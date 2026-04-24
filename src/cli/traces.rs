@@ -194,6 +194,29 @@ pub enum TracesCommand {
         json: bool,
     },
 
+    /// List active-learning central trace review work
+    ActiveLearningReviewQueue {
+        /// Trace Commons ingestion base URL or /v1/traces URL
+        #[arg(long)]
+        endpoint: String,
+
+        /// Maximum review work items to return
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Filter by residual privacy risk
+        #[arg(long, value_enum)]
+        privacy_risk: Option<TracePrivacyRiskArg>,
+
+        /// Environment variable containing a reviewer/admin bearer token
+        #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
+        bearer_token_env: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Approve or reject a quarantined central trace
     ReviewDecision {
         /// Trace Commons ingestion base URL or /v1/traces URL
@@ -358,6 +381,68 @@ pub enum TracesCommand {
         privacy_risk: Option<TracePrivacyRiskArg>,
 
         /// Maximum exported dataset items
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Write export JSON to a file instead of stdout
+        #[arg(short, long, value_name = "PATH")]
+        output: Option<PathBuf>,
+
+        /// Environment variable containing a reviewer/admin bearer token
+        #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
+        bearer_token_env: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Export approved ranker training candidates
+    RankerTrainingCandidates {
+        /// Trace Commons ingestion base URL or /v1/traces URL
+        #[arg(long)]
+        endpoint: String,
+
+        /// Filter by consent scope
+        #[arg(long, value_enum)]
+        consent_scope: Option<TraceScopeArg>,
+
+        /// Filter by residual privacy risk
+        #[arg(long, value_enum)]
+        privacy_risk: Option<TracePrivacyRiskArg>,
+
+        /// Maximum exported training candidates
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Write export JSON to a file instead of stdout
+        #[arg(short, long, value_name = "PATH")]
+        output: Option<PathBuf>,
+
+        /// Environment variable containing a reviewer/admin bearer token
+        #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
+        bearer_token_env: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Export approved ranker training pairs
+    RankerTrainingPairs {
+        /// Trace Commons ingestion base URL or /v1/traces URL
+        #[arg(long)]
+        endpoint: String,
+
+        /// Filter by consent scope
+        #[arg(long, value_enum)]
+        consent_scope: Option<TraceScopeArg>,
+
+        /// Filter by residual privacy risk
+        #[arg(long, value_enum)]
+        privacy_risk: Option<TracePrivacyRiskArg>,
+
+        /// Maximum exported training pairs
         #[arg(long)]
         limit: Option<usize>,
 
@@ -680,6 +765,22 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
             bearer_token_env,
             json,
         } => trace_commons_quarantine_list(&endpoint, &bearer_token_env, json).await,
+        TracesCommand::ActiveLearningReviewQueue {
+            endpoint,
+            limit,
+            privacy_risk,
+            bearer_token_env,
+            json,
+        } => {
+            trace_commons_active_learning_review_queue(
+                &endpoint,
+                &bearer_token_env,
+                limit,
+                privacy_risk,
+                json,
+            )
+            .await
+        }
         TracesCommand::ReviewDecision {
             endpoint,
             submission_id,
@@ -782,6 +883,52 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
                 limit,
                 output,
                 json,
+            })
+            .await
+        }
+        TracesCommand::RankerTrainingCandidates {
+            endpoint,
+            consent_scope,
+            privacy_risk,
+            limit,
+            output,
+            bearer_token_env,
+            json,
+        } => {
+            trace_commons_ranker_training_export(TraceCommonsRankerTrainingExportOptions {
+                endpoint: &endpoint,
+                bearer_token_env: &bearer_token_env,
+                consent_scope,
+                privacy_risk,
+                limit,
+                output,
+                json,
+                path: "/v1/ranker/training-candidates",
+                output_label: "ranker training candidates",
+                item_field: "candidates",
+            })
+            .await
+        }
+        TracesCommand::RankerTrainingPairs {
+            endpoint,
+            consent_scope,
+            privacy_risk,
+            limit,
+            output,
+            bearer_token_env,
+            json,
+        } => {
+            trace_commons_ranker_training_export(TraceCommonsRankerTrainingExportOptions {
+                endpoint: &endpoint,
+                bearer_token_env: &bearer_token_env,
+                consent_scope,
+                privacy_risk,
+                limit,
+                output,
+                json,
+                path: "/v1/ranker/training-pairs",
+                output_label: "ranker training pairs",
+                item_field: "pairs",
             })
             .await
         }
@@ -1198,6 +1345,49 @@ async fn trace_commons_quarantine_list(
     Ok(())
 }
 
+async fn trace_commons_active_learning_review_queue(
+    endpoint: &str,
+    bearer_token_env: &str,
+    limit: Option<usize>,
+    privacy_risk: Option<TracePrivacyRiskArg>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let mut query = optional_usize_query("limit", limit);
+    if let Some(privacy_risk) = privacy_risk {
+        query.push(("privacy_risk", privacy_risk.to_string()));
+    }
+    let Some(response) = trace_commons_optional_api_request(
+        Method::GET,
+        endpoint,
+        "/v1/review/active-learning",
+        &query,
+        Some(bearer_token_env),
+        None,
+    )
+    .await?
+    else {
+        print_trace_commons_unsupported("/v1/review/active-learning");
+        return Ok(());
+    };
+    if json {
+        print_trace_commons_json(&response)?;
+        return Ok(());
+    }
+    print_trace_commons_items(
+        "Central active-learning review queue",
+        response.json.as_ref().and_then(|value| value.get("items")),
+        &[
+            "submission_id",
+            "status",
+            "privacy_risk",
+            "priority_score",
+            "priority_reasons",
+            "received_at",
+        ],
+    );
+    Ok(())
+}
+
 struct TraceCommonsReviewDecisionOptions<'a> {
     endpoint: &'a str,
     bearer_token_env: &'a str,
@@ -1507,6 +1697,95 @@ async fn trace_commons_replay_dataset_export(
     print_trace_commons_json(&response)
 }
 
+struct TraceCommonsRankerTrainingExportOptions<'a> {
+    endpoint: &'a str,
+    bearer_token_env: &'a str,
+    consent_scope: Option<TraceScopeArg>,
+    privacy_risk: Option<TracePrivacyRiskArg>,
+    limit: Option<usize>,
+    output: Option<PathBuf>,
+    json: bool,
+    path: &'a str,
+    output_label: &'a str,
+    item_field: &'a str,
+}
+
+async fn trace_commons_ranker_training_export(
+    options: TraceCommonsRankerTrainingExportOptions<'_>,
+) -> anyhow::Result<()> {
+    let mut query = Vec::new();
+    if let Some(limit) = options.limit {
+        query.push(("limit", limit.to_string()));
+    }
+    if let Some(consent_scope) = options.consent_scope {
+        query.push(("consent_scope", consent_scope.to_string()));
+    }
+    if let Some(privacy_risk) = options.privacy_risk {
+        query.push(("privacy_risk", privacy_risk.to_string()));
+    }
+
+    let Some(response) = trace_commons_optional_api_request(
+        Method::GET,
+        options.endpoint,
+        options.path,
+        &query,
+        Some(options.bearer_token_env),
+        None,
+    )
+    .await?
+    else {
+        print_trace_commons_unsupported(options.path);
+        return Ok(());
+    };
+
+    if let Some(output) = options.output {
+        let body = pretty_trace_commons_body(&response)?;
+        std::fs::write(&output, body).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to write ranker training export {}: {}",
+                output.display(),
+                e
+            )
+        })?;
+        if options.json {
+            print_trace_commons_json(&response)?;
+        } else {
+            println!(
+                "Wrote central {} export to {}",
+                options.output_label,
+                output.display()
+            );
+            if let Some(value) = response.json.as_ref() {
+                print_optional_json_field("  export id", value, "export_id");
+                print_optional_json_field("  audit event id", value, "audit_event_id");
+                print_optional_json_field("  item count", value, "item_count");
+            }
+        }
+        return Ok(());
+    }
+
+    if options.json {
+        print_trace_commons_json(&response)
+    } else {
+        print_trace_commons_items(
+            &format!("Central {}", options.output_label),
+            response
+                .json
+                .as_ref()
+                .and_then(|value| value.get(options.item_field)),
+            &[
+                "submission_id",
+                "trace_id",
+                "ranker_score",
+                "preferred_submission_id",
+                "rejected_submission_id",
+                "reason",
+            ],
+        );
+        Ok(())
+    }
+}
+
 async fn trace_commons_audit_events(
     endpoint: &str,
     bearer_token_env: &str,
@@ -1700,6 +1979,55 @@ async fn trace_commons_api_request(
     Ok(TraceCommonsApiResponse { url, body, json })
 }
 
+async fn trace_commons_optional_api_request(
+    method: Method,
+    endpoint: &str,
+    path: &str,
+    query: &[(&str, String)],
+    bearer_token_env: Option<&str>,
+    request_body: Option<serde_json::Value>,
+) -> anyhow::Result<Option<TraceCommonsApiResponse>> {
+    let url = trace_commons_api_url(endpoint, path, query)?;
+    let client = reqwest::Client::new();
+    let mut request = client.request(method, &url);
+    if let Some(bearer_token_env) = bearer_token_env {
+        let token = std::env::var(bearer_token_env).map_err(|_| {
+            anyhow::anyhow!(
+                "{} is not set; refusing to call Trace Commons API without credentials",
+                bearer_token_env
+            )
+        })?;
+        request = request.bearer_auth(token);
+    }
+    if let Some(request_body) = request_body {
+        request = request.json(&request_body);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Trace Commons API request to {url} failed: {e}"))?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::NOT_IMPLEMENTED {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        anyhow::bail!(
+            "Trace Commons API request to {} failed with {}: {}",
+            url,
+            status,
+            compact_response_body(&body)
+        );
+    }
+    let json = if body.trim().is_empty() {
+        None
+    } else {
+        serde_json::from_str(&body).ok()
+    };
+    Ok(Some(TraceCommonsApiResponse { url, body, json }))
+}
+
 fn trace_commons_api_url(
     endpoint: &str,
     path: &str,
@@ -1789,6 +2117,12 @@ fn canary_leaked_tokens(original: &str, redacted: &str) -> Vec<String> {
 fn print_trace_commons_json(response: &TraceCommonsApiResponse) -> anyhow::Result<()> {
     println!("{}", pretty_trace_commons_body(response)?);
     Ok(())
+}
+
+fn print_trace_commons_unsupported(path: &str) {
+    println!(
+        "Trace Commons endpoint {path} is not exposed by this ingestion service yet (404/501)."
+    );
 }
 
 fn pretty_trace_commons_body(response: &TraceCommonsApiResponse) -> anyhow::Result<String> {
@@ -2496,5 +2830,50 @@ mod tests {
         counts.insert("local_path".to_string(), 2);
         counts.insert("secret".to_string(), 1);
         assert_eq!(redaction_summary(&counts), "2 local_path, 1 secret");
+    }
+
+    #[test]
+    fn active_learning_review_queue_uses_ingest_endpoint() {
+        let url = trace_commons_api_url(
+            "https://trace.example/internal/v1/traces",
+            "/v1/review/active-learning",
+            &[("limit", "25".to_string())],
+        )
+        .expect("url builds");
+
+        assert_eq!(
+            url,
+            "https://trace.example/internal/v1/review/active-learning?limit=25"
+        );
+    }
+
+    #[test]
+    fn ranker_training_candidates_use_ingest_endpoint() {
+        let url = trace_commons_api_url(
+            "https://trace.example/internal",
+            "/v1/ranker/training-candidates",
+            &[("consent_scope", "ranking-training".to_string())],
+        )
+        .expect("url builds");
+
+        assert_eq!(
+            url,
+            "https://trace.example/internal/v1/ranker/training-candidates?consent_scope=ranking-training"
+        );
+    }
+
+    #[test]
+    fn ranker_training_pairs_use_ingest_endpoint() {
+        let url = trace_commons_api_url(
+            "https://trace.example/internal/v1",
+            "/v1/ranker/training-pairs",
+            &[("privacy_risk", "low".to_string())],
+        )
+        .expect("url builds");
+
+        assert_eq!(
+            url,
+            "https://trace.example/internal/v1/ranker/training-pairs?privacy_risk=low"
+        );
     }
 }

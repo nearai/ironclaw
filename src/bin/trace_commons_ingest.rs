@@ -123,6 +123,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/v1/analytics/summary", get(analytics_handler))
         .route("/v1/review/quarantine", get(review_quarantine_handler))
         .route(
+            "/v1/review/active-learning",
+            get(active_learning_review_queue_handler),
+        )
+        .route(
             "/v1/review/{submission_id}/decision",
             post(review_decision_handler),
         )
@@ -132,6 +136,14 @@ fn app(state: Arc<AppState>) -> Router {
         )
         .route("/v1/datasets/replay", get(dataset_replay_handler))
         .route("/v1/benchmarks/convert", post(benchmark_convert_handler))
+        .route(
+            "/v1/ranker/training-candidates",
+            get(ranker_training_candidates_handler),
+        )
+        .route(
+            "/v1/ranker/training-pairs",
+            get(ranker_training_pairs_handler),
+        )
         .route("/v1/admin/maintenance", post(maintenance_handler))
         .route("/v1/audit/events", get(audit_events_handler))
         .with_state(state)
@@ -863,6 +875,148 @@ async fn benchmark_convert_handler(
 }
 
 #[derive(Debug, Deserialize)]
+struct RankerTrainingExportQuery {
+    limit: Option<usize>,
+    #[serde(default)]
+    consent_scope: Option<String>,
+    #[serde(default)]
+    privacy_risk: Option<ResidualPiiRisk>,
+}
+
+async fn ranker_training_candidates_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<RankerTrainingExportQuery>,
+) -> ApiResult<Json<TraceRankerTrainingCandidateExport>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_reviewer(&tenant)?;
+    let consent_scope = parse_ranker_consent_scope_filter(query.consent_scope.as_deref())?;
+    let mut candidate_query = query;
+    candidate_query.limit = Some(candidate_query.limit.unwrap_or(100).clamp(1, 500));
+    let candidates = collect_ranker_training_candidates(
+        state.as_ref(),
+        &tenant,
+        &candidate_query,
+        consent_scope,
+    )
+    .map_err(internal_error)?;
+    let export_id = Uuid::new_v4();
+    let audit_event = TraceCommonsAuditEvent::ranker_training_export(
+        &tenant,
+        export_id,
+        "ranker_training_candidates_export",
+        candidates.len(),
+    );
+    let audit_event_id = audit_event.event_id;
+    append_audit_event(&state.root, &tenant.tenant_id, audit_event).map_err(internal_error)?;
+    Ok(Json(TraceRankerTrainingCandidateExport {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        export_id,
+        audit_event_id,
+        generated_at: Utc::now(),
+        item_count: candidates.len(),
+        candidates,
+    }))
+}
+
+async fn ranker_training_pairs_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<RankerTrainingExportQuery>,
+) -> ApiResult<Json<TraceRankerTrainingPairExport>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_reviewer(&tenant)?;
+    let consent_scope = parse_ranker_consent_scope_filter(query.consent_scope.as_deref())?;
+    let mut pair_query = query;
+    let pair_limit = pair_query.limit.unwrap_or(100).clamp(1, 500);
+    pair_query.limit = Some(pair_limit.saturating_add(1));
+    let candidates =
+        collect_ranker_training_candidates(state.as_ref(), &tenant, &pair_query, consent_scope)
+            .map_err(internal_error)?;
+    let pairs = build_ranker_training_pairs(&candidates, pair_limit);
+    let export_id = Uuid::new_v4();
+    let audit_event = TraceCommonsAuditEvent::ranker_training_export(
+        &tenant,
+        export_id,
+        "ranker_training_pairs_export",
+        pairs.len(),
+    );
+    let audit_event_id = audit_event.event_id;
+    append_audit_event(&state.root, &tenant.tenant_id, audit_event).map_err(internal_error)?;
+    Ok(Json(TraceRankerTrainingPairExport {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        export_id,
+        audit_event_id,
+        generated_at: Utc::now(),
+        item_count: pairs.len(),
+        pairs,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ActiveLearningQueueQuery {
+    limit: Option<usize>,
+    #[serde(default)]
+    privacy_risk: Option<ResidualPiiRisk>,
+}
+
+async fn active_learning_review_queue_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<ActiveLearningQueueQuery>,
+) -> ApiResult<Json<TraceActiveLearningReviewQueue>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_reviewer(&tenant)?;
+    let records =
+        read_all_submission_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let derived =
+        read_all_derived_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let derived_by_submission = derived
+        .into_iter()
+        .map(|record| (record.submission_id, record))
+        .collect::<BTreeMap<_, _>>();
+    let limit = query.limit.unwrap_or(100).clamp(1, 501);
+    let mut items = records
+        .into_iter()
+        .filter(|record| {
+            matches!(
+                record.status,
+                TraceCorpusStatus::Accepted | TraceCorpusStatus::Quarantined
+            )
+        })
+        .filter(|record| !record.is_revoked())
+        .filter(|record| {
+            query
+                .privacy_risk
+                .is_none_or(|risk| record.privacy_risk == risk)
+        })
+        .map(|record| {
+            let submission_id = record.submission_id;
+            TraceActiveLearningReviewItem::from_record(
+                record,
+                derived_by_submission.get(&submission_id),
+            )
+        })
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        right
+            .priority_score
+            .total_cmp(&left.priority_score)
+            .then_with(|| left.received_at.cmp(&right.received_at))
+    });
+    items.truncate(limit);
+    Ok(Json(TraceActiveLearningReviewQueue {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        generated_at: Utc::now(),
+        item_count: items.len(),
+        items,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
 struct TraceMaintenanceRequest {
     #[serde(default)]
     purpose: Option<String>,
@@ -933,6 +1087,93 @@ fn trace_matches_derived_filters(
             .any(|candidate| candidate.eq_ignore_ascii_case(tool))
     });
     coverage_matches && tool_matches
+}
+
+fn collect_ranker_training_candidates(
+    state: &AppState,
+    tenant: &TenantAuth,
+    query: &RankerTrainingExportQuery,
+    consent_scope: Option<ConsentScope>,
+) -> anyhow::Result<Vec<TraceRankerTrainingCandidate>> {
+    let records = read_all_submission_records(&state.root, &tenant.tenant_id)?;
+    let derived = read_all_derived_records(&state.root, &tenant.tenant_id)?;
+    let derived_by_submission = derived
+        .into_iter()
+        .map(|record| (record.submission_id, record))
+        .collect::<BTreeMap<_, _>>();
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let mut candidates = records
+        .into_iter()
+        .filter(|record| matches!(record.status, TraceCorpusStatus::Accepted))
+        .filter(|record| !record.is_revoked())
+        .filter(|record| {
+            query
+                .privacy_risk
+                .is_none_or(|risk| record.privacy_risk == risk)
+        })
+        .filter(|record| ranker_consent_matches(&record.consent_scopes, consent_scope))
+        .filter_map(|record| {
+            derived_by_submission
+                .get(&record.submission_id)
+                .map(|derived| TraceRankerTrainingCandidate::from_records(&record, derived))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        right
+            .ranker_score
+            .total_cmp(&left.ranker_score)
+            .then_with(|| left.received_at.cmp(&right.received_at))
+    });
+    candidates.truncate(limit);
+    Ok(candidates)
+}
+
+fn ranker_consent_matches(scopes: &[ConsentScope], requested: Option<ConsentScope>) -> bool {
+    if let Some(requested) = requested {
+        return is_ranker_training_consent_scope(requested) && scopes.contains(&requested);
+    }
+    scopes.iter().copied().any(is_ranker_training_consent_scope)
+}
+
+fn parse_ranker_consent_scope_filter(value: Option<&str>) -> ApiResult<Option<ConsentScope>> {
+    let scope = parse_consent_scope_filter(value)?;
+    if let Some(scope) = scope
+        && !is_ranker_training_consent_scope(scope)
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ranker training exports require ranking-training or model-training consent",
+        ));
+    }
+    Ok(scope)
+}
+
+fn is_ranker_training_consent_scope(scope: ConsentScope) -> bool {
+    matches!(
+        scope,
+        ConsentScope::RankingTraining | ConsentScope::ModelTraining
+    )
+}
+
+fn build_ranker_training_pairs(
+    candidates: &[TraceRankerTrainingCandidate],
+    limit: usize,
+) -> Vec<TraceRankerTrainingPair> {
+    candidates
+        .windows(2)
+        .filter_map(|window| {
+            let [preferred, rejected] = window else {
+                return None;
+            };
+            if preferred.submission_id == rejected.submission_id {
+                return None;
+            }
+            Some(TraceRankerTrainingPair::from_candidates(
+                preferred, rejected,
+            ))
+        })
+        .take(limit)
+        .collect()
 }
 
 fn parse_consent_scope_filter(value: Option<&str>) -> ApiResult<Option<ConsentScope>> {
@@ -2229,6 +2470,249 @@ impl TraceBenchmarkCandidate {
     }
 }
 
+#[derive(Debug, Serialize)]
+struct TraceRankerTrainingCandidateExport {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    export_id: Uuid,
+    audit_event_id: Uuid,
+    generated_at: DateTime<Utc>,
+    item_count: usize,
+    candidates: Vec<TraceRankerTrainingCandidate>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRankerTrainingPairExport {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    export_id: Uuid,
+    audit_event_id: Uuid,
+    generated_at: DateTime<Utc>,
+    item_count: usize,
+    pairs: Vec<TraceRankerTrainingPair>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TraceRankerTrainingCandidate {
+    submission_id: Uuid,
+    trace_id: Uuid,
+    status: TraceCorpusStatus,
+    privacy_risk: ResidualPiiRisk,
+    label: TraceRankerTrainingLabel,
+    ranker_score: f32,
+    submission_score: f32,
+    credit_points_pending: f32,
+    consent_scopes: Vec<ConsentScope>,
+    redaction_counts: BTreeMap<String, u32>,
+    canonical_summary_hash: String,
+    canonical_summary: String,
+    summary_model: String,
+    task_success: String,
+    event_count: usize,
+    tool_sequence: Vec<String>,
+    tool_categories: Vec<String>,
+    coverage_tags: Vec<String>,
+    novelty_score: f32,
+    duplicate_score: f32,
+    received_at: DateTime<Utc>,
+}
+
+impl TraceRankerTrainingCandidate {
+    fn from_records(
+        submission: &TraceCommonsSubmissionRecord,
+        derived: &TraceCommonsDerivedRecord,
+    ) -> Self {
+        let label = TraceRankerTrainingLabel::from_status(submission.status);
+        Self {
+            submission_id: submission.submission_id,
+            trace_id: submission.trace_id,
+            status: submission.status,
+            privacy_risk: submission.privacy_risk,
+            label,
+            ranker_score: label.score_prior() + submission.submission_score,
+            submission_score: submission.submission_score,
+            credit_points_pending: submission.credit_points_pending,
+            consent_scopes: submission.consent_scopes.clone(),
+            redaction_counts: submission.redaction_counts.clone(),
+            canonical_summary_hash: derived.canonical_summary_hash.clone(),
+            canonical_summary: derived.canonical_summary.clone(),
+            summary_model: derived.summary_model.clone(),
+            task_success: derived.task_success.clone(),
+            event_count: derived.event_count,
+            tool_sequence: derived.tool_sequence.clone(),
+            tool_categories: derived.tool_categories.clone(),
+            coverage_tags: derived.coverage_tags.clone(),
+            novelty_score: derived.novelty_score,
+            duplicate_score: derived.duplicate_score,
+            received_at: submission.received_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum TraceRankerTrainingLabel {
+    Accepted,
+    NeedsReview,
+}
+
+impl TraceRankerTrainingLabel {
+    fn from_status(status: TraceCorpusStatus) -> Self {
+        match status {
+            TraceCorpusStatus::Accepted => Self::Accepted,
+            TraceCorpusStatus::Quarantined => Self::NeedsReview,
+            TraceCorpusStatus::Rejected | TraceCorpusStatus::Revoked => Self::NeedsReview,
+        }
+    }
+
+    fn score_prior(self) -> f32 {
+        match self {
+            Self::Accepted => 1.0,
+            Self::NeedsReview => 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRankerTrainingPair {
+    preferred_submission_id: Uuid,
+    rejected_submission_id: Uuid,
+    preferred_trace_id: Uuid,
+    rejected_trace_id: Uuid,
+    preferred_score: f32,
+    rejected_score: f32,
+    reason: String,
+    preferred: TraceRankerTrainingCandidate,
+    rejected: TraceRankerTrainingCandidate,
+}
+
+impl TraceRankerTrainingPair {
+    fn from_candidates(
+        preferred: &TraceRankerTrainingCandidate,
+        rejected: &TraceRankerTrainingCandidate,
+    ) -> Self {
+        Self {
+            preferred_submission_id: preferred.submission_id,
+            rejected_submission_id: rejected.submission_id,
+            preferred_trace_id: preferred.trace_id,
+            rejected_trace_id: rejected.trace_id,
+            preferred_score: preferred.ranker_score,
+            rejected_score: rejected.ranker_score,
+            reason: "higher_ranker_score".to_string(),
+            preferred: preferred.clone(),
+            rejected: rejected.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct TraceActiveLearningReviewQueue {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    item_count: usize,
+    items: Vec<TraceActiveLearningReviewItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceActiveLearningReviewItem {
+    submission_id: Uuid,
+    trace_id: Uuid,
+    status: TraceCorpusStatus,
+    privacy_risk: ResidualPiiRisk,
+    priority_score: f32,
+    priority_reasons: Vec<String>,
+    submission_score: f32,
+    redaction_counts: BTreeMap<String, u32>,
+    received_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    canonical_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    canonical_summary_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    coverage_tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tool_sequence: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tool_categories: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    novelty_score: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    duplicate_score: Option<f32>,
+}
+
+impl TraceActiveLearningReviewItem {
+    fn from_record(
+        record: TraceCommonsSubmissionRecord,
+        derived: Option<&TraceCommonsDerivedRecord>,
+    ) -> Self {
+        let (priority_score, priority_reasons) = active_learning_priority(&record, derived);
+        Self {
+            submission_id: record.submission_id,
+            trace_id: record.trace_id,
+            status: record.status,
+            privacy_risk: record.privacy_risk,
+            priority_score,
+            priority_reasons,
+            submission_score: record.submission_score,
+            redaction_counts: record.redaction_counts,
+            received_at: record.received_at,
+            canonical_summary: derived.map(|record| record.canonical_summary.clone()),
+            canonical_summary_hash: derived.map(|record| record.canonical_summary_hash.clone()),
+            coverage_tags: derived
+                .map(|record| record.coverage_tags.clone())
+                .unwrap_or_default(),
+            tool_sequence: derived
+                .map(|record| record.tool_sequence.clone())
+                .unwrap_or_default(),
+            tool_categories: derived
+                .map(|record| record.tool_categories.clone())
+                .unwrap_or_default(),
+            novelty_score: derived.map(|record| record.novelty_score),
+            duplicate_score: derived.map(|record| record.duplicate_score),
+        }
+    }
+}
+
+fn active_learning_priority(
+    record: &TraceCommonsSubmissionRecord,
+    derived: Option<&TraceCommonsDerivedRecord>,
+) -> (f32, Vec<String>) {
+    let mut score = 0.0;
+    let mut reasons = Vec::new();
+    if record.status == TraceCorpusStatus::Quarantined {
+        score += 2.0;
+        reasons.push("quarantined_for_privacy_review".to_string());
+    }
+    match record.privacy_risk {
+        ResidualPiiRisk::High => {
+            score += 1.0;
+            reasons.push("high_residual_pii_risk".to_string());
+        }
+        ResidualPiiRisk::Medium => {
+            score += 0.5;
+            reasons.push("medium_residual_pii_risk".to_string());
+        }
+        ResidualPiiRisk::Low => {}
+    }
+    let uncertainty = 1.0 - ((record.submission_score - 0.5).abs() * 2.0).clamp(0.0, 1.0);
+    if uncertainty > 0.0 {
+        score += uncertainty;
+        reasons.push("uncertain_submission_score".to_string());
+    }
+    if let Some(derived) = derived {
+        if derived.novelty_score >= 0.6 {
+            score += 0.25;
+            reasons.push("novel_trace_cluster".to_string());
+        }
+        if derived.duplicate_score >= 0.8 {
+            score += 0.25;
+            reasons.push("possible_duplicate".to_string());
+        }
+    }
+    (score, reasons)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct TraceExportCachePruneMarker {
     pruned_at: DateTime<Utc>,
@@ -2381,6 +2865,27 @@ impl TraceCommonsAuditEvent {
             reason: None,
             export_count: Some(candidate_count),
             export_id: Some(conversion_id),
+        }
+    }
+
+    fn ranker_training_export(
+        auth: &TenantAuth,
+        export_id: Uuid,
+        kind: &str,
+        item_count: usize,
+    ) -> Self {
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: kind.to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: None,
+            export_count: Some(item_count),
+            export_id: Some(export_id),
         }
     }
 
@@ -2945,6 +3450,274 @@ mod tests {
         assert!(audit_events.iter().any(|event| {
             event.event_id == benchmark.audit_event_id && event.kind == "benchmark_conversion"
         }));
+    }
+
+    #[tokio::test]
+    async fn ranker_training_exports_are_tenant_scoped_and_exclude_revoked_traces() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut tenant_a_best = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_a_best);
+        tenant_a_best.consent.scopes = vec![ConsentScope::RankingTraining];
+        let tenant_a_best_id = tenant_a_best.submission_id;
+        let mut tenant_a_lower = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_a_lower);
+        tenant_a_lower.consent.scopes = vec![ConsentScope::RankingTraining];
+        tenant_a_lower.value.submission_score = 0.25;
+        let tenant_a_lower_id = tenant_a_lower.submission_id;
+        let mut tenant_a_quarantined = sample_envelope().await;
+        tenant_a_quarantined.consent.scopes = vec![ConsentScope::RankingTraining];
+        let tenant_a_quarantined_id = tenant_a_quarantined.submission_id;
+        let mut tenant_a_revoked = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_a_revoked);
+        tenant_a_revoked.consent.scopes = vec![ConsentScope::RankingTraining];
+        let tenant_a_revoked_id = tenant_a_revoked.submission_id;
+        let mut tenant_b = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_b);
+        tenant_b.consent.scopes = vec![ConsentScope::RankingTraining];
+        let tenant_b_id = tenant_b.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(tenant_a_best),
+        )
+        .await
+        .expect("tenant a best submission succeeds");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(tenant_a_lower),
+        )
+        .await
+        .expect("tenant a lower submission succeeds");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(tenant_a_quarantined),
+        )
+        .await
+        .expect("tenant a quarantined submission succeeds");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(tenant_a_revoked),
+        )
+        .await
+        .expect("tenant a revoked submission succeeds");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(tenant_b),
+        )
+        .await
+        .expect("tenant b submission succeeds");
+        revoke_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            AxumPath(tenant_a_revoked_id),
+        )
+        .await
+        .expect("contributor can revoke own trace");
+
+        let contributor_error = ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                consent_scope: None,
+                privacy_risk: None,
+            }),
+        )
+        .await
+        .expect_err("contributors cannot export ranker candidates");
+        assert_eq!(contributor_error.0, StatusCode::FORBIDDEN);
+
+        let Json(candidates) = ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: None,
+            }),
+        )
+        .await
+        .expect("reviewer can export ranker candidates");
+        assert_eq!(candidates.item_count, 2);
+        assert_eq!(candidates.tenant_id, "tenant-a");
+        assert!(
+            candidates
+                .candidates
+                .iter()
+                .any(|candidate| candidate.submission_id == tenant_a_best_id)
+        );
+        assert!(
+            candidates
+                .candidates
+                .iter()
+                .any(|candidate| candidate.submission_id == tenant_a_lower_id)
+        );
+        assert!(
+            candidates
+                .candidates
+                .iter()
+                .all(|candidate| candidate.status == TraceCorpusStatus::Accepted)
+        );
+        assert!(
+            candidates
+                .candidates
+                .iter()
+                .all(|candidate| candidate.submission_id != tenant_a_quarantined_id)
+        );
+        assert!(
+            candidates
+                .candidates
+                .iter()
+                .all(|candidate| candidate.submission_id != tenant_a_revoked_id)
+        );
+        assert!(
+            candidates
+                .candidates
+                .iter()
+                .all(|candidate| candidate.submission_id != tenant_b_id)
+        );
+
+        let Json(pairs) = ranker_training_pairs_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: None,
+            }),
+        )
+        .await
+        .expect("reviewer can export ranker pairs");
+        assert_eq!(pairs.item_count, 1);
+        assert_eq!(pairs.pairs[0].preferred_submission_id, tenant_a_best_id);
+        assert_eq!(pairs.pairs[0].rejected_submission_id, tenant_a_lower_id);
+        assert!(
+            pairs
+                .pairs
+                .iter()
+                .all(|pair| pair.preferred_submission_id != tenant_a_revoked_id
+                    && pair.rejected_submission_id != tenant_a_revoked_id
+                    && pair.preferred_submission_id != tenant_a_quarantined_id
+                    && pair.rejected_submission_id != tenant_a_quarantined_id
+                    && pair.preferred_submission_id != tenant_b_id
+                    && pair.rejected_submission_id != tenant_b_id)
+        );
+
+        let Json(limited_pairs) = ranker_training_pairs_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(1),
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: None,
+            }),
+        )
+        .await
+        .expect("pair limit counts pairs, not candidates");
+        assert_eq!(limited_pairs.item_count, 1);
+
+        let debugging_scope_error = ranker_training_candidates_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                consent_scope: Some("debugging-evaluation".to_string()),
+                privacy_risk: None,
+            }),
+        )
+        .await
+        .expect_err("ranker exports require training consent");
+        assert_eq!(debugging_scope_error.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn active_learning_queue_is_tenant_scoped_and_excludes_revoked_traces() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let tenant_a_quarantined = sample_envelope().await;
+        let tenant_a_quarantined_id = tenant_a_quarantined.submission_id;
+        let mut tenant_a_accepted = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_a_accepted);
+        let tenant_a_accepted_id = tenant_a_accepted.submission_id;
+        let mut tenant_a_revoked = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_a_revoked);
+        let tenant_a_revoked_id = tenant_a_revoked.submission_id;
+        let tenant_b_quarantined = sample_envelope().await;
+        let tenant_b_quarantined_id = tenant_b_quarantined.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(tenant_a_quarantined),
+        )
+        .await
+        .expect("tenant a quarantined submission succeeds");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(tenant_a_accepted),
+        )
+        .await
+        .expect("tenant a accepted submission succeeds");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(tenant_a_revoked),
+        )
+        .await
+        .expect("tenant a revoked submission succeeds");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(tenant_b_quarantined),
+        )
+        .await
+        .expect("tenant b quarantined submission succeeds");
+        revoke_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            AxumPath(tenant_a_revoked_id),
+        )
+        .await
+        .expect("contributor can revoke own trace");
+
+        let Json(queue) = active_learning_review_queue_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(ActiveLearningQueueQuery {
+                limit: Some(10),
+                privacy_risk: None,
+            }),
+        )
+        .await
+        .expect("reviewer can read active-learning queue");
+        assert_eq!(queue.item_count, 2);
+        assert_eq!(queue.tenant_id, "tenant-a");
+        assert_eq!(queue.items[0].submission_id, tenant_a_quarantined_id);
+        assert!(
+            queue
+                .items
+                .iter()
+                .any(|item| item.submission_id == tenant_a_accepted_id)
+        );
+        assert!(
+            queue
+                .items
+                .iter()
+                .all(|item| item.submission_id != tenant_a_revoked_id)
+        );
+        assert!(
+            queue
+                .items
+                .iter()
+                .all(|item| item.submission_id != tenant_b_quarantined_id)
+        );
     }
 
     #[tokio::test]

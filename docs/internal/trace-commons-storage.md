@@ -37,6 +37,685 @@ Do not put bearer tokens, raw local paths, raw sidecar spans, unredacted trace t
 
 ## Schema Sketch
 
+## Concrete DB Migration Slice
+
+This is the first production-storage slice to implement when the file-backed MVP is ready to dual-write metadata. It creates the relational control plane only: envelope payloads still belong in encrypted artifact storage, and vector payloads can stay in a vector store or backend-specific index. The migration should not wire `src/bin/trace_commons_ingest.rs` to DB writes in the same patch.
+
+### Safe Migration Naming
+
+Current local state:
+
+- Local PostgreSQL migrations in this worktree end at `migrations/V23__list_workspace_files_escape_like.sql`.
+- Local `src/db/libsql_migrations.rs` ends at incremental version `22`.
+- The local `origin/staging` ref already contains `migrations/V24__llm_calls_created_at_index.sql` and libSQL incremental version `24`.
+
+Highest-safe guidance:
+
+- Before creating the migration, refresh refs with `git fetch origin` and re-check:
+  - `git ls-tree --name-only origin/staging:migrations`
+  - `git ls-tree --name-only origin/main:migrations`
+  - `git show origin/staging:src/db/libsql_migrations.rs | rg '"[a-z_]+",|\\([[:space:]]*[0-9]+,'`
+  - `git show origin/main:src/db/libsql_migrations.rs | rg '"[a-z_]+",|\\([[:space:]]*[0-9]+,'`
+- If staging/main are still highest at `V24`, name the PostgreSQL migration `migrations/V25__trace_commons_storage.sql`.
+- Add the libSQL migration as incremental version `25` named `"trace_commons_storage"`. The libSQL number does not always match PostgreSQL historically, but both staging and this planned batch would be highest at `25`.
+- Do not add `IF NOT EXISTS` to PostgreSQL migration DDL unless the repo's refinery policy changes. PostgreSQL migrations should be one-shot and checksum-stable.
+- For libSQL, use `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS`, and add only idempotent DDL to `INCREMENTAL_MIGRATIONS`.
+- After adding a real PostgreSQL migration, update `migrations/checksums.lock` using the repo's migration checksum workflow.
+
+### PostgreSQL DDL Sketch
+
+```sql
+CREATE TABLE trace_tenants (
+    tenant_id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'suspended', 'retention_only', 'deleted')),
+    data_residency_region TEXT,
+    default_retention_policy_id TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE trace_access_grants (
+    grant_id UUID PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
+    principal_ref TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('contributor', 'reviewer', 'admin', 'export_worker', 'retention_worker', 'vector_worker', 'benchmark_worker')),
+    allowed_scopes TEXT[] NOT NULL DEFAULT '{}',
+    allowed_uses TEXT[] NOT NULL DEFAULT '{}',
+    expires_at TIMESTAMPTZ,
+    revoked_at TIMESTAMPTZ,
+    created_by TEXT,
+    revoked_by TEXT,
+    reason TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (tenant_id, principal_ref, role)
+);
+CREATE INDEX idx_trace_access_grants_principal ON trace_access_grants(tenant_id, principal_ref);
+
+CREATE TABLE trace_submissions (
+    tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
+    submission_id UUID NOT NULL,
+    trace_id UUID NOT NULL,
+    auth_principal_ref TEXT NOT NULL,
+    contributor_pseudonym TEXT,
+    submitted_tenant_scope_ref TEXT,
+    schema_version TEXT NOT NULL,
+    consent_policy_version TEXT NOT NULL,
+    consent_scopes TEXT[] NOT NULL,
+    allowed_uses TEXT[] NOT NULL,
+    retention_policy_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('received', 'accepted', 'quarantined', 'rejected', 'revoked', 'expired', 'purged')),
+    privacy_risk TEXT NOT NULL CHECK (privacy_risk IN ('low', 'medium', 'high')),
+    redaction_pipeline_version TEXT NOT NULL,
+    redaction_hash TEXT NOT NULL,
+    canonical_summary_hash TEXT,
+    submission_score REAL,
+    credit_points_pending NUMERIC(18, 6),
+    credit_points_final NUMERIC(18, 6),
+    received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    reviewed_at TIMESTAMPTZ,
+    revoked_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ,
+    purged_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, submission_id)
+);
+CREATE INDEX idx_trace_submissions_status_received ON trace_submissions(tenant_id, status, received_at DESC);
+CREATE INDEX idx_trace_submissions_summary_hash ON trace_submissions(tenant_id, canonical_summary_hash);
+CREATE INDEX idx_trace_submissions_expires ON trace_submissions(tenant_id, expires_at);
+CREATE INDEX idx_trace_submissions_contributor ON trace_submissions(tenant_id, contributor_pseudonym);
+
+CREATE TABLE trace_object_refs (
+    object_ref_id UUID PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    submission_id UUID NOT NULL,
+    artifact_kind TEXT NOT NULL CHECK (artifact_kind IN ('submitted_envelope', 'rescrubbed_envelope', 'review_snapshot', 'benchmark_artifact', 'export_artifact', 'worker_intermediate')),
+    object_store TEXT NOT NULL,
+    object_key TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    encryption_key_ref TEXT NOT NULL,
+    size_bytes BIGINT NOT NULL CHECK (size_bytes >= 0),
+    compression TEXT,
+    created_by_job_id UUID,
+    valid_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    invalidated_at TIMESTAMPTZ,
+    deleted_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    FOREIGN KEY (tenant_id, submission_id) REFERENCES trace_submissions(tenant_id, submission_id) ON DELETE CASCADE,
+    UNIQUE (tenant_id, object_ref_id),
+    UNIQUE (tenant_id, submission_id, object_ref_id),
+    UNIQUE (tenant_id, object_store, object_key)
+);
+CREATE INDEX idx_trace_object_refs_submission ON trace_object_refs(tenant_id, submission_id, artifact_kind);
+
+CREATE TABLE trace_derived_records (
+    derived_id UUID PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    submission_id UUID NOT NULL,
+    trace_id UUID NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('current', 'invalidated', 'superseded', 'revoked', 'expired')),
+    worker_kind TEXT NOT NULL CHECK (worker_kind IN ('server_rescrub', 'summary', 'duplicate_precheck', 'embedding', 'ranking', 'benchmark_conversion')),
+    worker_version TEXT NOT NULL,
+    input_object_ref_id UUID,
+    input_hash TEXT NOT NULL,
+    output_object_ref_id UUID,
+    canonical_summary TEXT,
+    canonical_summary_hash TEXT,
+    task_success TEXT,
+    privacy_risk TEXT CHECK (privacy_risk IS NULL OR privacy_risk IN ('low', 'medium', 'high')),
+    event_count INTEGER,
+    tool_sequence TEXT[] NOT NULL DEFAULT '{}',
+    tool_categories TEXT[] NOT NULL DEFAULT '{}',
+    coverage_tags TEXT[] NOT NULL DEFAULT '{}',
+    duplicate_score REAL,
+    novelty_score REAL,
+    cluster_id TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    FOREIGN KEY (tenant_id, submission_id) REFERENCES trace_submissions(tenant_id, submission_id) ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, submission_id, input_object_ref_id) REFERENCES trace_object_refs(tenant_id, submission_id, object_ref_id),
+    FOREIGN KEY (tenant_id, submission_id, output_object_ref_id) REFERENCES trace_object_refs(tenant_id, submission_id, object_ref_id),
+    UNIQUE (tenant_id, submission_id, derived_id)
+);
+CREATE INDEX idx_trace_derived_current ON trace_derived_records(tenant_id, submission_id, status, worker_kind);
+CREATE INDEX idx_trace_derived_summary_hash ON trace_derived_records(tenant_id, canonical_summary_hash);
+
+CREATE TABLE trace_vector_entries (
+    vector_entry_id UUID PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    submission_id UUID NOT NULL,
+    derived_id UUID NOT NULL,
+    vector_store TEXT NOT NULL,
+    embedding_model TEXT NOT NULL,
+    embedding_dimension INTEGER NOT NULL CHECK (embedding_dimension > 0),
+    embedding_version TEXT NOT NULL,
+    source_projection TEXT NOT NULL CHECK (source_projection IN ('canonical_summary', 'redacted_messages', 'redacted_tool_sequence')),
+    source_hash TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'invalidated', 'deleted')),
+    nearest_trace_ids TEXT[] NOT NULL DEFAULT '{}',
+    cluster_id TEXT,
+    duplicate_score REAL,
+    novelty_score REAL,
+    indexed_at TIMESTAMPTZ,
+    invalidated_at TIMESTAMPTZ,
+    deleted_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    FOREIGN KEY (tenant_id, submission_id) REFERENCES trace_submissions(tenant_id, submission_id) ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, submission_id, derived_id) REFERENCES trace_derived_records(tenant_id, submission_id, derived_id) ON DELETE CASCADE,
+    UNIQUE (tenant_id, submission_id, vector_entry_id)
+);
+CREATE INDEX idx_trace_vector_entries_source ON trace_vector_entries(tenant_id, submission_id, status);
+
+CREATE TABLE trace_audit_events (
+    audit_event_id UUID PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
+    actor_principal_ref TEXT NOT NULL,
+    actor_role TEXT NOT NULL,
+    job_id UUID,
+    submission_id UUID,
+    object_ref_id UUID,
+    export_manifest_id UUID,
+    action TEXT NOT NULL CHECK (action IN ('submit', 'read', 'review', 'credit_mutate', 'revoke', 'export', 'retain', 'purge', 'vector_index', 'benchmark_convert')),
+    reason TEXT,
+    request_id TEXT,
+    decision_inputs_hash TEXT,
+    metadata_kind TEXT NOT NULL DEFAULT 'empty' CHECK (metadata_kind IN ('empty', 'submission', 'review_decision', 'export', 'maintenance')),
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    previous_event_hash TEXT,
+    event_hash TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    FOREIGN KEY (tenant_id, submission_id, object_ref_id) REFERENCES trace_object_refs(tenant_id, submission_id, object_ref_id)
+);
+CREATE INDEX idx_trace_audit_events_target ON trace_audit_events(tenant_id, submission_id, created_at DESC);
+CREATE INDEX idx_trace_audit_events_action ON trace_audit_events(tenant_id, action, created_at DESC);
+
+CREATE TABLE trace_credit_ledger (
+    credit_event_id UUID PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    submission_id UUID NOT NULL,
+    trace_id UUID NOT NULL,
+    credit_account_ref TEXT NOT NULL,
+    event_type TEXT NOT NULL CHECK (event_type IN ('accepted', 'privacy_rejection', 'duplicate_rejection', 'benchmark_conversion', 'regression_catch', 'training_utility', 'reviewer_bonus', 'abuse_penalty')),
+    points_delta NUMERIC(18, 6) NOT NULL,
+    reason TEXT NOT NULL,
+    external_ref TEXT,
+    actor_principal_ref TEXT NOT NULL,
+    actor_role TEXT NOT NULL,
+    settlement_state TEXT NOT NULL CHECK (settlement_state IN ('pending', 'final', 'reversed')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    FOREIGN KEY (tenant_id, submission_id) REFERENCES trace_submissions(tenant_id, submission_id) ON DELETE CASCADE
+);
+CREATE INDEX idx_trace_credit_ledger_account ON trace_credit_ledger(tenant_id, credit_account_ref, created_at DESC);
+CREATE INDEX idx_trace_credit_ledger_submission ON trace_credit_ledger(tenant_id, submission_id);
+
+CREATE TABLE trace_export_manifests (
+    export_manifest_id UUID PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
+    requested_by_principal_ref TEXT NOT NULL,
+    purpose TEXT NOT NULL CHECK (purpose IN ('replay_dataset', 'benchmark_eval', 'ranking_training', 'model_training', 'analytics')),
+    consent_scope_filter TEXT[] NOT NULL DEFAULT '{}',
+    allowed_use_filter TEXT[] NOT NULL DEFAULT '{}',
+    review_state_filter TEXT[] NOT NULL DEFAULT '{}',
+    privacy_risk_filter TEXT[] NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL CHECK (status IN ('planned', 'running', 'complete', 'failed', 'revoked_invalid', 'expired_invalid')),
+    item_count INTEGER NOT NULL DEFAULT 0,
+    manifest_object_ref_id UUID,
+    result_object_ref_id UUID,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    invalidated_at TIMESTAMPTZ,
+    FOREIGN KEY (tenant_id, manifest_object_ref_id) REFERENCES trace_object_refs(tenant_id, object_ref_id),
+    FOREIGN KEY (tenant_id, result_object_ref_id) REFERENCES trace_object_refs(tenant_id, object_ref_id),
+    UNIQUE (tenant_id, export_manifest_id)
+);
+
+CREATE TABLE trace_export_manifest_items (
+    export_manifest_id UUID NOT NULL REFERENCES trace_export_manifests(export_manifest_id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL,
+    submission_id UUID NOT NULL,
+    derived_id UUID,
+    object_ref_id UUID,
+    vector_entry_id UUID,
+    source_status_at_export TEXT NOT NULL,
+    source_hash_at_export TEXT NOT NULL,
+    revoked_after_export_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (export_manifest_id, tenant_id, submission_id),
+    FOREIGN KEY (tenant_id, submission_id) REFERENCES trace_submissions(tenant_id, submission_id) ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, submission_id, derived_id) REFERENCES trace_derived_records(tenant_id, submission_id, derived_id),
+    FOREIGN KEY (tenant_id, submission_id, object_ref_id) REFERENCES trace_object_refs(tenant_id, submission_id, object_ref_id),
+    FOREIGN KEY (tenant_id, submission_id, vector_entry_id) REFERENCES trace_vector_entries(tenant_id, submission_id, vector_entry_id)
+);
+
+CREATE TABLE trace_benchmark_artifacts (
+    benchmark_artifact_id UUID PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    submission_id UUID NOT NULL,
+    derived_id UUID,
+    benchmark_kind TEXT NOT NULL CHECK (benchmark_kind IN ('replay', 'process_eval', 'regression_case', 'ranking_pair')),
+    artifact_version TEXT NOT NULL,
+    object_ref_id UUID NOT NULL,
+    requirements_hash TEXT,
+    status TEXT NOT NULL CHECK (status IN ('candidate', 'approved', 'published', 'invalidated', 'deleted')),
+    created_by_job_id UUID,
+    published_export_manifest_id UUID,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    invalidated_at TIMESTAMPTZ,
+    deleted_at TIMESTAMPTZ,
+    FOREIGN KEY (tenant_id, submission_id) REFERENCES trace_submissions(tenant_id, submission_id) ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, submission_id, derived_id) REFERENCES trace_derived_records(tenant_id, submission_id, derived_id),
+    FOREIGN KEY (tenant_id, submission_id, object_ref_id) REFERENCES trace_object_refs(tenant_id, submission_id, object_ref_id),
+    FOREIGN KEY (tenant_id, published_export_manifest_id) REFERENCES trace_export_manifests(tenant_id, export_manifest_id)
+);
+
+CREATE TABLE trace_tombstones (
+    tombstone_id UUID PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
+    submission_id UUID NOT NULL,
+    trace_id UUID,
+    redaction_hash TEXT,
+    canonical_summary_hash TEXT,
+    reason TEXT NOT NULL,
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    effective_at TIMESTAMPTZ NOT NULL,
+    retain_until TIMESTAMPTZ,
+    created_by_principal_ref TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (tenant_id, submission_id)
+);
+CREATE INDEX idx_trace_tombstones_hashes ON trace_tombstones(tenant_id, redaction_hash, canonical_summary_hash);
+
+CREATE TABLE trace_retention_jobs (
+    retention_job_id UUID PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    policy_id TEXT NOT NULL,
+    cutoff_at TIMESTAMPTZ NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('planned', 'dry_run', 'running', 'complete', 'failed', 'paused')),
+    selected_count INTEGER NOT NULL DEFAULT 0,
+    purged_count INTEGER NOT NULL DEFAULT 0,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    dry_run_report_object_ref_id UUID,
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    FOREIGN KEY (tenant_id, dry_run_report_object_ref_id) REFERENCES trace_object_refs(tenant_id, object_ref_id)
+);
+
+CREATE TABLE trace_retention_job_items (
+    retention_job_id UUID NOT NULL REFERENCES trace_retention_jobs(retention_job_id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL,
+    submission_id UUID NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('expire', 'revoke', 'delete_object', 'delete_vector', 'invalidate_export', 'write_tombstone')),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'done', 'failed', 'skipped_policy_changed')),
+    object_ref_id UUID,
+    vector_entry_id UUID,
+    export_manifest_id UUID REFERENCES trace_export_manifests(export_manifest_id),
+    verified_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (retention_job_id, tenant_id, submission_id, action),
+    FOREIGN KEY (tenant_id, submission_id, object_ref_id) REFERENCES trace_object_refs(tenant_id, submission_id, object_ref_id),
+    FOREIGN KEY (tenant_id, submission_id, vector_entry_id) REFERENCES trace_vector_entries(tenant_id, submission_id, vector_entry_id)
+);
+```
+
+Before production cutover, add RLS in the same or a follow-up migration once the service role model is settled:
+
+```sql
+ALTER TABLE trace_submissions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY trace_submissions_tenant_isolation ON trace_submissions
+    USING (tenant_id = current_setting('app.tenant_id'))
+    WITH CHECK (tenant_id = current_setting('app.tenant_id'));
+```
+
+Apply the same RLS pattern to every tenant-scoped `trace_*` table. Worker roles should get explicit policy variants, not blanket bypass.
+
+### libSQL DDL Sketch
+
+```sql
+CREATE TABLE IF NOT EXISTS trace_tenants (
+    tenant_id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'suspended', 'retention_only', 'deleted')),
+    data_residency_region TEXT,
+    default_retention_policy_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS trace_access_grants (
+    grant_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
+    principal_ref TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('contributor', 'reviewer', 'admin', 'export_worker', 'retention_worker', 'vector_worker', 'benchmark_worker')),
+    allowed_scopes TEXT NOT NULL DEFAULT '[]',
+    allowed_uses TEXT NOT NULL DEFAULT '[]',
+    expires_at TEXT,
+    revoked_at TEXT,
+    created_by TEXT,
+    revoked_by TEXT,
+    reason TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE (tenant_id, principal_ref, role)
+);
+CREATE INDEX IF NOT EXISTS idx_trace_access_grants_principal ON trace_access_grants(tenant_id, principal_ref);
+
+CREATE TABLE IF NOT EXISTS trace_submissions (
+    tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
+    submission_id TEXT NOT NULL,
+    trace_id TEXT NOT NULL,
+    auth_principal_ref TEXT NOT NULL,
+    contributor_pseudonym TEXT,
+    submitted_tenant_scope_ref TEXT,
+    schema_version TEXT NOT NULL,
+    consent_policy_version TEXT NOT NULL,
+    consent_scopes TEXT NOT NULL,
+    allowed_uses TEXT NOT NULL,
+    retention_policy_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('received', 'accepted', 'quarantined', 'rejected', 'revoked', 'expired', 'purged')),
+    privacy_risk TEXT NOT NULL CHECK (privacy_risk IN ('low', 'medium', 'high')),
+    redaction_pipeline_version TEXT NOT NULL,
+    redaction_hash TEXT NOT NULL,
+    canonical_summary_hash TEXT,
+    submission_score REAL,
+    credit_points_pending TEXT,
+    credit_points_final TEXT,
+    received_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    reviewed_at TEXT,
+    revoked_at TEXT,
+    expires_at TEXT,
+    purged_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (tenant_id, submission_id)
+);
+CREATE INDEX IF NOT EXISTS idx_trace_submissions_status_received ON trace_submissions(tenant_id, status, received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trace_submissions_summary_hash ON trace_submissions(tenant_id, canonical_summary_hash);
+CREATE INDEX IF NOT EXISTS idx_trace_submissions_expires ON trace_submissions(tenant_id, expires_at);
+CREATE INDEX IF NOT EXISTS idx_trace_submissions_contributor ON trace_submissions(tenant_id, contributor_pseudonym);
+
+CREATE TABLE IF NOT EXISTS trace_object_refs (
+    object_ref_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    submission_id TEXT NOT NULL,
+    artifact_kind TEXT NOT NULL CHECK (artifact_kind IN ('submitted_envelope', 'rescrubbed_envelope', 'review_snapshot', 'benchmark_artifact', 'export_artifact', 'worker_intermediate')),
+    object_store TEXT NOT NULL,
+    object_key TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    encryption_key_ref TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+    compression TEXT,
+    created_by_job_id TEXT,
+    valid_from TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    invalidated_at TEXT,
+    deleted_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    FOREIGN KEY (tenant_id, submission_id) REFERENCES trace_submissions(tenant_id, submission_id) ON DELETE CASCADE,
+    UNIQUE (tenant_id, object_ref_id),
+    UNIQUE (tenant_id, submission_id, object_ref_id),
+    UNIQUE (tenant_id, object_store, object_key)
+);
+CREATE INDEX IF NOT EXISTS idx_trace_object_refs_submission ON trace_object_refs(tenant_id, submission_id, artifact_kind);
+
+CREATE TABLE IF NOT EXISTS trace_derived_records (
+    derived_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    submission_id TEXT NOT NULL,
+    trace_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('current', 'invalidated', 'superseded', 'revoked', 'expired')),
+    worker_kind TEXT NOT NULL CHECK (worker_kind IN ('server_rescrub', 'summary', 'duplicate_precheck', 'embedding', 'ranking', 'benchmark_conversion')),
+    worker_version TEXT NOT NULL,
+    input_object_ref_id TEXT,
+    input_hash TEXT NOT NULL,
+    output_object_ref_id TEXT,
+    canonical_summary TEXT,
+    canonical_summary_hash TEXT,
+    task_success TEXT,
+    privacy_risk TEXT CHECK (privacy_risk IS NULL OR privacy_risk IN ('low', 'medium', 'high')),
+    event_count INTEGER,
+    tool_sequence TEXT NOT NULL DEFAULT '[]',
+    tool_categories TEXT NOT NULL DEFAULT '[]',
+    coverage_tags TEXT NOT NULL DEFAULT '[]',
+    duplicate_score REAL,
+    novelty_score REAL,
+    cluster_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    FOREIGN KEY (tenant_id, submission_id) REFERENCES trace_submissions(tenant_id, submission_id) ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, submission_id, input_object_ref_id) REFERENCES trace_object_refs(tenant_id, submission_id, object_ref_id),
+    FOREIGN KEY (tenant_id, submission_id, output_object_ref_id) REFERENCES trace_object_refs(tenant_id, submission_id, object_ref_id),
+    UNIQUE (tenant_id, submission_id, derived_id)
+);
+CREATE INDEX IF NOT EXISTS idx_trace_derived_current ON trace_derived_records(tenant_id, submission_id, status, worker_kind);
+CREATE INDEX IF NOT EXISTS idx_trace_derived_summary_hash ON trace_derived_records(tenant_id, canonical_summary_hash);
+
+CREATE TABLE IF NOT EXISTS trace_vector_entries (
+    vector_entry_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    submission_id TEXT NOT NULL,
+    derived_id TEXT NOT NULL,
+    vector_store TEXT NOT NULL,
+    embedding_model TEXT NOT NULL,
+    embedding_dimension INTEGER NOT NULL CHECK (embedding_dimension > 0),
+    embedding_version TEXT NOT NULL,
+    source_projection TEXT NOT NULL CHECK (source_projection IN ('canonical_summary', 'redacted_messages', 'redacted_tool_sequence')),
+    source_hash TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'invalidated', 'deleted')),
+    nearest_trace_ids TEXT NOT NULL DEFAULT '[]',
+    cluster_id TEXT,
+    duplicate_score REAL,
+    novelty_score REAL,
+    indexed_at TEXT,
+    invalidated_at TEXT,
+    deleted_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    FOREIGN KEY (tenant_id, submission_id) REFERENCES trace_submissions(tenant_id, submission_id) ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, submission_id, derived_id) REFERENCES trace_derived_records(tenant_id, submission_id, derived_id) ON DELETE CASCADE,
+    UNIQUE (tenant_id, submission_id, vector_entry_id)
+);
+CREATE INDEX IF NOT EXISTS idx_trace_vector_entries_source ON trace_vector_entries(tenant_id, submission_id, status);
+
+CREATE TABLE IF NOT EXISTS trace_audit_events (
+    audit_event_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
+    actor_principal_ref TEXT NOT NULL,
+    actor_role TEXT NOT NULL,
+    job_id TEXT,
+    submission_id TEXT,
+    object_ref_id TEXT,
+    export_manifest_id TEXT,
+    action TEXT NOT NULL CHECK (action IN ('submit', 'read', 'review', 'credit_mutate', 'revoke', 'export', 'retain', 'purge', 'vector_index', 'benchmark_convert')),
+    reason TEXT,
+    request_id TEXT,
+    decision_inputs_hash TEXT,
+    metadata_kind TEXT NOT NULL DEFAULT 'empty' CHECK (metadata_kind IN ('empty', 'submission', 'review_decision', 'export', 'maintenance')),
+    metadata TEXT NOT NULL DEFAULT '{}',
+    previous_event_hash TEXT,
+    event_hash TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    FOREIGN KEY (tenant_id, submission_id, object_ref_id) REFERENCES trace_object_refs(tenant_id, submission_id, object_ref_id)
+);
+CREATE INDEX IF NOT EXISTS idx_trace_audit_events_target ON trace_audit_events(tenant_id, submission_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trace_audit_events_action ON trace_audit_events(tenant_id, action, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS trace_credit_ledger (
+    credit_event_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    submission_id TEXT NOT NULL,
+    trace_id TEXT NOT NULL,
+    credit_account_ref TEXT NOT NULL,
+    event_type TEXT NOT NULL CHECK (event_type IN ('accepted', 'privacy_rejection', 'duplicate_rejection', 'benchmark_conversion', 'regression_catch', 'training_utility', 'reviewer_bonus', 'abuse_penalty')),
+    points_delta TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    external_ref TEXT,
+    actor_principal_ref TEXT NOT NULL,
+    actor_role TEXT NOT NULL,
+    settlement_state TEXT NOT NULL CHECK (settlement_state IN ('pending', 'final', 'reversed')),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    FOREIGN KEY (tenant_id, submission_id) REFERENCES trace_submissions(tenant_id, submission_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_trace_credit_ledger_account ON trace_credit_ledger(tenant_id, credit_account_ref, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trace_credit_ledger_submission ON trace_credit_ledger(tenant_id, submission_id);
+
+CREATE TABLE IF NOT EXISTS trace_export_manifests (
+    export_manifest_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
+    requested_by_principal_ref TEXT NOT NULL,
+    purpose TEXT NOT NULL CHECK (purpose IN ('replay_dataset', 'benchmark_eval', 'ranking_training', 'model_training', 'analytics')),
+    consent_scope_filter TEXT NOT NULL DEFAULT '[]',
+    allowed_use_filter TEXT NOT NULL DEFAULT '[]',
+    review_state_filter TEXT NOT NULL DEFAULT '[]',
+    privacy_risk_filter TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL CHECK (status IN ('planned', 'running', 'complete', 'failed', 'revoked_invalid', 'expired_invalid')),
+    item_count INTEGER NOT NULL DEFAULT 0,
+    manifest_object_ref_id TEXT,
+    result_object_ref_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    completed_at TEXT,
+    invalidated_at TEXT,
+    FOREIGN KEY (tenant_id, manifest_object_ref_id) REFERENCES trace_object_refs(tenant_id, object_ref_id),
+    FOREIGN KEY (tenant_id, result_object_ref_id) REFERENCES trace_object_refs(tenant_id, object_ref_id),
+    UNIQUE (tenant_id, export_manifest_id)
+);
+
+CREATE TABLE IF NOT EXISTS trace_export_manifest_items (
+    export_manifest_id TEXT NOT NULL REFERENCES trace_export_manifests(export_manifest_id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL,
+    submission_id TEXT NOT NULL,
+    derived_id TEXT,
+    object_ref_id TEXT,
+    vector_entry_id TEXT,
+    source_status_at_export TEXT NOT NULL,
+    source_hash_at_export TEXT NOT NULL,
+    revoked_after_export_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (export_manifest_id, tenant_id, submission_id),
+    FOREIGN KEY (tenant_id, submission_id) REFERENCES trace_submissions(tenant_id, submission_id) ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, submission_id, derived_id) REFERENCES trace_derived_records(tenant_id, submission_id, derived_id),
+    FOREIGN KEY (tenant_id, submission_id, object_ref_id) REFERENCES trace_object_refs(tenant_id, submission_id, object_ref_id),
+    FOREIGN KEY (tenant_id, submission_id, vector_entry_id) REFERENCES trace_vector_entries(tenant_id, submission_id, vector_entry_id)
+);
+
+CREATE TABLE IF NOT EXISTS trace_benchmark_artifacts (
+    benchmark_artifact_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    submission_id TEXT NOT NULL,
+    derived_id TEXT,
+    benchmark_kind TEXT NOT NULL CHECK (benchmark_kind IN ('replay', 'process_eval', 'regression_case', 'ranking_pair')),
+    artifact_version TEXT NOT NULL,
+    object_ref_id TEXT NOT NULL,
+    requirements_hash TEXT,
+    status TEXT NOT NULL CHECK (status IN ('candidate', 'approved', 'published', 'invalidated', 'deleted')),
+    created_by_job_id TEXT,
+    published_export_manifest_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    invalidated_at TEXT,
+    deleted_at TEXT,
+    FOREIGN KEY (tenant_id, submission_id) REFERENCES trace_submissions(tenant_id, submission_id) ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, submission_id, derived_id) REFERENCES trace_derived_records(tenant_id, submission_id, derived_id),
+    FOREIGN KEY (tenant_id, submission_id, object_ref_id) REFERENCES trace_object_refs(tenant_id, submission_id, object_ref_id),
+    FOREIGN KEY (tenant_id, published_export_manifest_id) REFERENCES trace_export_manifests(tenant_id, export_manifest_id)
+);
+
+CREATE TABLE IF NOT EXISTS trace_tombstones (
+    tombstone_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
+    submission_id TEXT NOT NULL,
+    trace_id TEXT,
+    redaction_hash TEXT,
+    canonical_summary_hash TEXT,
+    reason TEXT NOT NULL,
+    first_seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    effective_at TEXT NOT NULL,
+    retain_until TEXT,
+    created_by_principal_ref TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE (tenant_id, submission_id)
+);
+CREATE INDEX IF NOT EXISTS idx_trace_tombstones_hashes ON trace_tombstones(tenant_id, redaction_hash, canonical_summary_hash);
+
+CREATE TABLE IF NOT EXISTS trace_retention_jobs (
+    retention_job_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    policy_id TEXT NOT NULL,
+    cutoff_at TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('planned', 'dry_run', 'running', 'complete', 'failed', 'paused')),
+    selected_count INTEGER NOT NULL DEFAULT 0,
+    purged_count INTEGER NOT NULL DEFAULT 0,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    dry_run_report_object_ref_id TEXT,
+    started_at TEXT,
+    completed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    FOREIGN KEY (tenant_id, dry_run_report_object_ref_id) REFERENCES trace_object_refs(tenant_id, object_ref_id)
+);
+
+CREATE TABLE IF NOT EXISTS trace_retention_job_items (
+    retention_job_id TEXT NOT NULL REFERENCES trace_retention_jobs(retention_job_id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL,
+    submission_id TEXT NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('expire', 'revoke', 'delete_object', 'delete_vector', 'invalidate_export', 'write_tombstone')),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'done', 'failed', 'skipped_policy_changed')),
+    object_ref_id TEXT,
+    vector_entry_id TEXT,
+    export_manifest_id TEXT REFERENCES trace_export_manifests(export_manifest_id),
+    verified_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (retention_job_id, tenant_id, submission_id, action),
+    FOREIGN KEY (tenant_id, submission_id, object_ref_id) REFERENCES trace_object_refs(tenant_id, submission_id, object_ref_id),
+    FOREIGN KEY (tenant_id, submission_id, vector_entry_id) REFERENCES trace_vector_entries(tenant_id, submission_id, vector_entry_id)
+);
+```
+
+### Rust Store Contract Shape
+
+The initial Rust contract now lives in `src/trace_corpus_storage.rs`. When this becomes active persistence, add `TraceCorpusStore` to `src/db/mod.rs` only when both PostgreSQL and libSQL implementations are in the same branch. Keep `src/bin/trace_commons_ingest.rs` on the file-backed path until dual-write verification exists.
+
+The first implementation-facing shape should stay close to:
+
+```rust
+#[async_trait]
+pub trait TraceCorpusStore: Send + Sync {
+    async fn upsert_trace_submission(
+        &self,
+        submission: TraceSubmissionWrite,
+    ) -> Result<TraceSubmissionRecord, DatabaseError>;
+
+    async fn get_trace_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<Option<TraceSubmissionRecord>, DatabaseError>;
+
+    async fn update_trace_submission_status(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        status: TraceCorpusStatus,
+        actor_principal_ref: &str,
+        reason: Option<&str>,
+    ) -> Result<(), DatabaseError>;
+
+    async fn append_trace_object_ref(&self, object_ref: TraceObjectRefWrite) -> Result<(), DatabaseError>;
+    async fn append_trace_derived_record(&self, derived_record: TraceDerivedRecordWrite) -> Result<(), DatabaseError>;
+    async fn append_trace_audit_event(&self, audit_event: TraceAuditEventWrite) -> Result<(), DatabaseError>;
+    async fn append_trace_credit_event(&self, credit_event: TraceCreditEventWrite) -> Result<(), DatabaseError>;
+    async fn write_trace_tombstone(&self, tombstone: TraceTombstoneWrite) -> Result<(), DatabaseError>;
+}
+```
+
+The concrete backend methods must take `tenant_id` as an explicit argument or as part of every write struct. Avoid generic `get_by_id` helpers for tenant-scoped trace rows.
+
 The names below are intentionally close to the MVP concepts, but are not proposed migrations yet. All primary records carry `tenant_id`, `created_at`, and `updated_at` unless noted. All tenant-scoped reads must filter by `tenant_id` through row policy or an equivalent query guard.
 
 ### Tenants and Access Grants
@@ -115,7 +794,7 @@ Indexes: `(tenant_id, submission_id) unique`, `(tenant_id, status, received_at)`
 | `created_by_job_id` | Producing worker/job. |
 | `valid_from`, `invalidated_at`, `deleted_at` | Artifact lifecycle. |
 
-Object keys must not reveal raw user ids, local paths, prompt content, or secrets. The service, not reviewer/user tokens, owns object-store credentials.
+Object keys must not reveal raw user ids, local paths, prompt content, or secrets. The service, not reviewer/user tokens, owns object-store credentials. Any backend write that stores an object reference must prove the referenced object belongs to the same `(tenant_id, submission_id)` as the row being written; bare UUID lookups are not sufficient in a multitenant corpus.
 
 ### Derived Records
 
@@ -128,9 +807,9 @@ Object keys must not reveal raw user ids, local paths, prompt content, or secret
 | `status` | Mirrors source eligibility: `current`, `invalidated`, `superseded`, `revoked`, `expired`. |
 | `worker_kind` | `server_rescrub`, `summary`, `duplicate_precheck`, `embedding`, `ranking`, `benchmark_conversion`. |
 | `worker_version` | Version of producing code/model/policy. |
-| `input_object_ref_id` | Exact input artifact. |
+| `input_object_ref_id` | Exact input artifact, resolved only through `(tenant_id, submission_id, object_ref_id)`. |
 | `input_hash` | Hash of input projection. |
-| `output_object_ref_id` | Optional large output. |
+| `output_object_ref_id` | Optional large output, resolved only through `(tenant_id, submission_id, object_ref_id)`. |
 | `canonical_summary` | Redacted short summary when safe for DB. |
 | `canonical_summary_hash` | Hash for duplicate checks. |
 | `task_success`, `privacy_risk`, `event_count` | Queryable attributes. |
@@ -173,7 +852,7 @@ Production may keep the vector payload in an external vector DB. Relational meta
 | `reason` | Required for privileged actions. |
 | `request_id` | API request or worker trace id. |
 | `decision_inputs_hash` | Hash of reviewed policy/input projection. |
-| `metadata` | Small JSON object without trace content. |
+| `metadata_kind`, `metadata` | Typed `TraceAuditSafeMetadata` projection only. Backends must reject arbitrary request bodies, tool payloads, raw paths, token values, and unallowlisted JSON keys. |
 | `created_at` | Append timestamp. |
 | `previous_event_hash`, `event_hash` | Optional tamper-evident chain per tenant. |
 
@@ -356,6 +1035,33 @@ Each migration batch should verify:
 - Vector entries do not exist for revoked, rejected, quarantined, expired, or out-of-scope submissions.
 - Audit import events cover every migrated submission and object ref.
 
+## Migration and Test Checklist
+
+Implementation checklist for the first real storage migration:
+
+- Refresh `origin/staging` and `origin/main`; choose the next migration number after the highest migration present on either branch.
+- Add `migrations/VN__trace_commons_storage.sql` with the PostgreSQL DDL, and update `migrations/checksums.lock` through the repo migration checksum workflow.
+- Add a same-version `"trace_commons_storage"` entry to `INCREMENTAL_MIGRATIONS` in `src/db/libsql_migrations.rs`.
+- If the libSQL base `SCHEMA` is updated for fresh installs, keep the incremental migration idempotent and make sure fresh and upgraded databases converge to the same schema.
+- Add `TraceCorpusStore` to the `Database` trait only after both `PgBackend` and `LibSqlBackend` implementations exist.
+- Keep DB writes behind a dark-launch or dual-write flag until parity checks pass.
+- Keep object payloads in encrypted artifact/object storage; write only object refs and hashes into DB.
+- Add a backfill tool that reads the file-backed tenant directories, validates envelopes, recomputes redaction and summary hashes, writes metadata, and emits audit import events.
+- Add a reconciliation command that compares file-backed responses with DB-backed metadata for status, review queues, credit, analytics, replay export, object refs, and tombstones.
+
+Test checklist for the same branch:
+
+- PostgreSQL migration test applies all migrations on an empty database and on a pre-Trace-Commons database.
+- libSQL migration test applies `SCHEMA` plus `INCREMENTAL_MIGRATIONS` on an empty in-memory database and on a database initialized before the Trace Commons migration.
+- Backend parity tests insert the same logical submission, object ref, audit event, credit event, derived record, and tombstone through the shared store trait for both backends.
+- Tenant-isolation tests seed duplicate `submission_id`, `trace_id`, `canonical_summary_hash`, and contributor pseudonym under two tenants and prove all public store methods filter by tenant.
+- Handler-level tests drive the future ingest/review/revoke/export callers, not only helper predicates, and assert each mocked DB/object/vector call receives `tenant_id`, `actor_principal_ref`, and `submission_id`.
+- Revocation propagation tests prove tombstone-first ordering and invalidation of submissions, derived rows, vectors, benchmark artifacts, exports, and credit settlement.
+- Retention tests run dry-run, policy-change, legal-hold, retry, and resumed-job paths before any destructive object/vector deletion path is enabled.
+- Export tests prove revoked, quarantined, rejected, expired, and out-of-scope submissions cannot enter new manifests, and existing manifests are invalidated after source revocation.
+- Security tests verify PostgreSQL RLS with `app.tenant_id` and libSQL query scoping with same ids across tenants.
+- Migration rollback tests prove DB-first reads can be disabled without deleting rows and that audit/tombstone rows remain append-only.
+
 ## Rollback
 
 Rollback should be operational, not destructive:
@@ -433,4 +1139,4 @@ When this plan becomes code:
 - Keep all new writes behind feature flags until dual-write verification exists.
 - Update `FEATURE_PARITY.md` only if user-visible Trace Commons status changes.
 - Update `docs/internal/trace-commons.md` if endpoint behavior, threat model, or MVP caveats change.
-- Run targeted tests for changed storage, web handlers, and migration tooling. Cargo is not required for this documentation-only scaffold.
+- Run targeted tests for changed storage, web handlers, migration tooling, and the Rust storage contract.

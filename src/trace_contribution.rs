@@ -55,6 +55,8 @@ pub struct TraceContributionEnvelope {
     pub hindsight: Option<HindsightRelabelingCandidate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub training_dynamics: Option<TrainingDynamicsSignals>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_evaluation: Option<ProcessEvaluationLabels>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -478,6 +480,57 @@ pub enum CartographyBucket {
     Unknown,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ProcessEvaluationLabels {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluator_name: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub evaluator_version: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<ProcessEvaluatorLabel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_selection: Option<ProcessEvalRating>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_argument_quality: Option<ProcessEvalRating>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_ordering: Option<ProcessEvalRating>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<ProcessEvalRating>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side_effect_safety: Option<ProcessEvalRating>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overall_score: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessEvalRating {
+    Pass,
+    Partial,
+    Fail,
+    NotApplicable,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessEvaluatorLabel {
+    CorrectToolSelection,
+    IncorrectToolSelection,
+    CorrectToolArguments,
+    IncorrectToolArguments,
+    CorrectToolOrdering,
+    ToolOrderingIssue,
+    RetryLoop,
+    MissingVerification,
+    ProperVerification,
+    SafeSideEffects,
+    UnsafeSideEffectAttempt,
+    UserCorrectionHandled,
+    RecoverableFailure,
+    BenchmarkCandidate,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum CanonicalRepresentationKind {
@@ -506,7 +559,9 @@ pub struct HindsightRelabelingCandidate {
     pub failure_type: Option<TraceFailureMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recoverability_score: Option<f32>,
+    #[serde(default)]
     pub benchmark_candidate: bool,
+    #[serde(default)]
     pub relabeled_training_candidate: bool,
 }
 
@@ -673,6 +728,11 @@ pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceVal
     } else {
         0.0
     };
+    let process_eval_value = envelope
+        .process_evaluation
+        .as_ref()
+        .and_then(|labels| labels.overall_score)
+        .map(|score| score.clamp(0.0, 1.0));
 
     let raw = gate
         * schema_validity
@@ -734,7 +794,7 @@ pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceVal
         difficulty,
         dependability,
         user_correction_value,
-        process_eval_value: None,
+        process_eval_value,
         downstream_utility: None,
         online_score,
         credit_points_estimate,
@@ -1909,6 +1969,7 @@ impl TraceRedactor for DeterministicTraceRedactor {
             value_card,
             hindsight: None,
             training_dynamics: None,
+            process_evaluation: None,
         })
     }
 }
@@ -4750,6 +4811,126 @@ mod tests {
         assert_eq!(
             estimate.credit_points_pending,
             estimate.scorecard.credit_points_estimate
+        );
+    }
+
+    #[tokio::test]
+    async fn research_scorecard_extension_fields_default_for_older_envelopes() {
+        let raw = RawTraceContribution::from_recorded_trace(
+            &sample_trace(),
+            RecordedTraceContributionOptions::default(),
+        );
+        let envelope = DeterministicTraceRedactor::default()
+            .redact_trace(raw)
+            .await
+            .expect("redaction should succeed");
+        let mut json = serde_json::to_value(&envelope).expect("envelope serializes");
+        let object = json.as_object_mut().expect("envelope is a json object");
+        object.remove("hindsight");
+        object.remove("training_dynamics");
+        object.remove("process_evaluation");
+
+        let decoded: TraceContributionEnvelope =
+            serde_json::from_value(json).expect("older envelope deserializes");
+
+        assert_eq!(decoded.hindsight, None);
+        assert_eq!(decoded.training_dynamics, None);
+        assert_eq!(decoded.process_evaluation, None);
+    }
+
+    #[tokio::test]
+    async fn process_evaluator_labels_allow_partial_future_payloads() {
+        let raw = RawTraceContribution::from_recorded_trace(
+            &sample_trace(),
+            RecordedTraceContributionOptions::default(),
+        );
+        let envelope = DeterministicTraceRedactor::default()
+            .redact_trace(raw)
+            .await
+            .expect("redaction should succeed");
+        let mut json = serde_json::to_value(&envelope).expect("envelope serializes");
+        let object = json.as_object_mut().expect("envelope is a json object");
+        object.insert(
+            "process_evaluation".to_string(),
+            serde_json::json!({
+                "overall_score": 0.66,
+                "labels": ["proper_verification"]
+            }),
+        );
+
+        let decoded: TraceContributionEnvelope =
+            serde_json::from_value(json).expect("partial process evaluation deserializes");
+
+        let process_evaluation = decoded
+            .process_evaluation
+            .expect("process evaluation should be preserved");
+        assert_eq!(process_evaluation.evaluator_version, "");
+        assert_eq!(process_evaluation.overall_score, Some(0.66));
+        assert_eq!(
+            process_evaluation.labels,
+            vec![ProcessEvaluatorLabel::ProperVerification]
+        );
+    }
+
+    #[tokio::test]
+    async fn process_evaluator_labels_do_not_require_raw_content() {
+        let raw = RawTraceContribution::from_recorded_trace(
+            &sample_trace(),
+            RecordedTraceContributionOptions::default(),
+        );
+        let mut envelope = DeterministicTraceRedactor::default()
+            .redact_trace(raw)
+            .await
+            .expect("redaction should succeed");
+        envelope.process_evaluation = Some(ProcessEvaluationLabels {
+            evaluator_version: "process-evaluator-v1".to_string(),
+            labels: vec![
+                ProcessEvaluatorLabel::CorrectToolSelection,
+                ProcessEvaluatorLabel::MissingVerification,
+            ],
+            tool_selection: Some(ProcessEvalRating::Pass),
+            tool_argument_quality: Some(ProcessEvalRating::Unknown),
+            tool_ordering: Some(ProcessEvalRating::Partial),
+            verification: Some(ProcessEvalRating::Fail),
+            side_effect_safety: Some(ProcessEvalRating::Pass),
+            overall_score: Some(0.72),
+            ..ProcessEvaluationLabels::default()
+        });
+        envelope.hindsight = Some(HindsightRelabelingCandidate {
+            achieved_subgoals: vec!["redacted_subgoal:diagnosed_tool_failure".to_string()],
+            failure_type: Some(TraceFailureMode::MissingVerification),
+            recoverability_score: Some(0.8),
+            benchmark_candidate: true,
+            relabeled_training_candidate: true,
+            ..HindsightRelabelingCandidate::default()
+        });
+        envelope.training_dynamics = Some(TrainingDynamicsSignals {
+            mean_confidence: Some(0.61),
+            variability: Some(0.29),
+            correctness: Some(0.5),
+            cartography_bucket: Some(CartographyBucket::Ambiguous),
+        });
+
+        let json = serde_json::to_string(&envelope).expect("envelope serializes");
+        let decoded: TraceContributionEnvelope =
+            serde_json::from_str(&json).expect("envelope deserializes");
+
+        assert!(json.contains("process_evaluation"));
+        assert!(json.contains("training_dynamics"));
+        assert!(json.contains("hindsight"));
+        assert!(!json.contains("raw_content"));
+        assert!(!json.contains("raw_tool"));
+        assert!(!json.contains("hidden_reasoning"));
+        assert_eq!(
+            decoded
+                .process_evaluation
+                .as_ref()
+                .expect("process labels present")
+                .labels,
+            vec![
+                ProcessEvaluatorLabel::CorrectToolSelection,
+                ProcessEvaluatorLabel::MissingVerification,
+            ]
         );
     }
 }
