@@ -190,12 +190,27 @@ Filesystem import rules:
 - no broad WASI preopens are granted
 - missing filesystem context returns a negative guest status instead of ambient access
 
+V1 also defines a host-mediated HTTP import. This import is linked for modules that declare it, but is default-deny unless invocation uses `invoke_json_with_network` with a `WasmHostHttp` implementation. The provided `WasmPolicyHttpClient` wrapper enforces `NetworkPolicy` before delegating to the host client.
+
+```text
+host.http_request_utf8(method, url_ptr, url_len, body_ptr, body_len, out_ptr, out_cap) -> i32 bytes_or_negative_status
+```
+
+Network import rules:
+
+- guests pass a URL string and UTF-8 request body; they never open raw sockets
+- URL scheme must be `http` or `https`
+- `NetworkPolicy.allowed_targets` must match scheme/host/port
+- `deny_private_ip_ranges` blocks literal private/loopback/link-local IP targets; production host HTTP clients must also enforce DNS/IP resolution safeguards to prevent rebinding or proxy bypasses
+- `max_egress_bytes` bounds request body bytes and, in the V1 shim, returned response body bytes before they are copied into guest memory
+- credentials/secrets are not injected by this import
+- missing network context returns a negative guest status instead of ambient network access
+
 Unsupported imports fail at module preparation as `WasmError::UnsupportedImport`.
 
 Future privileged imports should be grouped by service and routed through their owning host services:
 
 ```text
-host.network.request
 host.auth.resolve_secret_handle
 host.dispatch.capability
 host.events.emit
@@ -272,6 +287,25 @@ pub trait WasmHostFilesystem: Send + Sync {
 }
 
 pub struct WasmScopedFilesystem<F: RootFilesystem>;
+
+pub struct WasmHttpRequest {
+    pub method: NetworkMethod,
+    pub url: String,
+    pub body: String,
+}
+
+pub struct WasmHttpResponse {
+    pub status: u16,
+    pub body: String,
+}
+
+pub trait WasmHostHttp: Send + Sync {
+    fn request_utf8(&self, request: WasmHttpRequest) -> Result<WasmHttpResponse, String>;
+}
+
+pub struct WasmPolicyHttpClient<C>;
+
+impl<C: WasmHostHttp> WasmHostHttp for WasmPolicyHttpClient<C>;
 
 pub struct WasmModuleSpec {
     pub provider: ExtensionId,
@@ -355,6 +389,14 @@ impl WasmRuntime {
         reservation: Option<&ResourceReservation>,
         invocation: CapabilityInvocation,
         filesystem: Arc<dyn WasmHostFilesystem>,
+    ) -> Result<CapabilityResult, WasmError>;
+    pub fn invoke_json_with_network(
+        &self,
+        module: &PreparedWasmModule,
+        descriptor: &CapabilityDescriptor,
+        reservation: Option<&ResourceReservation>,
+        invocation: CapabilityInvocation,
+        http: Arc<dyn WasmHostHttp>,
     ) -> Result<CapabilityResult, WasmError>;
 }
 ```
