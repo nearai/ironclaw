@@ -190,6 +190,30 @@ pub struct TraceDerivedRecordWrite {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceDerivedRecord {
+    pub derived_id: Uuid,
+    pub tenant_id: String,
+    pub submission_id: Uuid,
+    pub trace_id: Uuid,
+    pub status: TraceDerivedStatus,
+    pub worker_kind: TraceWorkerKind,
+    pub worker_version: String,
+    pub input_object_ref: Option<TenantScopedTraceObjectRef>,
+    pub input_hash: String,
+    pub output_object_ref: Option<TenantScopedTraceObjectRef>,
+    pub canonical_summary: Option<String>,
+    pub canonical_summary_hash: Option<String>,
+    pub task_success: Option<String>,
+    pub privacy_risk: Option<String>,
+    pub event_count: Option<i32>,
+    pub duplicate_score: Option<f32>,
+    pub novelty_score: Option<f32>,
+    pub cluster_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceAuditEventWrite {
     pub audit_event_id: Uuid,
     pub tenant_id: String,
@@ -324,6 +348,11 @@ pub trait TraceCorpusStore: Send + Sync {
         &self,
         derived_record: TraceDerivedRecordWrite,
     ) -> Result<(), DatabaseError>;
+
+    async fn list_trace_derived_records(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceDerivedRecord>, DatabaseError>;
 
     async fn append_trace_audit_event(
         &self,

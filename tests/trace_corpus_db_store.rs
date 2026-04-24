@@ -138,6 +138,38 @@ mod libsql_trace_corpus_store {
             .await
             .expect("append derived record");
 
+        let derived_records = backend
+            .list_trace_derived_records(tenant_id)
+            .await
+            .expect("list derived records for tenant");
+        assert_eq!(derived_records.len(), 1);
+        assert_eq!(derived_records[0].submission_id, submission_id);
+        assert_eq!(derived_records[0].trace_id, inserted.trace_id);
+        assert_eq!(derived_records[0].status, TraceDerivedStatus::Current);
+        assert_eq!(
+            derived_records[0].worker_kind,
+            TraceWorkerKind::BenchmarkConversion
+        );
+        assert_eq!(
+            derived_records[0].canonical_summary.as_deref(),
+            Some("Converted into a benchmark candidate.")
+        );
+        assert_eq!(derived_records[0].duplicate_score, Some(0.1));
+        assert_eq!(derived_records[0].novelty_score, Some(0.7));
+        assert_eq!(
+            derived_records[0]
+                .input_object_ref
+                .as_ref()
+                .map(|ref_| ref_.object_ref_id),
+            Some(object_ref_id)
+        );
+
+        let other_tenant_derived_records = backend
+            .list_trace_derived_records("tenant-beta")
+            .await
+            .expect("list derived records for other tenant");
+        assert!(other_tenant_derived_records.is_empty());
+
         backend
             .append_trace_audit_event(TraceAuditEventWrite {
                 tenant_id: tenant_id.to_string(),

@@ -7,10 +7,11 @@ use crate::db::trace_corpus_common::{
 };
 use crate::error::DatabaseError;
 use crate::trace_corpus_storage::{
-    TraceArtifactInvalidationCounts, TraceAuditEventWrite, TraceAuditSafeMetadata,
-    TraceCorpusStatus, TraceCorpusStore, TraceCreditEventRecord, TraceCreditEventWrite,
-    TraceCreditSettlementState, TraceDerivedRecordWrite, TraceDerivedStatus, TraceObjectRefWrite,
-    TraceSubmissionRecord, TraceSubmissionWrite, TraceTombstoneWrite,
+    TenantScopedTraceObjectRef, TraceArtifactInvalidationCounts, TraceAuditEventWrite,
+    TraceAuditSafeMetadata, TraceCorpusStatus, TraceCorpusStore, TraceCreditEventRecord,
+    TraceCreditEventWrite, TraceCreditSettlementState, TraceDerivedRecord, TraceDerivedRecordWrite,
+    TraceDerivedStatus, TraceObjectRefWrite, TraceSubmissionRecord, TraceSubmissionWrite,
+    TraceTombstoneWrite, TraceWorkerKind,
 };
 
 const TRACE_SUBMISSION_COLUMNS: &str = "\
@@ -55,6 +56,12 @@ fn get_opt_f32(row: &libsql::Row, idx: i32) -> Option<f32> {
         .ok()
         .map(|value| value as f32)
         .or_else(|| row.get::<i64>(idx).ok().map(|value| value as f32))
+}
+
+fn get_opt_i32(row: &libsql::Row, idx: i32) -> Option<i32> {
+    row.get::<i64>(idx)
+        .ok()
+        .and_then(|value| i32::try_from(value).ok())
 }
 
 fn json_string<T: serde::Serialize>(value: &T) -> Result<String, DatabaseError> {
@@ -130,6 +137,47 @@ fn row_to_credit_event(row: &libsql::Row) -> Result<TraceCreditEventRecord, Data
             "TraceCreditSettlementState",
         )?,
         occurred_at: get_ts(row, 12),
+    })
+}
+
+fn row_to_derived_record(row: &libsql::Row) -> Result<TraceDerivedRecord, DatabaseError> {
+    let tenant_id = get_text(row, 0);
+    let submission_id = parse_uuid(&get_text(row, 2), "trace_derived_records.submission_id")?;
+    let input_object_ref_id = get_opt_text(row, 7)
+        .map(|id| parse_uuid(&id, "trace_derived_records.input_object_ref_id"))
+        .transpose()?;
+    let output_object_ref_id = get_opt_text(row, 9)
+        .map(|id| parse_uuid(&id, "trace_derived_records.output_object_ref_id"))
+        .transpose()?;
+    Ok(TraceDerivedRecord {
+        tenant_id: tenant_id.clone(),
+        derived_id: parse_uuid(&get_text(row, 1), "trace_derived_records.derived_id")?,
+        submission_id,
+        trace_id: parse_uuid(&get_text(row, 3), "trace_derived_records.trace_id")?,
+        status: enum_from_storage::<TraceDerivedStatus>(&get_text(row, 4), "TraceDerivedStatus")?,
+        worker_kind: enum_from_storage::<TraceWorkerKind>(&get_text(row, 5), "TraceWorkerKind")?,
+        worker_version: get_text(row, 6),
+        input_object_ref: input_object_ref_id.map(|object_ref_id| TenantScopedTraceObjectRef {
+            tenant_id: tenant_id.clone(),
+            submission_id,
+            object_ref_id,
+        }),
+        input_hash: get_text(row, 8),
+        output_object_ref: output_object_ref_id.map(|object_ref_id| TenantScopedTraceObjectRef {
+            tenant_id: tenant_id.clone(),
+            submission_id,
+            object_ref_id,
+        }),
+        canonical_summary: get_opt_text(row, 10),
+        canonical_summary_hash: get_opt_text(row, 11),
+        task_success: get_opt_text(row, 12),
+        privacy_risk: get_opt_text(row, 13),
+        event_count: get_opt_i32(row, 14),
+        duplicate_score: get_opt_f32(row, 15),
+        novelty_score: get_opt_f32(row, 16),
+        cluster_id: get_opt_text(row, 17),
+        created_at: get_ts(row, 18),
+        updated_at: get_ts(row, 19),
     })
 }
 
@@ -471,6 +519,36 @@ impl TraceCorpusStore for LibSqlBackend {
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(())
+    }
+
+    async fn list_trace_derived_records(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceDerivedRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT
+                    tenant_id, derived_id, submission_id, trace_id, status, worker_kind,
+                    worker_version, input_object_ref_id, input_hash, output_object_ref_id,
+                    canonical_summary, canonical_summary_hash, task_success, privacy_risk,
+                    event_count, duplicate_score, novelty_score, cluster_id, created_at, updated_at
+                 FROM trace_derived_records
+                 WHERE tenant_id = ?1
+                 ORDER BY created_at ASC",
+                libsql::params![tenant_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut records = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            records.push(row_to_derived_record(&row)?);
+        }
+        Ok(records)
     }
 
     async fn append_trace_audit_event(

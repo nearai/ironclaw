@@ -6,10 +6,11 @@ use crate::db::postgres::PgBackend;
 use crate::db::trace_corpus_common::{audit_action_for_status, enum_from_storage, enum_to_storage};
 use crate::error::DatabaseError;
 use crate::trace_corpus_storage::{
-    TraceArtifactInvalidationCounts, TraceAuditEventWrite, TraceAuditSafeMetadata,
-    TraceCorpusStatus, TraceCorpusStore, TraceCreditEventRecord, TraceCreditEventWrite,
-    TraceCreditSettlementState, TraceDerivedRecordWrite, TraceDerivedStatus, TraceObjectRefWrite,
-    TraceSubmissionRecord, TraceSubmissionWrite, TraceTombstoneWrite,
+    TenantScopedTraceObjectRef, TraceArtifactInvalidationCounts, TraceAuditEventWrite,
+    TraceAuditSafeMetadata, TraceCorpusStatus, TraceCorpusStore, TraceCreditEventRecord,
+    TraceCreditEventWrite, TraceCreditSettlementState, TraceDerivedRecord, TraceDerivedRecordWrite,
+    TraceDerivedStatus, TraceObjectRefWrite, TraceSubmissionRecord, TraceSubmissionWrite,
+    TraceTombstoneWrite, TraceWorkerKind,
 };
 
 fn json_array_strings(
@@ -84,6 +85,45 @@ fn row_to_credit_event(row: &Row) -> Result<TraceCreditEventRecord, DatabaseErro
             "TraceCreditSettlementState",
         )?,
         occurred_at: row.get("occurred_at"),
+    })
+}
+
+fn row_to_derived_record(row: &Row) -> Result<TraceDerivedRecord, DatabaseError> {
+    let status: String = row.get("status");
+    let worker_kind: String = row.get("worker_kind");
+    let tenant_id: String = row.get("tenant_id");
+    let submission_id: Uuid = row.get("submission_id");
+    let input_object_ref_id: Option<Uuid> = row.get("input_object_ref_id");
+    let output_object_ref_id: Option<Uuid> = row.get("output_object_ref_id");
+    Ok(TraceDerivedRecord {
+        derived_id: row.get("derived_id"),
+        tenant_id: tenant_id.clone(),
+        submission_id,
+        trace_id: row.get("trace_id"),
+        status: enum_from_storage::<TraceDerivedStatus>(&status, "TraceDerivedStatus")?,
+        worker_kind: enum_from_storage::<TraceWorkerKind>(&worker_kind, "TraceWorkerKind")?,
+        worker_version: row.get("worker_version"),
+        input_object_ref: input_object_ref_id.map(|object_ref_id| TenantScopedTraceObjectRef {
+            tenant_id: tenant_id.clone(),
+            submission_id,
+            object_ref_id,
+        }),
+        input_hash: row.get("input_hash"),
+        output_object_ref: output_object_ref_id.map(|object_ref_id| TenantScopedTraceObjectRef {
+            tenant_id: tenant_id.clone(),
+            submission_id,
+            object_ref_id,
+        }),
+        canonical_summary: row.get("canonical_summary"),
+        canonical_summary_hash: row.get("canonical_summary_hash"),
+        task_success: row.get("task_success"),
+        privacy_risk: row.get("privacy_risk"),
+        event_count: row.get("event_count"),
+        duplicate_score: row.get("duplicate_score"),
+        novelty_score: row.get("novelty_score"),
+        cluster_id: row.get("cluster_id"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
     })
 }
 
@@ -419,6 +459,28 @@ impl TraceCorpusStore for PgBackend {
             .await
             .map_err(DatabaseError::Postgres)?;
         Ok(())
+    }
+
+    async fn list_trace_derived_records(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceDerivedRecord>, DatabaseError> {
+        let client = self.pool().get().await?;
+        let rows = client
+            .query(
+                "SELECT
+                    tenant_id, derived_id, submission_id, trace_id, status, worker_kind,
+                    worker_version, input_object_ref_id, input_hash, output_object_ref_id,
+                    canonical_summary, canonical_summary_hash, task_success, privacy_risk,
+                    event_count, duplicate_score, novelty_score, cluster_id, created_at, updated_at
+                 FROM trace_derived_records
+                 WHERE tenant_id = $1
+                 ORDER BY created_at ASC",
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        rows.iter().map(row_to_derived_record).collect()
     }
 
     async fn append_trace_audit_event(
