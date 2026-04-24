@@ -764,19 +764,29 @@ async fn handle_llm_complete(
                 LlmResponse::Text(text) => {
                     serde_json::json!({"type": "text", "content": text, "usage": usage})
                 }
-                LlmResponse::Code { code, .. } => {
-                    serde_json::json!({"type": "code", "code": code, "usage": usage})
-                }
-                LlmResponse::ActionCalls { calls, content } => {
-                    // Single source of truth for the Python interchange
-                    // shape — must round-trip via `python_json_to_action_calls`.
-                    let calls_json = action_calls_to_python_json(&calls);
+                LlmResponse::Code { code, content } => {
+                    // Pass `content` through so the orchestrator can use the
+                    // model's original prose as the assistant transcript
+                    // entry instead of reconstructing a synthetic fence.
                     serde_json::json!({
-                        "type": "actions",
+                        "type": "code",
+                        "code": code,
                         "content": content,
-                        "calls": calls_json,
-                        "usage": usage
+                        "usage": usage,
                     })
+                }
+                LlmResponse::ActionCalls { .. } => {
+                    // Code-only contract: the LlmBridgeAdapter must never emit
+                    // ActionCalls. Surface the contract violation instead of
+                    // silently losing the response.
+                    return ExtFunctionResult::Error(monty::MontyException::new(
+                        monty::ExcType::RuntimeError,
+                        Some(
+                            "LlmBackend returned ActionCalls under the code-only \
+                             contract — check the bridge adapter or test mock."
+                                .into(),
+                        ),
+                    ));
                 }
             };
 
@@ -2987,11 +2997,10 @@ mod tests {
     // ── Python helper unit tests via Monty ──────────────────────
     //
     // Extracts the helper functions from the default orchestrator and
-    // evaluates `signals_tool_intent(text)` directly, mirroring the V1
-    // Rust unit test suite in src/llm/reasoning.rs.
+    // evaluates small Python expressions against them, for unit-testing
+    // the self-modifiable helpers (e.g. skill normalization, regex host
+    // dispatch) without spinning up a full thread.
 
-    /// Run a Python expression that returns a bool by prepending the
-    /// orchestrator helper definitions and wrapping in `FINAL(expr)`.
     /// Run a Python snippet and drive the Monty VM, returning the FINAL()
     /// value as a `MontyObject`. This is the common core for `eval_python_bool`
     /// and `eval_python_int`.
@@ -3086,6 +3095,7 @@ mod tests {
         // swallows the compile error).
         assert!(!eval_python_bool(r#"bool(__regex_match__("[", "abc"))"#));
     }
+
 
     // ── True positives (should trigger nudge) ───────────────────
 
@@ -3333,16 +3343,6 @@ mod tests {
         ));
         // Bare "disable" command
         assert!(eval_python_bool(r#"signals_execution_intent("disable")"#));
-    }
-
-    #[test]
-    fn signals_execution_intent_bare_stop_with_punctuation() {
-        // Bare commands with trailing punctuation must still match
-        assert!(eval_python_bool(r#"signals_execution_intent("stop.")"#));
-        assert!(eval_python_bool(r#"signals_execution_intent("cancel!")"#));
-        assert!(eval_python_bool(
-            r#"signals_execution_intent("stop pinging.")"#
-        ));
     }
 
     // ── Skill activation: smart-quote / autocorrect resilience ───

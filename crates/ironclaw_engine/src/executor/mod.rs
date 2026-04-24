@@ -3,7 +3,6 @@
 //! - [`ExecutionLoop`] — core loop replacing `run_agentic_loop()`
 //! - [`structured`] — Tier 0 action execution (structured tool calls)
 //! - [`context`] — context building for LLM calls
-//! - [`intent`] — tool intent nudge detection
 
 pub mod context;
 pub mod loop_engine;
