@@ -152,7 +152,7 @@ Both features compiled?
 **PostgreSQL path:**
 1. Check `DATABASE_URL` from env or settings
 2. Test connection via `connect_without_migrations()` (validates version, pgvector)
-3. Optionally run migrations
+3. Prompt to run migrations; declining aborts onboarding because later setup persistence depends on the migrated schema
 
 **libSQL path:**
 1. Offer local path (default: `~/.ironclaw/ironclaw.db`)

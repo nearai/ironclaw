@@ -656,6 +656,11 @@ impl SetupWizard {
 
                     if confirm("Run database migrations?", true).map_err(SetupError::Io)? {
                         self.run_migrations_postgres().await?;
+                    } else {
+                        return Err(SetupError::Database(
+                            "PostgreSQL onboarding requires running migrations before continuing"
+                                .to_string(),
+                        ));
                     }
 
                     self.settings.database_url = Some(url.clone());
@@ -684,6 +689,11 @@ impl SetupWizard {
 
                     if confirm("Run database migrations?", true).map_err(SetupError::Io)? {
                         self.run_migrations_postgres().await?;
+                    } else {
+                        return Err(SetupError::Database(
+                            "PostgreSQL onboarding requires running migrations before continuing"
+                                .to_string(),
+                        ));
                     }
 
                     self.settings.database_url = Some(url);
@@ -4017,10 +4027,10 @@ mod tests {
                 .expect("rewind stdin script");
 
             let original_fd = unsafe { dup(0) };
-            assert!(original_fd >= 0, "dup(stdin) must succeed");
+            assert!(original_fd >= 0, "failed to duplicate stdin");
 
             let swapped = unsafe { dup2(script.as_file().as_raw_fd(), 0) };
-            assert!(swapped >= 0, "dup2(stdin script -> stdin) must succeed");
+            assert!(swapped >= 0, "failed to redirect stdin");
 
             Self {
                 original_fd,
@@ -4033,9 +4043,9 @@ mod tests {
     impl Drop for StdinGuard {
         fn drop(&mut self) {
             let restored = unsafe { dup2(self.original_fd, 0) };
-            assert!(restored >= 0, "restoring stdin must succeed");
+            assert!(restored >= 0, "failed to restore stdin");
             let closed = unsafe { close(self.original_fd) };
-            assert_eq!(closed, 0, "closing duplicated stdin fd must succeed");
+            assert_eq!(closed, 0, "failed to close duplicated stdin");
         }
     }
 
@@ -4891,6 +4901,45 @@ mod tests {
             .expect("existing postgres URL should be accepted");
 
         assert_postgres_persisted(&wizard, &database_url).await;
+    }
+
+    /// Regression test for PR #2810 review feedback: declining PostgreSQL
+    /// migrations must fail early instead of allowing onboarding to continue
+    /// with a pool that cannot persist later setup state.
+    #[cfg(all(feature = "postgres", feature = "integration", unix))]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_step_database_postgres_existing_url_declining_migrations_fails_early() {
+        let _lock = lock_env();
+
+        let Some((_container, database_url)) = start_pg_container().await else {
+            return;
+        };
+
+        let _url_guard = EnvGuard::set("DATABASE_URL", &database_url);
+        let _backend_guard = EnvGuard::clear("DATABASE_BACKEND");
+        let _libsql_guard = EnvGuard::clear("LIBSQL_PATH");
+        let _ssl_guard = EnvGuard::set("DATABASE_SSLMODE", "disable");
+        let _stdin = StdinGuard::new("y\nn\n");
+
+        let mut wizard = SetupWizard::new();
+        let err = wizard
+            .step_database_postgres()
+            .await
+            .expect_err("declining postgres migrations must abort onboarding");
+
+        assert!(
+            matches!(
+                err,
+                SetupError::Database(message)
+                    if message == "PostgreSQL onboarding requires running migrations before continuing"
+            ),
+            "declining migrations should return the explicit onboarding error"
+        );
+        assert_eq!(
+            wizard.settings.database_url, None,
+            "failing early should not record a postgres URL"
+        );
     }
 
     /// Assert that a postgres setup path left the wizard in the correct state:
