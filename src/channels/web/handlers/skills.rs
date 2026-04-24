@@ -411,8 +411,7 @@ mod tests {
 
     use crate::channels::web::{
         auth::{AuthenticatedUser, UserIdentity},
-        platform::{state::ActiveConfigSnapshot, ws::WsConnectionTracker},
-        sse::SseManager,
+        test_helpers::TestGatewayBuilder,
     };
 
     #[test]
@@ -483,59 +482,12 @@ mod tests {
     #[tokio::test]
     async fn skills_install_handler_uses_manifest_name_when_request_name_is_absent() {
         let install_dir = tempfile::tempdir().expect("tempdir");
-        let state = Arc::new(GatewayState {
-            msg_tx: tokio::sync::RwLock::new(None),
-            sse: Arc::new(SseManager::new()),
-            workspace: None,
-            workspace_pool: None,
-            session_manager: None,
-            log_broadcaster: None,
-            log_level_handle: None,
-            extension_manager: None,
-            tool_registry: None,
-            store: None,
-            settings_cache: None,
-            job_manager: None,
-            prompt_queue: None,
-            owner_id: "test-user".to_string(),
-            shutdown_tx: tokio::sync::RwLock::new(None),
-            ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
-            llm_provider: None,
-            llm_reload: None,
-            llm_session_manager: None,
-            config_toml_path: None,
-            skill_registry: Some(Arc::new(std::sync::RwLock::new(
-                ironclaw_skills::SkillRegistry::new(install_dir.path().to_path_buf()),
-            ))),
-            skill_catalog: None,
-            auth_manager: None,
-            scheduler: None,
-            chat_rate_limiter: crate::channels::web::platform::state::PerUserRateLimiter::new(
-                30, 60,
-            ),
-            oauth_rate_limiter: crate::channels::web::platform::state::PerUserRateLimiter::new(
-                20, 60,
-            ),
-            webhook_rate_limiter: crate::channels::web::platform::state::RateLimiter::new(10, 60),
-            registry_entries: Vec::new(),
-            cost_guard: None,
-            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
-            startup_time: std::time::Instant::now(),
-            active_config: Arc::new(tokio::sync::RwLock::new(ActiveConfigSnapshot::default())),
-            secrets_store: None,
-            db_auth: None,
-            pairing_store: None,
-            oauth_providers: None,
-            oauth_state_store: None,
-            oauth_base_url: None,
-            oauth_allowed_domains: Vec::new(),
-            near_nonce_store: None,
-            near_rpc_url: None,
-            near_network: None,
-            oauth_sweep_shutdown: None,
-            frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
-            tool_dispatcher: None,
-        });
+        let mut state = TestGatewayBuilder::new().build();
+        Arc::get_mut(&mut state)
+            .expect("state should be uniquely owned in test")
+            .skill_registry = Some(Arc::new(std::sync::RwLock::new(
+            ironclaw_skills::SkillRegistry::new(install_dir.path().to_path_buf()),
+        )));
         let mut headers = HeaderMap::new();
         headers.insert("x-confirm-action", "true".parse().expect("static header"));
 
