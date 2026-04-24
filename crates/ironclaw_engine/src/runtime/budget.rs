@@ -22,11 +22,12 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
 
-use crate::traits::store::{AtomicReserveOutcome, Store};
+use crate::traits::store::{AtomicReserveOutcome, BudgetEventKind, BudgetEventRecord, Store};
 use crate::types::budget::{
     BudgetDenial, BudgetError, BudgetId, BudgetLimit, BudgetPeriod, BudgetReservation, BudgetScope,
     BudgetWarning, PeriodUnit, ReservationId, ReservationTicket, WarningTier,
 };
+use crate::types::thread::ThreadId;
 
 /// Enforcement mode mirroring `ironclaw::config::BudgetEnforcementMode`
 /// in the host crate. Duplicated here because the engine crate must
@@ -104,10 +105,22 @@ impl BudgetEnforcer {
         requested_tokens: u64,
         now: DateTime<Utc>,
     ) -> Result<Result<ReservationTicket, BudgetDenial>, BudgetError> {
+        // Audit context captured once per cascade — every scope in a
+        // single `reserve` call belongs to one user. An empty `scopes`
+        // vec still succeeds (returns an empty ticket); the empty
+        // `actor_user_id` is fine because there are no events to emit.
+        let actor_user_id = scopes
+            .first()
+            .map(|s| s.user_id().to_string())
+            .unwrap_or_default();
+        let thread_id = thread_id_from_scopes(scopes);
+
         if matches!(self.cfg.mode, EnforcementMode::Off) {
             return Ok(Ok(ReservationTicket {
                 reservations: Vec::new(),
                 warnings: Vec::new(),
+                actor_user_id,
+                thread_id,
             }));
         }
 
@@ -141,7 +154,29 @@ impl BudgetEnforcer {
                 // reserve_atomic below, which will just fail — but in
                 // Shadow we coerce failure to success).
                 if self.cfg.mode.is_denying() && projected_committed > budget.limit.usd {
-                    self.rollback(&granted, now).await;
+                    self.record_audit(
+                        BudgetEventKind::Deny,
+                        budget.id,
+                        None,
+                        thread_id,
+                        Some(requested_usd),
+                        Some(requested_tokens),
+                        Some(format!(
+                            "usd_exhausted: projected={projected_committed} limit={}",
+                            budget.limit.usd
+                        )),
+                        &actor_user_id,
+                        now,
+                    )
+                    .await;
+                    self.rollback_with_audit(
+                        &granted,
+                        thread_id,
+                        &actor_user_id,
+                        "rollback_usd_deny",
+                        now,
+                    )
+                    .await;
                     return Ok(Err(BudgetDenial::ExhaustedUsd {
                         first_exhausted: scope.clone(),
                         limit: budget.limit.usd,
@@ -156,19 +191,69 @@ impl BudgetEnforcer {
                 if utilization_after >= self.cfg.approval_threshold
                     && self.cfg.mode.gates_approvals()
                 {
-                    self.rollback(&granted, now).await;
+                    self.record_audit(
+                        BudgetEventKind::Deny,
+                        budget.id,
+                        None,
+                        thread_id,
+                        Some(requested_usd),
+                        Some(requested_tokens),
+                        Some(format!(
+                            "approval_required: utilization={utilization_after:.3}"
+                        )),
+                        &actor_user_id,
+                        now,
+                    )
+                    .await;
+                    self.rollback_with_audit(
+                        &granted,
+                        thread_id,
+                        &actor_user_id,
+                        "rollback_approval_required",
+                        now,
+                    )
+                    .await;
                     return Ok(Err(BudgetDenial::RequiresApproval {
                         scope: scope.clone(),
                         utilization: utilization_after,
                     }));
                 }
 
-                // Token cap backstop.
+                // Token cap backstop — **best-effort, not atomic**.
+                // `ledger.tokens_used` is only advanced on reconcile
+                // (see `reconcile_reservation`), and `reserve_atomic`
+                // does not increment a reserved-tokens column, so two
+                // concurrent reserves near the cap can both pass this
+                // check. Documented on `BudgetLimit::tokens`: USD is
+                // the authoritative dimension; tokens are a secondary
+                // guardrail only.
                 if let Some(token_limit) = budget.limit.tokens
                     && self.cfg.mode.is_denying()
                     && ledger.tokens_used + requested_tokens > token_limit
                 {
-                    self.rollback(&granted, now).await;
+                    self.record_audit(
+                        BudgetEventKind::Deny,
+                        budget.id,
+                        None,
+                        thread_id,
+                        Some(requested_usd),
+                        Some(requested_tokens),
+                        Some(format!(
+                            "tokens_exhausted: used={}+requested={requested_tokens} limit={token_limit}",
+                            ledger.tokens_used
+                        )),
+                        &actor_user_id,
+                        now,
+                    )
+                    .await;
+                    self.rollback_with_audit(
+                        &granted,
+                        thread_id,
+                        &actor_user_id,
+                        "rollback_tokens_deny",
+                        now,
+                    )
+                    .await;
                     return Ok(Err(BudgetDenial::ExhaustedTokens {
                         first_exhausted: scope.clone(),
                         limit: token_limit,
@@ -186,18 +271,26 @@ impl BudgetEnforcer {
                     // Shadow: record a synthetic outcome so the
                     // enforcer appears to have reserved, and audit the
                     // attempted amount.
-                    granted.push((
+                    let shadow_outcome = AtomicReserveOutcome {
+                        reservation_id: ReservationId::new(),
+                        budget_id: budget.id,
+                        reserved_usd: requested_usd,
+                        reserved_tokens: requested_tokens,
+                        ledger: ledger.clone(),
+                    };
+                    self.record_audit(
+                        BudgetEventKind::Reserve,
                         budget.id,
-                        scope.clone(),
-                        AtomicReserveOutcome {
-                            reservation_id: ReservationId::new(),
-                            budget_id: budget.id,
-                            reserved_usd: requested_usd,
-                            reserved_tokens: requested_tokens,
-                            ledger: ledger.clone(),
-                        },
-                        requested_usd,
-                    ));
+                        Some(shadow_outcome.reservation_id),
+                        thread_id,
+                        Some(requested_usd),
+                        Some(requested_tokens),
+                        Some("shadow".into()),
+                        &actor_user_id,
+                        now,
+                    )
+                    .await;
+                    granted.push((budget.id, scope.clone(), shadow_outcome, requested_usd));
                     // Still attach warnings so telemetry is rich.
                     if let Some(w) = warning_for(scope, &budget.limit, utilization_after, &self.cfg)
                     {
@@ -214,7 +307,26 @@ impl BudgetEnforcer {
                     Some(o) => o,
                     None => {
                         // DB-level denial (concurrent reserver won).
-                        self.rollback(&granted, now).await;
+                        self.record_audit(
+                            BudgetEventKind::Deny,
+                            budget.id,
+                            None,
+                            thread_id,
+                            Some(requested_usd),
+                            Some(requested_tokens),
+                            Some("usd_exhausted_db_level".into()),
+                            &actor_user_id,
+                            now,
+                        )
+                        .await;
+                        self.rollback_with_audit(
+                            &granted,
+                            thread_id,
+                            &actor_user_id,
+                            "rollback_usd_deny_db",
+                            now,
+                        )
+                        .await;
                         return Ok(Err(BudgetDenial::ExhaustedUsd {
                             first_exhausted: scope.clone(),
                             limit: budget.limit.usd,
@@ -223,6 +335,19 @@ impl BudgetEnforcer {
                         }));
                     }
                 };
+
+                self.record_audit(
+                    BudgetEventKind::Reserve,
+                    budget.id,
+                    Some(outcome.reservation_id),
+                    thread_id,
+                    Some(requested_usd),
+                    Some(requested_tokens),
+                    None,
+                    &actor_user_id,
+                    now,
+                )
+                .await;
 
                 granted.push((budget.id, scope.clone(), outcome, requested_usd));
 
@@ -246,6 +371,8 @@ impl BudgetEnforcer {
         Ok(Ok(ReservationTicket {
             reservations,
             warnings,
+            actor_user_id,
+            thread_id,
         }))
     }
 
@@ -285,6 +412,18 @@ impl BudgetEnforcer {
                     now,
                 )
                 .await?;
+            self.record_audit(
+                BudgetEventKind::Reconcile,
+                res.budget_id,
+                Some(res.id),
+                ticket.thread_id,
+                Some(share),
+                Some(token_share),
+                None,
+                &ticket.actor_user_id,
+                now,
+            )
+            .await;
         }
         Ok(())
     }
@@ -303,19 +442,37 @@ impl BudgetEnforcer {
             self.store
                 .release_reservation(res.id, res.budget_id, res.reserved_usd, now)
                 .await?;
+            self.record_audit(
+                BudgetEventKind::Release,
+                res.budget_id,
+                Some(res.id),
+                ticket.thread_id,
+                Some(res.reserved_usd),
+                None,
+                None,
+                &ticket.actor_user_id,
+                now,
+            )
+            .await;
         }
         Ok(())
     }
 
-    async fn rollback(
+    /// Roll back every reservation granted above a cascade-level denial.
+    /// Each release emits a `Release` audit row carrying `reason` so a
+    /// downstream reader can stitch the deny/rollback pair together.
+    async fn rollback_with_audit(
         &self,
         granted: &[(BudgetId, BudgetScope, AtomicReserveOutcome, Decimal)],
+        thread_id: Option<ThreadId>,
+        actor_user_id: &str,
+        reason: &str,
         now: DateTime<Utc>,
     ) {
         for (budget_id, _, outcome, _) in granted {
-            // Best-effort; if release fails here we at worst leak some
-            // `reserved_usd` that the next period rollover or the
-            // explicit release path will reclaim.
+            // Best-effort on the store write; if release fails here we
+            // at worst leak some `reserved_usd` that the next period
+            // rollover or the explicit release path will reclaim.
             let _ = self
                 .store
                 .release_reservation(
@@ -325,8 +482,69 @@ impl BudgetEnforcer {
                     now,
                 )
                 .await;
+            self.record_audit(
+                BudgetEventKind::Release,
+                *budget_id,
+                Some(outcome.reservation_id),
+                thread_id,
+                Some(outcome.reserved_usd),
+                None,
+                Some(reason.to_string()),
+                actor_user_id,
+                now,
+            )
+            .await;
         }
     }
+
+    /// Append one row to the `budget_events` audit table. Errors are
+    /// logged and swallowed — the audit write is a side-effect of the
+    /// business-critical operation that already completed, and failing
+    /// a successful reservation because the audit DB is down would be
+    /// worse than a gap in the audit trail. Monitoring should still
+    /// alert on the `record_budget_event failed` log line.
+    #[allow(clippy::too_many_arguments)]
+    async fn record_audit(
+        &self,
+        event_kind: BudgetEventKind,
+        budget_id: BudgetId,
+        reservation_id: Option<ReservationId>,
+        thread_id: Option<ThreadId>,
+        amount_usd: Option<Decimal>,
+        tokens: Option<u64>,
+        reason: Option<String>,
+        actor_user_id: &str,
+        now: DateTime<Utc>,
+    ) {
+        let event = BudgetEventRecord {
+            budget_id,
+            thread_id,
+            reservation_id,
+            event_kind,
+            amount_usd,
+            tokens,
+            reason,
+            actor_user_id: actor_user_id.to_string(),
+            created_at: now,
+        };
+        if let Err(e) = self.store.record_budget_event(&event).await {
+            tracing::warn!(
+                budget_id = %budget_id,
+                event_kind = event_kind.as_str(),
+                "record_budget_event failed: {e}",
+            );
+        }
+    }
+}
+
+/// Scan a cascade for a `Thread` scope. Used for `budget_events` audit
+/// rows; if the cascade has no thread (e.g. a standalone
+/// `BackgroundInvocation`), returns `None`.
+fn thread_id_from_scopes(scopes: &[BudgetScope]) -> Option<ThreadId> {
+    scopes.iter().find_map(|s| match s {
+        BudgetScope::Thread { thread_id, .. } => Some(*thread_id),
+        _ => None,
+    })
 }
 
 fn warning_for(
@@ -1059,5 +1277,130 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(ticket.reservations.len(), 1);
+    }
+
+    /// Regression for #2847 review (Copilot): the enforcer must call
+    /// `Store::record_budget_event` on every reserve/reconcile/release/deny
+    /// path so the `budget_events` audit table is actually populated.
+    /// Before this fix the table stayed empty despite the docs claiming
+    /// otherwise.
+    #[tokio::test]
+    async fn enforcer_emits_audit_events_on_reserve_and_reconcile() {
+        let store = Arc::new(FakeStore::new());
+        store.add(mk_budget(
+            BudgetScope::User {
+                user_id: "alice".into(),
+            },
+            dec!(1.00),
+        ));
+        let enf = enforce(
+            Arc::clone(&store) as Arc<FakeStore>,
+            EnforcementMode::Enforce,
+        );
+
+        let ticket = enf
+            .reserve(
+                &[BudgetScope::User {
+                    user_id: "alice".into(),
+                }],
+                dec!(0.10),
+                42,
+                Utc::now(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        // 1 Reserve row on success.
+        {
+            let events = store.events.lock().unwrap();
+            assert_eq!(
+                events.len(),
+                1,
+                "reserve should emit exactly one Reserve row"
+            );
+            assert_eq!(events[0].event_kind, BudgetEventKind::Reserve);
+            assert_eq!(events[0].actor_user_id, "alice");
+            assert_eq!(events[0].amount_usd, Some(dec!(0.10)));
+            assert_eq!(events[0].tokens, Some(42));
+            assert!(events[0].reservation_id.is_some());
+        }
+
+        enf.reconcile(&ticket, dec!(0.07), 30, Utc::now())
+            .await
+            .unwrap();
+
+        {
+            let events = store.events.lock().unwrap();
+            assert_eq!(events.len(), 2, "reconcile should append one Reconcile row");
+            assert_eq!(events[1].event_kind, BudgetEventKind::Reconcile);
+            assert_eq!(events[1].amount_usd, Some(dec!(0.07)));
+            assert_eq!(events[1].tokens, Some(30));
+            assert_eq!(events[1].reservation_id, Some(ticket.reservations[0].id));
+        }
+    }
+
+    /// Regression for #2847 review: when a cascade denial aborts the
+    /// reservation, the audit trail must show exactly one `Deny` row for
+    /// the budget that exhausted, plus one `Release` row per reservation
+    /// the enforcer rolled back at the earlier cascade levels.
+    #[tokio::test]
+    async fn enforcer_emits_deny_and_rollback_audit_events() {
+        let store = Arc::new(FakeStore::new());
+        let user_b = mk_budget(
+            BudgetScope::User {
+                user_id: "alice".into(),
+            },
+            dec!(1.00),
+        );
+        let user_budget_id = user_b.id;
+        store.add(user_b);
+        // Project budget that will deny on the second scope.
+        let proj_scope = BudgetScope::Project {
+            user_id: "alice".into(),
+            project_id: crate::types::project::ProjectId::new(),
+        };
+        let proj_b = mk_budget(proj_scope.clone(), dec!(0.01));
+        let proj_budget_id = proj_b.id;
+        store.add(proj_b);
+
+        let enf = enforce(
+            Arc::clone(&store) as Arc<FakeStore>,
+            EnforcementMode::Enforce,
+        );
+
+        let result = enf
+            .reserve(
+                &[
+                    BudgetScope::User {
+                        user_id: "alice".into(),
+                    },
+                    proj_scope,
+                ],
+                dec!(0.50),
+                0,
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+        assert!(result.is_err(), "project cap should trigger a denial");
+
+        let events = store.events.lock().unwrap();
+        // Expected order: Reserve(user), Deny(project), Release(user — rollback).
+        assert_eq!(events.len(), 3, "got: {:?}", *events);
+        assert_eq!(events[0].event_kind, BudgetEventKind::Reserve);
+        assert_eq!(events[0].budget_id, user_budget_id);
+        assert_eq!(events[1].event_kind, BudgetEventKind::Deny);
+        assert_eq!(events[1].budget_id, proj_budget_id);
+        assert!(
+            events[1]
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("usd_exhausted")
+        );
+        assert_eq!(events[2].event_kind, BudgetEventKind::Release);
+        assert_eq!(events[2].budget_id, user_budget_id);
+        assert_eq!(events[2].reason.as_deref(), Some("rollback_usd_deny"));
     }
 }

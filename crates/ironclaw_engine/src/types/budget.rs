@@ -201,9 +201,16 @@ pub struct BudgetLimit {
     /// unbounded). Use [`BudgetLimit::unlimited_usd`] for an absent cap
     /// when composing defaults.
     pub usd: Decimal,
-    /// Optional cap on cumulative input+output tokens.
+    /// Optional **best-effort** cap on cumulative input+output tokens.
+    /// Unlike `usd`, token accounting is not atomic: tokens are settled
+    /// on reconcile (not on reserve), and the enforcer's check against
+    /// this cap inspects only the already-settled `tokens_used` column.
+    /// Concurrent reserves at high utilization can therefore exceed
+    /// this cap by the in-flight amount. USD is the authoritative
+    /// dimension; set this only as a secondary guardrail.
     pub tokens: Option<u64>,
-    /// Optional wall-clock cap in seconds.
+    /// Optional wall-clock cap in seconds. Same best-effort caveat as
+    /// `tokens` — not enforced atomically by the Store layer.
     pub wall_clock_secs: Option<u64>,
 }
 
@@ -237,12 +244,31 @@ impl BudgetLimit {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BudgetPeriod {
-    /// Resets on each new run (threads, jobs, background invocations).
+    /// Each reserve call gets its own ledger row — there is no shared
+    /// bucket across calls in "the same invocation". This is by
+    /// design: `PerInvocation` models the single costed operation
+    /// (one LLM call, one tool use, one scheduler tick) as the unit
+    /// of spend. If you want multiple calls to share a rolling bucket,
+    /// use [`BudgetPeriod::Rolling24h`] instead. See `period_bounds`
+    /// in `crate::runtime::budget` for exact period arithmetic.
     PerInvocation,
-    /// Rolling 24 hours from the current moment — always counts the last
-    /// 24h of spend, no calendar alignment.
+    /// Engine-defined 24-hour budget window, **quantised to UTC
+    /// midnight** — not a true sliding-window "last 24h" computation.
+    /// A user who spends $4.99 at 23:59 and $0.02 at 00:00 therefore
+    /// sees the two charges bucket into separate daily ledgers. The
+    /// quantised design keeps ledger reads stable under concurrent
+    /// reservations; truly-rolling would require per-reservation
+    /// timestamp rows and is not implemented. See `period_bounds`
+    /// in `crate::runtime::budget`.
     Rolling24h,
-    /// Aligned to a calendar day/week/month in `tz` (IANA name).
+    /// Aligned to the calendar `unit` boundary in `tz` (IANA name).
+    ///
+    /// **Current implementation caveat:** the engine ships without
+    /// `chrono-tz`, so the `tz` field is retained on the wire for
+    /// forward compatibility but the period arithmetic anchors
+    /// everything to **UTC**. Operators choosing a non-UTC timezone
+    /// should expect UTC-aligned rollovers until proper IANA support
+    /// lands. See `calendar_period` in `crate::runtime::budget`.
     Calendar { tz: String, unit: PeriodUnit },
 }
 
@@ -387,10 +413,21 @@ pub struct BudgetReservation {
 /// mission, thread) so `reconcile`/`release` can update every ledger
 /// atomically. Warnings indicate thresholds crossed during this reservation
 /// so callers can surface UI hints without a second DB round-trip.
+///
+/// `actor_user_id` and `thread_id` are captured at reserve time and carried
+/// through reconcile/release so the enforcer can emit `budget_events` audit
+/// rows without looking the scope back up. A ticket never spans users — all
+/// scopes in a single cascade share one owning user.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReservationTicket {
     pub reservations: Vec<BudgetReservation>,
     pub warnings: Vec<BudgetWarning>,
+    /// The user owning every reservation in this ticket.
+    pub actor_user_id: String,
+    /// Thread the cascade was reserved against, if the input scopes
+    /// included a `Thread` variant. Only used for `budget_events`
+    /// audit-row correlation.
+    pub thread_id: Option<ThreadId>,
 }
 
 impl ReservationTicket {
@@ -669,6 +706,8 @@ mod tests {
         let ticket = ReservationTicket {
             reservations: vec![mk(dec!(0.10)), mk(dec!(0.10)), mk(dec!(0.10))],
             warnings: vec![],
+            actor_user_id: String::new(),
+            thread_id: None,
         };
         assert_eq!(ticket.total_reserved_usd(), dec!(0.30));
     }

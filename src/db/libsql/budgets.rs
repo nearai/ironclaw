@@ -34,6 +34,23 @@ use crate::error::DatabaseError;
 impl BudgetStore for LibSqlBackend {
     async fn save_budget(&self, budget: &Budget) -> Result<(), DatabaseError> {
         let conn = self.connect().await?;
+        let tokens_i64: Option<i64> =
+            budget
+                .limit
+                .tokens
+                .map(i64::try_from)
+                .transpose()
+                .map_err(|_| {
+                    DatabaseError::Query("save_budget: limit.tokens exceeds i64::MAX".into())
+                })?;
+        let wall_clock_i64: Option<i64> = budget
+            .limit
+            .wall_clock_secs
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| {
+                DatabaseError::Query("save_budget: limit.wall_clock_secs exceeds i64::MAX".into())
+            })?;
         conn.execute(
             "INSERT INTO budgets (
                 id, user_id, scope_kind, scope_id, limit_usd, limit_tokens,
@@ -48,8 +65,8 @@ impl BudgetStore for LibSqlBackend {
                 budget.scope.kind_str(),
                 budget.scope.scope_id(),
                 budget.limit.usd.to_string(),
-                budget.limit.tokens.map(|n| n as i64),
-                budget.limit.wall_clock_secs.map(|n| n as i64),
+                tokens_i64,
+                wall_clock_i64,
                 budget.period.kind_str(),
                 period_tz_str(&budget.period),
                 period_unit_str(&budget.period),
@@ -282,6 +299,9 @@ impl BudgetStore for LibSqlBackend {
             };
             let spent_new = ledger.spent_usd + actual_usd;
             let tokens_new = ledger.tokens_used + actual_tokens;
+            let tokens_new_i64 = i64::try_from(tokens_new).map_err(|_| {
+                DatabaseError::Query("reconcile_reservation: tokens_used exceeds i64::MAX".into())
+            })?;
 
             conn.execute(
                 "UPDATE budget_ledgers
@@ -291,7 +311,7 @@ impl BudgetStore for LibSqlBackend {
                 libsql::params![
                     spent_new.to_string(),
                     reserved_new.to_string(),
-                    tokens_new as i64,
+                    tokens_new_i64,
                     now_str.clone(),
                     budget_id_str.clone(),
                     start_str.clone(),
@@ -351,6 +371,9 @@ impl BudgetStore for LibSqlBackend {
         created_at: DateTime<Utc>,
     ) -> Result<(), DatabaseError> {
         let conn = self.connect().await?;
+        let tokens_i64: Option<i64> = tokens.map(i64::try_from).transpose().map_err(|_| {
+            DatabaseError::Query("record_budget_event: tokens exceeds i64::MAX".into())
+        })?;
         conn.execute(
             "INSERT INTO budget_events (
                 id, budget_id, thread_id, reservation_id, event_kind,
@@ -363,7 +386,7 @@ impl BudgetStore for LibSqlBackend {
                 reservation_id.map(|r| r.0.to_string()),
                 event_kind,
                 amount_usd.map(|d| d.to_string()),
-                tokens.map(|n| n as i64),
+                tokens_i64,
                 reason,
                 actor_user_id,
                 fmt_ts(&created_at),
@@ -402,9 +425,15 @@ async fn reserve_within_tx(
     .await
     .map_err(|e| DatabaseError::Query(format!("reserve UPDATE: {e}")))?;
 
+    // `requested_tokens` is accepted so the enforcer's soft token-cap
+    // check can see the requested amount, but it is NOT persisted here:
+    // `tokens_used` is the settled-token column and is only incremented
+    // on reconcile (see `reconcile_reservation`). The returned ledger
+    // therefore mirrors the stored state exactly — no virtual header
+    // increments that would diverge from a subsequent read.
+    let _ = requested_tokens;
     let updated = BudgetLedger {
         reserved_usd: reserved_new,
-        tokens_used: ledger.tokens_used + requested_tokens,
         updated_at: chrono::DateTime::parse_from_rfc3339(now_str)
             .map(|d| d.with_timezone(&Utc))
             .unwrap_or(ledger.updated_at),

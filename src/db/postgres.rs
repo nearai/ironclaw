@@ -1662,8 +1662,23 @@ impl BudgetStore for PgBackend {
     ) -> Result<(), DatabaseError> {
         let client = self.pool().get().await?;
         let usd = budget.limit.usd;
-        let tokens: Option<i64> = budget.limit.tokens.map(|n| n as i64);
-        let wall_clock: Option<i64> = budget.limit.wall_clock_secs.map(|n| n as i64);
+        let tokens: Option<i64> =
+            budget
+                .limit
+                .tokens
+                .map(i64::try_from)
+                .transpose()
+                .map_err(|_| {
+                    DatabaseError::Query("save_budget: limit.tokens exceeds i64::MAX".into())
+                })?;
+        let wall_clock: Option<i64> = budget
+            .limit
+            .wall_clock_secs
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| {
+                DatabaseError::Query("save_budget: limit.wall_clock_secs exceeds i64::MAX".into())
+            })?;
         let (period_tz, period_unit) = match &budget.period {
             ironclaw_engine::types::budget::BudgetPeriod::Calendar { tz, unit } => {
                 (Some(tz.clone()), Some(unit.as_str().to_string()))
@@ -1874,7 +1889,9 @@ impl BudgetStore for PgBackend {
                 "reconcile_reservation: amounts must be non-negative".into(),
             ));
         }
-        let tokens_delta = actual_tokens as i64;
+        let tokens_delta = i64::try_from(actual_tokens).map_err(|_| {
+            DatabaseError::Query("reconcile_reservation: actual_tokens exceeds i64::MAX".into())
+        })?;
         let client = self.pool().get().await?;
         client
             .execute(
@@ -1931,7 +1948,9 @@ impl BudgetStore for PgBackend {
         actor_user_id: &str,
         created_at: DateTime<Utc>,
     ) -> Result<(), DatabaseError> {
-        let tokens_i64: Option<i64> = tokens.map(|n| n as i64);
+        let tokens_i64: Option<i64> = tokens.map(i64::try_from).transpose().map_err(|_| {
+            DatabaseError::Query("record_budget_event: tokens exceeds i64::MAX".into())
+        })?;
         let thread_uuid: Option<Uuid> = thread_id.map(|t| t.0);
         let reservation_uuid: Option<Uuid> = reservation_id.map(|r| r.0);
         let client = self.pool().get().await?;

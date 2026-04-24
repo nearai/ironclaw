@@ -8,6 +8,18 @@
 //!
 //! Keep the two copies in sync — the calendar/rolling semantics are
 //! identical.
+//!
+//! **`PerInvocation` semantics:** each call produces its own
+//! `(now, now + 1h)` window. By design, a single `PerInvocation`
+//! budget does not share a ledger across multiple reserve calls — the
+//! unit is the single costed operation. Cross-call capping requires
+//! [`BudgetPeriod::Rolling24h`] or a [`BudgetPeriod::Calendar`]
+//! period. See the matching docstring on
+//! [`BudgetPeriod::PerInvocation`].
+//!
+//! **`Calendar { tz, .. }` caveat:** the engine ships without
+//! `chrono-tz`, so `tz` is accepted on the wire but arithmetic below
+//! anchors to UTC. Mirrors `ironclaw_engine::runtime::budget::calendar_period`.
 
 use chrono::{DateTime, Datelike, Duration, TimeZone, Utc};
 use ironclaw_engine::types::budget::{BudgetPeriod, PeriodUnit};

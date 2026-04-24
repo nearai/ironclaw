@@ -1765,6 +1765,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_large_output_command() {
+        // Hold the env guard for the lifetime of this test — otherwise
+        // the `bash_max_output_length_env_var_is_respected` test (also
+        // in this module) could mutate the key mid-execute and skew the
+        // `max_output_size()` read below.
+        let _env = BashEnvGuard::acquire();
         let tool = ShellTool::new().with_timeout(Duration::from_secs(10));
         let ctx = JobContext::default();
 
@@ -1786,12 +1791,56 @@ mod tests {
         assert_eq!(result.result.get("exit_code").unwrap().as_i64().unwrap(), 0);
     }
 
+    // Serializes every test that mutates `BASH_MAX_OUTPUT_LENGTH`.
+    // `set_var` / `remove_var` are process-wide: parallel tests would
+    // race on the same env key. Tests that read `max_output_size()`
+    // without mutating are also gated here so they can't observe
+    // another test's half-written value.
+    static BASH_ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII guard that snapshots `BASH_MAX_OUTPUT_LENGTH` on construction
+    /// and restores it on drop, while holding the module-wide env mutex.
+    struct BashEnvGuard {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        prior: Option<String>,
+    }
+
+    impl BashEnvGuard {
+        fn acquire() -> Self {
+            // Clear poison so a prior-test panic doesn't disable the
+            // rest of the suite. The guarded invariant is "exactly one
+            // test mutates at a time", not "no prior test crashed".
+            let guard = BASH_ENV_GUARD
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let prior = std::env::var("BASH_MAX_OUTPUT_LENGTH").ok();
+            Self {
+                _guard: guard,
+                prior,
+            }
+        }
+    }
+
+    impl Drop for BashEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: env mutation is process-wide; the guard mutex
+            // ensures no other test in this module observes the
+            // transient state.
+            unsafe {
+                match &self.prior {
+                    Some(v) => std::env::set_var("BASH_MAX_OUTPUT_LENGTH", v),
+                    None => std::env::remove_var("BASH_MAX_OUTPUT_LENGTH"),
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn bash_max_output_length_env_var_is_respected() {
-        // SAFETY: tests run single-threaded per module file by default,
-        // but set_var is a process-wide mutation. If this test ever
-        // flakes under parallel execution, hoist this into a
-        // #[serial_test::serial] block.
+        let _env = BashEnvGuard::acquire();
+        // SAFETY: env mutation is process-wide; `BashEnvGuard` serializes
+        // this with every other `BASH_MAX_OUTPUT_LENGTH`-touching test in
+        // the module and restores the prior value on drop.
         unsafe {
             std::env::set_var("BASH_MAX_OUTPUT_LENGTH", "2048");
         }
