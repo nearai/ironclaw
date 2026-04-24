@@ -12,12 +12,14 @@ use crate::auth::extension::AuthManager;
 use crate::bridge::capability_projector::{
     capability_status_for_extension, capability_surface_subject_for_extension,
 };
+use crate::bridge::tool_permissions::ToolPermissionSnapshot;
 use crate::bridge::tool_surface::{
     InvocationMode, SurfacePolicyInput, SurfaceSubjectKind, assign_surface,
 };
 use crate::extensions::naming::extension_name_candidates;
 use crate::extensions::{InstalledExtension, LatentProviderAction};
 use crate::tools::ToolRegistry;
+use crate::tools::permissions::PermissionState;
 
 pub(crate) struct ActionProjector;
 
@@ -25,6 +27,7 @@ struct InventoryInputs {
     tool_defs: Vec<Arc<dyn crate::tools::Tool>>,
     extension_statuses: Option<HashMap<String, InstalledExtension>>,
     latent_actions: Vec<LatentProviderAction>,
+    tool_permissions: ToolPermissionSnapshot,
 }
 
 impl ActionProjector {
@@ -90,11 +93,13 @@ async fn load_inventory_inputs(
     } else {
         Vec::new()
     };
+    let tool_permissions = ToolPermissionSnapshot::load(tools, &context.user_id).await;
 
     InventoryInputs {
         tool_defs,
         extension_statuses,
         latent_actions,
+        tool_permissions,
     }
 }
 
@@ -107,12 +112,17 @@ fn classify_projected_actions(
         tool_defs,
         extension_statuses,
         latent_actions,
+        tool_permissions,
     } = inputs;
     let mut inline = Vec::with_capacity(tool_defs.len());
     let mut discoverable = Vec::new();
 
     for tool in tool_defs {
-        match classify_registered_tool(tool.as_ref(), extension_statuses.as_ref()) {
+        match classify_registered_tool(
+            tool.as_ref(),
+            extension_statuses.as_ref(),
+            &tool_permissions,
+        ) {
             ProjectedAction::Inline(action) => inline.push(action),
             ProjectedAction::Discoverable(action) => discoverable.push(action),
             ProjectedAction::Hidden => {}
@@ -155,6 +165,9 @@ fn classify_projected_actions(
 
     let mut seen_discoverable: HashSet<String> = seen_inline.clone();
     for latent in latent_actions {
+        if tool_permissions.effective_permission(&latent.action_name) == PermissionState::Disabled {
+            continue;
+        }
         let action = project_latent_action(latent);
         if seen_discoverable.insert(action.name.clone()) {
             discoverable.push(action);
@@ -179,6 +192,7 @@ enum ProjectedAction {
 fn classify_registered_tool(
     tool: &dyn crate::tools::Tool,
     extension_statuses: Option<&HashMap<String, InstalledExtension>>,
+    tool_permissions: &ToolPermissionSnapshot,
 ) -> ProjectedAction {
     if crate::bridge::effect_adapter::is_v1_only_tool(tool.name()) {
         return ProjectedAction::Hidden;
@@ -187,6 +201,9 @@ fn classify_registered_tool(
         return ProjectedAction::Hidden;
     }
     if hidden_from_model_callable_surface(tool.name()) {
+        return ProjectedAction::Hidden;
+    }
+    if tool_permissions.effective_permission(tool.name()) == PermissionState::Disabled {
         return ProjectedAction::Hidden;
     }
 
@@ -522,6 +539,86 @@ mod tests {
         .expect("project should succeed")
     }
 
+    async fn inventory_with_tool_permission(
+        tool_name: &'static str,
+        permission: crate::tools::permissions::PermissionState,
+    ) -> ActionInventory {
+        let db_path = std::env::temp_dir().join(format!(
+            "ironclaw-action-projector-permissions-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db = crate::db::connect_from_config(&crate::config::DatabaseConfig::from_libsql_path(
+            db_path.to_str().expect("db path"),
+            None,
+            None,
+        ))
+        .await
+        .expect("db");
+        db.set_setting(
+            "test_user",
+            &format!("tool_permissions.{tool_name}"),
+            &serde_json::to_value(permission).expect("serialize permission"),
+        )
+        .await
+        .expect("save tool permission");
+
+        let tools = std::sync::Arc::new(ToolRegistry::new().with_database(db));
+        tools
+            .register(std::sync::Arc::new(BuiltinTool { name: tool_name }))
+            .await;
+
+        ActionProjector::project_inventory(tools.as_ref(), None, None, &[], &test_context(), None)
+            .await
+            .expect("project should succeed")
+    }
+
+    async fn provider_inventory_with_tool_permission(
+        tool_name: &'static str,
+        provider_extension: &'static str,
+        extension: InstalledExtension,
+        permission: crate::tools::permissions::PermissionState,
+    ) -> ActionInventory {
+        let db_path = std::env::temp_dir().join(format!(
+            "ironclaw-action-projector-provider-permissions-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db = crate::db::connect_from_config(&crate::config::DatabaseConfig::from_libsql_path(
+            db_path.to_str().expect("db path"),
+            None,
+            None,
+        ))
+        .await
+        .expect("db");
+        db.set_setting(
+            "test_user",
+            &format!("tool_permissions.{tool_name}"),
+            &serde_json::to_value(permission).expect("serialize permission"),
+        )
+        .await
+        .expect("save tool permission");
+
+        let tools = std::sync::Arc::new(ToolRegistry::new().with_database(db));
+        tools
+            .register(std::sync::Arc::new(ProviderTool {
+                name: tool_name,
+                description: "Provider action",
+                provider_extension,
+            }))
+            .await;
+
+        let extension_map = HashMap::from([(extension.name.clone(), extension)]);
+        ActionProjector::project_inventory(
+            tools.as_ref(),
+            None,
+            None,
+            &[],
+            &test_context(),
+            Some(&extension_map),
+        )
+        .await
+        .expect("project should succeed")
+    }
+
     fn test_context() -> ThreadExecutionContext {
         ThreadExecutionContext {
             thread_id: ironclaw_engine::ThreadId::new(),
@@ -778,5 +875,61 @@ mod tests {
 
         assert!(!action_names.iter().any(|name| name == "tool_install"));
         assert!(action_names.iter().any(|name| name == "tool_activate"));
+    }
+
+    #[tokio::test]
+    async fn disabled_tools_are_omitted_from_inventory() {
+        let inventory = inventory_with_tool_permission(
+            "message",
+            crate::tools::permissions::PermissionState::Disabled,
+        )
+        .await;
+
+        assert!(
+            inventory
+                .inline
+                .iter()
+                .all(|action| action.name != "message"),
+            "disabled tool should be hidden from available_actions, got: {:?}",
+            inventory.inline
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_each_time_tools_remain_visible_in_inventory() {
+        let inventory = inventory_with_tool_permission(
+            "message",
+            crate::tools::permissions::PermissionState::AskEachTime,
+        )
+        .await;
+
+        assert!(
+            inventory
+                .inline
+                .iter()
+                .any(|action| action.name == "message"),
+            "ask_each_time tool should remain visible in available_actions, got: {:?}",
+            inventory.inline
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_provider_tools_are_omitted_from_discoverable_inventory() {
+        let inventory = provider_inventory_with_tool_permission(
+            "gmail_send",
+            "gmail",
+            needs_auth_extension("gmail"),
+            crate::tools::permissions::PermissionState::Disabled,
+        )
+        .await;
+
+        assert!(
+            inventory
+                .discoverable
+                .iter()
+                .all(|action| action.name != "gmail_send"),
+            "disabled provider tool should be hidden from discoverable inventory, got: {:?}",
+            inventory.discoverable
+        );
     }
 }

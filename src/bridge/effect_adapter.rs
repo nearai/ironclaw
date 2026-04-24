@@ -28,6 +28,7 @@ use crate::bridge::action_projector::ActionProjector;
 use crate::bridge::capability_projector::CapabilityProjector;
 use crate::bridge::router::synthetic_action_call_id;
 use crate::bridge::sandbox::{InterceptOutcome, maybe_intercept};
+use crate::bridge::tool_permissions::ToolPermissionSnapshot;
 use crate::context::JobContext;
 use crate::extensions::InstalledExtension;
 use crate::extensions::naming::extension_name_candidates;
@@ -303,49 +304,31 @@ impl EffectBridgeAdapter {
         matching_extension_requires_install_approval(requested_name, &extensions).unwrap_or(false)
     }
 
-    async fn explicit_user_permission_for_tool(
+    async fn resolved_user_permission_for_tool(
         &self,
         lookup_name: &str,
         context: &ThreadExecutionContext,
-    ) -> Option<PermissionState> {
-        let db = self.tools.database()?;
-        match db.get_all_settings(&context.user_id).await {
-            Ok(db_map) => {
-                let settings = crate::settings::Settings::from_db_map(&db_map);
-                let normalized_name = lookup_name.replace('-', "_");
-                settings
-                    .tool_permissions
-                    .get(lookup_name)
-                    .copied()
-                    .or_else(|| settings.tool_permissions.get(&normalized_name).copied())
-            }
-            Err(error) => {
-                tracing::warn!(
-                    user_id = %context.user_id,
-                    tool = %lookup_name,
-                    error = %error,
-                    "Failed to load tool permission overrides for engine v2"
-                );
-                None
-            }
-        }
+    ) -> PermissionState {
+        ToolPermissionSnapshot::load(self.tools.as_ref(), &context.user_id)
+            .await
+            .effective_permission(lookup_name)
     }
 
     fn apply_user_permission_override(
         base_requirement: ApprovalRequirement,
-        user_permission: Option<PermissionState>,
+        user_permission: PermissionState,
     ) -> ApprovalRequirement {
         match user_permission {
-            Some(PermissionState::AskEachTime) => ApprovalRequirement::Always,
+            PermissionState::AskEachTime => ApprovalRequirement::Always,
             _ => base_requirement,
         }
     }
 
     fn ensure_tool_not_disabled(
         action_name: &str,
-        user_permission: Option<PermissionState>,
+        user_permission: PermissionState,
     ) -> Result<(), EngineError> {
-        if matches!(user_permission, Some(PermissionState::Disabled)) {
+        if matches!(user_permission, PermissionState::Disabled) {
             return Err(EngineError::LeaseDenied {
                 reason: format!("Tool '{}' is disabled for this user.", action_name),
             });
@@ -359,7 +342,7 @@ impl EffectBridgeAdapter {
         tool: &dyn Tool,
         parameters: &serde_json::Value,
         context: &ThreadExecutionContext,
-        user_permission: Option<PermissionState>,
+        user_permission: PermissionState,
         include_install_approval: bool,
     ) -> ApprovalRequirement {
         let base_requirement = if include_install_approval
@@ -378,7 +361,7 @@ impl EffectBridgeAdapter {
         &self,
         approval: &ToolApprovalContext<'_>,
         tool: &dyn Tool,
-        user_permission: Option<PermissionState>,
+        user_permission: PermissionState,
         include_install_approval: bool,
     ) -> Result<(), EngineError> {
         let requirement = self
@@ -414,7 +397,7 @@ impl EffectBridgeAdapter {
                         .read()
                         .await
                         .contains(approval.lookup_name)
-                    || matches!(user_permission, Some(PermissionState::AlwaysAllow));
+                    || matches!(user_permission, PermissionState::AlwaysAllow);
                 if !is_approved && !approval.approval_already_granted {
                     return Err(Self::gate_paused(
                         "approval",
@@ -457,7 +440,7 @@ impl EffectBridgeAdapter {
     ) -> Result<ActionResult, EngineError> {
         let resolved_tool = self.tools.get_resolved(tool_info.lookup_name).await;
         let user_permission = self
-            .explicit_user_permission_for_tool(tool_info.lookup_name, tool_info.context)
+            .resolved_user_permission_for_tool(tool_info.lookup_name, tool_info.context)
             .await;
         Self::ensure_tool_not_disabled(tool_info.action_name, user_permission)?;
 
@@ -1338,7 +1321,7 @@ impl EffectBridgeAdapter {
 
         let resolved_tool = self.tools.get_resolved(&lookup_name).await;
         let user_permission = self
-            .explicit_user_permission_for_tool(&lookup_name, context)
+            .resolved_user_permission_for_tool(&lookup_name, context)
             .await;
         Self::ensure_tool_not_disabled(action_name, user_permission)?;
 
@@ -2761,6 +2744,8 @@ mod tests {
 
     struct AlwaysApprovalTestTool;
 
+    struct DefaultAllowNamedApprovalTestTool;
+
     #[async_trait]
     impl Tool for ApprovalTestTool {
         fn name(&self) -> &str {
@@ -2828,6 +2813,41 @@ mod tests {
 
         fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
             ApprovalRequirement::Always
+        }
+    }
+
+    #[async_trait]
+    impl Tool for DefaultAllowNamedApprovalTestTool {
+        fn name(&self) -> &str {
+            "message"
+        }
+
+        fn description(&self) -> &str {
+            "Test tool named like a default-always-allow builtin"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "value": { "type": "string" }
+                }
+            })
+        }
+
+        async fn execute(
+            &self,
+            params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({ "echo": params }),
+                std::time::Duration::from_millis(1),
+            ))
+        }
+
+        fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+            ApprovalRequirement::UnlessAutoApproved
         }
     }
 
@@ -2939,6 +2959,59 @@ mod tests {
         let tools = Arc::new(ToolRegistry::new());
         tools.register_tool_info();
         tools.register(Arc::new(ApprovalTestTool)).await;
+        EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+    }
+
+    async fn make_default_allow_named_adapter() -> EffectBridgeAdapter {
+        let tools = Arc::new(ToolRegistry::new());
+        tools
+            .register(Arc::new(DefaultAllowNamedApprovalTestTool))
+            .await;
+        EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+    }
+
+    async fn make_restart_adapter_with_permission(
+        permission: Option<crate::tools::permissions::PermissionState>,
+    ) -> EffectBridgeAdapter {
+        let db_path = std::env::temp_dir().join(format!(
+            "ironclaw-restart-permissions-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db = crate::db::connect_from_config(&crate::config::DatabaseConfig::from_libsql_path(
+            db_path.to_str().expect("db path"),
+            None,
+            None,
+        ))
+        .await
+        .expect("db");
+        if let Some(permission) = permission {
+            db.set_setting(
+                "test_user",
+                "tool_permissions.restart",
+                &serde_json::to_value(permission).expect("serialize permission"),
+            )
+            .await
+            .expect("save tool permission");
+        }
+
+        let tools = Arc::new(ToolRegistry::new().with_database(db));
+        tools
+            .register(Arc::new(crate::tools::builtin::RestartTool))
+            .await;
         EffectBridgeAdapter::new(
             tools,
             Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
@@ -3201,12 +3274,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn global_auto_approve_with_no_explicit_override_skips_unless_auto_approved_gates() {
+    async fn unknown_tools_without_explicit_override_default_to_ask_each_time() {
         let adapter = make_approval_test_adapter_with_permission(None)
             .await
             .with_global_auto_approve(true);
 
-        let result = adapter
+        let err = adapter
             .execute_action(
                 "approval_test",
                 serde_json::json!({"value": "x"}),
@@ -3217,7 +3290,106 @@ mod tests {
                 ),
             )
             .await
-            .expect("global auto-approve should bypass default approval gate");
+            .expect_err("unknown tools should default to ask_each_time");
+
+        match err {
+            EngineError::GatePaused { gate_name, .. } => {
+                assert_eq!(gate_name, "approval");
+            }
+            other => panic!("expected GatePaused, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn always_allow_default_skips_unless_auto_approved_gates_without_override() {
+        let adapter = make_default_allow_named_adapter()
+            .await
+            .with_global_auto_approve(true);
+
+        let result = adapter
+            .execute_action(
+                "message",
+                serde_json::json!({"value": "x"}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_global_auto_approve_default_allow"),
+                ),
+            )
+            .await
+            .expect("always_allow default should bypass normal approval gate");
+
+        assert!(!result.is_error);
+    }
+
+    #[tokio::test]
+    async fn restart_uses_default_permission_floor_without_explicit_override() {
+        let _guard = crate::config::helpers::lock_env();
+        let original_in_docker = std::env::var("IRONCLAW_IN_DOCKER").ok();
+        let original_disable_restart = std::env::var("IRONCLAW_DISABLE_RESTART").ok();
+        // SAFETY: This test serializes env access with lock_env().
+        unsafe {
+            std::env::set_var("IRONCLAW_IN_DOCKER", "true");
+            std::env::set_var("IRONCLAW_DISABLE_RESTART", "true");
+        }
+
+        let adapter = make_restart_adapter_with_permission(None).await;
+
+        let err = adapter
+            .execute_action(
+                "restart",
+                serde_json::json!({"delay_secs": 1}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_restart_default_floor"),
+                ),
+            )
+            .await
+            .expect_err("restart should still pause for approval by default");
+
+        // SAFETY: This test serializes env access with lock_env().
+        unsafe {
+            if let Some(value) = original_in_docker {
+                std::env::set_var("IRONCLAW_IN_DOCKER", value);
+            } else {
+                std::env::remove_var("IRONCLAW_IN_DOCKER");
+            }
+            if let Some(value) = original_disable_restart {
+                std::env::set_var("IRONCLAW_DISABLE_RESTART", value);
+            } else {
+                std::env::remove_var("IRONCLAW_DISABLE_RESTART");
+            }
+        }
+
+        match err {
+            EngineError::GatePaused { gate_name, .. } => {
+                assert_eq!(gate_name, "approval");
+            }
+            other => panic!("expected GatePaused, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_always_allow_override_beats_ask_each_time_fallback() {
+        let adapter = make_approval_test_adapter_with_permission(Some(
+            crate::tools::permissions::PermissionState::AlwaysAllow,
+        ))
+        .await
+        .with_global_auto_approve(true);
+
+        let result = adapter
+            .execute_action(
+                "approval_test",
+                serde_json::json!({"value": "x"}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_global_auto_approve_db_always_allow"),
+                ),
+            )
+            .await
+            .expect("explicit always_allow should bypass ask_each_time fallback");
 
         assert!(!result.is_error);
     }
