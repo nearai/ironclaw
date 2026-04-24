@@ -120,9 +120,21 @@ fn build_date_today() -> MontyObject {
 }
 
 /// Default resource limits for Monty execution.
+///
+/// `max_duration` is wall-clock time, and `await tool(...)` calls count
+/// against it — so a CodeAct block that awaits a long shell command
+/// (`cargo check`, `pytest`) will time out well before the underlying
+/// tool's own 120s budget. The default is 30s for safety (catches
+/// runaway Python loops quickly), but coding-agent workflows need more
+/// headroom. Set `MONTY_CODEACT_TIMEOUT_SECS` to override.
 fn default_limits() -> ResourceLimits {
+    let duration_secs = std::env::var("MONTY_CODEACT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| (1..=600).contains(&n))
+        .unwrap_or(30);
     ResourceLimits::new()
-        .max_duration(Duration::from_secs(30))
+        .max_duration(Duration::from_secs(duration_secs))
         .max_allocations(1_000_000)
         .max_memory(64 * 1024 * 1024) // 64 MB
 }

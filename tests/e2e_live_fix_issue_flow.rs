@@ -68,14 +68,24 @@ mod fix_issue_test {
     }
 
     async fn build_harness(test_name: &str) -> LiveTestHarness {
+        // Raise the Monty CodeAct wall-clock cap for this test. Real
+        // `cargo check` / `cargo test` runs can blow past the 30s default
+        // when invoked via `await shell(...)` inside a ```repl``` block.
+        // 300s fits the fixture repo's compile times with headroom.
+        // SAFETY: single-threaded test setup before any Tokio work starts.
+        unsafe {
+            std::env::set_var("MONTY_CODEACT_TIMEOUT_SECS", "300");
+        }
+
         let mut builder = LiveTestHarnessBuilder::new(test_name)
             .with_engine_v2(true)
             .with_auto_approve_tools(true)
-            // Worktree setup + research + implement + test + commit + push
-            // + PR create is a lot of tool calls, but more than 40
-            // iterations usually indicates the agent is stuck looping
-            // rather than making progress — fail fast so we can iterate.
-            .with_max_tool_iterations(40)
+            // Each CodeAct block counts as one iteration but can execute
+            // many tools internally. The fix-issue skill (v0.3 CodeAct)
+            // needs ~5-8 blocks for the happy path (fetch → worktree →
+            // understand → edit/test → push+PR). 60 gives headroom for
+            // test/retest cycles without masking a genuine loop.
+            .with_max_tool_iterations(60)
             .with_skills_dir(repo_skills_dir());
 
         // Provide a write-scope github token. Two sources, in order:
