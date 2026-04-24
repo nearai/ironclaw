@@ -13,8 +13,7 @@ use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::agent::agentic_loop::{
-    AgenticLoopConfig, LoopDelegate, LoopOutcome, LoopSignal, TextAction, run_agentic_loop,
-    truncate_for_preview,
+    AgenticLoopConfig, LoopDelegate, LoopSignal, TextAction, run_agentic_loop, truncate_for_preview,
 };
 use crate::agent::scheduler::WorkerMessage;
 use crate::agent::task::TaskOutput;
@@ -75,6 +74,13 @@ pub struct Worker {
 /// Result of a tool execution with metadata for context building.
 struct ToolExecResult {
     result: Result<String, Error>,
+}
+
+enum JobLoopOutcome {
+    Completed(String),
+    Failed(String),
+    Stopped,
+    MaxIterations,
 }
 
 fn finish_job_signal_from_result(
@@ -356,35 +362,24 @@ or status \"failed\" when you hit an unresolvable blocker."#,
         .await;
 
         match result {
-            Ok(Ok(LoopOutcome::Response(summary))) => {
+            Ok(Ok(JobLoopOutcome::Completed(summary))) => {
                 tracing::info!(
                     job_id = %self.job_id,
                     summary = %summary,
                     "Worker completed successfully"
                 );
+                self.mark_completed(&summary).await?;
             }
-            Ok(Ok(LoopOutcome::Failure(reason))) => {
+            Ok(Ok(JobLoopOutcome::Failed(reason))) => {
                 tracing::error!("Worker for job {} failed: {}", self.job_id, reason);
                 self.mark_failed(&reason).await?;
             }
-            Ok(Ok(LoopOutcome::MaxIterations)) => {
+            Ok(Ok(JobLoopOutcome::MaxIterations)) => {
                 self.mark_failed("Maximum iterations exceeded: job hit the iteration cap")
                     .await?;
             }
-            Ok(Ok(LoopOutcome::Stopped)) => {
+            Ok(Ok(JobLoopOutcome::Stopped)) => {
                 tracing::info!("Worker for job {} stopped", self.job_id);
-            }
-            Ok(Ok(LoopOutcome::NeedApproval(_))) => {
-                self.mark_failed(
-                    "Autonomous job execution paused for approval, which is unsupported in worker jobs",
-                )
-                .await?;
-            }
-            Ok(Ok(LoopOutcome::AuthPending(_))) => {
-                self.mark_failed(
-                    "Autonomous job execution paused for authentication, which is unsupported in worker jobs",
-                )
-                .await?;
             }
             Ok(Err(e)) => {
                 tracing::error!("Worker for job {} failed: {}", self.job_id, e);
@@ -404,7 +399,7 @@ or status \"failed\" when you hit an unresolvable blocker."#,
         rx: &mut mpsc::Receiver<WorkerMessage>,
         reasoning: &Reasoning,
         reason_ctx: &mut ReasoningContext,
-    ) -> Result<LoopOutcome, Error> {
+    ) -> Result<JobLoopOutcome, Error> {
         let max_iterations = self
             .context_manager()
             .get_context(self.job_id)
@@ -504,7 +499,7 @@ or status \"failed\" when you hit an unresolvable blocker."#,
         run_agentic_loop(&delegate, reasoning, reason_ctx, &config).await
     }
 
-    fn loop_outcome_from_context(ctx: &crate::context::JobContext) -> LoopOutcome {
+    fn loop_outcome_from_context(ctx: &crate::context::JobContext) -> JobLoopOutcome {
         let summary = ctx
             .transitions
             .last()
@@ -523,12 +518,11 @@ or status \"failed\" when you hit an unresolvable blocker."#,
             });
 
         match ctx.state {
-            JobState::Completed | JobState::Submitted | JobState::Accepted => {
-                LoopOutcome::Response(summary)
-            }
-            JobState::Failed | JobState::Stuck => LoopOutcome::Failure(summary),
-            JobState::Cancelled => LoopOutcome::Stopped,
-            JobState::Pending | JobState::InProgress => LoopOutcome::Failure(summary),
+            JobState::Completed => JobLoopOutcome::Completed(summary),
+            JobState::Submitted | JobState::Accepted => JobLoopOutcome::Stopped,
+            JobState::Failed | JobState::Stuck => JobLoopOutcome::Failed(summary),
+            JobState::Cancelled => JobLoopOutcome::Stopped,
+            JobState::Pending | JobState::InProgress => JobLoopOutcome::Failed(summary),
         }
     }
 
@@ -986,7 +980,7 @@ or status \"failed\" when you hit an unresolvable blocker."#,
         rx: &mut mpsc::Receiver<WorkerMessage>,
         reason_ctx: &mut ReasoningContext,
         plan: &ActionPlan,
-    ) -> Result<Option<LoopOutcome>, Error> {
+    ) -> Result<Option<JobLoopOutcome>, Error> {
         for (i, action) in plan.actions.iter().enumerate() {
             // Check for stop signal and injected user messages
             while let Ok(msg) = rx.try_recv() {
@@ -996,7 +990,7 @@ or status \"failed\" when you hit an unresolvable blocker."#,
                             "Worker for job {} received stop signal during plan execution",
                             self.job_id
                         );
-                        return Ok(Some(LoopOutcome::Stopped));
+                        return Ok(Some(JobLoopOutcome::Stopped));
                     }
                     WorkerMessage::Ping => {
                         tracing::trace!("Worker for job {} received ping", self.job_id);
@@ -1077,21 +1071,11 @@ or status \"failed\" when you hit an unresolvable blocker."#,
 
             let finish_signal = finish_signal_result?;
             let finish_outcome = finish_signal.clone().map(|signal| match signal.status {
-                FinishJobStatus::Completed => LoopOutcome::Response(signal.summary),
-                FinishJobStatus::Failed => LoopOutcome::Failure(signal.summary),
+                FinishJobStatus::Completed => JobLoopOutcome::Completed(signal.summary),
+                FinishJobStatus::Failed => JobLoopOutcome::Failed(signal.summary),
             });
 
             if let Some(outcome) = finish_outcome {
-                if let Some(signal) = finish_signal.as_ref()
-                    && signal.status == FinishJobStatus::Completed
-                {
-                    self.mark_completed(&signal.summary).await.map_err(|e| {
-                        crate::error::Error::from(crate::error::JobError::ContextError {
-                            id: self.job_id,
-                            reason: e.to_string(),
-                        })
-                    })?;
-                }
                 return Ok(Some(outcome));
             }
 
@@ -1384,7 +1368,9 @@ impl<'a> JobDelegate<'a> {
 
 #[async_trait]
 impl<'a> LoopDelegate for JobDelegate<'a> {
-    async fn check_signals(&self) -> LoopSignal {
+    type Outcome = JobLoopOutcome;
+
+    async fn check_signals(&self) -> LoopSignal<Self::Outcome> {
         // Drain the entire message channel, prioritizing Stop over user messages.
         // Scope the lock so it's dropped before any .await below.
         let mut stop_requested = false;
@@ -1428,7 +1414,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
 
         // Stop takes priority over user messages
         if stop_requested {
-            return LoopSignal::Stop;
+            return LoopSignal::Stop(JobLoopOutcome::Stopped);
         }
 
         if let Some(content) = first_user_message {
@@ -1458,7 +1444,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                 self.worker.job_id,
                 ctx.state,
             );
-            return LoopSignal::Stop;
+            return LoopSignal::Stop(Worker::loop_outcome_from_context(&ctx));
         }
 
         LoopSignal::Continue
@@ -1468,7 +1454,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         &self,
         reason_ctx: &mut ReasoningContext,
         _iteration: usize,
-    ) -> Option<LoopOutcome> {
+    ) -> Option<Self::Outcome> {
         let recovery_mode_active = {
             let mut recovery = self.recovery_state.lock().await;
             recovery.begin_iteration()
@@ -1597,7 +1583,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         text: &str,
         metadata: ResponseMetadata,
         reason_ctx: &mut ReasoningContext,
-    ) -> TextAction {
+    ) -> TextAction<Self::Outcome> {
         let action = {
             let mut recovery = self.recovery_state.lock().await;
             recovery.on_text_response(metadata, text)
@@ -1641,7 +1627,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                     job_id = %self.worker.job_id,
                     "Failing fast after repeated malformed autonomous responses"
                 );
-                return TextAction::Return(LoopOutcome::Failure(
+                return TextAction::Return(JobLoopOutcome::Failed(
                     EMPTY_TOOL_COMPLETION_FAILURE.to_string(),
                 ));
             }
@@ -1679,7 +1665,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         tool_calls: Vec<crate::llm::ToolCall>,
         content: Option<String>,
         reason_ctx: &mut ReasoningContext,
-    ) -> Result<Option<LoopOutcome>, crate::error::Error> {
+    ) -> Result<Option<Self::Outcome>, crate::error::Error> {
         {
             let mut recovery = self.recovery_state.lock().await;
             recovery.on_valid_tool_call();
@@ -1861,19 +1847,10 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                     })
                 })?;
 
-                if signal.status == FinishJobStatus::Completed {
-                    self.worker
-                        .mark_completed(&signal.summary)
-                        .await
-                        .map_err(|e| {
-                            crate::error::Error::from(crate::error::JobError::ContextError {
-                                id: self.worker.job_id,
-                                reason: e.to_string(),
-                            })
-                        })?;
-                    return Ok(Some(LoopOutcome::Response(signal.summary)));
-                }
-                return Ok(Some(LoopOutcome::Failure(signal.summary)));
+                return Ok(Some(match signal.status {
+                    FinishJobStatus::Completed => JobLoopOutcome::Completed(signal.summary),
+                    FinishJobStatus::Failed => JobLoopOutcome::Failed(signal.summary),
+                }));
             }
         }
 
@@ -1894,6 +1871,10 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
     async fn after_iteration(&self, _iteration: usize) {
         // Small delay between iterations
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    fn max_iterations_outcome(&self) -> Self::Outcome {
+        JobLoopOutcome::MaxIterations
     }
 }
 
@@ -2086,6 +2067,53 @@ mod tests {
         }
     }
 
+    struct FinishJobToolLlm {
+        status: &'static str,
+        summary: Option<&'static str>,
+    }
+
+    impl FinishJobToolLlm {
+        fn completed(summary: &'static str) -> Self {
+            Self {
+                status: "completed",
+                summary: Some(summary),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for FinishJobToolLlm {
+        fn model_name(&self) -> &str {
+            "finish-job-tool"
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _req: CompletionRequest,
+        ) -> Result<CompletionResponse, crate::error::LlmError> {
+            unimplemented!("finish_job tool test should use tool mode")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _req: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
+            Ok(ToolCompletionResponse {
+                content: None,
+                tool_calls: vec![finish_job_call("call_finish", self.status, self.summary)],
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
     /// Build a Worker wired to a ToolRegistry containing the given tools.
     async fn make_worker(tools: Vec<Arc<dyn Tool>>) -> Worker {
         make_worker_with_llm(tools, Arc::new(StubLlm), false).await
@@ -2127,7 +2155,11 @@ mod tests {
     }
 
     #[cfg(feature = "libsql")]
-    async fn make_worker_with_store(tools: Vec<Arc<dyn Tool>>, store: Arc<dyn Database>) -> Worker {
+    async fn make_worker_with_store_and_llm(
+        tools: Vec<Arc<dyn Tool>>,
+        store: Arc<dyn Database>,
+        llm: Arc<dyn LlmProvider>,
+    ) -> Worker {
         let registry = ToolRegistry::new();
         registry.register_builtin_tools();
         for t in tools {
@@ -2146,7 +2178,7 @@ mod tests {
 
         let deps = WorkerDeps {
             context_manager: cm,
-            llm: Arc::new(StubLlm),
+            llm,
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {
                 max_output_length: 100_000,
                 injection_check_enabled: false,
@@ -2221,7 +2253,7 @@ mod tests {
     async fn execute_tool_batch(
         worker: &Worker,
         tool_calls: Vec<crate::llm::ToolCall>,
-    ) -> Result<(Option<LoopOutcome>, ReasoningContext), crate::error::Error> {
+    ) -> Result<(Option<JobLoopOutcome>, ReasoningContext), crate::error::Error> {
         let (_, mut rx) = tokio::sync::mpsc::channel(1);
         let delegate = make_job_delegate(worker, &mut rx);
         let mut reason_ctx = ReasoningContext::new();
@@ -2231,16 +2263,22 @@ mod tests {
         Ok((outcome, reason_ctx))
     }
 
-    fn assert_response_outcome(outcome: Option<LoopOutcome>, expected: &str) {
+    async fn run_started_worker(worker: Worker) -> Result<(), crate::error::Error> {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tx.send(WorkerMessage::Start).await.unwrap(); // safety: test
+        worker.run(rx).await
+    }
+
+    fn assert_completed_outcome(outcome: Option<JobLoopOutcome>, expected: &str) {
         assert!(
-            matches!(outcome, Some(LoopOutcome::Response(ref s)) if s == expected),
-            "expected Response({expected:?})"
+            matches!(outcome, Some(JobLoopOutcome::Completed(ref s)) if s == expected),
+            "expected Completed({expected:?})"
         ); // safety: test
     }
 
-    fn assert_failure_outcome(outcome: Option<LoopOutcome>, expected: &str) {
+    fn assert_failure_outcome(outcome: Option<JobLoopOutcome>, expected: &str) {
         assert!(
-            matches!(outcome, Some(LoopOutcome::Failure(ref s)) if s == expected),
+            matches!(outcome, Some(JobLoopOutcome::Failed(ref s)) if s == expected),
             "expected Failure({expected:?})"
         ); // safety: test
     }
@@ -2433,37 +2471,35 @@ mod tests {
     #[tokio::test]
     async fn test_finish_job_publishes_result_before_completed_status_is_observable() {
         let (db, _tmp) = crate::testing::test_db().await;
-        let worker = make_worker_with_store(vec![], Arc::clone(&db)).await;
-        transition_worker_to_in_progress(&worker).await;
-
         let summary = "Indexed the repo and wrote the final report";
-        let outcome = execute_tool_batch(
-            &worker,
-            vec![finish_job_call("call_finish", "completed", Some(summary))],
+        let worker = make_worker_with_store_and_llm(
+            vec![],
+            Arc::clone(&db),
+            Arc::new(FinishJobToolLlm::completed(summary)),
         )
-        .await
-        .map(|(outcome, _)| outcome)
-        .unwrap();
+        .await;
+        transition_worker_to_in_progress(&worker).await;
+        let job_id = worker.job_id;
 
-        assert_response_outcome(outcome, summary);
+        run_started_worker(worker).await.unwrap(); // safety: test
 
         let system_store = SystemScope::new(db);
         let persisted_job = system_store
-            .get_job(worker.job_id)
+            .get_job(job_id)
             .await
             .unwrap() // safety: test
             .expect("job should be persisted"); // safety: test
         assert_eq!(persisted_job.state, JobState::Completed); // safety: test
 
         let persisted_message = system_store
-            .get_agent_job_result_message(worker.job_id)
+            .get_agent_job_result_message(job_id)
             .await
             .unwrap(); // safety: test
 
         assert_eq!(persisted_message.as_deref(), Some(summary)); // safety: test
         assert!(
             system_store
-                .get_agent_job_failure_reason(worker.job_id)
+                .get_agent_job_failure_reason(job_id)
                 .await
                 .unwrap()
                 .is_none(),
@@ -2475,8 +2511,15 @@ mod tests {
     #[tokio::test]
     async fn test_finish_job_still_persists_status_when_result_event_write_fails() {
         let (db, tmp) = crate::testing::test_db().await;
-        let worker = make_worker_with_store(vec![], Arc::clone(&db)).await;
+        let summary = "Completed even though the result event could not be stored";
+        let worker = make_worker_with_store_and_llm(
+            vec![],
+            Arc::clone(&db),
+            Arc::new(FinishJobToolLlm::completed(summary)),
+        )
+        .await;
         transition_worker_to_in_progress(&worker).await;
+        let job_id = worker.job_id;
 
         let raw_db = libsql::Builder::new_local(tmp.path().join("test.db"))
             .build()
@@ -2485,20 +2528,11 @@ mod tests {
         let conn = raw_db.connect().unwrap(); // safety: test
         conn.execute("DROP TABLE job_events", ()).await.unwrap(); // safety: test
 
-        let summary = "Completed even though the result event could not be stored";
-        let outcome = execute_tool_batch(
-            &worker,
-            vec![finish_job_call("call_finish", "completed", Some(summary))],
-        )
-        .await
-        .map(|(outcome, _)| outcome)
-        .unwrap(); // safety: test
-
-        assert_response_outcome(outcome, summary);
+        run_started_worker(worker).await.unwrap(); // safety: test
 
         let system_store = SystemScope::new(db);
         let persisted_job = system_store
-            .get_job(worker.job_id)
+            .get_job(job_id)
             .await
             .unwrap() // safety: test
             .expect("job should be persisted"); // safety: test
@@ -2887,7 +2921,7 @@ mod tests {
         assert_eq!(ctx.state, JobState::InProgress); // safety: test
     }
 
-    /// finish_job tool call terminates the loop and marks the job complete.
+    /// finish_job tool call terminates the loop with an explicit completed outcome.
     #[tokio::test]
     async fn test_finish_job_terminates_loop() {
         let worker = make_worker(vec![]).await;
@@ -2905,20 +2939,14 @@ mod tests {
         .map(|(outcome, _)| outcome)
         .unwrap();
 
-        assert_response_outcome(outcome, "All tasks done");
+        assert_completed_outcome(outcome, "All tasks done");
 
         let ctx = worker
             .context_manager()
             .get_context(worker.job_id)
             .await
             .unwrap(); // safety: test
-        assert_eq!(ctx.state, JobState::Completed); // safety: test
-        assert_eq!(
-            ctx.transitions
-                .last()
-                .and_then(|transition| transition.reason.as_deref()),
-            Some("All tasks done")
-        ); // safety: test
+        assert_eq!(ctx.state, JobState::InProgress); // safety: test
     }
 
     /// finish_job aliases terminate the loop instead of being handled as ordinary tools.
@@ -2940,14 +2968,14 @@ mod tests {
         .map(|(outcome, _)| outcome)
         .unwrap();
 
-        assert_response_outcome(outcome, "Alias completion");
+        assert_completed_outcome(outcome, "Alias completion");
 
         let ctx = worker
             .context_manager()
             .get_context(worker.job_id)
             .await
             .unwrap(); // safety: test
-        assert_eq!(ctx.state, JobState::Completed); // safety: test
+        assert_eq!(ctx.state, JobState::InProgress); // safety: test
     }
 
     /// Blank completion summaries are normalized to a stable default message.
@@ -2968,20 +2996,14 @@ mod tests {
         .map(|(outcome, _)| outcome)
         .unwrap();
 
-        assert_response_outcome(outcome, "Job completed successfully with no summary.");
+        assert_completed_outcome(outcome, "Job completed successfully with no summary.");
 
         let ctx = worker
             .context_manager()
             .get_context(worker.job_id)
             .await
             .unwrap(); // safety: test
-        assert_eq!(ctx.state, JobState::Completed); // safety: test
-        assert_eq!(
-            ctx.transitions
-                .last()
-                .and_then(|transition| transition.reason.as_deref()),
-            Some("Job completed successfully with no summary.")
-        ); // safety: test
+        assert_eq!(ctx.state, JobState::InProgress); // safety: test
     }
 
     /// Empty text responses no longer auto-complete the job; they return Continue.
@@ -3022,10 +3044,11 @@ mod tests {
         let mut reason_ctx = ReasoningContext::new().with_job("test job");
         let (_, mut rx) = tokio::sync::mpsc::channel(1);
 
-        worker
+        let outcome = worker
             .execution_loop(&mut rx, &reasoning, &mut reason_ctx)
             .await
             .unwrap(); // safety: test
+        assert_completed_outcome(Some(outcome), "Planned completion");
 
         let planning_prompt = llm.planning_prompt().unwrap_or_default();
         assert!(
@@ -3038,7 +3061,7 @@ mod tests {
             .get_context(worker.job_id)
             .await
             .unwrap(); // safety: test
-        assert_eq!(ctx.state, JobState::Completed); // safety: test
+        assert_eq!(ctx.state, JobState::InProgress); // safety: test
     }
 
     #[tokio::test]
@@ -3058,7 +3081,7 @@ mod tests {
             .unwrap(); // safety: test
 
         match outcome {
-            LoopOutcome::Response(message) => {
+            JobLoopOutcome::Completed(message) => {
                 assert_eq!(message, "Planned completion");
             }
             _ => panic!("planned finish_job alias should terminate successfully"),
@@ -3068,7 +3091,7 @@ mod tests {
             .get_context(worker.job_id)
             .await
             .unwrap(); // safety: test
-        assert_eq!(ctx.state, JobState::Completed); // safety: test
+        assert_eq!(ctx.state, JobState::InProgress); // safety: test
     }
 
     // --- LLM bookkeeping regressions ----------------------------------------
@@ -3392,14 +3415,14 @@ mod tests {
         // record_tool must have executed
         assert!(called.load(Ordering::Relaxed), "record_tool was not called"); // safety: test
 
-        assert_response_outcome(outcome, "Mixed batch done");
+        assert_completed_outcome(outcome, "Mixed batch done");
 
         let ctx = worker
             .context_manager()
             .get_context(worker.job_id)
             .await
             .unwrap(); // safety: test
-        assert_eq!(ctx.state, JobState::Completed); // safety: test
+        assert_eq!(ctx.state, JobState::InProgress); // safety: test
     }
 
     /// If the model emits multiple finish_job calls, only the last call decides
@@ -3420,7 +3443,7 @@ mod tests {
         .unwrap();
 
         assert!(
-            matches!(outcome, Some(LoopOutcome::Response(ref s)) if s == "latest completion"),
+            matches!(outcome, Some(JobLoopOutcome::Completed(ref s)) if s == "latest completion"),
             "the last finish_job call must decide the final outcome"
         ); // safety: test
 
@@ -3439,10 +3462,10 @@ mod tests {
             .get_context(worker.job_id)
             .await
             .unwrap(); // safety: test
-        assert_eq!(ctx.state, JobState::Completed); // safety: test
+        assert_eq!(ctx.state, JobState::InProgress); // safety: test
     }
 
-    /// finish_job with status="failed" returns LoopOutcome::Failure (DB update by outer match).
+    /// finish_job with status="failed" returns a failed job outcome.
     #[tokio::test]
     async fn test_finish_job_failed_status_returns_failure() {
         let worker = make_worker(vec![]).await;

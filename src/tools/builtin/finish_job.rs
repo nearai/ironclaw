@@ -87,7 +87,7 @@ pub fn parse_finish_job_signal_from_output(output: &str) -> Result<FinishJobSign
 /// Signal job completion or failure.
 ///
 /// The delegate (JobDelegate / ContainerDelegate) intercepts calls to this
-/// tool and converts them into `LoopOutcome::Response` or `LoopOutcome::Failure`,
+/// tool and converts them into a completed or failed job outcome,
 /// breaking the agentic loop. The tool itself is a no-op; the side effects live
 /// in the delegate so they can access loop state.
 pub struct FinishJobTool;

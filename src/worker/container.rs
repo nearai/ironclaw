@@ -376,7 +376,9 @@ impl ContainerDelegate {
 
 #[async_trait]
 impl LoopDelegate for ContainerDelegate {
-    async fn check_signals(&self) -> LoopSignal {
+    type Outcome = LoopOutcome;
+
+    async fn check_signals(&self) -> LoopSignal<Self::Outcome> {
         // Container runtime has no stop signals — the orchestrator manages lifecycle.
         LoopSignal::Continue
     }
@@ -439,7 +441,7 @@ impl LoopDelegate for ContainerDelegate {
         text: &str,
         metadata: ResponseMetadata,
         reason_ctx: &mut ReasoningContext,
-    ) -> TextAction {
+    ) -> TextAction<Self::Outcome> {
         let action = {
             let mut recovery = self.recovery_state.lock().await;
             recovery.on_text_response(metadata, text)
@@ -704,6 +706,10 @@ impl LoopDelegate for ContainerDelegate {
     async fn after_iteration(&self, _iteration: usize) {
         // Brief pause between iterations
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    fn max_iterations_outcome(&self) -> Self::Outcome {
+        LoopOutcome::MaxIterations
     }
 }
 
