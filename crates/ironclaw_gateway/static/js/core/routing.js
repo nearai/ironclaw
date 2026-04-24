@@ -8,7 +8,7 @@ function updateHash() {
 
   switch (currentTab) {
     case 'chat':
-      if (currentThreadId && currentThreadId !== assistantThreadId) {
+      if (currentThreadId) {
         parts.push(currentThreadId);
       }
       break;

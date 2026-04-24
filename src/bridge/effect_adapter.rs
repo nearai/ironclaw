@@ -8,7 +8,7 @@
 //! - Sensitive parameter redaction
 //! - Rate limiting (per-user, per-tool)
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -16,16 +16,19 @@ use tokio::sync::RwLock;
 use tracing::debug;
 
 use ironclaw_engine::{
-    ActionDef, ActionResult, CapabilityLease, CapabilityRegistry, EffectExecutor, EngineError,
-    MountError, Store, ThreadExecutionContext, WorkspaceMounts,
+    ActionDef, ActionResult, CapabilityLease, CapabilityRegistry, CapabilitySummary,
+    EffectExecutor, EngineError, MountError, Store, ThreadExecutionContext, WorkspaceMounts,
 };
 use ironclaw_skills::SkillRegistry;
 
+use crate::auth::extension::{AuthCheckResult, AuthManager, LatentActionExecution, ToolReadiness};
 use crate::auth::oauth::sanitize_auth_url;
-use crate::bridge::auth_manager::{AuthCheckResult, AuthManager};
+use crate::bridge::action_projector::ActionProjector;
+use crate::bridge::capability_projector::CapabilityProjector;
 use crate::bridge::router::synthetic_action_call_id;
 use crate::bridge::sandbox::{InterceptOutcome, maybe_intercept};
 use crate::context::JobContext;
+use crate::extensions::InstalledExtension;
 use crate::hooks::{HookEvent, HookOutcome, HookRegistry};
 use crate::tools::permissions::{PermissionState, effective_permission};
 use crate::tools::rate_limiter::RateLimiter;
@@ -75,6 +78,30 @@ pub struct EffectBridgeAdapter {
     /// capabilities like `missions` are registered here in `router.rs` and
     /// would otherwise be invisible to the LLM despite having active leases.
     capability_registry: RwLock<Option<Arc<CapabilityRegistry>>>,
+    /// Short-lived cache for `list_capability_extensions` results. Keyed by
+    /// `user_id` with an expiry timestamp. Both `available_actions` and
+    /// `available_capabilities` are called in quick succession from the engine
+    /// loop; this cache eliminates the duplicate fetch.
+    extension_cache: RwLock<Option<ExtensionCacheEntry>>,
+}
+
+/// Cached extension list with a short TTL to deduplicate the fetch across
+/// `available_actions` and `available_capabilities` when called in sequence.
+struct ExtensionCacheEntry {
+    user_id: String,
+    fetched_at: Instant,
+    extensions: Vec<InstalledExtension>,
+}
+
+impl ExtensionCacheEntry {
+    /// Cache entries expire after 500ms — long enough to cover back-to-back
+    /// calls within a single system-prompt build, short enough to never serve
+    /// stale data across separate engine iterations.
+    const TTL_MS: u128 = 500;
+
+    fn is_valid_for(&self, user_id: &str) -> bool {
+        self.user_id == user_id && self.fetched_at.elapsed().as_millis() < Self::TTL_MS
+    }
 }
 
 impl EffectBridgeAdapter {
@@ -98,6 +125,7 @@ impl EffectBridgeAdapter {
             skill_registry: RwLock::new(None),
             workspace_mounts: RwLock::new(None),
             capability_registry: RwLock::new(None),
+            extension_cache: RwLock::new(None),
         }
     }
 
@@ -179,6 +207,72 @@ impl EffectBridgeAdapter {
     /// Get the mission manager if available.
     pub async fn mission_manager(&self) -> Option<Arc<ironclaw_engine::MissionManager>> {
         self.mission_manager.read().await.clone()
+    }
+
+    /// Fetch the extension list as a `Vec`, using the short-lived cache when
+    /// available. Returns `Some(vec)` when an auth_manager is present, `None`
+    /// otherwise.
+    async fn fetch_extension_list(
+        &self,
+        auth_manager: Option<&AuthManager>,
+        context: &ThreadExecutionContext,
+    ) -> Option<Vec<InstalledExtension>> {
+        let auth_manager = auth_manager?;
+
+        // Check cache first.
+        {
+            let cache = self.extension_cache.read().await;
+            if let Some(entry) = cache.as_ref()
+                && entry.is_valid_for(&context.user_id)
+            {
+                return Some(entry.extensions.clone());
+            }
+        }
+
+        // Cache miss — fetch from auth_manager.
+        let extensions = match auth_manager
+            .list_capability_extensions(&context.user_id)
+            .await
+        {
+            Ok(exts) => exts,
+            Err(error) => {
+                debug!(
+                    user_id = %context.user_id,
+                    error = %error,
+                    "failed to load extension inventory; returning empty list"
+                );
+                Vec::new()
+            }
+        };
+
+        // Populate cache for the sibling projector call.
+        {
+            let mut cache = self.extension_cache.write().await;
+            *cache = Some(ExtensionCacheEntry {
+                user_id: context.user_id.clone(),
+                fetched_at: Instant::now(),
+                extensions: extensions.clone(),
+            });
+        }
+
+        Some(extensions)
+    }
+
+    /// Fetch the extension list as a `HashMap<name, InstalledExtension>`, using
+    /// the short-lived cache when available. Returns `Some(map)` when an
+    /// auth_manager is present, `None` otherwise.
+    async fn fetch_extension_map(
+        &self,
+        auth_manager: Option<&AuthManager>,
+        context: &ThreadExecutionContext,
+    ) -> Option<HashMap<String, InstalledExtension>> {
+        let extensions = self.fetch_extension_list(auth_manager, context).await?;
+        Some(
+            extensions
+                .into_iter()
+                .map(|ext| (ext.name.clone(), ext))
+                .collect(),
+        )
     }
 
     async fn sync_skill_install_result(
@@ -907,12 +1001,10 @@ impl EffectBridgeAdapter {
                 .await
         {
             match latent_execution {
-                Ok(crate::bridge::auth_manager::LatentActionExecution::RetryRegisteredAction {
-                    resolved_action,
-                }) => {
+                Ok(LatentActionExecution::RetryRegisteredAction { resolved_action }) => {
                     lookup_name = resolved_action;
                 }
-                Ok(crate::bridge::auth_manager::LatentActionExecution::ProviderReady {
+                Ok(LatentActionExecution::ProviderReady {
                     provider_extension,
                     available_actions,
                 }) => {
@@ -931,7 +1023,7 @@ impl EffectBridgeAdapter {
                         duration: start.elapsed(),
                     });
                 }
-                Ok(crate::bridge::auth_manager::LatentActionExecution::NeedsAuth {
+                Ok(LatentActionExecution::NeedsAuth {
                     credential_name,
                     instructions,
                     auth_url,
@@ -950,7 +1042,7 @@ impl EffectBridgeAdapter {
                         Some(lease.clone()),
                     ));
                 }
-                Ok(crate::bridge::auth_manager::LatentActionExecution::NeedsSetup { message }) => {
+                Ok(LatentActionExecution::NeedsSetup { message }) => {
                     return Err(EngineError::Effect { reason: message });
                 }
                 Err(err) => {
@@ -1033,7 +1125,6 @@ impl EffectBridgeAdapter {
         if let Some(provider_extension) = self.tools.provider_extension_for_tool(&lookup_name).await
             && let Some(auth_mgr) = self.auth_manager.read().await.as_ref()
         {
-            use crate::bridge::auth_manager::ToolReadiness;
             match auth_mgr
                 .check_tool_readiness(&provider_extension, &context.user_id)
                 .await
@@ -1299,7 +1390,6 @@ impl EffectBridgeAdapter {
                     && let Some(auth_mgr) = self.auth_manager.read().await.as_ref()
                     && let Some(ext_name) = output_value.get("name").and_then(|v| v.as_str())
                 {
-                    use crate::bridge::auth_manager::ToolReadiness;
                     match auth_mgr
                         .check_tool_readiness(ext_name, &context.user_id)
                         .await
@@ -1484,97 +1574,34 @@ impl EffectExecutor for EffectBridgeAdapter {
     async fn available_actions(
         &self,
         leases: &[CapabilityLease],
+        context: &ThreadExecutionContext,
     ) -> Result<Vec<ActionDef>, EngineError> {
-        let tool_defs = self.tools.tool_definitions().await;
+        let auth_manager = self.auth_manager.read().await.clone();
+        let capability_registry = self.capability_registry.read().await.clone();
+        let extensions = self
+            .fetch_extension_map(auth_manager.as_deref(), context)
+            .await;
+        ActionProjector::project(
+            self.tools.as_ref(),
+            auth_manager.as_deref(),
+            capability_registry,
+            leases,
+            context,
+            extensions.as_ref(),
+        )
+        .await
+    }
 
-        // Build action defs, excluding v1-only tools and v1 auth tools
-        let mut actions = Vec::with_capacity(tool_defs.len());
-        for td in tool_defs {
-            // Skip tools that can't work in engine v2
-            if is_v1_only_tool(&td.name) {
-                continue;
-            }
-
-            // Skip v1 auth management tools — auth is kernel-level in v2
-            if is_v1_auth_tool(&td.name) {
-                continue;
-            }
-
-            let python_name = td.name.replace('-', "_");
-
-            actions.push(ActionDef {
-                name: python_name,
-                description: td.description,
-                parameters_schema: td.parameters,
-                effects: vec![],
-                // Approval is enforced at execute-time inside this adapter so
-                // thread-scoped one-shot approvals and auth-aware bypasses can
-                // participate. Advertising approval here would cause the engine
-                // policy preflight to interrupt before the adapter can apply
-                // those runtime checks.
-                requires_approval: false,
-            });
-        }
-
-        if let Some(auth_mgr) = self.auth_manager.read().await.as_ref() {
-            for latent in auth_mgr.latent_extension_actions().await {
-                if actions
-                    .iter()
-                    .any(|action| action.name == latent.action_name)
-                {
-                    continue;
-                }
-                actions.push(ActionDef {
-                    name: latent.action_name,
-                    description: latent.description,
-                    parameters_schema: latent.parameters_schema,
-                    effects: vec![],
-                    requires_approval: false,
-                });
-            }
-        }
-
-        // Surface actions from engine-native capabilities (e.g. `missions`).
-        // The v1 `ToolRegistry` path above only covers built-in + extension
-        // tools; capabilities registered directly against the engine
-        // (`CapabilityRegistry`) would otherwise be invisible to the LLM
-        // even though the thread holds active leases for them. Iterate
-        // leases so we only advertise what the current thread actually has
-        // access to, and skip the `"tools"` capability — that lease is
-        // reconciled dynamically from the v1 path already covered above.
-        if let Some(registry) = self.capability_registry.read().await.as_ref() {
-            let mut seen: HashSet<String> = actions.iter().map(|a| a.name.clone()).collect();
-            for lease in leases {
-                if lease.capability_name == "tools" {
-                    continue;
-                }
-                let Some(cap) = registry.get(&lease.capability_name) else {
-                    continue;
-                };
-                for action in &cap.actions {
-                    if !lease.granted_actions.covers(&action.name) {
-                        continue;
-                    }
-                    // Defensive: apply the same v1-isolation filters we run
-                    // on v1 tools. If a future engine capability registers
-                    // an action under a v1-denylisted name (`create_job`,
-                    // `tool_auth`, ...), the v1 filters above would have
-                    // hidden it — the engine path must not become a
-                    // silent bypass.
-                    if is_v1_only_tool(&action.name) || is_v1_auth_tool(&action.name) {
-                        continue;
-                    }
-                    if !seen.insert(action.name.clone()) {
-                        continue;
-                    }
-                    actions.push(action.clone());
-                }
-            }
-        }
-
-        actions.sort_by(|a, b| a.name.cmp(&b.name));
-
-        Ok(actions)
+    async fn available_capabilities(
+        &self,
+        leases: &[CapabilityLease],
+        context: &ThreadExecutionContext,
+    ) -> Result<Vec<CapabilitySummary>, EngineError> {
+        let auth_manager = self.auth_manager.read().await.clone();
+        let extensions = self
+            .fetch_extension_list(auth_manager.as_deref(), context)
+            .await;
+        CapabilityProjector::project(auth_manager.as_deref(), leases, context, extensions).await
     }
 }
 
@@ -2264,7 +2291,7 @@ fn extract_credential_name(error_msg: &str) -> Option<String> {
     None
 }
 
-fn is_v1_only_tool(name: &str) -> bool {
+pub(crate) fn is_v1_only_tool(name: &str) -> bool {
     // routine_* tools are surfaced in v2 too, but are intercepted by
     // `handle_mission_call`'s routine alias path *before* this check fires —
     // they get translated into mission_* dispatches via the existing
@@ -2285,7 +2312,7 @@ fn is_v1_only_tool(name: &str) -> bool {
 
 /// Auth management tools from v1 that are now kernel-internal in v2.
 /// The LLM should not see or call these — auth is handled automatically.
-fn is_v1_auth_tool(name: &str) -> bool {
+pub(crate) fn is_v1_auth_tool(name: &str) -> bool {
     matches!(name, "tool_auth" | "tool-auth")
 }
 
@@ -3687,7 +3714,16 @@ mod tests {
             async fn available_actions(
                 &self,
                 _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
             ) -> Result<Vec<ironclaw_engine::ActionDef>, EngineError> {
+                Ok(vec![])
+            }
+
+            async fn available_capabilities(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, EngineError> {
                 Ok(vec![])
             }
         }
@@ -4232,6 +4268,12 @@ mod tests {
         }
     }
 
+    /// Regression for #2883: latent provider actions (installed but not yet
+    /// ready — primarily WASM tools pending OAuth) must surface as callable
+    /// actions so the LLM can attempt them and trigger the auth-on-first-call
+    /// gate. Before the fix, unauthenticated WASM tools were invisible to the
+    /// LLM because `tool_definitions()` only returns registered tools and WASM
+    /// tools register only at activation (which requires auth first).
     #[tokio::test]
     async fn available_actions_include_latent_inactive_provider_actions() {
         use crate::secrets::InMemorySecretsStore;
@@ -4292,8 +4334,200 @@ mod tests {
             )))
             .await;
 
-        let actions = adapter.available_actions(&[]).await.expect("actions");
-        assert!(actions.iter().any(|action| action.name == "latent_tool"));
+        let actions = adapter
+            .available_actions(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
+            .await
+            .expect("actions");
+        assert!(
+            actions.iter().any(|action| action.name == "latent_tool"),
+            "latent WASM tool should appear in available_actions so the LLM can call it and trigger auth; got: {:?}",
+            actions.iter().map(|a| &a.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn available_actions_omit_registered_tool_when_provider_is_not_installed() {
+        use crate::secrets::InMemorySecretsStore;
+        use crate::secrets::SecretsCrypto;
+        use crate::tools::mcp::process::McpProcessManager;
+        use crate::tools::mcp::session::McpSessionManager;
+
+        struct LinearSearchTool;
+
+        #[async_trait]
+        impl crate::tools::Tool for LinearSearchTool {
+            fn name(&self) -> &str {
+                "linear_search"
+            }
+
+            fn description(&self) -> &str {
+                "Search Linear issues"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+
+            async fn execute(
+                &self,
+                _: serde_json::Value,
+                _: &crate::context::JobContext,
+            ) -> Result<crate::tools::ToolOutput, crate::tools::ToolError> {
+                Ok(crate::tools::ToolOutput::success(
+                    serde_json::json!({}),
+                    std::time::Duration::from_millis(1),
+                ))
+            }
+
+            fn provider_extension(&self) -> Option<&str> {
+                Some("linear")
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("tools")).expect("tools dir");
+        std::fs::write(dir.path().join("tools").join("linear.wasm"), b"fake-wasm")
+            .expect("write wasm");
+        std::fs::write(
+            dir.path().join("tools").join("linear.capabilities.json"),
+            r#"{"description":"linear provider"}"#,
+        )
+        .expect("write capabilities");
+
+        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(LinearSearchTool)).await;
+        let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            Arc::clone(&secrets),
+            Arc::clone(&tools),
+            None,
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+            "test_user".to_string(),
+            None,
+            vec![],
+        ));
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        adapter
+            .set_auth_manager(Arc::new(AuthManager::new(
+                secrets,
+                None,
+                Some(ext_mgr),
+                Some(Arc::clone(&tools)),
+            )))
+            .await;
+
+        let actions = adapter
+            .available_actions(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
+            .await
+            .expect("actions");
+        assert!(!actions.iter().any(|action| action.name == "linear_search"));
+    }
+
+    // NeedsAuth provider tool preservation is tested directly in
+    // action_projector::tests::needs_auth_provider_tools_remain_in_available_actions
+    // where the extension map can be constructed with correct NeedsAuth status.
+    // An EffectBridgeAdapter-level test would require a real WASM module to
+    // produce installed=true + authenticated=false; fake-wasm files produce
+    // installed=false (AvailableNotInstalled), making the test unreliable.
+
+    #[tokio::test]
+    async fn available_capabilities_projects_inactive_provider_background() {
+        use crate::secrets::InMemorySecretsStore;
+        use crate::secrets::SecretsCrypto;
+        use crate::tools::mcp::process::McpProcessManager;
+        use crate::tools::mcp::session::McpSessionManager;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("tools")).expect("tools dir");
+        std::fs::write(
+            dir.path().join("tools").join("latent_tool.wasm"),
+            b"fake-wasm",
+        )
+        .expect("write wasm");
+        std::fs::write(
+            dir.path()
+                .join("tools")
+                .join("latent_tool.capabilities.json"),
+            r#"{"description":"latent capability test"}"#,
+        )
+        .expect("write capabilities");
+
+        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+
+        let tools = Arc::new(ToolRegistry::new());
+        let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            Arc::clone(&secrets),
+            Arc::clone(&tools),
+            None,
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+            "test_user".to_string(),
+            None,
+            vec![],
+        ));
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        adapter
+            .set_auth_manager(Arc::new(AuthManager::new(
+                secrets,
+                None,
+                Some(ext_mgr),
+                Some(Arc::clone(&tools)),
+            )))
+            .await;
+
+        let context = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: None,
+            user_timezone: None,
+            thread_goal: None,
+        };
+
+        let capabilities = adapter
+            .available_capabilities(&[], &context)
+            .await
+            .expect("capabilities");
+
+        assert!(capabilities.iter().any(|summary| {
+            summary.name == "latent_tool"
+                && summary.status == ironclaw_engine::CapabilityStatus::Inactive
+        }));
     }
 
     #[tokio::test]
@@ -5016,7 +5250,17 @@ Use this skill to set up a Pika meeting.
             async fn available_actions(
                 &self,
                 _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
             ) -> Result<Vec<ironclaw_engine::ActionDef>, ironclaw_engine::EngineError> {
+                Ok(vec![])
+            }
+
+            async fn available_capabilities(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, ironclaw_engine::EngineError>
+            {
                 Ok(vec![])
             }
         }
@@ -5582,11 +5826,14 @@ Use this skill to set up a Pika meeting.
         adapter.set_capability_registry(Arc::new(registry)).await;
 
         let actions = adapter
-            .available_actions(&[mission_lease(&[
-                "mission_create",
-                "mission_list",
-                "mission_complete",
-            ])])
+            .available_actions(
+                &[mission_lease(&[
+                    "mission_create",
+                    "mission_list",
+                    "mission_complete",
+                ])],
+                &exec_ctx(ironclaw_engine::ThreadId::new(), None),
+            )
             .await
             .expect("available_actions should succeed");
 
@@ -5610,7 +5857,10 @@ Use this skill to set up a Pika meeting.
         // must NOT be advertised to the LLM even though they exist in the
         // capability registry.
         let actions = adapter
-            .available_actions(&[mission_lease(&["mission_list"])])
+            .available_actions(
+                &[mission_lease(&["mission_list"])],
+                &exec_ctx(ironclaw_engine::ThreadId::new(), None),
+            )
             .await
             .expect("available_actions should succeed");
 
@@ -5639,7 +5889,7 @@ Use this skill to set up a Pika meeting.
         // No leases passed — no capability actions should surface even
         // though the registry has them.
         let actions = adapter
-            .available_actions(&[])
+            .available_actions(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
             .await
             .expect("available_actions should succeed");
 
@@ -5704,11 +5954,14 @@ Use this skill to set up a Pika meeting.
         adapter.set_capability_registry(Arc::new(registry)).await;
 
         let actions = adapter
-            .available_actions(&[mission_lease(&[
-                "mission_create",
-                "mission_list",
-                "mission_complete",
-            ])])
+            .available_actions(
+                &[mission_lease(&[
+                    "mission_create",
+                    "mission_list",
+                    "mission_complete",
+                ])],
+                &exec_ctx(ironclaw_engine::ThreadId::new(), None),
+            )
             .await
             .expect("available_actions should succeed");
 
@@ -5781,7 +6034,10 @@ Use this skill to set up a Pika meeting.
         };
 
         let actions = adapter
-            .available_actions(&[rogue_lease])
+            .available_actions(
+                &[rogue_lease],
+                &exec_ctx(ironclaw_engine::ThreadId::new(), None),
+            )
             .await
             .expect("available_actions should succeed");
 

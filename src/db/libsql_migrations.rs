@@ -1070,6 +1070,21 @@ CREATE INDEX IF NOT EXISTS idx_llm_calls_created_at ON llm_calls(created_at);
 "#,
     ),
     (
+        25,
+        "wasm_fuel_limit_bump",
+        // The code default for wasm.default_fuel_limit was bumped from 10M to
+        // 500M (limits.rs, config/wasm.rs), but databases that persisted the
+        // old 10M value in the settings table still read it back at startup
+        // (DB-first resolution). Delete the stale row so the code default
+        // takes effect; users who intentionally lowered the limit can re-set
+        // it via the settings API.
+        r#"
+DELETE FROM settings
+WHERE key = 'wasm.default_fuel_limit'
+  AND CAST(json_extract(value, '$') AS INTEGER) = 10000000;
+"#,
+    ),
+    (
         26,
         "budgets",
         // Cost-based budgets (issue #2843). Three tables — budgets,
