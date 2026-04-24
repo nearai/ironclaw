@@ -440,7 +440,8 @@ pub fn apply_confidence_factor(base_score: u32, confidence: f64, is_authored: bo
 mod tests {
     use super::*;
     use crate::types::{
-        ActivationCriteria, GatingRequirements, LoadedSkill, SkillManifest, SkillSource, SkillTrust,
+        ActivationCriteria, GatingRequirements, LoadedSkill, SkillHttpAllowlist, SkillManifest,
+        SkillSource, SkillTrust,
     };
     use std::collections::HashSet;
     use std::path::PathBuf;
@@ -487,6 +488,7 @@ mod tests {
                     setup_marker: None,
                 },
                 credentials: vec![],
+                http: SkillHttpAllowlist::default(),
                 requires: GatingRequirements::default(),
             },
             prompt_content: "Test prompt".to_string(),

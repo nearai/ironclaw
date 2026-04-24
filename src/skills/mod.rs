@@ -192,8 +192,8 @@ fn credential_spec_to_auth_descriptor(
 /// Register credential mappings and HTTP allowlists from loaded skills into the shared registry.
 ///
 /// Validates each spec before registration; invalid specs are logged and skipped.
-/// Credential host patterns are implicitly added to the HTTP allowlist, so hosts
-/// that receive credential injection are always permitted.
+/// Credential hosts are implicitly allowed by `http_host_allowed` via its
+/// `has_credentials_for_host` fallback, so they are not duplicated in the allowlist.
 pub fn register_skill_credentials(
     skills: &[LoadedSkill],
     registry: &crate::tools::wasm::SharedCredentialRegistry,
@@ -238,8 +238,7 @@ pub fn register_skill_credentials(
                 "Skipping invalid HTTP allowlist"
             );
         } else {
-            let mut hosts: Vec<String> = skill.manifest.http.allowed_hosts.clone();
-            hosts.extend(credential_hosts);
+            let hosts: Vec<String> = skill.manifest.http.allowed_hosts.clone();
             if !hosts.is_empty() {
                 tracing::debug!(
                     skill = %skill.name(),

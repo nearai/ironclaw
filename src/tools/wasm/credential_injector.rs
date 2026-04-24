@@ -73,7 +73,7 @@ impl From<SecretError> for InjectionError {
 pub struct SharedCredentialRegistry {
     mappings: RwLock<Vec<CredentialMapping>>,
     oauth_refresh: RwLock<HashMap<String, OAuthRefreshConfig>>,
-    http_allowlist: RwLock<Vec<String>>,
+    http_allowlist: RwLock<HashMap<String, usize>>,
 }
 
 impl SharedCredentialRegistry {
@@ -82,7 +82,7 @@ impl SharedCredentialRegistry {
         Self {
             mappings: RwLock::new(Vec::new()),
             oauth_refresh: RwLock::new(HashMap::new()),
-            http_allowlist: RwLock::new(Vec::new()),
+            http_allowlist: RwLock::new(HashMap::new()),
         }
     }
 
@@ -225,21 +225,17 @@ impl SharedCredentialRegistry {
     /// These patterns restrict which hosts the built-in `http` tool may
     /// contact when any skill with an allowlist is active.
     pub fn add_http_allowlist_patterns(&self, patterns: impl IntoIterator<Item = String>) {
-        let collected: Vec<String> = patterns.into_iter().collect();
-        if collected.is_empty() {
-            return;
-        }
-        match self.http_allowlist.write() {
-            Ok(mut guard) => {
-                guard.extend(collected);
-            }
+        let mut guard = match self.http_allowlist.write() {
+            Ok(guard) => guard,
             Err(poisoned) => {
                 tracing::warn!(
                     "SharedCredentialRegistry RwLock poisoned during add_http_allowlist_patterns; recovering"
                 );
-                let mut guard = poisoned.into_inner();
-                guard.extend(collected);
+                poisoned.into_inner()
             }
+        };
+        for pattern in patterns {
+            *guard.entry(pattern).or_insert(0) += 1;
         }
     }
 
@@ -256,7 +252,14 @@ impl SharedCredentialRegistry {
                 poisoned.into_inner()
             }
         };
-        guard.retain(|p| !to_remove.contains(p));
+        for pattern in to_remove {
+            if let Some(count) = guard.get_mut(pattern) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    guard.remove(pattern);
+                }
+            }
+        }
     }
 
     /// Check if a host is allowed by the skill-driven HTTP allowlist.
@@ -285,7 +288,7 @@ impl SharedCredentialRegistry {
         }
 
         if allowlist_guard
-            .iter()
+            .keys()
             .any(|pattern| host_matches_pattern(host, pattern))
         {
             return true;
@@ -803,5 +806,46 @@ mod tests {
 
         let found = registry.find_for_host("api.example.com");
         assert_eq!(found.len(), 4);
+    }
+
+    #[test]
+    fn test_http_allowlist_shared_pattern_refcounting() {
+        let registry = SharedCredentialRegistry::new();
+
+        registry.add_http_allowlist_patterns(vec![
+            "*.googleapis.com".to_string(),
+            "api.github.com".to_string(),
+        ]);
+        registry.add_http_allowlist_patterns(vec![
+            "*.googleapis.com".to_string(),
+            "slack.com".to_string(),
+        ]);
+
+        assert!(registry.http_host_allowed("storage.googleapis.com"));
+        assert!(registry.http_host_allowed("api.github.com"));
+        assert!(registry.http_host_allowed("slack.com"));
+        assert!(!registry.http_host_allowed("evil.com"));
+
+        registry.remove_http_allowlist_patterns(&["*.googleapis.com".to_string()]);
+
+        assert!(
+            registry.http_host_allowed("storage.googleapis.com"),
+            "shared pattern should still be allowed after one removal"
+        );
+        assert!(registry.http_host_allowed("api.github.com"));
+        assert!(registry.http_host_allowed("slack.com"));
+
+        registry.remove_http_allowlist_patterns(&["*.googleapis.com".to_string()]);
+
+        assert!(
+            !registry.http_host_allowed("storage.googleapis.com"),
+            "pattern should be revoked after last skill removes it"
+        );
+    }
+
+    #[test]
+    fn test_http_allowlist_empty_means_no_restriction() {
+        let registry = SharedCredentialRegistry::new();
+        assert!(registry.http_host_allowed("any.host.com"));
     }
 }

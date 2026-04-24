@@ -545,7 +545,7 @@ mod tests {
             allowed_hosts: vec!["https://api.github.com/v1".to_string()],
         };
         let errors = validate_http_allowlist(&allowlist);
-        assert_eq!(errors.len(), 2); // contains both '/' and ':'
+        assert_eq!(errors.len(), 1); // single combined message for '/' and ':'
         assert!(errors[0].contains("must not contain"));
     }
 
