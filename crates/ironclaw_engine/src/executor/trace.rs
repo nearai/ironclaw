@@ -499,6 +499,7 @@ mod tests {
                 error: "No lease for action 'web_search'".into(),
                 duration_ms: 0,
                 params_summary: None,
+                display_hint: None,
             },
         ));
 

@@ -43,6 +43,7 @@ async fn gateway_send_status_preserves_tool_event_fields() {
             name: "shell".to_string(),
             detail: Some("ls -la".to_string()),
             call_id: Some("call_shell_1".to_string()),
+            display_hint: None,
         },
         &metadata,
     )
@@ -57,6 +58,7 @@ async fn gateway_send_status_preserves_tool_event_fields() {
             parameters: None,
             call_id: Some("call_shell_1".to_string()),
             duration_ms: Some(42),
+            display_hint: None,
         },
         &metadata,
     )
@@ -94,6 +96,7 @@ async fn gateway_send_status_preserves_tool_event_fields() {
             detail,
             call_id,
             thread_id,
+            ..
         } if name == "shell"
             && detail.as_deref() == Some("ls -la")
             && call_id.as_deref() == Some("call_shell_1")

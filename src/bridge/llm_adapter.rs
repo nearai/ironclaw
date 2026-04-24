@@ -16,6 +16,90 @@ use crate::llm::{
 
 const EMPTY_CLEANED_RESPONSE_FALLBACK: &str = "I'm not sure how to respond to that.";
 
+/// Generate a human-readable display hint for a tool call, combining the
+/// tool's own description (from its `ActionDef`) with a short summary of
+/// the actual parameters the LLM supplied.
+///
+/// This is the source of narration the UI renders for live tool activity.
+/// It works for any tool — built-in, WASM, MCP, skill — because every
+/// registered action has a description. Returns `None` when neither a
+/// description nor any usable parameter is available.
+///
+/// The hint is intentionally short (one line) and never includes
+/// sensitive-looking raw parameter values beyond the first 60 chars of a
+/// single string field. The `params_summary` helper in
+/// `ironclaw_engine::types::event` is the canonical truncation path.
+fn generate_display_hint(
+    action_name: &str,
+    description: Option<&str>,
+    parameters: &serde_json::Value,
+) -> Option<String> {
+    let param_summary = ironclaw_engine::summarize_params(action_name, parameters);
+    let desc = description
+        .map(first_sentence)
+        .map(progressive_description)
+        .filter(|s| !s.is_empty());
+
+    match (desc, param_summary) {
+        (Some(d), Some(p)) => Some(format!("{} — {}", d, p)),
+        (Some(d), None) => Some(d),
+        (None, Some(p)) => Some(format!("Running {} — {}", humanize_name(action_name), p)),
+        (None, None) => Some(format!("Running {}...", humanize_name(action_name))),
+    }
+}
+
+/// Return the first sentence (up to `.`, `!`, or `?`) of a description,
+/// or the whole string if no terminator is present. Keeps hints compact.
+fn first_sentence(s: &str) -> &str {
+    let end = s.find(['.', '!', '?']).map(|i| i + 1).unwrap_or(s.len());
+    s[..end].trim_end_matches(['.', '!', '?']).trim()
+}
+
+/// Convert an imperative tool description like "Create an issue" into a
+/// progress-style hint like "Creating an issue" when possible.
+fn progressive_description(description: &str) -> String {
+    let trimmed = description.trim();
+    let mut parts = trimmed.splitn(2, ' ');
+    let Some(first) = parts.next() else {
+        return String::new();
+    };
+    let rest = parts.next().unwrap_or("");
+
+    let progressive = match first.to_ascii_lowercase().as_str() {
+        "search" => "Searching",
+        "create" => "Creating",
+        "fetch" => "Fetching",
+        "read" => "Reading",
+        "write" => "Writing",
+        "run" => "Running",
+        "execute" => "Executing",
+        "send" => "Sending",
+        "open" => "Opening",
+        "list" => "Listing",
+        "find" => "Finding",
+        "get" => "Getting",
+        "install" => "Installing",
+        "update" => "Updating",
+        "delete" => "Deleting",
+        "remove" => "Removing",
+        "load" => "Loading",
+        "save" => "Saving",
+        _ => return trimmed.to_string(),
+    };
+
+    if rest.is_empty() {
+        progressive.to_string()
+    } else {
+        format!("{} {}", progressive, rest)
+    }
+}
+
+/// Convert a snake_case tool name into a space-separated phrase for fallback
+/// hints (e.g. `my_custom_tool` → `my custom tool`).
+fn humanize_name(name: &str) -> String {
+    name.replace(['_', '-'], " ")
+}
+
 /// Compute the USD cost of a single completion response, honoring the
 /// provider's prompt-caching pricing. Mirrors the formula in
 /// `src/agent/cost_guard.rs::CostGuard::record_llm_call` so engine v2's
@@ -183,10 +267,18 @@ impl LlmBackend for LlmBridgeAdapter {
             let mut calls: Vec<ironclaw_engine::ActionCall> = response
                 .tool_calls
                 .iter()
-                .map(|tc| ironclaw_engine::ActionCall {
-                    id: tc.id.clone(),
-                    action_name: tc.name.clone(),
-                    parameters: tc.arguments.clone(),
+                .map(|tc| {
+                    let description = actions
+                        .iter()
+                        .find(|a| a.name == tc.name)
+                        .map(|a| a.description.as_str());
+                    let display_hint = generate_display_hint(&tc.name, description, &tc.arguments);
+                    ironclaw_engine::ActionCall {
+                        id: tc.id.clone(),
+                        action_name: tc.name.clone(),
+                        parameters: tc.arguments.clone(),
+                        display_hint,
+                    }
                 })
                 .collect();
 
@@ -217,10 +309,19 @@ impl LlmBackend for LlmBridgeAdapter {
             if !recovered_calls.is_empty() {
                 let calls: Vec<ironclaw_engine::ActionCall> = recovered_calls
                     .iter()
-                    .map(|tc| ironclaw_engine::ActionCall {
-                        id: tc.id.clone(),
-                        action_name: tc.name.clone(),
-                        parameters: tc.arguments.clone(),
+                    .map(|tc| {
+                        let description = actions
+                            .iter()
+                            .find(|a| a.name == tc.name)
+                            .map(|a| a.description.as_str());
+                        let display_hint =
+                            generate_display_hint(&tc.name, description, &tc.arguments);
+                        ironclaw_engine::ActionCall {
+                            id: tc.id.clone(),
+                            action_name: tc.name.clone(),
+                            parameters: tc.arguments.clone(),
+                            display_hint,
+                        }
                     })
                     .collect();
                 let content = if cleaned_text.trim().is_empty() {
@@ -763,6 +864,7 @@ mod tests {
                     id: "call_1".to_string(),
                     action_name: "search".to_string(),
                     parameters: serde_json::json!({"q": "docs"}),
+                    display_hint: None,
                 }],
             ),
             ThreadMessage::action_result("call_1", "search", "result payload"),
@@ -1054,6 +1156,35 @@ mod tests {
         assert_eq!(models[0], None);
     }
 
+    #[test]
+    fn generate_display_hint_uses_description_and_params() {
+        let hint = generate_display_hint(
+            "memory_search",
+            Some("Search your memories"),
+            &serde_json::json!({"query": "last week"}),
+        );
+
+        assert_eq!(hint.as_deref(), Some("Searching your memories — last week"));
+    }
+
+    #[test]
+    fn generate_display_hint_falls_back_to_humanized_name() {
+        let hint = generate_display_hint(
+            "my_custom_tool",
+            None,
+            &serde_json::json!({"city": "Paris"}),
+        );
+
+        assert_eq!(hint.as_deref(), Some("Running my custom tool — Paris"));
+    }
+
+    #[test]
+    fn generate_display_hint_falls_back_without_description_or_params() {
+        let hint = generate_display_hint("my_custom_tool", None, &serde_json::json!({}));
+
+        assert_eq!(hint.as_deref(), Some("Running my custom tool..."));
+    }
+
     // ── extract_code_block tests ────────────────────────────
 
     #[test]
@@ -1225,16 +1356,19 @@ And also check the token price:\n\
                         id: "call_AAA".into(),
                         action_name: "tool_a".into(),
                         parameters: serde_json::json!({}),
+                        display_hint: None,
                     },
                     ActionCall {
                         id: "call_BBB".into(),
                         action_name: "tool_b".into(),
                         parameters: serde_json::json!({}),
+                        display_hint: None,
                     },
                     ActionCall {
                         id: "call_CCC".into(),
                         action_name: "tool_c".into(),
                         parameters: serde_json::json!({}),
+                        display_hint: None,
                     },
                 ],
             ),
@@ -1487,6 +1621,7 @@ And also check the token price:\n\
                     id: "call-1".into(),
                     action_name: "memory_write".into(),
                     parameters: serde_json::json!({"target": "projects/test/AGENTS.md"}),
+                    display_hint: None,
                 }],
             ),
             ThreadMessage::action_result(

@@ -6431,6 +6431,7 @@ mod tests {
                     name: "http_request".into(),
                     detail: None,
                     call_id: None,
+                    display_hint: None,
                 },
                 &metadata,
             )
@@ -6797,6 +6798,7 @@ mod tests {
                 name: "http_request".to_string(),
                 detail: None,
                 call_id: None,
+                display_hint: None,
             },
             &metadata,
         )
@@ -6822,6 +6824,7 @@ mod tests {
                 parameters: None,
                 call_id: None,
                 duration_ms: None,
+                display_hint: None,
             },
             &metadata,
         )
@@ -6847,6 +6850,7 @@ mod tests {
                 parameters: None,
                 call_id: None,
                 duration_ms: None,
+                display_hint: None,
             },
             &metadata,
         )

@@ -345,6 +345,7 @@ async fn test_ws_multiple_events_in_sequence() {
         detail: None,
         call_id: Some("call_shell_1".to_string()),
         thread_id: None,
+        display_hint: None,
     });
     state.sse.broadcast(AppEvent::ToolCompleted {
         name: "shell".to_string(),
@@ -354,6 +355,7 @@ async fn test_ws_multiple_events_in_sequence() {
         call_id: Some("call_shell_1".to_string()),
         duration_ms: Some(42),
         thread_id: None,
+        display_hint: None,
     });
     state.sse.broadcast(AppEvent::Response {
         content: "done".to_string(),

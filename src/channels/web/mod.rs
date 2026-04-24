@@ -715,11 +715,13 @@ impl Channel for GatewayChannel {
                 name,
                 detail,
                 call_id,
+                display_hint,
             } => AppEvent::ToolStarted {
                 name,
                 detail,
                 call_id,
                 thread_id: thread_id.clone(),
+                display_hint,
             },
             StatusUpdate::ToolCompleted {
                 name,
@@ -728,6 +730,7 @@ impl Channel for GatewayChannel {
                 parameters,
                 call_id,
                 duration_ms,
+                display_hint,
             } => AppEvent::ToolCompleted {
                 name,
                 success,
@@ -736,6 +739,7 @@ impl Channel for GatewayChannel {
                 call_id,
                 duration_ms,
                 thread_id: thread_id.clone(),
+                display_hint,
             },
             StatusUpdate::ToolResult {
                 name,

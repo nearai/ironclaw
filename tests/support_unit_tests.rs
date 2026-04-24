@@ -191,6 +191,7 @@ mod test_channel_tests {
                     name: "echo".to_string(),
                     detail: None,
                     call_id: None,
+                    display_hint: None,
                 },
                 &metadata,
             )
@@ -205,6 +206,7 @@ mod test_channel_tests {
                     parameters: None,
                     call_id: None,
                     duration_ms: None,
+                    display_hint: None,
                 },
                 &metadata,
             )
@@ -230,6 +232,7 @@ mod test_channel_tests {
                     name: "memory_search".to_string(),
                     detail: None,
                     call_id: None,
+                    display_hint: None,
                 },
                 &metadata,
             )
@@ -245,6 +248,7 @@ mod test_channel_tests {
                     name: "echo".to_string(),
                     detail: None,
                     call_id: None,
+                    display_hint: None,
                 },
                 &metadata,
             )
@@ -316,6 +320,7 @@ mod test_channel_tests {
                     name: "echo".to_string(),
                     detail: None,
                     call_id: None,
+                    display_hint: None,
                 },
                 &serde_json::Value::Null,
             )
@@ -331,6 +336,7 @@ mod test_channel_tests {
                     parameters: None,
                     call_id: None,
                     duration_ms: None,
+                    display_hint: None,
                 },
                 &serde_json::Value::Null,
             )

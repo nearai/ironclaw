@@ -1535,6 +1535,7 @@ mod tests {
             detail: None,
             call_id: Some("call_memory_search".to_string()),
             thread_id: Some("t".to_string()),
+            display_hint: None,
         }));
         assert!(!acc.process(AppEvent::ToolResult {
             name: "memory_search".to_string(),
@@ -1570,12 +1571,14 @@ mod tests {
             detail: None,
             call_id: Some("call_a".to_string()),
             thread_id: Some("t".to_string()),
+            display_hint: None,
         }));
         assert!(!acc.process(AppEvent::ToolStarted {
             name: "memory_search".to_string(),
             detail: None,
             call_id: Some("call_b".to_string()),
             thread_id: Some("t".to_string()),
+            display_hint: None,
         }));
         assert!(!acc.process(AppEvent::ToolResult {
             name: "memory_search".to_string(),
@@ -1617,6 +1620,7 @@ mod tests {
             detail: None,
             call_id: None,
             thread_id: Some("t".to_string()),
+            display_hint: None,
         }));
         let started_call_id = match &acc.output[0] {
             ResponseOutputItem::FunctionCall { call_id, .. } => call_id.clone(),
@@ -1651,6 +1655,7 @@ mod tests {
             detail: None,
             call_id: None,
             thread_id: Some("t".to_string()),
+            display_hint: None,
         }));
         let started_call_id = match &acc.output[0] {
             ResponseOutputItem::FunctionCall { call_id, .. } => call_id.clone(),
@@ -1665,6 +1670,7 @@ mod tests {
             call_id: Some("unexpected_call_id".to_string()),
             duration_ms: None,
             thread_id: Some("t".to_string()),
+            display_hint: None,
         }));
         assert!(acc.process(AppEvent::Response {
             content: "done".to_string(),

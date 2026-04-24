@@ -870,6 +870,7 @@ async fn handle_execute_code_step(
                         error: error_msg,
                         duration_ms: code_start.elapsed().as_millis() as u64,
                         params_summary: None,
+                        display_hint: None,
                     },
                 );
                 if let Some(tx) = event_tx {
@@ -1013,6 +1014,7 @@ async fn handle_execute_action(
                     error,
                     duration_ms: 0,
                     params_summary: None,
+                    display_hint: None,
                 },
                 &call_id,
                 &name,
@@ -1047,6 +1049,7 @@ async fn handle_execute_action(
                         error: reason,
                         duration_ms: 0,
                         params_summary: None,
+                        display_hint: None,
                     },
                     &call_id,
                     &name,
@@ -1115,6 +1118,7 @@ async fn handle_execute_action(
                     error,
                     duration_ms: 0,
                     params_summary: None,
+                    display_hint: None,
                 },
                 &call_id,
                 &name,
@@ -1162,6 +1166,7 @@ async fn handle_execute_action(
                             execution_start.elapsed().as_millis() as u64
                         },
                         params_summary: ps.clone(),
+                        display_hint: None,
                     },
                     &call_id,
                     &name,
@@ -1177,6 +1182,7 @@ async fn handle_execute_action(
                         call_id: call_id.clone(),
                         duration_ms: r.duration.as_millis() as u64,
                         params_summary: ps.clone(),
+                        display_hint: None,
                     },
                     &call_id,
                     &name,
@@ -1245,6 +1251,7 @@ async fn handle_execute_action(
                     error: e.to_string(),
                     duration_ms: execution_start.elapsed().as_millis() as u64,
                     params_summary: ps,
+                    display_hint: None,
                 },
                 &call_id,
                 &name,
@@ -1358,6 +1365,7 @@ async fn handle_execute_actions_parallel(
                     error,
                     duration_ms: 0,
                     params_summary: None,
+                    display_hint: None,
                 };
                 preflight.push(Some(PfOutcome::Error {
                     result_json,
@@ -1391,6 +1399,7 @@ async fn handle_execute_actions_parallel(
                         error: reason,
                         duration_ms: 0,
                         params_summary: None,
+                        display_hint: None,
                     };
                     preflight.push(Some(PfOutcome::Error {
                         result_json,
@@ -1486,6 +1495,7 @@ async fn handle_execute_actions_parallel(
                     error,
                     duration_ms: 0,
                     params_summary: None,
+                    display_hint: None,
                 };
                 preflight.push(Some(PfOutcome::Error {
                     result_json,
@@ -1540,6 +1550,7 @@ async fn handle_execute_actions_parallel(
             &lease,
             &exec_ctx,
             ps,
+            None,
         )
         .await;
         if interrupted_result_needs_refund(&result_json) {
@@ -1572,6 +1583,7 @@ async fn handle_execute_actions_parallel(
                     &lease,
                     &exec_ctx,
                     ps,
+                    None,
                 )
                 .await;
                 (idx, lease.id, result_json, event, output)
@@ -1623,6 +1635,7 @@ async fn handle_execute_actions_parallel(
 
 /// Execute a single action and return (result_json, event, output) for the
 /// batch handler to record. Shared by both single-call and parallel paths.
+#[allow(clippy::too_many_arguments)]
 async fn execute_single_action(
     effects: &Arc<dyn EffectExecutor>,
     name: &str,
@@ -1631,6 +1644,7 @@ async fn execute_single_action(
     lease: &crate::types::capability::CapabilityLease,
     exec_ctx: &ThreadExecutionContext,
     params_summary: Option<String>,
+    display_hint: Option<String>,
 ) -> (serde_json::Value, EventKind, serde_json::Value) {
     let execution_start = std::time::Instant::now();
     match effects.execute_action(name, params, lease, exec_ctx).await {
@@ -1656,6 +1670,7 @@ async fn execute_single_action(
                         execution_start.elapsed().as_millis() as u64
                     },
                     params_summary: params_summary.clone(),
+                    display_hint: display_hint.clone(),
                 }
             } else {
                 EventKind::ActionExecuted {
@@ -1664,6 +1679,7 @@ async fn execute_single_action(
                     call_id: call_id.to_string(),
                     duration_ms: r.duration.as_millis() as u64,
                     params_summary: params_summary.clone(),
+                    display_hint: display_hint.clone(),
                 }
             };
             let result_json = serde_json::json!({
@@ -1717,6 +1733,7 @@ async fn execute_single_action(
                 error: e.to_string(),
                 duration_ms: execution_start.elapsed().as_millis() as u64,
                 params_summary,
+                display_hint,
             };
             let result_json = serde_json::json!({
                 "output": &output,
@@ -1790,6 +1807,7 @@ fn handle_emit_event(
                 call_id,
                 duration_ms: 0,
                 params_summary: None,
+                display_hint: None,
             }
         }
         "action_failed" => {
@@ -1804,6 +1822,7 @@ fn handle_emit_event(
                 error,
                 duration_ms,
                 params_summary: None,
+                display_hint: None,
             }
         }
         "skill_activated" => {
@@ -2343,6 +2362,7 @@ impl From<PythonActionCall> for ActionCall {
             id: p.call_id,
             action_name: p.name,
             parameters: p.params,
+            display_hint: None,
         }
     }
 }
@@ -3805,6 +3825,7 @@ mod tests {
             id: "call_abc123".to_string(),
             action_name: "google_drive_tool".to_string(),
             parameters: serde_json::json!({"query": "expenses"}),
+            display_hint: None,
         };
 
         let python_json = serde_json::to_value(PythonActionCall::from(&original))
@@ -3832,11 +3853,13 @@ mod tests {
                 id: "call_1".to_string(),
                 action_name: "notion_notion_search".to_string(),
                 parameters: serde_json::json!({"query": "name"}),
+                display_hint: None,
             },
             ActionCall {
                 id: "call_2".to_string(),
                 action_name: "google_drive_tool".to_string(),
                 parameters: serde_json::json!({"action": "list"}),
+                display_hint: None,
             },
         ];
         let json = action_calls_to_python_json(&calls);
@@ -4042,6 +4065,7 @@ mod tests {
                 id: "call_resume_test".to_string(),
                 action_name: "google_drive_tool".to_string(),
                 parameters: serde_json::json!({"query": "budget"}),
+                display_hint: None,
             }],
         );
 

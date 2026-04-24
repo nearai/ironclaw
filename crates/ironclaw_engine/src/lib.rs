@@ -41,7 +41,7 @@ pub use types::capability::{
     PolicyRule,
 };
 pub use types::error::{CapabilityError, EngineError, StepError, ThreadError};
-pub use types::event::{EventId, EventKind, ThreadEvent};
+pub use types::event::{EventId, EventKind, ThreadEvent, summarize_params};
 pub use types::memory::{DocId, DocType, MemoryDoc};
 pub use types::message::{MessageRole, ThreadMessage};
 pub use types::mission::{Mission, MissionCadence, MissionId, MissionStatus, ValidTimezone};

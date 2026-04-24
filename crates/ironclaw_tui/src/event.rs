@@ -222,6 +222,7 @@ pub enum TuiEvent {
         name: String,
         detail: Option<String>,
         call_id: Option<String>,
+        display_hint: Option<String>,
     },
 
     /// Tool execution completed.
@@ -230,6 +231,7 @@ pub enum TuiEvent {
         success: bool,
         error: Option<String>,
         call_id: Option<String>,
+        display_hint: Option<String>,
     },
 
     /// Brief preview of tool output.

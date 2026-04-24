@@ -963,10 +963,12 @@ async fn handle_event(
             name,
             detail,
             call_id,
+            display_hint,
         } => {
-            state.status_text = match &detail {
-                Some(d) => format!("Running {name}: {d}"),
-                None => format!("Running {name}..."),
+            state.status_text = match (display_hint.as_deref(), detail.as_deref()) {
+                (Some(hint), _) => hint.to_string(),
+                (None, Some(d)) => format!("Running {name}: {d}"),
+                (None, None) => format!("Running {name}..."),
             };
             state.active_tools.push(ToolActivity {
                 call_id,
@@ -984,6 +986,7 @@ async fn handle_event(
             success,
             error: _,
             call_id,
+            display_hint: _,
         } => {
             // Move from active to recent
             if let Some(pos) = state

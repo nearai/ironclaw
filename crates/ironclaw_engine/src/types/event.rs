@@ -141,6 +141,9 @@ pub enum EventKind {
         /// Short human-readable summary of parameters (e.g., URL for http tool).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         params_summary: Option<String>,
+        /// Human-readable display hint (e.g. "Searching memories for 'notes'").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_hint: Option<String>,
     },
     ActionFailed {
         step_id: StepId,
@@ -152,6 +155,9 @@ pub enum EventKind {
         /// Short human-readable summary of parameters.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         params_summary: Option<String>,
+        /// Human-readable display hint (e.g. "Searching memories for 'notes'").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_hint: Option<String>,
     },
 
     // ── Capability leases ───────────────────────────────────
@@ -278,6 +284,7 @@ mod tests {
                 error,
                 duration_ms,
                 params_summary,
+                display_hint,
             } => {
                 assert_eq!(actual_step_id, step_id);
                 assert_eq!(action_name, "web_search");
@@ -285,6 +292,7 @@ mod tests {
                 assert_eq!(error, "permission denied");
                 assert_eq!(duration_ms, 0);
                 assert_eq!(params_summary, None);
+                assert_eq!(display_hint, None);
             }
             other => panic!("expected ActionFailed, got {other:?}"),
         }
