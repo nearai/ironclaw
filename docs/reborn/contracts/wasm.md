@@ -169,7 +169,7 @@ Rules:
 
 ## 8. Host imports
 
-V1 exposes only low-risk core imports by default:
+V1 exposes low-risk core imports by default:
 
 ```text
 host.log_utf8(level: i32, ptr: i32, len: i32) -> i32 status
@@ -178,12 +178,29 @@ host.time_unix_ms() -> i64
 
 `host.log_utf8` reads UTF-8 bytes from the guest's exported `memory`, bounds message size/count, additionally caps total captured log bytes by the runtime output-byte budget, and records structured logs in `CapabilityResult.logs`. Over-budget logs return a non-zero status to the guest and are not captured. `host.time_unix_ms` returns host wall-clock milliseconds since Unix epoch. These imports do not grant filesystem, network, secret, process, or dispatch authority.
 
+V1 also defines a scoped filesystem import group. These imports are linked for modules that declare them, but are default-deny unless the invocation uses `invoke_json_with_filesystem` with a `WasmScopedFilesystem` backed by `ScopedFilesystem` and a `MountView`:
+
+```text
+host.fs_read_utf8(path_ptr, path_len, out_ptr, out_cap) -> i32 bytes_or_negative_status
+host.fs_write_utf8(path_ptr, path_len, data_ptr, data_len) -> i32 status
+host.fs_list_utf8(path_ptr, path_len, out_ptr, out_cap) -> i32 bytes_or_negative_status
+host.fs_stat_len(path_ptr, path_len) -> i64 len_or_negative_status
+```
+
+Filesystem import rules:
+
+- paths are guest-visible `ScopedPath` values such as `/workspace/file.txt`
+- `MountView` resolves scoped paths to `VirtualPath` targets
+- read/list/stat/write go through `ScopedFilesystem` permission checks
+- no raw `HostPath` reaches the guest
+- no broad WASI preopens are granted
+- missing filesystem context returns a negative guest status instead of ambient access
+
 Unsupported imports fail at module preparation as `WasmError::UnsupportedImport`.
 
 Future privileged imports should be grouped by service and routed through their owning host services:
 
 ```text
-host.fs.read/write/list/stat
 host.network.request
 host.auth.resolve_secret_handle
 host.dispatch.capability
@@ -254,6 +271,15 @@ pub struct WasmRuntimeConfig {
     pub cache_dir: Option<std::path::PathBuf>,
     pub epoch_tick_interval: std::time::Duration,
 }
+
+pub trait WasmHostFilesystem: Send + Sync {
+    fn read_utf8(&self, path: &str) -> Result<String, String>;
+    fn write_utf8(&self, path: &str, contents: &str) -> Result<(), String>;
+    fn list_utf8(&self, path: &str) -> Result<String, String>;
+    fn stat_len(&self, path: &str) -> Result<u64, String>;
+}
+
+pub struct WasmScopedFilesystem<F: RootFilesystem>;
 
 pub struct WasmModuleSpec {
     pub provider: ExtensionId,
@@ -329,6 +355,14 @@ impl WasmRuntime {
         descriptor: &CapabilityDescriptor,
         reservation: Option<&ActiveResourceReservation>,
         invocation: CapabilityInvocation,
+    ) -> Result<CapabilityResult, WasmError>;
+    pub fn invoke_json_with_filesystem(
+        &self,
+        module: &PreparedWasmModule,
+        descriptor: &CapabilityDescriptor,
+        reservation: Option<&ResourceReservation>,
+        invocation: CapabilityInvocation,
+        filesystem: Arc<dyn WasmHostFilesystem>,
     ) -> Result<CapabilityResult, WasmError>;
 }
 ```
@@ -407,6 +441,9 @@ Local contract tests should prove:
 - resource-denied executions fail before module preparation/invocation
 - core `host.log_utf8` captures bounded structured logs in capability results and cannot exceed the runtime output-byte budget
 - core `host.time_unix_ms` is available without adding privileged authority
+- filesystem imports read/write/list/stat through `ScopedFilesystem` and `MountView`
+- filesystem imports deny by default when no filesystem context is provided
+- filesystem write respects mount permissions and cannot create host-path access
 - unsupported host imports still fail closed during module preparation
 - invocation returns actual usage suitable for resource reconciliation
 - no privileged host imports are available unless explicitly registered
@@ -417,7 +454,7 @@ Local contract tests should prove:
 
 Do not add in this first crate:
 
-- full WASI filesystem access
+- broad WASI filesystem access or ambient preopens
 - network host imports
 - secret host imports
 - owning extension discovery
