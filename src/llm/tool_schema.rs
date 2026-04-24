@@ -87,6 +87,7 @@ fn needs_top_level_flatten(schema: &JsonValue) -> bool {
     match schema {
         JsonValue::Object(map) => {
             let has_forbidden = FORBIDDEN_TOP_LEVEL.iter().any(|k| map.contains_key(*k));
+            let has_properties = map.contains_key("properties");
             let is_object_type = match map.get("type") {
                 Some(JsonValue::String(s)) => s == "object",
                 Some(JsonValue::Array(arr)) => arr
@@ -94,7 +95,7 @@ fn needs_top_level_flatten(schema: &JsonValue) -> bool {
                     .any(|v| matches!(v, JsonValue::String(s) if s == "object")),
                 _ => false,
             };
-            has_forbidden || !is_object_type
+            has_forbidden || (!is_object_type && !has_properties)
         }
         _ => true,
     }
@@ -264,6 +265,9 @@ fn normalize_schema_recursive(schema: &mut JsonValue, strict_objects: bool) {
     }
 
     if !strict_objects {
+        if obj.contains_key("properties") && !obj.contains_key("type") {
+            obj.insert("type".to_string(), JsonValue::String("object".to_string()));
+        }
         if let Some(JsonValue::Object(props)) = obj.get_mut("properties") {
             for prop_schema in props.values_mut() {
                 normalize_schema_recursive(prop_schema, false);
@@ -429,5 +433,52 @@ mod tests {
         assert_eq!(result["properties"]["name"]["type"], "string");
         assert_eq!(result["properties"]["id"]["type"], "string");
         assert!(description.contains("Upstream JSON schema"));
+    }
+
+    #[test]
+    fn test_flatten_only_preserves_properties_without_explicit_object_type() {
+        let input = serde_json::json!({
+            "properties": {
+                "content": { "type": "string" },
+                "channel": { "type": "string" }
+            },
+            "required": ["content"]
+        });
+        let mut description = "Message tool".to_string();
+
+        let result = shape_tool_schema(ToolSchemaPolicy::FlattenOnly, &input, &mut description);
+
+        assert_eq!(result["type"], "object");
+        assert_eq!(result["properties"]["content"]["type"], "string");
+        assert_eq!(result["properties"]["channel"]["type"], "string");
+        assert_eq!(result["required"], serde_json::json!(["content"]));
+        assert_eq!(description, "Message tool");
+    }
+
+    #[test]
+    fn test_strict_openai_preserves_properties_without_explicit_object_type() {
+        let input = serde_json::json!({
+            "properties": {
+                "content": { "type": "string" },
+                "channel": { "type": "string" }
+            },
+            "required": ["content"]
+        });
+        let mut description = "Message tool".to_string();
+
+        let result = shape_tool_schema(ToolSchemaPolicy::StrictOpenAi, &input, &mut description);
+
+        assert_eq!(result["type"], "object");
+        assert_eq!(result["properties"]["content"]["type"], "string");
+        assert_eq!(
+            result["properties"]["channel"]["type"],
+            serde_json::json!(["string", "null"])
+        );
+        assert_eq!(
+            result["required"],
+            serde_json::json!(["channel", "content"])
+        );
+        assert_eq!(result["additionalProperties"], false);
+        assert_eq!(description, "Message tool");
     }
 }

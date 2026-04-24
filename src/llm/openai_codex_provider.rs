@@ -498,12 +498,11 @@ fn sanitize_tool_name(name: &str) -> String {
 
 /// Convert a `ToolDefinition` to Responses API tool format.
 ///
-/// Both transforms — strict-mode object normalization and the top-level
-/// union flatten that the Responses API requires — live inside
-/// `normalize_schema_strict`, which is shared with `RigAdapter::convert_tools`
-/// so every rig-based provider gets the same treatment. The flatten can
-/// append a hint to the tool description, so we pass an owned clone through
-/// and read it back.
+/// Applies the shared `tool_schema.rs` shaping entrypoint with the
+/// `StrictOpenAi` policy, which performs strict-mode object normalization and
+/// the top-level union flatten that the Responses API requires. The flatten
+/// can append a hint to the tool description, so we pass an owned clone
+/// through and read it back.
 fn convert_tool_definition(tool: &ToolDefinition) -> serde_json::Value {
     use crate::llm::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 
