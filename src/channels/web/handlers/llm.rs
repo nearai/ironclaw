@@ -492,8 +492,19 @@ fn build_llm_providers() -> serde_json::Value {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-/// When the frontend doesn't supply an `api_key` (because it was already vaulted),
-/// look it up from the encrypted secrets store using `provider_id` + `provider_type`.
+/// When the frontend doesn't supply an `api_key` (because it was already
+/// configured), resolve it from:
+/// 1. the encrypted secrets store (per-user vaulted key), then
+/// 2. for built-in providers, the environment variable declared by the
+///    registry (e.g. `NEARAI_API_KEY`, `OPENAI_API_KEY`).
+///
+/// Fallback (2) matters because the default onboarding flow
+/// (`api_key_login()` in `llm/session.rs`) writes the key to the
+/// `NEARAI_API_KEY` env var + `~/.ironclaw/.env`, not to the secrets
+/// vault. Without the fallback, `list_models` / `test_connection`
+/// requests from the configure dialog end up with no Authorization
+/// header and the provider responds 401 even though `has_api_key`
+/// (surfaced by `build_llm_providers`) is true.
 async fn resolve_api_key_from_secrets(
     state: &GatewayState,
     user_id: &str,
@@ -509,17 +520,40 @@ async fn resolve_api_key_from_secrets(
         Some(id) => id,
         None => return,
     };
-    let secrets = match state.secrets_store.as_ref() {
-        Some(s) => s,
-        None => return,
-    };
-    let secret_name = match provider_type.as_deref() {
-        Some("custom") => crate::settings::custom_secret_name(pid),
-        _ => crate::settings::builtin_secret_name(pid),
-    };
-    if let Ok(decrypted) = secrets.get_decrypted(user_id, &secret_name).await {
-        *api_key = Some(decrypted.expose().to_string());
+
+    // 1. Encrypted secrets store (vaulted per-user key).
+    if let Some(secrets) = state.secrets_store.as_ref() {
+        let secret_name = match provider_type.as_deref() {
+            Some("custom") => crate::settings::custom_secret_name(pid),
+            _ => crate::settings::builtin_secret_name(pid),
+        };
+        if let Ok(decrypted) = secrets.get_decrypted(user_id, &secret_name).await {
+            *api_key = Some(decrypted.expose().to_string());
+            return;
+        }
     }
+
+    // 2. Env var fallback for built-in providers.
+    if !matches!(provider_type.as_deref(), Some("custom"))
+        && let Some(env_name) = builtin_api_key_env_var(pid)
+        && let Some(val) = crate::config::helpers::env_or_override(&env_name)
+    {
+        *api_key = Some(val);
+    }
+}
+
+/// Env var name carrying the API key for a built-in provider, or `None`
+/// if the provider has no declared env var (e.g. `bedrock` uses the AWS
+/// credential chain). Mirrors the env names surfaced to the frontend by
+/// `build_llm_providers()`.
+fn builtin_api_key_env_var(provider_id: &str) -> Option<String> {
+    // NEAR AI is a hardcoded special case and not in the registry.
+    if provider_id == "nearai" {
+        return Some("NEARAI_API_KEY".to_string());
+    }
+    crate::llm::registry::ProviderRegistry::load()
+        .find(provider_id)
+        .and_then(|def| def.api_key_env.clone())
 }
 
 /// Compute the effective base URL for a provider's `/models` endpoint.
@@ -586,8 +620,13 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_llm_providers_returns_nearai_with_env_vars() {
-        // SAFETY: test-only; tokio::test runs single-threaded by default.
+        // Serialize with other tests in this module that mutate
+        // NEARAI_* env vars (e.g.
+        // `test_llm_list_models_falls_back_to_env_api_key_for_nearai`).
+        let _env_lock = crate::config::helpers::lock_env();
+        // SAFETY: test-only; lock_env() serializes concurrent mutators.
         unsafe {
             std::env::set_var("NEARAI_API_KEY", "test-key-123");
             std::env::set_var("NEARAI_MODEL", "test-model");
@@ -970,5 +1009,120 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    // --- Env-var fallback for builtin provider API key ---
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_llm_list_models_falls_back_to_env_api_key_for_nearai() {
+        // Regression: default onboarding (`api_key_login`) writes
+        // `NEARAI_API_KEY` to env, not to the secrets vault. Without the
+        // fallback in `resolve_api_key_from_secrets`, the configure dialog's
+        // "Fetch available models" button sends no `api_key` (UI shows
+        // "Key configured"), the handler skips Authorization, and NEAR AI
+        // returns 401.
+        use std::sync::{Arc, Mutex};
+
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        // Serialize against other tests in this module that mutate
+        // NEARAI_API_KEY (e.g. `test_llm_providers_returns_nearai_with_env_vars`).
+        // `std::env::set_var` is UB under concurrent access; the codebase uses
+        // `lock_env()` as the canonical mutex for this hazard.
+        let _env_lock = crate::config::helpers::lock_env();
+
+        let captured_auth: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let captured_auth_clone = Arc::clone(&captured_auth);
+        let mock = axum::Router::new().route(
+            "/models",
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let auth = headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .map(String::from);
+                *captured_auth_clone.lock().unwrap() = auth;
+                async move {
+                    axum::Json(serde_json::json!({
+                        "data": [{"id": "mock-model"}]
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let addr = listener.local_addr().expect("mock server addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, mock).await;
+        });
+
+        // SAFETY: test-only; tokio::test runs single-threaded by default.
+        // Mirrors the existing env-set pattern in this file (see
+        // `test_llm_providers_returns_nearai_with_env_vars`).
+        //
+        // `NO_PROXY` is set so reqwest bypasses any developer-machine
+        // system proxy for the 127.0.0.1 mock server. CI runners
+        // without a proxy ignore it; without it, a local HTTP proxy
+        // (e.g. ClashX on macOS) returns 502 before reaching the mock.
+        let test_key = "test-env-api-key-nearai";
+        unsafe {
+            std::env::set_var("NEARAI_API_KEY", test_key);
+            std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+        }
+
+        let state = test_gateway_state(None);
+        let app = Router::new()
+            .route("/api/llm/list_models", post(llm_list_models_handler))
+            .with_state(state);
+
+        let req_body = serde_json::json!({
+            "adapter": "nearai",
+            "base_url": format!("http://{addr}"),
+            "provider_id": "nearai",
+            "provider_type": "builtin",
+            // intentionally no api_key — models what the UI sends when the
+            // key is "already configured" via NEARAI_API_KEY.
+        });
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/llm/list_models")
+            .header("content-type", "application/json")
+            .body(Body::from(req_body.to_string()))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "admin-user".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+
+        unsafe {
+            std::env::remove_var("NEARAI_API_KEY");
+            std::env::remove_var("NO_PROXY");
+        }
+
+        assert_eq!(status, StatusCode::OK);
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json response");
+        assert_eq!(
+            parsed["ok"],
+            serde_json::Value::Bool(true),
+            "handler must report success: {parsed}"
+        );
+
+        let auth_header = captured_auth.lock().unwrap().clone();
+        assert_eq!(
+            auth_header.as_deref(),
+            Some(format!("Bearer {test_key}").as_str()),
+            "handler must forward NEARAI_API_KEY env var as Authorization header"
+        );
     }
 }
