@@ -54,9 +54,8 @@ use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse,
 use crate::error::ChannelError;
 use crate::pairing::PairingStore;
 use crate::secrets::SecretsStore;
-use crate::tools::wasm::credential_injector::{
-    InjectedCredentials, host_matches_pattern, inject_credential,
-};
+use crate::secrets::host_matches_pattern;
+use crate::tools::wasm::credential_injector::{InjectedCredentials, inject_credential};
 use crate::tools::wasm::{
     LogLevel, WasmResourceLimiter, reject_private_ip, ssrf_safe_client_builder,
 };
@@ -88,8 +87,15 @@ wasmtime::component::bindgen!({
 /// WASM channels never see the raw secret values.
 #[derive(Clone)]
 struct ResolvedHostCredential {
+    /// Name of the source secret. Non-sensitive metadata used only for
+    /// deterministic tie-breaks when two matching credentials share the
+    /// same path specificity; never rendered to logs or tool output.
+    secret_name: String,
     /// Host patterns this credential applies to (e.g., "api.slack.com").
     host_patterns: Vec<String>,
+    /// Literal path prefixes scoping this credential to specific endpoints.
+    /// Empty means the credential applies to every path on a matching host.
+    path_patterns: Vec<String>,
     /// Headers to add to matching requests (e.g., "Authorization: Bearer ...").
     headers: HashMap<String, String>,
     /// Query parameters to add to matching requests.
@@ -229,25 +235,50 @@ impl ChannelStoreData {
 
     /// Inject pre-resolved host credentials into the request.
     ///
-    /// Matches the URL host against each resolved credential's host_patterns.
-    /// Matching credentials have their headers merged and query params appended.
+    /// Matches the URL host against each resolved credential's host_patterns
+    /// and, when declared, path_patterns. Matching credentials are sorted by
+    /// ascending path specificity (longest matching prefix last), ties
+    /// broken alphabetically on `secret_name` for determinism. Last-write-
+    /// wins header merging then gives the most-specific mapping any
+    /// conflicting header key.
     fn inject_host_credentials(
         &self,
         url_host: &str,
         headers: &mut HashMap<String, String>,
         url: &mut String,
     ) {
-        for cred in &self.host_credentials {
-            let matches = cred
-                .host_patterns
-                .iter()
-                .any(|pattern| host_matches_pattern(url_host, pattern));
+        use crate::secrets::{
+            extract_url_path_for_matching, match_specificity, path_matches_prefix,
+        };
 
-            if !matches {
-                continue;
-            }
+        let url_path = extract_url_path_for_matching(url);
 
-            // Merge injected headers (host credentials take precedence)
+        let mut matches_for_request: Vec<&ResolvedHostCredential> = self
+            .host_credentials
+            .iter()
+            .filter(|cred| {
+                cred.host_patterns
+                    .iter()
+                    .any(|pattern| host_matches_pattern(url_host, pattern))
+                    && (cred.path_patterns.is_empty()
+                        || cred
+                            .path_patterns
+                            .iter()
+                            .any(|prefix| path_matches_prefix(&url_path, prefix)))
+            })
+            .collect();
+
+        matches_for_request.sort_by(|a, b| {
+            let spec_a = match_specificity(&a.path_patterns, &url_path);
+            let spec_b = match_specificity(&b.path_patterns, &url_path);
+            spec_a
+                .cmp(&spec_b)
+                .then_with(|| a.secret_name.cmp(&b.secret_name))
+        });
+
+        for cred in matches_for_request {
+            // Merge injected headers (most-specific match iterates last so
+            // it wins any conflict under insert-and-overwrite).
             for (key, value) in &cred.headers {
                 headers.insert(key.clone(), value.clone());
             }
@@ -4925,7 +4956,9 @@ async fn resolve_channel_host_credentials(
         }
 
         resolved.push(ResolvedHostCredential {
+            secret_name: mapping.secret_name.clone(),
             host_patterns: mapping.host_patterns.clone(),
+            path_patterns: mapping.path_patterns.clone(),
             headers: injected.headers,
             query_params: injected.query_params,
             secret_value: secret.expose().to_string(),
@@ -5266,6 +5299,7 @@ mod tests {
                     prefix: Some("Bot ".to_string()),
                 },
                 host_patterns: vec!["discord.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -7176,7 +7210,9 @@ mod tests {
         );
 
         let host_creds = vec![ResolvedHostCredential {
+            secret_name: "host_secret".to_string(),
             host_patterns: vec!["api.example.com".to_string()],
+            path_patterns: vec![],
             headers: std::collections::HashMap::new(),
             query_params: std::collections::HashMap::new(),
             secret_value: "host secret+value".to_string(),
@@ -7226,6 +7262,91 @@ mod tests {
 
         let input = "should not match anything";
         assert_eq!(store.redact_credentials(input), input);
+    }
+
+    #[test]
+    fn test_inject_host_credentials_path_scoped() {
+        use super::{ChannelStoreData, ResolvedHostCredential};
+        use std::collections::HashMap;
+
+        let host_creds = vec![ResolvedHostCredential {
+            secret_name: "scoped_token".to_string(),
+            host_patterns: vec!["api.example.com".to_string()],
+            path_patterns: vec!["/api/v1".to_string()],
+            headers: {
+                let mut h = HashMap::new();
+                h.insert(
+                    "Authorization".to_string(),
+                    "Bearer scoped-token".to_string(),
+                );
+                h
+            },
+            query_params: HashMap::new(),
+            secret_value: "scoped-token".to_string(),
+        }];
+
+        let store = ChannelStoreData::new(
+            1024 * 1024,
+            "test",
+            ChannelCapabilities::default(),
+            HashMap::new(),
+            host_creds,
+            Arc::new(PairingStore::new_noop()),
+        );
+
+        // Matching host + matching path → inject
+        let mut headers = HashMap::new();
+        let mut url = "https://api.example.com/api/v1/users".to_string();
+        store.inject_host_credentials("api.example.com", &mut headers, &mut url);
+        assert_eq!(
+            headers.get("Authorization"),
+            Some(&"Bearer scoped-token".to_string())
+        );
+
+        // Matching host, different path → no injection
+        let mut headers2 = HashMap::new();
+        let mut url2 = "https://api.example.com/other/endpoint".to_string();
+        store.inject_host_credentials("api.example.com", &mut headers2, &mut url2);
+        assert!(!headers2.contains_key("Authorization"));
+
+        // Prefix-boundary attack → no injection
+        let mut headers3 = HashMap::new();
+        let mut url3 = "https://api.example.com/api/v1-malicious".to_string();
+        store.inject_host_credentials("api.example.com", &mut headers3, &mut url3);
+        assert!(!headers3.contains_key("Authorization"));
+    }
+
+    #[test]
+    fn test_inject_host_credentials_empty_path_patterns_matches_all() {
+        use super::{ChannelStoreData, ResolvedHostCredential};
+        use std::collections::HashMap;
+
+        let host_creds = vec![ResolvedHostCredential {
+            secret_name: "api_key".to_string(),
+            host_patterns: vec!["api.example.com".to_string()],
+            path_patterns: vec![], // empty → all paths
+            headers: {
+                let mut h = HashMap::new();
+                h.insert("X-Api-Key".to_string(), "k".to_string());
+                h
+            },
+            query_params: HashMap::new(),
+            secret_value: "k".to_string(),
+        }];
+
+        let store = ChannelStoreData::new(
+            1024 * 1024,
+            "test",
+            ChannelCapabilities::default(),
+            HashMap::new(),
+            host_creds,
+            Arc::new(PairingStore::new_noop()),
+        );
+
+        let mut headers = HashMap::new();
+        let mut url = "https://api.example.com/literally/anything".to_string();
+        store.inject_host_credentials("api.example.com", &mut headers, &mut url);
+        assert_eq!(headers.get("X-Api-Key"), Some(&"k".to_string()));
     }
 
     #[test]

@@ -19,6 +19,7 @@
 //! - `__get_actions__` — available tool definitions
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use std::collections::HashMap;
@@ -29,6 +30,8 @@ use monty::{
 };
 use tracing::{debug, warn};
 
+use super::scripting::{execute_code, json_to_monty, monty_to_json, monty_to_string};
+use super::thread_context::thread_execution_context;
 use crate::capability::lease::LeaseManager;
 use crate::capability::policy::PolicyEngine;
 use crate::memory::RetrievalEngine;
@@ -37,16 +40,13 @@ use crate::runtime::messaging::{SignalReceiver, ThreadOutcome, ThreadSignal};
 use crate::traits::effect::{EffectExecutor, ThreadExecutionContext};
 use crate::traits::llm::{LlmBackend, LlmCallConfig};
 use crate::traits::store::Store;
-use crate::types::error::EngineError;
+use crate::types::error::{EngineError, OrchestratorFailure, OrchestratorFailureKind};
 use crate::types::event::{EventKind, ThreadEvent, summarize_params};
 use crate::types::message::ThreadMessage;
 use crate::types::project::ProjectId;
 use crate::types::shared_owner_id;
 use crate::types::step::{ActionCall, StepId, TokenUsage};
 use crate::types::thread::{ActiveSkillProvenance, Thread, ThreadState};
-use ironclaw_common::ValidTimezone;
-
-use super::scripting::{execute_code, json_to_monty, monty_to_json, monty_to_string};
 
 /// The compiled-in default orchestrator (v0).
 pub(crate) const DEFAULT_ORCHESTRATOR: &str = include_str!("../../orchestrator/default.py");
@@ -65,24 +65,6 @@ pub struct OrchestratorResult {
     pub tokens_used: TokenUsage,
 }
 
-/// Extract source_channel from thread metadata (set by ConversationManager).
-fn thread_source_channel(thread: &Thread) -> Option<String> {
-    thread
-        .metadata
-        .get("source_channel")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-}
-
-/// Extract and validate user_timezone from thread metadata (set by bridge router).
-fn thread_user_timezone(thread: &Thread) -> Option<ValidTimezone> {
-    thread
-        .metadata
-        .get("user_timezone")
-        .and_then(|v| v.as_str())
-        .and_then(ValidTimezone::parse)
-}
-
 fn normalize_pause_outcome(
     thread: &mut Thread,
     outcome: &ThreadOutcome,
@@ -96,12 +78,116 @@ fn normalize_pause_outcome(
     Ok(())
 }
 
+/// Default orchestrator VM wall-clock budget, in seconds.
+const ORCHESTRATOR_DEFAULT_MAX_DURATION_SECS: u64 = 300;
+/// Floor for the configurable orchestrator budget, to prevent nonsense values.
+const ORCHESTRATOR_MIN_MAX_DURATION_SECS: u64 = 30;
+/// Ceiling for the configurable orchestrator budget, bounding resource waste.
+const ORCHESTRATOR_MAX_MAX_DURATION_SECS: u64 = 3600;
+
+/// Resolve the orchestrator VM wall-clock budget from
+/// `IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS`. Cached for the process lifetime.
+fn orchestrator_max_duration() -> std::time::Duration {
+    static CACHED: OnceLock<std::time::Duration> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let secs = std::env::var("IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(ORCHESTRATOR_DEFAULT_MAX_DURATION_SECS)
+            .clamp(
+                ORCHESTRATOR_MIN_MAX_DURATION_SECS,
+                ORCHESTRATOR_MAX_MAX_DURATION_SECS,
+            );
+        std::time::Duration::from_secs(secs)
+    })
+}
+
 /// Resource limits for the orchestrator VM.
 fn orchestrator_limits() -> ResourceLimits {
     ResourceLimits::new()
-        .max_duration(std::time::Duration::from_secs(300)) // 5 min (longer than user code)
+        .max_duration(orchestrator_max_duration())
         .max_allocations(5_000_000)
         .max_memory(128 * 1024 * 1024) // 128 MB
+}
+
+/// Classify a Monty orchestrator failure into a typed
+/// [`OrchestratorFailure`] that carries a user-safe classification plus
+/// the preserved low-level detail for gateway debug mode.
+///
+/// The raw `err_msg` (often a Python traceback containing internal file
+/// paths and upstream HTTP bodies) is always stored on the returned
+/// struct's `debug_detail` field and emitted at `debug!`, never placed
+/// into the user-visible classification — see
+/// `.claude/rules/error-handling.md`, "Error Boundaries at the Channel
+/// Edge" (#2546).
+fn classify_orchestrator_failure(prefix: &str, err_msg: &str) -> OrchestratorFailure {
+    debug!(prefix, err_msg, "orchestrator VM failure");
+
+    let lower = err_msg.to_ascii_lowercase();
+    // Reserve `TimeLimit` for unmistakable Monty wall-clock markers — the
+    // user-facing message tells operators to raise
+    // `IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS`, which is wrong advice for
+    // upstream LLM / network timeouts. Bare `"timeout"` / `"timed out"`
+    // used to catch those (e.g. `reqwest`'s `"Request timed out"`,
+    // provider `"Connection timed out"`) and point users at the budget
+    // knob instead of the real failure class. Those now fall through to
+    // `Other` (generic internal failure). References: serrrfirat review
+    // on PR #2753, commit 82d06410.
+    //
+    // The predicates we keep are either the explicit env-var name in the
+    // VM's own error text, the phrase the Monty runtime uses for its
+    // duration limit, or the sentinel emitted by the engine when the
+    // orchestrator itself times out a step. Duplicating `ResourceLimits`
+    // wording is OK — those strings live alongside this classifier in the
+    // same crate.
+    let hit_time_limit = lower.contains("duration limit")
+        || lower.contains("max_duration")
+        || lower.contains("maximum duration")
+        || lower.contains("execution duration exceeded")
+        || lower.contains("orchestrator timed out");
+    let hit_memory_limit = lower.contains("memory limit") || lower.contains("allocation limit");
+    let hit_resource_limit = lower.contains("resource limit")
+        || lower.contains("out of fuel")
+        || lower.contains("fuel exhausted");
+    let has_python_traceback =
+        lower.contains("traceback (most recent call last)") || lower.contains("traceback:");
+
+    let kind = if hit_time_limit {
+        OrchestratorFailureKind::TimeLimit {
+            prefix: prefix.to_string(),
+            limit_secs: orchestrator_max_duration().as_secs(),
+        }
+    } else if hit_memory_limit || hit_resource_limit {
+        OrchestratorFailureKind::ResourceLimit {
+            prefix: prefix.to_string(),
+        }
+    } else if has_python_traceback {
+        OrchestratorFailureKind::Traceback {
+            prefix: prefix.to_string(),
+        }
+    } else {
+        OrchestratorFailureKind::Other {
+            prefix: prefix.to_string(),
+        }
+    };
+
+    OrchestratorFailure::new(kind, err_msg)
+}
+
+/// Wrap a Monty VM panic (parse / start / resume phase) as a typed
+/// orchestrator failure. The panic itself has no textual payload — the
+/// `panic_payload` we can stringify is always a `&str` or `String` from
+/// `catch_unwind` — so `debug_detail` carries the phase tag for
+/// correlation.
+fn orchestrator_vm_panic(prefix: &str, phase: &'static str) -> OrchestratorFailure {
+    debug!(prefix, phase, "orchestrator VM panic");
+    OrchestratorFailure::new(
+        OrchestratorFailureKind::VmPanic {
+            prefix: prefix.to_string(),
+            phase,
+        },
+        format!("Monty VM panicked during {phase}"),
+    )
 }
 
 /// Maximum consecutive failures before auto-rollback.
@@ -356,14 +442,19 @@ pub async fn execute_orchestrator(
     })) {
         Ok(Ok(runner)) => runner,
         Ok(Err(e)) => {
-            return Err(EngineError::Effect {
-                reason: format!("Orchestrator parse error: {e}"),
-            });
+            // Route parse failures through the same typed sanitizer so
+            // a bad `default.py` deploy can't leak Monty internals to
+            // the channel edge.
+            return Err(EngineError::Orchestrator(classify_orchestrator_failure(
+                "Orchestrator parse error",
+                &e.to_string(),
+            )));
         }
         Err(_) => {
-            return Err(EngineError::Effect {
-                reason: "Monty VM panicked during orchestrator parsing".into(),
-            });
+            return Err(EngineError::Orchestrator(orchestrator_vm_panic(
+                "Orchestrator parse error",
+                "orchestrator parsing",
+            )));
         }
     };
 
@@ -372,20 +463,26 @@ pub async fn execute_orchestrator(
     let tracker = LimitedTracker::new(orchestrator_limits());
 
     let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        runner.start(input_values, tracker, PrintWriter::Collect(&mut stdout))
+        runner.start(
+            input_values,
+            tracker,
+            PrintWriter::CollectString(&mut stdout),
+        )
     }));
 
     let mut progress = match run_result {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
-            return Err(EngineError::Effect {
-                reason: format!("Orchestrator runtime error: {e}"),
-            });
+            return Err(EngineError::Orchestrator(classify_orchestrator_failure(
+                "Orchestrator runtime error",
+                &e.to_string(),
+            )));
         }
         Err(_) => {
-            return Err(EngineError::Effect {
-                reason: "Monty VM panicked during orchestrator start".into(),
-            });
+            return Err(EngineError::Orchestrator(orchestrator_vm_panic(
+                "Orchestrator runtime error",
+                "orchestrator start",
+            )));
         }
     };
 
@@ -512,18 +609,20 @@ pub async fn execute_orchestrator(
 
                 // Resume the orchestrator VM
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    call.resume(ext_result, PrintWriter::Collect(&mut stdout))
+                    call.resume(ext_result, PrintWriter::CollectString(&mut stdout))
                 })) {
                     Ok(Ok(p)) => progress = p,
                     Ok(Err(e)) => {
-                        return Err(EngineError::Effect {
-                            reason: format!("Orchestrator error after resume: {e}"),
-                        });
+                        return Err(EngineError::Orchestrator(classify_orchestrator_failure(
+                            "Orchestrator error after resume",
+                            &e.to_string(),
+                        )));
                     }
                     Err(_) => {
-                        return Err(EngineError::Effect {
-                            reason: "Monty VM panicked during orchestrator resume".into(),
-                        });
+                        return Err(EngineError::Orchestrator(orchestrator_vm_panic(
+                            "Orchestrator error after resume",
+                            "orchestrator resume",
+                        )));
                     }
                 }
 
@@ -540,19 +639,21 @@ pub async fn execute_orchestrator(
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     lookup.resume(
                         NameLookupResult::Undefined,
-                        PrintWriter::Collect(&mut stdout),
+                        PrintWriter::CollectString(&mut stdout),
                     )
                 })) {
                     Ok(Ok(p)) => progress = p,
                     Ok(Err(e)) => {
-                        return Err(EngineError::Effect {
-                            reason: format!("Orchestrator NameError '{name}': {e}"),
-                        });
+                        return Err(EngineError::Orchestrator(classify_orchestrator_failure(
+                            &format!("Orchestrator NameError '{name}'"),
+                            &e.to_string(),
+                        )));
                     }
                     Err(_) => {
-                        return Err(EngineError::Effect {
-                            reason: format!("Monty panic on NameLookup '{name}'"),
-                        });
+                        return Err(EngineError::Orchestrator(orchestrator_vm_panic(
+                            &format!("Orchestrator NameError '{name}'"),
+                            "name lookup",
+                        )));
                     }
                 }
             }
@@ -615,9 +716,10 @@ async fn handle_llm_complete(
     }
 
     let active_leases = deps.leases.active_for_thread(thread.id).await;
+    let actions_context = thread_execution_context(thread, StepId::new(), None);
     let actions = deps
         .effects
-        .available_actions(&active_leases)
+        .available_actions(&active_leases, &actions_context)
         .await
         .unwrap_or_default();
 
@@ -717,17 +819,7 @@ async fn handle_execute_code_step(
         .map(monty_to_json)
         .unwrap_or(serde_json::json!({}));
 
-    let exec_ctx = ThreadExecutionContext {
-        thread_id: thread.id,
-        thread_type: thread.thread_type,
-        project_id: thread.project_id,
-        user_id: thread.user_id.clone(),
-        step_id: StepId::new(),
-        current_call_id: None,
-        source_channel: thread_source_channel(thread),
-        user_timezone: thread_user_timezone(thread),
-        thread_goal: Some(thread.goal.clone()),
-    };
+    let exec_ctx = thread_execution_context(thread, StepId::new(), None);
 
     // Run user code in a nested Monty VM (same pattern as rlm_query)
     let code_start = std::time::Instant::now();
@@ -808,6 +900,40 @@ async fn handle_execute_code_step(
                 }
                 thread.events.push(instrumentation_event);
             }
+
+            // Always emit CodeExecuted so debug observers see the exact code
+            // and stdout, regardless of success/failure. The in-context chat
+            // summary is too lossy for diagnostics. Kept separate from
+            // CodeExecutionFailed (which carries the failure classifier) and
+            // the per-action events already broadcast above.
+            //
+            // Cap code, stdout, and return_value at `CODE_EXECUTED_MAX_BYTES`
+            // each before emission so a step that prints or returns a large
+            // blob cannot bloat persisted thread events or flood the SSE
+            // broadcast buffer. Byte-based (not `chars().count()`) to keep
+            // this O(1) even for very large payloads. `tail_chars` elsewhere
+            // in this file is left alone because its callers already run
+            // inside pre-bounded inputs (`OUTPUT_TRUNCATE_LEN`, 500-char
+            // error slices) where chars-vs-bytes is not a perf concern.
+            const CODE_EXECUTED_MAX_BYTES: usize = 8_000;
+            let code_executed_event = ThreadEvent::new(
+                thread.id,
+                EventKind::CodeExecuted {
+                    step_id: exec_ctx.step_id,
+                    code: tail_utf8_bytes(&code, CODE_EXECUTED_MAX_BYTES),
+                    stdout: tail_utf8_bytes(&result.stdout, CODE_EXECUTED_MAX_BYTES),
+                    return_value: bounded_return_value(
+                        &result.return_value,
+                        CODE_EXECUTED_MAX_BYTES,
+                    ),
+                    duration_ms: code_start.elapsed().as_millis() as u64,
+                },
+            );
+            if let Some(tx) = event_tx {
+                let _ = tx.send(code_executed_event.clone());
+            }
+            thread.events.push(code_executed_event);
+
             thread.updated_at = chrono::Utc::now();
 
             let action_results: Vec<serde_json::Value> = result
@@ -892,17 +1018,7 @@ async fn handle_execute_action(
 
     let call_id = extract_string_kwarg(kwargs, "call_id").unwrap_or_default();
 
-    let exec_ctx = ThreadExecutionContext {
-        thread_id: thread.id,
-        thread_type: thread.thread_type,
-        project_id: thread.project_id,
-        user_id: thread.user_id.clone(),
-        step_id: StepId::new(),
-        current_call_id: Some(call_id.clone()),
-        source_channel: thread_source_channel(thread),
-        user_timezone: thread_user_timezone(thread),
-        thread_goal: Some(thread.goal.clone()),
-    };
+    let exec_ctx = thread_execution_context(thread, StepId::new(), Some(call_id.clone()));
 
     // Helper: emit event only. The orchestrator owns transcript recording.
     let emit_and_record = |thread: &mut Thread,
@@ -950,7 +1066,7 @@ async fn handle_execute_action(
 
     // 2. Check policy
     let action_def = effects
-        .available_actions(std::slice::from_ref(&lease))
+        .available_actions(std::slice::from_ref(&lease), &exec_ctx)
         .await
         .ok()
         .and_then(|actions| actions.into_iter().find(|a| a.name == name));
@@ -1291,8 +1407,9 @@ async fn handle_execute_actions_parallel(
         };
 
         // Check policy
+        let exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
         let action_def = effects
-            .available_actions(std::slice::from_ref(&lease))
+            .available_actions(std::slice::from_ref(&lease), &exec_ctx)
             .await
             .ok()
             .and_then(|actions| actions.into_iter().find(|a| a.name == pc.name));
@@ -1451,22 +1568,7 @@ async fn handle_execute_actions_parallel(
         // Single call: execute directly
         let (idx, lease) = runnable.into_iter().next().unwrap(); // safety: len()==1 checked above
         let pc = &parsed[idx];
-        let exec_ctx = ThreadExecutionContext {
-            thread_id: thread.id,
-            thread_type: thread.thread_type,
-            project_id: thread.project_id,
-            user_id: thread.user_id.clone(),
-            step_id,
-            current_call_id: Some(pc.call_id.clone()),
-            // Read source_channel from thread metadata so downstream tools
-            // (e.g. mission_create) can default notify_channels to the
-            // originating channel. Hardcoding `None` here was a bug — it
-            // silently dropped the gateway routing for any tool dispatched
-            // through the parallel batch path.
-            source_channel: thread_source_channel(thread),
-            user_timezone: thread_user_timezone(thread),
-            thread_goal: Some(thread.goal.clone()),
-        };
+        let exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
         let ps = summarize_params(&pc.name, &pc.params);
         let (result_json, event, output) = execute_single_action(
             effects,
@@ -1490,27 +1592,13 @@ async fn handle_execute_actions_parallel(
         let effects = effects.clone();
         // Capture once outside the loop — the thread's metadata is stable
         // for the duration of the parallel batch.
-        let parallel_source_channel = thread_source_channel(thread);
-        let parallel_user_timezone = thread_user_timezone(thread);
-
         for (idx, lease) in runnable {
             let pc_name = parsed[idx].name.clone();
             let pc_params = parsed[idx].params.clone();
             let pc_call_id = parsed[idx].call_id.clone();
             let effects = effects.clone();
             let lease = lease.clone();
-            let exec_ctx = ThreadExecutionContext {
-                thread_id: thread.id,
-                thread_type: thread.thread_type,
-                project_id: thread.project_id,
-                user_id: thread.user_id.clone(),
-                step_id,
-                current_call_id: Some(pc_call_id.clone()),
-                // See comment above — read from thread metadata, not None.
-                source_channel: parallel_source_channel.clone(),
-                user_timezone: parallel_user_timezone,
-                thread_goal: Some(thread.goal.clone()),
-            };
+            let exec_ctx = thread_execution_context(thread, step_id, Some(pc_call_id.clone()));
             let ps = summarize_params(&pc_name, &pc_params);
 
             join_set.spawn(async move {
@@ -1941,7 +2029,11 @@ async fn handle_get_actions(
     }
 
     let active_leases = leases.active_for_thread(thread.id).await;
-    match effects.available_actions(&active_leases).await {
+    let actions_context = thread_execution_context(thread, StepId::new(), None);
+    match effects
+        .available_actions(&active_leases, &actions_context)
+        .await
+    {
         Ok(actions) => {
             let actions_json: Vec<serde_json::Value> = actions
                 .iter()
@@ -2336,6 +2428,50 @@ fn tail_chars(s: &str, n: usize) -> String {
     }
 }
 
+/// Return the last `max_bytes` bytes of `s`, adjusted forward to the
+/// next UTF-8 character boundary so the slice is always valid UTF-8.
+///
+/// Byte-based (unlike [`tail_chars`]) to stay O(1)+boundary-walk on
+/// large payloads. Used by the `CodeExecuted` emission path where
+/// `code`/`stdout` can be arbitrarily large, so `chars().count()` on
+/// every step would be measurable overhead.
+fn tail_utf8_bytes(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_owned();
+    }
+    let mut start = s.len() - max_bytes;
+    // Advance past mid-codepoint bytes. At most 3 iterations because
+    // UTF-8 codepoints are ≤ 4 bytes.
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    s[start..].to_owned() // safety: `start` is validated by `is_char_boundary`
+}
+
+/// Bound the serialized size of a CodeAct return value before emission.
+///
+/// - `Null` → `None` (no change — a null return is nothing to surface).
+/// - `String` → tail-truncated via [`tail_utf8_bytes`].
+/// - Other (`Array`, `Object`, `Number`, `Bool`) → serialized length
+///   checked; returned intact if ≤ `max_bytes`, dropped otherwise.
+///
+/// Dropping (rather than truncating arbitrary JSON) is deliberate: a
+/// truncated `Array` / `Object` is unparseable on the frontend and
+/// provides no diagnostic value. Observers see a `None` return value
+/// and know the payload was omitted for size, not that it was `null`.
+fn bounded_return_value(value: &serde_json::Value, max_bytes: usize) -> Option<serde_json::Value> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) => {
+            Some(serde_json::Value::String(tail_utf8_bytes(s, max_bytes)))
+        }
+        other => match serde_json::to_vec(other) {
+            Ok(buf) if buf.len() <= max_bytes => Some(other.clone()),
+            _ => None,
+        },
+    }
+}
+
 /// Build a PII-safe summary of an `action_calls` JSON value for log output.
 ///
 /// The action_calls payload contains tool parameters, which can carry user
@@ -2517,6 +2653,7 @@ fn parse_outcome(result: &serde_json::Value) -> ThreadOutcome {
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown error")
                 .to_string(),
+            debug_detail: None,
         },
         "gate_paused" => {
             let resume_kind_value = result
@@ -2605,6 +2742,248 @@ mod tests {
     use crate::types::memory::{DocType, MemoryDoc};
     use crate::types::project::ProjectId;
 
+    // ── CodeExecuted payload bounding ────────────────────────────
+
+    #[test]
+    fn tail_utf8_bytes_returns_input_when_already_small() {
+        assert_eq!(tail_utf8_bytes("hello", 100), "hello");
+    }
+
+    #[test]
+    fn tail_utf8_bytes_tails_ascii_at_byte_boundary() {
+        let s: String = "abcdefghij".repeat(100); // 1_000 bytes
+        let out = tail_utf8_bytes(&s, 50);
+        assert_eq!(out.len(), 50);
+        assert!(s.ends_with(&out));
+    }
+
+    #[test]
+    fn tail_utf8_bytes_advances_past_multibyte_split() {
+        // 4-byte emoji followed by ASCII; cut position lands mid-codepoint.
+        let s = format!("{}abcde", "🐍".repeat(10)); // 40 bytes of emoji + 5 ASCII = 45 bytes
+        let out = tail_utf8_bytes(&s, 9);
+        // The walk-forward must have landed on a char boundary; the
+        // resulting &str must be valid UTF-8 (implicit — String construction
+        // would panic otherwise) and end with the original tail.
+        assert!(s.ends_with(&out));
+        assert!(out.len() <= 9);
+    }
+
+    #[test]
+    fn bounded_return_value_drops_null() {
+        assert_eq!(bounded_return_value(&serde_json::Value::Null, 100), None);
+    }
+
+    #[test]
+    fn bounded_return_value_truncates_large_string() {
+        let big = "x".repeat(50_000);
+        let v = serde_json::Value::String(big);
+        let out = bounded_return_value(&v, 100).expect("string retained");
+        let s = out.as_str().expect("string variant");
+        assert_eq!(s.len(), 100);
+    }
+
+    #[test]
+    fn bounded_return_value_retains_small_structured() {
+        let v = serde_json::json!({"ok": true, "count": 42});
+        assert_eq!(bounded_return_value(&v, 1_000), Some(v));
+    }
+
+    #[test]
+    fn bounded_return_value_drops_oversized_structured() {
+        // A 10k-element array serializes well past 8 KiB.
+        let items: Vec<_> = (0..10_000).collect();
+        let v = serde_json::json!(items);
+        assert_eq!(
+            bounded_return_value(&v, 8_000),
+            None,
+            "oversized structured return_value should be dropped, not truncated"
+        );
+    }
+
+    // ── Orchestrator budget / error mapping ─────────────────────
+
+    #[test]
+    fn failure_reason_maps_timeout_to_user_safe_message() {
+        let failure = classify_orchestrator_failure(
+            "Orchestrator error after resume",
+            "ResourceLimits: duration limit exceeded",
+        );
+        assert!(
+            matches!(failure.kind, OrchestratorFailureKind::TimeLimit { .. }),
+            "expected TimeLimit variant, got: {:?}",
+            failure.kind
+        );
+        let rendered = failure.user_message();
+        assert!(
+            rendered.contains("time budget exhausted"),
+            "expected user-safe timeout reason, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS"),
+            "reason must point operators at the override env var, got: {rendered}"
+        );
+    }
+
+    /// Regression for serrrfirat review on PR #2753 (commit 82d06410) —
+    /// the classifier used to treat any `"timeout"` / `"timed out"`
+    /// substring as a wall-clock exhaustion, so upstream LLM / network
+    /// timeouts (`"Request timed out"`, `"Connection timed out"`) were
+    /// mapped to `TimeLimit` and the user-facing message advised raising
+    /// `IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS` — completely wrong for a
+    /// provider-side timeout. Those now fall through to `Other` so the
+    /// budget knob is only suggested when the failure is actually a
+    /// Monty wall-clock limit.
+    #[test]
+    fn failure_reason_does_not_treat_upstream_timeout_as_time_limit() {
+        for upstream in [
+            "Request timed out",
+            "Connection timed out",
+            "LLM call failed: timeout waiting for response",
+            "upstream provider timeout after 30s",
+        ] {
+            let failure = classify_orchestrator_failure("Orchestrator runtime error", upstream);
+            assert!(
+                !matches!(failure.kind, OrchestratorFailureKind::TimeLimit { .. }),
+                "upstream timeout {upstream:?} must NOT classify as TimeLimit, got: {:?}",
+                failure.kind,
+            );
+            assert!(
+                matches!(failure.kind, OrchestratorFailureKind::Other { .. }),
+                "upstream timeout {upstream:?} should fall through to Other, got: {:?}",
+                failure.kind,
+            );
+            let rendered = failure.user_message();
+            assert!(
+                !rendered.contains("IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS"),
+                "user message for upstream timeout must not advise raising the budget knob, got: {rendered}",
+            );
+        }
+    }
+
+    #[test]
+    fn failure_reason_maps_memory_limit() {
+        let failure =
+            classify_orchestrator_failure("Orchestrator runtime error", "memory limit hit");
+        assert!(matches!(
+            failure.kind,
+            OrchestratorFailureKind::ResourceLimit { .. }
+        ));
+        assert!(
+            failure.user_message().contains("resource budget exhausted"),
+            "memory-limit reason should not leak raw Monty text, got: {}",
+            failure.user_message()
+        );
+    }
+
+    /// Regression for Copilot review on PR #2753 (commit 042c2ee7) —
+    /// `Other`'s user-facing Display used to embed the raw `err_msg`.
+    /// Surfaces like `runtime/mission.rs::process_mission_outcome_and_notify`
+    /// render `format!("Mission failed: {error}")` directly, bypassing the
+    /// channel-edge sanitizer in `bridge::user_facing_errors`, so any
+    /// unclassified Monty output would leak tracebacks / internal paths
+    /// there. The generic user-facing text now reads "internal orchestrator
+    /// failure"; the raw message is preserved in `debug_detail`.
+    #[test]
+    fn failure_reason_hides_unknown_raw_message_from_user_text() {
+        let failure =
+            classify_orchestrator_failure("Orchestrator runtime error", "NameError: foo undefined");
+        assert!(matches!(
+            failure.kind,
+            OrchestratorFailureKind::Other { .. }
+        ));
+        let rendered = failure.user_message();
+        assert!(
+            !rendered.contains("NameError"),
+            "Other variant must not surface raw err_msg in Display, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("internal orchestrator failure"),
+            "Other variant should render the generic fallback, got: {rendered}"
+        );
+        // Raw detail is still available for operator triage via debug_detail.
+        assert!(
+            failure.debug_detail().contains("NameError"),
+            "debug_detail must preserve the raw err_msg, got: {}",
+            failure.debug_detail()
+        );
+    }
+
+    /// Regression for Copilot review on PR #2753 — substring `"duration"`
+    /// alone mis-classified any error whose message happened to contain
+    /// that word as a timeout. The narrow predicate set now requires
+    /// the full phrase `"duration limit"` / `"max_duration"` /
+    /// `"maximum duration"` or an explicit timeout word.
+    #[test]
+    fn failure_reason_does_not_treat_bare_duration_as_timeout() {
+        let failure = classify_orchestrator_failure(
+            "Orchestrator runtime error",
+            "TypeError: duration must be a positive integer",
+        );
+        assert!(
+            !matches!(failure.kind, OrchestratorFailureKind::TimeLimit { .. }),
+            "bare 'duration' in an unrelated error must not classify as TimeLimit, got: {:?}",
+            failure.kind
+        );
+        assert!(
+            matches!(failure.kind, OrchestratorFailureKind::Other { .. }),
+            "expected Other variant for unrelated duration-word error, got: {:?}",
+            failure.kind
+        );
+    }
+
+    #[test]
+    fn failure_reason_strips_python_traceback() {
+        // Regression for #2546 — bug bash 4/16 reported raw Python tracebacks
+        // from the Monty VM being shown verbatim to end users, including
+        // internal file paths ("orchestrator.py", line 907) and upstream
+        // HTTP response bodies.
+        let raw = "Traceback (most recent call last):\n  File \"orchestrator.py\", line 907, in run_loop\n  File \"orchestrator.py\", line 548, in __llm_complete__\nRuntimeError: LLM call failed: Provider nearai_chat request failed: HTTP 502 Bad Gateway";
+        let failure = classify_orchestrator_failure("Orchestrator error after resume", raw);
+        assert!(matches!(
+            failure.kind,
+            OrchestratorFailureKind::Traceback { .. }
+        ));
+        let rendered = failure.user_message();
+        assert!(
+            rendered.contains("internal orchestrator failure"),
+            "should surface a generic internal-failure message, got: {rendered}"
+        );
+        for forbidden in [
+            "Traceback",
+            "orchestrator.py",
+            "File \"",
+            "line 907",
+            "line 548",
+            "HTTP 502",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "user-visible reason must not leak `{forbidden}`, got: {rendered}"
+            );
+        }
+        // The debug detail MUST retain the raw traceback so gateway
+        // debug mode can surface it without re-reading logs.
+        assert!(
+            failure.debug_detail().contains("Traceback"),
+            "debug detail must preserve the raw Monty trace, got: {}",
+            failure.debug_detail()
+        );
+    }
+
+    #[test]
+    fn max_duration_default_and_bounds() {
+        // Default (no env var set): 300s — but OnceLock may already be
+        // primed by another test in the suite, so we only check it's within
+        // the documented bounds.
+        let secs = orchestrator_max_duration().as_secs();
+        assert!(
+            (ORCHESTRATOR_MIN_MAX_DURATION_SECS..=ORCHESTRATOR_MAX_MAX_DURATION_SECS)
+                .contains(&secs),
+            "orchestrator_max_duration must be within [{ORCHESTRATOR_MIN_MAX_DURATION_SECS}, {ORCHESTRATOR_MAX_MAX_DURATION_SECS}], got {secs}"
+        );
+    }
+
     // ── Python helper unit tests via Monty ──────────────────────
     //
     // Extracts the helper functions from the default orchestrator and
@@ -2623,7 +3002,7 @@ mod tests {
         let tracker = LimitedTracker::new(ResourceLimits::new().max_allocations(500_000));
 
         let mut progress = runner
-            .start(vec![], tracker, PrintWriter::Collect(&mut stdout))
+            .start(vec![], tracker, PrintWriter::CollectString(&mut stdout))
             .expect("Failed to start orchestrator test");
 
         loop {
@@ -2634,7 +3013,7 @@ mod tests {
                         let val = call.args.first().cloned().unwrap_or(MontyObject::None);
                         let _ = call.resume(
                             ExtFunctionResult::Return(MontyObject::None),
-                            PrintWriter::Collect(&mut stdout),
+                            PrintWriter::CollectString(&mut stdout),
                         );
                         return val;
                     }
@@ -2643,14 +3022,14 @@ mod tests {
                         _ => ExtFunctionResult::Return(MontyObject::None),
                     };
                     progress = call
-                        .resume(ext_result, PrintWriter::Collect(&mut stdout))
+                        .resume(ext_result, PrintWriter::CollectString(&mut stdout))
                         .expect("resume failed");
                 }
                 RunProgress::NameLookup(lookup) => {
                     progress = lookup
                         .resume(
                             NameLookupResult::Undefined,
-                            PrintWriter::Collect(&mut stdout),
+                            PrintWriter::CollectString(&mut stdout),
                         )
                         .expect("name lookup resume failed");
                 }
@@ -2855,6 +3234,114 @@ mod tests {
         // "If you want, I can fetch..." uses "I can" which is not a V1 prefix
         assert!(!eval_python_bool(
             r#"signals_tool_intent("If you want, I can next fetch a cleaner update.")"#
+        ));
+    }
+
+    // ── Stop / pause / cancel intent (mission lifecycle) ─────────
+
+    #[test]
+    fn signals_tool_intent_stop_pause_cancel() {
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("I'll stop the mission now.")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("Let me pause the ticker.")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("I'll cancel the monitoring.")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("I'm going to halt the recurring task.")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("I will disable the mission.")"#
+        ));
+    }
+
+    #[test]
+    fn signals_tool_intent_no_false_positive_stop_discussion() {
+        // "let me explain" is in EXCLUSIONS — blocks the entire text
+        assert!(!eval_python_bool(
+            r#"signals_tool_intent("Let me explain how to stop the mission.")"#
+        ));
+        // Past tense should not trigger
+        assert!(!eval_python_bool(
+            r#"signals_tool_intent("I already stopped the mission.")"#
+        ));
+    }
+
+    // ── Execution intent: stop / pause / cancel ────────────────
+
+    #[test]
+    fn signals_execution_intent_stop_pause_cancel() {
+        assert!(eval_python_bool(r#"signals_execution_intent("stop it")"#));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("pause the mission")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("cancel that")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("please stop the ticker")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("please pause everything")"#
+        ));
+    }
+
+    #[test]
+    fn signals_execution_intent_bare_stop() {
+        // Bare imperative commands — the exact user messages from #2808
+        assert!(eval_python_bool(r#"signals_execution_intent("stop")"#));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("stop pinging")"#
+        ));
+        assert!(eval_python_bool(r#"signals_execution_intent("pause")"#));
+        assert!(eval_python_bool(r#"signals_execution_intent("cancel")"#));
+        assert!(eval_python_bool(r#"signals_execution_intent("halt")"#));
+    }
+
+    #[test]
+    fn signals_execution_intent_no_false_positive_stop_in_sentence() {
+        // "stop" mid-sentence should NOT trigger — only at the start
+        assert!(!eval_python_bool(
+            r#"signals_execution_intent("I can't stop thinking about it")"#
+        ));
+        assert!(!eval_python_bool(
+            r#"signals_execution_intent("how do I stop a mission?")"#
+        ));
+    }
+
+    #[test]
+    fn signals_execution_intent_halt_disable_phrases() {
+        // "halt/disable" pronoun+article phrases and "please halt/disable"
+        assert!(eval_python_bool(r#"signals_execution_intent("halt that")"#));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("halt the mission")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("disable it")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("disable the ticker")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("please halt the mission")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("please disable the routine")"#
+        ));
+        // Bare "disable" command
+        assert!(eval_python_bool(r#"signals_execution_intent("disable")"#));
+    }
+
+    #[test]
+    fn signals_execution_intent_bare_stop_with_punctuation() {
+        // Bare commands with trailing punctuation must still match
+        assert!(eval_python_bool(r#"signals_execution_intent("stop.")"#));
+        assert!(eval_python_bool(r#"signals_execution_intent("cancel!")"#));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("stop pinging.")"#
         ));
     }
 
@@ -3142,7 +3629,7 @@ mod tests {
     fn parse_outcome_failed() {
         let result = serde_json::json!({"outcome": "failed", "error": "boom"});
         let outcome = parse_outcome(&result);
-        assert!(matches!(outcome, ThreadOutcome::Failed { error } if error == "boom"));
+        assert!(matches!(outcome, ThreadOutcome::Failed { error, .. } if error == "boom"));
     }
 
     #[test]
@@ -3338,7 +3825,16 @@ mod tests {
         async fn available_actions(
             &self,
             _: &[crate::types::capability::CapabilityLease],
+            _: &ThreadExecutionContext,
         ) -> Result<Vec<crate::types::capability::ActionDef>, EngineError> {
+            Ok(vec![])
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[crate::types::capability::CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
             Ok(vec![])
         }
     }

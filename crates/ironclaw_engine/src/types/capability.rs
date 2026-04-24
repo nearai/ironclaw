@@ -135,6 +135,63 @@ pub struct ActionDef {
     pub requires_approval: bool,
 }
 
+/// Canonical model-visible status for capability background surfacing.
+///
+/// This is a normalized projection over host runtime truth. It is not itself
+/// a source of truth for auth, activation, or installation state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityStatus {
+    /// Capability is directly usable now.
+    Ready,
+    /// Capability is usable now, but only through a scoped or indirect route.
+    ReadyScoped,
+    /// Capability exists but needs authentication before use.
+    NeedsAuth,
+    /// Capability exists but needs setup before auth or execution can proceed.
+    NeedsSetup,
+    /// Capability is installed or known, but not currently active.
+    Inactive,
+    /// Capability is known to the runtime but not yet activated into a direct action.
+    Latent,
+    /// Capability lookup or readiness failed with a concrete runtime error.
+    Error,
+    /// Capability is known in the registry but not installed.
+    AvailableNotInstalled,
+}
+
+/// High-level category for capability background summaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilitySummaryKind {
+    /// Messaging or notification route usable through a bridge action.
+    Channel,
+    /// Extension-backed provider or integration.
+    Provider,
+    /// Engine-native runtime capability background.
+    Runtime,
+}
+
+/// Background summary for a non-callable or indirectly-callable capability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilitySummary {
+    /// Stable capability identifier (for example `telegram` or `slack`).
+    pub name: String,
+    /// Human-readable display name when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// High-level category used by prompt/UI renderers.
+    pub kind: CapabilitySummaryKind,
+    /// Canonical normalized status.
+    pub status: CapabilityStatus,
+    /// Optional human-readable description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Optional routing guidance such as `Usable through message`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_hint: Option<String>,
+}
+
 // ── Capability ──────────────────────────────────────────────
 
 /// A capability — bundles actions, knowledge, and policies.
@@ -257,6 +314,7 @@ impl CapabilityLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn make_lease() -> CapabilityLease {
         CapabilityLease {
@@ -358,5 +416,112 @@ mod tests {
 
         lease.granted_actions = GrantedActions::Specific(vec!["list-prs".into()]);
         assert!(lease.covers_action("list_prs"));
+    }
+
+    #[test]
+    fn capability_status_serializes_as_snake_case() {
+        let cases = [
+            (CapabilityStatus::Ready, json!("ready")),
+            (CapabilityStatus::ReadyScoped, json!("ready_scoped")),
+            (CapabilityStatus::NeedsAuth, json!("needs_auth")),
+            (CapabilityStatus::NeedsSetup, json!("needs_setup")),
+            (CapabilityStatus::Inactive, json!("inactive")),
+            (CapabilityStatus::Latent, json!("latent")),
+            (CapabilityStatus::Error, json!("error")),
+            (
+                CapabilityStatus::AvailableNotInstalled,
+                json!("available_not_installed"),
+            ),
+        ];
+
+        for (status, expected) in cases {
+            assert_eq!(serde_json::to_value(status).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn capability_status_round_trips_from_wire_values() {
+        let cases = [
+            ("ready", CapabilityStatus::Ready),
+            ("ready_scoped", CapabilityStatus::ReadyScoped),
+            ("needs_auth", CapabilityStatus::NeedsAuth),
+            ("needs_setup", CapabilityStatus::NeedsSetup),
+            ("inactive", CapabilityStatus::Inactive),
+            ("latent", CapabilityStatus::Latent),
+            ("error", CapabilityStatus::Error),
+            (
+                "available_not_installed",
+                CapabilityStatus::AvailableNotInstalled,
+            ),
+        ];
+
+        for (wire, expected) in cases {
+            let parsed: CapabilityStatus = serde_json::from_value(json!(wire)).unwrap();
+            assert_eq!(parsed, expected);
+        }
+    }
+
+    #[test]
+    fn capability_summary_kind_serializes_as_snake_case() {
+        let cases = [
+            (CapabilitySummaryKind::Channel, json!("channel")),
+            (CapabilitySummaryKind::Provider, json!("provider")),
+            (CapabilitySummaryKind::Runtime, json!("runtime")),
+        ];
+
+        for (kind, expected) in cases {
+            assert_eq!(serde_json::to_value(kind).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn capability_summary_round_trips_with_optional_fields() {
+        let summary = CapabilitySummary {
+            name: "telegram".to_string(),
+            display_name: Some("Telegram".to_string()),
+            kind: CapabilitySummaryKind::Channel,
+            status: CapabilityStatus::ReadyScoped,
+            description: Some("Telegram messaging".to_string()),
+            routing_hint: Some("Usable through message".to_string()),
+        };
+
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(json["name"], "telegram");
+        assert_eq!(json["display_name"], "Telegram");
+        assert_eq!(json["kind"], "channel");
+        assert_eq!(json["status"], "ready_scoped");
+        assert_eq!(json["description"], "Telegram messaging");
+        assert_eq!(json["routing_hint"], "Usable through message");
+
+        let parsed: CapabilitySummary = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, summary);
+    }
+
+    #[test]
+    fn capability_summary_allows_minimal_payload_and_omits_none_fields() {
+        let summary = CapabilitySummary {
+            name: "notion".to_string(),
+            display_name: None,
+            kind: CapabilitySummaryKind::Provider,
+            status: CapabilityStatus::NeedsAuth,
+            description: None,
+            routing_hint: None,
+        };
+
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(json["name"], "notion");
+        assert_eq!(json["kind"], "provider");
+        assert_eq!(json["status"], "needs_auth");
+        assert!(json.get("display_name").is_none());
+        assert!(json.get("description").is_none());
+        assert!(json.get("routing_hint").is_none());
+
+        let parsed: CapabilitySummary = serde_json::from_value(serde_json::json!({
+            "name": "notion",
+            "kind": "provider",
+            "status": "needs_auth"
+        }))
+        .unwrap();
+        assert_eq!(parsed, summary);
     }
 }

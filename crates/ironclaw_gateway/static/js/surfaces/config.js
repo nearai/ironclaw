@@ -60,6 +60,98 @@ function scrollToProviders() {
   if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
+/** Check whether a provider has all required credentials (API key + base URL if required). */
+function isProviderConfigured(provider) {
+  // ── API key check ──────────────────────────────────────────────────────
+  // Built-in providers carry `api_key_required` from the backend registry.
+  // Custom providers don't — derive the requirement from the adapter instead:
+  // ollama runs locally and needs no key; other adapters do.
+  const needsKey = provider.builtin
+    ? provider.api_key_required !== false
+    : provider.adapter !== 'ollama';
+  const hasEnvKey = provider.has_api_key === true;
+  const overrideKey = provider.builtin && _builtinOverrides[provider.id]
+    ? _builtinOverrides[provider.id].api_key
+    : undefined;
+  // For custom providers, `api_key` is either the sentinel (vaulted on the
+  // server) OR a freshly-entered plaintext string that hasn't been swapped
+  // for the sentinel yet. Both mean the provider is configured.
+  const customKey = !provider.builtin ? provider.api_key : undefined;
+  const hasDbKey = provider.builtin
+    ? (overrideKey === API_KEY_UNCHANGED || (typeof overrideKey === 'string' && overrideKey.length > 0))
+    : (customKey === API_KEY_UNCHANGED || (typeof customKey === 'string' && customKey.length > 0));
+  const keyOk = !needsKey || hasEnvKey || hasDbKey;
+  if (!keyOk) return false;
+
+  // ── Base URL check ─────────────────────────────────────────────────────
+  // Built-ins with `base_url_required` (e.g. openai_compatible) have no
+  // hardcoded fallback in the client layer, so activation must be gated on
+  // having a URL from SOME source. Custom providers always need a URL
+  // because they have no default at all.
+  const needsBaseUrl = provider.builtin
+    ? provider.base_url_required === true
+    : true;
+  if (!needsBaseUrl) return true;
+
+  const overrideBaseUrl = provider.builtin && _builtinOverrides[provider.id]
+    ? _builtinOverrides[provider.id].base_url
+    : undefined;
+  const hasOverrideBaseUrl = typeof overrideBaseUrl === 'string' && overrideBaseUrl.trim().length > 0;
+  const hasEnvBaseUrl = typeof provider.env_base_url === 'string' && provider.env_base_url.trim().length > 0;
+  // `provider.base_url` is the registry default for built-ins (may be empty
+  // when base_url_required=true and there's no default) OR the user-set URL
+  // for custom providers.
+  const hasProviderBaseUrl = typeof provider.base_url === 'string' && provider.base_url.trim().length > 0;
+  return hasOverrideBaseUrl || hasEnvBaseUrl || hasProviderBaseUrl;
+}
+
+/**
+ * Determine what's missing on an unconfigured provider for a precise toast.
+ * Returns 'base_url' if the base URL is missing, 'api_key' if the key is
+ * missing, or 'ok' if nothing is missing. Mirrors the checks in
+ * isProviderConfigured — keep the two in sync.
+ */
+function providerMissingReason(provider) {
+  // API key check — matches isProviderConfigured above.
+  const needsKey = provider.builtin
+    ? provider.api_key_required !== false
+    : provider.adapter !== 'ollama';
+  if (needsKey) {
+    const hasEnvKey = provider.has_api_key === true;
+    const overrideKey = provider.builtin && _builtinOverrides[provider.id]
+      ? _builtinOverrides[provider.id].api_key
+      : undefined;
+    const customKey = !provider.builtin ? provider.api_key : undefined;
+    const hasDbKey = provider.builtin
+      ? (overrideKey === API_KEY_UNCHANGED || (typeof overrideKey === 'string' && overrideKey.length > 0))
+      : (customKey === API_KEY_UNCHANGED || (typeof customKey === 'string' && customKey.length > 0));
+    if (!hasEnvKey && !hasDbKey) return 'api_key';
+  }
+  // Base URL check — matches isProviderConfigured above.
+  const needsBaseUrl = provider.builtin
+    ? provider.base_url_required === true
+    : true;
+  if (needsBaseUrl) {
+    const overrideBaseUrl = provider.builtin && _builtinOverrides[provider.id]
+      ? _builtinOverrides[provider.id].base_url
+      : undefined;
+    const hasOverrideBaseUrl = typeof overrideBaseUrl === 'string' && overrideBaseUrl.trim().length > 0;
+    const hasEnvBaseUrl = typeof provider.env_base_url === 'string' && provider.env_base_url.trim().length > 0;
+    const hasProviderBaseUrl = typeof provider.base_url === 'string' && provider.base_url.trim().length > 0;
+    if (!hasOverrideBaseUrl && !hasEnvBaseUrl && !hasProviderBaseUrl) return 'base_url';
+  }
+  return 'ok';
+}
+
+/** Open the appropriate configuration dialog for a provider. */
+function openProviderConfigDialog(provider) {
+  if (provider.builtin && provider.id !== 'bedrock') {
+    configureBuiltinProvider(provider.id);
+  } else if (!provider.builtin) {
+    editCustomProvider(provider.id);
+  }
+}
+
 function renderProviders() {
   const list = document.getElementById('providers-list');
   const allProviders = [..._builtinProviders, ..._customProviders].sort((a, b) => {
@@ -76,11 +168,15 @@ function renderProviders() {
   list.innerHTML = allProviders.map((p) => {
     const isActive = p.id === _activeLlmBackend;
     const adapterLabel = ADAPTER_LABELS[p.adapter] || p.adapter;
+    const isConfigured = isProviderConfigured(p);
     const activeBadge = isActive
       ? '<span class="provider-badge provider-badge-active">' + I18n.t('status.active') + '</span>'
       : '';
     const builtinBadge = p.builtin
       ? '<span class="provider-badge provider-badge-builtin">' + I18n.t('config.builtin') + '</span>'
+      : '';
+    const unconfiguredBadge = !isActive && !isConfigured
+      ? '<span class="provider-badge provider-badge-unconfigured">' + I18n.t('config.notConfigured') + '</span>'
       : '';
     const deleteBtn = !p.builtin && !isActive
       ? '<button class="provider-action-btn provider-delete-btn" data-action="delete-custom-provider" data-id="' + escapeHtml(p.id) + '">' + I18n.t('common.delete') + '</button>'
@@ -92,7 +188,8 @@ function renderProviders() {
     const configureBtn = p.builtin && p.id !== 'bedrock'
       ? '<button class="provider-action-btn" data-action="configure-builtin-provider" data-id="' + escapeHtml(p.id) + '">' + I18n.t('config.configureProvider') + '</button>'
       : '';
-    const useBtn = !isActive
+    // Only show "Use" if provider is configured; unconfigured providers must be configured first
+    const useBtn = !isActive && isConfigured
       ? '<button class="provider-action-btn" data-action="set-active-provider" data-id="' + escapeHtml(p.id) + '">' + I18n.t('config.useProvider') + '</button>'
       : '';
     const overrideBaseUrl = p.builtin && _builtinOverrides[p.id] ? (_builtinOverrides[p.id].base_url || '') : '';
@@ -113,7 +210,7 @@ function renderProviders() {
       + '<div class="provider-card-header">'
       +   '<span class="provider-name">' + escapeHtml(p.name || p.id) + '</span>'
       +   '<span class="provider-id-label">' + escapeHtml(p.id) + '</span>'
-      +   activeBadge + builtinBadge
+      +   activeBadge + builtinBadge + unconfiguredBadge
       + '</div>'
       + '<div class="provider-card-meta">'
       +   '<span class="provider-adapter">' + escapeHtml(adapterLabel) + '</span>'
@@ -129,12 +226,28 @@ function renderProviders() {
 
 function setActiveProvider(id) {
   const provider = [..._builtinProviders, ..._customProviders].find((p) => p.id === id);
+  if (provider && !isProviderConfigured(provider)) {
+    // Pick a specific message so the user knows WHAT is missing, not just
+    // "configure the provider". Check base URL first because a provider
+    // that needs both a key and a URL typically surfaces URL entry first
+    // in the dialog layout.
+    const reason = providerMissingReason(provider);
+    const toastKey = reason === 'base_url' ? 'config.baseUrlRequired' : 'config.configureToUse';
+    showToast(I18n.t(toastKey), 'error');
+    openProviderConfigDialog(provider);
+    return;
+  }
   // Restore the last-configured model for this provider, falling back to the provider's default
-  const restoredModel =
-    (_builtinOverrides[id] && _builtinOverrides[id].model) ||
-    (provider && provider.default_model) ||
-    null;
+  const overrideModel = _builtinOverrides[id] && _builtinOverrides[id].model;
+  const envModel = provider && provider.env_model;
+  const restoredModel = overrideModel || envModel || (provider && provider.default_model) || null;
   const defaultModel = restoredModel;
+  // Guard: a model must be available
+  if (!defaultModel) {
+    showToast(I18n.t('config.modelRequired') || 'Model is required', 'error');
+    if (provider) openProviderConfigDialog(provider);
+    return;
+  }
   const modelUpdate = () => defaultModel
     ? apiFetchVoid('/api/settings/selected_model', { method: 'PUT', body: { value: defaultModel } })
     : apiFetchVoid('/api/settings/selected_model', { method: 'DELETE' });

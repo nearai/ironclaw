@@ -24,9 +24,23 @@ async def _wait_for_connected(page, *, timeout: int = 10000) -> None:
 
 
 async def _create_new_thread(page) -> str:
-    """Click the new-thread button and return the new thread ID."""
+    """Click the new-thread button and return the new thread ID.
+
+    `createNewThread()` fires an API call that updates `currentThreadId`
+    asynchronously. The previous `!!currentThreadId` wait returned as soon as
+    any thread id was set — which was usually true *before* the click (the
+    auth flow already pins us to the assistant thread). The result was that
+    callers got back the pre-click id while the actual new thread id
+    landed moments later, silently de-syncing any state keyed on the
+    returned id. Wait for the id to change instead.
+    """
+    previous = await page.evaluate("() => currentThreadId || null")
     await page.locator("#thread-new-btn").click()
-    await page.wait_for_function("() => !!currentThreadId", timeout=10000)
+    await page.wait_for_function(
+        "(prev) => !!currentThreadId && currentThreadId !== prev",
+        arg=previous,
+        timeout=10000,
+    )
     return await page.evaluate("() => currentThreadId")
 
 
@@ -129,6 +143,13 @@ async def test_pending_message_survives_sse_reconnect(page):
         load_count_before = await page.evaluate("() => window._testHistoryLoadCount")
 
         # Force SSE reconnect — triggers loadHistory() which clears+rebuilds DOM.
+        # The SSE open handler only reloads history when disconnectMs exceeds
+        # SSE_RELOAD_THRESHOLD_MS (a perf optimization for brief tab-visibility
+        # reconnects). Age `_sseDisconnectedAt` past that threshold so the
+        # test reconnect still exercises the reload+re-inject path.
+        await page.evaluate(
+            "() => { _sseDisconnectedAt = Date.now() - (SSE_RELOAD_THRESHOLD_MS + 5000); }"
+        )
         await page.evaluate("if (eventSource) eventSource.close()")
         await page.evaluate("connectSSE()")
 
