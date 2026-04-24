@@ -169,6 +169,7 @@ fn is_engine_runtime_path(path: &str) -> bool {
             // Auto-generated per-workspace README — regenerated at engine-turn
             // frequency; should not accumulate version rows.
             || path == "engine/README.md"
+            || path == ".system/engine/README.md"
         )
 }
 
@@ -1328,6 +1329,35 @@ impl Workspace {
             .get_or_create_document_by_path(&scope, self.agent_id, &path)
             .await?;
 
+        // Engine runtime fast-path: skip metadata resolution, versioning, and
+        // indexing — matching the guard in write(). Runtime blobs are not
+        // semantic documents and should not accumulate version rows or FTS chunks.
+        if is_engine_runtime_path(&path) {
+            let _ = self.storage.delete_chunks(doc.id).await;
+            if doc.content == content {
+                return Ok(WriteResult {
+                    document: doc,
+                    redirected,
+                    actual_layer,
+                });
+            }
+            let skip_meta = DocumentMetadata {
+                skip_indexing: Some(true),
+                skip_versioning: Some(true),
+                ..Default::default()
+            };
+            let _ = self
+                .maybe_save_version(doc.id, &doc.content, &skip_meta, Some(&self.user_id))
+                .await;
+            self.storage.update_document(doc.id, content).await?;
+            let document = self.storage.get_document_by_id(doc.id).await?;
+            return Ok(WriteResult {
+                document,
+                redirected,
+                actual_layer,
+            });
+        }
+
         // Resolve metadata in the *target layer's scope* — not the primary
         // user_id — so the layer's own `.config` chain governs schema,
         // indexing, and versioning for this write.
@@ -1397,6 +1427,34 @@ impl Workspace {
         // Engine runtime paths are exempt (see is_engine_runtime_path docs).
         if !is_engine_runtime_path(&path) && !new_content.is_empty() {
             reject_if_injected(&path, &new_content)?;
+        }
+
+        // Engine runtime fast-path: skip metadata resolution, versioning, and
+        // indexing — matching the guard in write() and write_to_layer().
+        if is_engine_runtime_path(&path) {
+            let _ = self.storage.delete_chunks(doc.id).await;
+            if doc.content == new_content {
+                return Ok(WriteResult {
+                    document: doc,
+                    redirected,
+                    actual_layer,
+                });
+            }
+            let skip_meta = DocumentMetadata {
+                skip_indexing: Some(true),
+                skip_versioning: Some(true),
+                ..Default::default()
+            };
+            let _ = self
+                .maybe_save_version(doc.id, &doc.content, &skip_meta, Some(&self.user_id))
+                .await;
+            self.storage.update_document(doc.id, &new_content).await?;
+            let document = self.storage.get_document_by_id(doc.id).await?;
+            return Ok(WriteResult {
+                document,
+                redirected,
+                actual_layer,
+            });
         }
 
         // Resolve metadata in the *target layer's scope* so the layer's own
@@ -2791,6 +2849,10 @@ mod tests {
         assert!(is_engine_runtime_path(
             ".system/engine/orchestrator/failures.json"
         ));
+
+        // Auto-generated README — both legacy and canonical
+        assert!(is_engine_runtime_path("engine/README.md"));
+        assert!(is_engine_runtime_path(".system/engine/README.md"));
 
         // Legacy paths (pre-#2049) — still matched
         assert!(is_engine_runtime_path(
