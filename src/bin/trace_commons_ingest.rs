@@ -14,6 +14,10 @@ use axum::{Json, Router, extract::Path as AxumPath, extract::State};
 use chrono::{DateTime, Utc};
 use ironclaw::config::{DatabaseBackend, DatabaseConfig};
 use ironclaw::db::Database;
+use ironclaw::secrets::SecretsCrypto;
+use ironclaw::trace_artifact_store::{
+    EncryptedTraceArtifactReceipt, LocalEncryptedTraceArtifactStore, TraceArtifactKind,
+};
 use ironclaw::trace_contribution::{
     ConsentScope, EmbeddingAnalysisMetadata, ResidualPiiRisk, TRACE_CONTRIBUTION_SCHEMA_VERSION,
     TraceContributionEnvelope, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
@@ -35,6 +39,7 @@ use ironclaw::trace_corpus_storage::{
     TraceSubmissionWrite as StorageTraceSubmissionWrite,
     TraceTombstoneWrite as StorageTraceTombstoneWrite, TraceWorkerKind as StorageTraceWorkerKind,
 };
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
@@ -65,6 +70,7 @@ struct AppState {
     root: PathBuf,
     tokens: Arc<BTreeMap<String, TenantAuth>>,
     db_mirror: Option<Arc<dyn Database>>,
+    artifact_store: Option<Arc<LocalEncryptedTraceArtifactStore>>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,12 +114,34 @@ impl AppState {
                 "TRACE_COMMONS_TENANT_TOKENS or TRACE_COMMONS_INGEST_TOKEN must be configured"
             );
         }
+        let db_mirror = trace_corpus_db_mirror_from_env().await?;
+        let artifact_store = trace_artifact_store_from_env(&root)?;
         Ok(Self {
             root,
             tokens: Arc::new(tokens),
-            db_mirror: trace_corpus_db_mirror_from_env().await?,
+            db_mirror,
+            artifact_store,
         })
     }
+}
+
+fn trace_artifact_store_from_env(
+    default_root: &Path,
+) -> anyhow::Result<Option<Arc<LocalEncryptedTraceArtifactStore>>> {
+    let key = std::env::var("TRACE_COMMONS_ARTIFACT_KEY_HEX").ok();
+    if key.is_none() && !env_truthy("TRACE_COMMONS_ENCRYPTED_ARTIFACTS") {
+        return Ok(None);
+    }
+    let key =
+        key.context("TRACE_COMMONS_ENCRYPTED_ARTIFACTS requires TRACE_COMMONS_ARTIFACT_KEY_HEX")?;
+    let root = std::env::var("TRACE_COMMONS_ARTIFACT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| default_root.join("encrypted_artifacts"));
+    let crypto = SecretsCrypto::new(SecretString::from(key))
+        .context("failed to initialize Trace Commons artifact encryption")?;
+    Ok(Some(Arc::new(LocalEncryptedTraceArtifactStore::new(
+        root, crypto,
+    ))))
 }
 
 async fn trace_corpus_db_mirror_from_env() -> anyhow::Result<Option<Arc<dyn Database>>> {
@@ -334,7 +362,7 @@ async fn submit_trace_handler(
         envelope.value_card.user_visible_explanation = envelope.value.explanation.clone();
     }
 
-    let object_key = store_envelope(&state.root, &tenant.tenant_id, corpus_status, &envelope)
+    let stored_envelope = store_envelope(&state, &tenant.tenant_id, corpus_status, &envelope)
         .map_err(internal_error)?;
     let derived_record = build_derived_record(
         &tenant.tenant_id,
@@ -358,7 +386,8 @@ async fn submit_trace_handler(
         consent_scopes: envelope.consent.scopes.clone(),
         redaction_counts: envelope.privacy.redaction_counts.clone(),
         received_at: Utc::now(),
-        object_key,
+        object_key: stored_envelope.object_key,
+        artifact_receipt: stored_envelope.artifact_receipt,
     };
     write_submission_record(&state.root, &record).map_err(internal_error)?;
     write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
@@ -718,7 +747,7 @@ async fn review_decision_handler(
             "revoked trace submissions are not eligible for review approval",
         ));
     }
-    let mut envelope = read_envelope_by_record(&state.root, &record).map_err(internal_error)?;
+    let mut envelope = read_envelope_by_record(state.as_ref(), &record).map_err(internal_error)?;
 
     match body.decision {
         TraceReviewDecision::Approve => {
@@ -732,13 +761,15 @@ async fn review_decision_handler(
             envelope.value.explanation =
                 vec!["Approved after privacy review for the private redacted corpus.".to_string()];
             envelope.value_card.user_visible_explanation = envelope.value.explanation.clone();
-            record.object_key = store_envelope(
-                &state.root,
+            let stored = store_envelope(
+                &state,
                 &tenant.tenant_id,
                 TraceCorpusStatus::Accepted,
                 &envelope,
             )
             .map_err(internal_error)?;
+            record.object_key = stored.object_key;
+            record.artifact_receipt = stored.artifact_receipt;
         }
         TraceReviewDecision::Reject => {
             record.status = TraceCorpusStatus::Rejected;
@@ -749,13 +780,15 @@ async fn review_decision_handler(
             envelope.value.explanation =
                 vec!["Rejected during privacy or quality review; no credit awarded.".to_string()];
             envelope.value_card.user_visible_explanation = envelope.value.explanation.clone();
-            record.object_key = store_envelope(
-                &state.root,
+            let stored = store_envelope(
+                &state,
                 &tenant.tenant_id,
                 TraceCorpusStatus::Rejected,
                 &envelope,
             )
             .map_err(internal_error)?;
+            record.object_key = stored.object_key;
+            record.artifact_receipt = stored.artifact_receipt;
         }
     }
 
@@ -827,7 +860,7 @@ async fn dataset_replay_handler(
         .filter(TraceCommonsSubmissionRecord::is_export_eligible)
         .take(limit)
     {
-        let envelope = read_envelope_by_record(&state.root, &record).map_err(internal_error)?;
+        let envelope = read_envelope_by_record(state.as_ref(), &record).map_err(internal_error)?;
         items.push(TraceReplayDatasetItem::from_record(
             &record,
             derived_by_submission.get(&record.submission_id),
@@ -1461,21 +1494,40 @@ fn submission_status_from_record(
     }
 }
 
+#[derive(Debug, Clone)]
+struct StoredTraceEnvelope {
+    object_key: String,
+    artifact_receipt: Option<EncryptedTraceArtifactReceipt>,
+}
+
 fn store_envelope(
-    root: &Path,
+    state: &AppState,
     tenant_id: &str,
     status: TraceCorpusStatus,
     envelope: &TraceContributionEnvelope,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<StoredTraceEnvelope> {
     let tenant_key = tenant_storage_key(tenant_id);
     let object_key = format!(
         "tenants/{tenant_key}/objects/{}/{}.json",
         status.as_str(),
         envelope.submission_id
     );
-    let path = root.join(&object_key);
+    let path = state.root.join(&object_key);
     write_json_file(&path, envelope, "trace contribution envelope")?;
-    Ok(object_key)
+    let artifact_receipt = if let Some(store) = state.artifact_store.as_ref() {
+        Some(store.put_json(
+            &tenant_storage_ref(tenant_id),
+            TraceArtifactKind::ContributionEnvelope,
+            &envelope.submission_id.to_string(),
+            envelope,
+        )?)
+    } else {
+        None
+    };
+    Ok(StoredTraceEnvelope {
+        object_key,
+        artifact_receipt,
+    })
 }
 
 async fn mirror_submission_to_db(
@@ -1492,7 +1544,21 @@ async fn mirror_submission_to_db(
         .context("failed to serialize trace envelope for DB mirror hashing")?;
     let object_ref_id = deterministic_trace_uuid("submitted-envelope", record);
     let derived_id = deterministic_trace_uuid("derived-precheck", record);
-    let content_sha256 = sha256_prefixed(&envelope_json);
+    let plaintext_sha256 = sha256_prefixed(&envelope_json);
+    let (object_store, object_key, content_sha256) =
+        if let Some(receipt) = record.artifact_receipt.as_ref() {
+            (
+                "trace_commons_encrypted_artifact_store".to_string(),
+                receipt.object_key.clone(),
+                format!("sha256:{}", receipt.ciphertext_sha256),
+            )
+        } else {
+            (
+                "trace_commons_file_store".to_string(),
+                record.object_key.clone(),
+                plaintext_sha256,
+            )
+        };
     let privacy_risk = serde_storage_string(&record.privacy_risk)?;
     let consent_scopes = consent_scope_storage_strings(&record.consent_scopes)?;
     let credit_account_ref = envelope
@@ -1532,8 +1598,8 @@ async fn mirror_submission_to_db(
         tenant_id: record.tenant_id.clone(),
         submission_id: record.submission_id,
         artifact_kind: StorageTraceObjectArtifactKind::SubmittedEnvelope,
-        object_store: "trace_commons_file_store".to_string(),
-        object_key: record.object_key.clone(),
+        object_store,
+        object_key,
         content_sha256: content_sha256.clone(),
         encryption_key_ref: format!("tenant:{}", tenant_storage_ref(&record.tenant_id)),
         size_bytes: i64::try_from(envelope_json.len()).unwrap_or(i64::MAX),
@@ -1730,10 +1796,17 @@ fn read_submission_record(
 }
 
 fn read_envelope_by_record(
-    root: &Path,
+    state: &AppState,
     record: &TraceCommonsSubmissionRecord,
 ) -> anyhow::Result<TraceContributionEnvelope> {
-    let path = root.join(&record.object_key);
+    if let (Some(store), Some(receipt)) = (
+        state.artifact_store.as_ref(),
+        record.artifact_receipt.as_ref(),
+    ) {
+        return store.get_json(&record.tenant_storage_ref, receipt);
+    }
+
+    let path = state.root.join(&record.object_key);
     let body = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read trace object {}", path.display()))?;
     serde_json::from_str(&body)
@@ -2420,6 +2493,8 @@ struct TraceCommonsSubmissionRecord {
     redaction_counts: BTreeMap<String, u32>,
     received_at: DateTime<Utc>,
     object_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    artifact_receipt: Option<EncryptedTraceArtifactReceipt>,
 }
 
 impl TraceCommonsSubmissionRecord {
@@ -3368,10 +3443,18 @@ mod tests {
     use ironclaw::trace_corpus_storage::TraceCorpusStore;
 
     fn test_state(root: PathBuf) -> Arc<AppState> {
-        test_state_with_db(root, None)
+        test_state_with_options(root, None, None)
     }
 
     fn test_state_with_db(root: PathBuf, db_mirror: Option<Arc<dyn Database>>) -> Arc<AppState> {
+        test_state_with_options(root, db_mirror, None)
+    }
+
+    fn test_state_with_options(
+        root: PathBuf,
+        db_mirror: Option<Arc<dyn Database>>,
+        artifact_store: Option<Arc<LocalEncryptedTraceArtifactStore>>,
+    ) -> Arc<AppState> {
         let mut tokens = BTreeMap::new();
         insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Contributor);
         insert_token(&mut tokens, "tenant-a", "token-a-2", TokenRole::Contributor);
@@ -3392,7 +3475,14 @@ mod tests {
             root,
             tokens: Arc::new(tokens),
             db_mirror,
+            artifact_store,
         })
+    }
+
+    fn test_artifact_store(root: &Path) -> Arc<LocalEncryptedTraceArtifactStore> {
+        let key = ironclaw::secrets::keychain::generate_master_key_hex();
+        let crypto = SecretsCrypto::new(SecretString::from(key)).expect("test crypto");
+        Arc::new(LocalEncryptedTraceArtifactStore::new(root, crypto))
     }
 
     fn auth_headers(token: &str) -> HeaderMap {
@@ -3469,6 +3559,47 @@ mod tests {
             .expect("stored envelope reads");
         assert!(stored.contains("server-rescrub-v1"));
         assert!(!stored.contains("/tmp/ironclaw/private/token.txt"));
+    }
+
+    #[tokio::test]
+    async fn submit_writes_encrypted_artifact_receipt_when_configured() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+        let artifact_store = test_artifact_store(artifact_temp.path());
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            None,
+            Some(artifact_store.clone()),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let Json(receipt) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        assert_eq!(receipt.status, "accepted");
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let receipt = record
+            .artifact_receipt
+            .as_ref()
+            .expect("encrypted artifact receipt should be persisted");
+        let encrypted = artifact_store
+            .read_artifact(&record.tenant_storage_ref, receipt)
+            .expect("encrypted artifact reads");
+        let encrypted_json = serde_json::to_string(&encrypted).expect("artifact serializes");
+        assert!(!encrypted_json.contains("Please inspect the workspace"));
+
+        let round_trip =
+            read_envelope_by_record(state.as_ref(), &record).expect("encrypted envelope reads");
+        assert_eq!(round_trip.submission_id, submission_id);
     }
 
     #[cfg(feature = "libsql")]
