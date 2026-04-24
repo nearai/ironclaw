@@ -11,11 +11,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+use futures::executor::block_on;
 use ironclaw_extensions::{ExtensionError, ExtensionPackage, ExtensionRuntime};
-use ironclaw_filesystem::{FilesystemError, RootFilesystem};
+use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, ExtensionId, ResourceEstimate, ResourceReservationId,
-    ResourceScope, ResourceUsage, RuntimeKind, VirtualPath,
+    CapabilityDescriptor, CapabilityId, ExtensionId, MountView, ResourceEstimate,
+    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeKind, ScopedPath, VirtualPath,
 };
 use ironclaw_resources::{
     ActiveResourceReservation, ResourceError, ResourceGovernor, ResourceReceipt,
@@ -35,6 +36,10 @@ const CACHE_ABI_VERSION: &str = "json-v1";
 const CORE_IMPORT_MODULE: &str = "host";
 const CORE_LOG_IMPORT: &str = "log_utf8";
 const CORE_TIME_IMPORT: &str = "time_unix_ms";
+const FS_READ_IMPORT: &str = "fs_read_utf8";
+const FS_WRITE_IMPORT: &str = "fs_write_utf8";
+const FS_LIST_IMPORT: &str = "fs_list_utf8";
+const FS_STAT_LEN_IMPORT: &str = "fs_stat_len";
 const MAX_LOG_ENTRIES: usize = 1_000;
 const MAX_LOG_MESSAGE_BYTES: usize = 4 * 1024;
 
@@ -78,6 +83,69 @@ impl WasmRuntimeConfig {
             cache_dir: None,
             epoch_tick_interval: Duration::from_millis(10),
         }
+    }
+}
+
+/// Synchronous filesystem surface exposed to WASM host imports.
+pub trait WasmHostFilesystem: Send + Sync {
+    fn read_utf8(&self, path: &str) -> Result<String, String>;
+    fn write_utf8(&self, path: &str, contents: &str) -> Result<(), String>;
+    fn list_utf8(&self, path: &str) -> Result<String, String>;
+    fn stat_len(&self, path: &str) -> Result<u64, String>;
+}
+
+/// Scoped filesystem adapter for WASM filesystem imports.
+#[derive(Debug, Clone)]
+pub struct WasmScopedFilesystem<F> {
+    scoped: ScopedFilesystem<F>,
+}
+
+impl<F> WasmScopedFilesystem<F>
+where
+    F: RootFilesystem,
+{
+    pub fn new(root: Arc<F>, mounts: MountView) -> Self {
+        Self {
+            scoped: ScopedFilesystem::new(root, mounts),
+        }
+    }
+
+    pub fn scoped(&self) -> &ScopedFilesystem<F> {
+        &self.scoped
+    }
+}
+
+impl<F> WasmHostFilesystem for WasmScopedFilesystem<F>
+where
+    F: RootFilesystem,
+{
+    fn read_utf8(&self, path: &str) -> Result<String, String> {
+        let path = ScopedPath::new(path.to_string()).map_err(|error| error.to_string())?;
+        let bytes = block_on(self.scoped.read_file(&path)).map_err(|error| error.to_string())?;
+        String::from_utf8(bytes).map_err(|error| error.to_string())
+    }
+
+    fn write_utf8(&self, path: &str, contents: &str) -> Result<(), String> {
+        let path = ScopedPath::new(path.to_string()).map_err(|error| error.to_string())?;
+        block_on(self.scoped.write_file(&path, contents.as_bytes()))
+            .map_err(|error| error.to_string())
+    }
+
+    fn list_utf8(&self, path: &str) -> Result<String, String> {
+        let path = ScopedPath::new(path.to_string()).map_err(|error| error.to_string())?;
+        let entries = block_on(self.scoped.list_dir(&path)).map_err(|error| error.to_string())?;
+        let names = entries
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>();
+        serde_json::to_string(&names).map_err(|error| error.to_string())
+    }
+
+    fn stat_len(&self, path: &str) -> Result<u64, String> {
+        let path = ScopedPath::new(path.to_string()).map_err(|error| error.to_string())?;
+        block_on(self.scoped.stat(&path))
+            .map(|stat| stat.len)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -544,6 +612,34 @@ impl WasmRuntime {
         reservation: Option<&ActiveResourceReservation>,
         invocation: CapabilityInvocation,
     ) -> Result<CapabilityResult, WasmError> {
+        self.invoke_json_inner(module, descriptor, reservation, invocation, None)
+    }
+
+    pub fn invoke_json_with_filesystem(
+        &self,
+        module: &PreparedWasmModule,
+        descriptor: &CapabilityDescriptor,
+        reservation: Option<&ActiveResourceReservation>,
+        invocation: CapabilityInvocation,
+        filesystem: Arc<dyn WasmHostFilesystem>,
+    ) -> Result<CapabilityResult, WasmError> {
+        self.invoke_json_inner(
+            module,
+            descriptor,
+            reservation,
+            invocation,
+            Some(filesystem),
+        )
+    }
+
+    fn invoke_json_inner(
+        &self,
+        module: &PreparedWasmModule,
+        descriptor: &CapabilityDescriptor,
+        reservation: Option<&ActiveResourceReservation>,
+        invocation: CapabilityInvocation,
+        filesystem: Option<Arc<dyn WasmHostFilesystem>>,
+    ) -> Result<CapabilityResult, WasmError> {
         let reservation = reservation.ok_or(WasmError::MissingReservation)?;
         self.validate_descriptor(module, descriptor)?;
         validate_invocation_schema(&descriptor.parameters_schema, &invocation.input)?;
@@ -559,7 +655,7 @@ impl WasmRuntime {
             })?;
 
         let start = Instant::now();
-        let mut store = self.fueled_store()?;
+        let mut store = self.fueled_store_with_filesystem(filesystem)?;
         let instance = self.instantiate_module(&mut store, module)?;
         let memory = instance
             .get_memory(&mut store, "memory")
@@ -731,9 +827,20 @@ impl WasmRuntime {
     }
 
     fn fueled_store(&self) -> Result<Store<RuntimeStoreData>, WasmError> {
+        self.fueled_store_with_filesystem(None)
+    }
+
+    fn fueled_store_with_filesystem(
+        &self,
+        filesystem: Option<Arc<dyn WasmHostFilesystem>>,
+    ) -> Result<Store<RuntimeStoreData>, WasmError> {
         let mut store = Store::new(
             &self.engine,
-            RuntimeStoreData::new(self.config.max_memory_bytes, self.config.max_output_bytes),
+            RuntimeStoreData::new(
+                self.config.max_memory_bytes,
+                self.config.max_output_bytes,
+                filesystem,
+            ),
         );
         store.limiter(|data| &mut data.limiter);
         store.epoch_deadline_trap();
@@ -802,21 +909,26 @@ impl WasmRuntime {
     }
 }
 
-#[derive(Debug)]
 struct RuntimeStoreData {
     limiter: WasmRuntimeLimiter,
     logs: Vec<WasmLogEntry>,
     log_bytes: u64,
     max_log_bytes: u64,
+    filesystem: Option<Arc<dyn WasmHostFilesystem>>,
 }
 
 impl RuntimeStoreData {
-    fn new(memory_limit: u64, max_log_bytes: u64) -> Self {
+    fn new(
+        memory_limit: u64,
+        max_log_bytes: u64,
+        filesystem: Option<Arc<dyn WasmHostFilesystem>>,
+    ) -> Self {
         Self {
             limiter: WasmRuntimeLimiter::new(memory_limit),
             logs: Vec::new(),
             log_bytes: 0,
             max_log_bytes,
+            filesystem,
         }
     }
 
@@ -931,7 +1043,16 @@ fn validate_module_imports(module: &Module) -> Result<(), WasmError> {
 }
 
 fn is_supported_core_import(module: &str, name: &str) -> bool {
-    module == CORE_IMPORT_MODULE && matches!(name, CORE_LOG_IMPORT | CORE_TIME_IMPORT)
+    module == CORE_IMPORT_MODULE
+        && matches!(
+            name,
+            CORE_LOG_IMPORT
+                | CORE_TIME_IMPORT
+                | FS_READ_IMPORT
+                | FS_WRITE_IMPORT
+                | FS_LIST_IMPORT
+                | FS_STAT_LEN_IMPORT
+        )
 }
 
 fn add_core_host_imports(linker: &mut Linker<RuntimeStoreData>) -> Result<(), WasmError> {
@@ -948,6 +1069,65 @@ fn add_core_host_imports(linker: &mut Linker<RuntimeStoreData>) -> Result<(), Wa
             CORE_LOG_IMPORT,
             |mut caller: Caller<'_, RuntimeStoreData>, level: i32, ptr: i32, len: i32| -> i32 {
                 host_log_utf8(&mut caller, level, ptr, len)
+            },
+        )
+        .map_err(|error| WasmError::Engine {
+            reason: error.to_string(),
+        })?;
+    linker
+        .func_wrap(
+            CORE_IMPORT_MODULE,
+            FS_READ_IMPORT,
+            |mut caller: Caller<'_, RuntimeStoreData>,
+             path_ptr: i32,
+             path_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                host_fs_read_utf8(&mut caller, path_ptr, path_len, out_ptr, out_cap)
+            },
+        )
+        .map_err(|error| WasmError::Engine {
+            reason: error.to_string(),
+        })?;
+    linker
+        .func_wrap(
+            CORE_IMPORT_MODULE,
+            FS_WRITE_IMPORT,
+            |mut caller: Caller<'_, RuntimeStoreData>,
+             path_ptr: i32,
+             path_len: i32,
+             data_ptr: i32,
+             data_len: i32|
+             -> i32 {
+                host_fs_write_utf8(&mut caller, path_ptr, path_len, data_ptr, data_len)
+            },
+        )
+        .map_err(|error| WasmError::Engine {
+            reason: error.to_string(),
+        })?;
+    linker
+        .func_wrap(
+            CORE_IMPORT_MODULE,
+            FS_LIST_IMPORT,
+            |mut caller: Caller<'_, RuntimeStoreData>,
+             path_ptr: i32,
+             path_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                host_fs_list_utf8(&mut caller, path_ptr, path_len, out_ptr, out_cap)
+            },
+        )
+        .map_err(|error| WasmError::Engine {
+            reason: error.to_string(),
+        })?;
+    linker
+        .func_wrap(
+            CORE_IMPORT_MODULE,
+            FS_STAT_LEN_IMPORT,
+            |mut caller: Caller<'_, RuntimeStoreData>, path_ptr: i32, path_len: i32| -> i64 {
+                host_fs_stat_len(&mut caller, path_ptr, path_len)
             },
         )
         .map_err(|error| WasmError::Engine {
@@ -987,6 +1167,128 @@ fn host_log_utf8(caller: &mut Caller<'_, RuntimeStoreData>, level: i32, ptr: i32
     } else {
         -2
     }
+}
+
+fn host_fs_read_utf8(
+    caller: &mut Caller<'_, RuntimeStoreData>,
+    path_ptr: i32,
+    path_len: i32,
+    out_ptr: i32,
+    out_cap: i32,
+) -> i32 {
+    let Ok(path) = read_guest_utf8(caller, path_ptr, path_len) else {
+        return -1;
+    };
+    let Some(filesystem) = caller.data().filesystem.clone() else {
+        return -10;
+    };
+    match filesystem.read_utf8(&path) {
+        Ok(contents) => write_guest_bytes(caller, out_ptr, out_cap, contents.as_bytes()),
+        Err(_) => -11,
+    }
+}
+
+fn host_fs_write_utf8(
+    caller: &mut Caller<'_, RuntimeStoreData>,
+    path_ptr: i32,
+    path_len: i32,
+    data_ptr: i32,
+    data_len: i32,
+) -> i32 {
+    let Ok(path) = read_guest_utf8(caller, path_ptr, path_len) else {
+        return -1;
+    };
+    let Ok(contents) = read_guest_utf8(caller, data_ptr, data_len) else {
+        return -2;
+    };
+    let Some(filesystem) = caller.data().filesystem.clone() else {
+        return -10;
+    };
+    match filesystem.write_utf8(&path, &contents) {
+        Ok(()) => 0,
+        Err(_) => -11,
+    }
+}
+
+fn host_fs_list_utf8(
+    caller: &mut Caller<'_, RuntimeStoreData>,
+    path_ptr: i32,
+    path_len: i32,
+    out_ptr: i32,
+    out_cap: i32,
+) -> i32 {
+    let Ok(path) = read_guest_utf8(caller, path_ptr, path_len) else {
+        return -1;
+    };
+    let Some(filesystem) = caller.data().filesystem.clone() else {
+        return -10;
+    };
+    match filesystem.list_utf8(&path) {
+        Ok(contents) => write_guest_bytes(caller, out_ptr, out_cap, contents.as_bytes()),
+        Err(_) => -11,
+    }
+}
+
+fn host_fs_stat_len(
+    caller: &mut Caller<'_, RuntimeStoreData>,
+    path_ptr: i32,
+    path_len: i32,
+) -> i64 {
+    let Ok(path) = read_guest_utf8(caller, path_ptr, path_len) else {
+        return -1;
+    };
+    let Some(filesystem) = caller.data().filesystem.clone() else {
+        return -10;
+    };
+    filesystem
+        .stat_len(&path)
+        .map(|len| len.min(i64::MAX as u64) as i64)
+        .unwrap_or(-11)
+}
+
+fn read_guest_utf8(
+    caller: &mut Caller<'_, RuntimeStoreData>,
+    ptr: i32,
+    len: i32,
+) -> Result<String, i32> {
+    let offset = usize::try_from(ptr).map_err(|_| -1)?;
+    let len = usize::try_from(len).map_err(|_| -1)?;
+    let Some(memory) = caller
+        .get_export("memory")
+        .and_then(|item| item.into_memory())
+    else {
+        return Err(-3);
+    };
+    let mut bytes = vec![0_u8; len];
+    memory.read(&*caller, offset, &mut bytes).map_err(|_| -4)?;
+    String::from_utf8(bytes).map_err(|_| -5)
+}
+
+fn write_guest_bytes(
+    caller: &mut Caller<'_, RuntimeStoreData>,
+    out_ptr: i32,
+    out_cap: i32,
+    bytes: &[u8],
+) -> i32 {
+    let Ok(offset) = usize::try_from(out_ptr) else {
+        return -1;
+    };
+    let Ok(capacity) = usize::try_from(out_cap) else {
+        return -1;
+    };
+    if bytes.len() > capacity {
+        return -6;
+    }
+    let Some(memory) = caller
+        .get_export("memory")
+        .and_then(|item| item.into_memory())
+    else {
+        return -3;
+    };
+    if memory.write(caller, offset, bytes).is_err() {
+        return -4;
+    }
+    i32::try_from(bytes.len()).unwrap_or(-6)
 }
 
 fn unix_time_ms() -> u64 {
