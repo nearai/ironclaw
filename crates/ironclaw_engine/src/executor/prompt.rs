@@ -89,6 +89,28 @@ pub const PROMPT_OVERLAY_TAG: &str = "prompt_overlay";
 /// Maximum size for a prompt overlay document (in chars).
 const MAX_PROMPT_OVERLAY_CHARS: usize = 4000;
 
+/// Optional deploy-time agent identity, loaded once from `AGENTS_SEED_PATH`.
+///
+/// Downstream forks (e.g. a domain-specific deploy) can point this env var
+/// at a markdown file whose contents are injected into every system prompt
+/// as an Identity section. `None` when the var is unset, unreadable, or
+/// the file is empty — in which case the compiled-in preamble carries the
+/// full identity (generic IronClaw).
+///
+/// Read once at first access; changes to the file or env var after startup
+/// do not take effect until process restart. This matches the rest of the
+/// engine's config surface and avoids per-prompt filesystem I/O.
+static AGENTS_SEED: std::sync::LazyLock<Option<String>> = std::sync::LazyLock::new(|| {
+    let path = std::env::var("AGENTS_SEED_PATH").ok()?;
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let trimmed = contents.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+});
+
 /// Build the system prompt for CodeAct/RLM execution.
 ///
 /// The prompt instructs the LLM to:
@@ -139,11 +161,41 @@ fn build_codeact_system_prompt_inner(
     overlay: Option<&str>,
     platform: Option<&PlatformInfo>,
 ) -> String {
+    build_codeact_system_prompt_with_identity(
+        actions,
+        capabilities,
+        overlay,
+        platform,
+        AGENTS_SEED.as_deref(),
+    )
+}
+
+/// Testable core that accepts an explicit identity string instead of reading
+/// the `AGENTS_SEED_PATH` env var. The env-var path is exercised in
+/// `build_codeact_system_prompt_inner`; tests call this helper directly so
+/// they don't race on process-wide `LazyLock` state.
+fn build_codeact_system_prompt_with_identity(
+    actions: &[ActionDef],
+    capabilities: &[CapabilitySummary],
+    overlay: Option<&str>,
+    platform: Option<&PlatformInfo>,
+    identity: Option<&str>,
+) -> String {
     let mut prompt = String::from(CODEACT_PREAMBLE);
 
     // Inject platform identity and runtime metadata
     if let Some(info) = platform {
         prompt.push_str(&info.to_prompt_section());
+    }
+
+    // Inject deploy-time agent identity from AGENTS_SEED_PATH, if configured.
+    // This is how a downstream fork swaps the generic IronClaw persona for
+    // a domain-specific one without forking prompt templates — engine v1
+    // reads this via the workspace seed, engine v2 reads the file directly
+    // at process start. Both paths converge on the same file on disk.
+    if let Some(identity) = identity {
+        prompt.push_str("\n\n## Agent Identity\n\n");
+        prompt.push_str(identity);
     }
 
     // Append runtime prompt overlay if available
@@ -253,6 +305,26 @@ mod tests {
         assert!(prompt.contains("Python REPL environment"));
         assert!(prompt.contains("Strategy"));
         assert!(!prompt.contains("Learned Rules"));
+    }
+
+    #[test]
+    fn identity_injected_when_agents_seed_set() {
+        let prompt = build_codeact_system_prompt_with_identity(
+            &[],
+            &[],
+            None,
+            None,
+            Some("You are the Abound remittance assistant."),
+        );
+        assert!(prompt.contains("## Agent Identity"));
+        assert!(prompt.contains("You are the Abound remittance assistant."));
+    }
+
+    #[test]
+    fn identity_absent_when_agents_seed_unset() {
+        let prompt =
+            build_codeact_system_prompt_with_identity(&[], &[], None, None, None);
+        assert!(!prompt.contains("## Agent Identity"));
     }
 
     #[tokio::test]
