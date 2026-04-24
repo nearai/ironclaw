@@ -146,6 +146,26 @@ mod fix_issue_test {
         use ironclaw_engine::ProjectId;
 
         let tmp = tempfile::tempdir().expect("project tempdir");
+
+        // Pre-clone the fixture repo into the workspace. In production a dev
+        // project's workspace_path already contains the checkout — the user
+        // either cloned it themselves or the coding-repo skill populated it
+        // on first use. Without this seed the agent sees an empty /project/
+        // on its first `ls`, which in practice makes the LLM escape to /tmp
+        // instead of creating a worktree at the project root (observed on
+        // the 2026-04-23 live run).
+        let clone_status = std::process::Command::new("git")
+            .arg("clone")
+            .arg("--depth=1")
+            .arg(format!("https://github.com/{REPO_OWNER}/{REPO_NAME}.git"))
+            .arg(tmp.path())
+            .status()
+            .expect("failed to spawn git clone");
+        assert!(
+            clone_status.success(),
+            "git clone of {REPO_OWNER}/{REPO_NAME} into project workspace failed"
+        );
+
         let pid = ProjectId::from_slug(user_id, "default");
         let fields = ProjectUpsertFields {
             name: None,

@@ -182,6 +182,7 @@ mod tests {
                 source_channel: None,
                 user_timezone: None,
                 thread_goal: Some("search the web".into()),
+                thread_metadata: serde_json::Value::Null,
             },
         )
         .await
@@ -220,6 +221,7 @@ mod tests {
                 source_channel: None,
                 user_timezone: None,
                 thread_goal: Some("hello".into()),
+                thread_metadata: serde_json::Value::Null,
             },
         )
         .await
@@ -254,6 +256,7 @@ mod tests {
                 source_channel: None,
                 user_timezone: None,
                 thread_goal: Some("hello".into()),
+                thread_metadata: serde_json::Value::Null,
             },
         )
         .await

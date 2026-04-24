@@ -686,24 +686,22 @@ impl Tool for ApplyPatchTool {
     }
 
     fn description(&self) -> &str {
-        "Apply a targeted edit to a file using search/replace. **Prefer this over write_file** \
+        "Apply a targeted edit to a file using search/replace. Prefer this over write_file \
          for modifying existing files — it sends only the changed portion. \
-         **You must read_file before editing.** \
-         \n\n\
-         Parameters: `path` is the filesystem path (must NOT contain newlines or code — \
-         that is the common LLM mistake of packing old_string into path); `old_string` is \
-         the exact snippet to find; `new_string` replaces it. \
-         \n\n\
-         Pick the **smallest old_string that uniquely identifies the target** — usually \
-         2–4 adjacent lines is enough; avoid 10+ lines of context when less uniquely \
-         identifies it. The edit fails if old_string is not unique; either provide more \
-         surrounding context or set replace_all=true. \
-         \n\n\
-         When copying text from read_file output, preserve the exact indentation \
-         (tabs/spaces) as it appears AFTER the line-number prefix (e.g. `42 | fn foo()` \
-         → copy `fn foo()`, not `42 | fn foo()`). If the edit fails with \"String to \
-         replace not found\", re-read the file and check the error message — it will \
-         quote the nearest matching region so you can align your old_string to it."
+         You MUST read_file(path) before calling apply_patch on that path.\n\n\
+         Required JSON shape (all three fields are top-level):\n\
+         {\"path\": \"src/foo.rs\", \"old_string\": \"let x = 1;\", \"new_string\": \"let x = 2;\"}\n\n\
+         `path` is a filesystem path — never pack code, newlines, or more than 512 bytes \
+         into this field. `old_string` is the exact snippet to find. `new_string` replaces it.\n\n\
+         Pick the smallest old_string that uniquely identifies the target — 2–4 adjacent \
+         lines is usually enough; avoid 10+ lines of context when less uniquely identifies \
+         it. The edit fails if old_string is not unique; either provide more surrounding \
+         context or set replace_all=true.\n\n\
+         When copying from read_file output, preserve the exact indentation AFTER the \
+         line-number prefix (e.g. `42 | fn foo()` → copy `fn foo()`, not `42 | fn foo()`). \
+         If the edit fails with \"String to replace not found\", re-read the file and check \
+         the error message — it quotes the nearest matching region so you can align \
+         old_string to it."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

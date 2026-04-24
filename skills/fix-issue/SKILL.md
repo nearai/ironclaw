@@ -16,7 +16,7 @@ activation:
     - "coding"
     - "github"
     - "issue"
-  max_context_tokens: 1500
+  max_context_tokens: 2200
 requires:
   bins:
     - "git"
@@ -43,7 +43,7 @@ Shapes:
 
 If any part is missing, stop and ask the user.
 
-## Step 2 — Fetch the issue
+## Step 2 — Fetch the issue (+ REQUIRED metadata call)
 
 ```
 http(method="GET", url="https://api.github.com/repos/<owner>/<repo>/issues/<number>")
@@ -53,7 +53,7 @@ If the response's `state` is `closed` or the body contains
 `pull_request`, stop and tell the user. Otherwise extract `title` and
 `body` for use in the PR.
 
-Record progress:
+**MANDATORY next call — do this BEFORE any other tool call:**
 ```
 thread_metadata_set(patch={"dev": {
   "repo": "<owner>/<repo>",
@@ -62,23 +62,42 @@ thread_metadata_set(patch={"dev": {
 }})
 ```
 
-## Step 3 — Clone + worktree
+This is not optional. The UI pills that show the user what's happening
+come from `thread.metadata.dev`; skipping this call means the chrome
+never updates and the feature looks dead. `thread_metadata_set` takes
+one argument, `patch`, which is a JSON object merged into
+`thread.metadata`. Example JSON call shape:
+`{"patch": {"dev": {"repo": "x/y", "issue_num": 1, "issue_title": "..."}}}`
 
-All shell calls: `workdir="/project/"` unless noted.
+## Step 3 — Clone + worktree (MANDATORY before any edit)
 
-1. If `/project/` is empty, clone:
+**All shell calls in this step and every subsequent step MUST use
+`workdir="/project/"` (or a sub-path of it). Never `cd /tmp`, never
+clone into `/tmp/...`, never edit files outside `/project/`.** If you
+catch yourself about to run `cd /<anything-outside-project>`, stop and
+re-read this step.
+
+Run these shell calls IN ORDER. Do not skip. Do not narrate. Do not
+move on to Step 4 until `git worktree list` shows your worktree.
+
+1. If `/project/` is empty, clone into it:
    `shell(command="[ -d .git ] || git clone https://github.com/<owner>/<repo>.git .")`
-2. Determine base: the repo's default branch. Try
-   `shell(command="git symbolic-ref refs/remotes/origin/HEAD --short")` →
-   strip `origin/`. Fall back to `staging`.
+2. Determine base branch:
+   `shell(command="git symbolic-ref refs/remotes/origin/HEAD --short 2>/dev/null | sed 's|origin/||' || echo staging")`
 3. Fetch: `shell(command="git fetch origin")`
-4. Branch name: `fix/<number>-<3-5 word slug>` from the issue title
-   (lowercase, hyphens, ≤ 50 chars).
-5. Worktree: `shell(command="git worktree add worktrees/<slug> -b <branch> origin/<base>")`
-   where `<slug>` is the first 8 chars of the thread id if available,
-   otherwise the branch name.
+4. Compute `<branch>` = `fix/<number>-<3-5 word slug>` from the issue
+   title (lowercase, hyphens, ≤ 50 chars).
+5. Compute `<slug>` = first 8 chars of the thread id if available,
+   otherwise equal to `<branch>` with `/` replaced by `-`.
+6. Create the worktree — this is non-negotiable; do NOT edit files
+   on the default branch:
+   `shell(command="git worktree add worktrees/<slug> -b <branch> origin/<base>")`
+7. VERIFY it was created:
+   `shell(command="git worktree list")` — the output MUST contain
+   `worktrees/<slug>`. If it does not, re-run step 6. If it still
+   fails, report the error to the user and stop.
 
-Record:
+Record progress:
 ```
 thread_metadata_set(patch={"dev": {
   "repo": "<owner>/<repo>",
@@ -91,7 +110,9 @@ thread_metadata_set(patch={"dev": {
 ```
 
 From here every `/project/...` file op and every bare `shell()` call
-lands in your worktree (the host rewrites paths transparently).
+lands in your worktree (the host rewrites paths transparently). You
+should NEVER need to reference an absolute host path like `/tmp/...`
+or `/home/...` — all work stays under `/project/worktrees/<slug>/`.
 
 ## Step 4 — Understand + research
 
