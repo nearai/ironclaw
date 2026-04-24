@@ -3,7 +3,12 @@
 **Status:** Draft for review — local only until merged  
 **Date:** 2026-04-24  
 **Participants:** Firat, Illia, pi  
-**Related design:** `docs/reborn/2026-04-24-os-like-architecture-design.md`
+**Related docs:**
+
+- `docs/reborn/2026-04-24-os-like-architecture-design.md`
+- `docs/reborn/2026-04-24-self-contained-crate-roadmap.md`
+- `docs/reborn/2026-04-24-existing-code-reuse-map.md`
+- `docs/reborn/2026-04-24-host-api-invariants-and-authorization.md`
 
 ---
 
@@ -31,6 +36,7 @@ extensions/ userland
 The key system-service crates are:
 
 ```text
+crates/ironclaw_host_api
 crates/ironclaw_extensions
 crates/ironclaw_filesystem
 crates/ironclaw_resources
@@ -909,6 +915,7 @@ These should be resolved during implementation planning, not by expanding the ke
 |---|---|
 | Top-level model | OS-like host with system-service crates, not forced 3-box |
 | Kernel | Composition/wiring, not product runtime |
+| Host API | Shared authority-bearing contracts and invariants |
 | ExtensionManager | Knows what can run |
 | ProcessManager | Knows what is running |
 | Filesystem | Durable mount/persistence surface with explicit `/engine`, `/projects`, `/memory`, and `/system/extensions` roots |

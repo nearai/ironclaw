@@ -3,6 +3,12 @@
 **Status:** Draft for review — local only, do not push  
 **Date:** 2026-04-24  
 **Authors:** Firat + Illia + pi
+**Related docs:**
+
+- `docs/reborn/2026-04-24-architecture-faq-decisions.md`
+- `docs/reborn/2026-04-24-self-contained-crate-roadmap.md`
+- `docs/reborn/2026-04-24-existing-code-reuse-map.md`
+- `docs/reborn/2026-04-24-host-api-invariants-and-authorization.md`
 
 ---
 
@@ -230,6 +236,7 @@ The proposed main crates are:
 
 ```text
 crates/
+  ironclaw_host_api
   ironclaw_extensions
   ironclaw_filesystem
   ironclaw_processes
@@ -242,11 +249,37 @@ crates/
   ironclaw_kernel
 ```
 
-`ironclaw_wasm`, `ironclaw_mcp`, and `ironclaw_scripts` are the V1 runtime/capability lanes. Generic arbitrary process extensions are not a public V1 lane; process execution remains an internal substrate for script runner, MCP stdio servers, and trusted system work.
+`ironclaw_host_api` owns shared authority-bearing contracts and invariants. `ironclaw_wasm`, `ironclaw_mcp`, and `ironclaw_scripts` are the V1 runtime/capability lanes. Generic arbitrary process extensions are not a public V1 lane; process execution remains an internal substrate for script runner, MCP stdio servers, and trusted system work.
 
 `ExtensionManager` should live in `crates/ironclaw_extensions` from day one. Kernel should compose it, not own extension discovery or manifest semantics.
 
-### 6.1 `crates/ironclaw_extensions`
+### 6.1 `crates/ironclaw_host_api`
+
+This crate owns shared contracts and authority-bearing types. It is the first crate to implement because every other crate depends on its vocabulary.
+
+#### Owns
+
+- identity and scope newtypes: tenant, user, project, mission, thread, invocation, process, extension
+- capability IDs, capability descriptors, capability grants, and grant constraints
+- execution context shape
+- runtime and trust enums
+- scoped/virtual path types and mount view contracts
+- action, decision, approval request, denial reason, and obligation contracts
+- resource scope, estimates, and usage contracts
+- event/audit envelope IDs and correlation IDs
+
+#### Does not own
+
+- filesystem implementation
+- policy storage
+- resource ledger enforcement
+- extension discovery
+- runtime execution
+- product workflows
+
+`ironclaw_host_api` must stay mostly type definitions, validation, and serialization contracts. It should not become a hidden kernel.
+
+### 6.2 `crates/ironclaw_extensions`
 
 This crate owns extension discovery and manifest semantics.
 
@@ -269,7 +302,7 @@ This crate owns extension discovery and manifest semantics.
 - routing decisions
 - product behavior
 
-### 6.2 `crates/ironclaw_filesystem`
+### 6.3 `crates/ironclaw_filesystem`
 
 This crate replaces the old `Workspace` abstraction.
 
@@ -300,7 +333,7 @@ This crate replaces the old `Workspace` abstraction.
 
 If rich querying or indexing becomes necessary, add a separate indexing/query service on top of the filesystem instead of putting those semantics inside the filesystem trait.
 
-### 6.3 `crates/ironclaw_processes`
+### 6.4 `crates/ironclaw_processes`
 
 This crate owns internal live execution for script backends, MCP stdio servers, trusted system services, and background jobs. It is not a public generic-process extension lane in V1.
 
@@ -344,7 +377,7 @@ subscribe(process_id) -> EventStream
 
 Internally, `dispatch` may use an ephemeral process or a warm worker pool. That is an implementation detail of `ironclaw_processes` and should not leak into extension APIs.
 
-### 6.4 `crates/ironclaw_auth`
+### 6.5 `crates/ironclaw_auth`
 
 This crate handles authentication and credential management.
 
@@ -366,7 +399,7 @@ This crate handles authentication and credential management.
 
 This crate should be about credential and identity plumbing, not every policy decision.
 
-### 6.5 `crates/ironclaw_network`
+### 6.6 `crates/ironclaw_network`
 
 This crate is the network mediation boundary.
 
@@ -386,7 +419,7 @@ This crate is the network mediation boundary.
 
 This crate should be the place where network effects are mediated, not just a bag of HTTP helpers.
 
-### 6.6 `crates/ironclaw_wasm`
+### 6.7 `crates/ironclaw_wasm`
 
 This crate is the default installed-extension runtime for stable reusable capabilities.
 
@@ -405,7 +438,7 @@ This crate is the default installed-extension runtime for stable reusable capabi
 - project-local script execution
 - product workflows
 
-### 6.7 `crates/ironclaw_mcp`
+### 6.8 `crates/ironclaw_mcp`
 
 This crate adapts existing MCP servers into IronClaw capabilities.
 
@@ -425,7 +458,7 @@ This crate adapts existing MCP servers into IronClaw capabilities.
 
 MCP capabilities still go through IronClaw scope, approval, audit, and policy checks.
 
-### 6.8 `crates/ironclaw_scripts`
+### 6.9 `crates/ironclaw_scripts`
 
 This crate provides the dynamic scripting lane for project-local model-generated work.
 
@@ -446,7 +479,7 @@ This crate provides the dynamic scripting lane for project-local model-generated
 
 Scripts are the creativity/discovery lane. WASM/MCP capabilities are the stabilization/reliability lanes.
 
-### 6.9 `crates/ironclaw_resources`
+### 6.10 `crates/ironclaw_resources`
 
 This crate is the multi-tenant resource and budget governor.
 
@@ -469,7 +502,7 @@ This crate is the multi-tenant resource and budget governor.
 
 Every V1 runtime lane must call resource reservation before costed work and reconcile after the work completes. No LLM, WASM, MCP, script runner, mission, heartbeat, or job path should bypass this service in hosted/multi-tenant mode.
 
-### 6.10 `crates/ironclaw_kernel`
+### 6.11 `crates/ironclaw_kernel`
 
 This crate composes the system.
 
@@ -498,20 +531,22 @@ The intended dependency direction is:
 
 ```text
 extensions -> host interface/contracts
-ironclaw_kernel -> extensions + filesystem + processes + wasm + mcp + scripts + resources + auth + network
-ironclaw_extensions -> filesystem contracts and manifest/capability types
+ironclaw_host_api -> no system-service crates
+ironclaw_kernel -> host_api + extensions + filesystem + processes + wasm + mcp + scripts + resources + auth + network
+ironclaw_extensions -> host_api + filesystem contracts and manifest/capability types
 ironclaw_wasm -> host ABI/contracts + filesystem/resources/auth/network/events interfaces
 ironclaw_mcp -> resources + processes for stdio servers + network/auth interfaces for remote servers
 ironclaw_scripts -> resources + processes + filesystem/auth/network interfaces
-ironclaw_resources -> filesystem contracts + event/audit contracts + host identity/scope types
-ironclaw_processes -> filesystem contracts + auth/network/sandbox interfaces as needed
-ironclaw_auth -> filesystem contracts
+ironclaw_resources -> host_api + filesystem contracts + event/audit contracts
+ironclaw_processes -> host_api + filesystem contracts + auth/network/sandbox interfaces as needed
+ironclaw_auth -> host_api + filesystem contracts
 ironclaw_network -> auth handles only when explicitly injected
 ironclaw_filesystem -> no other system-service crates
 ```
 
 Hard rules:
 
+- `ironclaw_host_api` must not depend on runtime/system-service crates.
 - `ironclaw_filesystem` must not depend on product extensions.
 - `ironclaw_processes` must not depend on extension discovery internals.
 - `ironclaw_kernel` must not parse extension manifests directly.
@@ -1112,6 +1147,7 @@ V1 should be intentionally narrow.
 
 Choose exactly:
 
+- one shared host API contract crate
 - one host-level resource/budget governor
 - one installed capability runtime: WASM
 - one MCP adapter path for existing MCP servers/tools
@@ -1141,57 +1177,62 @@ The goal of V1 is to prove the OS-like shape, not recreate all current IronClaw 
 
 ## 24. V1 implementation order
 
-1. **`ironclaw_filesystem`**
+1. **`ironclaw_host_api`**
+   - define authority-bearing IDs and scopes
+   - define `ExecutionContext`, `Action`, `Decision`, grants, approvals, paths, mounts, resources, and audit envelopes
+   - encode validation contracts from the host API invariants document
+
+2. **`ironclaw_filesystem`**
    - define the `Filesystem` trait
    - implement local mount
    - define mount table and minimal namespace including `/engine`, `/projects`, `/users`, `/memory`, and `/system/extensions`
 
-2. **`ironclaw_resources`**
+3. **`ironclaw_resources`**
    - scope cascade: tenant/user/project/mission/thread/invocation
    - reserve/reconcile/release protocol
    - budget/audit event records
    - V1 USD/tokens/wall-clock/concurrency model
 
-3. **`ironclaw_extensions` / ExtensionManager**
+4. **`ironclaw_extensions` / ExtensionManager**
    - manifest format
    - extension discovery under `/system/extensions`
    - capability extraction
    - config/state/cache folder contract
 
-4. **`ironclaw_wasm`**
+5. **`ironclaw_wasm`**
    - WASM module loading and validation
    - host ABI/import surface
    - capability invocation
    - limits and scoped host imports
 
-5. **`ironclaw_kernel` composition**
-   - wire filesystem + resources + extension manager + WASM runtime
+6. **`ironclaw_kernel` composition**
+   - wire host API + filesystem + resources + extension manager + WASM runtime
    - wire auth/network service handles
    - wire event bus
 
-6. **`ironclaw_mcp`**
+7. **`ironclaw_mcp`**
    - adapt existing MCP tools into IronClaw capabilities
    - support stdio and remote MCP paths as needed
    - preserve IronClaw policy/audit/scope controls
 
-7. **`ironclaw_scripts`**
+8. **`ironclaw_scripts`**
    - `script.run`
    - project-local sandboxed Python/bash/JS helpers
    - limits, cleanup, and scoped mounts
 
-8. **event model**
+9. **event model**
    - realtime bus
    - durable audit/history path
    - runtime/domain/audit event classes
 
-9. **first-party extensions**
+10. **first-party extensions**
    - `extensions/conversation`
    - `extensions/missions`
    - `extensions/agent_loop_tools`
    - `extensions/gateway`
    - `extensions/tui`
 
-10. **`ironclaw_auth`, `ironclaw_network`, and sandbox hardening**
+11. **`ironclaw_auth`, `ironclaw_network`, and sandbox hardening**
    - make auth and network explicit services
    - move runtime lanes off implicit access paths
    - enforce script/project sandbox profiles
@@ -1208,6 +1249,7 @@ It keeps the most valuable properties:
 
 - small kernel host
 - explicit system-service crates instead of a vague middle box
+- shared `ironclaw_host_api` contracts for authority-bearing types and invariants
 - V1 runtime lanes: WASM, MCP, and script runner
 - host-level resource budgeting for multi-tenant safety
 - first-party extensions for agent loop, conversation, missions, gateway, and TUI
