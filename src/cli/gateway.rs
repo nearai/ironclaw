@@ -140,12 +140,6 @@ async fn cmd_serve(config_path: Option<&Path>) -> anyhow::Result<()> {
         gw = gw.with_tool_dispatcher(dispatcher);
     }
     if let Some(ref ext_mgr) = components.extension_manager {
-        let gw_base = runtime_config
-            .tunnel
-            .public_url
-            .clone()
-            .unwrap_or_else(|| oauth_base_url(&gw_config.host, gw_config.port));
-        ext_mgr.enable_gateway_mode(gw_base).await;
         gw = gw.with_extension_manager(Arc::clone(ext_mgr));
     }
     if !components.catalog_entries.is_empty() {
@@ -168,7 +162,6 @@ async fn cmd_serve(config_path: Option<&Path>) -> anyhow::Result<()> {
         gw = gw.with_skill_catalog(Arc::clone(skill_catalog));
     }
     gw = gw.with_cost_guard(Arc::clone(&components.cost_guard));
-    gw = gw.with_oauth(runtime_config.oauth.clone(), gw_config.port);
     gw = gw.with_active_config(ActiveConfigSnapshot {
         llm_backend: runtime_config.llm.backend.to_string(),
         llm_model: components.llm.model_name().to_string(),
@@ -177,11 +170,30 @@ async fn cmd_serve(config_path: Option<&Path>) -> anyhow::Result<()> {
     });
 
     let addr = parse_gateway_addr(&gw_config.host, gw_config.port)?;
+    let (listener, bound_addr) = gateway_router::bind_listener(addr).await?;
+    let callback_base_url = effective_gateway_callback_base_url(
+        runtime_config.tunnel.public_url.as_deref(),
+        &gw_config.host,
+        bound_addr.port(),
+    );
+    if let Some(ref ext_mgr) = components.extension_manager {
+        ext_mgr.enable_gateway_mode(callback_base_url.clone()).await;
+    }
+    let mut oauth_config = runtime_config.oauth.clone();
+    if oauth_config.base_url.is_none() {
+        oauth_config.base_url = Some(callback_base_url);
+    }
+    gw = gw.with_oauth(oauth_config, bound_addr.port());
 
     let state = Arc::clone(gw.state());
     let auth_token = gw.auth_token().to_string();
-    let (bound_addr, server_handle) =
-        gateway_router::start_server(addr, Arc::clone(&state), gw.auth().clone()).await?;
+    let (bound_addr, server_handle) = gateway_router::start_server_with_listener(
+        listener,
+        bound_addr,
+        Arc::clone(&state),
+        gw.auth().clone(),
+    )
+    .await?;
     let base_url = format_http_base_url(&gw_config.host, bound_addr.port());
 
     let token_path = gateway_token_path();
@@ -663,13 +675,20 @@ fn is_process_alive(pid: u32) -> bool {
         let Some(pid_t) = to_pid_t(pid) else {
             return false;
         };
-        unsafe { libc::kill(pid_t, 0) == 0 }
+        // safety: `kill(pid, 0)` probes process existence without sending a signal.
+        let result = unsafe { libc::kill(pid_t, 0) };
+        process_exists_from_kill_result(result, std::io::Error::last_os_error().raw_os_error())
     }
     #[cfg(not(unix))]
     {
         let _ = pid;
         false
     }
+}
+
+#[cfg(unix)]
+fn process_exists_from_kill_result(result: i32, errno: Option<i32>) -> bool {
+    result == 0 || errno == Some(libc::EPERM)
 }
 
 #[cfg(unix)]
@@ -728,6 +747,12 @@ fn oauth_base_url(host: &str, port: u16) -> String {
     }
 }
 
+fn effective_gateway_callback_base_url(public_url: Option<&str>, host: &str, port: u16) -> String {
+    public_url
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| oauth_base_url(host, port))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -778,6 +803,22 @@ mod tests {
     }
 
     #[test]
+    fn effective_gateway_callback_base_url_uses_bound_port_for_dynamic_bind() {
+        assert_eq!(
+            effective_gateway_callback_base_url(None, "0.0.0.0", 45123),
+            "http://localhost:45123"
+        );
+    }
+
+    #[test]
+    fn effective_gateway_callback_base_url_preserves_configured_public_url() {
+        assert_eq!(
+            effective_gateway_callback_base_url(Some("https://gateway.example.com"), "0.0.0.0", 0),
+            "https://gateway.example.com"
+        );
+    }
+
+    #[test]
     fn format_http_base_url_handles_ipv6_and_wildcards() {
         assert_eq!(
             format_http_base_url("0.0.0.0", 3000),
@@ -792,6 +833,13 @@ mod tests {
     fn parse_gateway_addr_accepts_bracketed_and_unbracketed_ipv6() {
         assert!(parse_gateway_addr("::1", 3000).is_ok());
         assert!(parse_gateway_addr("[::1]", 3000).is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn process_exists_treats_eperm_as_alive() {
+        assert!(process_exists_from_kill_result(-1, Some(libc::EPERM)));
+        assert!(!process_exists_from_kill_result(-1, Some(libc::ESRCH)));
     }
 
     #[test]

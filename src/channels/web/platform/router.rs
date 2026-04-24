@@ -99,15 +99,10 @@ use crate::channels::web::features::settings::{
 };
 use crate::channels::web::features::status::gateway_status_handler;
 
-/// Start the gateway HTTP server.
-///
-/// Returns the actual bound `SocketAddr` (useful when binding to port 0)
-/// plus a join handle for the spawned server task.
-pub async fn start_server(
+/// Bind the gateway TCP listener and return the actual bound address.
+pub async fn bind_listener(
     addr: SocketAddr,
-    state: Arc<GatewayState>,
-    auth: CombinedAuthState,
-) -> Result<(SocketAddr, tokio::task::JoinHandle<()>), crate::error::ChannelError> {
+) -> Result<(tokio::net::TcpListener, SocketAddr), crate::error::ChannelError> {
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
         crate::error::ChannelError::StartupFailed {
             name: "gateway".to_string(),
@@ -121,7 +116,19 @@ pub async fn start_server(
                 name: "gateway".to_string(),
                 reason: format!("Failed to get local addr: {}", e),
             })?;
+    Ok((listener, bound_addr))
+}
 
+/// Start the gateway HTTP server from an already-bound listener.
+///
+/// Returns the actual bound `SocketAddr` (useful when binding to port 0)
+/// plus a join handle for the spawned server task.
+pub async fn start_server_with_listener(
+    listener: tokio::net::TcpListener,
+    bound_addr: SocketAddr,
+    state: Arc<GatewayState>,
+    auth: CombinedAuthState,
+) -> Result<(SocketAddr, tokio::task::JoinHandle<()>), crate::error::ChannelError> {
     // Public routes (no auth)
     let public = Router::new()
         .route("/api/health", get(health_handler))
@@ -490,21 +497,24 @@ pub async fn start_server(
     //
     // `SocketAddr`'s `Display` handles IPv6 bracketing correctly
     // (`[::1]:8080` rather than `::1:8080`), so building the origin off the
-    // whole `addr` avoids a broken URL on v6 binds. Parse errors here would
-    // mean the `SocketAddr` itself produced an invalid HTTP origin — a
-    // startup bug, not a request-time error — so we fail the bootstrap
-    // with `ChannelError::StartupFailed` rather than panic.
-    let ip_origin = format!("http://{addr}").parse().map_err(|e| {
+    // whole bound address avoids a broken URL on v6 binds. Parse errors here
+    // would mean the `SocketAddr` itself produced an invalid HTTP origin — a
+    // startup bug, not a request-time error — so we fail the bootstrap with
+    // `ChannelError::StartupFailed` rather than panic.
+    let ip_origin = format!("http://{bound_addr}").parse().map_err(|e| {
         crate::error::ChannelError::StartupFailed {
             name: "gateway".to_string(),
-            reason: format!("Invalid CORS origin for bound addr {addr}: {e}"),
+            reason: format!("Invalid CORS origin for bound addr {bound_addr}: {e}"),
         }
     })?;
-    let localhost_origin = format!("http://localhost:{}", addr.port())
+    let localhost_origin = format!("http://localhost:{}", bound_addr.port())
         .parse()
         .map_err(|e| crate::error::ChannelError::StartupFailed {
             name: "gateway".to_string(),
-            reason: format!("Invalid CORS origin for localhost:{}: {e}", addr.port()),
+            reason: format!(
+                "Invalid CORS origin for localhost:{}: {e}",
+                bound_addr.port()
+            ),
         })?;
     let cors = CorsLayer::new()
         .allow_origin([ip_origin, localhost_origin])
@@ -585,4 +595,17 @@ pub async fn start_server(
     });
 
     Ok((bound_addr, server_handle))
+}
+
+/// Start the gateway HTTP server.
+///
+/// Returns the actual bound `SocketAddr` (useful when binding to port 0)
+/// plus a join handle for the spawned server task.
+pub async fn start_server(
+    addr: SocketAddr,
+    state: Arc<GatewayState>,
+    auth: CombinedAuthState,
+) -> Result<(SocketAddr, tokio::task::JoinHandle<()>), crate::error::ChannelError> {
+    let (listener, bound_addr) = bind_listener(addr).await?;
+    start_server_with_listener(listener, bound_addr, state, auth).await
 }
