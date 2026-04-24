@@ -68,13 +68,20 @@ DATABASE_BACKEND=libsql \
 LIBSQL_PATH=/var/lib/ironclaw/ironclaw.db \
 cargo run --bin trace_commons_ingest
 
+# Optionally serve contributor credit/status endpoints from that DB mirror.
+TRACE_COMMONS_DB_DUAL_WRITE=true \
+TRACE_COMMONS_DB_CONTRIBUTOR_READS=true \
+DATABASE_BACKEND=libsql \
+LIBSQL_PATH=/var/lib/ironclaw/ironclaw.db \
+cargo run --bin trace_commons_ingest
+
 # Store submitted redacted envelopes in the encrypted local artifact sidecar.
 TRACE_COMMONS_ARTIFACT_KEY_HEX=<ironclaw-secrets-compatible-hex-key> \
 TRACE_COMMONS_ARTIFACT_DIR=/var/lib/ironclaw/trace-artifacts \
 cargo run --bin trace_commons_ingest
 ```
 
-`TRACE_COMMONS_DB_DUAL_WRITE=true` builds a `TraceCorpusStore` mirror from the normal `DATABASE_BACKEND` configuration. `DATABASE_BACKEND=postgres` requires `DATABASE_URL`; `DATABASE_BACKEND=libsql` uses `LIBSQL_PATH` with optional `LIBSQL_URL` and `LIBSQL_AUTH_TOKEN`. The mirror writes tenant-scoped submissions, object refs, derived precheck records, audit events, credit events, review state, and revocation tombstones while the API still serves from the file-backed pilot store.
+`TRACE_COMMONS_DB_DUAL_WRITE=true` builds a `TraceCorpusStore` mirror from the normal `DATABASE_BACKEND` configuration. `DATABASE_BACKEND=postgres` requires `DATABASE_URL`; `DATABASE_BACKEND=libsql` uses `LIBSQL_PATH` with optional `LIBSQL_URL` and `LIBSQL_AUTH_TOKEN`. The mirror writes tenant-scoped submissions, object refs, derived precheck records, audit events, credit events, review state, and revocation tombstones. By default, pilot API reads still use the file-backed store. `TRACE_COMMONS_DB_CONTRIBUTOR_READS=true` switches `/v1/contributors/me/credit`, `/v1/contributors/me/credit-events`, and `/v1/contributors/me/submission-status` to the DB mirror; it requires DB dual-write/backfill to be configured and preserves tenant plus principal filtering.
 
 `TRACE_COMMONS_ARTIFACT_KEY_HEX` enables the encrypted artifact sidecar. `TRACE_COMMONS_ENCRYPTED_ARTIFACTS=true` can be used as an explicit guard, but still requires the key. When enabled, submitted redacted envelopes are encrypted with IronClaw secrets crypto, stored under a tenant-hashed artifact directory, and referenced by an `EncryptedTraceArtifactReceipt`. File-backed submission records retain the receipt so envelope reads resolve through the encrypted sidecar when present.
 
@@ -122,7 +129,7 @@ On submit, the service also writes a derived redacted-only record with:
 - coverage tags for channel, tool, tool category, outcome, failure mode, and privacy risk
 - aggregate analytics by status, privacy risk, task success, tool, tool category, and coverage tag
 
-The current API remains intentionally file-backed under `TRACE_COMMONS_DATA_DIR` or `~/.ironclaw/trace_commons_ingest` for compatibility and easy local operation. This branch also includes the first production storage bridge: optional DB dual-write metadata and optional encrypted local artifact storage. Production deployments should promote those paths into DB/object-primary reads, add row-level tenant policies, and move encrypted artifacts behind service-owned object storage before broad rollout.
+The current API remains intentionally file-backed under `TRACE_COMMONS_DATA_DIR` or `~/.ironclaw/trace_commons_ingest` for compatibility and easy local operation, with an optional DB-backed read path for contributor credit/status endpoints. This branch also includes the first production storage bridge: optional DB dual-write metadata and optional encrypted local artifact storage. Production deployments should finish promoting reviewer/export/analytics paths into DB/object-primary reads, add row-level tenant policies, and move encrypted artifacts behind service-owned object storage before broad rollout.
 
 ## Production Hardening Roadmap
 
@@ -130,7 +137,7 @@ The current implementation is a usable MVP for local development and controlled 
 
 ### DB and Object Storage
 
-- Promote the current dual-write mirror into relational metadata reads and service-owned encrypted object storage for redacted trace bodies.
+- Promote the current dual-write mirror into relational metadata reads for all API surfaces and service-owned encrypted object storage for redacted trace bodies. Contributor credit/status reads already have an opt-in DB-backed rollout gate.
 - Keep metadata and object keys tenant-scoped from the auth-derived tenant id. Do not trust tenant fields in the envelope as storage partition keys.
 - Store immutable submission records, append-only credit events, revocation tombstones, review decisions, export job manifests, and processing job state as separate records.
 - Use row-level tenant policies or an equivalent authorization layer for every metadata query.

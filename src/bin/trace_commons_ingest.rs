@@ -29,6 +29,7 @@ use ironclaw::trace_corpus_storage::{
     TraceAuditEventWrite as StorageTraceAuditEventWrite,
     TraceAuditSafeMetadata as StorageTraceAuditSafeMetadata,
     TraceCorpusStatus as StorageTraceCorpusStatus,
+    TraceCreditEventRecord as StorageTraceCreditEventRecord,
     TraceCreditEventType as StorageTraceCreditEventType,
     TraceCreditEventWrite as StorageTraceCreditEventWrite,
     TraceCreditSettlementState as StorageTraceCreditSettlementState,
@@ -36,10 +37,12 @@ use ironclaw::trace_corpus_storage::{
     TraceDerivedStatus as StorageTraceDerivedStatus,
     TraceObjectArtifactKind as StorageTraceObjectArtifactKind,
     TraceObjectRefWrite as StorageTraceObjectRefWrite,
+    TraceSubmissionRecord as StorageTraceSubmissionRecord,
     TraceSubmissionWrite as StorageTraceSubmissionWrite,
     TraceTombstoneWrite as StorageTraceTombstoneWrite, TraceWorkerKind as StorageTraceWorkerKind,
 };
 use secrecy::SecretString;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
@@ -70,6 +73,7 @@ struct AppState {
     root: PathBuf,
     tokens: Arc<BTreeMap<String, TenantAuth>>,
     db_mirror: Option<Arc<dyn Database>>,
+    db_contributor_reads: bool,
     artifact_store: Option<Arc<LocalEncryptedTraceArtifactStore>>,
 }
 
@@ -115,11 +119,18 @@ impl AppState {
             );
         }
         let db_mirror = trace_corpus_db_mirror_from_env().await?;
+        let db_contributor_reads = env_truthy("TRACE_COMMONS_DB_CONTRIBUTOR_READS");
+        if db_contributor_reads && db_mirror.is_none() {
+            anyhow::bail!(
+                "TRACE_COMMONS_DB_CONTRIBUTOR_READS requires TRACE_COMMONS_DB_DUAL_WRITE"
+            );
+        }
         let artifact_store = trace_artifact_store_from_env(&root)?;
         Ok(Self {
             root,
             tokens: Arc::new(tokens),
             db_mirror,
+            db_contributor_reads,
             artifact_store,
         })
     }
@@ -483,22 +494,14 @@ async fn credit_handler(
     headers: HeaderMap,
 ) -> ApiResult<Json<TraceCommonsTenantCreditResponse>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
-    let records = visible_submission_records(
-        &tenant,
-        read_all_submission_records(&state.root, &tenant.tenant_id).map_err(internal_error)?,
-    );
-    let credit_events = eligible_credit_events_for_records(
-        &records,
-        visible_credit_events(
-            &tenant,
-            read_all_credit_events(&state.root, &tenant.tenant_id).map_err(internal_error)?,
-        ),
-    );
+    let credit_view = read_contributor_credit_view(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
     Ok(Json(
         TraceCommonsTenantCreditResponse::from_records_and_events(
             tenant.tenant_id,
-            records,
-            &credit_events,
+            credit_view.records,
+            &credit_view.credit_events,
         ),
     ))
 }
@@ -508,18 +511,10 @@ async fn credit_events_handler(
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<TraceCommonsCreditLedgerRecord>>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
-    let records = visible_submission_records(
-        &tenant,
-        read_all_submission_records(&state.root, &tenant.tenant_id).map_err(internal_error)?,
-    );
-    let credit_events = eligible_credit_events_for_records(
-        &records,
-        visible_credit_events(
-            &tenant,
-            read_all_credit_events(&state.root, &tenant.tenant_id).map_err(internal_error)?,
-        ),
-    );
-    Ok(Json(credit_events))
+    let credit_view = read_contributor_credit_view(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(credit_view.credit_events))
 }
 
 async fn submission_status_handler(
@@ -535,24 +530,21 @@ async fn submission_status_handler(
         ));
     }
 
-    let records =
-        read_all_submission_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
-    let visible_records = visible_submission_records(&tenant, records);
-    let credit_events = eligible_credit_events_for_records(
-        &visible_records,
-        visible_credit_events(
-            &tenant,
-            read_all_credit_events(&state.root, &tenant.tenant_id).map_err(internal_error)?,
-        ),
-    );
-    let visible_by_submission = visible_records
+    let credit_view = read_contributor_credit_view(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let visible_by_submission = credit_view
+        .records
         .iter()
         .map(|record| (record.submission_id, record))
         .collect::<BTreeMap<_, _>>();
     let mut statuses = Vec::new();
     for submission_id in body.submission_ids {
         if let Some(record) = visible_by_submission.get(&submission_id) {
-            statuses.push(submission_status_from_record(record, &credit_events));
+            statuses.push(submission_status_from_record(
+                record,
+                &credit_view.credit_events,
+            ));
         }
     }
 
@@ -1429,6 +1421,188 @@ fn eligible_credit_events_for_records(
         .into_iter()
         .filter(|event| eligible_submissions.contains(&event.submission_id))
         .collect()
+}
+
+#[derive(Debug)]
+struct TraceContributorCreditView {
+    records: Vec<TraceCommonsSubmissionRecord>,
+    credit_events: Vec<TraceCommonsCreditLedgerRecord>,
+}
+
+async fn read_contributor_credit_view(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<TraceContributorCreditView> {
+    if state.db_contributor_reads {
+        return read_contributor_credit_view_from_db(state, tenant).await;
+    }
+
+    let records = visible_submission_records(
+        tenant,
+        read_all_submission_records(&state.root, &tenant.tenant_id)?,
+    );
+    let credit_events = eligible_credit_events_for_records(
+        &records,
+        visible_credit_events(
+            tenant,
+            read_all_credit_events(&state.root, &tenant.tenant_id)?,
+        ),
+    );
+    Ok(TraceContributorCreditView {
+        records,
+        credit_events,
+    })
+}
+
+async fn read_contributor_credit_view_from_db(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<TraceContributorCreditView> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .context("TRACE_COMMONS_DB_CONTRIBUTOR_READS is enabled without a DB mirror")?;
+    let records = db
+        .list_trace_submissions(&tenant.tenant_id)
+        .await
+        .context("failed to read Trace Commons submissions from DB mirror")?
+        .into_iter()
+        .filter_map(trace_commons_record_from_storage_submission)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let records = visible_submission_records(tenant, records);
+    let owner_by_submission = records
+        .iter()
+        .map(|record| (record.submission_id, record.auth_principal_ref.clone()))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut credit_events = Vec::new();
+    for event in db
+        .list_trace_credit_events(&tenant.tenant_id)
+        .await
+        .context("failed to read Trace Commons credit events from DB mirror")?
+    {
+        let Some(owner_principal_ref) = owner_by_submission.get(&event.submission_id) else {
+            continue;
+        };
+        if let Some(event) =
+            trace_commons_credit_event_from_storage(event, owner_principal_ref.as_str())?
+        {
+            credit_events.push(event);
+        }
+    }
+    let credit_events =
+        eligible_credit_events_for_records(&records, visible_credit_events(tenant, credit_events));
+    Ok(TraceContributorCreditView {
+        records,
+        credit_events,
+    })
+}
+
+fn trace_commons_record_from_storage_submission(
+    record: StorageTraceSubmissionRecord,
+) -> Option<anyhow::Result<TraceCommonsSubmissionRecord>> {
+    let status = trace_corpus_status_from_storage(record.status)?;
+    Some((|| {
+        Ok(TraceCommonsSubmissionRecord {
+            tenant_storage_ref: tenant_storage_ref(&record.tenant_id),
+            tenant_id: record.tenant_id,
+            auth_principal_ref: record.auth_principal_ref,
+            submitted_tenant_scope_ref: record.submitted_tenant_scope_ref,
+            contributor_pseudonym: record.contributor_pseudonym,
+            submission_id: record.submission_id,
+            trace_id: record.trace_id,
+            status,
+            privacy_risk: storage_string_as(&record.privacy_risk, "privacy_risk")?,
+            submission_score: record.submission_score.unwrap_or(0.0),
+            credit_points_pending: record.credit_points_pending.unwrap_or(0.0),
+            credit_points_final: record.credit_points_final,
+            consent_scopes: record
+                .consent_scopes
+                .iter()
+                .map(|scope| storage_string_as(scope, "consent_scope"))
+                .collect::<anyhow::Result<Vec<_>>>()?,
+            redaction_counts: BTreeMap::new(),
+            received_at: record.received_at,
+            object_key: String::new(),
+            artifact_receipt: None,
+        })
+    })())
+}
+
+fn trace_commons_credit_event_from_storage(
+    event: StorageTraceCreditEventRecord,
+    owner_principal_ref: &str,
+) -> anyhow::Result<Option<TraceCommonsCreditLedgerRecord>> {
+    let Some(event_type) = trace_credit_event_type_from_storage(event.event_type) else {
+        return Ok(None);
+    };
+    let credit_points_delta = event.points_delta.parse::<f32>().with_context(|| {
+        format!(
+            "failed to parse trace credit points_delta for event {}",
+            event.credit_event_id
+        )
+    })?;
+    if !credit_points_delta.is_finite() {
+        anyhow::bail!(
+            "trace credit points_delta is not finite for event {}",
+            event.credit_event_id
+        );
+    }
+    Ok(Some(TraceCommonsCreditLedgerRecord {
+        event_id: event.credit_event_id,
+        tenant_storage_ref: tenant_storage_ref(&event.tenant_id),
+        tenant_id: event.tenant_id,
+        submission_id: event.submission_id,
+        trace_id: event.trace_id,
+        auth_principal_ref: owner_principal_ref.to_string(),
+        event_type,
+        credit_points_delta,
+        reason: Some(event.reason),
+        external_ref: event.external_ref,
+        actor_role: TokenRole::parse(&event.actor_role)?,
+        actor_principal_ref: event.actor_principal_ref,
+        created_at: event.occurred_at,
+    }))
+}
+
+fn trace_corpus_status_from_storage(status: StorageTraceCorpusStatus) -> Option<TraceCorpusStatus> {
+    match status {
+        StorageTraceCorpusStatus::Accepted => Some(TraceCorpusStatus::Accepted),
+        StorageTraceCorpusStatus::Quarantined => Some(TraceCorpusStatus::Quarantined),
+        StorageTraceCorpusStatus::Rejected => Some(TraceCorpusStatus::Rejected),
+        StorageTraceCorpusStatus::Revoked => Some(TraceCorpusStatus::Revoked),
+        StorageTraceCorpusStatus::Received
+        | StorageTraceCorpusStatus::Expired
+        | StorageTraceCorpusStatus::Purged => None,
+    }
+}
+
+fn trace_credit_event_type_from_storage(
+    event_type: StorageTraceCreditEventType,
+) -> Option<TraceCreditLedgerEventType> {
+    match event_type {
+        StorageTraceCreditEventType::Accepted
+        | StorageTraceCreditEventType::PrivacyRejection
+        | StorageTraceCreditEventType::DuplicateRejection => None,
+        StorageTraceCreditEventType::BenchmarkConversion => {
+            Some(TraceCreditLedgerEventType::BenchmarkConversion)
+        }
+        StorageTraceCreditEventType::RegressionCatch => {
+            Some(TraceCreditLedgerEventType::RegressionCatch)
+        }
+        StorageTraceCreditEventType::TrainingUtility => {
+            Some(TraceCreditLedgerEventType::TrainingUtility)
+        }
+        StorageTraceCreditEventType::ReviewerBonus => {
+            Some(TraceCreditLedgerEventType::ReviewerBonus)
+        }
+        StorageTraceCreditEventType::AbusePenalty => Some(TraceCreditLedgerEventType::AbusePenalty),
+    }
+}
+
+fn storage_string_as<T: DeserializeOwned>(raw: &str, label: &str) -> anyhow::Result<T> {
+    serde_json::from_value(serde_json::Value::String(raw.to_string()))
+        .with_context(|| format!("failed to parse Trace Commons storage {label}: {raw}"))
 }
 
 fn reviewer_credit_for_record(record: &TraceCommonsSubmissionRecord) -> f32 {
@@ -3664,17 +3838,25 @@ mod tests {
     use ironclaw::trace_corpus_storage::TraceCorpusStore;
 
     fn test_state(root: PathBuf) -> Arc<AppState> {
-        test_state_with_options(root, None, None)
+        test_state_with_options(root, None, None, false)
     }
 
     fn test_state_with_db(root: PathBuf, db_mirror: Option<Arc<dyn Database>>) -> Arc<AppState> {
-        test_state_with_options(root, db_mirror, None)
+        test_state_with_options(root, db_mirror, None, false)
+    }
+
+    fn test_state_with_db_contributor_reads(
+        root: PathBuf,
+        db_mirror: Option<Arc<dyn Database>>,
+    ) -> Arc<AppState> {
+        test_state_with_options(root, db_mirror, None, true)
     }
 
     fn test_state_with_options(
         root: PathBuf,
         db_mirror: Option<Arc<dyn Database>>,
         artifact_store: Option<Arc<LocalEncryptedTraceArtifactStore>>,
+        db_contributor_reads: bool,
     ) -> Arc<AppState> {
         let mut tokens = BTreeMap::new();
         insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Contributor);
@@ -3696,6 +3878,7 @@ mod tests {
             root,
             tokens: Arc::new(tokens),
             db_mirror,
+            db_contributor_reads,
             artifact_store,
         })
     }
@@ -3791,6 +3974,7 @@ mod tests {
             temp.path().to_path_buf(),
             None,
             Some(artifact_store.clone()),
+            false,
         );
         let mut envelope = sample_envelope().await;
         make_metadata_only_low_risk(&mut envelope);
@@ -3959,6 +4143,113 @@ mod tests {
             .expect("derived invalidation row fetch succeeds")
             .expect("derived invalidation count row exists");
         assert_eq!(row.get::<i64>(0).expect("derived count reads"), 1);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn contributor_credit_status_can_read_from_db_mirror_when_enabled() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-mirror.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db_contributor_reads(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let Json(receipt) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        assert_eq!(receipt.status, "accepted");
+
+        let Json(appended) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::ReviewerBonus,
+                credit_points_delta: 2.5,
+                reason: Some("reviewer found downstream utility".to_string()),
+                external_ref: Some("review:test".to_string()),
+            }),
+        )
+        .await
+        .expect("credit append succeeds");
+        assert_eq!(
+            appended.event_type,
+            TraceCreditLedgerEventType::ReviewerBonus
+        );
+
+        let tenant_dir = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"));
+        std::fs::remove_file(
+            tenant_dir
+                .join("metadata")
+                .join(format!("{submission_id}.json")),
+        )
+        .expect("remove file-backed metadata to prove DB read path");
+        std::fs::remove_file(tenant_dir.join("credit_ledger").join("events.jsonl"))
+            .expect("remove file-backed ledger to prove DB read path");
+
+        let Json(events) = credit_events_handler(State(state.clone()), auth_headers("token-a"))
+            .await
+            .expect("credit events load from DB");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].submission_id, submission_id);
+        assert_eq!(
+            events[0].event_type,
+            TraceCreditLedgerEventType::ReviewerBonus
+        );
+        assert_eq!(events[0].credit_points_delta, 2.5);
+
+        let Json(credit) = credit_handler(State(state.clone()), auth_headers("token-a"))
+            .await
+            .expect("credit summary loads from DB");
+        assert_eq!(credit.accepted, 1);
+        assert_eq!(credit.credit_points_ledger, 2.5);
+        assert!(credit.credit_points_final > 0.0);
+        assert_eq!(
+            credit.credit_points_total,
+            credit.credit_points_final + credit.credit_points_ledger
+        );
+
+        let Json(statuses) = submission_status_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(TraceSubmissionStatusRequest {
+                submission_ids: vec![submission_id],
+            }),
+        )
+        .await
+        .expect("status loads from DB");
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].submission_id, submission_id);
+        assert_eq!(statuses[0].status, "accepted");
+        assert_eq!(statuses[0].credit_points_ledger, 2.5);
+        assert_eq!(statuses[0].delayed_credit_explanations.len(), 1);
+
+        let Json(other_contributor_credit) =
+            credit_handler(State(state), auth_headers("token-a-2"))
+                .await
+                .expect("same-tenant contributor remains principal scoped");
+        assert_eq!(other_contributor_credit.accepted, 0);
+        assert_eq!(other_contributor_credit.credit_points_ledger, 0.0);
     }
 
     #[tokio::test]

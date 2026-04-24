@@ -179,7 +179,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `sandbox` | ✅ | ✅ | - | WASM sandbox |
 | `doctor` | ✅ | 🚧 | P2 | 16 subsystem checks |
 | `logs` | ✅ | 🚧 | P3 | `logs` (gateway.log tail), `--follow` (SSE live stream), `--level` (get/set). No DB-persisted log history. |
-| `traces` | ➖ | 🚧 | - | IronClaw-native Trace Commons MVP: opt-in local redaction, autonomous submission, private ingest/review/export/credit/admin helpers, optional DB dual-write mirror/backfill, encrypted artifact sidecar, and delayed credit notices. Not an OpenClaw parity feature. |
+| `traces` | ➖ | 🚧 | - | IronClaw-native Trace Commons MVP: opt-in local redaction, autonomous submission, private ingest/review/export/credit/admin helpers, optional DB dual-write/backfill plus contributor credit/status DB reads, encrypted artifact sidecar, and delayed credit notices. Not an OpenClaw parity feature. |
 | `update` | ✅ | ❌ | P3 | Self-update |
 | `completion` | ✅ | ✅ | - | Shell completion |
 | `/subagents spawn` | ✅ | ❌ | P3 | Spawn subagents from chat |
