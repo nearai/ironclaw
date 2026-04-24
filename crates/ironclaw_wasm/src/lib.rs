@@ -7,10 +7,12 @@
 use std::time::Instant;
 
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, ExtensionId, ResourceUsage, RuntimeKind,
+    CapabilityDescriptor, CapabilityId, ExtensionId, ResourceReservationId, ResourceUsage,
+    RuntimeKind,
 };
 use ironclaw_resources::ResourceReservation;
 use rust_decimal::Decimal;
+use serde_json::Value;
 use thiserror::Error;
 use wasmtime::{Config, Engine, Instance, Module, Store};
 
@@ -81,11 +83,27 @@ impl std::fmt::Debug for PreparedWasmModule {
     }
 }
 
+/// JSON capability invocation payload for the initial Reborn WASM ABI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityInvocation {
+    pub input: Value,
+}
+
+/// Structured JSON result returned by the initial Reborn WASM ABI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityResult {
+    pub output: Value,
+    pub reservation_id: ResourceReservationId,
+    pub usage: ResourceUsage,
+    pub fuel_consumed: u64,
+    pub output_bytes: u64,
+}
+
 /// WASM invocation result with usage data for resource reconciliation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmInvocationResult<T> {
     pub value: T,
-    pub reservation_id: ironclaw_host_api::ResourceReservationId,
+    pub reservation_id: ResourceReservationId,
     pub usage: ResourceUsage,
     pub fuel_consumed: u64,
     pub output_bytes: u64,
@@ -102,10 +120,20 @@ pub enum WasmError {
     UnsupportedImport { module: String, name: String },
     #[error("WASM descriptor mismatch: {reason}")]
     DescriptorMismatch { reason: String },
+    #[error("invalid WASM invocation: {reason}")]
+    InvalidInvocation { reason: String },
     #[error("WASM invocation requires an active resource reservation")]
     MissingReservation,
     #[error("WASM export '{export}' was not found or has the wrong signature")]
     MissingExport { export: String },
+    #[error("WASM JSON ABI requires an exported memory named 'memory'")]
+    MissingMemory,
+    #[error("WASM guest allocation failed: {reason}")]
+    GuestAllocation { reason: String },
+    #[error("WASM guest returned status {status}: {message}")]
+    GuestError { status: i32, message: String },
+    #[error("WASM guest output is invalid: {reason}")]
+    InvalidGuestOutput { reason: String },
     #[error("WASM fuel exhausted after limit {limit}")]
     FuelExhausted { limit: u64 },
     #[error("WASM output limit exceeded: limit {limit}, actual {actual}")]
@@ -169,6 +197,126 @@ impl WasmRuntime {
         })
     }
 
+    /// Invoke a capability through the initial JSON pointer/length ABI.
+    ///
+    /// The guest module must export:
+    ///
+    /// - `memory`
+    /// - `alloc(len: i32) -> i32`
+    /// - the module's configured capability export as `(ptr: i32, len: i32) -> i32`
+    /// - `output_ptr() -> i32`
+    /// - `output_len() -> i32`
+    ///
+    /// A zero status means the output buffer contains JSON success output. Any
+    /// non-zero status means the output buffer contains a JSON error object and
+    /// is surfaced as [`WasmError::GuestError`].
+    pub fn invoke_json(
+        &self,
+        module: &PreparedWasmModule,
+        descriptor: &CapabilityDescriptor,
+        reservation: Option<&ResourceReservation>,
+        invocation: CapabilityInvocation,
+    ) -> Result<CapabilityResult, WasmError> {
+        let reservation = reservation.ok_or(WasmError::MissingReservation)?;
+        self.validate_descriptor(module, descriptor)?;
+        validate_invocation_schema(&descriptor.parameters_schema, &invocation.input)?;
+
+        let input_bytes = serde_json::to_vec(&invocation.input).map_err(|error| {
+            WasmError::InvalidInvocation {
+                reason: error.to_string(),
+            }
+        })?;
+        let input_len =
+            i32::try_from(input_bytes.len()).map_err(|_| WasmError::InvalidInvocation {
+                reason: "input JSON is too large for the V1 WASM ABI".to_string(),
+            })?;
+
+        let start = Instant::now();
+        let mut store = self.fueled_store()?;
+        let instance = Instance::new(&mut store, &module.module, &[])
+            .map_err(|error| classify_wasmtime_error(error, self.config.fuel))?;
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .ok_or(WasmError::MissingMemory)?;
+        let alloc = instance
+            .get_typed_func::<i32, i32>(&mut store, "alloc")
+            .map_err(|_| WasmError::MissingExport {
+                export: "alloc".to_string(),
+            })?;
+        let run = instance
+            .get_typed_func::<(i32, i32), i32>(&mut store, module.export())
+            .map_err(|_| WasmError::MissingExport {
+                export: module.export().to_string(),
+            })?;
+        let output_ptr = instance
+            .get_typed_func::<(), i32>(&mut store, "output_ptr")
+            .map_err(|_| WasmError::MissingExport {
+                export: "output_ptr".to_string(),
+            })?;
+        let output_len = instance
+            .get_typed_func::<(), i32>(&mut store, "output_len")
+            .map_err(|_| WasmError::MissingExport {
+                export: "output_len".to_string(),
+            })?;
+
+        let input_ptr = alloc
+            .call(&mut store, input_len)
+            .map_err(|error| classify_wasmtime_error(error, self.config.fuel))?;
+        let input_offset = positive_offset(input_ptr, "alloc returned a negative input pointer")?;
+        memory
+            .write(&mut store, input_offset, &input_bytes)
+            .map_err(|error| WasmError::GuestAllocation {
+                reason: error.to_string(),
+            })?;
+
+        let status = run
+            .call(&mut store, (input_ptr, input_len))
+            .map_err(|error| classify_wasmtime_error(error, self.config.fuel))?;
+        let output_ptr_value = output_ptr
+            .call(&mut store, ())
+            .map_err(|error| classify_wasmtime_error(error, self.config.fuel))?;
+        let output_len_value = output_len
+            .call(&mut store, ())
+            .map_err(|error| classify_wasmtime_error(error, self.config.fuel))?;
+        let output_offset =
+            positive_offset(output_ptr_value, "output_ptr returned a negative pointer")?;
+        let output_len = positive_len(output_len_value)?;
+        if output_len as u64 > self.config.max_output_bytes {
+            return Err(WasmError::OutputLimitExceeded {
+                limit: self.config.max_output_bytes,
+                actual: output_len as u64,
+            });
+        }
+
+        let mut output_bytes = vec![0_u8; output_len];
+        memory
+            .read(&store, output_offset, &mut output_bytes)
+            .map_err(|error| WasmError::InvalidGuestOutput {
+                reason: error.to_string(),
+            })?;
+
+        if status != 0 {
+            return Err(guest_error(status, &output_bytes));
+        }
+
+        let output = serde_json::from_slice(&output_bytes).map_err(|error| {
+            WasmError::InvalidGuestOutput {
+                reason: error.to_string(),
+            }
+        })?;
+        let output_byte_count = output_bytes.len() as u64;
+        let fuel_consumed = self.fuel_consumed(&store);
+        let usage = resource_usage(start, output_byte_count);
+
+        Ok(CapabilityResult {
+            output,
+            reservation_id: reservation.id,
+            usage,
+            fuel_consumed,
+            output_bytes: output_byte_count,
+        })
+    }
+
     pub fn invoke_i32(
         &self,
         module: &PreparedWasmModule,
@@ -180,12 +328,7 @@ impl WasmRuntime {
         self.validate_descriptor(module, descriptor)?;
 
         let start = Instant::now();
-        let mut store = Store::new(&self.engine, ());
-        store
-            .set_fuel(self.config.fuel)
-            .map_err(|error| WasmError::Trap {
-                reason: error.to_string(),
-            })?;
+        let mut store = self.fueled_store()?;
 
         let instance = Instance::new(&mut store, &module.module, &[])
             .map_err(|error| classify_wasmtime_error(error, self.config.fuel))?;
@@ -207,23 +350,11 @@ impl WasmRuntime {
             });
         }
 
-        let fuel_remaining = store.get_fuel().unwrap_or(0);
-        let fuel_consumed = self.config.fuel.saturating_sub(fuel_remaining);
-        let wall_clock_ms = start.elapsed().as_millis().max(1) as u64;
-
         Ok(WasmInvocationResult {
             value,
             reservation_id: reservation.id,
-            usage: ResourceUsage {
-                usd: Decimal::ZERO,
-                input_tokens: 0,
-                output_tokens: 0,
-                wall_clock_ms,
-                output_bytes,
-                network_egress_bytes: 0,
-                process_count: 1,
-            },
-            fuel_consumed,
+            usage: resource_usage(start, output_bytes),
+            fuel_consumed: self.fuel_consumed(&store),
             output_bytes,
         })
     }
@@ -255,6 +386,120 @@ impl WasmRuntime {
             });
         }
         Ok(())
+    }
+
+    fn fueled_store(&self) -> Result<Store<()>, WasmError> {
+        let mut store = Store::new(&self.engine, ());
+        store
+            .set_fuel(self.config.fuel)
+            .map_err(|error| WasmError::Trap {
+                reason: error.to_string(),
+            })?;
+        Ok(store)
+    }
+
+    fn fuel_consumed(&self, store: &Store<()>) -> u64 {
+        self.config
+            .fuel
+            .saturating_sub(store.get_fuel().unwrap_or(0))
+    }
+}
+
+fn positive_offset(value: i32, reason: &str) -> Result<usize, WasmError> {
+    usize::try_from(value).map_err(|_| WasmError::InvalidGuestOutput {
+        reason: reason.to_string(),
+    })
+}
+
+fn positive_len(value: i32) -> Result<usize, WasmError> {
+    usize::try_from(value).map_err(|_| WasmError::InvalidGuestOutput {
+        reason: "output_len returned a negative length".to_string(),
+    })
+}
+
+fn guest_error(status: i32, output_bytes: &[u8]) -> WasmError {
+    let message = serde_json::from_slice::<Value>(output_bytes)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("message")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_else(|| "guest returned an error without a valid message".to_string());
+    WasmError::GuestError { status, message }
+}
+
+fn validate_invocation_schema(schema: &Value, input: &Value) -> Result<(), WasmError> {
+    if schema.is_null() {
+        return Ok(());
+    }
+
+    if let Some(expected_type) = schema.get("type").and_then(Value::as_str) {
+        validate_json_type(input, expected_type, "input")?;
+    }
+
+    let Some(input_object) = input.as_object() else {
+        return Ok(());
+    };
+
+    if let Some(required) = schema.get("required").and_then(Value::as_array) {
+        for field in required {
+            let Some(field) = field.as_str() else {
+                continue;
+            };
+            if !input_object.contains_key(field) {
+                return Err(WasmError::InvalidInvocation {
+                    reason: format!("missing required input field '{field}'"),
+                });
+            }
+        }
+    }
+
+    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+        for (field, property_schema) in properties {
+            let Some(value) = input_object.get(field) else {
+                continue;
+            };
+            if let Some(expected_type) = property_schema.get("type").and_then(Value::as_str) {
+                validate_json_type(value, expected_type, field)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_json_type(value: &Value, expected_type: &str, field: &str) -> Result<(), WasmError> {
+    let valid = match expected_type {
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "string" => value.is_string(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "number" => value.is_number(),
+        "boolean" => value.is_boolean(),
+        "null" => value.is_null(),
+        _ => true,
+    };
+
+    if valid {
+        Ok(())
+    } else {
+        Err(WasmError::InvalidInvocation {
+            reason: format!("input field '{field}' must be {expected_type}"),
+        })
+    }
+}
+
+fn resource_usage(start: Instant, output_bytes: u64) -> ResourceUsage {
+    ResourceUsage {
+        usd: Decimal::ZERO,
+        input_tokens: 0,
+        output_tokens: 0,
+        wall_clock_ms: start.elapsed().as_millis().max(1) as u64,
+        output_bytes,
+        network_egress_bytes: 0,
+        process_count: 1,
     }
 }
 
