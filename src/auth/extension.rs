@@ -37,7 +37,7 @@ use ironclaw_skills::{SkillCredentialSpec, SkillRegistry};
 pub enum AuthCheckResult {
     /// Credentials are present — proceed with execution.
     Ready,
-    /// Tool does not require any credentials for this call.
+    /// No credential gate applies after tool/host/scope filtering for this call.
     NoAuthRequired,
     /// One or more credentials are missing — pause and prompt.
     MissingCredentials(Vec<MissingCredential>),
@@ -380,6 +380,10 @@ impl AuthManager {
             "Pre-flight auth: credential registry lookup"
         );
         if matched.is_empty() {
+            // A host can have registered mappings that are all scoped to other
+            // skills. When nothing applies to the current turn, pre-flight
+            // should behave like any other unauthenticated HTTP call instead
+            // of prompting for a credential the turn cannot use.
             return AuthCheckResult::NoAuthRequired;
         }
 

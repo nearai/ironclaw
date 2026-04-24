@@ -271,17 +271,31 @@ pub struct SecretBindingApproval {
     pub approved_at: DateTime<Utc>,
 }
 
+#[derive(Serialize)]
+struct SecretBindingApprovalIdPayload<'a> {
+    artifact_fingerprint: &'a str,
+    artifact_kind: CredentialArtifactKind,
+    artifact_name: &'a str,
+    host: &'a str,
+    location: &'a CredentialLocation,
+    secret_name: &'a str,
+}
+
 impl SecretBindingApproval {
     pub fn approval_id(&self) -> String {
-        let payload = serde_json::json!({
-            "secret_name": self.secret_name,
-            "artifact_kind": self.artifact_kind,
-            "artifact_name": self.artifact_name,
-            "artifact_fingerprint": self.artifact_fingerprint,
-            "host": self.host,
-            "location": self.location,
-        });
-        let digest = blake3::hash(payload.to_string().as_bytes());
+        let payload = SecretBindingApprovalIdPayload {
+            artifact_fingerprint: &self.artifact_fingerprint,
+            artifact_kind: self.artifact_kind,
+            artifact_name: &self.artifact_name,
+            host: &self.host,
+            location: &self.location,
+            secret_name: &self.secret_name,
+        };
+        // safety: the payload only contains strings plus serde-serializable
+        // enums/structs with infallible derived `Serialize` impls.
+        let payload = serde_json::to_vec(&payload)
+            .unwrap_or_else(|_| unreachable!("secret binding approval id payload serializes"));
+        let digest = blake3::hash(&payload);
         hex::encode(digest.as_bytes())
     }
 }
@@ -367,6 +381,10 @@ impl CredentialMapping {
 ///
 /// User-authored/non-vetted bindings must bind to exact hosts only. Wildcard
 /// patterns are intentionally excluded from approval matching.
+///
+/// Request hosts are canonicalized with `Url::host_str()` before they reach the
+/// approval flow, so any `:port` suffix in the declared pattern is ignored here
+/// just like it is in the normal credential matcher.
 fn exact_host_matches_pattern(host: &str, pattern: &str) -> bool {
     if pattern == host {
         return true;
@@ -567,6 +585,63 @@ mod tests {
         let back: CredentialMapping = serde_json::from_str(&json).unwrap();
         assert_eq!(back.secret_name, "tok");
         assert_eq!(back.host_patterns, vec!["*.api.com".to_string()]);
+    }
+
+    #[test]
+    fn test_secret_binding_approval_id_is_stable() {
+        use chrono::{TimeZone, Utc};
+
+        use crate::secrets::types::{
+            CredentialArtifactKind, CredentialLocation, SecretBindingApproval,
+        };
+
+        let approval = SecretBindingApproval {
+            secret_name: "github_token".to_string(),
+            artifact_kind: CredentialArtifactKind::Skill,
+            artifact_name: "github-workflow".to_string(),
+            artifact_fingerprint: "skill-fingerprint-v1".to_string(),
+            host: "api.github.com".to_string(),
+            location: CredentialLocation::Header {
+                name: "X-Api-Key".to_string(),
+                prefix: Some("Bearer ".to_string()),
+            },
+            approved_at: Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap(),
+        };
+
+        assert_eq!(
+            approval.approval_id(),
+            "68d60f91c46bedb351def28b7c7b5ee423b64d3044259a5ffc201c58b97a6011",
+            "approval IDs must stay stable across serde_json map-order feature changes"
+        );
+    }
+
+    #[test]
+    fn test_approval_candidate_matches_exact_host_when_pattern_includes_port() {
+        use crate::secrets::types::{
+            CredentialArtifactKind, CredentialBindingPolicy, CredentialBindingProvenance,
+            CredentialMapping,
+        };
+
+        let mapping = CredentialMapping::bearer("github_token", "api.github.com:443")
+            .with_provenance(CredentialBindingProvenance {
+                artifact_kind: CredentialArtifactKind::Skill,
+                artifact_name: "github-workflow".to_string(),
+                artifact_fingerprint: "skill-fingerprint-v1".to_string(),
+                binding_policy: CredentialBindingPolicy::RequireApproval,
+            });
+
+        assert!(mapping.exact_host_match("api.github.com"));
+        assert!(
+            mapping
+                .approval_candidate_for_host("api.github.com")
+                .is_some()
+        );
+        assert!(!mapping.exact_host_match("uploads.github.com"));
+        assert!(
+            mapping
+                .approval_candidate_for_host("uploads.github.com")
+                .is_none()
+        );
     }
 
     #[test]

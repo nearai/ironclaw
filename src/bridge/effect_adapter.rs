@@ -1602,10 +1602,9 @@ impl EffectBridgeAdapter {
                             credential_name: ironclaw_common::CredentialName::from_trusted(
                                 cred_name.clone(),
                             ),
-                            instructions:
-                                crate::auth::extension::default_secret_setup_instructions(
-                                    &cred_name,
-                                ),
+                            instructions: crate::auth::extension::default_secret_setup_instructions(
+                                &cred_name,
+                            ),
                             auth_url: None,
                         },
                         None,

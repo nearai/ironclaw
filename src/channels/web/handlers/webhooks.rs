@@ -3,6 +3,10 @@
 //! `POST /api/webhooks/{path}` — matches the path against routines with
 //! `Trigger::Webhook { path, secret }`, validates the secret via constant-time
 //! comparison, and fires the matching routine through the `RoutineEngine`.
+//!
+//! dispatch-exempt: Webhook routing performs direct gateway/database lookups to
+//! locate the target routine before control transfers into the routine engine.
+//! These request-time routing guards are not `ToolDispatcher` operations.
 
 use std::sync::Arc;
 
@@ -104,6 +108,7 @@ async fn fire_webhook_inner(
     }
 
     let store = state.store.as_ref().ok_or((
+        // dispatch-exempt: webhook lookup needs the raw DB store before routine dispatch begins
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
