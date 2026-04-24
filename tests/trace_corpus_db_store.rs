@@ -55,6 +55,42 @@ mod libsql_trace_corpus_store {
         assert_eq!(inserted.tenant_id, tenant_id);
         assert_eq!(inserted.submission_id, submission_id);
         assert_eq!(inserted.status, TraceCorpusStatus::Accepted);
+        assert_eq!(
+            inserted.submitted_tenant_scope_ref.as_deref(),
+            Some(tenant_id)
+        );
+        assert_eq!(inserted.schema_version, "ironclaw.trace_contribution.v1");
+        assert_eq!(inserted.consent_policy_version, "2026-04-24");
+        assert_eq!(inserted.consent_scopes, vec!["training_allowed"]);
+        assert_eq!(inserted.allowed_uses, vec!["debugging", "training"]);
+        assert_eq!(inserted.retention_policy_id, "standard");
+        assert_eq!(inserted.privacy_risk, "low");
+        assert_eq!(inserted.redaction_pipeline_version, "deterministic-v1");
+        assert!(
+            inserted
+                .submission_score
+                .is_some_and(|score| (score - 0.82).abs() < 0.001)
+        );
+        assert!(
+            inserted
+                .credit_points_pending
+                .is_some_and(|points| (points - 1.0).abs() < 0.001)
+        );
+        assert!(inserted.credit_points_final.is_none());
+
+        let listed = backend
+            .list_trace_submissions(tenant_id)
+            .await
+            .expect("list submissions for tenant");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].submission_id, submission_id);
+        assert_eq!(listed[0].privacy_risk, "low");
+
+        let other_tenant_list = backend
+            .list_trace_submissions("tenant-beta")
+            .await
+            .expect("list submissions for other tenant");
+        assert!(other_tenant_list.is_empty());
 
         let object_ref_id = Uuid::new_v4();
         backend
@@ -140,6 +176,28 @@ mod libsql_trace_corpus_store {
             })
             .await
             .expect("append credit event");
+
+        let credit_events = backend
+            .list_trace_credit_events(tenant_id)
+            .await
+            .expect("list credit events for tenant");
+        assert_eq!(credit_events.len(), 1);
+        assert_eq!(credit_events[0].submission_id, submission_id);
+        assert_eq!(credit_events[0].trace_id, inserted.trace_id);
+        assert_eq!(credit_events[0].credit_account_ref, "credit:test");
+        assert_eq!(credit_events[0].event_type, TraceCreditEventType::Accepted);
+        assert_eq!(credit_events[0].points_delta, "1.0");
+        assert_eq!(
+            credit_events[0].settlement_state,
+            TraceCreditSettlementState::Pending
+        );
+        assert_eq!(credit_events[0].actor_role, "contributor");
+
+        let other_tenant_credit_events = backend
+            .list_trace_credit_events("tenant-beta")
+            .await
+            .expect("list credit events for other tenant");
+        assert!(other_tenant_credit_events.is_empty());
 
         let same_tenant = backend
             .get_trace_submission(tenant_id, submission_id)

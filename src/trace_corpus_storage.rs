@@ -124,8 +124,19 @@ pub struct TraceSubmissionRecord {
     pub status: TraceCorpusStatus,
     pub auth_principal_ref: String,
     pub contributor_pseudonym: Option<String>,
+    pub submitted_tenant_scope_ref: Option<String>,
+    pub schema_version: String,
+    pub consent_policy_version: String,
+    pub consent_scopes: Vec<String>,
+    pub allowed_uses: Vec<String>,
+    pub retention_policy_id: String,
+    pub privacy_risk: String,
+    pub redaction_pipeline_version: String,
     pub redaction_hash: String,
     pub canonical_summary_hash: Option<String>,
+    pub submission_score: Option<f32>,
+    pub credit_points_pending: Option<f32>,
+    pub credit_points_final: Option<f32>,
     pub received_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub reviewed_at: Option<DateTime<Utc>>,
@@ -235,6 +246,23 @@ pub struct TraceCreditEventWrite {
     pub settlement_state: TraceCreditSettlementState,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceCreditEventRecord {
+    pub credit_event_id: Uuid,
+    pub tenant_id: String,
+    pub submission_id: Uuid,
+    pub trace_id: Uuid,
+    pub credit_account_ref: String,
+    pub event_type: TraceCreditEventType,
+    pub points_delta: String,
+    pub reason: String,
+    pub external_ref: Option<String>,
+    pub actor_principal_ref: String,
+    pub actor_role: String,
+    pub settlement_state: TraceCreditSettlementState,
+    pub occurred_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TraceTombstoneWrite {
     pub tombstone_id: Uuid,
@@ -267,6 +295,16 @@ pub trait TraceCorpusStore: Send + Sync {
         tenant_id: &str,
         submission_id: Uuid,
     ) -> Result<Option<TraceSubmissionRecord>, DatabaseError>;
+
+    async fn list_trace_submissions(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError>;
+
+    async fn list_trace_credit_events(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceCreditEventRecord>, DatabaseError>;
 
     async fn update_trace_submission_status(
         &self,

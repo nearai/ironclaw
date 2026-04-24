@@ -7,13 +7,34 @@ use crate::db::trace_corpus_common::{audit_action_for_status, enum_from_storage,
 use crate::error::DatabaseError;
 use crate::trace_corpus_storage::{
     TraceArtifactInvalidationCounts, TraceAuditEventWrite, TraceAuditSafeMetadata,
-    TraceCorpusStatus, TraceCorpusStore, TraceCreditEventWrite, TraceDerivedRecordWrite,
-    TraceDerivedStatus, TraceObjectRefWrite, TraceSubmissionRecord, TraceSubmissionWrite,
-    TraceTombstoneWrite,
+    TraceCorpusStatus, TraceCorpusStore, TraceCreditEventRecord, TraceCreditEventWrite,
+    TraceCreditSettlementState, TraceDerivedRecordWrite, TraceDerivedStatus, TraceObjectRefWrite,
+    TraceSubmissionRecord, TraceSubmissionWrite, TraceTombstoneWrite,
 };
+
+fn json_array_strings(
+    value: serde_json::Value,
+    column: &str,
+) -> Result<Vec<String>, DatabaseError> {
+    let values = value.as_array().ok_or_else(|| {
+        DatabaseError::Serialization(format!("trace {column} column is not a JSON array"))
+    })?;
+    values
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_string).ok_or_else(|| {
+                DatabaseError::Serialization(format!(
+                    "trace {column} column contains a non-string value"
+                ))
+            })
+        })
+        .collect()
+}
 
 fn row_to_submission(row: &Row) -> Result<TraceSubmissionRecord, DatabaseError> {
     let status: String = row.get("status");
+    let consent_scopes: serde_json::Value = row.get("consent_scopes");
+    let allowed_uses: serde_json::Value = row.get("allowed_uses");
     Ok(TraceSubmissionRecord {
         tenant_id: row.get("tenant_id"),
         submission_id: row.get("submission_id"),
@@ -21,14 +42,48 @@ fn row_to_submission(row: &Row) -> Result<TraceSubmissionRecord, DatabaseError> 
         status: enum_from_storage::<TraceCorpusStatus>(&status, "TraceCorpusStatus")?,
         auth_principal_ref: row.get("auth_principal_ref"),
         contributor_pseudonym: row.get("contributor_pseudonym"),
+        submitted_tenant_scope_ref: row.get("submitted_tenant_scope_ref"),
+        schema_version: row.get("schema_version"),
+        consent_policy_version: row.get("consent_policy_version"),
+        consent_scopes: json_array_strings(consent_scopes, "consent_scopes")?,
+        allowed_uses: json_array_strings(allowed_uses, "allowed_uses")?,
+        retention_policy_id: row.get("retention_policy_id"),
+        privacy_risk: row.get("privacy_risk"),
+        redaction_pipeline_version: row.get("redaction_pipeline_version"),
         redaction_hash: row.get("redaction_hash"),
         canonical_summary_hash: row.get("canonical_summary_hash"),
+        submission_score: row.get("submission_score"),
+        credit_points_pending: row.get("credit_points_pending"),
+        credit_points_final: row.get("credit_points_final"),
         received_at: row.get("received_at"),
         updated_at: row.get("updated_at"),
         reviewed_at: row.get("reviewed_at"),
         revoked_at: row.get("revoked_at"),
         expires_at: row.get("expires_at"),
         purged_at: row.get("purged_at"),
+    })
+}
+
+fn row_to_credit_event(row: &Row) -> Result<TraceCreditEventRecord, DatabaseError> {
+    let event_type: String = row.get("event_type");
+    let settlement_state: String = row.get("settlement_state");
+    Ok(TraceCreditEventRecord {
+        tenant_id: row.get("tenant_id"),
+        credit_event_id: row.get("credit_event_id"),
+        submission_id: row.get("submission_id"),
+        trace_id: row.get("trace_id"),
+        credit_account_ref: row.get("credit_account_ref"),
+        event_type: enum_from_storage(&event_type, "TraceCreditEventType")?,
+        points_delta: row.get("points_delta"),
+        reason: row.get("reason"),
+        external_ref: row.get("external_ref"),
+        actor_principal_ref: row.get("actor_principal_ref"),
+        actor_role: row.get("actor_role"),
+        settlement_state: enum_from_storage::<TraceCreditSettlementState>(
+            &settlement_state,
+            "TraceCreditSettlementState",
+        )?,
+        occurred_at: row.get("occurred_at"),
     })
 }
 
@@ -97,8 +152,12 @@ impl TraceCorpusStore for PgBackend {
                     updated_at = NOW()
                  RETURNING
                     tenant_id, submission_id, trace_id, status, auth_principal_ref,
-                    contributor_pseudonym, redaction_hash, canonical_summary_hash,
-                    received_at, updated_at, reviewed_at, revoked_at, expires_at, purged_at",
+                    contributor_pseudonym, submitted_tenant_scope_ref, schema_version,
+                    consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
+                    privacy_risk, redaction_pipeline_version, redaction_hash,
+                    canonical_summary_hash, submission_score, credit_points_pending,
+                    credit_points_final, received_at, updated_at, reviewed_at, revoked_at,
+                    expires_at, purged_at",
                 &[
                     &submission.tenant_id,
                     &submission.submission_id,
@@ -137,8 +196,12 @@ impl TraceCorpusStore for PgBackend {
             .query_opt(
                 "SELECT
                     tenant_id, submission_id, trace_id, status, auth_principal_ref,
-                    contributor_pseudonym, redaction_hash, canonical_summary_hash,
-                    received_at, updated_at, reviewed_at, revoked_at, expires_at, purged_at
+                    contributor_pseudonym, submitted_tenant_scope_ref, schema_version,
+                    consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
+                    privacy_risk, redaction_pipeline_version, redaction_hash,
+                    canonical_summary_hash, submission_score, credit_points_pending,
+                    credit_points_final, received_at, updated_at, reviewed_at, revoked_at,
+                    expires_at, purged_at
                  FROM trace_submissions
                  WHERE tenant_id = $1 AND submission_id = $2",
                 &[&tenant_id, &submission_id],
@@ -146,6 +209,52 @@ impl TraceCorpusStore for PgBackend {
             .await
             .map_err(DatabaseError::Postgres)?;
         row.as_ref().map(row_to_submission).transpose()
+    }
+
+    async fn list_trace_submissions(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError> {
+        let client = self.pool().get().await?;
+        let rows = client
+            .query(
+                "SELECT
+                    tenant_id, submission_id, trace_id, status, auth_principal_ref,
+                    contributor_pseudonym, submitted_tenant_scope_ref, schema_version,
+                    consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
+                    privacy_risk, redaction_pipeline_version, redaction_hash,
+                    canonical_summary_hash, submission_score, credit_points_pending,
+                    credit_points_final, received_at, updated_at, reviewed_at, revoked_at,
+                    expires_at, purged_at
+                 FROM trace_submissions
+                 WHERE tenant_id = $1
+                 ORDER BY received_at ASC",
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        rows.iter().map(row_to_submission).collect()
+    }
+
+    async fn list_trace_credit_events(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceCreditEventRecord>, DatabaseError> {
+        let client = self.pool().get().await?;
+        let rows = client
+            .query(
+                "SELECT
+                    tenant_id, credit_event_id, submission_id, trace_id, credit_account_ref,
+                    event_type, points_delta, reason, external_ref, actor_principal_ref,
+                    actor_role, settlement_state, occurred_at
+                 FROM trace_credit_ledger
+                 WHERE tenant_id = $1
+                 ORDER BY occurred_at ASC",
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        rows.iter().map(row_to_credit_event).collect()
     }
 
     async fn update_trace_submission_status(

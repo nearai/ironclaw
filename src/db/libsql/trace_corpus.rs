@@ -8,10 +8,19 @@ use crate::db::trace_corpus_common::{
 use crate::error::DatabaseError;
 use crate::trace_corpus_storage::{
     TraceArtifactInvalidationCounts, TraceAuditEventWrite, TraceAuditSafeMetadata,
-    TraceCorpusStatus, TraceCorpusStore, TraceCreditEventWrite, TraceDerivedRecordWrite,
-    TraceDerivedStatus, TraceObjectRefWrite, TraceSubmissionRecord, TraceSubmissionWrite,
-    TraceTombstoneWrite,
+    TraceCorpusStatus, TraceCorpusStore, TraceCreditEventRecord, TraceCreditEventWrite,
+    TraceCreditSettlementState, TraceDerivedRecordWrite, TraceDerivedStatus, TraceObjectRefWrite,
+    TraceSubmissionRecord, TraceSubmissionWrite, TraceTombstoneWrite,
 };
+
+const TRACE_SUBMISSION_COLUMNS: &str = "\
+    tenant_id, submission_id, trace_id, status, auth_principal_ref, \
+    contributor_pseudonym, submitted_tenant_scope_ref, schema_version, \
+    consent_policy_version, consent_scopes, allowed_uses, retention_policy_id, \
+    privacy_risk, redaction_pipeline_version, redaction_hash, \
+    canonical_summary_hash, submission_score, credit_points_pending, \
+    credit_points_final, received_at, updated_at, reviewed_at, revoked_at, \
+    expires_at, purged_at";
 
 fn opt_f32(value: Option<f32>) -> libsql::Value {
     match value {
@@ -41,9 +50,35 @@ fn opt_string(value: Option<String>) -> libsql::Value {
     }
 }
 
+fn get_opt_f32(row: &libsql::Row, idx: i32) -> Option<f32> {
+    row.get::<f64>(idx)
+        .ok()
+        .map(|value| value as f32)
+        .or_else(|| row.get::<i64>(idx).ok().map(|value| value as f32))
+}
+
 fn json_string<T: serde::Serialize>(value: &T) -> Result<String, DatabaseError> {
     serde_json::to_string(value)
         .map_err(|e| DatabaseError::Serialization(format!("trace corpus JSON encode failed: {e}")))
+}
+
+fn json_array_strings(raw: &str, column: &str) -> Result<Vec<String>, DatabaseError> {
+    let value: serde_json::Value = serde_json::from_str(raw).map_err(|e| {
+        DatabaseError::Serialization(format!("trace {column} column JSON decode failed: {e}"))
+    })?;
+    let values = value.as_array().ok_or_else(|| {
+        DatabaseError::Serialization(format!("trace {column} column is not a JSON array"))
+    })?;
+    values
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_string).ok_or_else(|| {
+                DatabaseError::Serialization(format!(
+                    "trace {column} column contains a non-string value"
+                ))
+            })
+        })
+        .collect()
 }
 
 fn row_to_submission(row: &libsql::Row) -> Result<TraceSubmissionRecord, DatabaseError> {
@@ -55,14 +90,46 @@ fn row_to_submission(row: &libsql::Row) -> Result<TraceSubmissionRecord, Databas
         status,
         auth_principal_ref: get_text(row, 4),
         contributor_pseudonym: get_opt_text(row, 5),
-        redaction_hash: get_text(row, 6),
-        canonical_summary_hash: get_opt_text(row, 7),
-        received_at: get_ts(row, 8),
-        updated_at: get_ts(row, 9),
-        reviewed_at: get_opt_ts(row, 10),
-        revoked_at: get_opt_ts(row, 11),
-        expires_at: get_opt_ts(row, 12),
-        purged_at: get_opt_ts(row, 13),
+        submitted_tenant_scope_ref: get_opt_text(row, 6),
+        schema_version: get_text(row, 7),
+        consent_policy_version: get_text(row, 8),
+        consent_scopes: json_array_strings(&get_text(row, 9), "consent_scopes")?,
+        allowed_uses: json_array_strings(&get_text(row, 10), "allowed_uses")?,
+        retention_policy_id: get_text(row, 11),
+        privacy_risk: get_text(row, 12),
+        redaction_pipeline_version: get_text(row, 13),
+        redaction_hash: get_text(row, 14),
+        canonical_summary_hash: get_opt_text(row, 15),
+        submission_score: get_opt_f32(row, 16),
+        credit_points_pending: get_opt_f32(row, 17),
+        credit_points_final: get_opt_f32(row, 18),
+        received_at: get_ts(row, 19),
+        updated_at: get_ts(row, 20),
+        reviewed_at: get_opt_ts(row, 21),
+        revoked_at: get_opt_ts(row, 22),
+        expires_at: get_opt_ts(row, 23),
+        purged_at: get_opt_ts(row, 24),
+    })
+}
+
+fn row_to_credit_event(row: &libsql::Row) -> Result<TraceCreditEventRecord, DatabaseError> {
+    Ok(TraceCreditEventRecord {
+        tenant_id: get_text(row, 0),
+        credit_event_id: parse_uuid(&get_text(row, 1), "trace_credit_ledger.credit_event_id")?,
+        submission_id: parse_uuid(&get_text(row, 2), "trace_credit_ledger.submission_id")?,
+        trace_id: parse_uuid(&get_text(row, 3), "trace_credit_ledger.trace_id")?,
+        credit_account_ref: get_text(row, 4),
+        event_type: enum_from_storage(&get_text(row, 5), "TraceCreditEventType")?,
+        points_delta: get_text(row, 6),
+        reason: get_text(row, 7),
+        external_ref: get_opt_text(row, 8),
+        actor_principal_ref: get_text(row, 9),
+        actor_role: get_text(row, 10),
+        settlement_state: enum_from_storage::<TraceCreditSettlementState>(
+            &get_text(row, 11),
+            "TraceCreditSettlementState",
+        )?,
+        occurred_at: get_ts(row, 12),
     })
 }
 
@@ -165,12 +232,11 @@ impl TraceCorpusStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT
-                    tenant_id, submission_id, trace_id, status, auth_principal_ref,
-                    contributor_pseudonym, redaction_hash, canonical_summary_hash,
-                    received_at, updated_at, reviewed_at, revoked_at, expires_at, purged_at
-                 FROM trace_submissions
-                 WHERE tenant_id = ?1 AND submission_id = ?2",
+                &format!(
+                    "SELECT {TRACE_SUBMISSION_COLUMNS}
+                     FROM trace_submissions
+                     WHERE tenant_id = ?1 AND submission_id = ?2"
+                ),
                 libsql::params![tenant_id, submission_id.to_string()],
             )
             .await
@@ -183,6 +249,63 @@ impl TraceCorpusStore for LibSqlBackend {
             Some(row) => Ok(Some(row_to_submission(&row)?)),
             None => Ok(None),
         }
+    }
+
+    async fn list_trace_submissions(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {TRACE_SUBMISSION_COLUMNS}
+                     FROM trace_submissions
+                     WHERE tenant_id = ?1
+                     ORDER BY received_at ASC"
+                ),
+                libsql::params![tenant_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut submissions = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            submissions.push(row_to_submission(&row)?);
+        }
+        Ok(submissions)
+    }
+
+    async fn list_trace_credit_events(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceCreditEventRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT
+                    tenant_id, credit_event_id, submission_id, trace_id, credit_account_ref,
+                    event_type, points_delta, reason, external_ref, actor_principal_ref,
+                    actor_role, settlement_state, occurred_at
+                 FROM trace_credit_ledger
+                 WHERE tenant_id = ?1
+                 ORDER BY occurred_at ASC",
+                libsql::params![tenant_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut events = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            events.push(row_to_credit_event(&row)?);
+        }
+        Ok(events)
     }
 
     async fn update_trace_submission_status(
