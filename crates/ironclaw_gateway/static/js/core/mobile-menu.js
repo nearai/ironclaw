@@ -34,7 +34,9 @@
     menu.classList.add('open');
     backdrop.classList.add('open');
     menu.setAttribute('aria-hidden', 'false');
+    menu.removeAttribute('inert');
     hamburger.setAttribute('aria-expanded', 'true');
+    hamburger.setAttribute('aria-label', 'Close menu');
     document.body.classList.add('mobile-menu-open');
   }
 
@@ -42,7 +44,9 @@
     menu.classList.remove('open');
     backdrop.classList.remove('open');
     menu.setAttribute('aria-hidden', 'true');
+    menu.setAttribute('inert', '');
     hamburger.setAttribute('aria-expanded', 'false');
+    hamburger.setAttribute('aria-label', 'Open menu');
     document.body.classList.remove('mobile-menu-open');
   }
 

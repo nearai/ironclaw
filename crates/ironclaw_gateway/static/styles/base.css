@@ -41,9 +41,10 @@ body {
 
 /* --- Mobile responsive --- */
 
-/* Mobile hamburger header + drawer: only rendered at ≤768px. The desktop
-   tab-bar and thread-sidebar are hidden in the same block; mobile-menu.js
-   mirrors them into the drawer. */
+/* Mobile hamburger header + drawer: only rendered at ≤768px.
+   mobile-menu.js mirrors the desktop navigation into the drawer.
+   (The desktop .tab-bar is hidden via layout.css's mobile media query;
+   the thread-sidebar is hidden inside #tab-chat below.) */
 .mobile-header,
 .mobile-menu,
 .mobile-menu-backdrop {
@@ -64,7 +65,11 @@ body {
     display: none;
   }
 
-  /* --- Mobile header --- */
+  /* --- Mobile header ---
+     Stays above the drawer (200) and backdrop (150) when open so the
+     hamburger (now an X via CSS) remains tappable for dismissal — the
+     animated bars-to-X transform would be pointless if the drawer covered
+     the button. */
   .mobile-header {
     display: flex;
     align-items: center;
@@ -79,7 +84,7 @@ body {
     backdrop-filter: var(--glass-blur);
     -webkit-backdrop-filter: var(--glass-blur);
     border-bottom: 1px solid var(--border);
-    z-index: 100;
+    z-index: 250;
   }
 
   .mobile-title {
@@ -156,11 +161,14 @@ body {
     display: flex;
     flex-direction: column;
     position: fixed;
-    top: 0;
+    /* Sit below the fixed header so the IronClaw title stays visible
+       when the drawer is open and the hamburger-to-X button remains
+       tappable for dismissal. */
+    top: calc(48px + env(safe-area-inset-top));
     bottom: 0;
     left: 0;
     width: min(280px, 85vw);
-    padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+    padding: var(--space-2) 0 env(safe-area-inset-bottom);
     background: var(--bg-secondary, var(--bg));
     border-right: 1px solid var(--border);
     box-shadow: 2px 0 16px rgba(0, 0, 0, 0.3);
