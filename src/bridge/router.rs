@@ -1826,6 +1826,16 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     mission_manager_inner =
         mission_manager_inner.with_insights_interval(missions_config.insights_interval);
     let mission_manager = Arc::new(mission_manager_inner);
+    // Populate the shared `MissionSlot` on the tool registry so any
+    // downstream tool registered through `ExternalToolRegistrar`
+    // (before the engine was up) can reach the manager at execute
+    // time. See `tools::registry::MissionSlot` for the contract.
+    // Built-in engine mission actions don't use this slot — they go
+    // through the canonical bridge/capability surface.
+    agent
+        .tools()
+        .set_mission_slot(Arc::clone(&mission_manager), project_id)
+        .await;
     if let Err(e) = thread_manager.recover_project_threads(project_id).await {
         debug!("engine v2: recover_project_threads failed: {e}");
     }

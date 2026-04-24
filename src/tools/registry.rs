@@ -121,6 +121,34 @@ pub fn is_protected_tool_name(name: &str) -> bool {
     PROTECTED_TOOL_NAMES.contains(&name)
 }
 
+/// Deferred-injection handle for the engine's `MissionManager`.
+///
+/// The `MissionManager` is constructed inside `bridge/router.rs::init_engine`,
+/// which runs well after `ToolRegistry` is built in
+/// `AppBuilder::init_tools`. Any tool registered before the engine
+/// initializes — typically a downstream integration tool plugged in
+/// through [`crate::tools::ExternalToolRegistrar`] — takes an
+/// `Arc<MissionSlot>` at construction time and reads through it at
+/// execute time. The slot is empty until
+/// [`ToolRegistry::set_mission_slot`] fills it, at which point every
+/// holder of the `Arc` sees the manager.
+///
+/// **This slot is a plumbing primitive, not a new mission lifecycle.**
+/// It does not introduce a second set of mission CRUD tools — the v2
+/// engine's canonical mission action surface remains unchanged. The
+/// slot just exposes the existing `MissionManager` to in-process Rust
+/// tools that need to create or fire a mission from inside their
+/// `execute()` body (e.g. a downstream "schedule this for later"
+/// action).
+pub type MissionSlot = Arc<
+    tokio::sync::RwLock<
+        Option<(
+            Arc<ironclaw_engine::MissionManager>,
+            ironclaw_engine::ProjectId,
+        )>,
+    >,
+>;
+
 /// Registry of available tools.
 pub struct ToolRegistry {
     tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
@@ -143,6 +171,11 @@ pub struct ToolRegistry {
     /// Active engine version. Controls which tools are visible via
     /// `tool_definitions()`, `all()`, etc. Defaults to V1.
     engine_version: EngineVersion,
+    /// Deferred-injection slot for the engine's `MissionManager`. See
+    /// [`MissionSlot`] for the contract; filled by
+    /// `bridge/router.rs::init_engine` once the manager is constructed.
+    /// Shared by `Arc::clone` into any tool that needs mission access.
+    pub(crate) mission_slot: MissionSlot,
 }
 
 impl ToolRegistry {
@@ -172,6 +205,7 @@ impl ToolRegistry {
             http_interceptor: None,
             message_tool: RwLock::new(None),
             engine_version: EngineVersion::V1,
+            mission_slot: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
@@ -236,6 +270,27 @@ impl ToolRegistry {
 
     pub fn role_lookup(&self) -> Option<&Arc<dyn UserStore>> {
         self.role_lookup.as_ref()
+    }
+
+    /// Borrow the shared mission slot. Downstream tools that need to
+    /// create or fire missions should `Arc::clone` the returned value
+    /// and read through it at execute time. See [`MissionSlot`] for the
+    /// lifetime contract.
+    pub fn mission_slot(&self) -> &MissionSlot {
+        &self.mission_slot
+    }
+
+    /// Populate the shared mission slot. Called by
+    /// `bridge/router.rs::init_engine` once the engine constructs its
+    /// `MissionManager`. Every tool that holds an `Arc<MissionSlot>`
+    /// sees the manager immediately after this returns.
+    pub async fn set_mission_slot(
+        &self,
+        manager: Arc<ironclaw_engine::MissionManager>,
+        project_id: ironclaw_engine::ProjectId,
+    ) {
+        let mut guard = self.mission_slot.write().await;
+        *guard = Some((manager, project_id));
     }
 
     /// Register a tool. Rejects dynamic tools that try to shadow a protected built-in name.
@@ -455,6 +510,157 @@ impl ToolRegistry {
         self.register_sync(Arc::new(http));
 
         tracing::debug!("Registered {} built-in tools", self.count());
+    }
+
+    /// Load integration credential mappings from a JSON file and merge them
+    /// into the shared credential registry. Used by downstream deployments
+    /// that ship an `integrations/<name>/credentials.json` file alongside
+    /// the binary so the host can auto-inject per-secret credentials on
+    /// matching HTTP requests. See `AppBuilder::init_tools` for the
+    /// `INTEGRATION_CREDENTIALS_DIR` env-var-driven loader that wraps this.
+    ///
+    /// File format:
+    /// ```json
+    /// { "mappings": [
+    ///     { "secret_name": "...",
+    ///       "location": { "type": "bearer" | "header" | "query", "name": "..." },
+    ///       "host_patterns": ["..."],
+    ///       "path_patterns": ["..."] }
+    /// ] }
+    /// ```
+    ///
+    /// Missing / malformed files log a warning and return — never fatal.
+    pub fn load_credential_mappings(&self, path: &std::path::Path) {
+        use crate::secrets::{CredentialLocation, CredentialMapping};
+
+        let cr = match &self.credential_registry {
+            Some(cr) => cr,
+            None => {
+                tracing::warn!(
+                    "Cannot load credential mappings from {}: no credential registry attached to this ToolRegistry",
+                    path.display()
+                );
+                return;
+            }
+        };
+
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to read credential mappings from {}: {}",
+                    path.display(),
+                    e
+                );
+                return;
+            }
+        };
+        let json: serde_json::Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to parse credential mappings from {}: {}",
+                    path.display(),
+                    e
+                );
+                return;
+            }
+        };
+        let entries = match json.get("mappings").and_then(|v| v.as_array()) {
+            Some(arr) => arr,
+            None => {
+                tracing::warn!("No 'mappings' array in {}", path.display());
+                return;
+            }
+        };
+
+        let mut mappings = Vec::new();
+        for entry in entries {
+            let secret_name = match entry.get("secret_name").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let host_patterns: Vec<String> = entry
+                .get("host_patterns")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let path_patterns: Vec<String> = entry
+                .get("path_patterns")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let location = match entry
+                .get("location")
+                .and_then(|v| v.get("type"))
+                .and_then(|v| v.as_str())
+            {
+                Some("bearer") => CredentialLocation::AuthorizationBearer,
+                Some("header") => {
+                    let name = match entry["location"]["name"].as_str() {
+                        Some(n) => n.to_string(),
+                        None => {
+                            tracing::warn!(
+                                "Skipping credential mapping '{}': header location missing 'name'",
+                                secret_name
+                            );
+                            continue;
+                        }
+                    };
+                    let prefix = entry["location"]["prefix"].as_str().map(String::from);
+                    CredentialLocation::Header { name, prefix }
+                }
+                Some("query") => {
+                    let name = match entry["location"]["name"].as_str() {
+                        Some(n) => n.to_string(),
+                        None => {
+                            tracing::warn!(
+                                "Skipping credential mapping '{}': query location missing 'name'",
+                                secret_name
+                            );
+                            continue;
+                        }
+                    };
+                    CredentialLocation::QueryParam { name }
+                }
+                other => {
+                    tracing::warn!(
+                        "Skipping credential mapping '{}': unknown location type {:?}",
+                        secret_name,
+                        other
+                    );
+                    continue;
+                }
+            };
+
+            mappings.push(CredentialMapping {
+                secret_name,
+                location,
+                host_patterns,
+                path_patterns,
+                optional: entry
+                    .get("optional")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            });
+        }
+
+        let count = mappings.len();
+        cr.add_mappings(mappings);
+        tracing::debug!(
+            "Loaded {} credential mapping(s) from {}",
+            count,
+            path.display()
+        );
     }
 
     /// Register the `tool_info` discovery tool.
