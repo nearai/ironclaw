@@ -660,7 +660,6 @@ pub(crate) async fn extensions_setup_submit_handler(
 
 #[cfg(test)]
 mod tests {
-
     use axum::{
         Router,
         http::StatusCode,

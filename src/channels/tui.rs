@@ -121,6 +121,7 @@ fn build_tui_incoming_message(
     user_id: &str,
     sys_tz: &str,
 ) -> IncomingMessage {
+    let shell_mode = user_msg.shell_mode;
     let attachments: Vec<IncomingAttachment> = user_msg
         .attachments
         .into_iter()
@@ -140,15 +141,28 @@ fn build_tui_incoming_message(
         })
         .collect();
 
-    let msg = IncomingMessage::new("tui", user_id, &user_msg.text)
+    let mut msg = IncomingMessage::new("tui", user_id, &user_msg.text)
         .with_timezone(sys_tz)
         .with_attachments(attachments);
 
     if let Some(thread_id) = user_msg.thread_id {
-        msg.with_thread(thread_id)
-    } else {
-        msg
+        msg = msg.with_thread(thread_id);
     }
+
+    // `shell_mode` piggy-backs on the existing metadata channel so
+    // the TUI doesn't need a separate dispatch plumbing —
+    // `Agent::handle_message` checks for this flag and intercepts
+    // to run the shell tool directly, mirroring what the web
+    // gateway's `handle_shell_send` does for
+    // `ChatSendMode::Shell`. Kept as a plain boolean so wire
+    // round-trips through serde don't invent new variants.
+    if shell_mode {
+        let mut metadata = msg.metadata.as_object().cloned().unwrap_or_default();
+        metadata.insert("shell_mode".into(), serde_json::Value::Bool(true));
+        msg = msg.with_metadata(serde_json::Value::Object(metadata));
+    }
+
+    msg
 }
 
 fn build_engine_thread_detail_event(detail: crate::bridge::EngineThreadDetail) -> TuiEvent {

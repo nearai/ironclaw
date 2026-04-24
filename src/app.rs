@@ -607,13 +607,14 @@ impl AppBuilder {
             let reasoning_llm: Option<Arc<dyn LlmProvider>> =
                 cheap_llm.map(Arc::clone).or_else(|| Some(Arc::clone(llm)));
             tools.register_memory_tools_with_resolver(
-                pool,
+                Arc::clone(&pool),
                 reasoning_llm,
                 self.config.search.reasoning_enabled,
             );
+            tools.register_project_admin_tools(pool);
             tracing::debug!(
                 multi_tenant = is_multi_tenant,
-                "Memory tools configured with per-user workspace resolver"
+                "Memory + project-admin tools configured with per-user workspace resolver"
             );
 
             (Some(ws), Some(pool_for_hooks))

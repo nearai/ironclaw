@@ -148,8 +148,25 @@ impl Agent {
 
         // Select active skills. Explicit /skill-name mentions are force-activated
         // and replaced with the skill's description in the rewritten message.
+        //
+        // Activation context: pulled from `message.metadata`, populated by
+        // the gateway's chat-send handler when the message's thread has
+        // an effective project. Legacy channels leave metadata empty and
+        // the context defaults to admitting every skill.
+        let activation_context = ironclaw_skills::SkillActivationContext {
+            project_has_github_repo: message
+                .metadata
+                .get("project_has_github_repo")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            project_has_workspace_path: message
+                .metadata
+                .get("project_has_workspace_path")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        };
         let (active_skills, rewritten_content, skill_feedback) = self
-            .select_active_skills(&message.content, &message.user_id)
+            .select_active_skills(&message.content, &message.user_id, &activation_context)
             .await;
 
         // Surface the selection decision to the channel so the web UI can

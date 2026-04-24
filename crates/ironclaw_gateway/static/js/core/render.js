@@ -339,17 +339,78 @@ function copyCodeBlock(btn) {
 function copyMessage(btn) {
   const message = btn.closest('.message');
   if (!message) return;
-  const text = message.getAttribute('data-copy-text')
+  // `data-copy-text` holds the raw user/assistant content (markdown
+  // for assistant, plain text for user). Fallback chain covers
+  // streaming messages before `appendToLastAssistant` wrote the
+  // attribute; the last-resort `textContent` path pulls from the
+  // rendered content element so the copy button's own label
+  // ("Copy" / "Copied") can't leak into the clipboard.
+  let text = message.getAttribute('data-copy-text')
     || message.getAttribute('data-raw')
-    || message.textContent
     || '';
-  navigator.clipboard.writeText(text).then(() => {
+  if (!text) {
+    const contentEl = message.querySelector('.message-content');
+    text = contentEl ? contentEl.textContent : '';
+  }
+  text = text || '';
+
+  const succeed = () => {
     btn.textContent = I18n.t('message.copied');
     setTimeout(() => { btn.textContent = I18n.t('message.copy'); }, 1200);
-  }).catch(() => {
+  };
+  const fail = (err) => {
+    if (err) console.warn('copyMessage: clipboard write failed', err);
     btn.textContent = I18n.t('common.copyFailed');
     setTimeout(() => { btn.textContent = I18n.t('message.copy'); }, 1200);
-  });
+  };
+
+  // Prefer the async Clipboard API (requires a secure context — https
+  // or localhost — and an active document focus). Some environments
+  // (older browsers, insecure origins, extension sandboxes that
+  // strip `navigator.clipboard`) still need the legacy `execCommand`
+  // path, so fall back gracefully instead of silently dropping the
+  // copy. `fallbackCopyToClipboard` is exported from render.js.
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    navigator.clipboard.writeText(text).then(succeed).catch((err) => {
+      if (fallbackCopyToClipboard(text)) {
+        succeed();
+      } else {
+        fail(err);
+      }
+    });
+    return;
+  }
+  if (fallbackCopyToClipboard(text)) {
+    succeed();
+  } else {
+    fail(null);
+  }
+}
+
+// Legacy `document.execCommand('copy')` path — used when the async
+// Clipboard API is unavailable or rejects. Returns `true` on
+// success. Hidden `<textarea>` preserves multi-line content and is
+// positioned off-screen (not `display: none`, which prevents
+// selection in some browsers).
+function fallbackCopyToClipboard(text) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '0';
+    ta.style.left = '-10000px';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    const ok = document.execCommand && document.execCommand('copy');
+    document.body.removeChild(ta);
+    return !!ok;
+  } catch (err) {
+    console.warn('fallbackCopyToClipboard: execCommand path failed', err);
+    return false;
+  }
 }
 
 let _lastMessageDate = null;

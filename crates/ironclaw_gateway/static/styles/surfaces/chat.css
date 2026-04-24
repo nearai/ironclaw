@@ -60,6 +60,18 @@
   100% { opacity: 1; transform: translateY(0) scale(1); }
 }
 
+/* During a history replay (SSE reconnect after the browser tab has
+   been backgrounded past `SSE_RELOAD_THRESHOLD_MS`) the list is
+   rebuilt from `/api/chat/history`. Suppressing the per-message
+   slide-in in that window removes the "bounce cascade" that fires
+   on every tab refocus — the messages are the same ones the user
+   was just looking at. `loadHistory()`'s `.finally` clears the
+   flag so fresh streamed turns still animate. */
+.history-replay .message,
+.history-replay .shell-turn {
+  animation: none !important;
+}
+
 .message[data-streaming="true"]::after {
   content: '';
   display: inline-block;

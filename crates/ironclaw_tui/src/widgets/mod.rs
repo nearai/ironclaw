@@ -106,6 +106,14 @@ pub struct AppState {
     /// Pending approval request (if any).
     pub pending_approval: Option<ApprovalRequest>,
 
+    /// Shell-mode flag. When `true`, the input prompt renders `!`
+    /// instead of `›` and the next submit dispatches the buffered
+    /// text as a shell command via `mode=shell`. Toggled on when the
+    /// user types a leading `!` and cancelled on Esc or when the
+    /// buffer is emptied back below the prefix. Mirrors the gateway
+    /// UI's `!`-prefix behaviour so both surfaces feel identical.
+    pub shell_mode: bool,
+
     /// Whether the TUI should quit.
     pub should_quit: bool,
 
@@ -241,6 +249,7 @@ impl Default for AppState {
             is_streaming: false,
             sidebar_visible: true,
             pending_approval: None,
+            shell_mode: false,
             should_quit: false,
             active_tab: ActiveTab::default(),
             log_entries: LogRingBuffer::new(500),

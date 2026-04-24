@@ -323,6 +323,7 @@ mod tests {
             source_channel: None,
             user_timezone: None,
             thread_goal: None,
+            thread_metadata: serde_json::Value::Null,
         };
 
         let actions = ActionProjector::project(
@@ -398,6 +399,7 @@ mod tests {
             source_channel: None,
             user_timezone: None,
             thread_goal: None,
+            thread_metadata: serde_json::Value::Null,
         };
 
         let actions = ActionProjector::project(

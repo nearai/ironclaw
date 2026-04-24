@@ -78,6 +78,14 @@ let eventSource = null;
 let logEventSource = null;
 let currentTab = 'chat';
 let currentThreadId = null;
+// Expose on window as a read-only getter so Playwright scenarios can observe
+// the active thread id without needing postMessage wiring. The setter is a
+// no-op so production code can keep using the module-scoped binding.
+Object.defineProperty(window, 'currentThreadId', {
+  configurable: true,
+  get() { return currentThreadId; },
+  set() { /* read-only for external callers */ },
+});
 let currentThreadIsReadOnly = false;
 const threadChannelHints = new Map();
 let hasMore = false;

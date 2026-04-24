@@ -110,6 +110,80 @@ pub struct ActivationCriteria {
     /// for the developer setup).
     #[serde(default)]
     pub setup_marker: Option<String>,
+    /// Runtime-context constraints evaluated at selection time (rather
+    /// than at skill-load time like [`GatingRequirements`]).
+    ///
+    /// Added for the gateway's coding-agent flow so a skill like
+    /// `coding-repo` can declare "only fire when the active project has
+    /// a `github_repo` configured" without every message triggering the
+    /// GitHub-specific prompt body. The selector walks each candidate's
+    /// [`ContextCriteria::require_project_field`] against the caller's
+    /// [`SkillActivationContext`] and drops any skill whose constraint
+    /// isn't satisfied.
+    ///
+    /// Callers that don't have project context (CLI, REPL, legacy
+    /// channels) pass the default [`SkillActivationContext`] which
+    /// admits every skill — the gate is purely opt-in.
+    #[serde(default)]
+    pub context: ContextCriteria,
+}
+
+/// Selection-time constraints based on the active runtime context.
+///
+/// See [`ActivationCriteria::context`] for the usage model. Unknown
+/// `require_project_field` values are **not** a parse error — they
+/// behave as "no gate" so new constraint kinds introduced by later
+/// versions of the gateway can land without breaking older clients
+/// that happen to parse the same manifest.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContextCriteria {
+    /// Require a specific field on the active project to be set.
+    ///
+    /// Recognised values: `"github_repo"`, `"workspace_path"`. Any
+    /// other value is treated as "no gate" (forward-compat).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_project_field: Option<String>,
+    /// When true, the skill injector should append a rendered
+    /// git-context block (branch, dirty state, recent commits) to the
+    /// skill body at inject time. Pure metadata — the skill crate does
+    /// not render it; the host crate's injector reads this flag and
+    /// populates the block from its `ProjectContextCache`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_git_context: bool,
+}
+
+/// Runtime context a caller can pass into selection to satisfy
+/// [`ContextCriteria::require_project_field`] gates.
+///
+/// The default value (no project, no workspace path) admits every
+/// skill — callers with no project context pass it and no gate
+/// triggers. Callers that do know the active project populate the
+/// matching booleans so gated skills activate.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SkillActivationContext {
+    /// Whether the active project has a GitHub repo configured
+    /// (`Project.metadata.github_repo` present).
+    pub project_has_github_repo: bool,
+    /// Whether the active project has a custom workspace path
+    /// configured (`Project.workspace_path` present).
+    pub project_has_workspace_path: bool,
+}
+
+impl SkillActivationContext {
+    /// Return `true` iff `requirement` is satisfied by this context, or
+    /// the requirement is unknown/missing. Unknown requirements admit
+    /// the skill by design (forward-compat).
+    pub fn satisfies(&self, requirement: Option<&str>) -> bool {
+        match requirement {
+            None => true,
+            Some("github_repo") => self.project_has_github_repo,
+            Some("workspace_path") => self.project_has_workspace_path,
+            // Unknown requirement name: admit. A future version that
+            // recognises the name can tighten this; older clients
+            // stay forward-compatible in the meantime.
+            Some(_) => true,
+        }
+    }
 }
 
 impl ActivationCriteria {

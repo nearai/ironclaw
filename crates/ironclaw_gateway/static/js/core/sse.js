@@ -276,6 +276,29 @@ function connectSSE(lastEventIdOverride) {
     setToolCardOutput(data);
   });
 
+  // "!" shell mode — paired events, one per `$ cmd` header and one
+  // per stdout/stderr/exit-code body. Pre-create the card on
+  // `shell_command` so the user sees their command immediately while
+  // the shell tool runs; `shell_output` fills in the body. Two
+  // events keep the render ordering robust to interleaving with
+  // other SSE traffic on the same thread. Handlers live on
+  // `window.*` and are owned by `surfaces/projects.js`.
+  addTrackedEventListener('shell_command', (e) => {
+    const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
+    if (typeof window.renderShellCommand === 'function') {
+      window.renderShellCommand(data);
+    }
+  });
+
+  addTrackedEventListener('shell_output', (e) => {
+    const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
+    if (typeof window.fillShellOutput === 'function') {
+      window.fillShellOutput(data);
+    }
+  });
+
   addTrackedEventListener('stream_chunk', (e) => {
     const data = JSON.parse(e.data);
     if (data.thread_id) {

@@ -33,9 +33,12 @@ pub use router::{
     EngineStepInfo,
     EngineThreadDetail,
     EngineThreadInfo,
+    ProjectMetadataView,
     ProjectOverviewEntry,
+    ProjectUpsertFields,
     ProjectsOverviewResponse,
     clear_engine_pending_auth,
+    create_engine_project,
     discard_engine_pending_auth_request,
     // Query functions
     fire_engine_mission,
@@ -44,6 +47,7 @@ pub use router::{
     get_engine_project,
     get_engine_projects_overview,
     get_engine_thread,
+    get_engine_thread_metadata,
     // Action handlers
     handle_approval,
     handle_auth_gate_resolution,
@@ -68,7 +72,9 @@ pub use router::{
     resolve_engine_auth_callback,
     resolve_gate,
     resume_engine_mission,
+    set_conversation_project,
     transition_engine_pending_auth_request_to_pairing,
+    update_engine_project,
 };
 
 #[cfg(feature = "libsql")]

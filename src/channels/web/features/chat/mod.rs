@@ -86,9 +86,10 @@ pub(crate) async fn chat_send_handler(
     Json(req): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
     tracing::trace!(
-        "[chat_send_handler] Received message: content_len={}, thread_id={:?}",
+        "[chat_send_handler] Received message: content_len={}, thread_id={:?}, mode={:?}",
         req.content.len(),
-        req.thread_id
+        req.thread_id,
+        req.mode
     );
 
     if !state.chat_rate_limiter.check(&user.user_id) {
@@ -98,11 +99,47 @@ pub(crate) async fn chat_send_handler(
         ));
     }
 
-    let mut msg = web_incoming_message(
+    // "!" shell mode: run the command inside the thread's active project
+    // folder via the shell tool (dispatcher path keeps audit + safety
+    // intact). The LLM is not involved; we emit `shell_command` and
+    // `shell_output` SSE events and persist the paired conversation
+    // messages so history replay and next-turn context round-trip.
+    if matches!(req.mode, crate::channels::web::types::ChatSendMode::Shell) {
+        return handle_shell_send(state, user, req).await;
+    }
+
+    // Resolve active-project hints so the agent-loop skill selector can
+    // gate project-bound skills (like `coding-repo`) on whether the
+    // thread actually has a GitHub-backed project. Carried through the
+    // message metadata so it's available wherever the agent looks at
+    // the outgoing message — the skills crate reads the two booleans
+    // into a `SkillActivationContext`.
+    let project_hints = if let Some(ref thread) = req.thread_id
+        && let Ok(thread_uuid) = uuid::Uuid::parse_str(thread)
+    {
+        crate::channels::web::handlers::engine::resolve_thread_project(
+            state.as_ref(),
+            &user.user_id,
+            thread_uuid,
+        )
+        .await
+        .map(|(info, _)| {
+            serde_json::json!({
+                "project_has_github_repo": info.metadata.github_repo.is_some(),
+                "project_has_workspace_path": info.workspace_path.is_some(),
+            })
+        })
+        .unwrap_or_else(|| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    let mut msg = crate::channels::web::util::web_incoming_message_with_metadata(
         "gateway",
         &user.user_id,
         &req.content,
         req.thread_id.as_deref(),
+        project_hints,
     );
     // Prefer timezone from JSON body, fall back to X-Timezone header
     let tz = req
@@ -161,6 +198,190 @@ pub(crate) async fn chat_send_handler(
             status: "accepted",
         }),
     ))
+}
+
+/// Handle `POST /api/chat/send` when `mode = "shell"`.
+///
+/// Resolves the thread's effective project (per-thread override → active
+/// project), dispatches `shell` with `workdir = project.workspace_path`,
+/// broadcasts `shell_command` + `shell_output` SSE events, and persists
+/// both as conversation messages so history replay re-renders the turn
+/// and the next LLM turn sees the result in context.
+pub(crate) async fn handle_shell_send(
+    state: Arc<GatewayState>,
+    user: crate::channels::web::auth::UserIdentity,
+    req: SendMessageRequest,
+) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
+    let command = req.content.trim();
+    if command.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "empty shell command".to_string()));
+    }
+
+    let thread_id_str = req.thread_id.as_deref().ok_or((
+        StatusCode::BAD_REQUEST,
+        "thread_id is required for shell mode".to_string(),
+    ))?;
+    let thread_id = uuid::Uuid::parse_str(thread_id_str)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("thread_id: {e}")))?;
+
+    // Resolve the effective project (override → active).
+    let Some((project_info, _)) = crate::channels::web::handlers::engine::resolve_thread_project(
+        &state,
+        &user.user_id,
+        thread_id,
+    )
+    .await
+    else {
+        return Err((
+            StatusCode::CONFLICT,
+            "shell mode requires an active project — create or select one first".to_string(),
+        ));
+    };
+    let project_id = uuid::Uuid::parse_str(&project_info.id).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("invalid project id: {e}"),
+        )
+    })?;
+    let workspace_path = project_info.workspace_path.clone().unwrap_or_else(|| {
+        crate::bridge::sandbox::workspace_path::default_project_workspace_path(
+            &user.user_id,
+            project_id,
+        )
+    });
+    // Ensure the host folder exists before dispatching shell — a first-use
+    // project that's never been cloned into would fail with ENOENT otherwise.
+    if !workspace_path.exists()
+        && let Err(e) = std::fs::create_dir_all(&workspace_path)
+    {
+        tracing::warn!(
+            path = %workspace_path.display(),
+            error = %e,
+            "failed to create project workspace dir"
+        );
+    }
+
+    let dispatcher = state.tool_dispatcher.clone().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "tool dispatcher unavailable".to_string(),
+    ))?;
+
+    let turn_id = uuid::Uuid::new_v4();
+
+    // Broadcast the command immediately so the UI can render the "$ cmd"
+    // header before the tool runs.
+    state
+        .sse
+        .broadcast(ironclaw_common::AppEvent::ShellCommand {
+            thread_id: thread_id.to_string(),
+            turn_id: turn_id.to_string(),
+            command: command.to_string(),
+            workdir: workspace_path.display().to_string(),
+        });
+
+    // Persist the command itself so history replay renders it even if
+    // the tool output never comes back.
+    if let Some(ref store) = state.store // dispatch-exempt: shell-mode persistence pair
+        && let Err(e) = store
+            .add_conversation_message(thread_id, "shell_command", &format!("!{command}"))
+            .await
+    {
+        tracing::warn!(error = %e, "failed to persist shell_command message");
+    }
+
+    let params = serde_json::json!({
+        "command": command,
+        "workdir": workspace_path.display().to_string(),
+    });
+    let out = dispatcher
+        .dispatch(
+            "shell",
+            params,
+            &user.user_id,
+            crate::tools::dispatch::DispatchSource::Channel("gateway_shell".into()),
+        )
+        .await;
+
+    let (stdout, stderr, exit_code, truncated) = match &out {
+        Ok(output) => parse_shell_tool_output(&output.result),
+        Err(e) => (String::new(), e.to_string(), -1, false),
+    };
+
+    state.sse.broadcast(ironclaw_common::AppEvent::ShellOutput {
+        thread_id: thread_id.to_string(),
+        turn_id: turn_id.to_string(),
+        stdout: stdout.clone(),
+        stderr: stderr.clone(),
+        exit_code,
+        truncated,
+    });
+
+    // Persist the output so the next LLM turn's context includes it
+    // and history replay re-renders the card.
+    if let Some(ref store) = state.store {
+        // dispatch-exempt: shell-mode persistence pair
+        let persisted = serde_json::json!({
+            "stdout": stdout,
+            "stderr": stderr,
+            "exit_code": exit_code,
+            "truncated": truncated,
+        })
+        .to_string();
+        if let Err(e) = store
+            .add_conversation_message(thread_id, "shell_output", &persisted)
+            .await
+        {
+            tracing::warn!(error = %e, "failed to persist shell_output message");
+        }
+    }
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(SendMessageResponse {
+            message_id: turn_id,
+            status: "accepted",
+        }),
+    ))
+}
+
+/// Parse the `shell` tool's `ToolOutput.result` back into the wire fields
+/// the SSE event and conversation row expect.
+///
+/// The shell tool (`src/tools/builtin/shell.rs`) emits a
+/// `{output, exit_code, success, sandboxed}` object where `output`
+/// is the combined stdout+stderr (the tool merges the two streams
+/// before returning). Older drafts of this helper read `stdout` +
+/// `stderr` as separate top-level keys, which the tool does not
+/// emit — every shell-mode turn rendered with an empty body
+/// regardless of what the command produced. Fixed by reading
+/// `output`; `stderr` stays empty on the wire contract for now
+/// since we don't have a separate stream available.
+///
+/// A `Value::String` fallback covers the case where a future tool
+/// refactor returns a bare text payload.
+fn parse_shell_tool_output(value: &serde_json::Value) -> (String, String, i32, bool) {
+    if let Some(obj) = value.as_object() {
+        let stdout = obj
+            .get("output")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let stderr = obj
+            .get("stderr")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let exit_code = obj.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let truncated = obj
+            .get("truncated")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        return (stdout, stderr, exit_code, truncated);
+    }
+    if let Some(s) = value.as_str() {
+        return (s.to_string(), String::new(), 0, false);
+    }
+    (String::new(), String::new(), 0, false)
 }
 
 pub(crate) async fn chat_approval_handler(
@@ -687,6 +908,20 @@ pub(crate) async fn chat_threads_handler(
                 let mut threads = Vec::new();
 
                 for s in &summaries {
+                    // The pinned Assistant conversation is the home
+                    // thread — it spans all projects, so we skip
+                    // project resolution for it and keep the chrome
+                    // bar hidden.
+                    let project = if s.id == assistant_id {
+                        None
+                    } else {
+                        crate::channels::web::handlers::engine::thread_project_context(
+                            state.as_ref(),
+                            &user.user_id,
+                            s.id,
+                        )
+                        .await
+                    };
                     let info = ThreadInfo {
                         id: s.id,
                         state: live_thread_states
@@ -700,6 +935,7 @@ pub(crate) async fn chat_threads_handler(
                         title: s.title.clone(),
                         thread_type: s.thread_type.clone(),
                         channel: Some(s.channel.clone()),
+                        project,
                     };
 
                     if s.id == assistant_id {
@@ -723,6 +959,7 @@ pub(crate) async fn chat_threads_handler(
                         title: None,
                         thread_type: Some("assistant".to_string()),
                         channel: Some("gateway".to_string()),
+                        project: None,
                     });
                 }
 
@@ -763,6 +1000,10 @@ pub(crate) async fn chat_threads_handler(
             title: None,
             thread_type: None,
             channel: Some("gateway".to_string()),
+            // In-memory fallback (DB unavailable) skips project
+            // resolution — the sync iterator can't await the async
+            // helper. On DB recovery the full resolver path runs.
+            project: None,
         })
         .collect();
 
@@ -783,7 +1024,7 @@ pub(crate) async fn chat_new_thread_handler(
     ))?;
 
     let session = session_manager.get_or_create_session(&user.user_id).await;
-    let (thread_id, info) = {
+    let (thread_id, mut info) = {
         let mut sess = session.lock().await;
         let thread = sess.create_thread(Some("gateway"));
         let id = thread.id;
@@ -796,6 +1037,7 @@ pub(crate) async fn chat_new_thread_handler(
             title: None,
             thread_type: Some("thread".to_string()),
             channel: Some("gateway".to_string()),
+            project: None,
         };
         (id, info)
     };
@@ -823,6 +1065,17 @@ pub(crate) async fn chat_new_thread_handler(
             tracing::warn!("Failed to set thread_type metadata: {}", e);
         }
     }
+
+    // Populate the active-project chrome on the fresh thread so the UI
+    // doesn't have to wait for a full thread-list refresh to show
+    // context. A brand-new thread has no per-thread override in DB yet,
+    // so this resolves through the active pointer.
+    info.project = crate::channels::web::handlers::engine::thread_project_context(
+        state.as_ref(),
+        &user.user_id,
+        thread_id,
+    )
+    .await;
 
     Ok(Json(info))
 }
@@ -1059,6 +1312,10 @@ fn turn_info_from_in_memory_turn(t: &crate::agent::session::Turn) -> TurnInfo {
                 .map(|tc| (tc.tool_call_id.as_deref(), tc.result.as_ref())),
         ),
         narrative: t.narrative.clone(),
+        // In-memory turns never carry shell payloads — `!`-mode turns
+        // always round-trip through the DB pairing (shell_command +
+        // shell_output messages rebuilt by `build_turns_from_db_messages`).
+        shell: None,
     }
 }
 
@@ -1390,6 +1647,7 @@ mod tests {
             }],
             generated_images: Vec::new(),
             narrative: None,
+            shell: None,
         }];
 
         let reconciled = reconcile_in_progress_with_turns(
@@ -1455,6 +1713,7 @@ mod tests {
             ],
             generated_images: Vec::new(),
             narrative: None,
+            shell: None,
         }];
 
         let reconciled = reconcile_in_progress_with_turns(
@@ -1491,6 +1750,7 @@ mod tests {
             tool_calls: Vec::new(),
             generated_images: Vec::new(),
             narrative: None,
+            shell: None,
         }];
 
         let in_progress = reconcile_in_progress_with_turns(
@@ -1522,6 +1782,7 @@ mod tests {
             tool_calls: Vec::new(),
             generated_images: Vec::new(),
             narrative: None,
+            shell: None,
         }];
 
         let in_progress = reconcile_in_progress_with_turns(
@@ -1553,6 +1814,7 @@ mod tests {
             tool_calls: Vec::new(),
             generated_images: Vec::new(),
             narrative: None,
+            shell: None,
         }];
 
         let in_progress = reconcile_in_progress_with_turns(
@@ -1585,6 +1847,7 @@ mod tests {
             tool_calls: Vec::new(),
             generated_images: Vec::new(),
             narrative: None,
+            shell: None,
         }];
 
         let in_progress = reconcile_in_progress_with_turns(
@@ -1617,6 +1880,7 @@ mod tests {
             tool_calls: Vec::new(),
             generated_images: Vec::new(),
             narrative: None,
+            shell: None,
         }];
 
         let in_progress = reconcile_in_progress_with_turns(
@@ -1756,6 +2020,7 @@ mod tests {
             images: Vec::new(),
             attachments: Vec::new(),
             timezone: None,
+            mode: Default::default(),
         };
         let (status, body) = chat_send_handler(
             axum::extract::State(Arc::clone(&state)),
@@ -1801,6 +2066,7 @@ mod tests {
             images: Vec::new(),
             attachments: Vec::new(),
             timezone: None,
+            mode: Default::default(),
         };
         let err = chat_send_handler(
             axum::extract::State(Arc::clone(&state)),
@@ -1840,6 +2106,7 @@ mod tests {
                 images: Vec::new(),
                 attachments: Vec::new(),
                 timezone: None,
+                mode: Default::default(),
             };
             let (status, _) = chat_send_handler(
                 axum::extract::State(Arc::clone(&state)),
@@ -1866,6 +2133,7 @@ mod tests {
             images: Vec::new(),
             attachments: Vec::new(),
             timezone: None,
+            mode: Default::default(),
         };
         let err = chat_send_handler(
             axum::extract::State(Arc::clone(&state)),

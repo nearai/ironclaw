@@ -58,6 +58,7 @@ pub(crate) use filesystem_factory::{FilesystemMountFactory, ProjectPathResolver}
 pub(crate) use intercept::{InterceptOutcome, maybe_intercept};
 pub(crate) use manager::ProjectSandboxManager;
 pub(crate) use workspace_path::ensure_project_workspace_dir;
+pub(crate) use workspace_path::thread_worktree_subdir;
 
 #[cfg(test)]
 mod env_tests {

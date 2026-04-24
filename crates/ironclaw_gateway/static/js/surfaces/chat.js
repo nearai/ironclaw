@@ -83,6 +83,32 @@ async function sendMessage() {
   const content = input.value.trim();
   if (!content && stagedImages.length === 0 && stagedAttachments.length === 0) return;
 
+  // "!" shell mode: strip the prefix and route through /api/chat/send
+  // with mode=shell. The backend dispatches the shell tool in the
+  // thread's active-project folder, persists command+output as a
+  // shell turn, and broadcasts shell_command/shell_output SSE events
+  // that `core/sse.js` pairs into a distinct monospace card. Bare
+  // "!" is a no-op so users can discard a mis-prefix without firing
+  // a shell. Entry point lives on `window.sendShellCommand`, owned
+  // by `surfaces/projects.js`.
+  if (content.startsWith('!')) {
+    const command = content.slice(1).trimStart();
+    if (!command) return;
+    input.value = '';
+    // Programmatic value changes don't fire `input`, so the shell-mode
+    // badge on `.chat-input-wrapper` (toggled in surfaces/projects.js)
+    // stays stuck with a leading `!` after submit. Dispatch manually.
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    autoResizeTextarea(input);
+    input.focus();
+    if (typeof window.sendShellCommand === 'function') {
+      window.sendShellCommand(command);
+    } else {
+      console.error('sendMessage: window.sendShellCommand unavailable; projects surface not loaded?');
+    }
+    return;
+  }
+
   // Intercept approval keywords when an unresolved approval card is pending.
   // Find the most recent unresolved card for the current thread (resolved cards
   // linger 1.5s before removal; cards from other threads must not be matched).

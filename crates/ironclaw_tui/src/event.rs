@@ -78,6 +78,12 @@ pub struct TuiUserMessage {
     pub thread_id: Option<String>,
     /// Non-chat UI action to run through the bridge.
     pub ui_action: Option<TuiUiAction>,
+    /// `!`-prefix shell mode: dispatch `text` as a shell command in the
+    /// thread's active-project folder instead of queuing to the agent
+    /// loop. Mirrors the web gateway's `ChatSendMode::Shell`; the TUI
+    /// channel bridge intercepts this flag and dispatches directly
+    /// through `ToolDispatcher` rather than routing via the LLM.
+    pub shell_mode: bool,
 }
 
 /// Out-of-band UI actions emitted by the TUI.
@@ -95,12 +101,19 @@ impl TuiUserMessage {
             attachments: Vec::new(),
             thread_id: None,
             ui_action: None,
+            shell_mode: false,
         }
     }
 
     /// Attach a thread scope to this message.
     pub fn with_thread_id(mut self, thread_id: Option<String>) -> Self {
         self.thread_id = thread_id;
+        self
+    }
+
+    /// Mark this message as a shell-mode dispatch.
+    pub fn with_shell_mode(mut self, shell_mode: bool) -> Self {
+        self.shell_mode = shell_mode;
         self
     }
 
@@ -113,6 +126,7 @@ impl TuiUserMessage {
             ui_action: Some(TuiUiAction::OpenEngineThreadDetail {
                 thread_id: thread_id.into(),
             }),
+            shell_mode: false,
         }
     }
 }

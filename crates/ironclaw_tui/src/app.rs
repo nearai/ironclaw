@@ -395,62 +395,105 @@ async fn handle_event(
                     };
                     state.model_picker.close();
                     state.command_palette.close();
+                    let was_shell_mode = state.shell_mode;
                     let text = take_input_and_reset(widgets, state);
-                    let trimmed = if let Some(ref model) = selected_model {
-                        format!("/model {model}")
+                    // Shell-mode submit strips the leading `!` (we
+                    // already ate it visually as the prompt glyph)
+                    // and sends the command verbatim so the channel
+                    // bridge sees the same payload the gateway's
+                    // `sendShellCommand` produces. A bare `!` with
+                    // no command is a no-op — consistent with the
+                    // gateway's `if (!command) return;` guard.
+                    let (shell_command, mut trimmed) = if was_shell_mode {
+                        let cmd = text
+                            .strip_prefix('!')
+                            .unwrap_or(&text)
+                            .trim_start()
+                            .to_string();
+                        (true, cmd)
+                    } else if let Some(ref model) = selected_model {
+                        (false, format!("/model {model}"))
                     } else {
-                        text.trim().to_string()
+                        (false, text.trim().to_string())
                     };
-                    let attachments = std::mem::take(&mut state.pending_attachments);
-                    if !trimmed.is_empty() || !attachments.is_empty() {
-                        state.awaiting_model_list = selected_model.is_none()
-                            && attachments.is_empty()
-                            && trimmed == "/model";
-                        // Push to input history
-                        if !trimmed.is_empty() {
-                            state.input_history.push(trimmed.clone());
-                        }
-                        state.history_index = None;
-                        state.history_draft.clear();
-                        // Clear follow-up suggestions from previous turn
-                        state.suggestions.clear();
-                        // Build display content with attachment labels
-                        let display_content = if attachments.is_empty() {
-                            trimmed.clone()
-                        } else {
-                            let labels: Vec<&str> =
-                                attachments.iter().map(|a| a.label.as_str()).collect();
-                            if trimmed.is_empty() {
-                                format!("[{}]", labels.join("] ["))
-                            } else {
-                                format!("{trimmed} [{}]", labels.join("] ["))
+                    state.shell_mode = false;
+                    // Bare `!` with no command: silent no-op (matches
+                    // the gateway's `if (!command) return;`). Skipping
+                    // the rest of the Submit branch via an `if` —
+                    // `continue` is not allowed across the tokio
+                    // `select!` / async-block boundary in this loop.
+                    let skip_submit = shell_command && trimmed.is_empty();
+                    if !skip_submit {
+                        // Preserve existing mutability expectation downstream.
+                        let trimmed_ref = &mut trimmed;
+                        let attachments = std::mem::take(&mut state.pending_attachments);
+                        if !trimmed_ref.is_empty() || !attachments.is_empty() {
+                            state.awaiting_model_list = selected_model.is_none()
+                                && attachments.is_empty()
+                                && *trimmed_ref == "/model";
+                            // Push to input history. Shell commands land
+                            // here too so users can recall them with ↑.
+                            if !trimmed_ref.is_empty() {
+                                state.input_history.push(if shell_command {
+                                    format!("!{trimmed_ref}")
+                                } else {
+                                    trimmed_ref.clone()
+                                });
                             }
-                        };
-                        // Add user message to conversation
-                        state.messages.push(ChatMessage {
-                            role: MessageRole::User,
-                            content: display_content,
-                            timestamp: chrono::Utc::now(),
-                            cost_summary: None,
-                        });
-                        state.scroll_offset = 0;
-                        state.pinned_to_bottom = true;
-                        if let Some(model) = selected_model {
-                            state.model = model;
+                            state.history_index = None;
+                            state.history_draft.clear();
+                            // Clear follow-up suggestions from previous turn
+                            state.suggestions.clear();
+                            // Build display content with attachment labels.
+                            // Shell turns render with the visible `!` so
+                            // the user can tell them apart from normal
+                            // user turns without introducing a new message
+                            // role — cheap optical cue, matches gateway.
+                            let shown_text = if shell_command {
+                                format!("!{trimmed_ref}")
+                            } else {
+                                trimmed_ref.clone()
+                            };
+                            let display_content = if attachments.is_empty() {
+                                shown_text
+                            } else {
+                                let labels: Vec<&str> =
+                                    attachments.iter().map(|a| a.label.as_str()).collect();
+                                if trimmed_ref.is_empty() {
+                                    format!("[{}]", labels.join("] ["))
+                                } else {
+                                    format!("{shown_text} [{}]", labels.join("] ["))
+                                }
+                            };
+                            // Add user message to conversation
+                            state.messages.push(ChatMessage {
+                                role: MessageRole::User,
+                                content: display_content,
+                                timestamp: chrono::Utc::now(),
+                                cost_summary: None,
+                            });
+                            state.scroll_offset = 0;
+                            state.pinned_to_bottom = true;
+                            if let Some(model) = selected_model {
+                                state.model = model;
+                            }
+                            // Send to agent
+                            update_local_thread_scope_after_submit(state, trimmed_ref);
+                            let thread_id = outgoing_thread_scope(
+                                trimmed_ref,
+                                state.current_thread_id.as_deref(),
+                            );
+                            let _ = msg_tx
+                                .send(TuiUserMessage {
+                                    text: std::mem::take(trimmed_ref),
+                                    attachments,
+                                    thread_id,
+                                    ui_action: None,
+                                    shell_mode: shell_command,
+                                })
+                                .await;
                         }
-                        // Send to agent
-                        update_local_thread_scope_after_submit(state, &trimmed);
-                        let thread_id =
-                            outgoing_thread_scope(&trimmed, state.current_thread_id.as_deref());
-                        let _ = msg_tx
-                            .send(TuiUserMessage {
-                                text: trimmed,
-                                attachments,
-                                thread_id,
-                                ui_action: None,
-                            })
-                            .await;
-                    }
+                    } // end `if !skip_submit`
                 }
                 InputAction::ClearOrQuit => {
                     // Ctrl+C: first clears a non-empty input, second (on empty) quits.
@@ -496,13 +539,30 @@ async fn handle_event(
                     state.pinned_to_bottom = true;
                 }
                 InputAction::Interrupt => {
-                    let _ = msg_tx
-                        .send(
-                            TuiUserMessage::text_only("/interrupt")
-                                .with_thread_id(state.current_thread_id.clone()),
-                        )
-                        .await;
-                    state.status_text.clear();
+                    // Esc cancels shell mode before reaching the
+                    // agent-level `/interrupt`. Without this short-
+                    // circuit the user has no way to back out of a
+                    // buffered `!cmd` other than manually deleting
+                    // the text. Clearing the input + `shell_mode`
+                    // flips the prompt glyph back to `›` and
+                    // suppresses the pending shell dispatch.
+                    let cancel_shell =
+                        state.shell_mode || widgets.input_box.current_text().starts_with('!');
+                    if cancel_shell {
+                        widgets.input_box.set_text("");
+                        state.shell_mode = false;
+                        update_input_overlays_from_input(&widgets.input_box, state);
+                        state.history_index = None;
+                        state.history_draft.clear();
+                    } else {
+                        let _ = msg_tx
+                            .send(
+                                TuiUserMessage::text_only("/interrupt")
+                                    .with_thread_id(state.current_thread_id.clone()),
+                            )
+                            .await;
+                        state.status_text.clear();
+                    }
                 }
                 InputAction::ApprovalUp => {
                     if let Some(ref mut ap) = state.pending_approval {
@@ -655,6 +715,7 @@ async fn handle_event(
                                     attachments,
                                     thread_id,
                                     ui_action: None,
+                                    shell_mode: false,
                                 })
                                 .await;
                         }
@@ -708,6 +769,7 @@ async fn handle_event(
                                             attachments,
                                             thread_id,
                                             ui_action: None,
+                                            shell_mode: false,
                                         })
                                         .await;
                                 }
@@ -2261,6 +2323,15 @@ fn update_input_overlays_from_input(
 ) {
     state.input_line_count = input_box.line_count();
     let text = input_box.current_text();
+
+    // `!`-prefix shell mode: the prompt glyph flips from `›` to `!`
+    // while the buffer begins with `!`. The bare-`!` case keeps the
+    // mode on (input is empty post-prefix; submit is a no-op) so
+    // Esc is the single way to leave. Checking the raw text rather
+    // than the trimmed variant means a stray leading space cancels
+    // the mode, which matches the gateway's `startsWith('!')` check.
+    state.shell_mode = text.starts_with('!');
+
     let trimmed = text.trim();
 
     if state.model_picker.has_models() && (trimmed == "/model" || trimmed.starts_with("/model ")) {

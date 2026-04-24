@@ -68,12 +68,13 @@ pub async fn maybe_intercept(
     parameters: &Value,
     project_id: ProjectId,
     mounts: &WorkspaceMounts,
+    thread_worktree_subdir: Option<&str>,
 ) -> Result<InterceptOutcome, MountError> {
     if !SANDBOX_TOOL_NAMES.contains(&action_name) {
         return Ok(InterceptOutcome::FellThrough);
     }
 
-    let Some(path_str) = extract_path_param(action_name, parameters) else {
+    let Some(mut path_str) = extract_path_param(action_name, parameters) else {
         debug!(
             action = action_name,
             "sandbox intercept: no path param, falling through"
@@ -83,6 +84,19 @@ pub async fn maybe_intercept(
     if !is_mountable_path(&path_str) {
         debug!(action = action_name, path = %path_str, "sandbox intercept: path not mountable, falling through");
         return Ok(InterceptOutcome::FellThrough);
+    }
+
+    // Per-thread worktree rewrite: if the thread has a `dev.worktree`
+    // subdir in its metadata and the requested path is under `/project/`
+    // but not already under `/project/worktrees/`, splice the worktree
+    // subdir in so every tool call targets the thread's branch.
+    //
+    // The agent may still bypass this by targeting `/project/worktrees/...`
+    // explicitly (e.g. to inspect a sibling thread's checkout) — the
+    // rewrite only applies when the path would otherwise resolve to the
+    // shared project root.
+    if let Some(subdir) = thread_worktree_subdir {
+        path_str = rewrite_path_for_worktree(&path_str, subdir);
     }
 
     let Some((backend, rel_path)) = mounts.resolve(project_id, &path_str).await? else {
@@ -269,6 +283,35 @@ fn is_mountable_path(path: &str) -> bool {
     path.starts_with("/project/") || path == "/project"
 }
 
+/// Splice a worktree subdir into a `/project/...` path so per-thread
+/// git worktrees are transparent to the agent.
+///
+/// Rules:
+/// - `/project` (no trailing slash) → `/project/<subdir>`
+/// - `/project/` → `/project/<subdir>/`
+/// - `/project/foo/bar` → `/project/<subdir>/foo/bar`
+/// - `/project/worktrees/...` → **unchanged** (explicit opt-out)
+/// - Anything else → unchanged (only `/project/`-prefixed paths are rewritten)
+///
+/// The `subdir` caller ensures safety (no `..`, not absolute) via
+/// [`super::workspace_path::thread_worktree_subdir`].
+fn rewrite_path_for_worktree(path: &str, subdir: &str) -> String {
+    if path == "/project" {
+        return format!("/project/{subdir}");
+    }
+    let Some(rest) = path.strip_prefix("/project/") else {
+        return path.to_string();
+    };
+    // Agent-initiated escape hatch: paths already under worktrees/ stay put.
+    if rest.starts_with("worktrees/") || rest == "worktrees" {
+        return path.to_string();
+    }
+    if rest.is_empty() {
+        return format!("/project/{subdir}/");
+    }
+    format!("/project/{subdir}/{rest}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,6 +322,49 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
+
+    // ── rewrite_path_for_worktree unit tests ─────────────────────
+    // These gate the worktree-per-thread transparency: if these drift,
+    // file_* calls start landing in the shared project root instead of
+    // the thread's own branch checkout.
+    #[test]
+    fn rewrite_splices_worktree_into_project_paths() {
+        assert_eq!(
+            rewrite_path_for_worktree("/project/src/foo.rs", "worktrees/abc"),
+            "/project/worktrees/abc/src/foo.rs",
+        );
+        assert_eq!(
+            rewrite_path_for_worktree("/project/", "worktrees/abc"),
+            "/project/worktrees/abc/",
+        );
+        assert_eq!(
+            rewrite_path_for_worktree("/project", "worktrees/abc"),
+            "/project/worktrees/abc",
+        );
+    }
+
+    #[test]
+    fn rewrite_leaves_worktrees_prefix_alone() {
+        // Explicit /project/worktrees/* is the agent's escape hatch to
+        // inspect siblings — must not double-splice.
+        assert_eq!(
+            rewrite_path_for_worktree("/project/worktrees/other/src/foo.rs", "worktrees/abc"),
+            "/project/worktrees/other/src/foo.rs",
+        );
+        assert_eq!(
+            rewrite_path_for_worktree("/project/worktrees", "worktrees/abc"),
+            "/project/worktrees",
+        );
+    }
+
+    #[test]
+    fn rewrite_ignores_non_project_paths() {
+        assert_eq!(
+            rewrite_path_for_worktree("/etc/passwd", "worktrees/abc"),
+            "/etc/passwd",
+        );
+        assert_eq!(rewrite_path_for_worktree("", "worktrees/abc"), "");
+    }
 
     #[derive(Debug)]
     struct StaticFactory {
@@ -311,7 +397,7 @@ mod tests {
         let (mounts, pid, _dir) = make_mounts();
 
         let write = serde_json::json!({"path": "/project/foo.txt", "content": "hello"});
-        let outcome = maybe_intercept("file_write", &write, pid, &mounts)
+        let outcome = maybe_intercept("file_write", &write, pid, &mounts, None)
             .await
             .unwrap();
         match outcome {
@@ -323,7 +409,7 @@ mod tests {
         }
 
         let read = serde_json::json!({"path": "/project/foo.txt"});
-        let outcome = maybe_intercept("file_read", &read, pid, &mounts)
+        let outcome = maybe_intercept("file_read", &read, pid, &mounts, None)
             .await
             .unwrap();
         match outcome {
@@ -343,7 +429,7 @@ mod tests {
         std::fs::create_dir(dir.path().join("sub")).unwrap();
 
         let params = serde_json::json!({"path": "/project/"});
-        let outcome = maybe_intercept("list_dir", &params, pid, &mounts)
+        let outcome = maybe_intercept("list_dir", &params, pid, &mounts, None)
             .await
             .unwrap();
         match outcome {
@@ -367,7 +453,7 @@ mod tests {
         // a path the agent might pass when not using /project/ — should not
         // resolve and the interception should fall through.
         let params = serde_json::json!({"path": "/Users/coder/notes.md"});
-        let outcome = maybe_intercept("file_read", &params, pid, &mounts)
+        let outcome = maybe_intercept("file_read", &params, pid, &mounts, None)
             .await
             .unwrap();
         assert!(matches!(outcome, InterceptOutcome::FellThrough));
@@ -377,7 +463,7 @@ mod tests {
     async fn relative_path_falls_through() {
         let (mounts, pid, _dir) = make_mounts();
         let params = serde_json::json!({"path": "notes.md"});
-        let outcome = maybe_intercept("file_read", &params, pid, &mounts)
+        let outcome = maybe_intercept("file_read", &params, pid, &mounts, None)
             .await
             .unwrap();
         assert!(matches!(outcome, InterceptOutcome::FellThrough));
@@ -387,7 +473,7 @@ mod tests {
     async fn non_sandbox_action_falls_through() {
         let (mounts, pid, _dir) = make_mounts();
         let params = serde_json::json!({"path": "/project/foo.txt"});
-        let outcome = maybe_intercept("memory_read", &params, pid, &mounts)
+        let outcome = maybe_intercept("memory_read", &params, pid, &mounts, None)
             .await
             .unwrap();
         assert!(matches!(outcome, InterceptOutcome::FellThrough));
@@ -414,7 +500,7 @@ mod tests {
         let pid = ProjectId::new();
 
         let params = serde_json::json!({"command": "echo hi"});
-        let outcome = maybe_intercept("shell", &params, pid, &mounts)
+        let outcome = maybe_intercept("shell", &params, pid, &mounts, None)
             .await
             .unwrap();
         assert!(
@@ -430,10 +516,18 @@ mod tests {
 
     #[tokio::test]
     async fn unsupported_backend_op_falls_through() {
-        // FilesystemBackend::shell returns Unsupported in Phase 1.
+        // `FilesystemBackend::patch` still returns `Unsupported`; the
+        // interceptor must map that to `FellThrough` so the bridge runs
+        // the host apply_patch tool instead. `shell` is deliberately
+        // *not* tested here anymore — it used to be `Unsupported` but
+        // now runs via `/bin/sh -c` so it would succeed.
         let (mounts, pid, _dir) = make_mounts();
-        let params = serde_json::json!({"command": "ls", "workdir": "/project/"});
-        let outcome = maybe_intercept("shell", &params, pid, &mounts)
+        let params = serde_json::json!({
+            "path": "/project/foo.txt",
+            "old_string": "a",
+            "new_string": "b",
+        });
+        let outcome = maybe_intercept("apply_patch", &params, pid, &mounts, None)
             .await
             .unwrap();
         assert!(matches!(outcome, InterceptOutcome::FellThrough));
@@ -443,7 +537,7 @@ mod tests {
     async fn missing_path_param_falls_through() {
         let (mounts, pid, _dir) = make_mounts();
         let params = serde_json::json!({"content": "hello"});
-        let outcome = maybe_intercept("file_write", &params, pid, &mounts)
+        let outcome = maybe_intercept("file_write", &params, pid, &mounts, None)
             .await
             .unwrap();
         assert!(matches!(outcome, InterceptOutcome::FellThrough));
@@ -458,7 +552,7 @@ mod tests {
         // the escape).
         let (mounts, pid, _dir) = make_mounts();
         let params = serde_json::json!({"path": "/project/../etc/passwd"});
-        let result = maybe_intercept("file_read", &params, pid, &mounts).await;
+        let result = maybe_intercept("file_read", &params, pid, &mounts, None).await;
         assert!(matches!(result, Err(MountError::InvalidPath { .. })));
     }
 
@@ -551,6 +645,7 @@ mod tests {
             &serde_json::json!({"path": "/project/foo.txt"}),
             pid,
             &mounts,
+            None,
         )
         .await
         .unwrap();
@@ -562,6 +657,7 @@ mod tests {
             &serde_json::json!({"path": "/project/foo.txt", "content": "x"}),
             pid,
             &mounts,
+            None,
         )
         .await
         .unwrap();
@@ -573,6 +669,7 @@ mod tests {
             &serde_json::json!({"path": "/project/"}),
             pid,
             &mounts,
+            None,
         )
         .await
         .unwrap();
@@ -585,6 +682,7 @@ mod tests {
             &serde_json::json!({"path": "/project/foo.txt", "old_string": "x", "new_string": "y"}),
             pid,
             &mounts,
+            None,
         )
         .await
         .unwrap();

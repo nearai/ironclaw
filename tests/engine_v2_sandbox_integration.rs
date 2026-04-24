@@ -92,6 +92,7 @@ fn make_context(project_id: ProjectId) -> ThreadExecutionContext {
         source_channel: None,
         user_timezone: None,
         thread_goal: None,
+        thread_metadata: serde_json::Value::Null,
     }
 }
 

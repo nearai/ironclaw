@@ -33,6 +33,13 @@ pub struct ThreadExecutionContext {
     /// Host adapters use this to distinguish immediate one-shot foreground
     /// requests from explicit mission/routine setup.
     pub thread_goal: Option<String>,
+    /// Snapshot of the thread's metadata at dispatch time.
+    ///
+    /// Host adapters read this for per-thread, skill-written state — most
+    /// notably the `dev.worktree` subdir that retargets `/project/...` paths
+    /// through the per-thread git worktree. The engine crate does not
+    /// interpret it; it is opaque passthrough.
+    pub thread_metadata: serde_json::Value,
 }
 
 /// Abstraction over capability action execution.

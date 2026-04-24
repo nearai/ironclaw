@@ -29,12 +29,23 @@ function loadHistory(before) {
   const isPaginating = !!before;
   if (isPaginating) loadingOlder = true;
 
-  // Show skeleton while loading (only for fresh loads)
+  // Show the skeleton only for *first* fresh loads. Repeat reloads
+  // (SSE-reconnect after a backgrounded tab, thread switch) already
+  // have rendered content and flipping it to a skeleton then back
+  // to the same content caused a visible bounce on every tab-focus
+  // cycle. Also stamp a `history-replay` flag so per-message
+  // slide-in animations are suppressed while the reload runs — the
+  // list is being rebuilt from cached messages, not streaming anew.
+  // `.finally` below clears the flag.
   if (!isPaginating) {
     _chatToolActivity.reset(false);
     const chatContainer = document.getElementById('chat-messages');
-    chatContainer.innerHTML = '';
-    chatContainer.appendChild(renderSkeleton('message', 3));
+    const hasExistingContent = chatContainer.querySelector('.message, .shell-turn') !== null;
+    chatContainer.classList.add('history-replay');
+    if (!hasExistingContent) {
+      chatContainer.innerHTML = '';
+      chatContainer.appendChild(renderSkeleton('message', 3));
+    }
   }
 
   apiFetch(historyUrl).then((data) => {
@@ -64,6 +75,15 @@ function loadHistory(before) {
       // Fresh load: clear and render
       container.innerHTML = '';
       for (const turn of data.turns) {
+        // Shell turns ("!"-mode commands) render as one combined
+        // card — command line + output — rather than separate
+        // user/assistant bubbles. `turn.shell` is populated by
+        // `build_turns_from_db_messages` when the backend paired a
+        // shell_command + shell_output message pair.
+        if (turn.shell && typeof window.renderShellTurn === 'function') {
+          window.renderShellTurn(turn.shell);
+          continue;
+        }
         if (turn.user_input) {
           let renderedPending = false;
           const pendingQueue = pendingByContent && pendingByContent.get(turn.user_input);
@@ -244,6 +264,14 @@ function loadHistory(before) {
   }).finally(() => {
     loadingOlder = false;
     removeScrollSpinner();
+    // Clear the replay flag so future messages (streaming responses,
+    // freshly-sent user turns) animate in normally. Done in
+    // `.finally` so a failed fetch doesn't leave animations
+    // permanently disabled.
+    const chatContainer = document.getElementById('chat-messages');
+    if (chatContainer) {
+      chatContainer.classList.remove('history-replay');
+    }
   });
 }
 
@@ -549,6 +577,7 @@ function switchThread(threadId) {
   loadHistory();
   loadThreads();
   updateHash();
+  notifyActiveThreadChanged();
   if (window.innerWidth <= 768) {
     const sidebar = document.getElementById('thread-sidebar');
     sidebar.classList.remove('expanded-mobile');
@@ -565,9 +594,28 @@ function createNewThread() {
     enableChatInput();
     loadThreads();
     updateHash();
+    notifyActiveThreadChanged();
   }).catch((err) => {
     showToast(I18n.t('chat.threadCreateFailed', { message: err.message }), 'error');
   });
+}
+
+// Fire a `threadchange` CustomEvent on `window` so surfaces outside
+// core/history can react to thread switches without needing to patch
+// the function directly (each surface lives in its own JS module and
+// `switchThread` / `switchToAssistant` are file-scoped via
+// concatenation — not reassignable through `window`). The event
+// carries the new `currentThreadId`; listeners deduplicate as needed.
+function notifyActiveThreadChanged() {
+  try {
+    window.dispatchEvent(new CustomEvent('threadchange', {
+      detail: { threadId: currentThreadId },
+    }));
+  } catch (err) {
+    // CustomEvent fails in very old browsers; the chrome simply
+    // lags one reload cycle — not worth a polyfill here.
+    console.warn('notifyActiveThreadChanged: dispatchEvent failed', err);
+  }
 }
 
 function toggleThreadSidebar() {

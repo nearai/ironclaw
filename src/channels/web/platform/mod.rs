@@ -19,6 +19,7 @@
 pub mod auth;
 pub mod engine_dispatch;
 pub mod legacy_auth;
+pub mod project_context_cache;
 pub mod router;
 pub mod sse;
 pub mod state;

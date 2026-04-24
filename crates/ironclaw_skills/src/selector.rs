@@ -154,12 +154,49 @@ fn try_select<'a>(
 ///
 /// Pass an empty set to disable marker filtering (the legacy behavior
 /// where every skill competes regardless of workspace state).
+///
+/// ## Activation context
+///
+/// Legacy callers that have no notion of an active project should call
+/// [`prefilter_skills`]; it delegates to
+/// [`prefilter_skills_with_context`] with a default context that
+/// admits every skill. Callers that *do* know about an active project
+/// (the gateway's chat path) should call the `_with_context` variant
+/// so skills with [`ContextCriteria::require_project_field`] gates
+/// (e.g. `coding-repo`) activate only when the context matches.
 pub fn prefilter_skills<'a>(
     message: &str,
     available_skills: &'a [LoadedSkill],
     max_candidates: usize,
     max_context_tokens: usize,
     satisfied_setup_markers: &std::collections::HashSet<String>,
+) -> SelectionOutcome<'a> {
+    prefilter_skills_with_context(
+        message,
+        available_skills,
+        max_candidates,
+        max_context_tokens,
+        satisfied_setup_markers,
+        &crate::types::SkillActivationContext::default(),
+    )
+}
+
+/// Context-aware prefilter: same as [`prefilter_skills`] but applies
+/// [`ContextCriteria::require_project_field`] gates using the caller's
+/// [`crate::types::SkillActivationContext`].
+///
+/// A skill whose `activation.context.require_project_field` is set but
+/// unsatisfied by the passed context is dropped **before** scoring, with
+/// a note added to [`SelectionOutcome::notes`] so the UI can explain why
+/// a candidate that matched on keywords didn't make the cut. Skills
+/// with no context requirement are unaffected.
+pub fn prefilter_skills_with_context<'a>(
+    message: &str,
+    available_skills: &'a [LoadedSkill],
+    max_candidates: usize,
+    max_context_tokens: usize,
+    satisfied_setup_markers: &std::collections::HashSet<String>,
+    context: &crate::types::SkillActivationContext,
 ) -> SelectionOutcome<'a> {
     if available_skills.is_empty() || message.is_empty() {
         return SelectionOutcome::default();
@@ -173,6 +210,7 @@ pub fn prefilter_skills<'a>(
         .map(|s| (s.manifest.name.as_str(), s))
         .collect();
 
+    let mut context_filtered_notes: Vec<String> = Vec::new();
     let mut scored: Vec<ScoredSkill<'a>> = available_skills
         .iter()
         .filter_map(|skill| {
@@ -182,6 +220,25 @@ pub fn prefilter_skills<'a>(
             if let Some(marker) = &skill.manifest.activation.setup_marker
                 && satisfied_setup_markers.contains(marker)
             {
+                return None;
+            }
+            // Activation-context gate: if the skill requires a specific
+            // project field and the caller's context doesn't satisfy it,
+            // drop the skill before scoring. A note is recorded so the
+            // feedback UI can explain the drop.
+            let requirement = skill
+                .manifest
+                .activation
+                .context
+                .require_project_field
+                .as_deref();
+            if !context.satisfies(requirement)
+                && let Some(reason) = requirement
+            {
+                context_filtered_notes.push(format!(
+                    "{}: skipped (requires project.{} which is not set)",
+                    skill.manifest.name, reason
+                ));
                 return None;
             }
             let score = score_skill(skill, &message_lower, message);
@@ -281,9 +338,15 @@ pub fn prefilter_skills<'a>(
         }
     }
 
+    // Prepend context-filter notes so the UI sees them above chain-load /
+    // budget notes — they explain *why a candidate that matched on keywords
+    // was not considered at all*, which is the most surprising outcome.
+    let mut merged_notes = context_filtered_notes;
+    merged_notes.extend(notes);
+
     SelectionOutcome {
         selected: result,
-        notes,
+        notes: merged_notes,
     }
 }
 
@@ -485,6 +548,7 @@ mod tests {
                     tags: tag_vec,
                     max_context_tokens: 1000,
                     setup_marker: None,
+                    context: crate::types::ContextCriteria::default(),
                 },
                 credentials: vec![],
                 requires: GatingRequirements::default(),
@@ -1239,5 +1303,129 @@ mod tests {
         );
         assert!(names.contains(&"parent-one"));
         assert!(names.contains(&"parent-two"));
+    }
+
+    /// Build a skill whose `activation.context.require_project_field` is
+    /// set — used by the coding-repo-style gating tests below.
+    fn make_skill_with_project_requirement(
+        name: &str,
+        keywords: &[&str],
+        required_field: &str,
+    ) -> LoadedSkill {
+        let mut skill = make_skill(name, keywords, &[], &[]);
+        skill.manifest.activation.context = crate::types::ContextCriteria {
+            require_project_field: Some(required_field.to_string()),
+            include_git_context: true,
+        };
+        skill
+    }
+
+    #[test]
+    fn test_context_gate_drops_skill_when_requirement_unsatisfied() {
+        // Two skills both match on "ship"; one requires `github_repo` set.
+        // With an empty context, only the non-gated skill should activate.
+        let gated = make_skill_with_project_requirement("coding-repo", &["ship"], "github_repo");
+        let ungated = make_skill("generic-coding", &["ship"], &[], &[]);
+        let skills = vec![gated, ungated];
+
+        let outcome = prefilter_skills_with_context(
+            "let's ship this",
+            &skills,
+            10,
+            MAX_SKILL_CONTEXT_TOKENS,
+            &HashSet::new(),
+            &crate::types::SkillActivationContext::default(),
+        );
+        let names: Vec<&str> = outcome.selected.iter().map(|s| s.name()).collect();
+        assert!(
+            !names.contains(&"coding-repo"),
+            "gated skill must be filtered when requirement is unsatisfied, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"generic-coding"),
+            "ungated skill must still activate, got: {names:?}"
+        );
+        assert!(
+            outcome
+                .notes
+                .iter()
+                .any(|n| n.contains("coding-repo") && n.contains("github_repo")),
+            "a feedback note must explain why coding-repo was skipped, got: {:?}",
+            outcome.notes
+        );
+    }
+
+    #[test]
+    fn test_context_gate_admits_skill_when_requirement_satisfied() {
+        let gated = make_skill_with_project_requirement("coding-repo", &["ship"], "github_repo");
+        let skills = vec![gated];
+
+        let ctx = crate::types::SkillActivationContext {
+            project_has_github_repo: true,
+            ..crate::types::SkillActivationContext::default()
+        };
+
+        let outcome = prefilter_skills_with_context(
+            "let's ship this",
+            &skills,
+            10,
+            MAX_SKILL_CONTEXT_TOKENS,
+            &HashSet::new(),
+            &ctx,
+        );
+        let names: Vec<&str> = outcome.selected.iter().map(|s| s.name()).collect();
+        assert_eq!(names, vec!["coding-repo"]);
+    }
+
+    #[test]
+    fn test_unknown_require_project_field_admits_skill() {
+        // Forward-compat: an unknown requirement kind in a skill written
+        // for a future gateway version must not break older clients —
+        // it's treated as "no gate" so the skill competes as usual.
+        let skill =
+            make_skill_with_project_requirement("future-skill", &["ship"], "brand_new_field");
+        let skills = vec![skill];
+
+        let outcome = prefilter_skills_with_context(
+            "let's ship this",
+            &skills,
+            10,
+            MAX_SKILL_CONTEXT_TOKENS,
+            &HashSet::new(),
+            &crate::types::SkillActivationContext::default(),
+        );
+        let names: Vec<&str> = outcome.selected.iter().map(|s| s.name()).collect();
+        assert_eq!(names, vec!["future-skill"]);
+    }
+
+    #[test]
+    fn test_legacy_prefilter_skills_filters_gated_skill_by_default_context() {
+        // The legacy `prefilter_skills` (no context argument) delegates
+        // to `prefilter_skills_with_context` with the default
+        // `SkillActivationContext`, which does not claim any project
+        // fields. A skill that requires `github_repo` therefore filters
+        // out on the legacy path — which is the right behavior, because
+        // a caller with no project context can't meaningfully run a
+        // github-specific skill anyway. Non-gated skills are unaffected.
+        let gated = make_skill_with_project_requirement("coding-repo", &["ship"], "github_repo");
+        let ungated = make_skill("generic-coding", &["ship"], &[], &[]);
+        let skills = vec![gated, ungated];
+
+        let result = prefilter_skills(
+            "let's ship this",
+            &skills,
+            10,
+            MAX_SKILL_CONTEXT_TOKENS,
+            &HashSet::new(),
+        );
+        let names: Vec<&str> = result.selected.iter().map(|s| s.name()).collect();
+        assert!(
+            !names.contains(&"coding-repo"),
+            "legacy prefilter must still honour the gate via default context, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"generic-coding"),
+            "non-gated skill must continue to activate on the legacy path, got: {names:?}"
+        );
     }
 }
