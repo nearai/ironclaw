@@ -23,7 +23,8 @@ use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse,
 };
-use crate::llm::{costs, rig_adapter::normalize_schema_strict, session::SessionManager};
+use crate::llm::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
+use crate::llm::{costs, session::SessionManager};
 
 /// Information about an available model from NEAR AI API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1088,12 +1089,15 @@ struct ChatCompletionFunction {
 
 /// Convert a `ToolDefinition` to NEAR AI Chat Completions tool format.
 ///
-/// Applies the same strict schema normalization used by the other OpenAI-compatible
-/// provider adapters so that top-level `oneOf`/`anyOf`/`allOf`/`enum`/`not` schemas
-/// are flattened before request serialization.
+/// Chat Completions is non-strict by default, but this boundary still flattens
+/// top-level combinators that OpenAI-compatible tool APIs reject.
 fn convert_tool_definition(tool: crate::llm::provider::ToolDefinition) -> ChatCompletionTool {
     let mut description = tool.description.clone();
-    let parameters = normalize_schema_strict(&tool.parameters, &mut description);
+    let parameters = shape_tool_schema(
+        ToolSchemaPolicy::FlattenOnly,
+        &tool.parameters,
+        &mut description,
+    );
 
     ChatCompletionTool {
         tool_type: "function".to_string(),
@@ -1363,27 +1367,62 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_tool_definition_normalizes_top_level_oneof() {
+    fn test_convert_tool_definition_preserves_optional_fields() {
         use crate::llm::provider::ToolDefinition;
 
         let tool = ToolDefinition {
-            name: "github".to_string(),
-            description: "Search GitHub".to_string(),
+            name: "message".to_string(),
+            description: "Send a message".to_string(),
             parameters: serde_json::json!({
-                "oneOf": [
-                    {
-                        "type": "object",
-                        "properties": {
-                            "repo": { "type": "string" }
-                        }
+                "type": "object",
+                "properties": {
+                    "content": { "type": "string" },
+                    "channel": { "type": "string" },
+                    "target": { "type": "string" },
+                    "attachments": { "type": "array" }
+                },
+                "required": ["content"]
+            }),
+        };
+
+        let converted = convert_tool_definition(tool);
+        let params = converted.function.parameters.expect("parameters");
+
+        assert_eq!(params["required"], serde_json::json!(["content"]));
+        assert_eq!(params["properties"]["channel"]["type"], "string");
+        assert_eq!(params["properties"]["target"]["type"], "string");
+        assert_eq!(params["properties"]["attachments"]["type"], "array");
+        assert_eq!(
+            converted.function.description.as_deref(),
+            Some("Send a message")
+        );
+    }
+
+    #[test]
+    fn test_convert_tool_definition_flattens_top_level_oneof_without_strictifying() {
+        use crate::llm::provider::ToolDefinition;
+
+        let tool = ToolDefinition {
+            name: "lookup".to_string(),
+            description: "Resolve a user".to_string(),
+            parameters: serde_json::json!({
+            "type": "object",
+            "oneOf": [
+                {
+                    "properties": {
+                        "mode": { "const": "by_name" },
+                        "name": { "type": "string" }
                     },
-                    {
-                        "type": "object",
-                        "properties": {
-                            "owner": { "type": "string" }
-                        }
-                    }
-                ]
+                    "required": ["mode", "name"]
+                },
+                {
+                    "properties": {
+                        "mode": { "const": "by_id" },
+                        "id": { "type": "string" }
+                    },
+                    "required": ["mode", "id"]
+                }
+            ]
             }),
         };
 
@@ -1391,13 +1430,20 @@ mod tests {
         let params = converted.function.parameters.expect("parameters");
 
         assert_eq!(params["type"], "object");
-        assert!(params.get("oneOf").is_none());
-        let description = converted
-            .function
-            .description
-            .expect("description")
-            .to_lowercase();
-        assert!(description.contains("oneof"));
+        assert!(
+            params.get("oneOf").is_none(),
+            "top-level oneOf should still be flattened for OpenAI-compatible requests"
+        );
+        assert_eq!(params["additionalProperties"], true);
+        assert_eq!(params["required"], serde_json::json!([]));
+        assert_eq!(params["properties"]["mode"]["const"], "by_name");
+        assert_eq!(params["properties"]["name"]["type"], "string");
+        assert_eq!(params["properties"]["id"]["type"], "string");
+        let description = converted.function.description.expect("description");
+        assert!(
+            description.contains("Upstream JSON schema"),
+            "flattened schemas should preserve the advisory hint"
+        );
     }
 
     #[test]

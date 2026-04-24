@@ -505,10 +505,14 @@ fn sanitize_tool_name(name: &str) -> String {
 /// append a hint to the tool description, so we pass an owned clone through
 /// and read it back.
 fn convert_tool_definition(tool: &ToolDefinition) -> serde_json::Value {
-    use crate::llm::rig_adapter::normalize_schema_strict;
+    use crate::llm::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 
     let mut description = tool.description.clone();
-    let parameters = normalize_schema_strict(&tool.parameters, &mut description);
+    let parameters = shape_tool_schema(
+        ToolSchemaPolicy::StrictOpenAi,
+        &tool.parameters,
+        &mut description,
+    );
 
     serde_json::json!({
         "type": "function",
