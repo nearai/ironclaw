@@ -4,7 +4,12 @@
 //! receive no ambient host authority: every privileged effect must eventually
 //! cross an explicit host import checked by IronClaw host API contracts.
 
-use std::time::Instant;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, ExtensionId, ResourceReservationId, ResourceUsage,
@@ -14,20 +19,37 @@ use ironclaw_resources::ResourceReservation;
 use rust_decimal::Decimal;
 use serde_json::Value;
 use thiserror::Error;
-use wasmtime::{Config, Engine, Instance, Module, Store};
+use wasmtime::{Cache, Config, Engine, Instance, Module, ResourceLimiter, Store};
 
-/// WASM runtime configuration for the narrow V1 vertical slice.
+const DEFAULT_FUEL: u64 = 500_000;
+const DEFAULT_OUTPUT_BYTES: u64 = 1024 * 1024;
+const DEFAULT_MEMORY_BYTES: u64 = 10 * 1024 * 1024;
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(500);
+const CACHE_ABI_VERSION: &str = "json-v1";
+
+/// WASM runtime configuration for the V1 runtime lane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmRuntimeConfig {
     pub fuel: u64,
     pub max_output_bytes: u64,
+    pub max_memory_bytes: u64,
+    pub timeout: Duration,
+    pub cache_compiled_modules: bool,
+    pub cache_dir: Option<PathBuf>,
+    pub epoch_tick_interval: Duration,
 }
 
 impl Default for WasmRuntimeConfig {
     fn default() -> Self {
         Self {
-            fuel: 500_000,
-            max_output_bytes: 1024 * 1024,
+            fuel: DEFAULT_FUEL,
+            max_output_bytes: DEFAULT_OUTPUT_BYTES,
+            max_memory_bytes: DEFAULT_MEMORY_BYTES,
+            timeout: DEFAULT_TIMEOUT,
+            cache_compiled_modules: true,
+            cache_dir: None,
+            epoch_tick_interval: DEFAULT_EPOCH_TICK_INTERVAL,
         }
     }
 }
@@ -37,6 +59,11 @@ impl WasmRuntimeConfig {
         Self {
             fuel: 100_000,
             max_output_bytes: 1024,
+            max_memory_bytes: 1024 * 1024,
+            timeout: Duration::from_secs(5),
+            cache_compiled_modules: false,
+            cache_dir: None,
+            epoch_tick_interval: Duration::from_millis(10),
         }
     }
 }
@@ -56,6 +83,7 @@ pub struct PreparedWasmModule {
     provider: ExtensionId,
     capability: CapabilityId,
     export: String,
+    content_hash: String,
     module: Module,
 }
 
@@ -71,6 +99,10 @@ impl PreparedWasmModule {
     pub fn export(&self) -> &str {
         &self.export
     }
+
+    pub fn content_hash(&self) -> &str {
+        &self.content_hash
+    }
 }
 
 impl std::fmt::Debug for PreparedWasmModule {
@@ -79,7 +111,29 @@ impl std::fmt::Debug for PreparedWasmModule {
             .field("provider", &self.provider)
             .field("capability", &self.capability)
             .field("export", &self.export)
+            .field("content_hash", &self.content_hash)
             .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ModuleCacheKey {
+    provider: ExtensionId,
+    capability: CapabilityId,
+    export: String,
+    content_hash: String,
+    abi_version: &'static str,
+}
+
+impl ModuleCacheKey {
+    fn new(spec: &WasmModuleSpec) -> Self {
+        Self {
+            provider: spec.provider.clone(),
+            capability: spec.capability.clone(),
+            export: spec.export.clone(),
+            content_hash: wasm_content_hash(&spec.bytes),
+            abi_version: CACHE_ABI_VERSION,
+        }
     }
 }
 
@@ -114,6 +168,8 @@ pub struct WasmInvocationResult<T> {
 pub enum WasmError {
     #[error("failed to create WASM engine: {reason}")]
     Engine { reason: String },
+    #[error("WASM runtime cache error: {reason}")]
+    Cache { reason: String },
     #[error("invalid WASM module: {reason}")]
     InvalidModule { reason: String },
     #[error("unsupported WASM import {module}.{name}; no privileged host imports are registered")]
@@ -136,6 +192,10 @@ pub enum WasmError {
     InvalidGuestOutput { reason: String },
     #[error("WASM fuel exhausted after limit {limit}")]
     FuelExhausted { limit: u64 },
+    #[error("WASM memory limit exceeded: {used} bytes requested, {limit} bytes allowed")]
+    MemoryExceeded { used: u64, limit: u64 },
+    #[error("WASM execution timed out after {timeout:?}")]
+    Timeout { timeout: Duration },
     #[error("WASM output limit exceeded: limit {limit}, actual {actual}")]
     OutputLimitExceeded { limit: u64, actual: u64 },
     #[error("WASM trap: {reason}")]
@@ -147,18 +207,28 @@ pub enum WasmError {
 pub struct WasmRuntime {
     engine: Engine,
     config: WasmRuntimeConfig,
+    prepared_modules: Arc<Mutex<HashMap<ModuleCacheKey, Arc<PreparedWasmModule>>>>,
 }
 
 impl WasmRuntime {
     pub fn new(config: WasmRuntimeConfig) -> Result<Self, WasmError> {
         let mut wasmtime_config = Config::new();
         wasmtime_config.consume_fuel(true);
+        wasmtime_config.epoch_interruption(true);
         wasmtime_config.wasm_threads(false);
         wasmtime_config.debug_info(false);
+        if let Some(cache_dir) = &config.cache_dir {
+            enable_compilation_cache(&mut wasmtime_config, cache_dir)?;
+        }
         let engine = Engine::new(&wasmtime_config).map_err(|error| WasmError::Engine {
             reason: error.to_string(),
         })?;
-        Ok(Self { engine, config })
+        spawn_epoch_ticker(engine.clone(), config.epoch_tick_interval)?;
+        Ok(Self {
+            engine,
+            config,
+            prepared_modules: Arc::new(Mutex::new(HashMap::new())),
+        })
     }
 
     pub fn for_testing() -> Result<Self, WasmError> {
@@ -169,7 +239,44 @@ impl WasmRuntime {
         &self.config
     }
 
+    pub fn prepared_module_count(&self) -> usize {
+        self.prepared_modules
+            .lock()
+            .map(|cache| cache.len())
+            .unwrap_or(0)
+    }
+
     pub fn prepare(&self, spec: WasmModuleSpec) -> Result<PreparedWasmModule, WasmError> {
+        self.prepare_uncached(spec)
+    }
+
+    pub fn prepare_cached(
+        &self,
+        spec: WasmModuleSpec,
+    ) -> Result<Arc<PreparedWasmModule>, WasmError> {
+        if !self.config.cache_compiled_modules {
+            return self.prepare_uncached(spec).map(Arc::new);
+        }
+
+        let key = ModuleCacheKey::new(&spec);
+        {
+            let cache = self.prepared_modules.lock().map_err(|_| WasmError::Cache {
+                reason: "prepared module cache lock poisoned".to_string(),
+            })?;
+            if let Some(module) = cache.get(&key) {
+                return Ok(Arc::clone(module));
+            }
+        }
+
+        let prepared = Arc::new(self.prepare_uncached(spec)?);
+        let mut cache = self.prepared_modules.lock().map_err(|_| WasmError::Cache {
+            reason: "prepared module cache lock poisoned".to_string(),
+        })?;
+        Ok(Arc::clone(cache.entry(key).or_insert(prepared)))
+    }
+
+    fn prepare_uncached(&self, spec: WasmModuleSpec) -> Result<PreparedWasmModule, WasmError> {
+        let content_hash = wasm_content_hash(&spec.bytes);
         let module = Module::from_binary(&self.engine, &spec.bytes).map_err(|error| {
             WasmError::InvalidModule {
                 reason: error.to_string(),
@@ -193,6 +300,7 @@ impl WasmRuntime {
             provider: spec.provider,
             capability: spec.capability,
             export: spec.export,
+            content_hash,
             module,
         })
     }
@@ -234,7 +342,7 @@ impl WasmRuntime {
         let start = Instant::now();
         let mut store = self.fueled_store()?;
         let instance = Instance::new(&mut store, &module.module, &[])
-            .map_err(|error| classify_wasmtime_error(error, self.config.fuel))?;
+            .map_err(|error| self.classify_wasmtime_error(error))?;
         let memory = instance
             .get_memory(&mut store, "memory")
             .ok_or(WasmError::MissingMemory)?;
@@ -261,7 +369,7 @@ impl WasmRuntime {
 
         let input_ptr = alloc
             .call(&mut store, input_len)
-            .map_err(|error| classify_wasmtime_error(error, self.config.fuel))?;
+            .map_err(|error| self.classify_wasmtime_error(error))?;
         let input_offset = positive_offset(input_ptr, "alloc returned a negative input pointer")?;
         memory
             .write(&mut store, input_offset, &input_bytes)
@@ -271,13 +379,14 @@ impl WasmRuntime {
 
         let status = run
             .call(&mut store, (input_ptr, input_len))
-            .map_err(|error| classify_wasmtime_error(error, self.config.fuel))?;
+            .map_err(|error| self.classify_wasmtime_error(error))?;
+        self.ensure_no_memory_denial(&store)?;
         let output_ptr_value = output_ptr
             .call(&mut store, ())
-            .map_err(|error| classify_wasmtime_error(error, self.config.fuel))?;
+            .map_err(|error| self.classify_wasmtime_error(error))?;
         let output_len_value = output_len
             .call(&mut store, ())
-            .map_err(|error| classify_wasmtime_error(error, self.config.fuel))?;
+            .map_err(|error| self.classify_wasmtime_error(error))?;
         let output_offset =
             positive_offset(output_ptr_value, "output_ptr returned a negative pointer")?;
         let output_len = positive_len(output_len_value)?;
@@ -331,7 +440,7 @@ impl WasmRuntime {
         let mut store = self.fueled_store()?;
 
         let instance = Instance::new(&mut store, &module.module, &[])
-            .map_err(|error| classify_wasmtime_error(error, self.config.fuel))?;
+            .map_err(|error| self.classify_wasmtime_error(error))?;
         let func = instance
             .get_typed_func::<i32, i32>(&mut store, module.export())
             .map_err(|_| WasmError::MissingExport {
@@ -340,7 +449,8 @@ impl WasmRuntime {
 
         let value = func
             .call(&mut store, input)
-            .map_err(|error| classify_wasmtime_error(error, self.config.fuel))?;
+            .map_err(|error| self.classify_wasmtime_error(error))?;
+        self.ensure_no_memory_denial(&store)?;
 
         let output_bytes = value.to_string().len() as u64;
         if output_bytes > self.config.max_output_bytes {
@@ -388,8 +498,14 @@ impl WasmRuntime {
         Ok(())
     }
 
-    fn fueled_store(&self) -> Result<Store<()>, WasmError> {
-        let mut store = Store::new(&self.engine, ());
+    fn fueled_store(&self) -> Result<Store<RuntimeStoreData>, WasmError> {
+        let mut store = Store::new(
+            &self.engine,
+            RuntimeStoreData::new(self.config.max_memory_bytes),
+        );
+        store.limiter(|data| &mut data.limiter);
+        store.epoch_deadline_trap();
+        store.set_epoch_deadline(epoch_deadline_ticks(&self.config));
         store
             .set_fuel(self.config.fuel)
             .map_err(|error| WasmError::Trap {
@@ -398,11 +514,186 @@ impl WasmRuntime {
         Ok(store)
     }
 
-    fn fuel_consumed(&self, store: &Store<()>) -> u64 {
+    fn fuel_consumed(&self, store: &Store<RuntimeStoreData>) -> u64 {
         self.config
             .fuel
             .saturating_sub(store.get_fuel().unwrap_or(0))
     }
+
+    fn ensure_no_memory_denial(&self, store: &Store<RuntimeStoreData>) -> Result<(), WasmError> {
+        if let Some((used, limit)) = store.data().limiter.denied_memory_growth {
+            Err(WasmError::MemoryExceeded { used, limit })
+        } else {
+            Ok(())
+        }
+    }
+
+    fn classify_wasmtime_error(&self, error: wasmtime::Error) -> WasmError {
+        if matches!(
+            error.downcast_ref::<wasmtime::Trap>(),
+            Some(wasmtime::Trap::OutOfFuel)
+        ) {
+            return WasmError::FuelExhausted {
+                limit: self.config.fuel,
+            };
+        }
+        if matches!(
+            error.downcast_ref::<wasmtime::Trap>(),
+            Some(wasmtime::Trap::Interrupt)
+        ) {
+            return WasmError::Timeout {
+                timeout: self.config.timeout,
+            };
+        }
+        let message = error.to_string();
+        if message.contains("ironclaw memory limit exceeded") {
+            return WasmError::MemoryExceeded {
+                used: parse_marker_u64(&message, "desired=")
+                    .unwrap_or(self.config.max_memory_bytes.saturating_add(1)),
+                limit: parse_marker_u64(&message, "limit=").unwrap_or(self.config.max_memory_bytes),
+            };
+        }
+        if message.contains("all fuel consumed") || message.contains("out of fuel") {
+            WasmError::FuelExhausted {
+                limit: self.config.fuel,
+            }
+        } else if message.contains("interrupt") {
+            WasmError::Timeout {
+                timeout: self.config.timeout,
+            }
+        } else {
+            WasmError::Trap { reason: message }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RuntimeStoreData {
+    limiter: WasmRuntimeLimiter,
+}
+
+impl RuntimeStoreData {
+    fn new(memory_limit: u64) -> Self {
+        Self {
+            limiter: WasmRuntimeLimiter::new(memory_limit),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct WasmRuntimeLimiter {
+    memory_limit: u64,
+    memory_used: u64,
+    denied_memory_growth: Option<(u64, u64)>,
+}
+
+impl WasmRuntimeLimiter {
+    fn new(memory_limit: u64) -> Self {
+        Self {
+            memory_limit,
+            memory_used: 0,
+            denied_memory_growth: None,
+        }
+    }
+}
+
+impl ResourceLimiter for WasmRuntimeLimiter {
+    fn memory_growing(
+        &mut self,
+        _current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> Result<bool, wasmtime::Error> {
+        let desired = desired as u64;
+        if desired > self.memory_limit {
+            self.denied_memory_growth = Some((desired, self.memory_limit));
+            return Ok(false);
+        }
+        self.memory_used = desired;
+        Ok(true)
+    }
+
+    fn table_growing(
+        &mut self,
+        _current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> Result<bool, wasmtime::Error> {
+        Ok(desired <= 10_000)
+    }
+
+    fn instances(&self) -> usize {
+        10
+    }
+
+    fn tables(&self) -> usize {
+        10
+    }
+
+    fn memories(&self) -> usize {
+        10
+    }
+}
+
+fn enable_compilation_cache(config: &mut Config, cache_dir: &Path) -> Result<(), WasmError> {
+    std::fs::create_dir_all(cache_dir).map_err(|error| WasmError::Cache {
+        reason: error.to_string(),
+    })?;
+    let toml_path = cache_dir.join("wasmtime-cache.toml");
+    let escaped = cache_dir
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    std::fs::write(&toml_path, format!("[cache]\ndirectory = \"{escaped}\"\n")).map_err(
+        |error| WasmError::Cache {
+            reason: error.to_string(),
+        },
+    )?;
+    let cache = Cache::from_file(Some(&toml_path)).map_err(|error| WasmError::Cache {
+        reason: error.to_string(),
+    })?;
+    config.cache(Some(cache));
+    Ok(())
+}
+
+fn spawn_epoch_ticker(engine: Engine, tick_interval: Duration) -> Result<(), WasmError> {
+    if tick_interval.is_zero() {
+        return Ok(());
+    }
+    std::thread::Builder::new()
+        .name("ironclaw-wasm-epoch-ticker".to_string())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(tick_interval);
+                engine.increment_epoch();
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| WasmError::Engine {
+            reason: format!("failed to spawn epoch ticker thread: {error}"),
+        })
+}
+
+fn epoch_deadline_ticks(config: &WasmRuntimeConfig) -> u64 {
+    if config.timeout.is_zero() || config.epoch_tick_interval.is_zero() {
+        return u64::MAX;
+    }
+    let timeout_ms = config.timeout.as_millis();
+    let interval_ms = config.epoch_tick_interval.as_millis().max(1);
+    (timeout_ms / interval_ms).max(1) as u64
+}
+
+fn wasm_content_hash(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
+fn parse_marker_u64(message: &str, marker: &str) -> Option<u64> {
+    let start = message.find(marker)? + marker.len();
+    let digits: String = message[start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
 }
 
 fn positive_offset(value: i32, reason: &str) -> Result<usize, WasmError> {
@@ -500,20 +791,5 @@ fn resource_usage(start: Instant, output_bytes: u64) -> ResourceUsage {
         output_bytes,
         network_egress_bytes: 0,
         process_count: 1,
-    }
-}
-
-fn classify_wasmtime_error(error: wasmtime::Error, fuel_limit: u64) -> WasmError {
-    if matches!(
-        error.downcast_ref::<wasmtime::Trap>(),
-        Some(wasmtime::Trap::OutOfFuel)
-    ) {
-        return WasmError::FuelExhausted { limit: fuel_limit };
-    }
-    let message = error.to_string();
-    if message.contains("all fuel consumed") || message.contains("out of fuel") {
-        WasmError::FuelExhausted { limit: fuel_limit }
-    } else {
-        WasmError::Trap { reason: message }
     }
 }

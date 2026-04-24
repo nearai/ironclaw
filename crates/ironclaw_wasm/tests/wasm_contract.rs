@@ -115,6 +115,7 @@ fn output_byte_limit_is_enforced() {
     let runtime = WasmRuntime::new(WasmRuntimeConfig {
         fuel: 10_000,
         max_output_bytes: 1,
+        ..WasmRuntimeConfig::for_testing()
     })
     .unwrap();
     let module = runtime.prepare(echo_spec()).unwrap();
@@ -136,6 +137,7 @@ fn fuel_limit_stops_runaway_module() {
     let runtime = WasmRuntime::new(WasmRuntimeConfig {
         fuel: 1_000,
         max_output_bytes: 1_024,
+        ..WasmRuntimeConfig::for_testing()
     })
     .unwrap();
     let module = runtime
