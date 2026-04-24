@@ -189,6 +189,10 @@ async fn async_main() -> anyhow::Result<()> {
             init_cli_tracing();
             return run_service_command(service_cmd);
         }
+        Some(Command::Gateway(gateway_cmd)) => {
+            return ironclaw::cli::run_gateway_command(gateway_cmd.clone(), cli.config.as_deref())
+                .await;
+        }
         Some(Command::Skills(skills_cmd)) => {
             init_cli_tracing();
             return ironclaw::cli::run_skills_command(skills_cmd.clone(), cli.config.as_deref())

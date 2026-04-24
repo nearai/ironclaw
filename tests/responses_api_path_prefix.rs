@@ -49,7 +49,7 @@ async fn start_test_server() -> (SocketAddr, Arc<GatewayState>, ServerGuard) {
     let addr: SocketAddr = "127.0.0.1:0"
         .parse()
         .expect("hard-coded address must parse");
-    let bound = start_server(addr, state.clone(), auth.into())
+    let (bound, _server_handle) = start_server(addr, state.clone(), auth.into())
         .await
         .expect("start gateway test server");
     let shutdown = state.shutdown_tx.write().await.take();

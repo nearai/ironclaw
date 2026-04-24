@@ -101,12 +101,13 @@ use crate::channels::web::features::status::gateway_status_handler;
 
 /// Start the gateway HTTP server.
 ///
-/// Returns the actual bound `SocketAddr` (useful when binding to port 0).
+/// Returns the actual bound `SocketAddr` (useful when binding to port 0)
+/// plus a join handle for the spawned server task.
 pub async fn start_server(
     addr: SocketAddr,
     state: Arc<GatewayState>,
     auth: CombinedAuthState,
-) -> Result<SocketAddr, crate::error::ChannelError> {
+) -> Result<(SocketAddr, tokio::task::JoinHandle<()>), crate::error::ChannelError> {
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
         crate::error::ChannelError::StartupFailed {
             name: "gateway".to_string(),
@@ -571,7 +572,7 @@ pub async fn start_server(
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     *state.shutdown_tx.write().await = Some(shutdown_tx);
 
-    tokio::spawn(async move {
+    let server_handle = tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app)
             .with_graceful_shutdown(async {
                 let _ = shutdown_rx.await;
@@ -583,5 +584,5 @@ pub async fn start_server(
         }
     });
 
-    Ok(bound_addr)
+    Ok((bound_addr, server_handle))
 }

@@ -1,5 +1,6 @@
 ---
 source: src/cli/mod.rs
+assertion_line: 520
 expression: help
 ---
 IronClaw is a secure AI assistant.
@@ -33,6 +34,7 @@ Commands:
   pairing     Manage DM pairing
   profile     Manage deployment profiles
   service     Manage OS service
+  gateway     Manage standalone gateway lifecycle
   skills      Manage skills
   hooks       Manage lifecycle hooks
   models      Manage LLM providers and models

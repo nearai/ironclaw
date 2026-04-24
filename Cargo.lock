@@ -3917,6 +3917,7 @@ dependencies = [
  "json5",
  "jsonschema",
  "jsonwebtoken",
+ "libc",
  "libsql",
  "lru 0.16.3",
  "mime_guess",
