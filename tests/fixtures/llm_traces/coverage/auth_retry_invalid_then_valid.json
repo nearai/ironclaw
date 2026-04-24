@@ -1,0 +1,37 @@
+{
+  "model_name": "coverage-auth-retry",
+  "expects": {
+    "min_responses": 1,
+    "response_contains": ["configured"]
+  },
+  "turns": [
+    {
+      "user_input": "Set up the credential",
+      "steps": [
+        {
+          "request_hint": { "last_user_message_contains": "credential" },
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_auth_retry",
+                "name": "tool_activate",
+                "arguments": { "name": "test_credential" }
+              }
+            ],
+            "input_tokens": 60,
+            "output_tokens": 20
+          }
+        },
+        {
+          "response": {
+            "type": "text",
+            "content": "Credential 'test_credential' is now configured.",
+            "input_tokens": 90,
+            "output_tokens": 15
+          }
+        }
+      ]
+    }
+  ]
+}

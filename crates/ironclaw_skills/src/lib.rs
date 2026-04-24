@@ -62,7 +62,8 @@ pub use selector::{
 };
 pub use validation::{
     escape_skill_content, escape_xml_attr, normalize_line_endings, validate_credential_name,
-    validate_credential_spec, validate_http_allowlist, validate_skill_name,
+    validate_credential_spec, validate_http_allowlist, validate_path_pattern,
+    validate_skill_name,
 };
 
 #[cfg(feature = "catalog")]

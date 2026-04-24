@@ -4,6 +4,17 @@
 .env.*
 !.env.example
 
+# macOS metadata
+.DS_Store
+
+# Local scratch directories — contain operator-only env files with real
+# production admin/API tokens. Never commit.
+tests_all/
+integrations/abound/tests/source_env_vars.sh
+
+# Stale insta snapshot proposals (review via `cargo insta review`)
+*.snap.new
+
 # Claude Code worktrees and lock files
 .claude/worktrees/
 .claude/scheduled_tasks.lock
