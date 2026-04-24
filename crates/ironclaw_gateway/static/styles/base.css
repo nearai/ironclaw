@@ -323,45 +323,50 @@ body {
     border-bottom: 1px solid var(--border);
   }
 
-  /* Settings layout: drill-down on mobile */
-  .settings-layout { flex-direction: column; }
-  .settings-sidebar {
+  /* Settings layout: drill-down on mobile.
+     Scoped under #tab-settings so specificity (1,1,0) beats settings.css's
+     unconditional desktop styles (0,1,0), which are concatenated later and
+     would otherwise win on source order. Without this, the mobile sidebar
+     renders at the desktop 180px width instead of full-width, and subtabs
+     use desktop left-border styling instead of the mobile chevron list. */
+  #tab-settings .settings-layout { flex-direction: column; }
+  #tab-settings .settings-sidebar {
     width: 100%;
     flex-direction: column;
     border-right: none;
     padding: 8px 0;
   }
-  .settings-subtab {
+  #tab-settings .settings-subtab {
     border-left: none;
     padding: 14px 20px;
     text-align: left;
     font-size: var(--text-base);
     border-bottom: 1px solid var(--border);
   }
-  .settings-subtab::after {
+  #tab-settings .settings-subtab::after {
     content: '\203A';
     float: right;
     color: var(--text-secondary);
     font-size: 18px;
   }
-  .settings-subtab.active {
+  #tab-settings .settings-subtab.active {
     border-left-color: transparent;
     color: var(--text);
   }
-  .settings-layout > .settings-content {
+  #tab-settings .settings-layout > .settings-content {
     display: none;
   }
-  .settings-layout.settings-detail-active > .settings-sidebar {
+  #tab-settings .settings-layout.settings-detail-active > .settings-sidebar {
     display: none;
   }
-  .settings-layout.settings-detail-active > .settings-content {
+  #tab-settings .settings-layout.settings-detail-active > .settings-content {
     display: flex;
   }
-  .settings-back-btn {
+  #tab-settings .settings-back-btn {
     display: flex;
   }
 
-  .settings-theme-toggle {
+  #tab-settings .settings-theme-toggle {
     display: block;
     padding: 14px 20px;
     text-align: left;
