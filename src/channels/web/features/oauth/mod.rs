@@ -512,21 +512,53 @@ pub(crate) async fn relay_events_handler(
     let ts: i64 = match timestamp.parse() {
         Ok(t) => t,
         Err(_) => {
+            tracing::warn!("relay callback: malformed timestamp");
             return (StatusCode::BAD_REQUEST, "malformed timestamp").into_response();
         }
     };
     let now = chrono::Utc::now().timestamp();
-    if (now - ts).abs() > 300 {
+    let age = (now - ts).abs();
+    if age > 300 {
+        tracing::warn!(
+            age_secs = age,
+            relay_ts = ts,
+            local_now = now,
+            "relay callback: stale timestamp"
+        );
         return (StatusCode::UNAUTHORIZED, "stale timestamp").into_response();
     }
 
     // Verify HMAC: sha256(secret, timestamp + "." + body)
-    if !crate::channels::relay::webhook::verify_relay_signature(
+    let valid = crate::channels::relay::webhook::verify_relay_signature(
         &signing_secret,
         &timestamp,
         &body,
         &signature,
-    ) {
+    );
+    if !valid {
+        // Recompute expected signature for diagnostics
+        let expected = {
+            use hmac::{Hmac, Mac};
+            use sha2::Sha256;
+            type HmacSha256 = Hmac<Sha256>;
+            let mut mac = HmacSha256::new_from_slice(&signing_secret).unwrap();
+            mac.update(timestamp.as_bytes());
+            mac.update(b".");
+            mac.update(&body);
+            format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
+        };
+        tracing::warn!(
+            secret_len = signing_secret.len(),
+            secret_sha256 = %{
+                use sha2::Digest;
+                hex::encode(sha2::Sha256::digest(&signing_secret))[..16].to_string()
+            },
+            body_len = body.len(),
+            timestamp = %timestamp,
+            received_sig = %signature,
+            expected_sig = %expected,
+            "relay callback: HMAC signature mismatch"
+        );
         return (StatusCode::UNAUTHORIZED, "invalid signature").into_response();
     }
 
