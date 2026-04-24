@@ -194,6 +194,17 @@ impl EffectBridgeAdapter {
         &self.tools
     }
 
+    /// Access the underlying safety layer.
+    ///
+    /// The bridge router uses this to redact verbose-only observability
+    /// events (notably `CodeExecuted`) through the leak detector before
+    /// broadcasting them on SSE. The engine crate emits those events
+    /// raw because it has no dependency on `ironclaw_safety`; the
+    /// scrubbing therefore happens at this adapter boundary.
+    pub fn safety(&self) -> &Arc<SafetyLayer> {
+        &self.safety
+    }
+
     /// Set the auth manager for pre-flight credential checks.
     pub async fn set_auth_manager(&self, mgr: Arc<AuthManager>) {
         *self.auth_manager.write().await = Some(mgr);
@@ -4268,8 +4279,14 @@ mod tests {
         }
     }
 
+    /// Regression for #2883: latent provider actions (installed but not yet
+    /// ready — primarily WASM tools pending OAuth) must surface as callable
+    /// actions so the LLM can attempt them and trigger the auth-on-first-call
+    /// gate. Before the fix, unauthenticated WASM tools were invisible to the
+    /// LLM because `tool_definitions()` only returns registered tools and WASM
+    /// tools register only at activation (which requires auth first).
     #[tokio::test]
-    async fn available_actions_omit_latent_inactive_provider_actions() {
+    async fn available_actions_include_latent_inactive_provider_actions() {
         use crate::secrets::InMemorySecretsStore;
         use crate::secrets::SecretsCrypto;
         use crate::tools::mcp::process::McpProcessManager;
@@ -4332,7 +4349,11 @@ mod tests {
             .available_actions(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
             .await
             .expect("actions");
-        assert!(!actions.iter().any(|action| action.name == "latent_tool"));
+        assert!(
+            actions.iter().any(|action| action.name == "latent_tool"),
+            "latent WASM tool should appear in available_actions so the LLM can call it and trigger auth; got: {:?}",
+            actions.iter().map(|a| &a.name).collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]

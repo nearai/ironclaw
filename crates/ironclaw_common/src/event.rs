@@ -519,6 +519,39 @@ pub enum AppEvent {
         thread_id: Option<String>,
     },
 
+    /// CodeAct (Python) execution trace (verbose/debug mode only).
+    ///
+    /// Emitted after the engine runs a model-authored snippet through the
+    /// Monty VM. The summary that ends up in the chat context is too lossy
+    /// for diagnostics; this event retains the raw code + stdout so the
+    /// debug inspector can surface what the model actually wrote and what
+    /// it produced.
+    #[serde(rename = "code_executed")]
+    CodeExecuted {
+        code: String,
+        stdout: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        return_value: Option<serde_json::Value>,
+        duration_ms: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+
+    /// WARN/ERROR log line (verbose/debug mode only).
+    ///
+    /// Forwarded from a tracing bridge so the debug inspector can surface
+    /// warnings that would otherwise only appear in server logs. Distinct
+    /// from `error` — warnings are recoverable conditions the operator may
+    /// still want to see.
+    #[serde(rename = "warning")]
+    Warning {
+        /// Originating module/target (e.g. `ironclaw::bridge::router`).
+        source: String,
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+
     /// CodeAct (Python / Monty) execution failed.
     ///
     /// Bridged from engine `EventKind::CodeExecutionFailed`. The engine's
@@ -696,6 +729,8 @@ impl AppEvent {
             Self::ChildThreadCompleted { .. } => "child_thread_completed",
             Self::MissionThreadSpawned { .. } => "mission_thread_spawned",
             Self::PlanUpdate { .. } => "plan_update",
+            Self::CodeExecuted { .. } => "code_executed",
+            Self::Warning { .. } => "warning",
             Self::CodeExecutionFailed { .. } => "code_execution_failed",
             Self::LeaseGranted { .. } => "lease_granted",
             Self::LeaseRevoked { .. } => "lease_revoked",
@@ -707,7 +742,13 @@ impl AppEvent {
 
     /// Whether this event should only be delivered to verbose/debug subscribers.
     pub fn is_verbose_only(&self) -> bool {
-        matches!(self, Self::ToolResultFull { .. } | Self::TurnMetrics { .. })
+        matches!(
+            self,
+            Self::ToolResultFull { .. }
+                | Self::TurnMetrics { .. }
+                | Self::CodeExecuted { .. }
+                | Self::Warning { .. }
+        )
     }
 }
 
@@ -896,6 +937,18 @@ mod tests {
                 status: String::new(),
                 steps: vec![],
                 mission_id: None,
+                thread_id: None,
+            },
+            AppEvent::CodeExecuted {
+                code: String::new(),
+                stdout: String::new(),
+                return_value: None,
+                duration_ms: 0,
+                thread_id: None,
+            },
+            AppEvent::Warning {
+                source: String::new(),
+                message: String::new(),
                 thread_id: None,
             },
             AppEvent::ChildThreadCompleted {
