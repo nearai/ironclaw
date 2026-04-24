@@ -775,10 +775,27 @@ fn resolve_workdir(requested: PathBuf, sandboxed: bool) -> Result<PathBuf, ToolE
         return Ok(requested);
     }
 
-    let diagnosis = match std::fs::symlink_metadata(&requested) {
-        Ok(meta) if meta.file_type().is_symlink() => "broken symlink",
+    // Classify why `requested` isn't a usable directory. `fs::metadata` follows
+    // symlinks, so its error distinguishes a missing path from a permission
+    // problem; `fs::symlink_metadata` then disambiguates a genuine missing
+    // path from a symlink whose target is missing. Without this split,
+    // `symlink_metadata` would mislabel a valid symlink-to-file as "broken"
+    // and `Err(_) => "does not exist"` would mislabel `PermissionDenied`.
+    let diagnosis = match std::fs::metadata(&requested) {
         Ok(_) => "exists but is not a directory",
-        Err(_) => "does not exist",
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let is_dangling_symlink = matches!(
+                std::fs::symlink_metadata(&requested),
+                Ok(meta) if meta.file_type().is_symlink()
+            );
+            if is_dangling_symlink {
+                "broken symlink"
+            } else {
+                "does not exist"
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => "permission denied",
+        Err(_) => "unreadable",
     };
 
     if sandboxed {
@@ -2087,13 +2104,20 @@ mod tests {
             .expect("should succeed with fallback workdir");
 
         let text = output.result.get("output").unwrap().as_str().unwrap();
+        // Canonicalize both sides: on systems where the process cwd traverses
+        // symlinks (e.g. macOS /tmp is a symlink to /private/tmp), `pwd` and
+        // `env::current_dir()` can disagree on the logical path while naming
+        // the same directory.
+        let actual = PathBuf::from(text.trim())
+            .canonicalize()
+            .expect("pwd output should canonicalize");
         let expected = std::env::current_dir()
             .expect("process cwd")
-            .to_string_lossy()
-            .into_owned();
+            .canonicalize()
+            .expect("process cwd should canonicalize");
         // Positive invariant: the command ran in the fallback cwd, not the
         // missing one.
-        assert_eq!(text.trim(), expected);
+        assert_eq!(actual, expected);
         assert_eq!(output.result.get("exit_code").unwrap().as_i64().unwrap(), 0);
     }
 
@@ -2162,6 +2186,48 @@ mod tests {
             // Unsandboxed: fall back without error (warn log is behavioural).
             let fallback = resolve_workdir(link, false).expect("unsandboxed falls back");
             assert!(fallback.is_dir());
+        }
+    }
+
+    #[test]
+    fn resolve_workdir_accepts_valid_symlink_to_dir() {
+        #[cfg(unix)]
+        {
+            let tmp = TempDir::new().expect("create temp dir");
+            let real_dir = tmp.path().join("real");
+            std::fs::create_dir(&real_dir).expect("create real dir");
+            let link = tmp.path().join("link");
+            std::os::unix::fs::symlink(&real_dir, &link).expect("create symlink");
+
+            // A valid symlink to a directory must NOT be labelled as
+            // "broken symlink" — is_dir() follows symlinks and returns true.
+            let resolved = resolve_workdir(link.clone(), true).expect("valid symlink resolves");
+            assert_eq!(resolved, link);
+        }
+    }
+
+    #[test]
+    fn resolve_workdir_does_not_mislabel_file_as_broken_symlink() {
+        // A plain regular file used to be caught by the old symlink_metadata
+        // branch. The new metadata-first logic must correctly diagnose
+        // "exists but is not a directory".
+        let tmp = TempDir::new().expect("create temp dir");
+        let file_path = tmp.path().join("plain.txt");
+        std::fs::write(&file_path, b"hi").expect("write file");
+
+        let err = resolve_workdir(file_path.clone(), true).expect_err("must fail closed");
+        match err {
+            ToolError::ExecutionFailed(msg) => {
+                assert!(
+                    msg.contains("not a directory"),
+                    "expected 'not a directory' diagnosis, got: {msg}"
+                );
+                assert!(
+                    !msg.contains("broken symlink"),
+                    "regular file must not be diagnosed as symlink: {msg}"
+                );
+            }
+            other => panic!("expected ExecutionFailed, got {other:?}"),
         }
     }
 }
