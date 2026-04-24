@@ -3806,7 +3806,28 @@ async fn await_thread_outcome(
                     Ok(ref evt) if evt.thread_id == thread_id => {
                         forward_event_to_channel(evt, channels, channel_name, metadata).await;
                         if let Some(sse) = sse {
-                            for app_event in thread_event_to_app_events(evt, &tid_str) {
+                            // Mirror the `send_status` gate: verbose-only
+                            // events (e.g. `CodeExecuted`, `Warning`) are
+                            // only useful when a debug subscriber is
+                            // actually listening. Skipping here avoids
+                            // flooding the shared SSE broadcast buffer
+                            // and the per-event clone cost for normal
+                            // (non-debug) browser tabs.
+                            let skip_verbose = !sse.has_verbose_receivers();
+                            let leak_detector = state.effect_adapter.safety().leak_detector();
+                            for mut app_event in thread_event_to_app_events(evt, &tid_str) {
+                                if skip_verbose && app_event.is_verbose_only() {
+                                    continue;
+                                }
+                                // The engine crate emits CodeExecuted
+                                // raw — it has no dependency on
+                                // `ironclaw_safety`. Scrub secrets
+                                // (bearer tokens, API keys, etc.) out
+                                // of the code/stdout/return_value
+                                // payload here, at the bridge boundary,
+                                // before the event reaches any SSE
+                                // subscriber.
+                                redact_code_executed_secrets(&mut app_event, leak_detector);
                                 sse.broadcast_for_user(&message.user_id, app_event);
                             }
                         }
@@ -4587,6 +4608,99 @@ fn code_execution_category_to_wire(
     }
 }
 
+/// Scrub secrets (bearer tokens, API keys, etc.) out of the payload of
+/// an `AppEvent::CodeExecuted` before it is broadcast on SSE.
+///
+/// The engine crate (`ironclaw_engine`) emits `CodeExecuted` with raw
+/// `code` / `stdout` / `return_value` because it does not depend on
+/// `ironclaw_safety`. Verbose-only SSE subscribers would otherwise see
+/// model-authored Python snippets that printed credentials, API
+/// responses echoed to stdout, or credential-shaped return values —
+/// material that `sanitize_tool_output` would normally catch on the
+/// tool-output path but that never flows through that pipeline.
+///
+/// Redaction is no-op for any other `AppEvent` variant.
+fn redact_code_executed_secrets(
+    event: &mut AppEvent,
+    leak_detector: &ironclaw_safety::LeakDetector,
+) {
+    let AppEvent::CodeExecuted {
+        code,
+        stdout,
+        return_value,
+        ..
+    } = event
+    else {
+        return;
+    };
+
+    *code = redact_leaks_in_string(code, leak_detector);
+    *stdout = redact_leaks_in_string(stdout, leak_detector);
+
+    if let Some(value) = return_value {
+        redact_secrets_in_json(value, leak_detector);
+    }
+}
+
+/// Return `content` with every `LeakDetector` match replaced by
+/// `[REDACTED]`. Unlike `scan_and_clean`, this redacts matches under
+/// *any* action (`Block`, `Redact`, or `Warn`) — for a verbose-only
+/// observability event, a leak-carrying field is never appropriate to
+/// keep verbatim, regardless of what the detector's policy would say
+/// for tool output. `Block`-action patterns in particular were only
+/// flagging `should_block` before, which `scan()`'s `redacted_content`
+/// leaves `None` for — so a `ghp_…` token would have flowed through
+/// unchanged without this path.
+fn redact_leaks_in_string(content: &str, leak_detector: &ironclaw_safety::LeakDetector) -> String {
+    let scan = leak_detector.scan(content);
+    if scan.matches.is_empty() {
+        return content.to_string();
+    }
+    let mut ranges: Vec<_> = scan.matches.iter().map(|m| m.location.clone()).collect();
+    ranges.sort_by_key(|r| r.start);
+
+    let mut out = String::with_capacity(content.len());
+    let mut cursor = 0usize;
+    for range in ranges {
+        // Overlapping / duplicate ranges — skip any already covered.
+        if range.start < cursor {
+            continue;
+        }
+        out.push_str(&content[cursor..range.start]);
+        out.push_str("[REDACTED]");
+        cursor = range.end;
+    }
+    if cursor < content.len() {
+        out.push_str(&content[cursor..]);
+    }
+    out
+}
+
+/// Walk a `serde_json::Value` and replace leak-detector matches inside
+/// string values with `[REDACTED]`. Structural positions (object keys,
+/// numeric values, null/bool) pass through unchanged.
+fn redact_secrets_in_json(
+    value: &mut serde_json::Value,
+    leak_detector: &ironclaw_safety::LeakDetector,
+) {
+    match value {
+        serde_json::Value::String(s) => {
+            *s = redact_leaks_in_string(s, leak_detector);
+        }
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                redact_secrets_in_json(item, leak_detector);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (_, v) in map.iter_mut() {
+                redact_secrets_in_json(v, leak_detector);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Convert a `ThreadEvent` to `AppEvent`s for the web gateway SSE stream.
 ///
 /// Returns multiple events when needed (e.g., `ToolStarted` + `ToolCompleted`
@@ -4621,7 +4735,7 @@ fn thread_event_to_app_events(
                     name: display_name,
                     success: true,
                     error: None,
-                    parameters: None,
+                    parameters: params_summary.clone(),
                     call_id: Some(call_id.clone()),
                     duration_ms: Some(*duration_ms),
                     thread_id: Some(thread_id.into()),
@@ -4648,7 +4762,7 @@ fn thread_event_to_app_events(
                     name: display_name,
                     success: false,
                     error: Some(error.clone()),
-                    parameters: None,
+                    parameters: params_summary.clone(),
                     call_id: Some(call_id.clone()),
                     duration_ms: Some(*duration_ms),
                     thread_id: Some(thread_id.into()),
@@ -4710,6 +4824,19 @@ fn thread_event_to_app_events(
             skill_names: skill_names.clone(),
             thread_id: Some(thread_id.into()),
             feedback: Vec::new(),
+        }],
+        EventKind::CodeExecuted {
+            code,
+            stdout,
+            return_value,
+            duration_ms,
+            ..
+        } => vec![AppEvent::CodeExecuted {
+            code: code.clone(),
+            stdout: stdout.clone(),
+            return_value: return_value.clone(),
+            duration_ms: *duration_ms,
+            thread_id: Some(thread_id.into()),
         }],
         EventKind::LeaseGranted {
             lease_id,
@@ -7249,6 +7376,62 @@ mod tests {
                 && duration_ms == &Some(17)
                 && thread_id.as_deref() == Some("thread-123")
         ));
+    }
+
+    #[test]
+    fn redact_code_executed_scrubs_secrets_from_code_stdout_and_return_value() {
+        // Regression: PR #2850 review — `AppEvent::CodeExecuted` carried
+        // raw code / stdout / return_value to verbose SSE subscribers
+        // without passing through any leak-detection layer, so a model
+        // snippet that printed a bearer token or returned an API key
+        // would surface that material to every debug client.
+        let detector = ironclaw_safety::LeakDetector::new();
+
+        // GitHub personal access token pattern (`ghp_` + 36+
+        // alphanumerics) is in the default LeakDetector patterns.
+        let fake_secret = "ghp_aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQrR";
+
+        let code = format!("headers = {{ 'X-Auth-Token': '{fake_secret}' }}");
+        let stdout = format!("response: token={fake_secret}");
+        let mut event = AppEvent::CodeExecuted {
+            code: code.clone(),
+            stdout: stdout.clone(),
+            return_value: Some(serde_json::json!({
+                "token": fake_secret,
+                "count": 42,
+            })),
+            duration_ms: 12,
+            thread_id: Some("thread-x".into()),
+        };
+
+        redact_code_executed_secrets(&mut event, &detector);
+
+        let AppEvent::CodeExecuted {
+            code: redacted_code,
+            stdout: redacted_stdout,
+            return_value,
+            ..
+        } = event
+        else {
+            panic!("expected CodeExecuted after redaction");
+        };
+
+        assert!(
+            !redacted_code.contains(fake_secret),
+            "leaked key in code: {redacted_code}"
+        );
+        assert!(
+            !redacted_stdout.contains(fake_secret),
+            "leaked key in stdout: {redacted_stdout}"
+        );
+        let rv = return_value.expect("return_value preserved");
+        let token = rv.get("token").and_then(|v| v.as_str()).unwrap_or_default();
+        assert!(
+            !token.contains(fake_secret),
+            "leaked key in return_value: {token}"
+        );
+        // Numeric sibling fields survive untouched.
+        assert_eq!(rv.get("count").and_then(|v| v.as_u64()), Some(42));
     }
 
     #[test]

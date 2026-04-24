@@ -194,6 +194,17 @@ impl EffectBridgeAdapter {
         &self.tools
     }
 
+    /// Access the underlying safety layer.
+    ///
+    /// The bridge router uses this to redact verbose-only observability
+    /// events (notably `CodeExecuted`) through the leak detector before
+    /// broadcasting them on SSE. The engine crate emits those events
+    /// raw because it has no dependency on `ironclaw_safety`; the
+    /// scrubbing therefore happens at this adapter boundary.
+    pub fn safety(&self) -> &Arc<SafetyLayer> {
+        &self.safety
+    }
+
     /// Set the auth manager for pre-flight credential checks.
     pub async fn set_auth_manager(&self, mgr: Arc<AuthManager>) {
         *self.auth_manager.write().await = Some(mgr);
