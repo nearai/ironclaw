@@ -282,3 +282,219 @@ effects = ["network", "dispatch_capability"]
 default_permission = "ask"
 parameters_schema = { type = "object" }
 "#;
+
+#[test]
+fn malformed_or_incomplete_manifest_fails() {
+    assert!(matches!(
+        ExtensionManifest::parse("not = [valid"),
+        Err(ExtensionError::ManifestParse { .. })
+    ));
+
+    let missing_name = WASM_MANIFEST.replace("name = \"Echo\"\n", "");
+    assert!(matches!(
+        ExtensionManifest::parse(&missing_name),
+        Err(ExtensionError::ManifestParse { .. })
+    ));
+
+    let unknown_field =
+        WASM_MANIFEST.replace("version = \"0.1.0\"", "version = \"0.1.0\"\nunknown = true");
+    assert!(matches!(
+        ExtensionManifest::parse(&unknown_field),
+        Err(ExtensionError::ManifestParse { .. })
+    ));
+
+    let no_capabilities = r#"
+id = "empty"
+name = "Empty"
+version = "0.1.0"
+description = "No capabilities"
+trust = "sandbox"
+
+[runtime]
+kind = "wasm"
+module = "wasm/empty.wasm"
+"#;
+    assert!(matches!(
+        ExtensionManifest::parse(no_capabilities),
+        Err(ExtensionError::InvalidManifest { reason }) if reason.contains("capability")
+    ));
+}
+
+#[test]
+fn package_root_must_match_manifest_id() {
+    let manifest = ExtensionManifest::parse(WASM_MANIFEST).unwrap();
+    let err = ExtensionPackage::from_manifest(
+        manifest,
+        VirtualPath::new("/system/extensions/not-echo").unwrap(),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExtensionError::ManifestIdMismatch { expected, actual, .. }
+            if expected.as_str() == "not-echo" && actual.as_str() == "echo"
+    ));
+}
+
+#[test]
+fn package_rejects_duplicate_capabilities_within_manifest() {
+    let duplicate_manifest = WASM_MANIFEST.to_string()
+        + r#"
+[[capabilities]]
+id = "echo.say"
+description = "Duplicate Echo"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+parameters_schema = { type = "object" }
+"#;
+    let manifest = ExtensionManifest::parse(&duplicate_manifest).unwrap();
+    let err = ExtensionPackage::from_manifest(
+        manifest,
+        VirtualPath::new("/system/extensions/echo").unwrap(),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExtensionError::DuplicateCapability { id } if id.as_str() == "echo.say"
+    ));
+}
+
+#[test]
+fn script_runtime_requires_docker_backend_in_v1() {
+    let manifest = SCRIPT_MANIFEST.replace("backend = \"docker\"", "backend = \"podman\"");
+    let err = ExtensionManifest::parse(&manifest).unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExtensionError::InvalidManifest { reason } if reason.contains("docker")
+    ));
+}
+
+#[test]
+fn first_party_and_system_runtimes_parse_but_do_not_execute() {
+    let first_party = ExtensionManifest::parse(FIRST_PARTY_MANIFEST).unwrap();
+    assert_eq!(first_party.runtime_kind(), RuntimeKind::FirstParty);
+    assert_eq!(first_party.trust, TrustClass::FirstParty);
+    assert!(matches!(
+        first_party.runtime,
+        ExtensionRuntime::FirstParty { ref service } if service == "conversation"
+    ));
+
+    let system = ExtensionManifest::parse(SYSTEM_MANIFEST).unwrap();
+    assert_eq!(system.runtime_kind(), RuntimeKind::System);
+    assert_eq!(system.trust, TrustClass::System);
+    assert!(matches!(
+        system.runtime,
+        ExtensionRuntime::System { ref service } if service == "audit"
+    ));
+}
+
+#[test]
+fn asset_path_resolves_under_extension_root_only() {
+    let asset = ExtensionAssetPath::new("wasm/echo.wasm").unwrap();
+    let resolved = asset
+        .resolve_under(&VirtualPath::new("/system/extensions/echo").unwrap())
+        .unwrap();
+
+    assert_eq!(resolved.as_str(), "/system/extensions/echo/wasm/echo.wasm");
+}
+
+#[test]
+fn registry_lookup_returns_declared_package_and_descriptor() {
+    let package = ExtensionPackage::from_manifest(
+        ExtensionManifest::parse(WASM_MANIFEST).unwrap(),
+        VirtualPath::new("/system/extensions/echo").unwrap(),
+    )
+    .unwrap();
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+
+    let extension = registry
+        .get_extension(&ExtensionId::new("echo").unwrap())
+        .unwrap();
+    assert_eq!(extension.root.as_str(), "/system/extensions/echo");
+
+    let capability = registry
+        .get_capability(&CapabilityId::new("echo.say").unwrap())
+        .unwrap();
+    assert_eq!(capability.description, "Echo text");
+    assert_eq!(capability.provider.as_str(), "echo");
+}
+
+#[tokio::test]
+async fn discovery_returns_extensions_in_deterministic_name_order() {
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("zeta")).unwrap();
+    std::fs::create_dir_all(storage.path().join("alpha")).unwrap();
+    std::fs::write(
+        storage.path().join("zeta/manifest.toml"),
+        WASM_MANIFEST
+            .replace("id = \"echo\"", "id = \"zeta\"")
+            .replace("echo.say", "zeta.say"),
+    )
+    .unwrap();
+    std::fs::write(
+        storage.path().join("alpha/manifest.toml"),
+        WASM_MANIFEST
+            .replace("id = \"echo\"", "id = \"alpha\"")
+            .replace("echo.say", "alpha.say"),
+    )
+    .unwrap();
+
+    let mut fs = LocalFilesystem::new();
+    fs.mount_local(
+        VirtualPath::new("/system/extensions").unwrap(),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
+    )
+    .unwrap();
+
+    let registry =
+        ExtensionDiscovery::discover(&fs, &VirtualPath::new("/system/extensions").unwrap())
+            .await
+            .unwrap();
+    let ids: Vec<_> = registry
+        .extensions()
+        .map(|package| package.id.as_str().to_string())
+        .collect();
+
+    assert_eq!(ids, vec!["alpha", "zeta"]);
+}
+
+const FIRST_PARTY_MANIFEST: &str = r#"
+id = "conversation"
+name = "Conversation"
+version = "0.1.0"
+description = "Conversation service"
+trust = "first_party"
+
+[runtime]
+kind = "first_party"
+service = "conversation"
+
+[[capabilities]]
+id = "conversation.ingest"
+description = "Ingest normalized messages"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+parameters_schema = { type = "object" }
+"#;
+
+const SYSTEM_MANIFEST: &str = r#"
+id = "audit"
+name = "Audit"
+version = "0.1.0"
+description = "Audit service"
+trust = "system"
+
+[runtime]
+kind = "system"
+service = "audit"
+
+[[capabilities]]
+id = "audit.write"
+description = "Write audit event"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+parameters_schema = { type = "object" }
+"#;

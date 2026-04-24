@@ -5,7 +5,7 @@
 //! execute WASM modules, start Docker containers, connect to MCP servers, resolve
 //! secrets, or reserve resources.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
@@ -210,6 +210,7 @@ impl ExtensionPackage {
     ) -> Result<Self, ExtensionError> {
         ensure_extension_root_matches(&manifest.id, &root)?;
         let expected_prefix = format!("{}.", manifest.id.as_str());
+        let mut seen_capabilities = HashSet::new();
         let capabilities = manifest
             .capabilities
             .iter()
@@ -221,6 +222,11 @@ impl ExtensionPackage {
                             capability.id.as_str(),
                             expected_prefix
                         ),
+                    });
+                }
+                if !seen_capabilities.insert(capability.id.clone()) {
+                    return Err(ExtensionError::DuplicateCapability {
+                        id: capability.id.clone(),
                     });
                 }
                 Ok(CapabilityDescriptor {
@@ -251,6 +257,7 @@ impl ExtensionPackage {
 pub struct ExtensionRegistry {
     packages: HashMap<ExtensionId, ExtensionPackage>,
     capabilities: HashMap<CapabilityId, CapabilityDescriptor>,
+    extension_order: Vec<ExtensionId>,
 }
 
 impl ExtensionRegistry {
@@ -283,6 +290,7 @@ impl ExtensionRegistry {
             self.capabilities
                 .insert(descriptor.id.clone(), descriptor.clone());
         }
+        self.extension_order.push(package.id.clone());
         self.packages.insert(package.id.clone(), package);
         Ok(())
     }
@@ -296,7 +304,9 @@ impl ExtensionRegistry {
     }
 
     pub fn extensions(&self) -> impl Iterator<Item = &ExtensionPackage> {
-        self.packages.values()
+        self.extension_order
+            .iter()
+            .filter_map(|id| self.packages.get(id))
     }
 
     pub fn capabilities(&self) -> impl Iterator<Item = &CapabilityDescriptor> {
@@ -355,6 +365,7 @@ struct RawManifest {
     description: String,
     trust: TrustClass,
     runtime: RawRuntime,
+    #[serde(default)]
     capabilities: Vec<RawCapability>,
 }
 
@@ -399,6 +410,11 @@ impl RawRuntime {
                 args,
             } => {
                 validate_non_empty("script backend", &backend)?;
+                if backend != "docker" {
+                    return Err(ExtensionError::InvalidManifest {
+                        reason: "script runtime backend must be docker in V1".to_string(),
+                    });
+                }
                 validate_non_empty("script image", &image)?;
                 validate_non_empty("script command", &command)?;
                 Ok(ExtensionRuntime::Script {
