@@ -17,9 +17,11 @@ The goal is not to rewrite IronClaw in one pass. The goal is to build a small ve
 
 ```text
 filesystem mount
-  -> discover extension
+  -> discover extension manifest
   -> register capability
-  -> dispatch process
+  -> execute WASM capability
+  -> expose MCP capability
+  -> run script runner helper
   -> emit realtime event
   -> write durable state
 ```
@@ -41,7 +43,7 @@ Do not start with:
 - all filesystem backends
 - self-repair
 - GitHub extension
-- hot reload
+- arbitrary live in-flight hot migration
 
 Start with the smallest host path that proves the OS-like model.
 
@@ -69,31 +71,35 @@ Build manifest/discovery/capability declaration logic.
 
 This may begin inside `ironclaw_kernel` if kept narrow, but a separate crate is preferred if implementation scope grows.
 
-### PR 4 — `crates/ironclaw_processes`
+### PR 4 — `crates/ironclaw_wasm` + WASM echo
 
-Build dispatch/spawn/process table and a language-agnostic stdio process protocol.
+Build the default installed capability lane and prove one tiny WASM capability.
 
 ### PR 5 — `crates/ironclaw_kernel`
 
-Wire filesystem + extensions + processes into a composition-only host.
+Wire filesystem + extensions + WASM runtime into a composition-only host.
 
-### PR 6 — `extensions/echo`
+### PR 6 — `crates/ironclaw_mcp`
 
-Add the first tiny extension proving the full path.
+Adapt existing MCP servers/tools into IronClaw capabilities.
 
-### PR 7 — `extensions/conversation`
+### PR 7 — `crates/ironclaw_scripts`
 
-Add normalized inbound routing, channel-to-thread mapping, and inbox/outbox semantics.
+Add `script.run` for project-local sandboxed Python/bash/JS helpers.
 
-### PR 8 — `extensions/agent_loop_tools`
+### PR 8 — `extensions/conversation` and `extensions/missions`
+
+Add normalized inbound routing, channel-to-thread mapping, inbox/outbox semantics, and mission definition execution.
+
+### PR 9 — `extensions/agent_loop_tools`
 
 Move the default tool/capability agent loop into a first-party extension.
 
-### PR 9 — `extensions/gateway`
+### PR 10 — `extensions/gateway` and `extensions/tui`
 
-Move gateway/channel behavior into a first-party extension and prove reconnect/cursor/outbox flow.
+Move gateway/TUI channel behavior into first-party extensions and prove reconnect/cursor/outbox flow.
 
-### PR 10 — auth/network/sandbox hardening
+### PR 11 — auth/network/sandbox hardening
 
 Add secret handles, mediated network, sandbox profile enforcement, and stronger scope propagation.
 
@@ -108,6 +114,9 @@ Suggested files:
 ```text
 docs/reborn/contracts/filesystem.md
 docs/reborn/contracts/extensions.md
+docs/reborn/contracts/wasm.md
+docs/reborn/contracts/mcp.md
+docs/reborn/contracts/scripts.md
 docs/reborn/contracts/processes.md
 docs/reborn/contracts/auth.md
 docs/reborn/contracts/network.md
@@ -212,14 +221,18 @@ crates/ironclaw_extensions/
 ### Manifest sketch
 
 ```toml
-id = "agent_loop_tools"
+id = "echo"
 version = "0.1.0"
-trust = "privileged"
+trust = "sandboxed"
 
-[capabilities.handle_input]
-description = "Run tool-based agent loop for a thread"
+[runtime]
+type = "wasm"
+module = "bin/echo.wasm"
+
+[capabilities.say]
+description = "Echo text"
 mode = "dispatch"
-permission = "ask"
+permission = "allow"
 
 [paths]
 config = "config/"
@@ -251,85 +264,55 @@ Do not add:
 
 ---
 
-## 7. Milestone 3 — `ironclaw_processes`
+## 7. Milestone 3 — `ironclaw_wasm`
 
 ### Purpose
 
-Represent what is running.
+Provide the default installed capability lane.
 
 ### Crate
 
 ```text
-crates/ironclaw_processes/
+crates/ironclaw_wasm/
 ```
 
 ### Build
 
-- `ProcessId`
-- `Process`
-- process table
-- `dispatch`
-- `spawn`
-- lifecycle states
-- stdio JSON process protocol
-- simple sandbox profile placeholder
-- process events
+- WASM module loader
+- host ABI/import surface
+- module validation
+- fuel/time/memory/output limits
+- capability invocation wrapper
+- scoped imports for filesystem/auth/network/events/dispatch
 
 ### API sketch
 
 ```rust
-async fn dispatch(
+async fn invoke_wasm(
+    module: WasmModuleRef,
     capability: CapabilityRef,
     params: Value,
     scope: ExecutionScope,
 ) -> Result<Value>;
-
-async fn spawn(
-    capability: CapabilityRef,
-    params: Value,
-    scope: ExecutionScope,
-) -> Result<ProcessId>;
-
-async fn status(process_id: ProcessId) -> Result<ProcessStatus>;
-async fn kill(process_id: ProcessId) -> Result<()>;
-async fn subscribe(process_id: ProcessId) -> EventStream;
 ```
-
-### V1 protocol
-
-Use a language-agnostic stdio JSON protocol.
-
-Messages:
-
-- `handshake`
-- `invoke`
-- `invoke_result`
-- `invoke_error`
-- `cancel`
-- `shutdown`
-- `healthcheck`
 
 ### Tests
 
-- dispatch calls simple extension and returns result
-- spawn starts process and returns id
-- status changes correctly
-- kill works
-- stdout/stderr captured as runtime events
-- timeout kills process
-- process cannot run outside allowed working directory
+- valid module loads
+- invalid module fails
+- capability export is invoked
+- fuel/time limit stops runaway code
+- memory/output limits are enforced
+- filesystem/network/auth imports require scoped grants
 
 ### Non-goals
 
 Do not add:
 
-- extension discovery
-- extension manifest validation as source of truth
-- thread persistence
-- global auth policy
-- global network policy
-- routing/repair/reflection logic
-- durable event storage
+- MCP protocol handling
+- project-local Python/bash/JS execution
+- marketplace behavior
+- product workflows
 
 ---
 
@@ -348,10 +331,10 @@ crates/ironclaw_kernel/
 ### Build
 
 - system builder
-- filesystem + extension manager + process manager wiring
+- filesystem + extension manager + WASM runtime wiring
 - event bus composition
 - boot namespace
-- extension registration into process manager
+- extension capability registration into host dispatch table
 
 ### API sketch
 
@@ -359,7 +342,7 @@ crates/ironclaw_kernel/
 let kernel = KernelBuilder::new()
     .with_filesystem(fs)
     .with_extension_manager(extensions)
-    .with_process_manager(processes)
+    .with_wasm_runtime(wasm)
     .build()
     .await?;
 ```
@@ -386,35 +369,34 @@ Do not add:
 
 ---
 
-## 9. Milestone 5 — first-party extensions
+## 9. Milestone 5 — MCP and script runner lanes
 
-Only after the crate stack works.
+After filesystem, extension discovery, WASM, and kernel composition work, add the other two V1 lanes.
 
-### Start with `extensions/echo`
+### `crates/ironclaw_mcp`
 
-`echo` proves:
+Proves:
 
-- manifest
-- discovery
-- capability registration
-- dispatch
-- process protocol
-- config folder
-- event flow
+- MCP server manifest/discovery path
+- stdio MCP tool discovery
+- MCP tool to IronClaw capability mapping
+- scoped invocation and audit hooks
 
-Demo:
+### `crates/ironclaw_scripts`
 
-```bash
-ironclaw reborn dispatch echo.say '{"text":"hello"}'
-```
+Proves:
 
-Expected:
+- `script.run` capability
+- project-local Python/bash/JS helper execution
+- sandbox profile limits
+- scoped filesystem mounts
+- no network/secrets by default
 
-```json
-{"text":"hello"}
-```
+## 10. Milestone 6 — first-party product/userland extensions
 
-### Then add `extensions/conversation`
+Only after the runtime lanes work.
+
+### `extensions/conversation`
 
 Proves:
 
@@ -423,7 +405,15 @@ Proves:
 - outbox paths
 - configured agent-loop selection
 
-### Then add `extensions/agent_loop_tools`
+### `extensions/missions`
+
+Proves:
+
+- filesystem-backed mission definitions
+- cron/event/manual triggers
+- dispatch/spawn into agent loops, scripts, or capabilities
+
+### `extensions/agent_loop_tools`
 
 Proves:
 
@@ -432,7 +422,7 @@ Proves:
 - step append
 - capability dispatch
 
-### Then add `extensions/gateway` and `extensions/tui`
+### `extensions/gateway` and `extensions/tui`
 
 Proves:
 
@@ -442,7 +432,7 @@ Proves:
 
 ---
 
-## 10. Milestone 6 — auth/network/sandbox hardening
+## 11. Milestone 7 — auth/network/sandbox hardening
 
 Do not start here unless the team intentionally wants to prioritize security infrastructure before proving the execution path.
 
@@ -479,27 +469,27 @@ Add stronger isolation later.
 
 ---
 
-## 11. Minimum viable vertical slice
+## 12. Minimum viable vertical slice
 
 The first meaningful proof should include:
 
 ```text
 crates/ironclaw_filesystem
 crates/ironclaw_extensions
-crates/ironclaw_processes
+crates/ironclaw_wasm
 crates/ironclaw_kernel
-extensions/echo
+wasm echo capability
 ```
 
 End-to-end flow:
 
 ```text
 filesystem mount
-  -> discover echo extension
+  -> discover echo WASM extension
   -> extract echo.say capability
-  -> register capability with process manager
+  -> register capability with kernel host
   -> dispatch echo.say
-  -> run extension process
+  -> invoke WASM module
   -> emit runtime event
   -> return result
   -> write durable event/history if configured
@@ -509,28 +499,32 @@ This proves the architecture without product complexity.
 
 ---
 
-## 12. Success criteria
+## 13. Success criteria
 
 The architecture is real when:
 
 - `ironclaw_kernel` has almost no product logic
-- `ironclaw_processes` does not discover extensions
-- `ironclaw_extensions` does not run processes
+- `ironclaw_wasm` does not discover extensions
+- `ironclaw_mcp` tools are adapted into capabilities and still go through policy/audit
+- `ironclaw_scripts` is project-scoped and not a generic extension install path
+- `ironclaw_extensions` does not execute capabilities
 - `ironclaw_filesystem` does not know about agents
 - `agent_loop` can be deleted or replaced without touching kernel
 - `gateway` can be deleted or replaced without touching kernel
-- `echo` extension runs through the same path future extensions will use
+- WASM echo capability runs through the same path future installed WASM capabilities will use
 
 ---
 
-## 13. Early architecture guardrails
+## 14. Early architecture guardrails
 
 Add guardrails as soon as the first crates exist:
 
 - dependency checks between crates
 - forbidden imports from extensions into kernel internals
 - contract tests for manifests
-- process protocol tests
+- WASM host ABI tests
+- MCP adapter tests
+- script runner sandbox tests
 - filesystem path traversal tests
 - no outbound network bypasses in hosted mode
 - no raw secret material in config fixtures
@@ -539,10 +533,10 @@ These tests are not polish. They are the mechanism that keeps the architecture f
 
 ---
 
-## 14. Final recommendation
+## 15. Final recommendation
 
 The next implementation work should be a sequence of small self-contained crates, not a broad product rewrite.
 
-Start with the durable filesystem, then extension discovery, then process execution, then kernel composition, then a tiny `echo` extension.
+Start with the durable filesystem, then extension discovery, then WASM capability execution, then kernel composition, then a tiny WASM echo capability.
 
-Only after that path is working should the team move the agent loop, gateway, TUI, auth, network, sandboxing, GitHub, or self-repair into the new model.
+After that path is working, add MCP and script runner as the remaining V1 lanes. Only then should the team move conversation, missions, agent loop, gateway, TUI, auth, network, sandboxing, GitHub, or self-repair into the new model.

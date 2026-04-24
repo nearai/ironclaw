@@ -224,16 +224,45 @@ The proposed main crates are:
 
 ```text
 crates/
+  ironclaw_extensions
   ironclaw_filesystem
   ironclaw_processes
+  ironclaw_wasm
+  ironclaw_mcp
+  ironclaw_scripts
   ironclaw_auth
   ironclaw_network
   ironclaw_kernel
 ```
 
-`ExtensionManager` should stay explicit. It can begin as a narrow subsystem inside `ironclaw_kernel`, but it should become `crates/ironclaw_extensions` if extension discovery, manifests, lifecycle, or package management grow beyond simple host wiring.
+`ironclaw_wasm`, `ironclaw_mcp`, and `ironclaw_scripts` are the V1 runtime/capability lanes. Generic arbitrary process extensions are not a public V1 lane; process execution remains an internal substrate for script runner, MCP stdio servers, and trusted system work.
 
-### 6.1 `crates/ironclaw_filesystem`
+`ExtensionManager` should live in `crates/ironclaw_extensions` from day one. Kernel should compose it, not own extension discovery or manifest semantics.
+
+### 6.1 `crates/ironclaw_extensions`
+
+This crate owns extension discovery and manifest semantics.
+
+#### Owns
+
+- extension manifest schema
+- extension discovery through filesystem mounts
+- extension layout validation
+- capability declarations
+- trust class parsing
+- extension registry
+- runtime lane declaration: WASM, MCP, or script/project-local helper
+
+#### Does not own
+
+- process execution
+- sandboxing mechanism
+- auth policy
+- network policy
+- routing decisions
+- product behavior
+
+### 6.2 `crates/ironclaw_filesystem`
 
 This crate replaces the old `Workspace` abstraction.
 
@@ -264,15 +293,15 @@ This crate replaces the old `Workspace` abstraction.
 
 If rich querying or indexing becomes necessary, add a separate indexing/query service on top of the filesystem instead of putting those semantics inside the filesystem trait.
 
-### 6.2 `crates/ironclaw_processes`
+### 6.3 `crates/ironclaw_processes`
 
-This crate owns live execution.
+This crate owns internal live execution for script backends, MCP stdio servers, trusted system services, and background jobs. It is not a public generic-process extension lane in V1.
 
 #### Owns
 
-- capability runtime representation
-- `dispatch(name, params)` for request/response execution
-- `spawn(name, params)` for background or long-lived execution
+- internal process runtime representation
+- `dispatch(name, params)` for request/response execution through approved runtime lanes
+- `spawn(name, params)` for background or long-lived execution through approved runtime lanes
 - `ProcessId`
 - process table: `HashMap<ProcessId, Process>`
 - process lifecycle state
@@ -308,7 +337,7 @@ subscribe(process_id) -> EventStream
 
 Internally, `dispatch` may use an ephemeral process or a warm worker pool. That is an implementation detail of `ironclaw_processes` and should not leak into extension APIs.
 
-### 6.3 `crates/ironclaw_auth`
+### 6.4 `crates/ironclaw_auth`
 
 This crate handles authentication and credential management.
 
@@ -330,7 +359,7 @@ This crate handles authentication and credential management.
 
 This crate should be about credential and identity plumbing, not every policy decision.
 
-### 6.4 `crates/ironclaw_network`
+### 6.5 `crates/ironclaw_network`
 
 This crate is the network mediation boundary.
 
@@ -350,13 +379,73 @@ This crate is the network mediation boundary.
 
 This crate should be the place where network effects are mediated, not just a bag of HTTP helpers.
 
-### 6.5 `crates/ironclaw_kernel`
+### 6.6 `crates/ironclaw_wasm`
+
+This crate is the default installed-extension runtime for stable reusable capabilities.
+
+#### Owns
+
+- WASM module loading and validation
+- WASM host ABI/import surface
+- fuel/time/memory/output limits
+- mapping WASM exports to IronClaw capabilities
+- scoped host imports for filesystem, network, auth, events, and dispatch
+
+#### Does not own
+
+- extension discovery
+- MCP server management
+- project-local script execution
+- product workflows
+
+### 6.7 `crates/ironclaw_mcp`
+
+This crate adapts existing MCP servers into IronClaw capabilities.
+
+#### Owns
+
+- stdio and remote MCP connection management
+- MCP tool discovery
+- mapping MCP tools to capability metadata
+- MCP tool invocation and result normalization
+- MCP-specific prompt/tool description sanitization hooks
+
+#### Does not own
+
+- IronClaw policy enforcement
+- generic process extension installation
+- product workflows
+
+MCP capabilities still go through IronClaw scope, approval, audit, and policy checks.
+
+### 6.8 `crates/ironclaw_scripts`
+
+This crate provides the dynamic scripting lane for project-local model-generated work.
+
+#### Owns
+
+- `script.run` capability
+- script profiles for Python/bash/JS backends
+- project-scoped sandbox execution
+- script input/output/artifact handling
+- limits and cleanup for script runs
+
+#### Does not own
+
+- installed extension packaging
+- stable first-party integration behavior
+- raw host shell access
+- raw secret storage
+
+Scripts are the creativity/discovery lane. WASM/MCP capabilities are the stabilization/reliability lanes.
+
+### 6.9 `crates/ironclaw_kernel`
 
 This crate composes the system.
 
 #### Owns
 
-- wiring between extension manager, filesystem, processes, auth, and network
+- wiring between extension manager, filesystem, WASM, MCP, scripts, processes, auth, and network
 - stable system contracts shared across services
 - user/tenant/project scope wiring
 - high-level host startup
@@ -379,7 +468,11 @@ The intended dependency direction is:
 
 ```text
 extensions -> host interface/contracts
-ironclaw_kernel -> filesystem + processes + auth + network + extension manager
+ironclaw_kernel -> extensions + filesystem + processes + wasm + mcp + scripts + auth + network
+ironclaw_extensions -> filesystem contracts and manifest/capability types
+ironclaw_wasm -> host ABI/contracts + filesystem/auth/network/events interfaces
+ironclaw_mcp -> processes for stdio servers + network/auth interfaces for remote servers
+ironclaw_scripts -> processes + filesystem/auth/network interfaces
 ironclaw_processes -> filesystem contracts + auth/network/sandbox interfaces as needed
 ironclaw_auth -> filesystem contracts
 ironclaw_network -> auth handles only when explicitly injected
@@ -390,6 +483,7 @@ Hard rules:
 
 - `ironclaw_filesystem` must not depend on product extensions.
 - `ironclaw_processes` must not depend on extension discovery internals.
+- `ironclaw_kernel` must not parse extension manifests directly.
 - Extensions must not import kernel internals directly.
 - First-party extensions must use the same host API shape as third-party extensions, with explicit privilege levels.
 
@@ -425,7 +519,31 @@ A clean separation is:
 
 ---
 
-## 9. Extension host API
+## 9. V1 runtime/capability lanes
+
+V1 supports three capability lanes:
+
+```text
+WASM + MCP + Script Runner
+```
+
+### WASM
+
+The default lane for installed reusable capabilities. WASM optimizes for hosted security, multi-tenant safety, versioned artifacts, and weaker-model reliability.
+
+### MCP
+
+The compatibility/ecosystem lane. Existing MCP servers are represented as extensions and their tools are adapted into IronClaw capabilities. MCP is required in V1 because existing users and integrations already depend on it.
+
+### Script runner
+
+The creativity lane. Strong models can write Python/bash/JS helpers and run them through scoped project sandboxes. Script runner is for exploration, self-repair experiments, and project-local helpers; repeated stable workflows can later be promoted into WASM/MCP/stable capabilities.
+
+Generic arbitrary process extensions are deferred as a public extension model. Process execution still exists internally for MCP stdio servers, script runner backends, project runtimes, and trusted system services.
+
+---
+
+## 10. Extension host API
 
 Extensions should receive a narrow host API instead of direct access to internal crates.
 
@@ -450,7 +568,7 @@ The goal is to keep first-party extensions from becoming “extensions in name o
 
 ---
 
-## 10. Event model
+## 11. Event model
 
 The current sketch places the event bus near the process manager. That is partially right, but the bus should not be a purely process-owned subsystem.
 
@@ -485,7 +603,7 @@ Define event classes early:
 
 ---
 
-## 11. Where the processes live
+## 12. Where the processes live
 
 Processes live in `ironclaw_processes`.
 
@@ -507,7 +625,7 @@ These three should not be collapsed into one abstraction.
 
 ---
 
-## 12. Agent loop placement
+## 13. Agent loop placement
 
 The new sketch moves the agent loop into `extensions/agent_loop/`. That is a strong move and should be preserved.
 
@@ -540,7 +658,7 @@ It should write durable thread/step state into the mounted filesystem, not hide 
 
 ---
 
-## 13. Filesystem-based configuration
+## 14. Filesystem-based configuration
 
 The design proposes killing the current config system and moving to filesystem-based config, with each extension managing its own config in its own folder.
 
@@ -589,7 +707,7 @@ Raw secret material should be mediated by `ironclaw_auth`.
 
 ---
 
-## 14. Security, network, sandboxing, secrets, and tenancy
+## 15. Security, network, sandboxing, secrets, and tenancy
 
 The OS-like architecture still needs hard boundaries, but they should be system services, not kernel bloat.
 
@@ -636,7 +754,7 @@ This keeps extensions from inventing their own scoping rules.
 
 ---
 
-## 15. Capabilities and permission schemes
+## 16. Capabilities and permission schemes
 
 The sketch suggests capability metadata such as:
 
@@ -664,7 +782,7 @@ The kernel and system services should enforce policy; capability declarations sh
 
 ---
 
-## 16. Recommended filesystem namespace
+## 17. Recommended filesystem namespace
 
 A namespace like this is a good starting point:
 
@@ -697,7 +815,7 @@ This keeps durable state visible and inspectable while still allowing different 
 
 ---
 
-## 17. Boundary enforcement and CI guardrails
+## 18. Boundary enforcement and CI guardrails
 
 The architecture should be enforced mechanically.
 
@@ -737,7 +855,7 @@ This prevents future contributors and agents from guessing.
 
 ---
 
-## 18. Risks and mitigations
+## 19. Risks and mitigations
 
 ### 18.1 `ironclaw_processes` becoming the new blob
 
@@ -813,17 +931,87 @@ Mitigations:
 
 ---
 
-## 19. V1 implementation constraints
+## 20. Safe-boundary hot reload
+
+V1 should support hot reload at safe boundaries.
+
+Supported in V1:
+
+- reload skills
+- reload config
+- reload extension manifests
+- reload WASM modules for future invocations
+- reconnect or restart MCP servers
+- restart script runner workers
+
+Deferred from V1:
+
+- live in-flight process migration
+- mutating an active agent loop mid-turn
+- changing schemas while calls are in flight
+- gateway connection-preserving upgrade
+- project sandbox migration while scripts are running
+
+The reload rule is: new work can see new definitions; in-flight work keeps its current bindings until a safe boundary.
+
+---
+
+## 21. Missions and learning loops
+
+Missions and learning loops are first-party extensions, not kernel behavior.
+
+Recommended extensions:
+
+```text
+extensions/missions/
+extensions/reflection/
+extensions/repair/
+extensions/evals/
+```
+
+Mission definitions are filesystem data:
+
+```text
+/projects/<project>/missions/*.toml
+/users/<user>/missions/*.toml
+/system/missions/*.toml
+```
+
+Learning loop outputs are filesystem artifacts:
+
+```text
+/projects/<project>/learning/findings/
+/projects/<project>/learning/lessons/
+/projects/<project>/learning/repair-candidates/
+/projects/<project>/skills/
+/projects/<project>/scripts/
+```
+
+Clean mental model:
+
+- missions = when to run
+- learning/reflection/repair/evals = how to improve
+- skills = learned workflow/judgment
+- scripts = experimental helpers
+- WASM/MCP = stable promoted capabilities
+
+---
+
+## 22. V1 implementation constraints
 
 V1 should be intentionally narrow.
 
 Choose exactly:
 
-- one extension protocol: stdio JSON or equivalent simple process protocol
-- one sandbox backend
+- one installed capability runtime: WASM
+- one MCP adapter path for existing MCP servers/tools
+- one script runner capability for project-local Python/bash/JS helpers
+- one sandbox backend/profile set for script runner and process internals
 - one local filesystem backend
 - one event bus format
 - one durable audit/history format
+- one first-party conversation extension
+- one first-party missions extension
 - one first-party agent loop extension
 - one gateway extension
 - one TUI extension
@@ -833,15 +1021,15 @@ Do not build:
 - full extension marketplace
 - multiple sandbox backends
 - every filesystem backend
-- hot reload if it muddies lifecycle
+- arbitrary live in-flight hot migration
 - multiple competing config formats
-- automatic repair/evolution mechanics
+- automatic repair/evolution mechanics beyond filesystem-recorded findings and proposals
 
 The goal of V1 is to prove the OS-like shape, not recreate all current IronClaw behavior.
 
 ---
 
-## 20. V1 implementation order
+## 23. V1 implementation order
 
 1. **`ironclaw_filesystem`**
    - define the `Filesystem` trait
@@ -854,38 +1042,49 @@ The goal of V1 is to prove the OS-like shape, not recreate all current IronClaw 
    - capability extraction
    - config/state/cache folder contract
 
-3. **`ironclaw_processes`**
-   - `dispatch`
-   - `spawn`
-   - `ProcessId`
-   - process table
-   - simple sandbox profile hook
-   - process lifecycle events
+3. **`ironclaw_wasm`**
+   - WASM module loading and validation
+   - host ABI/import surface
+   - capability invocation
+   - limits and scoped host imports
 
-4. **event model**
+4. **`ironclaw_kernel` composition**
+   - wire filesystem + extension manager + WASM runtime
+   - wire auth/network service handles
+   - wire event bus
+
+5. **`ironclaw_mcp`**
+   - adapt existing MCP tools into IronClaw capabilities
+   - support stdio and remote MCP paths as needed
+   - preserve IronClaw policy/audit/scope controls
+
+6. **`ironclaw_scripts`**
+   - `script.run`
+   - project-local sandboxed Python/bash/JS helpers
+   - limits, cleanup, and scoped mounts
+
+7. **event model**
    - realtime bus
    - durable audit/history path
    - runtime/domain/audit event classes
 
-5. **`ironclaw_kernel` composition**
-   - wire filesystem + extension manager + process manager
-   - wire auth/network service handles
-   - wire event bus
-
-6. **first-party extensions**
+8. **first-party extensions**
+   - `extensions/conversation`
+   - `extensions/missions`
    - `extensions/agent_loop_tools`
    - `extensions/gateway`
    - `extensions/tui`
 
-7. **`ironclaw_auth` and `ironclaw_network` mediation**
+9. **`ironclaw_auth`, `ironclaw_network`, and sandbox hardening**
    - make auth and network explicit services
-   - move extension runtime off implicit access paths
+   - move runtime lanes off implicit access paths
+   - enforce script/project sandbox profiles
 
 This sequencing preserves the OS-like shape early instead of reintroducing product logic too soon.
 
 ---
 
-## 21. Final recommendation
+## 24. Final recommendation
 
 This revised architecture is stronger than both the earlier “smart kernel” direction and the forced 3-box framing.
 
@@ -893,7 +1092,8 @@ It keeps the most valuable properties:
 
 - small kernel host
 - explicit system-service crates instead of a vague middle box
-- first-party extensions for agent loop, gateway, and TUI
+- V1 runtime lanes: WASM, MCP, and script runner
+- first-party extensions for agent loop, conversation, missions, gateway, and TUI
 - filesystem as the primary persistence surface
 - clear separation between extension, process, and thread
 - enforceable architecture boundaries

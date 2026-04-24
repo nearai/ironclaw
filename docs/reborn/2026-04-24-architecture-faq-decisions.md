@@ -97,7 +97,7 @@ It should not own:
 
 ## 5. Where does `ExtensionManager` live?
 
-Initially, `ExtensionManager` can live as a narrow subsystem inside `ironclaw_kernel`.
+`ExtensionManager` should live in `crates/ironclaw_extensions` from day one.
 
 It owns:
 
@@ -117,9 +117,9 @@ It does not own:
 - routing decisions
 - thread persistence
 
-If extension lifecycle/package management grows, it should become a separate crate such as `crates/ironclaw_extensions`.
+`ironclaw_kernel` composes this crate; it should not parse manifests or own extension discovery directly.
 
-**Decision:** Keep `ExtensionManager` explicit and narrow. It knows what can run; it does not know what is currently running.
+**Decision:** Keep `ExtensionManager` explicit and narrow in `crates/ironclaw_extensions`. It knows what can run; it does not know what is currently running.
 
 ---
 
@@ -539,7 +539,129 @@ Skills do not directly execute privileged behavior.
 
 ---
 
-## 22. Should CodeAct/Monty be foundational?
+## 22. What are the V1 runtime/capability lanes?
+
+V1 should use three lanes:
+
+```text
+WASM + MCP + Script Runner
+```
+
+### WASM
+
+Stable installable capabilities.
+
+Use for:
+
+- reusable tools
+- weaker-model reliability
+- hosted/multi-tenant safety
+- shareable/installable capabilities
+
+### MCP
+
+Compatibility and ecosystem lane.
+
+Use for:
+
+- existing MCP servers
+- stdio or remote MCP integrations
+- tools users already depend on
+
+MCP tools are adapted into IronClaw capabilities and still go through IronClaw policy, scope, approval, and audit.
+
+### Script runner
+
+Dynamic creativity lane.
+
+Use for:
+
+- Python/bash/JS snippets
+- project-local helpers
+- self-repair experiments
+- pi-mono-style model-written scripting
+
+**Decision:** V1 capability/runtime lanes are WASM, MCP, and script runner. Generic arbitrary process extensions are deferred as a public extension model.
+
+---
+
+## 23. Why not just skills and scripts?
+
+Skills plus scripts are powerful with frontier models, but they make the system model-dependent. Smaller or cheaper models need stable capabilities.
+
+The split is:
+
+```text
+strong model -> can use script runner for missing glue
+weak model   -> should prefer WASM/MCP/stable capabilities
+```
+
+Scripts are discovery and creativity. WASM/MCP capabilities are stabilization and reliability.
+
+**Decision:** Do not rely on dynamic scripting as the only path. Use scripting for exploration and helper generation; promote stable workflows into WASM/MCP capabilities when reliability matters.
+
+---
+
+## 24. What hot reload do we support?
+
+Hot reload is supported only at safe boundaries in V1.
+
+V1 can support:
+
+- reload skills
+- reload config
+- reload extension manifests
+- reload WASM modules for future invocations
+- reconnect or restart MCP servers
+- restart script runner workers
+
+V1 should not support:
+
+- live in-flight process migration
+- mutating an active agent loop mid-turn
+- changing schemas while calls are in flight
+- gateway connection-preserving upgrade
+- project sandbox migration while scripts are running
+
+**Decision:** V1 supports reload-at-safe-boundaries, not arbitrary live mutation.
+
+---
+
+## 25. What happens to missions?
+
+Missions are not kernel.
+
+The mission engine should be a first-party extension:
+
+```text
+extensions/missions/
+```
+
+Mission definitions are filesystem data:
+
+```text
+/projects/<project>/missions/*.toml
+/users/<user>/missions/*.toml
+/system/missions/*.toml
+```
+
+A mission definition describes durable intent, triggers, and the target action. When triggered, the missions extension uses dispatch/spawn to run agent loops, scripts, or capabilities.
+
+Example:
+
+```toml
+id = "daily-pr-review"
+enabled = true
+trigger = "cron:0 9 * * *"
+agent_loop = "agent_loop_tools"
+skill = "github-pr-review"
+```
+
+**Decision:** Mission engine is a first-party extension. Mission definitions are durable filesystem records.
+
+---
+
+## 26. Should CodeAct/Monty be foundational?
 
 No.
 
@@ -563,7 +685,7 @@ extensions/agent_loop_codeact/    # optional, experimental
 
 ---
 
-## 23. Do skills replace first-party tools/extensions?
+## 27. Do skills replace first-party tools/extensions?
 
 No.
 
@@ -591,7 +713,7 @@ github skill:
 
 ---
 
-## 24. How do self-learning and self-repair work?
+## 28. How do self-learning and self-repair work?
 
 They are first-party extensions, not kernel magic.
 
@@ -628,7 +750,7 @@ Repair ladder:
 
 ---
 
-## 25. How do we get pi-mono-style scripting safely?
+## 29. How do we get pi-mono-style scripting safely?
 
 Use sandboxed real scripting, not Monty as the primary answer.
 
@@ -657,7 +779,7 @@ Execution must use:
 
 ---
 
-## 26. Can Monty scale to 10k users?
+## 30. Can Monty scale to 10k users?
 
 Only for tiny pure snippets should Monty be considered; do not bet the architecture on it.
 
@@ -679,7 +801,7 @@ It should not be used for:
 
 ---
 
-## 27. What is the recommended execution tier model?
+## 31. What is the recommended execution tier model?
 
 Use tiered execution:
 
@@ -701,26 +823,26 @@ Tier 3: strong per-job isolation
 
 ---
 
-## 28. What decisions are still open?
+## 32. What decisions are still open?
 
 Open implementation details:
 
-1. exact extension manifest schema
-2. exact host protocol for process extensions
-3. whether `ExtensionManager` starts inside `ironclaw_kernel` or as `ironclaw_extensions`
+1. exact WASM host ABI/import surface
+2. exact MCP adapter shape and tool-to-capability mapping
+3. exact script runner sandbox profiles
 4. exact filesystem backend interface and mount semantics
 5. initial sandbox backend
 6. initial event bus implementation
 7. initial durable audit/history file format
-8. first GitHub capability extension scope
-9. whether CodeAct ships in V1 or later as experimental
-10. exact project sandbox lifecycle policy
+8. first GitHub capability scope across WASM/MCP/skills/script runner
+9. exact project sandbox lifecycle policy
+10. exact mission trigger format and scheduler semantics
 
 These should be resolved during implementation planning, not by expanding the kernel.
 
 ---
 
-## 29. Summary of major decisions
+## 33. Summary of major decisions
 
 | Topic | Decision |
 |---|---|
@@ -733,6 +855,8 @@ These should be resolved during implementation planning, not by expanding the ke
 | Secrets | Handles in config, raw material mediated by auth |
 | Network | Mediated by `ironclaw_network` |
 | Sandboxing | Mechanism under `ironclaw_processes`, tiered profiles |
+| Runtime lanes | V1 uses WASM + MCP + script runner |
+| Hot reload | Safe-boundary reload only, no live in-flight migration |
 | Agent loop | First-party extension, not kernel |
 | Channels | Transport extensions |
 | Conversation | First-party routing extension between channels and agent loop |
@@ -740,5 +864,6 @@ These should be resolved during implementation planning, not by expanding the ke
 | CodeAct | Optional/experimental, not foundation |
 | Monty | Optional constrained backend, not default scripting path |
 | Scripting | Prefer sandboxed real Python/bash/Node |
+| Missions | Mission engine is an extension; mission definitions are filesystem data |
 | Self-repair | Reflection/repair/evals extensions, not kernel magic |
 | Scaling | Use pools, quotas, project runtimes, and tiered isolation |
