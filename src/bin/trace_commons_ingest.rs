@@ -1150,6 +1150,8 @@ struct TraceMaintenanceRequest {
     purpose: Option<String>,
     #[serde(default)]
     dry_run: bool,
+    #[serde(default)]
+    backfill_db_mirror: bool,
     #[serde(default = "default_true")]
     prune_export_cache: bool,
     #[serde(default)]
@@ -1167,7 +1169,9 @@ async fn maintenance_handler(
 ) -> ApiResult<Json<TraceMaintenanceResponse>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_reviewer(&tenant)?;
-    let response = run_maintenance(state.as_ref(), &tenant, body).map_err(internal_error)?;
+    let response = run_maintenance(state.as_ref(), &tenant, body)
+        .await
+        .map_err(internal_error)?;
     Ok(Json(response))
 }
 
@@ -2381,7 +2385,7 @@ fn export_artifact_dir(root: &Path, tenant_id: &str, export_id: Uuid) -> PathBuf
         .join(export_id.to_string())
 }
 
-fn run_maintenance(
+async fn run_maintenance(
     state: &AppState,
     tenant: &TenantAuth,
     request: TraceMaintenanceRequest,
@@ -2398,9 +2402,9 @@ fn run_maintenance(
         .map(|revocation| revocation.submission_id)
         .collect::<BTreeSet<_>>();
 
-    let records = read_all_submission_records(&state.root, &tenant.tenant_id)?;
+    let mut records = read_all_submission_records(&state.root, &tenant.tenant_id)?;
     let mut records_marked_revoked = 0usize;
-    for mut record in records {
+    for record in &mut records {
         if record.is_revoked() {
             revoked_submission_ids.insert(record.submission_id);
             continue;
@@ -2410,21 +2414,21 @@ fn run_maintenance(
             if !request.dry_run {
                 record.status = TraceCorpusStatus::Revoked;
                 record.credit_points_final = Some(0.0);
-                write_submission_record(&state.root, &record)?;
+                write_submission_record(&state.root, record)?;
             }
         }
     }
 
-    let derived = read_all_derived_records(&state.root, &tenant.tenant_id)?;
+    let mut derived = read_all_derived_records(&state.root, &tenant.tenant_id)?;
     let mut derived_marked_revoked = 0usize;
-    for mut record in derived {
+    for record in &mut derived {
         if revoked_submission_ids.contains(&record.submission_id)
             && record.status != TraceCorpusStatus::Revoked
         {
             derived_marked_revoked += 1;
             if !request.dry_run {
                 record.status = TraceCorpusStatus::Revoked;
-                write_derived_record(&state.root, &record)?;
+                write_derived_record(&state.root, record)?;
             }
         }
     }
@@ -2440,6 +2444,15 @@ fn run_maintenance(
     } else {
         0
     };
+    let db_mirror_backfilled = backfill_db_mirror_from_files(
+        state,
+        tenant,
+        &records,
+        &derived,
+        request.backfill_db_mirror,
+        request.dry_run,
+    )
+    .await?;
 
     let audit_event = TraceCommonsAuditEvent::maintenance(
         tenant,
@@ -2448,6 +2461,7 @@ fn run_maintenance(
         records_marked_revoked,
         derived_marked_revoked,
         export_cache_files_pruned,
+        db_mirror_backfilled,
     );
     let audit_event_id = audit_event.event_id;
     append_audit_event(&state.root, &tenant.tenant_id, audit_event)?;
@@ -2462,7 +2476,63 @@ fn run_maintenance(
         records_marked_revoked,
         derived_marked_revoked,
         export_cache_files_pruned,
+        db_mirror_backfilled,
     })
+}
+
+async fn backfill_db_mirror_from_files(
+    state: &AppState,
+    tenant: &TenantAuth,
+    records: &[TraceCommonsSubmissionRecord],
+    derived: &[TraceCommonsDerivedRecord],
+    enabled: bool,
+    dry_run: bool,
+) -> anyhow::Result<usize> {
+    if !enabled {
+        return Ok(0);
+    }
+    if state.db_mirror.is_none() && !dry_run {
+        anyhow::bail!(
+            "Trace Commons DB mirror backfill requested but TRACE_COMMONS_DB_DUAL_WRITE is not configured"
+        );
+    }
+    let db = state.db_mirror.as_ref();
+    let derived_by_submission = derived
+        .iter()
+        .map(|record| (record.submission_id, record))
+        .collect::<BTreeMap<_, _>>();
+    let mut backfilled = 0usize;
+    for record in records {
+        let envelope = read_envelope_by_record(state, record)
+            .with_context(|| format!("failed to validate envelope {}", record.submission_id))?;
+        let derived_record = derived_by_submission
+            .get(&record.submission_id)
+            .copied()
+            .with_context(|| {
+                format!(
+                    "trace submission {} is missing a derived precheck record",
+                    record.submission_id
+                )
+            })?;
+        if dry_run {
+            backfilled += 1;
+            continue;
+        }
+        if let Some(db) = db
+            && db
+                .get_trace_submission(&tenant.tenant_id, record.submission_id)
+                .await?
+                .is_some()
+        {
+            continue;
+        }
+        mirror_submission_to_db(state, tenant, record, derived_record, &envelope).await?;
+        if record.is_revoked() {
+            mirror_revocation_to_db(state, tenant, record.submission_id, Some(record)).await?;
+        }
+        backfilled += 1;
+    }
+    Ok(backfilled)
 }
 
 fn prune_export_cache_files(
@@ -3252,6 +3322,7 @@ struct TraceMaintenanceResponse {
     records_marked_revoked: usize,
     derived_marked_revoked: usize,
     export_cache_files_pruned: usize,
+    db_mirror_backfilled: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -3417,6 +3488,7 @@ impl TraceCommonsAuditEvent {
         records_marked_revoked: usize,
         derived_marked_revoked: usize,
         export_cache_files_pruned: usize,
+        db_mirror_backfilled: usize,
     ) -> Self {
         Self {
             event_id: Uuid::new_v4(),
@@ -3428,7 +3500,7 @@ impl TraceCommonsAuditEvent {
             actor_role: Some(auth.role),
             actor_principal_ref: Some(auth.principal_ref.clone()),
             reason: Some(format!(
-                "purpose={purpose};dry_run={dry_run};records_marked_revoked={records_marked_revoked};derived_marked_revoked={derived_marked_revoked};export_cache_files_pruned={export_cache_files_pruned}"
+                "purpose={purpose};dry_run={dry_run};records_marked_revoked={records_marked_revoked};derived_marked_revoked={derived_marked_revoked};export_cache_files_pruned={export_cache_files_pruned};db_mirror_backfilled={db_mirror_backfilled}"
             )),
             export_count: Some(export_cache_files_pruned),
             export_id: None,
@@ -4514,6 +4586,7 @@ mod tests {
             Json(TraceMaintenanceRequest {
                 purpose: None,
                 dry_run: false,
+                backfill_db_mirror: false,
                 prune_export_cache: true,
                 max_export_age_hours: None,
             }),
@@ -4528,6 +4601,7 @@ mod tests {
             Json(TraceMaintenanceRequest {
                 purpose: Some("test_retention".to_string()),
                 dry_run: false,
+                backfill_db_mirror: false,
                 prune_export_cache: true,
                 max_export_age_hours: None,
             }),
@@ -4563,6 +4637,88 @@ mod tests {
         assert!(audit_events.iter().any(|event| {
             event.event_id == response.audit_event_id && event.kind == "maintenance"
         }));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn maintenance_can_backfill_file_backed_records_to_db_mirror() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let file_state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let Json(receipt) =
+            submit_trace_handler(State(file_state), auth_headers("token-a"), Json(envelope))
+                .await
+                .expect("file-backed submission succeeds");
+        assert_eq!(receipt.status, "accepted");
+
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-mirror-backfill.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+
+        let Json(response) = maintenance_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_db_backfill".to_string()),
+                dry_run: false,
+                backfill_db_mirror: true,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+            }),
+        )
+        .await
+        .expect("reviewer can backfill DB mirror");
+        assert_eq!(response.db_mirror_backfilled, 1);
+
+        let mirrored = db
+            .get_trace_submission("tenant-a", submission_id)
+            .await
+            .expect("mirror query succeeds")
+            .expect("mirrored submission exists");
+        assert_eq!(mirrored.status, StorageTraceCorpusStatus::Accepted);
+        let conn = db.connect().await.expect("connect to mirror");
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM trace_object_refs WHERE tenant_id = ?1 AND submission_id = ?2",
+                libsql::params!["tenant-a", submission_id.to_string()],
+            )
+            .await
+            .expect("object ref query succeeds");
+        let row = rows
+            .next()
+            .await
+            .expect("object ref row fetch succeeds")
+            .expect("object ref count exists");
+        assert_eq!(row.get::<i64>(0).expect("object ref count reads"), 1);
+
+        let Json(second_response) = maintenance_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_db_backfill_idempotent".to_string()),
+                dry_run: false,
+                backfill_db_mirror: true,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+            }),
+        )
+        .await
+        .expect("backfill can be rerun");
+        assert_eq!(second_response.db_mirror_backfilled, 0);
     }
 
     #[tokio::test]
