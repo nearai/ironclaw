@@ -727,6 +727,9 @@ async fn append_credit_event_handler(
         created_at: Utc::now(),
     };
     append_credit_event(&state.root, &tenant.tenant_id, &event).map_err(internal_error)?;
+    if let Err(error) = mirror_credit_event_to_db(&state, &event).await {
+        tracing::warn!(%error, submission_id = %event.submission_id, "Trace Commons DB dual-write credit mirror failed");
+    }
     Ok(Json(event))
 }
 
@@ -793,11 +796,13 @@ async fn review_decision_handler(
     }
 
     write_submission_record(&state.root, &record).map_err(internal_error)?;
+    let mut mirrored_derived = None;
     if let Some(mut derived) = read_derived_record(&state.root, &tenant.tenant_id, submission_id)
         .map_err(internal_error)?
     {
         derived.status = record.status;
         write_derived_record(&state.root, &derived).map_err(internal_error)?;
+        mirrored_derived = Some(derived);
     }
     append_audit_event(
         &state.root,
@@ -810,6 +815,17 @@ async fn review_decision_handler(
         ),
     )
     .map_err(internal_error)?;
+    if let Err(error) = mirror_review_decision_to_db(
+        &state,
+        &tenant,
+        &record,
+        &envelope,
+        mirrored_derived.as_ref(),
+    )
+    .await
+    {
+        tracing::warn!(%error, %submission_id, "Trace Commons DB dual-write review mirror failed");
+    }
 
     Ok(Json(receipt_from_record(&record)))
 }
@@ -1560,7 +1576,6 @@ async fn mirror_submission_to_db(
             )
         };
     let privacy_risk = serde_storage_string(&record.privacy_risk)?;
-    let consent_scopes = consent_scope_storage_strings(&record.consent_scopes)?;
     let credit_account_ref = envelope
         .contributor
         .credit_account_ref
@@ -1568,28 +1583,11 @@ async fn mirror_submission_to_db(
         .or_else(|| record.contributor_pseudonym.clone())
         .unwrap_or_else(|| record.auth_principal_ref.clone());
 
-    db.upsert_trace_submission(StorageTraceSubmissionWrite {
-        tenant_id: record.tenant_id.clone(),
-        submission_id: record.submission_id,
-        trace_id: record.trace_id,
-        auth_principal_ref: record.auth_principal_ref.clone(),
-        contributor_pseudonym: record.contributor_pseudonym.clone(),
-        submitted_tenant_scope_ref: record.submitted_tenant_scope_ref.clone(),
-        schema_version: envelope.schema_version.clone(),
-        consent_policy_version: envelope.consent.policy_version.clone(),
-        consent_scopes: consent_scopes.clone(),
-        allowed_uses: consent_scopes,
-        retention_policy_id: "private_corpus_revocable".to_string(),
-        status: storage_corpus_status(record.status),
-        privacy_risk: privacy_risk.clone(),
-        redaction_pipeline_version: envelope.privacy.redaction_pipeline_version.clone(),
-        redaction_hash: envelope.privacy.redaction_hash.clone(),
-        canonical_summary_hash: Some(derived_record.canonical_summary_hash.clone()),
-        submission_score: Some(record.submission_score),
-        credit_points_pending: Some(record.credit_points_pending),
-        credit_points_final: record.credit_points_final,
-        expires_at: None,
-    })
+    db.upsert_trace_submission(storage_submission_write_from_record(
+        record,
+        envelope,
+        Some(derived_record.canonical_summary_hash.clone()),
+    )?)
     .await
     .context("failed to mirror trace submission metadata")?;
 
@@ -1723,6 +1721,93 @@ async fn mirror_revocation_to_db(
     Ok(())
 }
 
+async fn mirror_review_decision_to_db(
+    state: &AppState,
+    tenant: &TenantAuth,
+    record: &TraceCommonsSubmissionRecord,
+    envelope: &TraceContributionEnvelope,
+    derived_record: Option<&TraceCommonsDerivedRecord>,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    db.upsert_trace_submission(storage_submission_write_from_record(
+        record,
+        envelope,
+        derived_record.map(|derived| derived.canonical_summary_hash.clone()),
+    )?)
+    .await
+    .context("failed to mirror reviewed trace submission metadata")?;
+    db.update_trace_submission_status(
+        &record.tenant_id,
+        record.submission_id,
+        storage_corpus_status(record.status),
+        &tenant.principal_ref,
+        Some("review_decision"),
+    )
+    .await
+    .context("failed to mirror trace review status")?;
+    Ok(())
+}
+
+async fn mirror_credit_event_to_db(
+    state: &AppState,
+    event: &TraceCommonsCreditLedgerRecord,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    db.append_trace_credit_event(StorageTraceCreditEventWrite {
+        credit_event_id: event.event_id,
+        tenant_id: event.tenant_id.clone(),
+        submission_id: event.submission_id,
+        trace_id: event.trace_id,
+        credit_account_ref: event.auth_principal_ref.clone(),
+        event_type: storage_credit_event_type(event.event_type),
+        points_delta: format!("{:.4}", event.credit_points_delta),
+        reason: event
+            .reason
+            .clone()
+            .unwrap_or_else(|| "delayed credit event".to_string()),
+        external_ref: event.external_ref.clone(),
+        actor_principal_ref: event.actor_principal_ref.clone(),
+        actor_role: format!("{:?}", event.actor_role).to_ascii_lowercase(),
+        settlement_state: StorageTraceCreditSettlementState::Final,
+    })
+    .await
+    .context("failed to mirror trace credit ledger event")
+}
+
+fn storage_submission_write_from_record(
+    record: &TraceCommonsSubmissionRecord,
+    envelope: &TraceContributionEnvelope,
+    canonical_summary_hash: Option<String>,
+) -> anyhow::Result<StorageTraceSubmissionWrite> {
+    let consent_scopes = consent_scope_storage_strings(&record.consent_scopes)?;
+    Ok(StorageTraceSubmissionWrite {
+        tenant_id: record.tenant_id.clone(),
+        submission_id: record.submission_id,
+        trace_id: record.trace_id,
+        auth_principal_ref: record.auth_principal_ref.clone(),
+        contributor_pseudonym: record.contributor_pseudonym.clone(),
+        submitted_tenant_scope_ref: record.submitted_tenant_scope_ref.clone(),
+        schema_version: envelope.schema_version.clone(),
+        consent_policy_version: envelope.consent.policy_version.clone(),
+        consent_scopes: consent_scopes.clone(),
+        allowed_uses: consent_scopes,
+        retention_policy_id: "private_corpus_revocable".to_string(),
+        status: storage_corpus_status(record.status),
+        privacy_risk: serde_storage_string(&record.privacy_risk)?,
+        redaction_pipeline_version: envelope.privacy.redaction_pipeline_version.clone(),
+        redaction_hash: envelope.privacy.redaction_hash.clone(),
+        canonical_summary_hash,
+        submission_score: Some(record.submission_score),
+        credit_points_pending: Some(record.credit_points_pending),
+        credit_points_final: record.credit_points_final,
+        expires_at: None,
+    })
+}
+
 fn deterministic_trace_uuid(label: &str, record: &TraceCommonsSubmissionRecord) -> Uuid {
     let input = format!(
         "ironclaw.trace_commons.{label}:{}:{}",
@@ -1747,6 +1832,23 @@ fn storage_derived_status(status: TraceCorpusStatus) -> StorageTraceDerivedStatu
         TraceCorpusStatus::Accepted | TraceCorpusStatus::Quarantined => {
             StorageTraceDerivedStatus::Current
         }
+    }
+}
+
+fn storage_credit_event_type(
+    event_type: TraceCreditLedgerEventType,
+) -> StorageTraceCreditEventType {
+    match event_type {
+        TraceCreditLedgerEventType::BenchmarkConversion => {
+            StorageTraceCreditEventType::BenchmarkConversion
+        }
+        TraceCreditLedgerEventType::RegressionCatch => StorageTraceCreditEventType::RegressionCatch,
+        TraceCreditLedgerEventType::TrainingUtility
+        | TraceCreditLedgerEventType::RankingUtility => {
+            StorageTraceCreditEventType::TrainingUtility
+        }
+        TraceCreditLedgerEventType::ReviewerBonus => StorageTraceCreditEventType::ReviewerBonus,
+        TraceCreditLedgerEventType::AbusePenalty => StorageTraceCreditEventType::AbusePenalty,
     }
 }
 
@@ -3645,6 +3747,56 @@ mod tests {
                 .expect("tenant-isolated mirror query succeeds")
                 .is_none()
         );
+
+        let Json(credit_event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::ReviewerBonus,
+                credit_points_delta: 2.5,
+                reason: Some("reviewer found high utility".to_string()),
+                external_ref: Some("review:test".to_string()),
+            }),
+        )
+        .await
+        .expect("credit append succeeds");
+        assert_eq!(credit_event.credit_points_delta, 2.5);
+        let conn = db.connect().await.expect("connect to mirror");
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM trace_credit_ledger WHERE tenant_id = ?1 AND submission_id = ?2 AND event_type = ?3",
+                libsql::params!["tenant-a", submission_id.to_string(), "reviewer_bonus"],
+            )
+            .await
+            .expect("credit ledger query succeeds");
+        let row = rows
+            .next()
+            .await
+            .expect("credit ledger row fetch succeeds")
+            .expect("credit ledger count row exists");
+        let mirrored_credit_events = row.get::<i64>(0).expect("count column reads");
+        assert_eq!(mirrored_credit_events, 1);
+
+        let Json(review_receipt) = review_decision_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Reject,
+                reason: Some("test rejection".to_string()),
+                credit_points_pending: None,
+            }),
+        )
+        .await
+        .expect("review decision succeeds");
+        assert_eq!(review_receipt.status, "rejected");
+        let reviewed = db
+            .get_trace_submission("tenant-a", submission_id)
+            .await
+            .expect("review mirror query succeeds")
+            .expect("mirrored submission remains queryable");
+        assert_eq!(reviewed.status, StorageTraceCorpusStatus::Rejected);
 
         let status = revoke_trace_handler(
             State(state),
