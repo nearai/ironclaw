@@ -179,7 +179,7 @@ fn json_abi_enforces_output_byte_limit() {
     let runtime = WasmRuntime::new(WasmRuntimeConfig {
         fuel: 100_000,
         max_output_bytes: 8,
-        max_memory_bytes: 1024 * 1024,
+        ..WasmRuntimeConfig::for_testing()
     })
     .unwrap();
     let module = runtime.prepare(json_echo_spec()).unwrap();

@@ -11,6 +11,7 @@ repository = "https://github.com/nearai/ironclaw"
 publish = false
 
 [dependencies]
+blake3 = "1"
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_resources = { path = "../ironclaw_resources", version = "0.1.0" }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }

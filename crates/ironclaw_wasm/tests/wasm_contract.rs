@@ -116,7 +116,7 @@ fn output_byte_limit_is_enforced() {
     let runtime = WasmRuntime::new(WasmRuntimeConfig {
         fuel: 10_000,
         max_output_bytes: 1,
-        max_memory_bytes: 1024 * 1024,
+        ..WasmRuntimeConfig::for_testing()
     })
     .unwrap();
     let module = runtime.prepare(echo_spec()).unwrap();
@@ -138,7 +138,7 @@ fn fuel_limit_stops_runaway_module() {
     let runtime = WasmRuntime::new(WasmRuntimeConfig {
         fuel: 1_000,
         max_output_bytes: 1_024,
-        max_memory_bytes: 1024 * 1024,
+        ..WasmRuntimeConfig::for_testing()
     })
     .unwrap();
     let module = runtime
@@ -194,7 +194,7 @@ fn memory_limit_is_enforced() {
         .invoke_i32(&module, &descriptor, Some(&reservation), 0)
         .unwrap_err();
 
-    assert!(matches!(err, WasmError::MemoryLimitExceeded { .. }));
+    assert!(matches!(err, WasmError::MemoryExceeded { .. }));
 }
 
 #[test]

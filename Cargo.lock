@@ -4121,6 +4121,7 @@ dependencies = [
 name = "ironclaw_wasm"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "ironclaw_host_api",
  "ironclaw_resources",
  "rust_decimal",
