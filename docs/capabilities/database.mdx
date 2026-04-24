@@ -56,7 +56,8 @@ sudo -u postgres psql -d ironclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
 ```bash
 export DATABASE_BACKEND=postgres
-export DATABASE_URL="postgres://ironclaw:your-password@localhost/ironclaw"
+export DATABASE_URL="postgres://ironclaw:***@localhost/ironclaw"
+export DATABASE_POOL_SIZE=30  # default; increase for high-throughput workloads
 ```
 
 Or in the wizard:
@@ -261,11 +262,11 @@ cp ~/.ironclaw/ironclaw.db.backup ~/.ironclaw/ironclaw.db
 ## Next Steps
 
 <CardGroup cols={2}>
-  <Card title="Configuration" icon="settings" href="/setup/configuration">
+  <Card title="Configuration" icon="settings" href="/capabilities/configuration">
     Full environment variable reference
   </Card>
 
-  <Card title="VPS Install" icon="server" href="/install/vps">
+  <Card title="VPS Install" icon="server" href="/infrastructure/droplet">
     Production deployment guide with PostgreSQL
   </Card>
 </CardGroup>
