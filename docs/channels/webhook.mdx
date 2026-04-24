@@ -1,55 +1,68 @@
 ---
 title: HTTP Webhook
 sidebarTitle: Webhook
-description: REST API for external integrations
+description: Receive HTTP webhook requests on the unified webhook listener
 ---
 
-The HTTP Webhook channel provides a REST API for integrating external services with IronClaw.
+The HTTP Webhook channel registers `POST /webhook` on IronClaw's unified webhook listener.
 
 <Note>
-If you haven't set up your agent yet, follow our [Quickstart guide](../quickstart)
+If you haven't set up your agent yet, follow our [Quickstart guide](../quickstart).
 </Note>
 
 ---
 
-## Enabling Webhooks
+## Listener Model
+
+IronClaw now separates two concerns:
+
+- The **unified webhook listener** bind address is configured with `WEBHOOK_HOST` / `WEBHOOK_PORT`.
+- The **named HTTP webhook channel** is enabled with `HTTP_ENABLED=true`.
+
+That means `HTTP_ENABLED=false` keeps the HTTP webhook channel disabled even if `HTTP_HOST` / `HTTP_PORT` are still present for compatibility.
 
 ```bash
+export WEBHOOK_HOST=127.0.0.1
+export WEBHOOK_PORT=8080
+
 export HTTP_ENABLED=true
-export HTTP_HOST=0.0.0.0
-export HTTP_PORT=8080
 export HTTP_WEBHOOK_SECRET=your-secret
 ```
 
-Or during onboarding:
-```
-Step 6: Channel Configuration
-→ Select "HTTP Webhook"
-→ Port: 8080
-```
+If `WEBHOOK_HOST` / `WEBHOOK_PORT` are unset, IronClaw can still fall back to legacy `HTTP_HOST` / `HTTP_PORT` listener settings for compatibility. New deployments should set `WEBHOOK_*` explicitly.
 
 ---
 
 ## Security
 
 <Warning>
-The HTTP webhook binds to `0.0.0.0:8080` by default. If you don't need external webhook delivery, set `HTTP_HOST=127.0.0.1`.
+The unified webhook listener binds to `127.0.0.1:8080` by default. If you need external delivery, expose it intentionally via a reverse proxy, tunnel, or an explicit `WEBHOOK_HOST` setting.
 </Warning>
 
-### Shared Secret Validation
+### Authentication
 
-Configure a webhook secret to validate requests:
+Configure a shared secret for the HTTP webhook channel:
 
 ```bash
 export HTTP_WEBHOOK_SECRET="your-secret-here"
 ```
 
-The secret is sent in the `X-Webhook-Secret` header.
+Clients should authenticate with HMAC-SHA256 using the raw request body:
 
-### Rate Limiting
+```text
+X-Hub-Signature-256: sha256=<hex_digest>
+```
 
-- **Body size**: 64 KB maximum
-- **Rate**: 60 requests per minute per IP
+The digest is `HMAC-SHA256(HTTP_WEBHOOK_SECRET, raw_request_body)` encoded as lowercase hex.
+
+The older JSON-body `secret` field is still accepted for compatibility, but it is deprecated.
+
+### Limits
+
+- Request body: 15 MB maximum
+- Message content: 32 KB maximum
+- Rate limit: 60 requests per minute
+- Pending synchronous responses: 100
 
 ---
 
@@ -58,104 +71,82 @@ The secret is sent in the `X-Webhook-Secret` header.
 ### Request Format
 
 ```bash
+BODY='{"content":"Hello, IronClaw!","wait_for_response":true}'
+SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$HTTP_WEBHOOK_SECRET" | cut -d' ' -f2)
+
 curl -X POST http://localhost:8080/webhook \
   -H "Content-Type: application/json" \
-  -H "X-Webhook-Secret: your-secret" \
-  -d '{
-    "user_id": "default",
-    "message": "Hello, IronClaw!"
-  }'
+  -H "X-Hub-Signature-256: sha256=$SIG" \
+  -d "$BODY"
 ```
+
+### Payload Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `content` | string | Yes | Message content |
+| `user_id` | string | No | Optional sender identifier for routing while keeping the configured owner scope |
+| `thread_id` | string | No | Continue an existing conversation thread |
+| `wait_for_response` | boolean | No | Wait up to 60 seconds for a synchronous response |
+| `attachments` | array | No | Base64 attachments or attachment URLs |
+| `secret` | string | No | Deprecated fallback for body-secret authentication |
 
 ### Response Format
 
 ```json
 {
-  "job_id": "uuid",
-  "status": "queued"
+  "message_id": "uuid",
+  "status": "accepted",
+  "response": "Hello! How can I help?"
 }
 ```
 
----
+- `message_id` is always returned
+- `status` is typically `accepted` or `error`
+- `response` is only populated when `wait_for_response=true`
 
-## Payload Fields
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `user_id` | string | Yes | User identifier |
-| `message` | string | Yes | Message content |
-| `conversation_id` | string | No | Continue existing conversation |
-| `metadata` | object | No | Arbitrary metadata |
-
-## Response Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `job_id` | string | Job UUID for status checking |
-| `status` | string | `queued`, `running`, `completed` |
-| `response` | string | Agent response (when complete) |
-
----
-
-## Checking Status
+### Health Check
 
 ```bash
-curl http://localhost:8080/jobs/{job_id} -H "X-Webhook-Secret: your-secret"
+curl http://localhost:8080/health
 ```
 
 Response:
+
 ```json
 {
-  "id": "uuid",
-  "status": "completed",
-  "response": "Hello! How can I help?",
-  "created_at": "2024-01-15T10:30:00Z",
-  "completed_at": "2024-01-15T10:30:05Z"
+  "status": "healthy",
+  "channel": "http"
 }
 ```
 
 ---
 
-## Error Responses
-
-| Status | Meaning |
-|--------|---------|
-| `400` | Invalid request body |
-| `401` | Missing or invalid secret |
-| `429` | Rate limit exceeded |
-| `500` | Server error |
-
----
-
-## Example Integrations
-
-### GitHub Webhook
-
-Configure GitHub to send events to your IronClaw webhook URL:
-
-```bash
-# GitHub webhook URL
-https://your-server:8080/webhook
-
-# Secret: your configured HTTP_WEBHOOK_SECRET
-```
-
-### Zapier
-
-Use Zapier's Webhook action to send events to IronClaw.
-
-### Custom Script
+## Example Client
 
 ```python
+import hashlib
+import hmac
+import json
 import requests
+
+secret = b"your-secret"
+body = json.dumps({
+    "content": "Process this data",
+    "user_id": "automation",
+}).encode()
+signature = hmac.new(secret, body, hashlib.sha256).hexdigest()
 
 response = requests.post(
     "http://localhost:8080/webhook",
-    headers={"X-Webhook-Secret": "your-secret"},
-    json={"user_id": "automation", "message": "Process this data"}
+    headers={
+        "Content-Type": "application/json",
+        "X-Hub-Signature-256": f"sha256={signature}",
+    },
+    data=body,
 )
 
-print(response.json()["job_id"])
+print(response.json())
 ```
 
 ---
@@ -165,23 +156,22 @@ print(response.json()["job_id"])
 <AccordionGroup>
   <Accordion title="Connection refused" icon="x-circle">
     - Check IronClaw is running
-    - Verify `HTTP_PORT` is correct
-    - Check firewall: `sudo ufw allow 8080`
+    - Verify `WEBHOOK_HOST` / `WEBHOOK_PORT`
+    - If `HTTP_ENABLED=true`, make sure the HTTP channel is enabled
   </Accordion>
 
   <Accordion title="401 Unauthorized" icon="key">
-    - Include `X-Webhook-Secret` header
-    - Verify secret matches configuration
+    - Include `X-Hub-Signature-256`
+    - Verify the signature uses the raw request body
+    - Confirm `HTTP_WEBHOOK_SECRET` matches on both sides
+  </Accordion>
+
+  <Accordion title="415 Unsupported Media Type" icon="file-warning">
+    - Send `Content-Type: application/json`
   </Accordion>
 
   <Accordion title="429 Too Many Requests" icon="clock">
-    - Rate limit: 60 requests/minute
-    - Implement exponential backoff
-  </Accordion>
-
-  <Accordion title="Messages not processed" icon="message-circle">
-    - Check logs: `RUST_LOG=ironclaw=debug ironclaw run`
-    - Verify JSON format
-    - Check `user_id` is valid
+    - Rate limit is 60 requests per minute
+    - Implement retries with backoff
   </Accordion>
 </AccordionGroup>

@@ -667,11 +667,7 @@ impl Channel for HttpChannel {
         let (tx, rx) = mpsc::channel(256);
         *self.state.tx.write().await = Some(tx);
 
-        tracing::info!(
-            "HTTP channel ready ({}:{})",
-            self.config.host,
-            self.config.port
-        );
+        tracing::debug!("HTTP channel route registered");
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }

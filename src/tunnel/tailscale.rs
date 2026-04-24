@@ -65,7 +65,7 @@ impl Tunnel for TailscaleTunnel {
                 .to_string()
         };
 
-        let target = format!("http://{}:{}", local_host, local_port);
+        let target = super::format_tunnel_origin(local_host, local_port);
 
         // `tailscale funnel --bg <target>` configures the tunnel and exits.
         // Without `--bg`, the command may hang without establishing the tunnel.

@@ -2,7 +2,7 @@
 
 This document catalogs every network-facing surface in IronClaw, its authentication mechanism, bind address, security controls, and known findings. Use this as the authoritative reference during code reviews that touch network-facing code.
 
-**Last updated:** 2026-02-18
+**Last updated:** 2026-04-24
 
 ---
 
@@ -31,7 +31,7 @@ IronClaw operates across four trust boundaries:
 | Listener | Default Port | Default Bind | Auth Mechanism | Config Env Var | Source |
 |----------|-------------|-------------|----------------|----------------|--------|
 | Web Gateway | 3000 | `127.0.0.1` | Bearer token (constant-time) | `GATEWAY_HOST`, `GATEWAY_PORT`, `GATEWAY_AUTH_TOKEN` | `server.rs` — `start_server()` |
-| HTTP Webhook Server | 8080 | `0.0.0.0` | Shared secret (body field) | `HTTP_HOST`, `HTTP_PORT`, `HTTP_WEBHOOK_SECRET` | `webhook_server.rs` — `start()` |
+| Unified Webhook Listener | 8080 | `127.0.0.1` | Route-specific auth (tool auth, channel secrets) | `WEBHOOK_HOST`, `WEBHOOK_PORT` (`HTTP_HOST`, `HTTP_PORT` compatibility fallback when unset) | `main.rs` — unified webhook server startup |
 | Orchestrator Internal API | 50051 | `127.0.0.1` (macOS/Win) / `0.0.0.0` (Linux) | Per-job bearer token (constant-time) | `ORCHESTRATOR_PORT` | `api.rs` — `OrchestratorApi::start()` |
 | OAuth Callback Listener | 9876 | `127.0.0.1` | None (ephemeral, 5-min timeout) | N/A (hardcoded) | `src/auth/oauth.rs` — `bind_callback_listener()` |
 | Sandbox HTTP Proxy | OS-assigned (ephemeral) | `127.0.0.1` | None (loopback only) | N/A (auto-assigned) | `proxy/http.rs` — `SandboxProxy::start()` |
@@ -128,37 +128,41 @@ Shutdown is triggered via a `oneshot::Sender` stored in `GatewayState::shutdown_
 
 ---
 
-## 2. HTTP Webhook Server
+## 2. Unified Webhook Listener
 
 **Source:** `src/channels/webhook_server.rs`, `src/channels/http.rs`
 
 ### Bind Address
 
-Configurable via `HTTP_HOST` (default `127.0.0.1`) and `HTTP_PORT` (default `8080`).
+Configurable via `WEBHOOK_HOST` (default `127.0.0.1`) and `WEBHOOK_PORT` (default `8080`).
 
-By default the webhook server binds to loopback only. For external webhook providers, expose it intentionally via a tunnel or set `HTTP_HOST` explicitly.
+If `WEBHOOK_HOST` / `WEBHOOK_PORT` are unset, existing deployments can still inherit the unified listener bind from `HTTP_HOST` / `HTTP_PORT` as a compatibility fallback. `HTTP_ENABLED` now controls only whether the named HTTP webhook channel is registered; it does not decide whether the unified listener exists.
+
+By default the unified listener binds to loopback only. For external webhook providers, expose it intentionally via a tunnel or set `WEBHOOK_HOST` explicitly.
 
 **`--cli-only` mode:** When the `--cli-only` flag is set, non-CLI network services and channel activations are suppressed — no webhook server, WASM channel endpoints, HTTP channel, Signal channel, relay channel restoration, gateway channel, managed tunnel, or sandbox orchestrator API will start.
 
 This mode suppresses network-facing services; it does not disable the job tool surface. Scheduler-backed job tools remain available, while sandbox/container-backed job dependencies are only injected when the orchestrator is running.
 
-**Reference:** `src/config/channels.rs` — `http_host` default (`"127.0.0.1"`), `http_port` default (`8080`)
+**Reference:** `src/config/channels.rs` — `webhook_listener` resolution and defaults; `src/main.rs` — unified webhook server bind
 
 ### Authentication
 
-Webhook secret is passed **in the JSON request body** (`secret` field), not as a header. The secret is compared using **constant-time** `subtle::ConstantTimeEq` (`ct_eq`).
+The optional named HTTP webhook channel registers `POST /webhook` on the unified listener when `HTTP_ENABLED=true`.
 
-The secret is required to start the channel — if `HTTP_WEBHOOK_SECRET` is not set, `start()` returns an error.
+Authentication for that route is HMAC-SHA256 via `X-Hub-Signature-256: sha256=<hex_digest>`. A deprecated JSON-body `secret` field is still accepted for compatibility. Secret comparisons use **constant-time** `subtle::ConstantTimeEq` (`ct_eq`).
 
-**CSRF note:** Because the secret is in the JSON body (not a cookie or header that browsers auto-attach), a cross-origin form POST cannot forge a valid request. Browsers would send `application/x-www-form-urlencoded`, which the `Json<T>` extractor rejects with HTTP 415. Even if `Content-Type` were spoofed via CORS preflight, the attacker would need the secret value, which is never stored in the browser.
+The secret is required to start the named HTTP channel — if `HTTP_WEBHOOK_SECRET` is not set, `start()` returns an error.
+
+**CSRF note:** Browsers do not auto-attach the HMAC signature header, and the deprecated body-secret fallback still requires attacker knowledge of the shared secret. A cross-origin form POST would also use `application/x-www-form-urlencoded`, which the handler rejects with HTTP 415 before JSON parsing. Even if `Content-Type` were spoofed via CORS preflight, the attacker would still need the secret value.
 
 **Reference:** `src/channels/http.rs` — `webhook_handler()` (secret validation with `ct_eq`), `start()` (required-secret check)
 
 ### Content-Type Validation
 
-The webhook endpoint uses axum's `Json<WebhookRequest>` extractor, which enforces `Content-Type: application/json`. Requests with missing or incorrect Content-Type are rejected with **HTTP 415 Unsupported Media Type** before the handler body executes. Malformed JSON bodies are rejected with **HTTP 422 Unprocessable Entity**.
+The webhook endpoint validates `Content-Type: application/json` explicitly from request headers before parsing the body. Requests with missing or incorrect content type are rejected with **HTTP 415 Unsupported Media Type**. Malformed JSON bodies are parsed manually with `serde_json::from_slice`; authenticated requests receive **HTTP 400 Bad Request**, while unauthenticated requests without a signature header are rejected earlier with **HTTP 401 Unauthorized**.
 
-**Reference:** `src/channels/http.rs` — `webhook_handler()` function signature (`Json(req): Json<WebhookRequest>`)
+**Reference:** `src/channels/http.rs` — `webhook_handler()` content-type check and manual JSON parsing
 
 ### Rate Limiting
 
@@ -168,7 +172,7 @@ The webhook endpoint uses axum's `Json<WebhookRequest>` extractor, which enforce
 
 ### Body Limits
 
-- JSON body: **64 KB** max (`MAX_BODY_BYTES`)
+- JSON body: **15 MB** max (`MAX_BODY_BYTES`)
 - Message content: **32 KB** max (`MAX_CONTENT_BYTES`)
 - Pending synchronous responses: **100 max** (`MAX_PENDING_RESPONSES`)
 - Synchronous response timeout: **60 seconds**
@@ -187,6 +191,12 @@ The webhook endpoint uses axum's `Json<WebhookRequest>` extractor, which enforce
 Shutdown is triggered via a `oneshot::Sender` stored on the `WebhookServer` struct. The server uses `axum::serve(...).with_graceful_shutdown(...)`. The public `shutdown()` method sends the signal and awaits the task join handle, ensuring a clean drain-and-wait.
 
 **Reference:** `src/channels/webhook_server.rs` — `shutdown()` method
+
+### SIGHUP Reload Contract
+
+Reload of the unified webhook listener is atomic for this surface: IronClaw validates the replacement listener config first, then only applies HTTP webhook secret updates if listener validation and any required rebind succeed. If the new listener config is invalid or rebinding fails, IronClaw keeps the existing listener and skips secret rotation for the HTTP webhook channel.
+
+**Reference:** `src/main.rs` — `prepare_sighup_reload()` and the SIGHUP handler restart/secret-update sequence
 
 ---
 
