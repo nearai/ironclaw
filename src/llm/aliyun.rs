@@ -27,7 +27,7 @@ impl AliyunProvider {
     pub fn new(config: AliyunConfig) -> Result<Self, LlmError> {
         if config.api_key.is_none() {
             return Err(LlmError::AuthFailed {
-                provider: aliyun.to_string(),
+                provider: "aliyun".to_string(),
             });
         }
 
@@ -523,12 +523,9 @@ impl LlmProvider for AliyunProvider {
     }
 
     fn cost_per_token(&self) -> (Decimal, Decimal) {
-        // Use default cost for unknown models instead of treating them as zero-cost local models
-        let cost = costs::model_cost(&self.config.model);
-        if cost.is_none() || cost.unwrap().0.is_zero() {
-            costs::default_cost()
-        } else {
-            cost.unwrap()
+        match costs::model_cost(&self.config.model) {
+            Some(c) if !c.0.is_zero() => c,
+            _ => costs::default_cost(),
         }
     }
 
