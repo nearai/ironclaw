@@ -21,7 +21,7 @@ use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt, Resou
 use rust_decimal::Decimal;
 use serde_json::Value;
 use thiserror::Error;
-use wasmtime::{Cache, Config, Engine, Instance, Module, ResourceLimiter, Store};
+use wasmtime::{Cache, Caller, Config, Engine, Instance, Linker, Module, ResourceLimiter, Store};
 
 const DEFAULT_FUEL: u64 = 500_000;
 const DEFAULT_OUTPUT_BYTES: u64 = 1024 * 1024;
@@ -29,6 +29,11 @@ const DEFAULT_MEMORY_BYTES: u64 = 10 * 1024 * 1024;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(500);
 const CACHE_ABI_VERSION: &str = "json-v1";
+const CORE_IMPORT_MODULE: &str = "host";
+const CORE_LOG_IMPORT: &str = "log_utf8";
+const CORE_TIME_IMPORT: &str = "time_unix_ms";
+const MAX_LOG_ENTRIES: usize = 1_000;
+const MAX_LOG_MESSAGE_BYTES: usize = 4 * 1024;
 
 /// WASM runtime configuration for the V1 runtime lane.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +152,36 @@ pub struct PreparedWasmCapability {
     pub module_path: VirtualPath,
 }
 
+/// Core host log levels accepted by the low-risk logging import.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WasmLogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl WasmLogLevel {
+    fn from_i32(value: i32) -> Self {
+        match value {
+            0 => Self::Trace,
+            1 => Self::Debug,
+            3 => Self::Warn,
+            4 => Self::Error,
+            _ => Self::Info,
+        }
+    }
+}
+
+/// Guest log entry captured through the core `host.log_utf8` import.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WasmLogEntry {
+    pub level: WasmLogLevel,
+    pub message: String,
+    pub timestamp_unix_ms: u64,
+}
+
 /// JSON capability invocation payload for the initial Reborn WASM ABI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityInvocation {
@@ -161,6 +196,7 @@ pub struct CapabilityResult {
     pub usage: ResourceUsage,
     pub fuel_consumed: u64,
     pub output_bytes: u64,
+    pub logs: Vec<WasmLogEntry>,
 }
 
 /// Full resource-governed execution request.
@@ -323,12 +359,7 @@ impl WasmRuntime {
             }
         })?;
 
-        if let Some(import) = module.imports().next() {
-            return Err(WasmError::UnsupportedImport {
-                module: import.module().to_string(),
-                name: import.name().to_string(),
-            });
-        }
+        validate_module_imports(&module)?;
 
         if spec.export.trim().is_empty()
             || !module.exports().any(|export| export.name() == spec.export)
@@ -487,8 +518,7 @@ impl WasmRuntime {
 
         let start = Instant::now();
         let mut store = self.fueled_store()?;
-        let instance = Instance::new(&mut store, &module.module, &[])
-            .map_err(|error| self.classify_wasmtime_error(error))?;
+        let instance = self.instantiate_module(&mut store, module)?;
         let memory = instance
             .get_memory(&mut store, "memory")
             .ok_or(WasmError::MissingMemory)?;
@@ -563,12 +593,15 @@ impl WasmRuntime {
         let fuel_consumed = self.fuel_consumed(&store);
         let usage = resource_usage(start, output_byte_count);
 
+        let logs = store.data().logs.clone();
+
         Ok(CapabilityResult {
             output,
             reservation_id: reservation.id,
             usage,
             fuel_consumed,
             output_bytes: output_byte_count,
+            logs,
         })
     }
 
@@ -585,8 +618,7 @@ impl WasmRuntime {
         let start = Instant::now();
         let mut store = self.fueled_store()?;
 
-        let instance = Instance::new(&mut store, &module.module, &[])
-            .map_err(|error| self.classify_wasmtime_error(error))?;
+        let instance = self.instantiate_module(&mut store, module)?;
         let func = instance
             .get_typed_func::<i32, i32>(&mut store, module.export())
             .map_err(|_| WasmError::MissingExport {
@@ -642,6 +674,18 @@ impl WasmRuntime {
             });
         }
         Ok(())
+    }
+
+    fn instantiate_module(
+        &self,
+        store: &mut Store<RuntimeStoreData>,
+        module: &PreparedWasmModule,
+    ) -> Result<Instance, WasmError> {
+        let mut linker = Linker::new(&self.engine);
+        add_core_host_imports(&mut linker)?;
+        linker
+            .instantiate(store, &module.module)
+            .map_err(|error| self.classify_wasmtime_error(error))
     }
 
     fn fueled_store(&self) -> Result<Store<RuntimeStoreData>, WasmError> {
@@ -716,13 +760,26 @@ impl WasmRuntime {
 #[derive(Debug)]
 struct RuntimeStoreData {
     limiter: WasmRuntimeLimiter,
+    logs: Vec<WasmLogEntry>,
 }
 
 impl RuntimeStoreData {
     fn new(memory_limit: u64) -> Self {
         Self {
             limiter: WasmRuntimeLimiter::new(memory_limit),
+            logs: Vec::new(),
         }
+    }
+
+    fn push_log(&mut self, level: WasmLogLevel, message: String) {
+        if self.logs.len() >= MAX_LOG_ENTRIES {
+            return;
+        }
+        self.logs.push(WasmLogEntry {
+            level,
+            message,
+            timestamp_unix_ms: unix_time_ms(),
+        });
     }
 }
 
@@ -779,6 +836,82 @@ impl ResourceLimiter for WasmRuntimeLimiter {
     fn memories(&self) -> usize {
         10
     }
+}
+
+fn validate_module_imports(module: &Module) -> Result<(), WasmError> {
+    for import in module.imports() {
+        if !is_supported_core_import(import.module(), import.name()) {
+            return Err(WasmError::UnsupportedImport {
+                module: import.module().to_string(),
+                name: import.name().to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn is_supported_core_import(module: &str, name: &str) -> bool {
+    module == CORE_IMPORT_MODULE && matches!(name, CORE_LOG_IMPORT | CORE_TIME_IMPORT)
+}
+
+fn add_core_host_imports(linker: &mut Linker<RuntimeStoreData>) -> Result<(), WasmError> {
+    linker
+        .func_wrap(CORE_IMPORT_MODULE, CORE_TIME_IMPORT, || -> i64 {
+            unix_time_ms() as i64
+        })
+        .map_err(|error| WasmError::Engine {
+            reason: error.to_string(),
+        })?;
+    linker
+        .func_wrap(
+            CORE_IMPORT_MODULE,
+            CORE_LOG_IMPORT,
+            |mut caller: Caller<'_, RuntimeStoreData>, level: i32, ptr: i32, len: i32| -> i32 {
+                host_log_utf8(&mut caller, level, ptr, len)
+            },
+        )
+        .map_err(|error| WasmError::Engine {
+            reason: error.to_string(),
+        })?;
+    Ok(())
+}
+
+fn host_log_utf8(caller: &mut Caller<'_, RuntimeStoreData>, level: i32, ptr: i32, len: i32) -> i32 {
+    let Ok(offset) = usize::try_from(ptr) else {
+        return -1;
+    };
+    let Ok(len) = usize::try_from(len) else {
+        return -1;
+    };
+    if len > MAX_LOG_MESSAGE_BYTES {
+        return -2;
+    }
+    let Some(memory) = caller
+        .get_export("memory")
+        .and_then(|item| item.into_memory())
+    else {
+        return -3;
+    };
+    let mut bytes = vec![0_u8; len];
+    if memory.read(&*caller, offset, &mut bytes).is_err() {
+        return -4;
+    }
+    let Ok(message) = String::from_utf8(bytes) else {
+        return -5;
+    };
+    caller
+        .data_mut()
+        .push_log(WasmLogLevel::from_i32(level), message);
+    0
+}
+
+fn unix_time_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn release_after_failure<G>(
