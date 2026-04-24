@@ -163,9 +163,18 @@ Rules:
 
 ## 8. Host imports
 
-Initial V1 may expose no privileged imports beyond the minimal test/demo ABI.
+V1 exposes only low-risk core imports by default:
 
-Future imports should be grouped by service:
+```text
+host.log_utf8(level: i32, ptr: i32, len: i32) -> i32 status
+host.time_unix_ms() -> i64
+```
+
+`host.log_utf8` reads UTF-8 bytes from the guest's exported `memory`, bounds message size/count, and records structured logs in `CapabilityResult.logs`. `host.time_unix_ms` returns host wall-clock milliseconds since Unix epoch. These imports do not grant filesystem, network, secret, process, or dispatch authority.
+
+Unsupported imports fail at module preparation as `WasmError::UnsupportedImport`.
+
+Future privileged imports should be grouped by service and routed through their owning host services:
 
 ```text
 host.fs.read/write/list/stat
@@ -251,6 +260,20 @@ pub struct PreparedWasmCapability {
     pub module_path: VirtualPath,
 }
 
+pub enum WasmLogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+pub struct WasmLogEntry {
+    pub level: WasmLogLevel,
+    pub message: String,
+    pub timestamp_unix_ms: u64,
+}
+
 pub struct CapabilityInvocation {
     pub input: serde_json::Value,
 }
@@ -261,6 +284,7 @@ pub struct CapabilityResult {
     pub usage: ResourceUsage,
     pub fuel_consumed: u64,
     pub output_bytes: u64,
+    pub logs: Vec<WasmLogEntry>,
 }
 
 pub struct WasmExecutionRequest<'a> {
@@ -365,6 +389,9 @@ Local contract tests should prove:
 - executor reserves before preparation/invocation and reconciles successful usage
 - executor releases reservations on preparation or invocation failure
 - resource-denied executions fail before module preparation/invocation
+- core `host.log_utf8` captures bounded structured logs in capability results
+- core `host.time_unix_ms` is available without adding privileged authority
+- unsupported host imports still fail closed during module preparation
 - invocation returns actual usage suitable for resource reconciliation
 - no privileged host imports are available unless explicitly registered
 
