@@ -313,7 +313,10 @@ impl NearAiChatProvider {
             // compatible backends also compute a negative remaining output budget
             // when the prompt already exceeds the context window, surfacing that as
             // "max_tokens must be at least 1, got -123" instead of the more common
-            // "context_length_exceeded" wording.
+            // "context_length_exceeded" wording. Keep this match intentionally
+            // narrow so unrelated 400s do not trigger overflow recovery; if token
+            // counts are absent, downstream retry heuristics still key off the
+            // structured `ContextLengthExceeded` signal rather than these numbers.
             if status_code == 400 {
                 let lower = response_text.to_ascii_lowercase();
                 const CONTEXT_PATTERNS: &[&str] = &[

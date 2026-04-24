@@ -1812,6 +1812,15 @@ fn handle_emit_event(
                 params_summary: None,
             }
         }
+        "message_added" => {
+            let role = extract_string_kwarg(kwargs, "role").unwrap_or_default();
+            let content_preview =
+                extract_string_kwarg(kwargs, "content_preview").unwrap_or_default();
+            EventKind::MessageAdded {
+                role,
+                content_preview,
+            }
+        }
         "skill_activated" => {
             let names_str = extract_string_kwarg(kwargs, "skill_names").unwrap_or_default();
             let skill_names: Vec<String> = names_str
@@ -3489,6 +3498,8 @@ mod tests {
 
     struct ContextOverflowRetryLlm {
         captured: tokio::sync::Mutex<Vec<Vec<ThreadMessage>>>,
+        overflow_used: u64,
+        overflow_limit: u64,
     }
 
     #[async_trait::async_trait]
@@ -3517,8 +3528,8 @@ mod tests {
                 })
             } else {
                 Err(EngineError::TokenLimitExceeded {
-                    used: 150_000,
-                    limit: 128_000,
+                    used: self.overflow_used,
+                    limit: self.overflow_limit,
                 })
             }
         }
@@ -3528,6 +3539,8 @@ mod tests {
     async fn llm_complete_retries_after_context_overflow_with_compacted_messages() {
         let concrete = Arc::new(ContextOverflowRetryLlm {
             captured: tokio::sync::Mutex::new(Vec::new()),
+            overflow_used: 150_000,
+            overflow_limit: 128_000,
         });
         let llm: Arc<dyn LlmBackend> = Arc::clone(&concrete) as Arc<dyn LlmBackend>;
         let effects: Arc<dyn EffectExecutor> = Arc::new(NoopEffects);
@@ -3616,6 +3629,8 @@ mod tests {
     async fn llm_complete_retries_after_context_overflow_when_using_thread_message_fallback() {
         let concrete = Arc::new(ContextOverflowRetryLlm {
             captured: tokio::sync::Mutex::new(Vec::new()),
+            overflow_used: 150_000,
+            overflow_limit: 128_000,
         });
         let llm: Arc<dyn LlmBackend> = Arc::clone(&concrete) as Arc<dyn LlmBackend>;
         let effects: Arc<dyn EffectExecutor> = Arc::new(NoopEffects);
@@ -3673,6 +3688,78 @@ mod tests {
                 .unwrap_or_default()
                 .contains(RETRY_COMPACTION_NOTE_SENTINEL)),
             "fallback retries should still compact the transcript"
+        );
+
+        let captured = concrete.captured.lock().await;
+        assert_eq!(captured.len(), 2, "LLM should be retried exactly once");
+    }
+
+    #[tokio::test]
+    async fn llm_complete_retries_when_overflow_counts_are_unknown() {
+        let concrete = Arc::new(ContextOverflowRetryLlm {
+            captured: tokio::sync::Mutex::new(Vec::new()),
+            overflow_used: 0,
+            overflow_limit: 0,
+        });
+        let llm: Arc<dyn LlmBackend> = Arc::clone(&concrete) as Arc<dyn LlmBackend>;
+        let effects: Arc<dyn EffectExecutor> = Arc::new(NoopEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let store: Arc<dyn Store> = Arc::new(crate::tests::InMemoryStore::with_docs(vec![]));
+
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        let messages = serde_json::json!([
+            {"role": "System", "content": "You are helpful."},
+            {"role": "User", "content": "First question"},
+            {"role": "Assistant", "content": "First answer"},
+            {"role": "User", "content": "Second question"},
+            {"role": "Assistant", "content": "Second answer"},
+            {"role": "User", "content": "Current request"}
+        ]);
+
+        let mut total_tokens = TokenUsage::default();
+        let result = handle_llm_complete(
+            &[
+                json_to_monty(&messages),
+                json_to_monty(&serde_json::json!([])),
+                json_to_monty(&serde_json::json!({})),
+            ],
+            &[],
+            &mut thread,
+            LlmCompleteDeps {
+                llm: &llm,
+                effects: &effects,
+                leases: &leases,
+                store: Some(&store),
+            },
+            &mut total_tokens,
+        )
+        .await;
+
+        let response = match result {
+            ExtFunctionResult::Return(obj) => monty_to_json(&obj),
+            other => panic!("expected successful retry result, got {other:?}"),
+        };
+
+        assert_eq!(response["type"], "text");
+        assert_eq!(response["content"], "FINAL(\"done\")");
+        assert!(
+            response["compacted_messages"]
+                .as_array()
+                .expect("compacted messages should be returned on retry")
+                .iter()
+                .any(|msg| msg["content"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains(RETRY_COMPACTION_NOTE_SENTINEL)),
+            "retry should still run when the provider cannot report used/limit counts"
         );
 
         let captured = concrete.captured.lock().await;
@@ -3950,6 +4037,16 @@ mod tests {
                 .iter()
                 .any(|msg| msg.content == "Still working"),
             "post-retry assistant output should be appended onto the compacted transcript"
+        );
+        assert!(
+            thread.events.iter().any(|event| matches!(
+                &event.kind,
+                EventKind::MessageAdded { role, content_preview }
+                    if role == "System"
+                        && content_preview
+                            .contains("overflow retry compacted working_messages")
+            )),
+            "retry compaction should be observable in the thread event log"
         );
     }
 

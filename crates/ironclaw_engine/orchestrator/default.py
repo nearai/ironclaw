@@ -682,6 +682,11 @@ def run_loop(context, goal, actions, state, config):
         if isinstance(compacted_messages, list):
             state["working_messages"] = compacted_messages
             working_messages = state["working_messages"]
+            __emit_event__(
+                "message_added",
+                role="System",
+                content_preview="overflow retry compacted working_messages",
+            )
         __emit_event__("step_completed", step=step,
                        input_tokens=response.get("usage", {}).get("input_tokens", 0),
                        output_tokens=response.get("usage", {}).get("output_tokens", 0))
