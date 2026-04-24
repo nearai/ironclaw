@@ -180,9 +180,23 @@ async fn run_bridge(
         };
 
         // Validate that the returned URL uses encrypted WebSocket and points
-        // to an allowlisted host. Prevents a MITM on the open endpoint from
-        // redirecting the bridge to a plaintext or attacker-controlled URL.
-        validate_wss_url(&channel_name, &wss_url, &http_allowlist)?;
+        // to an allowlisted host. Treat validation failure as retriable — a new
+        // load-balancer subdomain (e.g., wss-eu.slack.com) might appear that
+        // isn't covered by the allowlist suffix match. Fatal failure would take
+        // the channel offline until a config update.
+        if let Err(e) = validate_wss_url(&channel_name, &wss_url, &http_allowlist) {
+            reconnect_attempt += 1;
+            tracing::warn!(
+                channel = %channel_name,
+                error = %e,
+                attempt = reconnect_attempt,
+                "WSS URL validation failed, retrying"
+            );
+            if reconnect_attempt > config.max_reconnect_attempts {
+                return Err(e);
+            }
+            continue;
+        }
 
         tracing::info!(channel = %channel_name, "Connecting to Socket Mode WebSocket");
 
@@ -350,7 +364,11 @@ async fn event_loop(
                     }
                 };
 
-                // Immediately ack the envelope (must respond within 3 seconds)
+                // Defensive: ack any envelope with an envelope_id within Slack's
+                // 3-second window. Slack requires acks for events_api, slash_commands,
+                // and interactive envelopes. Hello and disconnect typically don't carry
+                // an envelope_id (the `if let Some` guard is a no-op for them).
+                // Acking unexpected envelope types is harmless.
                 if let Some(envelope_id) = envelope.get("envelope_id").and_then(|v| v.as_str()) {
                     let ack = serde_json::json!({ "envelope_id": envelope_id });
                     if let Err(e) = write.send(WsMessage::Text(ack.to_string().into())).await {
@@ -464,12 +482,15 @@ async fn forward_event_to_wasm(
     let query = HashMap::new();
 
     // Channel names are validated at registration (setup.rs rejects reserved names,
-    // loader.rs rejects names with '/', '\\', or '..'), but assert here since this
-    // path is also reachable from the Socket Mode bridge.
-    debug_assert!(
-        !channel_name.contains('/') && !channel_name.contains(".."),
-        "channel_name must not contain path separators"
-    );
+    // loader.rs rejects names with '/', '\\', or '..'), but check at runtime since
+    // this path is also reachable from the Socket Mode bridge.
+    if channel_name.contains('/') || channel_name.contains("..") {
+        tracing::error!(
+            channel = %channel_name,
+            "Refusing to forward event: channel name contains path separators"
+        );
+        return;
+    }
     let path = format!("/webhook/{}", channel_name);
     // `secret_validated: true` — Socket Mode events arrive over an authenticated WSS
     // connection (app token was verified during `open_connection`), so there is no
@@ -657,6 +678,16 @@ async fn open_connection(
             name: channel_name.to_string(),
             reason: format!("HTTP request to apps.connections.open failed: {}", e),
         })?;
+
+    // Check HTTP status before parsing JSON — a 5xx HTML error page would
+    // produce a misleading "Failed to parse JSON" error instead of "HTTP 503".
+    let status = response.status();
+    if !status.is_success() {
+        return Err(WasmChannelError::SocketMode {
+            name: channel_name.to_string(),
+            reason: format!("apps.connections.open returned HTTP {}", status),
+        });
+    }
 
     let body: serde_json::Value =
         response

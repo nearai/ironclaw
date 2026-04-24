@@ -30,7 +30,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -854,8 +854,6 @@ pub struct WasmChannel {
     workspace_store: Arc<ChannelWorkspaceStore>,
 
     /// Consecutive response failures for health monitoring.
-    /// Reset to 0 on success; emits a warning after `CONSECUTIVE_ERROR_THRESHOLD`.
-    consecutive_errors: AtomicU32,
 
     /// Shutdown sender for the Socket Mode bridge task.
     socket_shutdown_tx: RwLock<Option<oneshot::Sender<()>>>,
@@ -1165,7 +1163,6 @@ impl WasmChannel {
             typing_task: RwLock::new(None),
             pairing_store,
             workspace_store: Arc::new(ChannelWorkspaceStore::new()),
-            consecutive_errors: AtomicU32::new(0),
             socket_shutdown_tx: RwLock::new(None),
             socket_bridge_generation: AtomicU64::new(0),
             socket_bridge_active_id: AtomicU64::new(0),
@@ -3556,7 +3553,7 @@ impl WasmChannel {
     }
 }
 
-/// Number of consecutive response failures before emitting a health warning.
+/// Context for dispatching emitted messages from WASM callbacks.
 struct EmitDispatchContext<'a> {
     channel_name: &'a str,
     owner_scope_id: &'a str,
@@ -3737,7 +3734,6 @@ impl Channel for WasmChannel {
             reason: e.to_string(),
         })?;
 
-        self.consecutive_errors.store(0, Ordering::Relaxed);
         Ok(())
     }
 

@@ -114,11 +114,7 @@ pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
 ///
 /// Used by the legacy routing path; the engine_v2 path performs an equivalent
 /// check earlier (before the BeforeInbound hook).
-fn should_route_as_approval(
-    thread_state: ThreadState,
-    raw_content: &str,
-    _has_awaiting_approval_in_session: bool,
-) -> bool {
+fn should_route_as_approval(thread_state: ThreadState, raw_content: &str) -> bool {
     // Bare approval keywords (yes/no/always) are thread-local only.
     // Cross-thread approval requires an explicit request ID or slash command.
     // This prevents an unrelated "yes" in thread B from approving a
@@ -1976,25 +1972,16 @@ impl Agent {
                 message: "Auth gate resolution requires ENGINE_V2".to_string(),
             }),
             Submission::ApprovalResponse { approved, always } => {
-                let (thread_state, has_awaiting_approval_in_session) = {
+                let thread_state = {
                     let sess = session.lock().await;
-                    (
-                        sess.threads
-                            .get(&thread_id)
-                            .map(|t| t.state)
-                            .unwrap_or(ThreadState::Idle),
-                        sess.threads.values().any(|t| {
-                            t.state == ThreadState::AwaitingApproval && t.pending_approval.is_some()
-                        }),
-                    )
+                    sess.threads
+                        .get(&thread_id)
+                        .map(|t| t.state)
+                        .unwrap_or(ThreadState::Idle)
                 };
                 // NOTE: TOCTOU possible — state could change between check
                 // and process_approval; process_approval handles stale cases.
-                if should_route_as_approval(
-                    thread_state,
-                    &message.content,
-                    has_awaiting_approval_in_session,
-                ) {
+                if should_route_as_approval(thread_state, &message.content) {
                     self.process_approval(message, session, thread_id, None, approved, always)
                         .await
                 } else {
@@ -2482,19 +2469,19 @@ mod tests {
             ThreadState::Interrupted,
         ] {
             assert!(
-                !should_route_as_approval(state, "yes", false),
+                !should_route_as_approval(state, "yes"),
                 "bare 'yes' should not route as approval in {state:?}"
             );
             assert!(
-                !should_route_as_approval(state, "no", false),
+                !should_route_as_approval(state, "no"),
                 "bare 'no' should not route as approval in {state:?}"
             );
             assert!(
-                !should_route_as_approval(state, "always", false),
+                !should_route_as_approval(state, "always"),
                 "bare 'always' should not route as approval in {state:?}"
             );
             assert!(
-                !should_route_as_approval(state, "ok", false),
+                !should_route_as_approval(state, "ok"),
                 "bare 'ok' should not route as approval in {state:?}"
             );
         }
@@ -2508,18 +2495,15 @@ mod tests {
 
         assert!(should_route_as_approval(
             ThreadState::AwaitingApproval,
-            "yes",
-            false,
+            "yes"
         ));
         assert!(should_route_as_approval(
             ThreadState::AwaitingApproval,
-            "no",
-            false,
+            "no"
         ));
         assert!(should_route_as_approval(
             ThreadState::AwaitingApproval,
-            "always",
-            false,
+            "always"
         ));
     }
 
@@ -2530,18 +2514,10 @@ mod tests {
         use super::should_route_as_approval;
         use crate::agent::session::ThreadState;
 
-        assert!(should_route_as_approval(
-            ThreadState::Idle,
-            "/approve",
-            false
-        ));
-        assert!(should_route_as_approval(ThreadState::Idle, "/deny", false));
-        assert!(should_route_as_approval(ThreadState::Idle, "/yes", false));
-        assert!(should_route_as_approval(
-            ThreadState::Processing,
-            "/always",
-            false,
-        ));
+        assert!(should_route_as_approval(ThreadState::Idle, "/approve"));
+        assert!(should_route_as_approval(ThreadState::Idle, "/deny"));
+        assert!(should_route_as_approval(ThreadState::Idle, "/yes"));
+        assert!(should_route_as_approval(ThreadState::Processing, "/always"));
     }
 
     #[test]
@@ -2553,67 +2529,29 @@ mod tests {
         use super::should_route_as_approval;
         use crate::agent::session::ThreadState;
 
-        assert!(!should_route_as_approval(ThreadState::Idle, "yes", true));
-        assert!(!should_route_as_approval(ThreadState::Completed, "no", true));
+        assert!(!should_route_as_approval(ThreadState::Idle, "yes"));
+        assert!(!should_route_as_approval(ThreadState::Completed, "no"));
         assert!(!should_route_as_approval(
             ThreadState::Interrupted,
-            "always",
-            true
+            "always"
         ));
         // Slash commands still route cross-thread
-        assert!(should_route_as_approval(ThreadState::Idle, "/approve", true));
+        assert!(should_route_as_approval(ThreadState::Idle, "/approve"));
     }
 
     #[test]
-    fn interrupted_thread_with_stale_pending_approval_does_not_trigger_session_scan() {
+    fn idle_thread_does_not_route_bare_keywords_as_approval() {
         use super::should_route_as_approval;
-        use crate::agent::session::{PendingApproval, Session, Thread, ThreadState};
-        use uuid::Uuid;
+        use crate::agent::session::ThreadState;
 
-        let session_id = Uuid::new_v4();
-        let current_thread_id = Uuid::new_v4();
-        let interrupted_thread_id = Uuid::new_v4();
-
-        let current_thread = Thread::with_id(current_thread_id, session_id, Some("gateway"));
-
-        let mut interrupted_thread =
-            Thread::with_id(interrupted_thread_id, session_id, Some("slack"));
-        interrupted_thread.await_approval(PendingApproval {
-            request_id: Uuid::new_v4(),
-            tool_name: "shell".to_string(),
-            parameters: serde_json::json!({"cmd": "echo hi"}),
-            display_parameters: serde_json::json!({"cmd": "echo hi"}),
-            description: "Run shell command".to_string(),
-            tool_call_id: "call_shell".to_string(),
-            context_messages: vec![],
-            deferred_tool_calls: vec![],
-            selected_auth_prompt: None,
-            user_timezone: None,
-            allow_always: false,
-        });
-        interrupted_thread.interrupt();
-        assert_eq!(interrupted_thread.state, ThreadState::Interrupted);
+        // Bare "yes" in an Idle thread is regular user input, not an approval.
         assert!(
-            interrupted_thread.pending_approval.is_some(),
-            "interrupt() currently preserves pending approval metadata"
-        );
-
-        let mut session = Session::new("test-user");
-        session.threads.insert(current_thread_id, current_thread);
-        session
-            .threads
-            .insert(interrupted_thread_id, interrupted_thread);
-
-        let has_awaiting_approval_in_session = session.threads.values().any(|thread| {
-            thread.state == ThreadState::AwaitingApproval && thread.pending_approval.is_some()
-        });
-        assert!(
-            !has_awaiting_approval_in_session,
-            "only AwaitingApproval threads should count for approval routing"
+            !should_route_as_approval(ThreadState::Idle, "yes"),
+            "bare keywords in Idle thread must not route as approval"
         );
         assert!(
-            !should_route_as_approval(ThreadState::Idle, "yes", has_awaiting_approval_in_session),
-            "stale interrupted approvals must downgrade bare keywords to UserInput"
+            !should_route_as_approval(ThreadState::Interrupted, "yes"),
+            "bare keywords in Interrupted thread must not route as approval"
         );
     }
 
