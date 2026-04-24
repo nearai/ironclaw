@@ -34,7 +34,7 @@ pub fn period_bounds(period: &BudgetPeriod, now: DateTime<Utc>) -> (DateTime<Utc
                 PeriodUnit::Month => {
                     let nd = now.date_naive();
                     let first = chrono::NaiveDate::from_ymd_opt(nd.year(), nd.month(), 1)
-                        .expect("first of month always valid");
+                        .expect("first of month always valid"); // safety: year/month come from a valid NaiveDate, day=1 is always in range
                     first
                         .and_hms_opt(0, 0, 0)
                         .and_then(|ndt| Utc.from_local_datetime(&ndt).single())

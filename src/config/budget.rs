@@ -112,13 +112,13 @@ impl Default for BudgetConfig {
         // `defaults_parse_cleanly` unit test.
         Self {
             mode: BudgetEnforcementMode::Off,
-            user_daily_usd: Decimal::from_str("5.00").expect("hardcoded default parses"),
-            project_daily_usd: Decimal::from_str("2.00").expect("hardcoded default parses"),
-            mission_per_tick_usd: Decimal::from_str("0.50").expect("hardcoded default parses"),
-            heartbeat_per_tick_usd: Decimal::from_str("0.05").expect("hardcoded default parses"),
-            routine_lightweight_usd: Decimal::from_str("0.02").expect("hardcoded default parses"),
-            routine_standard_usd: Decimal::from_str("0.10").expect("hardcoded default parses"),
-            job_default_usd: Decimal::from_str("1.00").expect("hardcoded default parses"),
+            user_daily_usd: Decimal::from_str("5.00").expect("hardcoded default parses"), // safety: literal, covered by defaults_parse_cleanly
+            project_daily_usd: Decimal::from_str("2.00").expect("hardcoded default parses"), // safety: literal, covered by defaults_parse_cleanly
+            mission_per_tick_usd: Decimal::from_str("0.50").expect("hardcoded default parses"), // safety: literal, covered by defaults_parse_cleanly
+            heartbeat_per_tick_usd: Decimal::from_str("0.05").expect("hardcoded default parses"), // safety: literal, covered by defaults_parse_cleanly
+            routine_lightweight_usd: Decimal::from_str("0.02").expect("hardcoded default parses"), // safety: literal, covered by defaults_parse_cleanly
+            routine_standard_usd: Decimal::from_str("0.10").expect("hardcoded default parses"), // safety: literal, covered by defaults_parse_cleanly
+            job_default_usd: Decimal::from_str("1.00").expect("hardcoded default parses"), // safety: literal, covered by defaults_parse_cleanly
             warn_threshold: 0.75,
             approval_threshold: 0.90,
         }
