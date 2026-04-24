@@ -1,3 +1,13 @@
+//! Action contracts for host authorization.
+//!
+//! An [`Action`] is the normalized description of something an execution wants
+//! to do before any service performs it: read/write a scoped path, dispatch a
+//! capability, spawn another extension, use a secret, contact the network, or
+//! reserve resources. Runtime crates should convert their concrete operations
+//! into these variants so policy, approvals, resources, and audit all reason
+//! about the same shape. Actions intentionally contain scoped/virtual contract
+//! types, never raw host paths or secret values.
+
 use serde::{Deserialize, Serialize};
 
 use crate::{

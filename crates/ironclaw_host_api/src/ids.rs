@@ -1,3 +1,11 @@
+//! Authority-bearing identifier contracts.
+//!
+//! This module defines the newtypes used to prevent stringly-typed authority
+//! flow: tenant/user/project/thread scope IDs, extension and capability IDs,
+//! secret handles, and UUID-backed invocation/process/grant/reservation/audit
+//! IDs. Constructors validate path-adjacent strings so invalid names cannot be
+//! smuggled into manifests, mount paths, approvals, or audit records.
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

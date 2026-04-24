@@ -1,3 +1,12 @@
+//! Path contracts for host, virtual, and scoped namespaces.
+//!
+//! Reborn separates physical host paths from the paths exposed to extensions.
+//! [`HostPath`] is backend-internal and intentionally not serializable.
+//! [`VirtualPath`] names canonical durable roots such as `/projects` or
+//! `/system/extensions`. [`ScopedPath`] is what runtimes receive through a
+//! [`MountView`](crate::MountView), such as `/workspace/README.md`. This split is
+//! a core containment invariant.
+
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};

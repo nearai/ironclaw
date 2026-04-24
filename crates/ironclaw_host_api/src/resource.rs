@@ -1,3 +1,11 @@
+//! Resource scope, estimate, usage, and quota contracts.
+//!
+//! `ironclaw_resources` owns enforcement, but this module defines the shared
+//! shapes used by callers and audit records. [`ResourceScope`] captures the
+//! tenant/user/project/mission/thread/invocation cascade. [`ResourceEstimate`]
+//! and [`ResourceUsage`] describe budgeted work, while [`SandboxQuota`] and
+//! [`ResourceCeiling`] describe runtime limits that sandbox providers enforce.
+
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 

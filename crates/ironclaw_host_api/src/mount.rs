@@ -1,3 +1,11 @@
+//! Mount view contracts for scoped filesystem authority.
+//!
+//! A [`MountView`] is the filesystem authority visible to one execution
+//! context. It maps extension-facing aliases such as `/workspace` or
+//! `/extension/state` to canonical [`VirtualPath`] roots with explicit
+//! [`MountPermissions`]. Resolution is lexical and fail-closed; backend-specific
+//! symlink and storage containment checks belong in `ironclaw_filesystem`.
+
 use serde::{Deserialize, Serialize};
 
 use crate::{HostApiError, MountAlias, ScopedPath, VirtualPath};

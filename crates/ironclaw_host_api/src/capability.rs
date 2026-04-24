@@ -1,3 +1,12 @@
+//! Capability declaration and grant contracts.
+//!
+//! A [`CapabilityDescriptor`] says what an extension can provide; it does not
+//! grant anyone authority to use it. Authority comes from active
+//! [`CapabilityGrant`] values collected in a [`CapabilitySet`]. Grants carry
+//! constraints for effects, mounts, network access, secrets, resources, expiry,
+//! and invocation count so delegated authority can be attenuated across spawned
+//! work.
+
 use serde::{Deserialize, Serialize};
 
 use crate::{

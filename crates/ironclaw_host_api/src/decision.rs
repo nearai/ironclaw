@@ -1,3 +1,12 @@
+//! Authorization decision contracts.
+//!
+//! [`Decision`] is the host-facing result of evaluating an action in context:
+//! allow with required [`Obligation`]s, deny with a structured [`DenyReason`],
+//! or require a user approval request. Allowing an action is not enough by
+//! itself; runtime services must also satisfy attached obligations such as
+//! resource reservation, audit events, output limits, secret injection, and
+//! scoped mounts.
+
 use serde::{Deserialize, Serialize};
 
 use crate::ApprovalRequest;

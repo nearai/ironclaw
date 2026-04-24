@@ -1,9 +1,28 @@
 //! Shared host API contracts for IronClaw Reborn.
 //!
+//! `ironclaw_host_api` is the vocabulary every Reborn system-service crate uses
+//! to describe authority: who is acting, which extension/runtime is acting, what
+//! filesystem mounts are visible, which capabilities were granted, what resources
+//! may be spent, what action is requested, and what decision/obligations the host
+//! produced.
+//!
 //! This crate intentionally contains authority-bearing types, validation, and
 //! serialization contracts only. Runtime behavior belongs in system-service
 //! crates such as filesystem, resources, extensions, WASM, MCP, auth, network,
 //! and kernel.
+//!
+//! The main contract groups are:
+//!
+//! - [`ids`]: validated identity, scope, extension, capability, and audit IDs.
+//! - [`path`] and [`mount`]: host-internal paths, virtual durable paths, scoped
+//!   runtime paths, and mount permissions.
+//! - [`scope`]: [`ExecutionContext`], the authority envelope for one invocation.
+//! - [`capability`]: capability descriptors and grants; declarations do not grant
+//!   authority by themselves.
+//! - [`action`], [`decision`], and [`approval`]: normalized requested effects,
+//!   host decisions, obligations, and approval scopes.
+//! - [`resource`]: budget/resource scopes, estimates, usage, and quota contracts.
+//! - [`audit`]: redacted durable audit envelope shapes.
 
 pub mod action;
 pub mod approval;

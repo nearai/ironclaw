@@ -1,3 +1,11 @@
+//! Execution scope contracts.
+//!
+//! [`ExecutionContext`] is the authority envelope for one invocation. It ties
+//! together identity, tenancy, optional process/thread/mission/project context,
+//! runtime/trust class, capability grants, mount view, resource scope, and
+//! correlation ID. Every filesystem, resource, secret, network, dispatch, spawn,
+//! and audit decision should be traceable back to this context.
+
 use serde::{Deserialize, Serialize};
 
 use crate::{

@@ -1,3 +1,12 @@
+//! Approval contracts for user-mediated authority.
+//!
+//! Approval is a scoped grant to continue a specific action, not a vague
+//! confirmation. [`ApprovalRequest`] carries the exact action that needs a
+//! decision and may optionally describe a reusable [`ApprovalScope`] such as a
+//! capability, path prefix, or network target. Matching must be exact or
+//! policy-defined by the host; callers must not infer broader authority from a
+//! one-off approval.
+
 use serde::{Deserialize, Serialize};
 
 use crate::{

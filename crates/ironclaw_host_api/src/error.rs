@@ -1,3 +1,11 @@
+//! Host API validation errors.
+//!
+//! [`HostApiError`] reports invalid contract values: malformed identifiers,
+//! paths, mounts, network targets, and invariant violations. It is deliberately
+//! not a service/runtime error type. Filesystem, resources, auth, network, and
+//! runtime crates should wrap these errors when validation failures surface
+//! through their APIs.
+
 use thiserror::Error;
 
 /// Contract validation failures for host API value types.

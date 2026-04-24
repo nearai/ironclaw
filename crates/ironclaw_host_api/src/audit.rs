@@ -1,3 +1,11 @@
+//! Audit envelope contracts for durable provenance.
+//!
+//! [`AuditEnvelope`] is the redacted, durable record shape for authorization
+//! decisions and externally visible side effects. It carries scope, correlation,
+//! action summary, decision summary, and optional result metadata without raw
+//! secrets or raw host paths. Service crates are responsible for persisting and
+//! emitting these envelopes at the required before/after/denied stages.
+
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
