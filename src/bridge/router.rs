@@ -1823,8 +1823,9 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
             crate::config::MissionsConfig::default()
         }
     };
-    mission_manager_inner =
-        mission_manager_inner.with_insights_interval(missions_config.insights_interval);
+    mission_manager_inner = mission_manager_inner
+        .with_insights_interval(missions_config.insights_interval)
+        .with_codeact_host_shims(agent.config().codeact_host_shims);
     let mission_manager = Arc::new(mission_manager_inner);
     if let Err(e) = thread_manager.recover_project_threads(project_id).await {
         debug!("engine v2: recover_project_threads failed: {e}");

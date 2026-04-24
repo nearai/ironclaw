@@ -175,12 +175,22 @@ pub struct Mission {
     /// Payload from the most recent trigger (webhook body, event data, etc.).
     /// Injected into the thread's context so the code can access it.
     pub last_trigger_payload: Option<serde_json::Value>,
+    /// Whether mission-spawned engine-v2 threads should expose the CodeAct
+    /// host-backed Pythonic shim layer. Persisted on the mission so fires
+    /// inherit the rollout posture that was active when the mission was
+    /// created, even if they run later in background workers.
+    #[serde(default = "default_codeact_host_shims")]
+    pub codeact_host_shims: bool,
 
     pub metadata: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// When the next thread should be spawned (for Cron cadence).
     pub next_fire_at: Option<DateTime<Utc>>,
+}
+
+fn default_codeact_host_shims() -> bool {
+    true
 }
 
 impl Mission {
@@ -241,6 +251,7 @@ impl Mission {
             dedup_window_secs: 0,
             last_fire_at: None,
             last_trigger_payload: None,
+            codeact_host_shims: default_codeact_host_shims(),
             metadata: serde_json::Value::Object(serde_json::Map::new()),
             created_at: now,
             updated_at: now,

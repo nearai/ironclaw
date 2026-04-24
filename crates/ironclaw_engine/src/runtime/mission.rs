@@ -165,6 +165,9 @@ pub struct MissionManager {
     budget_gate: Option<Arc<dyn BudgetGate>>,
     /// Conversation insights extraction interval (every N completed threads).
     insights_interval: u32,
+    /// Default CodeAct host-shim posture to persist onto newly created
+    /// missions, so later background fires inherit the same rollout setting.
+    codeact_host_shims: bool,
 }
 
 /// Minimum gap between successive `fire_mission` attempts for the same
@@ -190,6 +193,7 @@ impl MissionManager {
             rate_limit: FireRateLimit::default(),
             budget_gate: None,
             insights_interval: 5,
+            codeact_host_shims: true,
         }
     }
 
@@ -204,6 +208,11 @@ impl MissionManager {
     /// supply a reader.
     pub fn with_workspace_reader(mut self, reader: Arc<dyn WorkspaceReader>) -> Self {
         self.workspace = Some(reader);
+        self
+    }
+
+    pub fn with_codeact_host_shims(mut self, enabled: bool) -> Self {
+        self.codeact_host_shims = enabled;
         self
     }
 
@@ -360,6 +369,7 @@ impl MissionManager {
         notify_channels: Vec<String>,
     ) -> Result<MissionId, EngineError> {
         let mut mission = Mission::new(project_id, user_id, name, goal, cadence);
+        mission.codeact_host_shims = self.codeact_host_shims;
         if let MissionCadence::Cron {
             ref expression,
             ref timezone,
@@ -764,7 +774,10 @@ impl MissionManager {
                 Some(mission.name.clone()),
                 ThreadType::Mission,
                 mission.project_id,
-                ThreadConfig::default(),
+                ThreadConfig {
+                    codeact_host_shims: mission.codeact_host_shims,
+                    ..ThreadConfig::default()
+                },
                 None,
                 user_id,
             )
@@ -1436,6 +1449,7 @@ impl MissionManager {
                 filters: std::collections::HashMap::new(),
             },
         );
+        mission.codeact_host_shims = self.codeact_host_shims;
         mission.success_criteria = Some(
             "Continuously improve system prompts and fix patterns based on execution traces".into(),
         );
@@ -1655,6 +1669,7 @@ impl MissionManager {
         }
 
         let mut mission = Mission::new(project_id, user_id, name, goal, cadence);
+        mission.codeact_host_shims = self.codeact_host_shims;
         mission.success_criteria = Some(success_criteria.into());
         mission.metadata = serde_json::json!({metadata_key: true});
         mission.max_threads_per_day = max_per_day;
@@ -3496,6 +3511,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_mission_persists_codeact_host_shims_setting() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>)
+            .with_codeact_host_shims(false);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "shim-gated mission",
+                "do the thing",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(
+            !mission.codeact_host_shims,
+            "mission should persist the manager shim toggle"
+        );
+    }
+
+    #[tokio::test]
     async fn pause_and_resume() {
         let store = Arc::new(TestStore::new());
         let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
@@ -3634,6 +3675,44 @@ mod tests {
         assert!(
             mission.thread_history.contains(&tid),
             "thread should be recorded in mission history"
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_mission_uses_persisted_codeact_host_shims_setting() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>)
+            .with_codeact_host_shims(false);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "fireable",
+                "build something",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        let tid = mgr
+            .fire_mission(id, "test-user", None)
+            .await
+            .unwrap()
+            .expect("thread id");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let thread = store
+            .load_thread(tid)
+            .await
+            .unwrap()
+            .expect("spawned thread should be persisted");
+        assert!(
+            !thread.config.codeact_host_shims,
+            "mission fires should inherit the persisted shim toggle"
         );
     }
 
