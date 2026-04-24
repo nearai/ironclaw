@@ -249,7 +249,7 @@ crates/
   ironclaw_kernel
 ```
 
-`ironclaw_host_api` owns shared authority-bearing contracts and invariants. `ironclaw_wasm`, `ironclaw_mcp`, and `ironclaw_scripts` are the V1 runtime/capability lanes. Generic arbitrary process extensions are not a public V1 lane; process execution remains an internal substrate for script runner, MCP stdio servers, and trusted system work.
+`ironclaw_host_api` owns shared authority-bearing contracts and invariants. The V1 execution model is `Host | WASM | Script Runner`: trusted first-party host services, portable WASM capabilities, and native CLI/script execution. `ironclaw_mcp` remains a required V1 adapter path that maps MCP tools into IronClaw capabilities and invokes local stdio servers through the same process/sandbox substrate. Generic arbitrary process extensions are not a public V1 lane; process execution remains an internal substrate for script runner, MCP stdio servers, and trusted system work.
 
 `ExtensionManager` should live in `crates/ironclaw_extensions` from day one. Kernel should compose it, not own extension discovery or manifest semantics.
 
@@ -291,7 +291,7 @@ This crate owns extension discovery and manifest semantics.
 - capability declarations
 - trust class parsing
 - extension registry
-- runtime lane declaration: WASM, MCP, or script/project-local helper
+- runtime lane declaration: host, WASM, script/project-local helper, or MCP adapter
 
 #### Does not own
 
@@ -588,23 +588,31 @@ A clean separation is:
 
 ## 9. V1 runtime/capability lanes
 
-V1 supports three capability lanes:
+V1 keeps execution narrow while still supporting existing software:
 
 ```text
-WASM + MCP + Script Runner
+Host | WASM | Script Runner
 ```
+
+MCP remains a required V1 adapter path for existing tool ecosystems, but it is modeled as a capability adapter on top of the same host authorization, process, sandbox, resource, and audit contracts rather than as an unmediated escape hatch.
+
+### Host
+
+The trusted first-party service lane. Host execution is for IronClaw-owned services such as filesystem mediation, resource governance, auth/secrets, audit, extension discovery, conversation, missions, gateway, and TUI orchestration. Host code can hold privileged service handles, but it must still use `ExecutionContext`, `Action`, `Decision`, and audit/resource contracts instead of silently bypassing them.
 
 ### WASM
 
-The default lane for installed reusable capabilities. WASM optimizes for hosted security, multi-tenant safety, versioned artifacts, and weaker-model reliability.
-
-### MCP
-
-The compatibility/ecosystem lane. Existing MCP servers are represented as extensions and their tools are adapted into IronClaw capabilities. MCP is required in V1 because existing users and integrations already depend on it.
+The portable installed-capability lane. WASM optimizes for fine-grained host imports, hosted security, multi-tenant safety, versioned artifacts, cheap/dense invocations, and weaker-model reliability. Use it for stable reusable capabilities such as parsers, formatters, validators, policy helpers, and deterministic transforms.
 
 ### Script runner
 
-The creativity lane. Strong models can write Python/bash/JS helpers and run them through scoped project sandboxes. Script runner is for exploration, self-repair experiments, and project-local helpers; repeated stable workflows can later be promoted into WASM/MCP/stable capabilities.
+The native software lane. V1 uses one Docker/container-backed sandbox profile for existing CLIs, Python/bash/JS helpers, project-local scripts, package managers, test runners, and other software that should not be rebuilt in WASM. The public abstraction is `script`/`cli`; Docker is the initial backend, not the security model. Future backends may include microVMs or remote workers without changing the capability contract.
+
+Script runner invocations receive only scoped mounts, explicit network policy, approved secret handles, resource limits, bounded output/artifact export, and durable audit. Repeated stable workflows can later be promoted into WASM, MCP, or another stable capability implementation.
+
+### MCP adapter
+
+The compatibility/ecosystem adapter. Existing MCP servers are represented as extensions and their tools are adapted into IronClaw capabilities. Stdio MCP servers run through the same internal process/sandbox substrate as script runner where needed; remote MCP calls still go through IronClaw scope, approval, network, resource, and audit checks.
 
 Generic arbitrary process extensions are deferred as a public extension model. Process execution still exists internally for MCP stdio servers, script runner backends, project runtimes, and trusted system services.
 
@@ -1149,10 +1157,11 @@ Choose exactly:
 
 - one shared host API contract crate
 - one host-level resource/budget governor
+- one trusted host service lane for first-party system services
 - one installed capability runtime: WASM
+- one script runner capability for native CLIs and project-local Python/bash/JS helpers
+- one Docker/container-backed sandbox profile for script runner and process internals
 - one MCP adapter path for existing MCP servers/tools
-- one script runner capability for project-local Python/bash/JS helpers
-- one sandbox backend/profile set for script runner and process internals
 - one local filesystem backend
 - one event bus format
 - one durable audit/history format
@@ -1205,20 +1214,21 @@ The goal of V1 is to prove the OS-like shape, not recreate all current IronClaw 
    - capability invocation
    - limits and scoped host imports
 
-6. **`ironclaw_kernel` composition**
-   - wire host API + filesystem + resources + extension manager + WASM runtime
+6. **`ironclaw_scripts`**
+   - `script.run` and declared CLI capabilities
+   - Docker/container-backed V1 sandbox profile
+   - project-local Python/bash/JS helpers and existing native CLIs
+   - limits, cleanup, scoped mounts, bounded output, and artifact export
+
+7. **`ironclaw_kernel` composition**
+   - wire host API + filesystem + resources + extension manager + WASM runtime + script runner
    - wire auth/network service handles
    - wire event bus
 
-7. **`ironclaw_mcp`**
+8. **`ironclaw_mcp`**
    - adapt existing MCP tools into IronClaw capabilities
    - support stdio and remote MCP paths as needed
    - preserve IronClaw policy/audit/scope controls
-
-8. **`ironclaw_scripts`**
-   - `script.run`
-   - project-local sandboxed Python/bash/JS helpers
-   - limits, cleanup, and scoped mounts
 
 9. **event model**
    - realtime bus
@@ -1250,7 +1260,7 @@ It keeps the most valuable properties:
 - small kernel host
 - explicit system-service crates instead of a vague middle box
 - shared `ironclaw_host_api` contracts for authority-bearing types and invariants
-- V1 runtime lanes: WASM, MCP, and script runner
+- V1 execution lanes: Host, WASM, and Docker-backed script runner, with MCP as a required capability adapter path
 - host-level resource budgeting for multi-tenant safety
 - first-party extensions for agent loop, conversation, missions, gateway, and TUI
 - filesystem as the primary persistence surface
