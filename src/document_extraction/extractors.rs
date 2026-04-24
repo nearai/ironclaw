@@ -175,9 +175,9 @@ fn bounded_read_zip_entry(
 fn extract_pdf(data: Vec<u8>) -> Result<String, String> {
     let mut doc = pdf_oxide::PdfDocument::from_bytes(data)
         .map_err(|e| format!("PDF extraction failed: {e}"))?;
-    // Images are deliberately disabled — embedding base64 data URIs or linked
-    // image paths would inject remote references into LLM context. This tool
-    // is text-only.
+    // Keep the extracted markdown text-only: avoid image markup, large inline
+    // base64 blobs, and any external image URLs. LLM context should not carry
+    // binary payloads or arbitrary outbound references.
     let options = pdf_oxide::converters::ConversionOptions {
         include_images: false,
         ..Default::default()
