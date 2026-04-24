@@ -247,7 +247,7 @@ impl Worker {
                 _ => None,
             };
             if let Some(event) = event {
-                sse.broadcast(event);
+                sse.broadcast(event); // projection-exempt: sandbox JobEvent, worker event projection
             }
         }
     }
