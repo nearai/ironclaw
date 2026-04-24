@@ -539,6 +539,38 @@ impl AppBuilder {
         tools.register_tool_info();
         tools.register_system_tools();
 
+        // Load integration credential mappings from a directory referenced
+        // by `INTEGRATION_CREDENTIALS_DIR`. Scans the directory and one
+        // level of subdirectories for `*.json` files (e.g.
+        // `integrations/abound/credentials.json`). Each file's `mappings`
+        // array is merged into the shared credential registry so injection
+        // works without patching the agent source. Missing directory or
+        // unparseable file = warn and continue; never fatal at startup.
+        if let Ok(dir) = std::env::var("INTEGRATION_CREDENTIALS_DIR") {
+            let dir_path = std::path::Path::new(&dir);
+            if dir_path.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(dir_path) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                            tools.load_credential_mappings(&path);
+                        } else if path.is_dir()
+                            && let Ok(sub) = std::fs::read_dir(&path)
+                        {
+                            for sub_entry in sub.flatten() {
+                                let sub_path = sub_entry.path();
+                                if sub_path.extension().and_then(|e| e.to_str()) == Some("json") {
+                                    tools.load_credential_mappings(&sub_path);
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if dir_path.is_file() {
+                tools.load_credential_mappings(dir_path);
+            }
+        }
+
         if let Some(ref ss) = self.secrets_store {
             tools.register_secrets_tools(Arc::clone(ss));
         }

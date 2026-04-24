@@ -80,6 +80,43 @@ const CODEACT_PREAMBLE: &str = include_str!("../../prompts/codeact_preamble.md")
 /// The strategy/closing block (after tool listing).
 const CODEACT_POSTAMBLE: &str = include_str!("../../prompts/codeact_postamble.md");
 
+/// Optional deploy-time override for the compiled-in preamble, loaded once
+/// from `CODEACT_PREAMBLE_PATH`. Same pattern as `AGENTS_SEED` — downstream
+/// forks whose agent flow diverges from the upstream prompt's discipline
+/// (e.g. a deploy that wants raw tool output in `FINAL()` rather than
+/// Markdown reformatting) can point this env var at a markdown file and
+/// replace the preamble wholesale. Unset → compiled-in default.
+static CODEACT_PREAMBLE_OVERRIDE: std::sync::LazyLock<Option<String>> =
+    std::sync::LazyLock::new(|| load_override_file("CODEACT_PREAMBLE_PATH"));
+
+/// Optional deploy-time override for the compiled-in postamble, loaded once
+/// from `CODEACT_POSTAMBLE_PATH`. See `CODEACT_PREAMBLE_OVERRIDE`.
+static CODEACT_POSTAMBLE_OVERRIDE: std::sync::LazyLock<Option<String>> =
+    std::sync::LazyLock::new(|| load_override_file("CODEACT_POSTAMBLE_PATH"));
+
+fn load_override_file(env_var: &str) -> Option<String> {
+    let Ok(path) = std::env::var(env_var) else {
+        tracing::info!(env_var, "override disabled: env var unset");
+        return None;
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => {
+            let len = contents.len();
+            if contents.trim().is_empty() {
+                tracing::warn!(env_var, path, "override file exists but is empty — ignoring");
+                None
+            } else {
+                tracing::info!(env_var, path, len, "override loaded");
+                Some(contents)
+            }
+        }
+        Err(e) => {
+            tracing::warn!(env_var, path, err = %e, "override file unreadable — falling back to compiled-in default");
+            None
+        }
+    }
+}
+
 /// Well-known title for the CodeAct preamble overlay.
 pub const PREAMBLE_OVERLAY_TITLE: &str = "prompt:codeact_preamble";
 
@@ -88,6 +125,20 @@ pub const PROMPT_OVERLAY_TAG: &str = "prompt_overlay";
 
 /// Maximum size for a prompt overlay document (in chars).
 const MAX_PROMPT_OVERLAY_CHARS: usize = 4000;
+
+/// Optional deploy-time agent identity, loaded once from `AGENTS_SEED_PATH`.
+///
+/// Downstream forks (e.g. a domain-specific deploy) can point this env var
+/// at a markdown file whose contents are injected into every system prompt
+/// as an Identity section. `None` when the var is unset, unreadable, or
+/// the file is empty — in which case the compiled-in preamble carries the
+/// full identity (generic IronClaw).
+///
+/// Read once at first access; changes to the file or env var after startup
+/// do not take effect until process restart. This matches the rest of the
+/// engine's config surface and avoids per-prompt filesystem I/O.
+static AGENTS_SEED: std::sync::LazyLock<Option<String>> =
+    std::sync::LazyLock::new(|| load_override_file("AGENTS_SEED_PATH").map(|s| s.trim().to_string()));
 
 /// Build the system prompt for CodeAct/RLM execution.
 ///
@@ -139,11 +190,47 @@ fn build_codeact_system_prompt_inner(
     overlay: Option<&str>,
     platform: Option<&PlatformInfo>,
 ) -> String {
-    let mut prompt = String::from(CODEACT_PREAMBLE);
+    build_codeact_system_prompt_with_overrides(
+        actions,
+        capabilities,
+        overlay,
+        platform,
+        AGENTS_SEED.as_deref(),
+        CODEACT_PREAMBLE_OVERRIDE.as_deref(),
+        CODEACT_POSTAMBLE_OVERRIDE.as_deref(),
+    )
+}
+
+/// Testable core that accepts explicit override strings instead of reading
+/// env vars. The env-var path is exercised in
+/// `build_codeact_system_prompt_inner`; tests call this helper directly so
+/// they don't race on process-wide `LazyLock` state.
+fn build_codeact_system_prompt_with_overrides(
+    actions: &[ActionDef],
+    capabilities: &[CapabilitySummary],
+    overlay: Option<&str>,
+    platform: Option<&PlatformInfo>,
+    identity: Option<&str>,
+    preamble_override: Option<&str>,
+    postamble_override: Option<&str>,
+) -> String {
+    let preamble = preamble_override.unwrap_or(CODEACT_PREAMBLE);
+    let postamble = postamble_override.unwrap_or(CODEACT_POSTAMBLE);
+    let mut prompt = String::from(preamble);
 
     // Inject platform identity and runtime metadata
     if let Some(info) = platform {
         prompt.push_str(&info.to_prompt_section());
+    }
+
+    // Inject deploy-time agent identity from AGENTS_SEED_PATH, if configured.
+    // This is how a downstream fork swaps the generic IronClaw persona for
+    // a domain-specific one without forking prompt templates — engine v1
+    // reads this via the workspace seed, engine v2 reads the file directly
+    // at process start. Both paths converge on the same file on disk.
+    if let Some(identity) = identity {
+        prompt.push_str("\n\n## Agent Identity\n\n");
+        prompt.push_str(identity);
     }
 
     // Append runtime prompt overlay if available
@@ -192,7 +279,7 @@ fn build_codeact_system_prompt_inner(
         }
     }
 
-    prompt.push_str(CODEACT_POSTAMBLE);
+    prompt.push_str(postamble);
     prompt
 }
 
@@ -253,6 +340,82 @@ mod tests {
         assert!(prompt.contains("Python REPL environment"));
         assert!(prompt.contains("Strategy"));
         assert!(!prompt.contains("Learned Rules"));
+    }
+
+    #[test]
+    fn identity_injected_when_agents_seed_set() {
+        let prompt = build_codeact_system_prompt_with_overrides(
+            &[],
+            &[],
+            None,
+            None,
+            Some("You are the Abound remittance assistant."),
+            None,
+            None,
+        );
+        assert!(prompt.contains("## Agent Identity"));
+        assert!(prompt.contains("You are the Abound remittance assistant."));
+    }
+
+    #[test]
+    fn identity_absent_when_agents_seed_unset() {
+        let prompt = build_codeact_system_prompt_with_overrides(
+            &[], &[], None, None, None, None, None,
+        );
+        assert!(!prompt.contains("## Agent Identity"));
+    }
+
+    #[test]
+    fn preamble_override_replaces_compiled_in() {
+        let prompt = build_codeact_system_prompt_with_overrides(
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            Some("# Custom preamble\n\nRespond with plain text for simple messages."),
+            None,
+        );
+        assert!(prompt.contains("# Custom preamble"));
+        assert!(prompt.contains("Respond with plain text for simple messages."));
+        // The stock preamble's "Python REPL environment" marker must not leak through.
+        assert!(!prompt.contains("Python REPL environment"));
+    }
+
+    #[test]
+    fn postamble_override_replaces_compiled_in() {
+        let prompt = build_codeact_system_prompt_with_overrides(
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            None,
+            Some("## Custom postamble\n\nPass raw tool results to FINAL() unchanged."),
+        );
+        assert!(prompt.contains("## Custom postamble"));
+        assert!(prompt.contains("Pass raw tool results to FINAL() unchanged."));
+        // The stock postamble's "Strategy" marker must not leak through.
+        assert!(!prompt.contains("Strategy"));
+    }
+
+    #[test]
+    fn overrides_compose_with_identity_and_tools() {
+        let prompt = build_codeact_system_prompt_with_overrides(
+            &[],
+            &[],
+            None,
+            None,
+            Some("Abound assistant."),
+            Some("# PRE"),
+            Some("# POST"),
+        );
+        // Order: preamble → identity → (no overlay) → (no tools) → postamble
+        let pre_idx = prompt.find("# PRE").expect("preamble present");
+        let identity_idx = prompt.find("## Agent Identity").expect("identity present");
+        let post_idx = prompt.find("# POST").expect("postamble present");
+        assert!(pre_idx < identity_idx);
+        assert!(identity_idx < post_idx);
     }
 
     #[tokio::test]

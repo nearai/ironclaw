@@ -1582,7 +1582,7 @@ impl MissionManager {
     /// caller-supplied metadata that an LLM tool call could forge).
     async fn seed_orchestrator_v0(&self, project_id: ProjectId) -> Result<(), EngineError> {
         use crate::executor::orchestrator::{
-            DEFAULT_ORCHESTRATOR, ORCHESTRATOR_TAG, ORCHESTRATOR_TITLE,
+            default_orchestrator, ORCHESTRATOR_TAG, ORCHESTRATOR_TITLE,
         };
         use crate::runtime::internal_write::with_trusted_internal_writes;
         use crate::types::memory::{DocType, MemoryDoc};
@@ -1598,14 +1598,17 @@ impl MissionManager {
                     == 0
         });
 
+        let active_default = default_orchestrator();
+
         if let Some(doc) = existing_v0 {
-            // Update if compiled-in code changed (rebuild with new default.py)
-            if doc.content != DEFAULT_ORCHESTRATOR {
+            // Update if the active default (compiled-in or override) changed
+            // since the last seed.
+            if doc.content != active_default {
                 let mut updated = doc.clone();
-                updated.content = DEFAULT_ORCHESTRATOR.to_string();
+                updated.content = active_default.to_string();
                 updated.updated_at = chrono::Utc::now();
                 with_trusted_internal_writes(self.store.save_memory_doc(&updated)).await?;
-                debug!("updated orchestrator v0 to match compiled-in default");
+                debug!("updated orchestrator v0 to match active default");
             }
             return Ok(());
         }
@@ -1619,7 +1622,7 @@ impl MissionManager {
             shared_owner_id(),
             DocType::Note,
             ORCHESTRATOR_TITLE,
-            DEFAULT_ORCHESTRATOR,
+            active_default,
         )
         .with_tags(vec![ORCHESTRATOR_TAG.to_string()]);
         doc.metadata = serde_json::json!({"version": 0, "source": "compiled_in"});
