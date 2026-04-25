@@ -759,9 +759,12 @@ pub struct ApprovalRequest {
     pub correlation_id: CorrelationId,
     pub requested_by: Principal,
     pub action: Box<Action>,
+    pub invocation_fingerprint: Option<InvocationFingerprint>,
     pub reason: String,
     pub reusable_scope: Option<ApprovalScope>,
 }
+
+pub struct InvocationFingerprint(String);
 
 pub struct ApprovalScope {
     pub principal: Principal,
@@ -790,7 +793,8 @@ Rules:
 - approval matching is exact or policy-defined; never substring/heuristic authority
 - reusable approvals must declare scope explicitly
 - approvals are audited
-- approval for one path/action does not imply approval for broader paths/actions
+- dispatch approval fingerprints are stable `sha256:` digests over scope, capability, estimate, and canonical JSON input; they must not store raw input payloads
+- approval for one path/action/invocation fingerprint does not imply approval for broader paths/actions/inputs
 
 ---
 
@@ -971,7 +975,7 @@ The first `ironclaw_host_api` implementation is not accepted without tests for:
 
 - `Action` cannot contain `HostPath`
 - `AuditEnvelope` cannot contain raw host path fields
-- `ApprovalRequest` carries an action and explicit reusable scope when reusable
+- `ApprovalRequest` carries an action, optional invocation fingerprint, and explicit reusable scope when reusable
 - validated contract values cannot be forged through serde deserialization
 
 ---
