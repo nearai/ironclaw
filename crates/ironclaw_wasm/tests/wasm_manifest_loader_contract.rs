@@ -9,6 +9,60 @@ use serde_json::json;
 use tempfile::tempdir;
 
 #[tokio::test]
+async fn manifest_loader_rejects_forged_package_root() {
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("other/wasm")).unwrap();
+    std::fs::write(
+        storage.path().join("other/wasm/echo.wasm"),
+        json_echo_module(),
+    )
+    .unwrap();
+    let mut package = package_from_manifest(
+        WASM_MANIFEST,
+        VirtualPath::new("/system/extensions/echo").unwrap(),
+    );
+    package.root = VirtualPath::new("/system/extensions/other").unwrap();
+    let mut fs = LocalFilesystem::new();
+    fs.mount_local(
+        VirtualPath::new("/system/extensions").unwrap(),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
+    )
+    .unwrap();
+    let runtime = WasmRuntime::for_testing().unwrap();
+
+    let err = runtime
+        .prepare_extension_capability(&fs, &package, &CapabilityId::new("echo.say").unwrap())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        WasmError::PackageRootMismatch { extension, root }
+            if extension.as_str() == "echo" && root == "/system/extensions/other"
+    ));
+}
+
+#[tokio::test]
+async fn manifest_loader_rejects_module_asset_above_configured_limit_before_reading() {
+    let (fs, package) = wasm_package_with_module(json_echo_module()).await;
+    let runtime = WasmRuntime::new(WasmRuntimeConfig {
+        max_module_bytes: 16,
+        ..WasmRuntimeConfig::for_testing()
+    })
+    .unwrap();
+
+    let err = runtime
+        .prepare_extension_capability(&fs, &package, &CapabilityId::new("echo.say").unwrap())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        WasmError::ModuleTooLarge { limit: 16, actual } if actual > 16
+    ));
+}
+
+#[tokio::test]
 async fn manifest_loader_reads_extension_module_and_invokes_json_capability() {
     let (fs, package) = wasm_package_with_module(json_echo_module()).await;
     let runtime = WasmRuntime::new(WasmRuntimeConfig {
@@ -36,7 +90,7 @@ async fn manifest_loader_reads_extension_module_and_invokes_json_capability() {
         .invoke_json(
             prepared.module.as_ref(),
             &prepared.descriptor,
-            Some(&sample_reservation()),
+            Some(&sample_active_reservation()),
             CapabilityInvocation {
                 input: json!({"message": "hello from manifest"}),
             },
@@ -243,12 +297,12 @@ fn sample_scope() -> ResourceScope {
     }
 }
 
-fn sample_reservation() -> ResourceReservation {
-    ResourceReservation {
-        id: ResourceReservationId::new(),
-        scope: sample_scope(),
-        estimate: ResourceEstimate::default(),
-    }
+fn sample_active_reservation() -> ActiveResourceReservation {
+    let governor = InMemoryResourceGovernor::new();
+    let reservation = governor
+        .reserve(sample_scope(), ResourceEstimate::default())
+        .unwrap();
+    governor.active_reservation(reservation.id).unwrap()
 }
 
 const WASM_MANIFEST: &str = r#"

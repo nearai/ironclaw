@@ -26,6 +26,7 @@ use wasmtime::{Cache, Config, Engine, Instance, Module, ResourceLimiter, Store};
 const DEFAULT_FUEL: u64 = 500_000;
 const DEFAULT_OUTPUT_BYTES: u64 = 1024 * 1024;
 const DEFAULT_MEMORY_BYTES: u64 = 10 * 1024 * 1024;
+const DEFAULT_MODULE_BYTES: u64 = 50 * 1024 * 1024;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(500);
 const CACHE_ABI_VERSION: &str = "json-v1";
@@ -36,6 +37,7 @@ pub struct WasmRuntimeConfig {
     pub fuel: u64,
     pub max_output_bytes: u64,
     pub max_memory_bytes: u64,
+    pub max_module_bytes: u64,
     pub timeout: Duration,
     pub cache_compiled_modules: bool,
     pub cache_dir: Option<PathBuf>,
@@ -48,6 +50,7 @@ impl Default for WasmRuntimeConfig {
             fuel: DEFAULT_FUEL,
             max_output_bytes: DEFAULT_OUTPUT_BYTES,
             max_memory_bytes: DEFAULT_MEMORY_BYTES,
+            max_module_bytes: DEFAULT_MODULE_BYTES,
             timeout: DEFAULT_TIMEOUT,
             cache_compiled_modules: true,
             cache_dir: None,
@@ -62,6 +65,7 @@ impl WasmRuntimeConfig {
             fuel: 100_000,
             max_output_bytes: 1024,
             max_memory_bytes: 1024 * 1024,
+            max_module_bytes: 1024 * 1024,
             timeout: Duration::from_secs(5),
             cache_compiled_modules: false,
             cache_dir: None,
@@ -192,6 +196,11 @@ pub enum WasmError {
     UnsupportedImport { module: String, name: String },
     #[error("WASM descriptor mismatch: {reason}")]
     DescriptorMismatch { reason: String },
+    #[error("extension {extension} package root {root} does not match expected extension root")]
+    PackageRootMismatch {
+        extension: ExtensionId,
+        root: String,
+    },
     #[error("extension {extension} uses runtime {actual:?}, not RuntimeKind::Wasm")]
     ExtensionRuntimeMismatch {
         extension: ExtensionId,
@@ -201,6 +210,8 @@ pub enum WasmError {
     CapabilityNotDeclared { capability: CapabilityId },
     #[error("invalid WASM invocation: {reason}")]
     InvalidInvocation { reason: String },
+    #[error("WASM module asset exceeds configured size limit: limit {limit}, actual {actual}")]
+    ModuleTooLarge { limit: u64, actual: u64 },
     #[error("WASM invocation requires an active resource reservation")]
     MissingReservation,
     #[error("WASM export '{export}' was not found or has the wrong signature")]
@@ -341,6 +352,8 @@ impl WasmRuntime {
     where
         F: RootFilesystem,
     {
+        validate_package_root(package)?;
+
         let descriptor = package
             .capabilities
             .iter()
@@ -377,10 +390,16 @@ impl WasmRuntime {
         let module_path = module_asset
             .resolve_under(&package.root)
             .map_err(|error| WasmError::Extension(Box::new(error)))?;
+        let stat = fs
+            .stat(&module_path)
+            .await
+            .map_err(|error| WasmError::Filesystem(Box::new(error)))?;
+        ensure_module_size_within_limit(stat.len, self.config.max_module_bytes)?;
         let bytes = fs
             .read_file(&module_path)
             .await
             .map_err(|error| WasmError::Filesystem(Box::new(error)))?;
+        ensure_module_size_within_limit(bytes.len() as u64, self.config.max_module_bytes)?;
         let export = capability_export_name(&package.id, capability_id)?;
         let module = self.prepare_cached(WasmModuleSpec {
             provider: package.id.clone(),
@@ -729,6 +748,28 @@ impl ResourceLimiter for WasmRuntimeLimiter {
     }
 }
 
+fn validate_package_root(package: &ExtensionPackage) -> Result<(), WasmError> {
+    let expected_root = VirtualPath::new(format!("/system/extensions/{}", package.id.as_str()))
+        .map_err(|error| WasmError::InvalidInvocation {
+            reason: error.to_string(),
+        })?;
+    if package.root != expected_root {
+        return Err(WasmError::PackageRootMismatch {
+            extension: package.id.clone(),
+            root: package.root.as_str().to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn ensure_module_size_within_limit(actual: u64, limit: u64) -> Result<(), WasmError> {
+    if actual > limit {
+        Err(WasmError::ModuleTooLarge { limit, actual })
+    } else {
+        Ok(())
+    }
+}
+
 fn capability_export_name(
     package_id: &ExtensionId,
     capability_id: &CapabilityId,
@@ -756,6 +797,11 @@ fn validate_runtime_config(config: &WasmRuntimeConfig) -> Result<(), WasmError> 
     if config.max_memory_bytes == 0 {
         return Err(WasmError::InvalidConfig {
             reason: "max_memory_bytes must be greater than zero".to_string(),
+        });
+    }
+    if config.max_module_bytes == 0 {
+        return Err(WasmError::InvalidConfig {
+            reason: "max_module_bytes must be greater than zero".to_string(),
         });
     }
     if config.timeout.is_zero() {

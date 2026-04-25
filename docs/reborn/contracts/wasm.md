@@ -106,6 +106,7 @@ The existing IronClaw codebase already uses Wasmtime with fuel, epoch interrupti
 - **Fuel:** every store receives configured fuel before guest execution.
 - **Epoch timeout:** the engine runs an epoch ticker; each invocation sets an epoch deadline derived from the configured timeout. Non-zero timeout and epoch tick interval are required.
 - **Memory limiter:** stores attach a `ResourceLimiter`; memory growth beyond `max_memory_bytes` fails closed as `WasmError::MemoryExceeded`.
+- **Module size limiter:** manifest-loaded module assets are checked with `RootFilesystem::stat` before `read_file` and again after read; assets above `max_module_bytes` fail closed as `WasmError::ModuleTooLarge`.
 - **Compile cache:** `prepare_cached` caches compiled modules by provider, capability, export name, ABI version, and module content hash.
 - **Persistent compilation cache:** an optional `cache_dir` may enable Wasmtime's on-disk compilation cache without changing capability authority. Cache setup errors are sanitized and must not leak raw host paths.
 - **Fresh instance guarantee:** cached modules only reuse compiled code. Every invocation still creates a fresh store and instance, so mutable guest globals and memories do not carry across invocations.
@@ -122,6 +123,7 @@ Loading flow:
 
 ```text
 ExtensionPackage
+  -> verify package root is /system/extensions/<extension>
   -> verify package runtime is RuntimeKind::Wasm
   -> find requested CapabilityDescriptor in package.capabilities
   -> derive export name from capability suffix (`<extension>.<export>`)
@@ -135,6 +137,8 @@ Rules:
 
 - module assets are read through `RootFilesystem` and `VirtualPath`, never raw host paths
 - runtime.module must resolve under the extension package root
+- package root must match `/system/extensions/<extension>` even if a caller forges public package fields
+- module assets must be size-checked before and after reading
 - non-WASM packages fail with `ExtensionRuntimeMismatch`
 - undeclared capabilities fail closed
 - missing/mismatched WASM exports fail before invocation
@@ -214,6 +218,7 @@ pub struct WasmRuntimeConfig {
     pub fuel: u64,
     pub max_output_bytes: u64,
     pub max_memory_bytes: u64,
+    pub max_module_bytes: u64,
     pub timeout: std::time::Duration,
     pub cache_compiled_modules: bool,
     pub cache_dir: Option<std::path::PathBuf>,
@@ -280,9 +285,11 @@ WasmError::Filesystem
 WasmError::InvalidModule
 WasmError::UnsupportedImport
 WasmError::DescriptorMismatch
+WasmError::PackageRootMismatch
 WasmError::ExtensionRuntimeMismatch
 WasmError::CapabilityNotDeclared
 WasmError::InvalidInvocation
+WasmError::ModuleTooLarge
 WasmError::MissingReservation
 WasmError::MissingExport
 WasmError::MissingMemory
@@ -324,7 +331,9 @@ Local contract tests should prove:
 - cache setup errors do not leak raw host paths
 - cached prepared modules reuse identical bytes and split changed content
 - cached modules still instantiate fresh per invocation
+- extension package root is revalidated before module loading
 - extension package module assets are read via `RootFilesystem` virtual paths
+- oversized manifest module assets are rejected before reading
 - non-WASM package runtimes are rejected by the WASM lane
 - undeclared capabilities are rejected before module preparation
 - manifest-derived export mismatches are rejected before invocation
