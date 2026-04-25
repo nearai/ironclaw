@@ -2,9 +2,13 @@
 
 use std::collections::BTreeMap;
 
+use chrono::Utc;
 use ironclaw::config::{DatabaseBackend, DatabaseConfig, SslMode};
 use ironclaw::db::{Database, postgres::PgBackend};
-use ironclaw::trace_corpus_storage::{TraceCorpusStatus, TraceCorpusStore, TraceSubmissionWrite};
+use ironclaw::trace_corpus_storage::{
+    TraceCorpusStatus, TraceCorpusStore, TraceExportManifestWrite, TraceObjectArtifactKind,
+    TraceSubmissionWrite,
+};
 use secrecy::{ExposeSecret, SecretString};
 use tokio_postgres::NoTls;
 use uuid::Uuid;
@@ -368,4 +372,120 @@ async fn store_facade_keeps_same_submission_id_isolated_by_tenant() {
             &[&vec![tenant_a, tenant_b]],
         )
         .await;
+}
+
+#[tokio::test]
+async fn store_facade_invalidates_export_manifests_by_submission_with_tenant_scope() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+    assert_trace_rls_policies_installed(&backend).await;
+
+    let submission_id = Uuid::new_v4();
+    backend
+        .upsert_trace_submission(sample_submission("tenant-alpha", submission_id))
+        .await
+        .expect("insert alpha submission");
+    backend
+        .upsert_trace_submission(sample_submission("tenant-beta", submission_id))
+        .await
+        .expect("insert beta submission");
+
+    let alpha_export_id = Uuid::new_v4();
+    let beta_export_id = Uuid::new_v4();
+    backend
+        .upsert_trace_export_manifest(TraceExportManifestWrite {
+            tenant_id: "tenant-alpha".to_string(),
+            export_manifest_id: alpha_export_id,
+            artifact_kind: TraceObjectArtifactKind::ExportArtifact,
+            purpose_code: Some("ranking_dataset".to_string()),
+            audit_event_id: Some(Uuid::new_v4()),
+            source_submission_ids: vec![submission_id],
+            source_submission_ids_hash: "sha256:alpha-sources".to_string(),
+            item_count: 1,
+            generated_at: Utc::now(),
+        })
+        .await
+        .expect("insert alpha export manifest");
+    backend
+        .upsert_trace_export_manifest(TraceExportManifestWrite {
+            tenant_id: "tenant-beta".to_string(),
+            export_manifest_id: beta_export_id,
+            artifact_kind: TraceObjectArtifactKind::ExportArtifact,
+            purpose_code: Some("ranking_dataset".to_string()),
+            audit_event_id: Some(Uuid::new_v4()),
+            source_submission_ids: vec![submission_id],
+            source_submission_ids_hash: "sha256:beta-sources".to_string(),
+            item_count: 1,
+            generated_at: Utc::now(),
+        })
+        .await
+        .expect("insert beta export manifest");
+
+    let invalidated = backend
+        .invalidate_trace_export_manifests_for_submission("tenant-alpha", submission_id)
+        .await
+        .expect("invalidate alpha export manifest");
+    assert_eq!(invalidated, 1);
+
+    let idempotent = backend
+        .invalidate_trace_export_manifests_for_submission("tenant-alpha", submission_id)
+        .await
+        .expect("repeat export manifest invalidation");
+    assert_eq!(idempotent, 0);
+
+    let alpha_manifests = backend
+        .list_trace_export_manifests("tenant-alpha")
+        .await
+        .expect("list alpha export manifests");
+    let alpha_manifest = alpha_manifests
+        .iter()
+        .find(|manifest| manifest.export_manifest_id == alpha_export_id)
+        .expect("alpha export manifest exists");
+    assert!(alpha_manifest.invalidated_at.is_some());
+    assert!(alpha_manifest.deleted_at.is_none());
+
+    let beta_manifests = backend
+        .list_trace_export_manifests("tenant-beta")
+        .await
+        .expect("list beta export manifests");
+    let beta_manifest = beta_manifests
+        .iter()
+        .find(|manifest| manifest.export_manifest_id == beta_export_id)
+        .expect("beta export manifest exists");
+    assert!(beta_manifest.invalidated_at.is_none());
+    assert!(beta_manifest.deleted_at.is_none());
+
+    let mut client = backend.pool().get().await.expect("get cleanup connection");
+    for (tenant_id, export_manifest_id) in [
+        ("tenant-alpha", alpha_export_id),
+        ("tenant-beta", beta_export_id),
+    ] {
+        let tx = client
+            .transaction()
+            .await
+            .expect("start cleanup transaction");
+        tx.execute(
+            "SELECT set_config('ironclaw.trace_tenant_id', $1, true)",
+            &[&tenant_id],
+        )
+        .await
+        .expect("set cleanup tenant context");
+        let _ = tx
+            .execute(
+                "DELETE FROM trace_export_manifests
+                 WHERE tenant_id = $1 AND export_manifest_id = $2",
+                &[&tenant_id, &export_manifest_id],
+            )
+            .await;
+        let _ = tx
+            .execute(
+                "DELETE FROM trace_submissions
+                 WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &submission_id],
+            )
+            .await;
+        tx.commit().await.expect("commit cleanup transaction");
+    }
 }
