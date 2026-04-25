@@ -993,7 +993,7 @@ async fn dataset_replay_handler(
         .filter(TraceCommonsSubmissionRecord::is_export_eligible)
         .take(limit)
     {
-        let envelope = read_envelope_for_replay_export(
+        let body_read = read_envelope_for_replay_export(
             state.as_ref(),
             &tenant,
             &record,
@@ -1005,7 +1005,8 @@ async fn dataset_replay_handler(
         items.push(TraceReplayDatasetItem::from_record(
             &record,
             derived_by_submission.get(&record.submission_id),
-            &envelope,
+            &body_read.envelope,
+            body_read.object_ref_id,
         ));
     }
     let source_submission_ids = items
@@ -2803,7 +2804,7 @@ async fn mirror_export_manifest_to_db(
             submission_id: item.submission_id,
             trace_id: item.trace_id,
             derived_id: None,
-            object_ref_id: None,
+            object_ref_id: item.object_ref_id,
             vector_entry_id: None,
             source_status_at_export: storage_corpus_status(item.source_status_at_export),
             source_hash_at_export: item.source_hash_at_export.clone(),
@@ -3116,7 +3117,7 @@ async fn read_envelope_for_replay_export(
     record: &TraceCommonsSubmissionRecord,
     surface: &str,
     purpose: Option<&str>,
-) -> anyhow::Result<TraceContributionEnvelope> {
+) -> anyhow::Result<TraceEnvelopeBodyRead> {
     anyhow::ensure!(
         tenant.role.can_review(),
         "trace body read requires reviewer or admin role"
@@ -3139,7 +3140,7 @@ async fn read_envelope_for_replay_export(
         purpose,
     )
     .await?;
-    Ok(body_read.envelope)
+    Ok(body_read)
 }
 
 async fn read_envelope_body_for_replay_export(
@@ -5316,6 +5317,8 @@ struct TraceReplayDatasetItem {
     source_status_at_export: TraceCorpusStatus,
     #[serde(skip)]
     source_hash_at_export: String,
+    #[serde(skip)]
+    object_ref_id: Option<Uuid>,
 }
 
 impl TraceReplayDatasetItem {
@@ -5323,6 +5326,7 @@ impl TraceReplayDatasetItem {
         record: &TraceCommonsSubmissionRecord,
         derived: Option<&TraceCommonsDerivedRecord>,
         envelope: &TraceContributionEnvelope,
+        object_ref_id: Option<Uuid>,
     ) -> Self {
         let canonical_summary_hash = derived.map(|record| record.canonical_summary_hash.clone());
         let source_hash_at_export = canonical_summary_hash
@@ -5346,6 +5350,7 @@ impl TraceReplayDatasetItem {
             submission_score: record.submission_score,
             source_status_at_export: record.status,
             source_hash_at_export,
+            object_ref_id,
         }
     }
 }
@@ -9007,7 +9012,7 @@ mod tests {
                 .expect("create libsql mirror"),
         );
         db.run_migrations().await.expect("run migrations");
-        let state = test_state_with_db(
+        let state = test_state_with_db_replay_export_reads(
             temp.path().to_path_buf(),
             Some(db.clone() as Arc<dyn Database>),
         );
@@ -9042,6 +9047,15 @@ mod tests {
             .canonical_summary_hash
             .clone()
             .expect("accepted test trace has derived canonical hash");
+        let active_object_ref = db
+            .get_latest_active_trace_object_ref(
+                "tenant-a",
+                submission_id,
+                StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            )
+            .await
+            .expect("active object ref reads")
+            .expect("active submitted envelope object ref exists");
 
         let items = db
             .list_trace_export_manifest_items("tenant-a", export.export_id)
@@ -9055,6 +9069,10 @@ mod tests {
         assert_eq!(
             items[0].source_status_at_export,
             StorageTraceCorpusStatus::Accepted
+        );
+        assert_eq!(
+            items[0].object_ref_id,
+            Some(active_object_ref.object_ref_id)
         );
         assert_eq!(items[0].source_hash_at_export, expected_source_hash);
         assert!(items[0].source_invalidated_at.is_none());
