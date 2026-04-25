@@ -18,7 +18,10 @@ async fn capability_host_blocks_for_approval_without_dispatch_or_reservation() {
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
     let authorizer = ApprovalAuthorizer;
     let run_state = InMemoryRunStateStore::new();
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
     let account = ResourceAccount::tenant(context.resource_scope.tenant_id.clone());
     let invocation_id = context.invocation_id;
@@ -40,9 +43,16 @@ async fn capability_host_blocks_for_approval_without_dispatch_or_reservation() {
         err,
         CapabilityInvocationError::AuthorizationRequiresApproval { .. }
     ));
-    let record = run_state.get(invocation_id).unwrap();
+    let record = run_state.get(invocation_id).await.unwrap().unwrap();
     assert_eq!(record.status, RunStatus::BlockedApproval);
-    assert!(record.approval_request_id.is_some());
+    let approval_request_id = record.approval_request_id.unwrap();
+    let approval = approval_requests
+        .get(approval_request_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(approval.status, ApprovalStatus::Pending);
+    assert_eq!(approval.request.id, approval_request_id);
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert_eq!(governor.usage_for(&account), ResourceTally::default());
 }
@@ -152,7 +162,7 @@ async fn capability_host_records_completed_run_after_authorized_dispatch() {
 
     assert_eq!(result.dispatch.output, json!({"message": "ok"}));
     assert_eq!(
-        run_state.get(invocation_id).unwrap().status,
+        run_state.get(invocation_id).await.unwrap().unwrap().status,
         RunStatus::Completed
     );
 }
@@ -191,7 +201,7 @@ async fn capability_host_records_failed_run_after_dispatch_error() {
         .unwrap_err();
 
     assert!(matches!(err, CapabilityInvocationError::Dispatch(_)));
-    let record = run_state.get(invocation_id).unwrap();
+    let record = run_state.get(invocation_id).await.unwrap().unwrap();
     assert_eq!(record.status, RunStatus::Failed);
     assert_eq!(record.error_kind.as_deref(), Some("Dispatch"));
 }
