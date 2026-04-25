@@ -115,6 +115,7 @@ pub struct ProcessResultRecord {
     pub scope: ResourceScope,
     pub status: ProcessStatus,
     pub output: Option<Value>,
+    pub output_ref: Option<VirtualPath>,
     pub error_kind: Option<String>,
 }
 
@@ -256,6 +257,17 @@ pub trait ProcessResultStore: Send + Sync {
         scope: &ResourceScope,
         process_id: ProcessId,
     ) -> Result<Option<ProcessResultRecord>, ProcessError>;
+
+    async fn output(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<Option<Value>, ProcessError> {
+        Ok(self
+            .get(scope, process_id)
+            .await?
+            .and_then(|record| record.output))
+    }
 }
 
 #[derive(Clone)]
@@ -447,6 +459,14 @@ impl<'a> ProcessHost<'a> {
         self.result_store()?.get(scope, process_id).await
     }
 
+    pub async fn output(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<Option<Value>, ProcessError> {
+        self.result_store()?.output(scope, process_id).await
+    }
+
     pub async fn await_result(
         &self,
         scope: &ResourceScope,
@@ -595,6 +615,7 @@ impl InMemoryProcessResultStore {
             scope: scope.clone(),
             status,
             output,
+            output_ref: None,
             error_kind,
         };
         self.records_guard()
@@ -1379,12 +1400,25 @@ where
         Ok(())
     }
 
+    async fn write_output(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        output: &Value,
+    ) -> Result<VirtualPath, ProcessError> {
+        let path = process_output_path(scope, process_id)?;
+        let bytes = serialize_pretty(output)?;
+        self.filesystem.as_ref().write_file(&path, &bytes).await?;
+        Ok(path)
+    }
+
     async fn store_result(
         &self,
         scope: &ResourceScope,
         process_id: ProcessId,
         status: ProcessStatus,
         output: Option<Value>,
+        output_ref: Option<VirtualPath>,
         error_kind: Option<String>,
     ) -> Result<ProcessResultRecord, ProcessError> {
         let record = ProcessResultRecord {
@@ -1392,6 +1426,7 @@ where
             scope: scope.clone(),
             status,
             output,
+            output_ref,
             error_kind,
         };
         self.write_result(&record).await?;
@@ -1410,11 +1445,13 @@ where
         process_id: ProcessId,
         output: Value,
     ) -> Result<ProcessResultRecord, ProcessError> {
+        let output_ref = self.write_output(scope, process_id, &output).await?;
         self.store_result(
             scope,
             process_id,
             ProcessStatus::Completed,
-            Some(output),
+            None,
+            Some(output_ref),
             None,
         )
         .await
@@ -1431,6 +1468,7 @@ where
             process_id,
             ProcessStatus::Failed,
             None,
+            None,
             Some(error_kind),
         )
         .await
@@ -1441,7 +1479,7 @@ where
         scope: &ResourceScope,
         process_id: ProcessId,
     ) -> Result<ProcessResultRecord, ProcessError> {
-        self.store_result(scope, process_id, ProcessStatus::Killed, None, None)
+        self.store_result(scope, process_id, ProcessStatus::Killed, None, None, None)
             .await
     }
 
@@ -1462,6 +1500,34 @@ where
         } else {
             Ok(None)
         }
+    }
+
+    async fn output(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<Option<Value>, ProcessError> {
+        let Some(record) = self.get(scope, process_id).await? else {
+            return Ok(None);
+        };
+        if let Some(output) = record.output {
+            return Ok(Some(output));
+        }
+        let Some(output_ref) = record.output_ref else {
+            return Ok(None);
+        };
+        let expected_output_ref = process_output_path(&record.scope, record.process_id)?;
+        if output_ref != expected_output_ref {
+            return Err(ProcessError::InvalidPath(format!(
+                "process output ref {output_ref:?} does not match scoped process output path"
+            )));
+        }
+        let bytes = match self.filesystem.as_ref().read_file(&output_ref).await {
+            Ok(bytes) => bytes,
+            Err(error) if is_not_found(&error) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        deserialize::<Value>(&bytes).map(Some)
     }
 }
 
@@ -1508,6 +1574,28 @@ fn process_result_path(
 
 fn process_results_root(scope: &ResourceScope) -> Result<VirtualPath, ProcessError> {
     VirtualPath::new(format!("{}/process-results", tenant_user_root(scope))).map_err(Into::into)
+}
+
+fn process_output_path(
+    scope: &ResourceScope,
+    process_id: ProcessId,
+) -> Result<VirtualPath, ProcessError> {
+    VirtualPath::new(format!(
+        "{}/output.json",
+        process_outputs_root(scope, process_id)?.as_str()
+    ))
+    .map_err(Into::into)
+}
+
+fn process_outputs_root(
+    scope: &ResourceScope,
+    process_id: ProcessId,
+) -> Result<VirtualPath, ProcessError> {
+    VirtualPath::new(format!(
+        "{}/process-outputs/{process_id}",
+        tenant_user_root(scope)
+    ))
+    .map_err(Into::into)
 }
 
 fn tenant_user_root(scope: &ResourceScope) -> String {

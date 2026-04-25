@@ -8,7 +8,7 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_processes::*;
 use ironclaw_resources::{
@@ -164,6 +164,7 @@ async fn background_process_manager_stores_success_output_result() {
     assert_eq!(result.scope, scope);
     assert_eq!(result.status, ProcessStatus::Completed);
     assert_eq!(result.output, Some(serde_json::json!({"ok": true})));
+    assert_eq!(result.output_ref, None);
     assert_eq!(result.error_kind, None);
 }
 
@@ -190,6 +191,7 @@ async fn background_process_manager_stores_failure_error_result() {
     let result = host.result(&scope, process_id).await.unwrap().unwrap();
     assert_eq!(result.status, ProcessStatus::Failed);
     assert_eq!(result.output, None);
+    assert_eq!(result.output_ref, None);
     assert_eq!(result.error_kind.as_deref(), Some("RuntimeDispatch"));
 }
 
@@ -954,6 +956,7 @@ async fn process_host_kill_records_killed_result_without_output() {
     let result = host.result(&scope, process_id).await.unwrap().unwrap();
     assert_eq!(result.status, ProcessStatus::Killed);
     assert_eq!(result.output, None);
+    assert_eq!(result.output_ref, None);
     assert_eq!(result.error_kind, None);
 }
 
@@ -981,6 +984,11 @@ async fn process_host_await_result_waits_for_background_success() {
     let result = host.await_result(&scope, process_id).await.unwrap();
     assert_eq!(result.status, ProcessStatus::Completed);
     assert_eq!(result.output, Some(serde_json::json!({"ok": true})));
+    assert_eq!(result.output_ref, None);
+    assert_eq!(
+        host.output(&scope, process_id).await.unwrap(),
+        Some(serde_json::json!({"ok": true}))
+    );
 }
 
 #[tokio::test]
@@ -1053,13 +1061,112 @@ async fn filesystem_process_result_store_persists_under_tenant_user_scope() {
         .unwrap()
         .unwrap();
     assert_eq!(reloaded.status, ProcessStatus::Completed);
-    assert_eq!(reloaded.output, Some(serde_json::json!({"ok": true})));
+    assert_eq!(reloaded.output, None);
+    assert_eq!(
+        reloaded.output_ref,
+        Some(
+            VirtualPath::new(format!(
+                "/engine/tenants/{}/users/{}/process-outputs/{}/output.json",
+                scope.tenant_id.as_str(),
+                scope.user_id.as_str(),
+                process_id
+            ))
+            .unwrap()
+        )
+    );
+    assert_eq!(
+        FilesystemProcessResultStore::new(&fs)
+            .output(&scope, process_id)
+            .await
+            .unwrap(),
+        Some(serde_json::json!({"ok": true}))
+    );
     assert!(
         FilesystemProcessResultStore::new(&fs)
             .get(&other_scope, process_id)
             .await
             .unwrap()
             .is_none()
+    );
+    assert!(
+        FilesystemProcessResultStore::new(&fs)
+            .output(&other_scope, process_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn filesystem_process_result_store_rejects_forged_cross_scope_output_ref() {
+    let fs = engine_filesystem();
+    let store = FilesystemProcessResultStore::new(&fs);
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let other_scope = sample_scope(invocation_id, "tenant2", "user1");
+    let forged_output_ref = VirtualPath::new(format!(
+        "/engine/tenants/{}/users/{}/process-outputs/{}/output.json",
+        other_scope.tenant_id.as_str(),
+        other_scope.user_id.as_str(),
+        process_id
+    ))
+    .unwrap();
+    let result_path = VirtualPath::new(format!(
+        "/engine/tenants/{}/users/{}/process-results/{}.json",
+        scope.tenant_id.as_str(),
+        scope.user_id.as_str(),
+        process_id
+    ))
+    .unwrap();
+    let forged_record = ProcessResultRecord {
+        process_id,
+        scope: scope.clone(),
+        status: ProcessStatus::Completed,
+        output: None,
+        output_ref: Some(forged_output_ref.clone()),
+        error_kind: None,
+    };
+
+    fs.write_file(&forged_output_ref, br#"{"leaked":true}"#)
+        .await
+        .unwrap();
+    fs.write_file(&result_path, &serde_json::to_vec(&forged_record).unwrap())
+        .await
+        .unwrap();
+
+    let err = store.output(&scope, process_id).await.unwrap_err();
+
+    assert!(matches!(err, ProcessError::InvalidPath(_)));
+}
+
+#[tokio::test]
+async fn background_process_manager_stores_filesystem_output_ref() {
+    let fs = Arc::new(engine_filesystem());
+    let store = Arc::new(InMemoryProcessStore::new());
+    let result_store = Arc::new(FilesystemProcessResultStore::from_arc(fs));
+    let manager =
+        BackgroundProcessManager::new(store.clone(), Arc::new(CountingExecutor::success()))
+            .with_result_store(result_store.clone());
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let host = ProcessHost::new(store.as_ref())
+        .with_result_store(result_store.clone())
+        .with_poll_interval(Duration::from_millis(5));
+
+    manager
+        .spawn(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+
+    let result = host.await_result(&scope, process_id).await.unwrap();
+    assert_eq!(result.status, ProcessStatus::Completed);
+    assert_eq!(result.output, None);
+    assert!(result.output_ref.is_some());
+    assert_eq!(
+        host.output(&scope, process_id).await.unwrap(),
+        Some(serde_json::json!({"ok": true}))
     );
 }
 

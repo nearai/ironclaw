@@ -163,7 +163,8 @@ This slice does not implement:
 - durable grant/lease storage, revocation, or expiration persistence
 - approval/resume of `Action::SpawnCapability`
 - process lifecycle/cancellation/result APIs inside `CapabilityHost`; `status`/`kill`/`await_process`/`subscribe`/`result`/`await_result` and cooperative cancellation live in `ironclaw_processes`
-- filesystem/artifact-backed process output references; V1 process results store inline JSON only
+- process output/result APIs inside `CapabilityHost`; result lookup and output resolution live in `ironclaw_processes`
+- generalized streaming/binary process output references beyond the current filesystem JSON output path
 - streaming output APIs
 - obligation application beyond returning allowed/denied
 - transcript/job history
