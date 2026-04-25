@@ -1,14 +1,14 @@
-# IronClaw Reborn kernel dispatch contract
+# IronClaw Reborn dispatcher contract
 
 Date: 2026-04-24
 Status: V1 contract slice
-Crate: `crates/ironclaw_kernel`
+Crate: `crates/ironclaw_dispatcher`
 
 ---
 
 ## 1. Purpose
 
-`ironclaw_kernel` is the first composition-only dispatch layer for Reborn.
+`ironclaw_dispatcher` is the composition-only runtime dispatch layer for Reborn.
 
 It connects already-validated extension capabilities to runtime lanes:
 
@@ -19,13 +19,13 @@ ExtensionRegistry + RootFilesystem + ResourceGovernor + runtime backends
   -> normalized CapabilityDispatchResult
 ```
 
-The kernel does not discover extensions, parse manifests, implement policy, open files directly, resolve secrets, or execute product workflows. It wires service crates together and fails closed when a required lane or declaration is missing.
+The dispatcher does not discover extensions, parse manifests, implement policy, open files directly, resolve secrets, or execute product workflows. It wires service crates together and fails closed when a required lane or declaration is missing.
 
 ---
 
 ## 2. Inputs
 
-The dispatcher receives a `CapabilityDispatchRequest`:
+The dispatcher receives an already-authorized `CapabilityDispatchRequest`:
 
 ```rust
 pub struct CapabilityDispatchRequest {
@@ -41,6 +41,8 @@ The dispatcher is constructed from references to service boundaries:
 ```rust
 RuntimeDispatcher::new(&registry, &root_filesystem, &resource_governor)
     .with_wasm_runtime(&wasm_runtime)
+    .with_script_runtime(&script_runtime)
+    .with_mcp_runtime(&mcp_runtime)
 ```
 
 `ExtensionRegistry` remains the authority for what can run. Runtime crates remain the authority for how a lane runs.
@@ -66,7 +68,19 @@ For `RuntimeKind::Wasm`, the dispatcher calls:
 ironclaw_wasm::WasmRuntime::execute_extension_json(...)
 ```
 
-The WASM lane still owns its local reserve/prepare/invoke/reconcile/release lifecycle. The dispatcher does not duplicate the resource-governor protocol.
+For `RuntimeKind::Script`, the dispatcher calls:
+
+```text
+ironclaw_scripts::ScriptExecutor::execute_extension_json(...)
+```
+
+For `RuntimeKind::Mcp`, the dispatcher calls:
+
+```text
+ironclaw_mcp::McpExecutor::execute_extension_json(...)
+```
+
+Each runtime lane still owns its local reserve/prepare/invoke/reconcile/release lifecycle. The dispatcher does not duplicate the resource-governor protocol.
 
 ---
 
@@ -77,12 +91,12 @@ V1 routes these runtime kinds explicitly:
 | Runtime kind | Dispatch behavior |
 | --- | --- |
 | `Wasm` | Executes through configured `WasmRuntime` |
-| `Script` | Recognized, returns `UnsupportedRuntime` until script runner crate lands |
-| `Mcp` | Recognized, returns `UnsupportedRuntime` until MCP adapter crate lands |
+| `Script` | Executes through configured `ScriptExecutor` |
+| `Mcp` | Executes through configured `McpExecutor` adapter |
 | `FirstParty` | Recognized, returns `UnsupportedRuntime` until host service adapters land |
 | `System` | Recognized, returns `UnsupportedRuntime` until system service adapters land |
 
-If the WASM runtime is not configured, WASM dispatch returns `MissingRuntimeBackend` before reserving resources.
+If the selected WASM, Script, or MCP runtime is not configured, dispatch returns `MissingRuntimeBackend` before reserving resources.
 
 ---
 
@@ -123,18 +137,18 @@ The shape intentionally exposes common host-level facts and avoids leaking WASM-
 
 This PR does not add:
 
-- authorization/grant evaluation; see `docs/reborn/contracts/capability-access.md` for the planned boundary
+- authorization/grant evaluation
 - approval prompts
-- audit/event persistence
-- script execution
-- MCP client execution
+- full audit/event projection persistence
+- script filesystem mounts, artifact export, network access, or secret injection
+- MCP protocol handshake/lifecycle management beyond the adapter contract
 - host service dispatch for first-party/system capabilities
 - filesystem mount selection
 - network or secret injection
 - background `spawn` / process lifecycle
 - agent-loop behavior
 
-Those belong in dedicated service crates or later narrow kernel composition slices.
+Those belong in dedicated service crates or later narrow dispatcher composition slices.
 
 ---
 
@@ -145,7 +159,9 @@ The crate test suite covers:
 - WASM capability dispatch through the real WASM executor
 - unknown capability failure before resource reservation
 - descriptor/package runtime mismatch failure before execution
-- script, MCP, first-party, and system lanes recognized but not executed
-- missing WASM backend failure before resource reservation
+- Script capability dispatch through a configured script executor
+- MCP capability dispatch through a configured MCP executor
+- first-party and system lanes recognized but not executed
+- missing WASM, Script, or MCP backend failure before resource reservation
 
 These tests are intentionally caller-level: they drive `RuntimeDispatcher::dispatch_json`, not only helper functions.

@@ -1,170 +1,172 @@
 # IronClaw Reborn run-state contract
 
 **Date:** 2026-04-25
-**Status:** Draft contract
-**Depends on:** `docs/reborn/contracts/runtime-workflows.md`, `docs/reborn/contracts/host-api.md`
+**Status:** V1 contract slice
+**Crate:** `crates/ironclaw_run_state`
+**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/filesystem.md`, `docs/reborn/contracts/capabilities.md`
 
 ---
 
 ## 1. Purpose
 
-Run state is the live lifecycle of work on a thread. It is not the transcript, not the realtime event stream, not a projection, and not a runtime lane.
+`ironclaw_run_state` stores the current lifecycle state for host-managed invocations and the pending approval requests that can block them.
 
-The contract exists to make blocked/resume/cancel behavior explicit before conversation, agent-loop, jobs, and subagent implementations grow around implicit state.
-
----
-
-## 2. Core invariant
+It is distinct from runtime events:
 
 ```text
-one active run per thread
+events      -> append-only history of what happened
+run state   -> current answer to “what is this invocation doing or waiting on?”
+approvals   -> durable request objects that a human/policy service can resolve later
 ```
 
-A thread may have durable history and many completed runs, but only one run may be active or blocked at a time.
+This crate lives in the host control plane. It is not part of WASM, Script, MCP, or dispatcher runtime execution.
 
-If another request arrives while a run is active, the system must choose an explicit behavior:
-
-- reject
-- enqueue
-- interrupt then replace
-- attach as input to the active run, if the active run type supports it
-
-It must not silently start a second active run on the same thread.
+Multi-tenancy is part of the contract. Records are keyed by invocation/request IDs but always read, listed, and transitioned through a tenant/user `ResourceScope` partition.
 
 ---
 
-## 3. State model
+## 2. Current status model
 
-Minimum V1 states:
+```rust
+pub enum RunStatus {
+    Running,
+    BlockedApproval,
+    BlockedAuth,
+    Completed,
+    Failed,
+}
+```
 
-| State | Meaning |
-| --- | --- |
-| `idle` | No active run on the thread |
-| `running` | Run is actively executing or waiting on model/runtime work |
-| `blocked_approval` | Run is paused on a structured approval request |
-| `blocked_auth` | Run is paused on a structured auth flow |
-| `interrupted` | Run is paused by operator/system interruption and can resume if checkpoint permits |
-| `cancelling` | Cancellation requested; runtime cleanup is in progress |
-| `completed` | Run ended successfully |
-| `failed` | Run ended with an error |
-| `cancelled` | Run ended by cancellation |
+Current records include:
 
-Terminal states:
+```rust
+pub struct RunRecord {
+    pub invocation_id: InvocationId,
+    pub capability_id: CapabilityId,
+    pub scope: ResourceScope,
+    pub status: RunStatus,
+    pub approval_request_id: Option<ApprovalRequestId>,
+    pub error_kind: Option<String>,
+}
+```
+
+Approval records also carry scope:
+
+```rust
+pub struct ApprovalRecord {
+    pub scope: ResourceScope,
+    pub request: ApprovalRequest,
+    pub status: ApprovalStatus,
+}
+```
+
+`BlockedAuth` is reserved for future auth/OAuth/secret-auth flows. A grant denial is currently terminal `Failed`, not `BlockedAuth`.
+
+---
+
+## 3. Store contracts
+
+The run-state API is current-state oriented and async so durable implementations can use the host filesystem abstraction.
+
+Every read, list, and mutation after `start` requires a `ResourceScope`:
+
+```rust
+pub trait RunStateStore {
+    async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError>;
+    async fn block_approval(&self, scope, invocation_id, approval) -> Result<RunRecord, RunStateError>;
+    async fn block_auth(&self, scope, invocation_id, error_kind) -> Result<RunRecord, RunStateError>;
+    async fn complete(&self, scope, invocation_id) -> Result<RunRecord, RunStateError>;
+    async fn fail(&self, scope, invocation_id, error_kind) -> Result<RunRecord, RunStateError>;
+    async fn get(&self, scope, invocation_id) -> Result<Option<RunRecord>, RunStateError>;
+    async fn records_for_scope(&self, scope) -> Result<Vec<RunRecord>, RunStateError>;
+}
+```
+
+Approval requests have a separate store because they are durable objects that need independent resolution later:
+
+```rust
+pub trait ApprovalRequestStore {
+    async fn save_pending(&self, scope, request) -> Result<ApprovalRecord, RunStateError>;
+    async fn get(&self, scope, request_id) -> Result<Option<ApprovalRecord>, RunStateError>;
+    async fn approve(&self, scope, request_id) -> Result<ApprovalRecord, RunStateError>;
+    async fn deny(&self, scope, request_id) -> Result<ApprovalRecord, RunStateError>;
+    async fn records_for_scope(&self, scope) -> Result<Vec<ApprovalRecord>, RunStateError>;
+}
+```
+
+Current implementations:
 
 ```text
-completed | failed | cancelled
+InMemoryRunStateStore
+InMemoryApprovalRequestStore
+FilesystemRunStateStore
+FilesystemApprovalRequestStore
 ```
-
-Blocked states are active states. They still occupy the one-active-run slot.
 
 ---
 
-## 4. Transition sketch
+## 4. Tenant/user partitioning
+
+Stores partition durable data by tenant and user from `ResourceScope`:
 
 ```text
-idle -> running
-running -> blocked_approval
-running -> blocked_auth
-running -> interrupted
-running -> cancelling
-running -> completed
-running -> failed
-blocked_approval -> running | failed | cancelling
-blocked_auth -> running | failed | cancelling
-interrupted -> running | cancelled
-cancelling -> cancelled | failed
-terminal -> idle for the next run
+/engine/tenants/{tenant_id}/users/{user_id}/runs/{invocation_id}.json
+/engine/tenants/{tenant_id}/users/{user_id}/approvals/{approval_request_id}.json
 ```
 
-Invalid transitions should fail closed and emit diagnostic events.
+The full `ResourceScope` remains inside each record for project/mission/thread/invocation metadata. The first hard isolation boundary is tenant/user; later projection/index layers can add project/thread views without weakening tenant/user partitioning.
+
+Store APIs hide cross-tenant and cross-user records by returning `None`, an empty list, `UnknownInvocation`, or `UnknownApprovalRequest`. They must not expose whether another tenant/user has a matching UUID. This applies to in-memory stores too: test/dev backends use tenant/user/UUID composite keys rather than UUID-only maps.
 
 ---
 
-## 5. Approval-blocked vs auth-blocked
+## 5. Filesystem persistence
 
-Approval and auth both pause work, but they are different gates.
+Filesystem-backed stores persist through `ironclaw_filesystem::RootFilesystem`, not direct host paths or database APIs.
 
-| Gate | Owner | Resume input | Durable record |
-| --- | --- | --- | --- |
-| Approval | `ApprovalManager` | approve / deny / always with explicit reusable scope | approval request/resolution + audit |
-| Auth | `AuthFlowManager` | OAuth callback/token completion/credential availability | auth flow record + secret lease/audit |
+This is intentional. Production can later back `/engine` with a DB-backed filesystem/document-store implementation while Reborn service crates continue depending on host storage traits instead of Postgres/libSQL internals.
 
-Rules:
-
-- approval prompts do not collect raw secrets
-- auth prompts do not imply user approval for the blocked action
-- both gates must resume from a stable checkpoint or retry descriptor
-- both gates must be replay-safe after process restart
+The filesystem store is durable current-state storage. It is not a transition log; runtime events remain the append-only history lane.
 
 ---
 
-## 6. Ownership boundaries
+## 6. Capability host integration
 
-| Component | Owns | Must not own |
-| --- | --- | --- |
-| `RunStateManager` | current run id, state, transition validation, cancel/interrupt/resume, checkpoint references | transcript text, approval semantics, auth callbacks, runtime execution |
-| `ConversationManager` | durable thread records and transcript milestones that reference run ids/gates | live run transition authority |
-| `ApprovalManager` | approval requests and decisions | thread lifecycle or auth flow completion |
-| `AuthFlowManager` | auth-required state and retry-after-auth | approval decisions or raw secret storage |
-| `RuntimeDispatcher` | dispatch handoff to runtime lanes | run-state ownership |
-| `EventStreamManager` | publishing state changes | transition authority |
+`CapabilityHost` may be configured with run-state and approval stores:
 
----
+```rust
+CapabilityHost::new(&registry, &dispatcher, &authorizer)
+    .with_run_state(&run_state)
+    .with_approval_requests(&approval_requests)
+```
 
-## 7. Checkpoints and resume
-
-A resumable blocked run needs a checkpoint containing enough structured data to continue without guessing from chat text.
-
-Minimum checkpoint fields:
-
-- run id
-- thread id
-- invocation id
-- blocked action or retry descriptor
-- scope
-- capability id or runtime operation
-- correlation id
-- gate id, if approval/auth blocked
-
-Checkpoint records must not contain:
-
-- raw secrets
-- raw host paths
-- unredacted request payloads that policy forbids storing
-- model-visible free-form authority grants
-
----
-
-## 8. Event requirements
-
-Every transition emits a typed event:
+When configured, `invoke_json` records under the caller's `ExecutionContext.resource_scope`:
 
 ```text
-run_started
-run_blocked_approval
-run_blocked_auth
-run_interrupted
-run_resumed
-run_cancelling
-run_completed
-run_failed
-run_cancelled
+start -> Running
+Decision::RequireApproval -> save pending ApprovalRecord + BlockedApproval
+Decision::Deny -> Failed(error_kind = AuthorizationDenied)
+dispatch success -> Completed
+dispatch failure -> Failed(error_kind = Dispatch)
 ```
 
-Events are used for live streams and projections. Durable audit/history decides which events or derived records become permanent.
+The dispatcher remains run-state-unaware. It still routes already-authorized dispatches only.
 
 ---
 
-## 9. Non-goals
+## 7. Non-goals
 
-This contract does not define:
+This slice does not implement:
 
-- prompt assembly
-- LLM provider routing
-- approval UI
-- OAuth provider mechanics
-- process lifecycle internals
-- transcript storage format
-- event transport protocol
+- invocation resume after approval
+- durable grant/lease persistence
+- append-only transition history
+- atomic transactions across run-state and approval stores
+- project/thread secondary indexes
+- auth/OAuth blocking semantics beyond reserving `BlockedAuth`
+- cancellation
+- retries
+- parent/child run trees
+- websocket/SSE projections
 
-Those belong to neighboring service contracts.
+Those should be follow-on slices built on this scoped current-state and approval-request contract.

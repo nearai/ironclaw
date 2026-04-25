@@ -265,7 +265,7 @@ ironclaw_extensions = package discovery + manifest/capability declarations
 ironclaw_wasm       = WASM execution
 ironclaw_mcp        = MCP adaptation/execution
 ironclaw_auth       = credentials/OAuth
-ironclaw_kernel     = composition
+ironclaw_dispatcher     = composition
 ```
 
 ---
@@ -651,7 +651,7 @@ The following current patterns should not become foundations of Reborn:
 8. Gateway/TUI assumptions inside core crates.
 9. Runtime lanes reading raw secrets or opening raw network clients directly.
 10. Extension-visible raw host paths.
-11. Product workflows accumulating in `ironclaw_kernel`.
+11. Product workflows accumulating in `ironclaw_dispatcher`.
 
 ---
 
