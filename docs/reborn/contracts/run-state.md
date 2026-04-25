@@ -21,6 +21,8 @@ approvals   -> durable request objects that a human/policy service can resolve l
 
 This crate lives in the host control plane. It is not part of WASM, Script, MCP, or dispatcher runtime execution.
 
+Multi-tenancy is part of the contract. Records are keyed by invocation/request IDs but always read, listed, and transitioned through a tenant/user `ResourceScope` partition.
+
 ---
 
 ## 2. Current status model
@@ -48,23 +50,35 @@ pub struct RunRecord {
 }
 ```
 
+Approval records also carry scope:
+
+```rust
+pub struct ApprovalRecord {
+    pub scope: ResourceScope,
+    pub request: ApprovalRequest,
+    pub status: ApprovalStatus,
+}
+```
+
 `BlockedAuth` is reserved for future auth/OAuth/secret-auth flows. A grant denial is currently terminal `Failed`, not `BlockedAuth`.
 
 ---
 
 ## 3. Store contracts
 
-The run-state API is current-state oriented and async so durable implementations can use the host filesystem abstraction:
+The run-state API is current-state oriented and async so durable implementations can use the host filesystem abstraction.
+
+Every read, list, and mutation after `start` requires a `ResourceScope`:
 
 ```rust
 pub trait RunStateStore {
     async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError>;
-    async fn block_approval(&self, invocation_id, approval) -> Result<RunRecord, RunStateError>;
-    async fn block_auth(&self, invocation_id, error_kind) -> Result<RunRecord, RunStateError>;
-    async fn complete(&self, invocation_id) -> Result<RunRecord, RunStateError>;
-    async fn fail(&self, invocation_id, error_kind) -> Result<RunRecord, RunStateError>;
-    async fn get(&self, invocation_id) -> Result<Option<RunRecord>, RunStateError>;
-    async fn records(&self) -> Result<Vec<RunRecord>, RunStateError>;
+    async fn block_approval(&self, scope, invocation_id, approval) -> Result<RunRecord, RunStateError>;
+    async fn block_auth(&self, scope, invocation_id, error_kind) -> Result<RunRecord, RunStateError>;
+    async fn complete(&self, scope, invocation_id) -> Result<RunRecord, RunStateError>;
+    async fn fail(&self, scope, invocation_id, error_kind) -> Result<RunRecord, RunStateError>;
+    async fn get(&self, scope, invocation_id) -> Result<Option<RunRecord>, RunStateError>;
+    async fn records_for_scope(&self, scope) -> Result<Vec<RunRecord>, RunStateError>;
 }
 ```
 
@@ -72,9 +86,9 @@ Approval requests have a separate store because they are durable objects that ne
 
 ```rust
 pub trait ApprovalRequestStore {
-    async fn save_pending(&self, request: ApprovalRequest) -> Result<ApprovalRecord, RunStateError>;
-    async fn get(&self, request_id) -> Result<Option<ApprovalRecord>, RunStateError>;
-    async fn records(&self) -> Result<Vec<ApprovalRecord>, RunStateError>;
+    async fn save_pending(&self, scope, request) -> Result<ApprovalRecord, RunStateError>;
+    async fn get(&self, scope, request_id) -> Result<Option<ApprovalRecord>, RunStateError>;
+    async fn records_for_scope(&self, scope) -> Result<Vec<ApprovalRecord>, RunStateError>;
 }
 ```
 
@@ -89,14 +103,24 @@ FilesystemApprovalRequestStore
 
 ---
 
-## 4. Filesystem persistence
+## 4. Tenant/user partitioning
 
-Filesystem-backed stores persist through `ironclaw_filesystem::RootFilesystem`, not direct host paths or database APIs:
+Stores partition durable data by tenant and user from `ResourceScope`:
 
 ```text
-/engine/runs/{invocation_id}.json
-/engine/approvals/{approval_request_id}.json
+/engine/tenants/{tenant_id}/users/{user_id}/runs/{invocation_id}.json
+/engine/tenants/{tenant_id}/users/{user_id}/approvals/{approval_request_id}.json
 ```
+
+The full `ResourceScope` remains inside each record for project/mission/thread/invocation metadata. The first hard isolation boundary is tenant/user; later projection/index layers can add project/thread views without weakening tenant/user partitioning.
+
+Store APIs hide cross-tenant and cross-user records by returning `None`, an empty list, or `UnknownInvocation`. They must not expose whether another tenant/user has a matching UUID.
+
+---
+
+## 5. Filesystem persistence
+
+Filesystem-backed stores persist through `ironclaw_filesystem::RootFilesystem`, not direct host paths or database APIs.
 
 This is intentional. Production can later back `/engine` with a DB-backed filesystem/document-store implementation while Reborn service crates continue depending on host storage traits instead of Postgres/libSQL internals.
 
@@ -104,7 +128,7 @@ The filesystem store is durable current-state storage. It is not a transition lo
 
 ---
 
-## 5. Capability host integration
+## 6. Capability host integration
 
 `CapabilityHost` may be configured with run-state and approval stores:
 
@@ -114,7 +138,7 @@ CapabilityHost::new(&registry, &dispatcher, &authorizer)
     .with_approval_requests(&approval_requests)
 ```
 
-When configured, `invoke_json` records:
+When configured, `invoke_json` records under the caller's `ExecutionContext.resource_scope`:
 
 ```text
 start -> Running
@@ -128,7 +152,7 @@ The dispatcher remains run-state-unaware. It still routes already-authorized dis
 
 ---
 
-## 6. Non-goals
+## 7. Non-goals
 
 This slice does not implement:
 
@@ -136,10 +160,11 @@ This slice does not implement:
 - grant/lease issuance from approved requests
 - append-only transition history
 - atomic transactions across run-state and approval stores
+- project/thread secondary indexes
 - auth/OAuth blocking semantics beyond reserving `BlockedAuth`
 - cancellation
 - retries
 - parent/child run trees
 - websocket/SSE projections
 
-Those should be follow-on slices built on this current-state and approval-request contract.
+Those should be follow-on slices built on this scoped current-state and approval-request contract.

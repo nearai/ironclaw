@@ -32,11 +32,11 @@ This service is the middle communication layer between authorization and dispatc
 
 ```text
 1. receive ExecutionContext + capability id + input + estimate
-2. if configured, mark invocation `Running` in `RunStateStore`
+2. if configured, mark invocation `Running` in `RunStateStore` under `context.resource_scope`
 3. lookup CapabilityDescriptor in ExtensionRegistry
 4. call CapabilityDispatchAuthorizer
 5. if denied, mark `Failed` and return a typed invocation error before dispatch/resource reservation
-6. if approval is required, save a pending approval request, mark `BlockedApproval`, and return a typed approval-required error
+6. if approval is required, save a tenant/user-scoped pending approval request, mark `BlockedApproval`, and return a typed approval-required error
 7. if allowed, call RuntimeDispatcher with context.resource_scope
 8. mark `Completed` or `Failed` after dispatch
 9. return the normalized dispatch result
@@ -82,7 +82,9 @@ CapabilityHost::new(&registry, &dispatcher, &authorizer)
     .with_approval_requests(&approval_requests)
 ```
 
-The stores are optional for low-level tests, but host-facing invocation should configure them so approvals and failures are visible outside the call stack and can survive process restarts. The durable implementations write through the `/engine` filesystem namespace, so production can provide a DB-backed filesystem implementation without coupling this crate to a specific database.
+The stores are optional for low-level tests, but host-facing invocation should configure them so approvals and failures are visible outside the call stack and can survive process restarts. The durable implementations write through tenant/user partitions under the `/engine` filesystem namespace, so production can provide a DB-backed filesystem implementation without coupling this crate to a specific database.
+
+The capability host is responsible for preserving `ExecutionContext.resource_scope` across run-state, approval persistence, and dispatch. A caller cannot authorize under one tenant/user and persist or bill under another.
 
 ---
 
