@@ -90,6 +90,45 @@ async fn capability_host_authorized_dispatch_reaches_dispatcher() {
 }
 
 #[tokio::test]
+async fn capability_host_depends_on_dispatch_interface_not_concrete_dispatcher() {
+    let (_fs, package) = wasm_package_with_module(json_echo_module());
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    let dispatcher = RecordingDispatcher::default();
+    let authorizer = GrantAuthorizer::new();
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer);
+    let context = execution_context(CapabilitySet {
+        grants: vec![grant_for(
+            CapabilityId::new("echo.say").unwrap(),
+            Principal::Extension(ExtensionId::new("caller").unwrap()),
+            vec![EffectKind::DispatchCapability],
+        )],
+    });
+    let scope = context.resource_scope.clone();
+
+    let result = host
+        .invoke_json(CapabilityInvocationRequest {
+            context,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: ResourceEstimate {
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+            input: json!({"message": "trait dispatch"}),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.dispatch.output, json!({"ok": true}));
+    let recorded = dispatcher.take_request();
+    assert_eq!(recorded.scope, scope);
+    assert_eq!(
+        recorded.capability_id,
+        CapabilityId::new("echo.say").unwrap()
+    );
+}
+
+#[tokio::test]
 async fn capability_host_routes_mcp_through_same_authorized_path() {
     let fs = mounted_empty_extension_root();
     let mut registry = ExtensionRegistry::new();
@@ -127,6 +166,41 @@ async fn capability_host_routes_mcp_through_same_authorized_path() {
 
     assert_eq!(result.dispatch.runtime, RuntimeKind::Mcp);
     assert_eq!(result.dispatch.output, json!({"query": "ironclaw"}));
+}
+
+#[derive(Default)]
+struct RecordingDispatcher {
+    request: std::sync::Mutex<Option<CapabilityDispatchRequest>>,
+}
+
+impl RecordingDispatcher {
+    fn take_request(&self) -> CapabilityDispatchRequest {
+        self.request.lock().unwrap().take().unwrap()
+    }
+}
+
+#[async_trait]
+impl CapabilityDispatcher for RecordingDispatcher {
+    async fn dispatch_json(
+        &self,
+        request: CapabilityDispatchRequest,
+    ) -> Result<CapabilityDispatchResult, DispatchError> {
+        *self.request.lock().unwrap() = Some(request.clone());
+        Ok(CapabilityDispatchResult {
+            capability_id: request.capability_id,
+            provider: ExtensionId::new("echo").unwrap(),
+            runtime: RuntimeKind::Wasm,
+            output: json!({"ok": true}),
+            usage: ResourceUsage::default(),
+            receipt: ResourceReceipt {
+                id: ResourceReservationId::new(),
+                scope: request.scope,
+                status: ReservationStatus::Reconciled,
+                estimate: request.estimate,
+                actual: Some(ResourceUsage::default()),
+            },
+        })
+    }
 }
 
 #[derive(Clone)]

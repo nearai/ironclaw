@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     ApprovalRequest, ApprovalRequestId, CapabilityId, HostApiError, InvocationId, ResourceScope,
-    VirtualPath,
+    TenantId, UserId, VirtualPath,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -64,6 +64,40 @@ pub struct ApprovalRecord {
     pub scope: ResourceScope,
     pub request: ApprovalRequest,
     pub status: ApprovalStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RunStateKey {
+    tenant_id: TenantId,
+    user_id: UserId,
+    invocation_id: InvocationId,
+}
+
+impl RunStateKey {
+    fn new(scope: &ResourceScope, invocation_id: InvocationId) -> Self {
+        Self {
+            tenant_id: scope.tenant_id.clone(),
+            user_id: scope.user_id.clone(),
+            invocation_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ApprovalKey {
+    tenant_id: TenantId,
+    user_id: UserId,
+    request_id: ApprovalRequestId,
+}
+
+impl ApprovalKey {
+    fn new(scope: &ResourceScope, request_id: ApprovalRequestId) -> Self {
+        Self {
+            tenant_id: scope.tenant_id.clone(),
+            user_id: scope.user_id.clone(),
+            request_id,
+        }
+    }
 }
 
 /// Run-state and approval persistence errors.
@@ -153,7 +187,7 @@ pub trait ApprovalRequestStore: Send + Sync {
 /// In-memory run-state store for tests and early host wiring.
 #[derive(Debug, Default)]
 pub struct InMemoryRunStateStore {
-    records: Mutex<HashMap<InvocationId, RunRecord>>,
+    records: Mutex<HashMap<RunStateKey, RunRecord>>,
 }
 
 impl InMemoryRunStateStore {
@@ -167,16 +201,16 @@ impl InMemoryRunStateStore {
         invocation_id: InvocationId,
         update: impl FnOnce(&mut RunRecord),
     ) -> Result<RunRecord, RunStateError> {
+        let key = RunStateKey::new(scope, invocation_id);
         let mut records = self.records_guard();
         let record = records
-            .get_mut(&invocation_id)
-            .filter(|record| same_tenant_user(&record.scope, scope))
+            .get_mut(&key)
             .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
         update(record);
         Ok(record.clone())
     }
 
-    fn records_guard(&self) -> MutexGuard<'_, HashMap<InvocationId, RunRecord>> {
+    fn records_guard(&self) -> MutexGuard<'_, HashMap<RunStateKey, RunRecord>> {
         self.records
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -194,8 +228,10 @@ impl RunStateStore for InMemoryRunStateStore {
             approval_request_id: None,
             error_kind: None,
         };
-        self.records_guard()
-            .insert(record.invocation_id, record.clone());
+        self.records_guard().insert(
+            RunStateKey::new(&record.scope, record.invocation_id),
+            record.clone(),
+        );
         Ok(record)
     }
 
@@ -254,8 +290,7 @@ impl RunStateStore for InMemoryRunStateStore {
     ) -> Result<Option<RunRecord>, RunStateError> {
         Ok(self
             .records_guard()
-            .get(&invocation_id)
-            .filter(|record| same_tenant_user(&record.scope, scope))
+            .get(&RunStateKey::new(scope, invocation_id))
             .cloned())
     }
 
@@ -277,7 +312,7 @@ impl RunStateStore for InMemoryRunStateStore {
 /// In-memory approval request store for tests and early host wiring.
 #[derive(Debug, Default)]
 pub struct InMemoryApprovalRequestStore {
-    records: Mutex<HashMap<ApprovalRequestId, ApprovalRecord>>,
+    records: Mutex<HashMap<ApprovalKey, ApprovalRecord>>,
 }
 
 impl InMemoryApprovalRequestStore {
@@ -285,7 +320,7 @@ impl InMemoryApprovalRequestStore {
         Self::default()
     }
 
-    fn records_guard(&self) -> MutexGuard<'_, HashMap<ApprovalRequestId, ApprovalRecord>> {
+    fn records_guard(&self) -> MutexGuard<'_, HashMap<ApprovalKey, ApprovalRecord>> {
         self.records
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -304,8 +339,10 @@ impl ApprovalRequestStore for InMemoryApprovalRequestStore {
             request,
             status: ApprovalStatus::Pending,
         };
-        self.records_guard()
-            .insert(record.request.id, record.clone());
+        self.records_guard().insert(
+            ApprovalKey::new(&record.scope, record.request.id),
+            record.clone(),
+        );
         Ok(record)
     }
 
@@ -316,8 +353,7 @@ impl ApprovalRequestStore for InMemoryApprovalRequestStore {
     ) -> Result<Option<ApprovalRecord>, RunStateError> {
         Ok(self
             .records_guard()
-            .get(&request_id)
-            .filter(|record| same_tenant_user(&record.scope, scope))
+            .get(&ApprovalKey::new(scope, request_id))
             .cloned())
     }
 

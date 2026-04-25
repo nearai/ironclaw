@@ -4,6 +4,7 @@
 //! It coordinates authorization and runtime dispatch without making callers
 //! understand grant evaluation and without making the dispatcher own auth.
 
+use async_trait::async_trait;
 use ironclaw_authorization::CapabilityDispatchAuthorizer;
 use ironclaw_dispatcher::{
     CapabilityDispatchRequest, CapabilityDispatchResult, DispatchError, RuntimeDispatcher,
@@ -29,6 +30,29 @@ pub struct CapabilityInvocationRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityInvocationResult {
     pub dispatch: CapabilityDispatchResult,
+}
+
+/// Interface for already-authorized runtime dispatch.
+#[async_trait]
+pub trait CapabilityDispatcher: Send + Sync {
+    async fn dispatch_json(
+        &self,
+        request: CapabilityDispatchRequest,
+    ) -> Result<CapabilityDispatchResult, DispatchError>;
+}
+
+#[async_trait]
+impl<F, G> CapabilityDispatcher for RuntimeDispatcher<'_, F, G>
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
+    async fn dispatch_json(
+        &self,
+        request: CapabilityDispatchRequest,
+    ) -> Result<CapabilityDispatchResult, DispatchError> {
+        RuntimeDispatcher::dispatch_json(self, request).await
+    }
 }
 
 /// Capability invocation failures before or during dispatch.
@@ -62,26 +86,24 @@ impl From<DispatchError> for CapabilityInvocationError {
 }
 
 /// Host-facing capability invocation service.
-pub struct CapabilityHost<'a, F, G>
+pub struct CapabilityHost<'a, D>
 where
-    F: RootFilesystem,
-    G: ResourceGovernor,
+    D: CapabilityDispatcher + ?Sized,
 {
     registry: &'a ExtensionRegistry,
-    dispatcher: &'a RuntimeDispatcher<'a, F, G>,
+    dispatcher: &'a D,
     authorizer: &'a dyn CapabilityDispatchAuthorizer,
     run_state: Option<&'a dyn RunStateStore>,
     approval_requests: Option<&'a dyn ApprovalRequestStore>,
 }
 
-impl<'a, F, G> CapabilityHost<'a, F, G>
+impl<'a, D> CapabilityHost<'a, D>
 where
-    F: RootFilesystem,
-    G: ResourceGovernor,
+    D: CapabilityDispatcher + ?Sized,
 {
     pub fn new(
         registry: &'a ExtensionRegistry,
-        dispatcher: &'a RuntimeDispatcher<'a, F, G>,
+        dispatcher: &'a D,
         authorizer: &'a dyn CapabilityDispatchAuthorizer,
     ) -> Self {
         Self {
@@ -113,6 +135,13 @@ where
         let invocation_id = request.context.invocation_id;
         let capability_id = request.capability_id.clone();
         let scope = request.context.resource_scope.clone();
+        if request.context.validate().is_err() {
+            return Err(CapabilityInvocationError::AuthorizationDenied {
+                capability: request.capability_id,
+                reason: DenyReason::InternalInvariantViolation,
+            });
+        }
+
         if let Some(run_state) = self.run_state {
             run_state
                 .start(RunStart {

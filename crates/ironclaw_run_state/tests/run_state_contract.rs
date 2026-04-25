@@ -96,6 +96,50 @@ async fn run_state_transitions_fail_for_unknown_invocation() {
 }
 
 #[tokio::test]
+async fn in_memory_run_state_allows_same_invocation_id_in_different_tenants() {
+    let store = InMemoryRunStateStore::new();
+    let invocation_id = InvocationId::new();
+    let tenant_a = sample_scope(invocation_id, "tenant1", "user1");
+    let tenant_b = sample_scope(invocation_id, "tenant2", "user1");
+
+    store
+        .start(RunStart {
+            invocation_id,
+            capability_id: CapabilityId::new("echo.one").unwrap(),
+            scope: tenant_a.clone(),
+        })
+        .await
+        .unwrap();
+    store
+        .start(RunStart {
+            invocation_id,
+            capability_id: CapabilityId::new("echo.two").unwrap(),
+            scope: tenant_b.clone(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store
+            .get(&tenant_a, invocation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .capability_id,
+        CapabilityId::new("echo.one").unwrap()
+    );
+    assert_eq!(
+        store
+            .get(&tenant_b, invocation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .capability_id,
+        CapabilityId::new("echo.two").unwrap()
+    );
+}
+
+#[tokio::test]
 async fn in_memory_run_state_hides_records_from_other_tenants_and_users() {
     let store = InMemoryRunStateStore::new();
     let invocation_id = InvocationId::new();
@@ -218,6 +262,43 @@ async fn filesystem_approval_request_store_persists_pending_requests_under_tenan
         .unwrap()
         .unwrap();
     assert_eq!(reloaded, record);
+}
+
+#[tokio::test]
+async fn in_memory_approval_store_allows_same_request_id_in_different_tenants() {
+    let store = InMemoryApprovalRequestStore::new();
+    let invocation_id = InvocationId::new();
+    let tenant_a = sample_scope(invocation_id, "tenant1", "user1");
+    let tenant_b = sample_scope(invocation_id, "tenant2", "user1");
+    let approval = approval_request(invocation_id);
+
+    store
+        .save_pending(tenant_a.clone(), approval.clone())
+        .await
+        .unwrap();
+    store
+        .save_pending(tenant_b.clone(), approval.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store
+            .get(&tenant_a, approval.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .scope,
+        tenant_a
+    );
+    assert_eq!(
+        store
+            .get(&tenant_b, approval.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .scope,
+        tenant_b
+    );
 }
 
 #[tokio::test]
