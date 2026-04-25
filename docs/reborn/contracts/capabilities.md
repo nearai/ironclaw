@@ -140,7 +140,7 @@ If only one of `RunStateStore` or `ApprovalRequestStore` is configured and autho
 
 For approved resume, `CapabilityHost` compares the replayed request fingerprint to the approved fingerprint before dispatch, claims the matching lease before dispatch, and consumes it after successful dispatch. Denied/expired/non-approved approvals, missing leases, failed lease claims, and fingerprint mismatches fail before runtime dispatch.
 
-For spawn, `CapabilityHost` preserves `ExecutionContext.resource_scope` and creates a process record through `ProcessManager`. It does not call `dispatch_json` directly. If a runtime-backed process manager is configured, the lower-level `DispatchProcessExecutor` adapter can route the background work through `CapabilityDispatcher` after the authorized process record is created. The process record carries the target capability identity and runtime so later lifecycle operations remain capability-backed.
+For spawn, `CapabilityHost` preserves `ExecutionContext.resource_scope` and creates a process record through `ProcessManager`. It does not call `dispatch_json` directly. If a runtime-backed process manager is configured, the lower-level `DispatchProcessExecutor` adapter can route the background work through `CapabilityDispatcher` after the authorized process record is created. If an `EventingProcessStore` is used behind that manager, process lifecycle events are emitted by `ironclaw_processes`, not by the capability host or dispatcher. The process record carries the target capability identity and runtime so later lifecycle operations remain capability-backed.
 
 ---
 

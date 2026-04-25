@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, ResourceScope, RuntimeKind, Timestamp, VirtualPath,
+    CapabilityId, ExtensionId, ProcessId, ResourceScope, RuntimeKind, Timestamp, VirtualPath,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -49,6 +49,10 @@ pub enum RuntimeEventKind {
     RuntimeSelected,
     DispatchSucceeded,
     DispatchFailed,
+    ProcessStarted,
+    ProcessCompleted,
+    ProcessFailed,
+    ProcessKilled,
 }
 
 /// Redacted runtime event payload.
@@ -61,21 +65,23 @@ pub struct RuntimeEvent {
     pub capability_id: CapabilityId,
     pub provider: Option<ExtensionId>,
     pub runtime: Option<RuntimeKind>,
+    pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
 }
 
 impl RuntimeEvent {
     pub fn dispatch_requested(scope: ResourceScope, capability_id: CapabilityId) -> Self {
-        Self::new(
-            RuntimeEventKind::DispatchRequested,
+        Self::new(RuntimeEventPayload {
+            kind: RuntimeEventKind::DispatchRequested,
             scope,
             capability_id,
-            None,
-            None,
-            None,
-            None,
-        )
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: None,
+            error_kind: None,
+        })
     }
 
     pub fn runtime_selected(
@@ -84,15 +90,16 @@ impl RuntimeEvent {
         provider: ExtensionId,
         runtime: RuntimeKind,
     ) -> Self {
-        Self::new(
-            RuntimeEventKind::RuntimeSelected,
+        Self::new(RuntimeEventPayload {
+            kind: RuntimeEventKind::RuntimeSelected,
             scope,
             capability_id,
-            Some(provider),
-            Some(runtime),
-            None,
-            None,
-        )
+            provider: Some(provider),
+            runtime: Some(runtime),
+            process_id: None,
+            output_bytes: None,
+            error_kind: None,
+        })
     }
 
     pub fn dispatch_succeeded(
@@ -102,15 +109,16 @@ impl RuntimeEvent {
         runtime: RuntimeKind,
         output_bytes: u64,
     ) -> Self {
-        Self::new(
-            RuntimeEventKind::DispatchSucceeded,
+        Self::new(RuntimeEventPayload {
+            kind: RuntimeEventKind::DispatchSucceeded,
             scope,
             capability_id,
-            Some(provider),
-            Some(runtime),
-            Some(output_bytes),
-            None,
-        )
+            provider: Some(provider),
+            runtime: Some(runtime),
+            process_id: None,
+            output_bytes: Some(output_bytes),
+            error_kind: None,
+        })
     }
 
     pub fn dispatch_failed(
@@ -120,38 +128,134 @@ impl RuntimeEvent {
         runtime: Option<RuntimeKind>,
         error_kind: impl Into<String>,
     ) -> Self {
-        Self::new(
-            RuntimeEventKind::DispatchFailed,
+        Self::new(RuntimeEventPayload {
+            kind: RuntimeEventKind::DispatchFailed,
             scope,
             capability_id,
             provider,
             runtime,
-            None,
-            Some(error_kind.into()),
-        )
+            process_id: None,
+            output_bytes: None,
+            error_kind: Some(sanitize_error_kind(error_kind)),
+        })
     }
 
-    fn new(
-        kind: RuntimeEventKind,
+    pub fn process_started(
         scope: ResourceScope,
         capability_id: CapabilityId,
-        provider: Option<ExtensionId>,
-        runtime: Option<RuntimeKind>,
-        output_bytes: Option<u64>,
-        error_kind: Option<String>,
+        provider: ExtensionId,
+        runtime: RuntimeKind,
+        process_id: ProcessId,
     ) -> Self {
+        Self::new(RuntimeEventPayload {
+            kind: RuntimeEventKind::ProcessStarted,
+            scope,
+            capability_id,
+            provider: Some(provider),
+            runtime: Some(runtime),
+            process_id: Some(process_id),
+            output_bytes: None,
+            error_kind: None,
+        })
+    }
+
+    pub fn process_completed(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        provider: ExtensionId,
+        runtime: RuntimeKind,
+        process_id: ProcessId,
+    ) -> Self {
+        Self::new(RuntimeEventPayload {
+            kind: RuntimeEventKind::ProcessCompleted,
+            scope,
+            capability_id,
+            provider: Some(provider),
+            runtime: Some(runtime),
+            process_id: Some(process_id),
+            output_bytes: None,
+            error_kind: None,
+        })
+    }
+
+    pub fn process_failed(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        provider: ExtensionId,
+        runtime: RuntimeKind,
+        process_id: ProcessId,
+        error_kind: impl Into<String>,
+    ) -> Self {
+        Self::new(RuntimeEventPayload {
+            kind: RuntimeEventKind::ProcessFailed,
+            scope,
+            capability_id,
+            provider: Some(provider),
+            runtime: Some(runtime),
+            process_id: Some(process_id),
+            output_bytes: None,
+            error_kind: Some(sanitize_error_kind(error_kind)),
+        })
+    }
+
+    pub fn process_killed(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        provider: ExtensionId,
+        runtime: RuntimeKind,
+        process_id: ProcessId,
+    ) -> Self {
+        Self::new(RuntimeEventPayload {
+            kind: RuntimeEventKind::ProcessKilled,
+            scope,
+            capability_id,
+            provider: Some(provider),
+            runtime: Some(runtime),
+            process_id: Some(process_id),
+            output_bytes: None,
+            error_kind: None,
+        })
+    }
+
+    fn new(payload: RuntimeEventPayload) -> Self {
         Self {
             event_id: RuntimeEventId::new(),
             timestamp: Utc::now(),
-            kind,
-            scope,
-            capability_id,
-            provider,
-            runtime,
-            output_bytes,
-            error_kind,
+            kind: payload.kind,
+            scope: payload.scope,
+            capability_id: payload.capability_id,
+            provider: payload.provider,
+            runtime: payload.runtime,
+            process_id: payload.process_id,
+            output_bytes: payload.output_bytes,
+            error_kind: payload.error_kind,
         }
     }
+}
+
+fn sanitize_error_kind(error_kind: impl Into<String>) -> String {
+    let error_kind = error_kind.into();
+    let is_safe = !error_kind.is_empty()
+        && error_kind.len() <= 128
+        && error_kind
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'));
+    if is_safe {
+        error_kind
+    } else {
+        "Unclassified".to_string()
+    }
+}
+
+struct RuntimeEventPayload {
+    kind: RuntimeEventKind,
+    scope: ResourceScope,
+    capability_id: CapabilityId,
+    provider: Option<ExtensionId>,
+    runtime: Option<RuntimeKind>,
+    process_id: Option<ProcessId>,
+    output_bytes: Option<u64>,
+    error_kind: Option<String>,
 }
 
 /// Event sink failures.

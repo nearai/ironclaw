@@ -3,7 +3,7 @@
 **Date:** 2026-04-25
 **Status:** V1 contract slice
 **Crate:** `crates/ironclaw_processes`
-**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/capabilities.md`, `docs/reborn/contracts/filesystem.md`
+**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/capabilities.md`, `docs/reborn/contracts/filesystem.md`, `docs/reborn/contracts/events.md`
 
 ---
 
@@ -22,6 +22,7 @@ CapabilityHost::spawn_json(...)
 ironclaw_processes
   -> stores process identity and lifecycle
   -> optionally starts background execution through ProcessExecutor
+  -> optionally emits process lifecycle events through EventingProcessStore
   -> exposes status transitions such as complete/fail/kill
 ```
 
@@ -100,7 +101,18 @@ The executor receives a redaction-friendly `ProcessExecutionRequest` containing 
 
 `FilesystemProcessStore::from_arc(...)` provides an owned store handle for detached background managers. The filesystem store serializes start/status writes within a store instance; production DB/object-store implementations should use compare-and-swap or transactional updates for cross-process terminal-state protection.
 
-`start` rejects duplicate process IDs within the same tenant/user partition. Callers must transition existing records instead of overwriting lifecycle state. `complete`, `fail`, and `kill` only transition from `Running`; late executor completions after `kill` are ignored by the background manager because the store rejects the terminal-state overwrite.
+`EventingProcessStore` wraps any `ProcessStore` and emits best-effort lifecycle events after successful state transitions:
+
+```text
+start    -> process_started
+complete -> process_completed
+fail     -> process_failed
+kill     -> process_killed
+```
+
+These events include tenant/user `ResourceScope`, `CapabilityId`, provider `ExtensionId`, `RuntimeKind`, and `ProcessId`. The wrapper does not make `ironclaw_dispatcher` process-aware; process observability stays in the process lifecycle service.
+
+`start` rejects duplicate process IDs within the same tenant/user partition. Callers must transition existing records instead of overwriting lifecycle state. `complete`, `fail`, and `kill` only transition from `Running`; late executor completions after `kill` are ignored by the background manager because the store rejects the terminal-state overwrite. Because event emission happens after successful transitions, a killed process does not emit a misleading late `process_completed` event when the background executor finishes after kill.
 
 ---
 
@@ -123,7 +135,7 @@ This slice does not implement:
 - direct WASM/Script/MCP process loops inside `ironclaw_processes`; runtime work is delegated through `ProcessExecutor`
 - cooperative cancellation/abort handles for running executor tasks
 - `await`, `subscribe`, or streaming output APIs
-- durable append-only process event history
+- durable process event projection/read APIs beyond the shared event sink
 - process tree queries beyond parent process ID storage
 - resource reservation ownership/cleanup beyond the optional reservation ID field
 - approval resume for `Action::SpawnCapability`

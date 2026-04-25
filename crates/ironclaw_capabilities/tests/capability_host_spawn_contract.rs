@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
 use ironclaw_dispatcher::*;
+use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extensions::*;
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::*;
@@ -278,6 +279,63 @@ async fn capability_host_spawn_can_run_background_dispatch_process() {
 }
 
 #[tokio::test]
+async fn capability_host_spawn_emits_scoped_process_events_without_raw_input() {
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(package_from_manifest(WASM_MANIFEST))
+        .unwrap();
+    let dispatcher = Arc::new(RecordingSpawnDispatcher::default());
+    let executor = Arc::new(DispatchProcessExecutor::new(dispatcher.clone()));
+    let events = Arc::new(InMemoryEventSink::new());
+    let process_store = Arc::new(EventingProcessStore::new(
+        InMemoryProcessStore::new(),
+        events.clone(),
+    ));
+    let process_manager = BackgroundProcessManager::new(process_store.clone(), executor);
+    let authorizer = GrantAuthorizer::new();
+    let context = execution_context(CapabilitySet {
+        grants: vec![grant_for(
+            CapabilityId::new("echo.say").unwrap(),
+            Principal::Extension(ExtensionId::new("caller").unwrap()),
+            vec![EffectKind::DispatchCapability, EffectKind::SpawnProcess],
+        )],
+    });
+    let scope = context.resource_scope.clone();
+    let secret_input = json!({"message": "background dispatch", "token": "do-not-log"});
+    let host = CapabilityHost::new(&registry, dispatcher.as_ref(), &authorizer)
+        .with_process_manager(&process_manager);
+
+    let spawned = host
+        .spawn_json(CapabilitySpawnRequest {
+            context,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: ResourceEstimate::default(),
+            input: secret_input,
+        })
+        .await
+        .unwrap();
+
+    wait_for_process_status(
+        process_store.as_ref(),
+        &scope,
+        spawned.process.process_id,
+        ProcessStatus::Completed,
+    )
+    .await;
+    wait_for_event_count(events.as_ref(), 2).await;
+    let emitted = events.events();
+    assert_eq!(emitted[0].kind, RuntimeEventKind::ProcessStarted);
+    assert_eq!(emitted[1].kind, RuntimeEventKind::ProcessCompleted);
+    for event in emitted {
+        assert_eq!(event.scope, scope);
+        assert_eq!(event.process_id, Some(spawned.process.process_id));
+        let serialized = serde_json::to_string(&event).unwrap();
+        assert!(!serialized.contains("do-not-log"));
+        assert!(!serialized.contains("background dispatch"));
+    }
+}
+
+#[tokio::test]
 async fn capability_host_spawn_can_run_background_runtime_dispatcher_process() {
     let (fs, package) = wasm_package_with_module(json_echo_module());
     let mut registry = ExtensionRegistry::new();
@@ -493,6 +551,21 @@ fn grant_for(
             expires_at: None,
             max_invocations: None,
         },
+    }
+}
+
+async fn wait_for_event_count(events: &InMemoryEventSink, expected: usize) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let count = events.events().len();
+        if count >= expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "event sink did not reach {expected} events; last count was {count}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
 

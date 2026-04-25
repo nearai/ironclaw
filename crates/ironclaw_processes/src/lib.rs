@@ -10,6 +10,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_events::{EventSink, RuntimeEvent};
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     CapabilityId, CapabilitySet, ExtensionId, HostApiError, InvocationId, MountView, ProcessId,
@@ -137,6 +138,117 @@ pub trait ProcessExecutor: Send + Sync {
 #[async_trait]
 pub trait ProcessManager: Send + Sync {
     async fn spawn(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError>;
+}
+
+pub struct EventingProcessStore<S>
+where
+    S: ProcessStore,
+{
+    inner: S,
+    event_sink: Arc<dyn EventSink>,
+}
+
+impl<S> EventingProcessStore<S>
+where
+    S: ProcessStore,
+{
+    pub fn new(inner: S, event_sink: Arc<dyn EventSink>) -> Self {
+        Self { inner, event_sink }
+    }
+
+    async fn emit_best_effort(&self, event: RuntimeEvent) {
+        let _ = self.event_sink.emit(event).await;
+    }
+}
+
+#[async_trait]
+impl<S> ProcessStore for EventingProcessStore<S>
+where
+    S: ProcessStore,
+{
+    async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
+        let record = self.inner.start(start).await?;
+        self.emit_best_effort(RuntimeEvent::process_started(
+            record.scope.clone(),
+            record.capability_id.clone(),
+            record.extension_id.clone(),
+            record.runtime,
+            record.process_id,
+        ))
+        .await;
+        Ok(record)
+    }
+
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ProcessRecord, ProcessError> {
+        let record = self.inner.complete(scope, process_id).await?;
+        self.emit_best_effort(RuntimeEvent::process_completed(
+            record.scope.clone(),
+            record.capability_id.clone(),
+            record.extension_id.clone(),
+            record.runtime,
+            record.process_id,
+        ))
+        .await;
+        Ok(record)
+    }
+
+    async fn fail(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        error_kind: String,
+    ) -> Result<ProcessRecord, ProcessError> {
+        let record = self.inner.fail(scope, process_id, error_kind).await?;
+        self.emit_best_effort(RuntimeEvent::process_failed(
+            record.scope.clone(),
+            record.capability_id.clone(),
+            record.extension_id.clone(),
+            record.runtime,
+            record.process_id,
+            record
+                .error_kind
+                .clone()
+                .unwrap_or_else(|| "Unknown".to_string()),
+        ))
+        .await;
+        Ok(record)
+    }
+
+    async fn kill(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ProcessRecord, ProcessError> {
+        let record = self.inner.kill(scope, process_id).await?;
+        self.emit_best_effort(RuntimeEvent::process_killed(
+            record.scope.clone(),
+            record.capability_id.clone(),
+            record.extension_id.clone(),
+            record.runtime,
+            record.process_id,
+        ))
+        .await;
+        Ok(record)
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<Option<ProcessRecord>, ProcessError> {
+        self.inner.get(scope, process_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<ProcessRecord>, ProcessError> {
+        self.inner.records_for_scope(scope).await
+    }
 }
 
 pub struct BackgroundProcessManager {

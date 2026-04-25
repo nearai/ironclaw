@@ -300,6 +300,10 @@ fn event_kind_label(kind: RuntimeEventKind) -> &'static str {
         RuntimeEventKind::RuntimeSelected => "runtime_selected",
         RuntimeEventKind::DispatchSucceeded => "dispatch_succeeded",
         RuntimeEventKind::DispatchFailed => "dispatch_failed",
+        RuntimeEventKind::ProcessStarted => "process_started",
+        RuntimeEventKind::ProcessCompleted => "process_completed",
+        RuntimeEventKind::ProcessFailed => "process_failed",
+        RuntimeEventKind::ProcessKilled => "process_killed",
     }
 }
 
