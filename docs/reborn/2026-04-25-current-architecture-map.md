@@ -188,6 +188,7 @@ Implemented/current pieces:
 - Process persistence exists through in-memory and filesystem-backed stores.
 - `ProcessHost` exists as the current host-facing `status`, `kill`, `await_process`, `subscribe`, `result`, `output`, and `await_result` API over scoped process current state/results; when wired to `ProcessCancellationRegistry`, scoped kill also signals cooperative executor cancellation.
 - `ProcessServices` exists as convenience composition so `ProcessHost` and `BackgroundProcessManager` share the same process store, result store, and cancellation registry.
+- `CapabilityHost::with_process_services(...)` exists as convenience spawn wiring that derives the process manager from that shared services bundle without absorbing process lifecycle/result APIs.
 - Process lifecycle events exist through `EventingProcessStore` and shared `EventSink` implementations.
 - Process resource reservation ownership exists through `ResourceManagedProcessStore`; public process starts cannot forge reserved handles, and runtime-backed process dispatch suppresses duplicate reservation through the process-dispatch adapter.
 
@@ -213,7 +214,7 @@ The current implemented or contract-backed Reborn stack includes these slices:
 | Extension discovery/registry | `[exists]` manifests, package validation, capability descriptors, runtime declaration mapping |
 | Resource governor | `[exists]` reservation/reconcile/release model and V1 dimensions for hosted resource control |
 | Capability access | `[exists/partial]` grant matching, action-time authorization, lease-backed authorizer semantics |
-| CapabilityHost | `[exists]` caller-facing invocation, approval-blocking, resume, and spawn workflow gate over the neutral host API dispatch port |
+| CapabilityHost | `[exists]` caller-facing invocation, approval-blocking, resume, spawn workflow gate, and `ProcessServices` spawn wiring over the neutral host API dispatch port |
 | Approvals/resume | `[exists/partial]` pending approval records, invocation fingerprints, approval resolver, in-memory exact-invocation leases, `resume_json` replay checks |
 | Run-state | `[exists]` `Running`, `BlockedApproval`, `BlockedAuth`, `Completed`, `Failed` current-state stores with tenant/user partitioning |
 | Dispatcher | `[exists]` routing of already-authorized requests to WASM, Script, and MCP lanes; `FirstParty`/`System` recognized but unsupported |
