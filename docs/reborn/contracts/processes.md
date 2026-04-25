@@ -98,10 +98,11 @@ async fn kill(scope, process_id) -> Result<ProcessRecord>;
 async fn await_process(scope, process_id) -> Result<ProcessExit>;
 async fn subscribe(scope, process_id) -> Result<ProcessSubscription>;
 async fn result(scope, process_id) -> Result<Option<ProcessResultRecord>>;
+async fn output(scope, process_id) -> Result<Option<Value>>;
 async fn await_result(scope, process_id) -> Result<ProcessResultRecord>;
 ```
 
-`status` preserves tenant/user isolation by returning `None` for out-of-scope records. `kill` delegates to the scoped store transition and signals cooperative cancellation only after a scoped kill succeeds. `await_process` polls the scoped current-state store until the record reaches `Completed`, `Failed`, or `Killed`, then returns a terminal `ProcessExit`. `subscribe` returns a scoped current-state subscription whose first `next()` yields the current record, whose later `next()` calls yield status changes, and whose terminal record is emitted once before returning `None`. `result` and `await_result` read terminal output/error data from a scoped `ProcessResultStore`. Missing or out-of-scope records fail closed with `UnknownProcess`.
+`status` preserves tenant/user isolation by returning `None` for out-of-scope records. `kill` delegates to the scoped store transition and signals cooperative cancellation only after a scoped kill succeeds. `await_process` polls the scoped current-state store until the record reaches `Completed`, `Failed`, or `Killed`, then returns a terminal `ProcessExit`. `subscribe` returns a scoped current-state subscription whose first `next()` yields the current record, whose later `next()` calls yield status changes, and whose terminal record is emitted once before returning `None`. `result` and `await_result` read terminal output/error metadata from a scoped `ProcessResultStore`; `output` resolves inline or referenced JSON output through the same scoped store. Missing or out-of-scope records fail closed with `UnknownProcess`.
 
 The V1 subscription is intentionally scoped and current-state based. It does not expose raw process input/output, host paths, or cross-tenant existence information, and it does not require `CapabilityHost` or `ironclaw_dispatcher` to own process lifecycle mechanics.
 
@@ -124,11 +125,12 @@ pub struct ProcessResultRecord {
     pub scope: ResourceScope,
     pub status: ProcessStatus,
     pub output: Option<Value>,
+    pub output_ref: Option<VirtualPath>,
     pub error_kind: Option<String>,
 }
 ```
 
-V1 stores successful output as inline JSON for the narrow vertical slice. This is intentionally not the final output model: large, streaming, binary, or sensitive outputs should move to filesystem/artifact-backed `VirtualPath` references in a later slice so lifecycle/result metadata stays small and redaction-friendly.
+In-memory/dev result stores may keep small JSON output inline. Filesystem-backed process results write successful JSON output to scoped output artifact paths and store only `output_ref` in the result record, keeping lifecycle/result metadata small and easier to redact. This is still not a streaming/binary output system; later slices should generalize these refs for large, streaming, binary, or sensitive outputs.
 
 `ProcessCancellationRegistry` is optional wiring shared by `BackgroundProcessManager` and `ProcessHost`. The manager registers a token under tenant/user/process scope before starting executor work. `ProcessHost::kill` removes and signals the matching token only after the scoped store kill succeeds. Cross-tenant or cross-user kill attempts therefore cannot cancel another tenant/user's running executor even if they know a process UUID. Executor cancellation is cooperative: runtime adapters must observe `ProcessExecutionRequest.cancellation` and stop themselves.
 
@@ -176,6 +178,7 @@ Process records and result records are tenant/user scoped. The filesystem-backed
 ```text
 /engine/tenants/{tenant_id}/users/{user_id}/processes/{process_id}.json
 /engine/tenants/{tenant_id}/users/{user_id}/process-results/{process_id}.json
+/engine/tenants/{tenant_id}/users/{user_id}/process-outputs/{process_id}/output.json
 ```
 
 Cross-tenant and cross-user reads return `None`, empty lists, or `UnknownProcess`; they must not reveal that another tenant/user has a matching process UUID.
@@ -189,7 +192,7 @@ This slice does not implement:
 - direct WASM/Script/MCP process loops inside `ironclaw_processes`; runtime work is delegated through `ProcessExecutor`
 - dynamic executor-reported actual resource usage; completion reconciliation currently uses configured/default usage
 - forced/preemptive cancellation of uncooperative executor tasks
-- filesystem/artifact-backed output references for large, streaming, binary, or sensitive outputs; V1 result output is inline JSON
+- generalized artifact references for large, streaming, binary, or sensitive outputs beyond the current JSON output file
 - streaming output APIs
 - durable subscription cursors or process event projection/read APIs beyond the shared event sink/current-state subscription
 - process tree queries beyond parent process ID storage
