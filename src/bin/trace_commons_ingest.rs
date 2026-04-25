@@ -675,11 +675,18 @@ async fn analytics_handler(
         read_reviewer_metadata_view(state.as_ref(), &tenant)
             .await
             .map_err(internal_error)?;
-    Ok(Json(TraceCommonsAnalyticsResponse::from_records(
-        tenant.tenant_id,
-        records,
-        derived,
-    )))
+    let response =
+        TraceCommonsAnalyticsResponse::from_records(tenant.tenant_id.clone(), records, derived);
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::read(&tenant, "analytics_summary", response.submissions_total),
+        StorageTraceAuditAction::Read,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(response))
 }
 
 #[derive(Debug, Deserialize)]
@@ -7879,6 +7886,15 @@ mod tests {
         assert_eq!(analytics.submissions_total, 2);
         assert_eq!(analytics.duplicate_groups, 1);
         assert_eq!(analytics.by_privacy_risk.get("medium"), Some(&2));
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "read"
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("surface=analytics_summary"))
+                && event.export_count == Some(2)
+        }));
     }
 
     #[tokio::test]
