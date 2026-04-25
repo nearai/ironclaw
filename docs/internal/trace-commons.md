@@ -89,13 +89,20 @@ DATABASE_BACKEND=libsql \
 LIBSQL_PATH=/var/lib/ironclaw/ironclaw.db \
 cargo run --bin trace_commons_ingest
 
+# Optionally serve reviewer audit reads from the DB mirror.
+TRACE_COMMONS_DB_DUAL_WRITE=true \
+TRACE_COMMONS_DB_AUDIT_READS=true \
+DATABASE_BACKEND=libsql \
+LIBSQL_PATH=/var/lib/ironclaw/ironclaw.db \
+cargo run --bin trace_commons_ingest
+
 # Store submitted redacted envelopes in the encrypted local artifact sidecar.
 TRACE_COMMONS_ARTIFACT_KEY_HEX=<ironclaw-secrets-compatible-hex-key> \
 TRACE_COMMONS_ARTIFACT_DIR=/var/lib/ironclaw/trace-artifacts \
 cargo run --bin trace_commons_ingest
 ```
 
-`TRACE_COMMONS_DB_DUAL_WRITE=true` builds a `TraceCorpusStore` mirror from the normal `DATABASE_BACKEND` configuration. `DATABASE_BACKEND=postgres` requires `DATABASE_URL`; `DATABASE_BACKEND=libsql` uses `LIBSQL_PATH` with optional `LIBSQL_URL` and `LIBSQL_AUTH_TOKEN`. The mirror writes tenant-scoped submissions, object refs, derived precheck records, audit events, credit events, review state, and revocation tombstones, including redaction-count aggregates and derived summary/tool/coverage metadata needed for DB-backed reviewer/export/analytics paths. By default, pilot API reads still use the file-backed store. `TRACE_COMMONS_DB_CONTRIBUTOR_READS=true` switches `/v1/contributors/me/credit`, `/v1/contributors/me/credit-events`, and `/v1/contributors/me/submission-status` to the DB mirror; it requires DB dual-write/backfill to be configured and preserves tenant plus principal filtering. `TRACE_COMMONS_DB_REVIEWER_READS=true` switches reviewer/admin metadata reads for analytics, trace listing, quarantine queue, active-learning queue, benchmark candidate conversion, and ranker candidate/pair exports to the DB mirror. `TRACE_COMMONS_DB_REPLAY_EXPORT_READS=true` switches replay export eligibility and derived metadata selection to the DB mirror while still loading the redacted envelope body through the existing object path.
+`TRACE_COMMONS_DB_DUAL_WRITE=true` builds a `TraceCorpusStore` mirror from the normal `DATABASE_BACKEND` configuration. `DATABASE_BACKEND=postgres` requires `DATABASE_URL`; `DATABASE_BACKEND=libsql` uses `LIBSQL_PATH` with optional `LIBSQL_URL` and `LIBSQL_AUTH_TOKEN`. The mirror writes tenant-scoped submissions, object refs, derived precheck records, audit events, credit events, review state, and revocation tombstones, including redaction-count aggregates and derived summary/tool/coverage metadata needed for DB-backed reviewer/export/analytics paths. By default, pilot API reads still use the file-backed store. `TRACE_COMMONS_DB_CONTRIBUTOR_READS=true` switches `/v1/contributors/me/credit`, `/v1/contributors/me/credit-events`, and `/v1/contributors/me/submission-status` to the DB mirror; it requires DB dual-write/backfill to be configured and preserves tenant plus principal filtering. `TRACE_COMMONS_DB_REVIEWER_READS=true` switches reviewer/admin metadata reads for analytics, trace listing, quarantine queue, active-learning queue, benchmark candidate conversion, and ranker candidate/pair exports to the DB mirror. `TRACE_COMMONS_DB_REPLAY_EXPORT_READS=true` switches replay export eligibility and derived metadata selection to the DB mirror while still loading the redacted envelope body through the existing object path. `TRACE_COMMONS_DB_AUDIT_READS=true` switches `/v1/audit/events` to the DB mirror.
 
 `TRACE_COMMONS_ARTIFACT_KEY_HEX` enables the encrypted artifact sidecar. `TRACE_COMMONS_ENCRYPTED_ARTIFACTS=true` can be used as an explicit guard, but still requires the key. When enabled, submitted redacted envelopes are encrypted with IronClaw secrets crypto, stored under a tenant-hashed artifact directory, and referenced by an `EncryptedTraceArtifactReceipt`. File-backed submission records retain the receipt so envelope reads resolve through the encrypted sidecar when present.
 
@@ -292,7 +299,7 @@ The web settings panel includes a Trace Commons tab for standing opt-in, autonom
 | Replay dataset export | Partial | Approved redacted slices can be exported by reviewer/admin tokens, and DB metadata can now drive replay export selection when envelope objects remain readable. Production needs object-primary reads, bulk export controls, manifests, per-trace audit, retention filters, and revocation invalidation. |
 | Analytics summary | Partial | Aggregate counts by status/risk/tool/coverage exist. Production needs tenant policy, privacy budgets if exposed broadly, and audit for privileged analytics. |
 | Production relational DB and encrypted object storage | Partial | V25/V26/V27 PostgreSQL/libSQL schema, shared `TraceCorpusStore`, both backend implementations, optional ingest DB mirror with contributor, reviewer metadata, and replay selection reads, encrypted local artifact sidecar, and maintenance-triggered DB mirror backfill exist. Object-primary replay/export reads, full reconciliation, RLS/policy enforcement, and service-owned object storage remain. |
-| Central audit log | Partial | File-backed audit routes and DB-mirrored audit events cover core submit/review/credit/revoke mutations. Production still needs tamper-evident audit, trace-read/export coverage, reconciliation, and privileged reason enforcement. |
+| Central audit log | Partial | File-backed audit routes and optional DB audit reads cover core submit/review/credit/revoke mutations. Production still needs tamper-evident audit, trace-read/export coverage, reconciliation, and privileged reason enforcement. |
 | Retention enforcement | Not implemented | Envelope records policy metadata, but central purge/tombstone propagation jobs are still needed. |
 | Revocation propagation to derived artifacts | Partial | Current revocation marks local/file status, mirrors DB status, writes tenant-scoped tombstones, invalidates DB-mirrored object refs and derived precheck rows, and blocks file-backed replay export. Production must invalidate vector, benchmark, ranking, worker, and existing export artifacts. |
 | Vector duplicate/novelty index | Not implemented | MVP stores hashes and placeholder novelty fields only. |

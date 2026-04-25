@@ -219,6 +219,29 @@ mod libsql_trace_corpus_store {
             .await
             .expect("append audit event");
 
+        let audit_events = backend
+            .list_trace_audit_events(tenant_id)
+            .await
+            .expect("list audit events for tenant");
+        assert_eq!(audit_events.len(), 1);
+        assert_eq!(audit_events[0].submission_id, Some(submission_id));
+        assert_eq!(audit_events[0].action, TraceAuditAction::Submit);
+        assert_eq!(audit_events[0].actor_principal_ref, "principal:test-user");
+        assert_eq!(audit_events[0].request_id.as_deref(), Some("request:test"));
+        assert_eq!(
+            audit_events[0].metadata,
+            TraceAuditSafeMetadata::Submission {
+                status: TraceCorpusStatus::Accepted,
+                privacy_risk: "low".to_string(),
+            }
+        );
+
+        let other_tenant_audit_events = backend
+            .list_trace_audit_events("tenant-beta")
+            .await
+            .expect("list audit events for other tenant");
+        assert!(other_tenant_audit_events.is_empty());
+
         backend
             .append_trace_credit_event(TraceCreditEventWrite {
                 tenant_id: tenant_id.to_string(),

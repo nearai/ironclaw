@@ -239,6 +239,23 @@ pub struct TraceAuditEventWrite {
     pub metadata: TraceAuditSafeMetadata,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceAuditEventRecord {
+    pub audit_event_id: Uuid,
+    pub tenant_id: String,
+    pub actor_principal_ref: String,
+    pub actor_role: String,
+    pub action: TraceAuditAction,
+    pub reason: Option<String>,
+    pub request_id: Option<String>,
+    pub submission_id: Option<Uuid>,
+    pub object_ref_id: Option<Uuid>,
+    pub export_manifest_id: Option<Uuid>,
+    pub decision_inputs_hash: Option<String>,
+    pub metadata: TraceAuditSafeMetadata,
+    pub occurred_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TraceAuditSafeMetadata {
@@ -368,6 +385,11 @@ pub trait TraceCorpusStore: Send + Sync {
         &self,
         audit_event: TraceAuditEventWrite,
     ) -> Result<(), DatabaseError>;
+
+    async fn list_trace_audit_events(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceAuditEventRecord>, DatabaseError>;
 
     async fn append_trace_credit_event(
         &self,

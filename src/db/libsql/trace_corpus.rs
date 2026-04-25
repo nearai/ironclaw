@@ -9,11 +9,11 @@ use crate::db::trace_corpus_common::{
 };
 use crate::error::DatabaseError;
 use crate::trace_corpus_storage::{
-    TenantScopedTraceObjectRef, TraceArtifactInvalidationCounts, TraceAuditEventWrite,
-    TraceAuditSafeMetadata, TraceCorpusStatus, TraceCorpusStore, TraceCreditEventRecord,
-    TraceCreditEventWrite, TraceCreditSettlementState, TraceDerivedRecord, TraceDerivedRecordWrite,
-    TraceDerivedStatus, TraceObjectRefWrite, TraceSubmissionRecord, TraceSubmissionWrite,
-    TraceTombstoneWrite, TraceWorkerKind,
+    TenantScopedTraceObjectRef, TraceArtifactInvalidationCounts, TraceAuditEventRecord,
+    TraceAuditEventWrite, TraceAuditSafeMetadata, TraceCorpusStatus, TraceCorpusStore,
+    TraceCreditEventRecord, TraceCreditEventWrite, TraceCreditSettlementState, TraceDerivedRecord,
+    TraceDerivedRecordWrite, TraceDerivedStatus, TraceObjectRefWrite, TraceSubmissionRecord,
+    TraceSubmissionWrite, TraceTombstoneWrite, TraceWorkerKind,
 };
 
 const TRACE_SUBMISSION_COLUMNS: &str = "\
@@ -191,6 +191,36 @@ fn row_to_derived_record(row: &libsql::Row) -> Result<TraceDerivedRecord, Databa
         cluster_id: get_opt_text(row, 21),
         created_at: get_ts(row, 22),
         updated_at: get_ts(row, 23),
+    })
+}
+
+fn row_to_audit_event(row: &libsql::Row) -> Result<TraceAuditEventRecord, DatabaseError> {
+    let submission_id = get_opt_text(row, 7)
+        .map(|id| parse_uuid(&id, "trace_audit_events.submission_id"))
+        .transpose()?;
+    let object_ref_id = get_opt_text(row, 8)
+        .map(|id| parse_uuid(&id, "trace_audit_events.object_ref_id"))
+        .transpose()?;
+    let export_manifest_id = get_opt_text(row, 9)
+        .map(|id| parse_uuid(&id, "trace_audit_events.export_manifest_id"))
+        .transpose()?;
+    let metadata = serde_json::from_str(&get_text(row, 11)).map_err(|e| {
+        DatabaseError::Serialization(format!("trace audit metadata JSON decode failed: {e}"))
+    })?;
+    Ok(TraceAuditEventRecord {
+        tenant_id: get_text(row, 0),
+        audit_event_id: parse_uuid(&get_text(row, 1), "trace_audit_events.audit_event_id")?,
+        actor_principal_ref: get_text(row, 2),
+        actor_role: get_text(row, 3),
+        action: enum_from_storage(&get_text(row, 4), "TraceAuditAction")?,
+        reason: get_opt_text(row, 5),
+        request_id: get_opt_text(row, 6),
+        submission_id,
+        object_ref_id,
+        export_manifest_id,
+        decision_inputs_hash: get_opt_text(row, 10),
+        metadata,
+        occurred_at: get_ts(row, 12),
     })
 }
 
@@ -613,6 +643,35 @@ impl TraceCorpusStore for LibSqlBackend {
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(())
+    }
+
+    async fn list_trace_audit_events(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceAuditEventRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT
+                    tenant_id, audit_event_id, actor_principal_ref, actor_role, action, reason,
+                    request_id, submission_id, object_ref_id, export_manifest_id,
+                    decision_inputs_hash, metadata_json, occurred_at
+                 FROM trace_audit_events
+                 WHERE tenant_id = ?1
+                 ORDER BY occurred_at ASC",
+                libsql::params![tenant_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut events = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            events.push(row_to_audit_event(&row)?);
+        }
+        Ok(events)
     }
 
     async fn append_trace_credit_event(

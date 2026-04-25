@@ -8,11 +8,11 @@ use crate::db::postgres::PgBackend;
 use crate::db::trace_corpus_common::{audit_action_for_status, enum_from_storage, enum_to_storage};
 use crate::error::DatabaseError;
 use crate::trace_corpus_storage::{
-    TenantScopedTraceObjectRef, TraceArtifactInvalidationCounts, TraceAuditEventWrite,
-    TraceAuditSafeMetadata, TraceCorpusStatus, TraceCorpusStore, TraceCreditEventRecord,
-    TraceCreditEventWrite, TraceCreditSettlementState, TraceDerivedRecord, TraceDerivedRecordWrite,
-    TraceDerivedStatus, TraceObjectRefWrite, TraceSubmissionRecord, TraceSubmissionWrite,
-    TraceTombstoneWrite, TraceWorkerKind,
+    TenantScopedTraceObjectRef, TraceArtifactInvalidationCounts, TraceAuditEventRecord,
+    TraceAuditEventWrite, TraceAuditSafeMetadata, TraceCorpusStatus, TraceCorpusStore,
+    TraceCreditEventRecord, TraceCreditEventWrite, TraceCreditSettlementState, TraceDerivedRecord,
+    TraceDerivedRecordWrite, TraceDerivedStatus, TraceObjectRefWrite, TraceSubmissionRecord,
+    TraceSubmissionWrite, TraceTombstoneWrite, TraceWorkerKind,
 };
 
 fn json_array_strings(
@@ -144,6 +144,28 @@ fn row_to_derived_record(row: &Row) -> Result<TraceDerivedRecord, DatabaseError>
         cluster_id: row.get("cluster_id"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+    })
+}
+
+fn row_to_audit_event(row: &Row) -> Result<TraceAuditEventRecord, DatabaseError> {
+    let action: String = row.get("action");
+    let metadata: serde_json::Value = row.get("metadata_json");
+    Ok(TraceAuditEventRecord {
+        tenant_id: row.get("tenant_id"),
+        audit_event_id: row.get("audit_event_id"),
+        actor_principal_ref: row.get("actor_principal_ref"),
+        actor_role: row.get("actor_role"),
+        action: enum_from_storage(&action, "TraceAuditAction")?,
+        reason: row.get("reason"),
+        request_id: row.get("request_id"),
+        submission_id: row.get("submission_id"),
+        object_ref_id: row.get("object_ref_id"),
+        export_manifest_id: row.get("export_manifest_id"),
+        decision_inputs_hash: row.get("decision_inputs_hash"),
+        metadata: serde_json::from_value(metadata).map_err(|e| {
+            DatabaseError::Serialization(format!("trace audit metadata JSON decode failed: {e}"))
+        })?,
+        occurred_at: row.get("occurred_at"),
     })
 }
 
@@ -566,6 +588,27 @@ impl TraceCorpusStore for PgBackend {
             .await
             .map_err(DatabaseError::Postgres)?;
         Ok(())
+    }
+
+    async fn list_trace_audit_events(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceAuditEventRecord>, DatabaseError> {
+        let client = self.pool().get().await?;
+        let rows = client
+            .query(
+                "SELECT
+                    tenant_id, audit_event_id, actor_principal_ref, actor_role, action, reason,
+                    request_id, submission_id, object_ref_id, export_manifest_id,
+                    decision_inputs_hash, metadata_json, occurred_at
+                 FROM trace_audit_events
+                 WHERE tenant_id = $1
+                 ORDER BY occurred_at ASC",
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        rows.iter().map(row_to_audit_event).collect()
     }
 
     async fn append_trace_credit_event(

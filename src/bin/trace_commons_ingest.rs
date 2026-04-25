@@ -26,6 +26,7 @@ use ironclaw::trace_contribution::{
 };
 use ironclaw::trace_corpus_storage::{
     TraceAuditAction as StorageTraceAuditAction,
+    TraceAuditEventRecord as StorageTraceAuditEventRecord,
     TraceAuditEventWrite as StorageTraceAuditEventWrite,
     TraceAuditSafeMetadata as StorageTraceAuditSafeMetadata,
     TraceCorpusStatus as StorageTraceCorpusStatus,
@@ -77,6 +78,7 @@ struct AppState {
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
     db_replay_export_reads: bool,
+    db_audit_reads: bool,
     artifact_store: Option<Arc<LocalEncryptedTraceArtifactStore>>,
 }
 
@@ -138,6 +140,10 @@ impl AppState {
                 "TRACE_COMMONS_DB_REPLAY_EXPORT_READS requires TRACE_COMMONS_DB_DUAL_WRITE"
             );
         }
+        let db_audit_reads = env_truthy("TRACE_COMMONS_DB_AUDIT_READS");
+        if db_audit_reads && db_mirror.is_none() {
+            anyhow::bail!("TRACE_COMMONS_DB_AUDIT_READS requires TRACE_COMMONS_DB_DUAL_WRITE");
+        }
         let artifact_store = trace_artifact_store_from_env(&root)?;
         Ok(Self {
             root,
@@ -146,6 +152,7 @@ impl AppState {
             db_contributor_reads,
             db_reviewer_reads,
             db_replay_export_reads,
+            db_audit_reads,
             artifact_store,
         })
     }
@@ -1197,7 +1204,8 @@ async fn audit_events_handler(
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_reviewer(&tenant)?;
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
-    let events = read_all_audit_events(&state.root, &tenant.tenant_id)
+    let events = read_audit_events(state.as_ref(), &tenant)
+        .await
         .map_err(internal_error)?
         .into_iter()
         .rev()
@@ -1585,6 +1593,33 @@ async fn read_contributor_credit_view_from_db(
     })
 }
 
+async fn read_audit_events(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<Vec<TraceCommonsAuditEvent>> {
+    if state.db_audit_reads {
+        return read_audit_events_from_db(state, tenant).await;
+    }
+
+    read_all_audit_events(&state.root, &tenant.tenant_id)
+}
+
+async fn read_audit_events_from_db(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<Vec<TraceCommonsAuditEvent>> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .context("TRACE_COMMONS_DB_AUDIT_READS is enabled without a DB mirror")?;
+    db.list_trace_audit_events(&tenant.tenant_id)
+        .await
+        .context("failed to read Trace Commons audit events from DB mirror")?
+        .into_iter()
+        .map(trace_commons_audit_event_from_storage)
+        .collect()
+}
+
 fn trace_commons_record_from_storage_submission(
     record: StorageTraceSubmissionRecord,
 ) -> Option<anyhow::Result<TraceCommonsSubmissionRecord>> {
@@ -1615,6 +1650,86 @@ fn trace_commons_record_from_storage_submission(
             artifact_receipt: None,
         })
     })())
+}
+
+fn trace_commons_audit_event_from_storage(
+    event: StorageTraceAuditEventRecord,
+) -> anyhow::Result<TraceCommonsAuditEvent> {
+    let (status, reason, export_count) = match &event.metadata {
+        StorageTraceAuditSafeMetadata::Submission {
+            status,
+            privacy_risk: _,
+        } => (
+            trace_corpus_status_from_storage(*status),
+            event.reason.clone(),
+            None,
+        ),
+        StorageTraceAuditSafeMetadata::ReviewDecision {
+            decision: _,
+            resulting_status,
+            reason_code,
+        } => (
+            trace_corpus_status_from_storage(*resulting_status),
+            reason_code.clone().or_else(|| event.reason.clone()),
+            None,
+        ),
+        StorageTraceAuditSafeMetadata::Export {
+            artifact_kind: _,
+            purpose_code,
+            item_count,
+        } => (
+            None,
+            purpose_code.clone().or_else(|| event.reason.clone()),
+            Some(*item_count as usize),
+        ),
+        StorageTraceAuditSafeMetadata::Maintenance {
+            dry_run,
+            action_counts,
+        } => (
+            None,
+            Some(format!(
+                "dry_run={dry_run};action_counts={}",
+                serde_json::to_string(action_counts)
+                    .context("failed to serialize trace audit action_counts")?
+            )),
+            Some(
+                action_counts
+                    .values()
+                    .copied()
+                    .map(|count| count as usize)
+                    .sum(),
+            ),
+        ),
+        StorageTraceAuditSafeMetadata::Empty => (None, event.reason.clone(), None),
+    };
+    Ok(TraceCommonsAuditEvent {
+        event_id: event.audit_event_id,
+        tenant_id: event.tenant_id,
+        submission_id: event.submission_id.unwrap_or_else(Uuid::nil),
+        kind: storage_audit_action_kind(event.action).to_string(),
+        created_at: event.occurred_at,
+        status,
+        actor_role: TokenRole::parse(&event.actor_role).ok(),
+        actor_principal_ref: Some(event.actor_principal_ref),
+        reason,
+        export_count,
+        export_id: event.export_manifest_id,
+    })
+}
+
+fn storage_audit_action_kind(action: StorageTraceAuditAction) -> &'static str {
+    match action {
+        StorageTraceAuditAction::Submit => "submitted",
+        StorageTraceAuditAction::Read => "read",
+        StorageTraceAuditAction::Review => "review_decision",
+        StorageTraceAuditAction::CreditMutate => "credit_mutate",
+        StorageTraceAuditAction::Revoke => "revoked",
+        StorageTraceAuditAction::Export => "dataset_export",
+        StorageTraceAuditAction::Retain => "retain",
+        StorageTraceAuditAction::Purge => "purge",
+        StorageTraceAuditAction::VectorIndex => "vector_index",
+        StorageTraceAuditAction::BenchmarkConvert => "benchmark_conversion",
+    }
 }
 
 fn trace_commons_derived_record_from_storage(
@@ -3982,32 +4097,39 @@ mod tests {
     use ironclaw::trace_corpus_storage::TraceCorpusStore;
 
     fn test_state(root: PathBuf) -> Arc<AppState> {
-        test_state_with_options(root, None, None, false, false, false)
+        test_state_with_options(root, None, None, false, false, false, false)
     }
 
     fn test_state_with_db(root: PathBuf, db_mirror: Option<Arc<dyn Database>>) -> Arc<AppState> {
-        test_state_with_options(root, db_mirror, None, false, false, false)
+        test_state_with_options(root, db_mirror, None, false, false, false, false)
     }
 
     fn test_state_with_db_contributor_reads(
         root: PathBuf,
         db_mirror: Option<Arc<dyn Database>>,
     ) -> Arc<AppState> {
-        test_state_with_options(root, db_mirror, None, true, false, false)
+        test_state_with_options(root, db_mirror, None, true, false, false, false)
     }
 
     fn test_state_with_db_reviewer_reads(
         root: PathBuf,
         db_mirror: Option<Arc<dyn Database>>,
     ) -> Arc<AppState> {
-        test_state_with_options(root, db_mirror, None, false, true, false)
+        test_state_with_options(root, db_mirror, None, false, true, false, false)
     }
 
     fn test_state_with_db_replay_export_reads(
         root: PathBuf,
         db_mirror: Option<Arc<dyn Database>>,
     ) -> Arc<AppState> {
-        test_state_with_options(root, db_mirror, None, false, false, true)
+        test_state_with_options(root, db_mirror, None, false, false, true, false)
+    }
+
+    fn test_state_with_db_audit_reads(
+        root: PathBuf,
+        db_mirror: Option<Arc<dyn Database>>,
+    ) -> Arc<AppState> {
+        test_state_with_options(root, db_mirror, None, false, false, false, true)
     }
 
     fn test_state_with_options(
@@ -4017,6 +4139,7 @@ mod tests {
         db_contributor_reads: bool,
         db_reviewer_reads: bool,
         db_replay_export_reads: bool,
+        db_audit_reads: bool,
     ) -> Arc<AppState> {
         let mut tokens = BTreeMap::new();
         insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Contributor);
@@ -4041,6 +4164,7 @@ mod tests {
             db_contributor_reads,
             db_reviewer_reads,
             db_replay_export_reads,
+            db_audit_reads,
             artifact_store,
         })
     }
@@ -4136,6 +4260,7 @@ mod tests {
             temp.path().to_path_buf(),
             None,
             Some(artifact_store.clone()),
+            false,
             false,
             false,
             false,
@@ -5438,6 +5563,137 @@ mod tests {
         assert_eq!(export.items[0].submission_id, submission_id);
         assert_eq!(export.items[0].required_tools, vec!["shell"]);
         assert!(export.items[0].canonical_summary_hash.is_some());
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn replay_export_uses_db_object_ref_after_review_status_change() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp
+            .path()
+            .join("trace-mirror-replay-export-reviewed.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        envelope.replay.replayable = true;
+        envelope
+            .replay
+            .required_tools
+            .push("calendar_create".to_string());
+        let submission_id = envelope.submission_id;
+
+        let Json(receipt) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("quarantined submission dual-writes");
+        assert_eq!(receipt.status, "quarantined");
+        let Json(review_receipt) = review_decision_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Approve,
+                reason: Some("approved for replay export".to_string()),
+                credit_points_pending: Some(1.0),
+            }),
+        )
+        .await
+        .expect("reviewer approves quarantined trace");
+        assert_eq!(review_receipt.status, "accepted");
+
+        let tenant_dir = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"));
+        assert!(
+            tenant_dir
+                .join("objects")
+                .join("quarantined")
+                .join(format!("{submission_id}.json"))
+                .exists(),
+            "the envelope object stays under its original quarantine path"
+        );
+        std::fs::remove_dir_all(tenant_dir.join("metadata")).expect("remove file metadata");
+        std::fs::remove_dir_all(tenant_dir.join("derived")).expect("remove derived metadata");
+
+        let replay_state =
+            test_state_with_db_replay_export_reads(temp.path().to_path_buf(), Some(db));
+        let Json(export) = dataset_replay_handler(
+            State(replay_state),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("db_reviewed_replay_export".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: None,
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("replay export resolves DB object ref after review");
+        assert_eq!(export.item_count, 1);
+        assert_eq!(export.items[0].submission_id, submission_id);
+        assert_eq!(export.items[0].required_tools, vec!["calendar_create"]);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn audit_events_can_read_from_db_mirror_when_enabled() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-mirror-audit-reads.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let submit_state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(State(submit_state), auth_headers("token-a"), Json(envelope))
+            .await
+            .expect("submission dual-writes audit event");
+        let tenant_dir = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"));
+        std::fs::remove_dir_all(tenant_dir.join("audit")).expect("remove file audit events");
+
+        let audit_state = test_state_with_db_audit_reads(temp.path().to_path_buf(), Some(db));
+        let Json(events) = audit_events_handler(
+            State(audit_state),
+            auth_headers("review-token-a"),
+            Query(AuditEventsQuery { limit: Some(10) }),
+        )
+        .await
+        .expect("audit events can read DB mirror");
+        assert!(events.iter().any(|event| {
+            event.submission_id == submission_id
+                && event.kind == "submitted"
+                && event.status == Some(TraceCorpusStatus::Accepted)
+        }));
     }
 
     #[tokio::test]
