@@ -105,6 +105,8 @@ impl ApprovalKey {
 pub enum RunStateError {
     #[error("unknown invocation {invocation_id}")]
     UnknownInvocation { invocation_id: InvocationId },
+    #[error("unknown approval request {request_id}")]
+    UnknownApprovalRequest { request_id: ApprovalRequestId },
     #[error("invalid storage path: {0}")]
     InvalidPath(String),
     #[error("filesystem error: {0}")]
@@ -178,6 +180,16 @@ pub trait ApprovalRequestStore: Send + Sync {
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
     ) -> Result<Option<ApprovalRecord>, RunStateError>;
+    async fn approve(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError>;
+    async fn deny(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError>;
     async fn records_for_scope(
         &self,
         scope: &ResourceScope,
@@ -320,6 +332,20 @@ impl InMemoryApprovalRequestStore {
         Self::default()
     }
 
+    fn update_status(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+        status: ApprovalStatus,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        let mut records = self.records_guard();
+        let record = records
+            .get_mut(&ApprovalKey::new(scope, request_id))
+            .ok_or(RunStateError::UnknownApprovalRequest { request_id })?;
+        record.status = status;
+        Ok(record.clone())
+    }
+
     fn records_guard(&self) -> MutexGuard<'_, HashMap<ApprovalKey, ApprovalRecord>> {
         self.records
             .lock()
@@ -355,6 +381,22 @@ impl ApprovalRequestStore for InMemoryApprovalRequestStore {
             .records_guard()
             .get(&ApprovalKey::new(scope, request_id))
             .cloned())
+    }
+
+    async fn approve(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.update_status(scope, request_id, ApprovalStatus::Approved)
+    }
+
+    async fn deny(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.update_status(scope, request_id, ApprovalStatus::Denied)
     }
 
     async fn records_for_scope(
@@ -538,6 +580,21 @@ where
         Self { filesystem }
     }
 
+    async fn update_status(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+        status: ApprovalStatus,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        let mut record = self
+            .get(scope, request_id)
+            .await?
+            .ok_or(RunStateError::UnknownApprovalRequest { request_id })?;
+        record.status = status;
+        self.write_record(&record).await?;
+        Ok(record)
+    }
+
     async fn write_record(&self, record: &ApprovalRecord) -> Result<(), RunStateError> {
         let path = approval_record_path(&record.scope, record.request.id)?;
         let bytes = serialize_pretty(record)?;
@@ -582,6 +639,24 @@ where
         } else {
             Ok(None)
         }
+    }
+
+    async fn approve(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.update_status(scope, request_id, ApprovalStatus::Approved)
+            .await
+    }
+
+    async fn deny(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.update_status(scope, request_id, ApprovalStatus::Denied)
+            .await
     }
 
     async fn records_for_scope(

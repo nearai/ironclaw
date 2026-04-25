@@ -3976,6 +3976,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_approvals"
+version = "0.1.0"
+dependencies = [
+ "ironclaw_authorization",
+ "ironclaw_host_api",
+ "ironclaw_run_state",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "ironclaw_authorization"
 version = "0.1.0"
 dependencies = [
