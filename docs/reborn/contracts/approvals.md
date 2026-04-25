@@ -27,13 +27,14 @@ ApprovalResolver
   -> deny: marks Denied and issues no lease
 
 LeaseBackedAuthorizer
-  -> combines ExecutionContext.grants with active scoped leases
+  -> combines ExecutionContext.grants with active non-fingerprinted scoped leases
   -> returns Allow/Deny before CapabilityHost dispatches runtime work
 
 CapabilityHost::resume_json
-  -> reloads the approved record and matching lease
+  -> reloads the approved record and matching fingerprinted lease
   -> compares the replayed invocation fingerprint
-  -> dispatches and consumes the lease on success
+  -> claims the lease before runtime dispatch
+  -> dispatches and consumes the claimed lease on success
 ```
 
 ---
@@ -117,14 +118,17 @@ The lease adds host-managed lifecycle state:
 ```rust
 pub enum CapabilityLeaseStatus {
     Active,
+    Claimed,
     Consumed,
     Revoked,
 }
 ```
 
-V1 includes an in-memory lease store with exact tenant/user/invocation scoped lookup, consumption, and revocation. Lease lookup, consumption, and revocation are not global by ID; the authorizer asks for unexpired active leases visible to the current `ExecutionContext.resource_scope`. This slice treats issued approval leases as one-off invocation leases: a lease only authorizes a context with the same invocation ID as the approved request. Broader reusable approval scopes are a later policy slice.
+V1 includes an in-memory lease store with exact tenant/user/invocation scoped lookup, claim, consumption, and revocation. Lease lookup, claim, consumption, and revocation are not global by ID; the authorizer asks for unexpired active leases visible to the current `ExecutionContext.resource_scope`. This slice treats issued approval leases as one-off invocation leases: a lease only authorizes a context with the same invocation ID as the approved request. Broader reusable approval scopes are a later policy slice.
 
-Leases preserve the approval request fingerprint so resume can validate that the replayed invocation request matches what was approved. Resume only considers unexpired active leases visible to the exact tenant/user/invocation scope.
+Leases preserve the approval request fingerprint so resume can validate that the replayed invocation request matches what was approved. Fingerprinted approval leases are not converted into generic grants for plain `invoke_json`; they can only be used by `resume_json`, which compares the fingerprint and claims the exact lease before dispatch.
+
+Claiming enforces that the lease is active, unexpired, not exhausted, and fingerprint-equal to the replayed request. A claimed lease is hidden from generic authorization so a second concurrent resume cannot also dispatch with the same one-shot approval lease.
 
 Lease consumption enforces `GrantConstraints.max_invocations`:
 
@@ -135,7 +139,7 @@ Some(0)     -> reject as exhausted
 None        -> no invocation-count decrement
 ```
 
-Expiration is enforced during authorization and consumption using `GrantConstraints.expires_at`.
+Expiration is enforced during authorization, claim, and consumption using `GrantConstraints.expires_at`.
 
 ---
 
@@ -184,13 +188,15 @@ No lease is issued for denied requests.
 
 ## 6. Authorization integration
 
-`LeaseBackedAuthorizer` evaluates both request-local grants and active leases:
+`LeaseBackedAuthorizer` evaluates request-local grants and active non-fingerprinted leases:
 
 ```text
 ExecutionContext.grants + CapabilityLeaseStore.active_grants_for_context(context)
   -> normal grant matching rules
   -> Decision::Allow | Decision::Deny
 ```
+
+Fingerprinted approval leases are deliberately excluded from `active_grants_for_context`. During resume, `CapabilityHost` first validates the approved fingerprint and claims the lease, then passes the claimed lease grant as request-local authority for the replayed dispatch. This keeps approval leases from becoming ambient same-invocation grants for plain `invoke_json`.
 
 This preserves the dispatcher boundary:
 

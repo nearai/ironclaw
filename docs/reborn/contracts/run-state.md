@@ -68,7 +68,8 @@ pub struct ApprovalRecord {
 
 The run-state API is current-state oriented and async so durable implementations can use the host filesystem abstraction.
 
-Every read, list, and mutation after `start` requires a `ResourceScope`:
+Every read, list, and mutation after `start` requires a `ResourceScope`. `start` creates a new invocation record and must fail if the same tenant/user/invocation already exists; callers must use explicit resume/transition APIs rather than overwriting current state.
+
 
 ```rust
 pub trait RunStateStore {
@@ -145,6 +146,7 @@ When configured, `invoke_json` records under the caller's `ExecutionContext.reso
 ```text
 start -> Running
 Decision::RequireApproval -> save pending ApprovalRecord + BlockedApproval
+Decision::RequireApproval with incoherent store wiring -> Failed(error_kind = ApprovalStoreMissing)
 Decision::Deny -> Failed(error_kind = AuthorizationDenied)
 dispatch success -> Completed
 dispatch failure -> Failed(error_kind = Dispatch)
@@ -153,10 +155,11 @@ dispatch failure -> Failed(error_kind = Dispatch)
 `resume_json` continues a `BlockedApproval` run only after loading an approved request and matching lease under the same tenant/user/invocation scope:
 
 ```text
-Approved + matching fingerprint + active lease -> dispatch -> consume lease -> Completed
+Approved + matching fingerprint + active lease -> claim lease -> dispatch -> consume lease -> Completed
 Denied/Expired/Pending approval -> Failed(error_kind = ApprovalDenied/ApprovalExpired/ApprovalPending)
 fingerprint mismatch -> Failed(error_kind = InvocationFingerprintMismatch)
 missing lease -> Failed(error_kind = ApprovalLeaseMissing)
+failed lease claim -> Failed(error_kind = ApprovalLeaseClaim)
 dispatch failure -> Failed(error_kind = Dispatch)
 ```
 
