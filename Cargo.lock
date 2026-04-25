@@ -4162,6 +4162,7 @@ dependencies = [
  "ironclaw_events",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_resources",
  "serde",
  "serde_json",
  "tempfile",
