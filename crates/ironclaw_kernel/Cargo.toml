@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }

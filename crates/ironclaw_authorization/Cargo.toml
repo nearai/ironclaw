@@ -1,0 +1,12 @@
+[package]
+name = "ironclaw_authorization"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"

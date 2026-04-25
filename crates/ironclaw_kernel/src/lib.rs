@@ -5,11 +5,13 @@
 //! itself, or execute product workflows. Those responsibilities stay in the
 //! owning service crates.
 
+use ironclaw_authorization::CapabilityDispatchAuthorizer;
 use ironclaw_events::{EventError, EventSink, RuntimeEvent};
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, ResourceEstimate, ResourceScope, ResourceUsage, RuntimeKind,
+    CapabilityId, Decision, DenyReason, ExecutionContext, ExtensionId, ResourceEstimate,
+    ResourceScope, ResourceUsage, RuntimeKind,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_resources::{ResourceGovernor, ResourceReceipt};
@@ -56,6 +58,13 @@ pub enum DispatchError {
         descriptor_runtime: RuntimeKind,
         package_runtime: RuntimeKind,
     },
+    #[error("capability {capability} dispatch denied: {reason:?}")]
+    AuthorizationDenied {
+        capability: CapabilityId,
+        reason: DenyReason,
+    },
+    #[error("capability {capability} dispatch requires approval")]
+    AuthorizationRequiresApproval { capability: CapabilityId },
     #[error("runtime backend {runtime:?} is not configured")]
     MissingRuntimeBackend { runtime: RuntimeKind },
     #[error(
@@ -112,6 +121,7 @@ where
     script_runtime: Option<&'a dyn ScriptExecutor>,
     mcp_runtime: Option<&'a dyn McpExecutor>,
     event_sink: Option<&'a dyn EventSink>,
+    authorization: Option<(&'a dyn CapabilityDispatchAuthorizer, &'a ExecutionContext)>,
 }
 
 impl<'a, F, G> RuntimeDispatcher<'a, F, G>
@@ -128,6 +138,7 @@ where
             script_runtime: None,
             mcp_runtime: None,
             event_sink: None,
+            authorization: None,
         }
     }
 
@@ -148,6 +159,15 @@ where
 
     pub fn with_event_sink(mut self, sink: &'a dyn EventSink) -> Self {
         self.event_sink = Some(sink);
+        self
+    }
+
+    pub fn with_capability_authorizer(
+        mut self,
+        authorizer: &'a dyn CapabilityDispatchAuthorizer,
+        context: &'a ExecutionContext,
+    ) -> Self {
+        self.authorization = Some((authorizer, context));
         self
     }
 
@@ -208,6 +228,56 @@ where
             )
             .await?;
             return Err(error);
+        }
+
+        if let Some((authorizer, context)) = self.authorization {
+            if context.resource_scope != request.scope {
+                let error = DispatchError::AuthorizationDenied {
+                    capability: request.capability_id,
+                    reason: DenyReason::InternalInvariantViolation,
+                };
+                self.emit_dispatch_failure(
+                    scope,
+                    capability_id,
+                    Some(descriptor.provider.clone()),
+                    Some(descriptor.runtime),
+                    &error,
+                )
+                .await?;
+                return Err(error);
+            }
+            match authorizer.authorize_dispatch(context, descriptor, &request.estimate) {
+                Decision::Allow { .. } => {}
+                Decision::Deny { reason } => {
+                    let error = DispatchError::AuthorizationDenied {
+                        capability: request.capability_id,
+                        reason,
+                    };
+                    self.emit_dispatch_failure(
+                        scope,
+                        capability_id,
+                        Some(descriptor.provider.clone()),
+                        Some(descriptor.runtime),
+                        &error,
+                    )
+                    .await?;
+                    return Err(error);
+                }
+                Decision::RequireApproval { .. } => {
+                    let error = DispatchError::AuthorizationRequiresApproval {
+                        capability: request.capability_id,
+                    };
+                    self.emit_dispatch_failure(
+                        scope,
+                        capability_id,
+                        Some(descriptor.provider.clone()),
+                        Some(descriptor.runtime),
+                        &error,
+                    )
+                    .await?;
+                    return Err(error);
+                }
+            }
         }
 
         match descriptor.runtime {
@@ -471,6 +541,8 @@ fn dispatch_error_kind(error: &DispatchError) -> &'static str {
         DispatchError::UnknownCapability { .. } => "UnknownCapability",
         DispatchError::UnknownProvider { .. } => "UnknownProvider",
         DispatchError::RuntimeMismatch { .. } => "RuntimeMismatch",
+        DispatchError::AuthorizationDenied { .. } => "AuthorizationDenied",
+        DispatchError::AuthorizationRequiresApproval { .. } => "AuthorizationRequiresApproval",
         DispatchError::MissingRuntimeBackend { .. } => "MissingRuntimeBackend",
         DispatchError::UnsupportedRuntime { .. } => "UnsupportedRuntime",
         DispatchError::Event(_) => "Event",

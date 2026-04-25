@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use ironclaw_authorization::*;
 use ironclaw_extensions::*;
 use ironclaw_filesystem::*;
 use ironclaw_host_api::*;
@@ -168,6 +169,128 @@ async fn dispatcher_routes_mcp_capability_through_mcp_runtime() {
     assert_eq!(requests[0].transport, "stdio");
     assert_eq!(requests[0].command.as_deref(), Some("github-mcp"));
     assert_eq!(requests[0].input, json!({"query": "ironclaw"}));
+}
+
+#[tokio::test]
+async fn dispatcher_authorization_denial_happens_before_runtime_or_resource_reservation() {
+    let (fs, package) = wasm_package_with_module(json_echo_module());
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    let runtime = WasmRuntime::for_testing().unwrap();
+    let governor = InMemoryResourceGovernor::new();
+    let authorizer = GrantAuthorizer::new();
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
+        .with_wasm_runtime(&runtime)
+        .with_capability_authorizer(&authorizer, &context);
+    let err = dispatcher
+        .dispatch_json(CapabilityDispatchRequest {
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            scope,
+            estimate: ResourceEstimate {
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+            input: json!({"message": "blocked"}),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        DispatchError::AuthorizationDenied {
+            reason: DenyReason::MissingGrant,
+            ..
+        }
+    ));
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(governor.usage_for(&account), ResourceTally::default());
+}
+
+#[tokio::test]
+async fn dispatcher_authorization_scope_mismatch_fails_before_reservation() {
+    let (fs, package) = wasm_package_with_module(json_echo_module());
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    let runtime = WasmRuntime::for_testing().unwrap();
+    let governor = InMemoryResourceGovernor::new();
+    let authorizer = GrantAuthorizer::new();
+    let context = execution_context(CapabilitySet {
+        grants: vec![grant_for(
+            CapabilityId::new("echo.say").unwrap(),
+            Principal::Extension(ExtensionId::new("caller").unwrap()),
+            vec![EffectKind::DispatchCapability],
+        )],
+    });
+    let request_scope = sample_scope();
+    let account = ResourceAccount::tenant(request_scope.tenant_id.clone());
+
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
+        .with_wasm_runtime(&runtime)
+        .with_capability_authorizer(&authorizer, &context);
+    let err = dispatcher
+        .dispatch_json(CapabilityDispatchRequest {
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            scope: request_scope,
+            estimate: ResourceEstimate {
+                concurrency_slots: Some(1),
+                output_bytes: Some(10_000),
+                ..ResourceEstimate::default()
+            },
+            input: json!({"message": "wrong scope"}),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        DispatchError::AuthorizationDenied {
+            reason: DenyReason::InternalInvariantViolation,
+            ..
+        }
+    ));
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+}
+
+#[tokio::test]
+async fn dispatcher_authorization_allow_reaches_runtime() {
+    let (fs, package) = wasm_package_with_module(json_echo_module());
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    let runtime = WasmRuntime::for_testing().unwrap();
+    let governor = InMemoryResourceGovernor::new();
+    let authorizer = GrantAuthorizer::new();
+    let context = execution_context(CapabilitySet {
+        grants: vec![grant_for(
+            CapabilityId::new("echo.say").unwrap(),
+            Principal::Extension(ExtensionId::new("caller").unwrap()),
+            vec![EffectKind::DispatchCapability],
+        )],
+    });
+
+    let scope = context.resource_scope.clone();
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
+        .with_wasm_runtime(&runtime)
+        .with_capability_authorizer(&authorizer, &context);
+    let result = dispatcher
+        .dispatch_json(CapabilityDispatchRequest {
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            scope,
+            estimate: ResourceEstimate {
+                concurrency_slots: Some(1),
+                output_bytes: Some(10_000),
+                ..ResourceEstimate::default()
+            },
+            input: json!({"message": "authorized"}),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.output, json!({"message": "authorized"}));
+    assert_eq!(result.receipt.status, ReservationStatus::Reconciled);
 }
 
 #[tokio::test]
@@ -481,6 +604,57 @@ impl ScriptBackend for RecordingScriptBackend {
     fn execute(&self, request: ScriptBackendRequest) -> Result<ScriptBackendOutput, String> {
         self.requests.lock().unwrap().push(request);
         Ok(self.output.clone())
+    }
+}
+
+fn grant_for(
+    capability: CapabilityId,
+    grantee: Principal,
+    allowed_effects: Vec<EffectKind>,
+) -> CapabilityGrant {
+    CapabilityGrant {
+        id: CapabilityGrantId::new(),
+        capability,
+        grantee,
+        issued_by: Principal::System,
+        constraints: GrantConstraints {
+            allowed_effects,
+            mounts: MountView::default(),
+            network: NetworkPolicy::default(),
+            secrets: Vec::new(),
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: None,
+        },
+    }
+}
+
+fn execution_context(grants: CapabilitySet) -> ExecutionContext {
+    let invocation_id = InvocationId::new();
+    let resource_scope = ResourceScope {
+        tenant_id: TenantId::new("tenant1").unwrap(),
+        user_id: UserId::new("user1").unwrap(),
+        project_id: Some(ProjectId::new("project1").unwrap()),
+        mission_id: None,
+        thread_id: None,
+        invocation_id,
+    };
+    ExecutionContext {
+        invocation_id,
+        correlation_id: CorrelationId::new(),
+        process_id: None,
+        parent_process_id: None,
+        tenant_id: resource_scope.tenant_id.clone(),
+        user_id: resource_scope.user_id.clone(),
+        project_id: resource_scope.project_id.clone(),
+        mission_id: resource_scope.mission_id.clone(),
+        thread_id: resource_scope.thread_id.clone(),
+        extension_id: ExtensionId::new("caller").unwrap(),
+        runtime: RuntimeKind::Wasm,
+        trust: TrustClass::Sandbox,
+        grants,
+        mounts: MountView::default(),
+        resource_scope,
     }
 }
 

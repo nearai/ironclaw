@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use ironclaw_authorization::*;
 use ironclaw_extensions::*;
 use ironclaw_filesystem::*;
 use ironclaw_host_api::*;
@@ -23,12 +24,15 @@ async fn vertical_slice_discovers_and_dispatches_wasm_script_and_mcp_capabilitie
     let script_backend = EchoScriptBackend;
     let script_runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), script_backend);
     let mcp_runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), EchoMcpClient);
+    let authorizer = GrantAuthorizer::new();
+    let context = sample_context();
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
         .with_wasm_runtime(&wasm_runtime)
         .with_script_runtime(&script_runtime)
-        .with_mcp_runtime(&mcp_runtime);
+        .with_mcp_runtime(&mcp_runtime)
+        .with_capability_authorizer(&authorizer, &context);
 
-    let wasm_scope = sample_scope();
+    let wasm_scope = context.resource_scope.clone();
     let wasm_account = ResourceAccount::tenant(wasm_scope.tenant_id.clone());
     let wasm = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
@@ -53,7 +57,7 @@ async fn vertical_slice_discovers_and_dispatches_wasm_script_and_mcp_capabilitie
         ResourceTally::default()
     );
 
-    let script_scope = sample_scope();
+    let script_scope = context.resource_scope.clone();
     let script_account = ResourceAccount::tenant(script_scope.tenant_id.clone());
     let script = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
@@ -81,7 +85,7 @@ async fn vertical_slice_discovers_and_dispatches_wasm_script_and_mcp_capabilitie
     assert_eq!(script.usage.process_count, 1);
     assert!(governor.usage_for(&script_account).process_count >= 1);
 
-    let mcp_scope = sample_scope();
+    let mcp_scope = context.resource_scope.clone();
     let mcp_account = ResourceAccount::tenant(mcp_scope.tenant_id.clone());
     let mcp = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
@@ -187,14 +191,77 @@ fn json_echo_module() -> Vec<u8> {
     .unwrap()
 }
 
-fn sample_scope() -> ResourceScope {
+fn grant_for(
+    capability: CapabilityId,
+    grantee: Principal,
+    allowed_effects: Vec<EffectKind>,
+) -> CapabilityGrant {
+    CapabilityGrant {
+        id: CapabilityGrantId::new(),
+        capability,
+        grantee,
+        issued_by: Principal::System,
+        constraints: GrantConstraints {
+            allowed_effects,
+            mounts: MountView::default(),
+            network: NetworkPolicy::default(),
+            secrets: Vec::new(),
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: None,
+        },
+    }
+}
+
+fn sample_context() -> ExecutionContext {
+    let invocation_id = InvocationId::new();
+    let resource_scope = sample_scope(invocation_id);
+    let extension_id = ExtensionId::new("demo-host").unwrap();
+    ExecutionContext {
+        invocation_id,
+        correlation_id: CorrelationId::new(),
+        process_id: None,
+        parent_process_id: None,
+        tenant_id: resource_scope.tenant_id.clone(),
+        user_id: resource_scope.user_id.clone(),
+        project_id: resource_scope.project_id.clone(),
+        mission_id: resource_scope.mission_id.clone(),
+        thread_id: resource_scope.thread_id.clone(),
+        extension_id: extension_id.clone(),
+        runtime: RuntimeKind::System,
+        trust: TrustClass::System,
+        grants: CapabilitySet {
+            grants: vec![
+                grant_for(
+                    CapabilityId::new("echo-wasm.say").unwrap(),
+                    Principal::Extension(extension_id.clone()),
+                    vec![EffectKind::DispatchCapability],
+                ),
+                grant_for(
+                    CapabilityId::new("echo-script.say").unwrap(),
+                    Principal::Extension(extension_id.clone()),
+                    vec![EffectKind::DispatchCapability],
+                ),
+                grant_for(
+                    CapabilityId::new("echo-mcp.say").unwrap(),
+                    Principal::Extension(extension_id),
+                    vec![EffectKind::DispatchCapability, EffectKind::Network],
+                ),
+            ],
+        },
+        mounts: MountView::default(),
+        resource_scope,
+    }
+}
+
+fn sample_scope(invocation_id: InvocationId) -> ResourceScope {
     ResourceScope {
         tenant_id: TenantId::new("tenant1").unwrap(),
         user_id: UserId::new("user1").unwrap(),
         project_id: Some(ProjectId::new("project1").unwrap()),
         mission_id: None,
         thread_id: None,
-        invocation_id: InvocationId::new(),
+        invocation_id,
     }
 }
 

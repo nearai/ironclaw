@@ -1,12 +1,15 @@
 use std::{error::Error, sync::Arc};
 
 use async_trait::async_trait;
+use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_events::{JsonlEventSink, RuntimeEventKind};
 use ironclaw_extensions::ExtensionDiscovery;
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{
-    CapabilityId, HostPath, InvocationId, ProjectId, ResourceEstimate, ResourceScope, RuntimeKind,
-    TenantId, UserId, VirtualPath,
+    CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, CorrelationId, EffectKind,
+    ExecutionContext, ExtensionId, GrantConstraints, HostPath, InvocationId, MountView,
+    NetworkPolicy, Principal, ProjectId, ResourceEstimate, ResourceScope, RuntimeKind, TenantId,
+    TrustClass, UserId, VirtualPath,
 };
 use ironclaw_kernel::{CapabilityDispatchRequest, RuntimeDispatcher};
 use ironclaw_mcp::{McpClient, McpClientOutput, McpClientRequest, McpRuntime, McpRuntimeConfig};
@@ -40,18 +43,21 @@ where
     let wasm_runtime = WasmRuntime::for_testing()?;
     let script_runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), script_backend);
     let mcp_runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), EchoMcpClient);
+    let authorizer = GrantAuthorizer::new();
+    let context = sample_context()?;
     let event_path = VirtualPath::new("/engine/events/reborn-demo.jsonl")?;
     let events = JsonlEventSink::new(Arc::clone(&fs), event_path.clone());
     let dispatcher = RuntimeDispatcher::new(&registry, fs.as_ref(), &governor)
         .with_wasm_runtime(&wasm_runtime)
         .with_script_runtime(&script_runtime)
         .with_mcp_runtime(&mcp_runtime)
+        .with_capability_authorizer(&authorizer, &context)
         .with_event_sink(&events);
 
     let wasm = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo-wasm.say")?,
-            scope: sample_scope()?,
+            scope: context.resource_scope.clone(),
             estimate: ResourceEstimate {
                 concurrency_slots: Some(1),
                 output_bytes: Some(10_000),
@@ -64,7 +70,7 @@ where
     let script = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo-script.say")?,
-            scope: sample_scope()?,
+            scope: context.resource_scope.clone(),
             estimate: ResourceEstimate {
                 concurrency_slots: Some(1),
                 process_count: Some(1),
@@ -78,7 +84,7 @@ where
     let mcp = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo-mcp.say")?,
-            scope: sample_scope()?,
+            scope: context.resource_scope.clone(),
             estimate: ResourceEstimate {
                 concurrency_slots: Some(1),
                 process_count: Some(1),
@@ -214,15 +220,74 @@ fn json_echo_module() -> Result<Vec<u8>, wat::Error> {
     )
 }
 
-fn sample_scope() -> Result<ResourceScope, Box<dyn Error>> {
-    Ok(ResourceScope {
+fn sample_context() -> Result<ExecutionContext, Box<dyn Error>> {
+    let invocation_id = InvocationId::new();
+    let resource_scope = ResourceScope {
         tenant_id: TenantId::new("tenant1")?,
         user_id: UserId::new("user1")?,
         project_id: Some(ProjectId::new("project1")?),
         mission_id: None,
         thread_id: None,
-        invocation_id: InvocationId::new(),
+        invocation_id,
+    };
+    let extension_id = ExtensionId::new("demo-host")?;
+    Ok(ExecutionContext {
+        invocation_id,
+        correlation_id: CorrelationId::new(),
+        process_id: None,
+        parent_process_id: None,
+        tenant_id: resource_scope.tenant_id.clone(),
+        user_id: resource_scope.user_id.clone(),
+        project_id: resource_scope.project_id.clone(),
+        mission_id: resource_scope.mission_id.clone(),
+        thread_id: resource_scope.thread_id.clone(),
+        extension_id: extension_id.clone(),
+        runtime: RuntimeKind::System,
+        trust: TrustClass::System,
+        grants: CapabilitySet {
+            grants: vec![
+                grant_for(
+                    CapabilityId::new("echo-wasm.say")?,
+                    extension_id.clone(),
+                    vec![EffectKind::DispatchCapability],
+                ),
+                grant_for(
+                    CapabilityId::new("echo-script.say")?,
+                    extension_id.clone(),
+                    vec![EffectKind::DispatchCapability],
+                ),
+                grant_for(
+                    CapabilityId::new("echo-mcp.say")?,
+                    extension_id,
+                    vec![EffectKind::DispatchCapability, EffectKind::Network],
+                ),
+            ],
+        },
+        mounts: MountView::default(),
+        resource_scope,
     })
+}
+
+fn grant_for(
+    capability: CapabilityId,
+    extension_id: ExtensionId,
+    allowed_effects: Vec<EffectKind>,
+) -> CapabilityGrant {
+    CapabilityGrant {
+        id: CapabilityGrantId::new(),
+        capability,
+        grantee: Principal::Extension(extension_id),
+        issued_by: Principal::System,
+        constraints: GrantConstraints {
+            allowed_effects,
+            mounts: MountView::default(),
+            network: NetworkPolicy::default(),
+            secrets: Vec::new(),
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: None,
+        },
+    }
 }
 
 fn event_kind_label(kind: RuntimeEventKind) -> &'static str {
