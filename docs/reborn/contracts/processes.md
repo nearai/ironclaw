@@ -71,7 +71,7 @@ pub enum ProcessStatus {
 }
 ```
 
-`spawn_json` creates a `Running` process record. `BackgroundProcessManager` then drives `Running -> Completed` or `Running -> Failed` from the attached `ProcessExecutor`. Terminal states are protected: `Completed`, `Failed`, and `Killed` cannot be overwritten by a late background completion.
+`spawn_json` creates a `Running` process record. `BackgroundProcessManager` then drives `Running -> Completed` or `Running -> Failed` from the attached `ProcessExecutor`. `ProcessHost::kill` drives `Running -> Killed` and, when configured with a shared `ProcessCancellationRegistry`, also signals the running executor's cooperative cancellation token. Terminal states are protected: `Completed`, `Failed`, and `Killed` cannot be overwritten by a late background completion.
 
 ---
 
@@ -99,7 +99,7 @@ async fn await_process(scope, process_id) -> Result<ProcessExit>;
 async fn subscribe(scope, process_id) -> Result<ProcessSubscription>;
 ```
 
-`status` preserves tenant/user isolation by returning `None` for out-of-scope records. `kill` delegates to the scoped store transition. `await_process` polls the scoped current-state store until the record reaches `Completed`, `Failed`, or `Killed`, then returns a terminal `ProcessExit`. `subscribe` returns a scoped current-state subscription whose first `next()` yields the current record, whose later `next()` calls yield status changes, and whose terminal record is emitted once before returning `None`. Missing or out-of-scope records fail closed with `UnknownProcess`.
+`status` preserves tenant/user isolation by returning `None` for out-of-scope records. `kill` delegates to the scoped store transition and signals cooperative cancellation only after a scoped kill succeeds. `await_process` polls the scoped current-state store until the record reaches `Completed`, `Failed`, or `Killed`, then returns a terminal `ProcessExit`. `subscribe` returns a scoped current-state subscription whose first `next()` yields the current record, whose later `next()` calls yield status changes, and whose terminal record is emitted once before returning `None`. Missing or out-of-scope records fail closed with `UnknownProcess`.
 
 The V1 subscription is intentionally scoped and current-state based. It does not expose raw process input/output, host paths, or cross-tenant existence information, and it does not require `CapabilityHost` or `ironclaw_dispatcher` to own process lifecycle mechanics.
 
@@ -112,7 +112,9 @@ start ProcessRecord as Running
   -> executor failure: fail(scope, process_id, error_kind)
 ```
 
-The executor receives a redaction-friendly `ProcessExecutionRequest` containing process identity, scope, target capability, estimate, and raw input. `BackgroundProcessManager` preserves the process estimate for the executor. Runtime-backed duplicate-reservation suppression belongs in the process-dispatch adapter, where dispatch-specific semantics are known. It returns `ProcessExecutionResult` for future output/event handling; this slice does not persist process output.
+The executor receives a redaction-friendly `ProcessExecutionRequest` containing process identity, scope, target capability, estimate, raw input, and a `ProcessCancellationToken`. `BackgroundProcessManager` preserves the process estimate for the executor. Runtime-backed duplicate-reservation suppression belongs in the process-dispatch adapter, where dispatch-specific semantics are known. It returns `ProcessExecutionResult` for future output/event handling; this slice does not persist process output.
+
+`ProcessCancellationRegistry` is optional wiring shared by `BackgroundProcessManager` and `ProcessHost`. The manager registers a token under tenant/user/process scope before starting executor work. `ProcessHost::kill` removes and signals the matching token only after the scoped store kill succeeds. Cross-tenant or cross-user kill attempts therefore cannot cancel another tenant/user's running executor even if they know a process UUID. Executor cancellation is cooperative: runtime adapters must observe `ProcessExecutionRequest.cancellation` and stop themselves.
 
 `FilesystemProcessStore::from_arc(...)` provides an owned store handle for detached background managers. The filesystem store serializes start/status writes within a store instance; production DB/object-store implementations should use compare-and-swap or transactional updates for cross-process terminal-state protection.
 
@@ -169,7 +171,7 @@ This slice does not implement:
 
 - direct WASM/Script/MCP process loops inside `ironclaw_processes`; runtime work is delegated through `ProcessExecutor`
 - dynamic executor-reported actual resource usage; completion reconciliation currently uses configured/default usage
-- cooperative cancellation/abort handles for running executor tasks
+- forced/preemptive cancellation of uncooperative executor tasks
 - streaming output APIs
 - durable subscription cursors or process event projection/read APIs beyond the shared event sink/current-state subscription
 - process tree queries beyond parent process ID storage
