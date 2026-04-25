@@ -2370,6 +2370,8 @@ fn trace_commons_audit_event_from_storage(
         export_count,
         export_id: event.export_manifest_id,
         decision_inputs_hash: event.decision_inputs_hash,
+        previous_event_hash: None,
+        event_hash: None,
     })
 }
 
@@ -3999,7 +4001,7 @@ fn write_revocation(root: &Path, tombstone: &TraceCommonsRevocation) -> anyhow::
 fn append_audit_event(
     root: &Path,
     tenant_id: &str,
-    event: TraceCommonsAuditEvent,
+    mut event: TraceCommonsAuditEvent,
 ) -> anyhow::Result<()> {
     let tenant_key = tenant_storage_key(tenant_id);
     let path = root
@@ -4007,6 +4009,11 @@ fn append_audit_event(
         .join(tenant_key)
         .join("audit")
         .join("events.jsonl");
+    let previous_event_hash = latest_audit_event_hash(&path)?
+        .unwrap_or_else(|| TRACE_AUDIT_EVENT_GENESIS_HASH.to_string());
+    event.previous_event_hash = Some(previous_event_hash.clone());
+    event.event_hash = None;
+    event.event_hash = Some(compute_audit_event_hash(&previous_event_hash, &event)?);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create audit dir {}", parent.display()))?;
@@ -4019,6 +4026,46 @@ fn append_audit_event(
     let line = serde_json::to_string(&event).context("failed to serialize audit event")?;
     writeln!(file, "{line}")
         .with_context(|| format!("failed to append audit log {}", path.display()))
+}
+
+const TRACE_AUDIT_EVENT_GENESIS_HASH: &str = "sha256:genesis";
+const TRACE_AUDIT_EVENT_HASH_DOMAIN: &str = "trace_commons_audit_event:v1";
+
+fn latest_audit_event_hash(path: &Path) -> anyhow::Result<Option<String>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let body = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read audit log {}", path.display()))?;
+    let Some(line) = body
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+    else {
+        return Ok(None);
+    };
+    let event: TraceCommonsAuditEvent = serde_json::from_str(line).with_context(|| {
+        format!(
+            "failed to parse latest audit event for hash chain {}",
+            path.display()
+        )
+    })?;
+    Ok(event.event_hash)
+}
+
+fn compute_audit_event_hash(
+    previous_event_hash: &str,
+    event: &TraceCommonsAuditEvent,
+) -> anyhow::Result<String> {
+    let mut event_for_hash = event.clone();
+    event_for_hash.previous_event_hash = Some(previous_event_hash.to_string());
+    event_for_hash.event_hash = None;
+    let canonical_event =
+        serde_json::to_string(&event_for_hash).context("failed to serialize audit event hash")?;
+    Ok(sha256_prefixed(&format!(
+        "{TRACE_AUDIT_EVENT_HASH_DOMAIN}\n{previous_event_hash}\n{canonical_event}"
+    )))
 }
 
 async fn append_audit_event_with_db_mirror(
@@ -6461,6 +6508,10 @@ struct TraceCommonsAuditEvent {
     export_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     decision_inputs_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_event_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    event_hash: Option<String>,
 }
 
 impl TraceCommonsAuditEvent {
@@ -6478,6 +6529,8 @@ impl TraceCommonsAuditEvent {
             export_count: None,
             export_id: None,
             decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
         }
     }
 
@@ -6495,6 +6548,8 @@ impl TraceCommonsAuditEvent {
             export_count: None,
             export_id: None,
             decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
         }
     }
 
@@ -6512,6 +6567,8 @@ impl TraceCommonsAuditEvent {
             export_count: None,
             export_id: None,
             decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
         }
     }
 
@@ -6534,6 +6591,8 @@ impl TraceCommonsAuditEvent {
             export_count: None,
             export_id: None,
             decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
         }
     }
 
@@ -6559,6 +6618,8 @@ impl TraceCommonsAuditEvent {
             export_count: None,
             export_id: None,
             decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
         }
     }
 
@@ -6576,6 +6637,8 @@ impl TraceCommonsAuditEvent {
             export_count: Some(item_count),
             export_id: None,
             decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
         }
     }
 
@@ -6603,6 +6666,8 @@ impl TraceCommonsAuditEvent {
             export_count: None,
             export_id: None,
             decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
         }
     }
 
@@ -6627,6 +6692,8 @@ impl TraceCommonsAuditEvent {
             export_count: Some(export_count),
             export_id: Some(export_id),
             decision_inputs_hash: Some(source_submission_ids_hash),
+            previous_event_hash: None,
+            event_hash: None,
         }
     }
 
@@ -6651,6 +6718,8 @@ impl TraceCommonsAuditEvent {
             export_count: Some(candidate_count),
             export_id: Some(conversion_id),
             decision_inputs_hash: Some(source_submission_ids_hash),
+            previous_event_hash: None,
+            event_hash: None,
         }
     }
 
@@ -6674,6 +6743,8 @@ impl TraceCommonsAuditEvent {
             export_count: Some(item_count),
             export_id: Some(export_id),
             decision_inputs_hash: Some(source_item_list_hash),
+            previous_event_hash: None,
+            event_hash: None,
         }
     }
 
@@ -6693,6 +6764,8 @@ impl TraceCommonsAuditEvent {
             export_count: Some(vector_entries_indexed),
             export_id: None,
             decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
         }
     }
 
@@ -6728,6 +6801,8 @@ impl TraceCommonsAuditEvent {
             export_count: Some(counts.export_cache_files_pruned),
             export_id: None,
             decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
         }
     }
 }
@@ -7054,6 +7129,35 @@ mod tests {
             HeaderValue::from_str(&value).expect("valid auth header"),
         );
         headers
+    }
+
+    fn test_reviewer_auth(tenant_id: &str) -> TenantAuth {
+        TenantAuth {
+            tenant_id: tenant_id.to_string(),
+            role: TokenRole::Reviewer,
+            principal_ref: principal_storage_ref("review-token"),
+        }
+    }
+
+    fn audit_log_path(root: &Path, tenant_id: &str) -> PathBuf {
+        root.join("tenants")
+            .join(tenant_storage_key(tenant_id))
+            .join("audit")
+            .join("events.jsonl")
+    }
+
+    fn read_raw_audit_events(
+        root: &Path,
+        tenant_id: &str,
+    ) -> anyhow::Result<Vec<TraceCommonsAuditEvent>> {
+        let path = audit_log_path(root, tenant_id);
+        let body = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read raw audit events {}", path.display()))?;
+        body.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_str(line).context("failed to parse raw audit event"))
+            .collect()
     }
 
     async fn sample_envelope() -> TraceContributionEnvelope {
@@ -10635,6 +10739,118 @@ mod tests {
         .await
         .expect_err("contributors cannot read audit events");
         assert_eq!(audit_error.0, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn append_audit_event_adds_genesis_and_chains_hashes() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let auth = test_reviewer_auth("tenant-a");
+        let first = TraceCommonsAuditEvent::read(&auth, "trace_list", 2);
+        append_audit_event(temp.path(), "tenant-a", first).expect("first audit event appends");
+        let second = TraceCommonsAuditEvent::read(&auth, "audit_events", 1);
+        append_audit_event(temp.path(), "tenant-a", second).expect("second audit event appends");
+
+        let raw_events =
+            read_raw_audit_events(temp.path(), "tenant-a").expect("raw audit events read");
+        assert_eq!(raw_events.len(), 2);
+        assert_eq!(
+            raw_events[0].previous_event_hash.as_deref(),
+            Some(TRACE_AUDIT_EVENT_GENESIS_HASH)
+        );
+        let first_hash = raw_events[0]
+            .event_hash
+            .as_deref()
+            .expect("first audit event hash");
+        assert!(first_hash.starts_with("sha256:"));
+        assert_eq!(
+            raw_events[1].previous_event_hash.as_deref(),
+            Some(first_hash)
+        );
+        let second_hash = raw_events[1]
+            .event_hash
+            .as_deref()
+            .expect("second audit event hash");
+        assert_ne!(first_hash, second_hash);
+        assert_eq!(
+            compute_audit_event_hash(
+                raw_events[1]
+                    .previous_event_hash
+                    .as_deref()
+                    .expect("second previous hash"),
+                &raw_events[1]
+            )
+            .expect("recompute second audit hash"),
+            second_hash
+        );
+
+        let events = read_all_audit_events(temp.path(), "tenant-a").expect("audit events read");
+        assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn audit_event_hash_changes_when_event_is_tampered() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let auth = test_reviewer_auth("tenant-a");
+        append_audit_event(
+            temp.path(),
+            "tenant-a",
+            TraceCommonsAuditEvent::read(&auth, "trace_list", 2),
+        )
+        .expect("audit event appends");
+        let event = read_raw_audit_events(temp.path(), "tenant-a")
+            .expect("raw audit events read")
+            .into_iter()
+            .next()
+            .expect("audit event exists");
+        let stored_hash = event.event_hash.as_deref().expect("stored event hash");
+        let mut tampered = event.clone();
+        tampered.kind = "tampered_read".to_string();
+        let tampered_hash = compute_audit_event_hash(
+            tampered
+                .previous_event_hash
+                .as_deref()
+                .expect("previous event hash"),
+            &tampered,
+        )
+        .expect("tampered event hash recomputes");
+        assert_ne!(stored_hash, tampered_hash);
+    }
+
+    #[test]
+    fn read_all_audit_events_accepts_legacy_rows_without_chain_fields() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let auth = test_reviewer_auth("tenant-a");
+        let legacy_event = TraceCommonsAuditEvent::read(&auth, "legacy_audit", 1);
+        let path = audit_log_path(temp.path(), "tenant-a");
+        std::fs::create_dir_all(path.parent().expect("audit parent")).expect("create audit dir");
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&legacy_event).expect("legacy event serializes")
+            ),
+        )
+        .expect("write legacy audit event");
+
+        let events = read_all_audit_events(temp.path(), "tenant-a").expect("legacy audit reads");
+        assert_eq!(events.len(), 1);
+        assert!(events[0].previous_event_hash.is_none());
+        assert!(events[0].event_hash.is_none());
+
+        append_audit_event(
+            temp.path(),
+            "tenant-a",
+            TraceCommonsAuditEvent::read(&auth, "post_legacy_audit", 1),
+        )
+        .expect("post-legacy audit event appends");
+        let raw_events =
+            read_raw_audit_events(temp.path(), "tenant-a").expect("raw audit events read");
+        assert_eq!(raw_events.len(), 2);
+        assert_eq!(
+            raw_events[1].previous_event_hash.as_deref(),
+            Some(TRACE_AUDIT_EVENT_GENESIS_HASH)
+        );
+        assert!(raw_events[1].event_hash.is_some());
     }
 
     #[tokio::test]
