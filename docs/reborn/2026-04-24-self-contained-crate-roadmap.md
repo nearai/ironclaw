@@ -134,6 +134,7 @@ docs/reborn/contracts/processes.md
 docs/reborn/contracts/auth.md
 docs/reborn/contracts/network.md
 docs/reborn/contracts/events.md
+docs/reborn/contracts/live-vertical-slice.md
 docs/reborn/contracts/host.md
 ```
 
