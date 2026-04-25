@@ -114,7 +114,7 @@ let host = services.host();
 let manager = services.background_manager(executor);
 ```
 
-It also supports filesystem-backed composition from a shared filesystem handle. This helper is convenience wiring only; it does not move process lifecycle into `CapabilityHost`, `ironclaw_dispatcher`, or any runtime lane.
+It also supports filesystem-backed composition from a shared filesystem handle. `CapabilityHost::with_process_services(...)` can derive its spawn manager from this same bundle, while callers still use `services.host()` for lifecycle/result/output operations. This helper is convenience wiring only; it does not move process lifecycle into `CapabilityHost`, `ironclaw_dispatcher`, or any runtime lane.
 
 `BackgroundProcessManager` composes a `ProcessStore` and `ProcessExecutor`:
 

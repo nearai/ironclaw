@@ -448,6 +448,99 @@ async fn capability_host_spawn_can_run_background_runtime_dispatcher_process() {
 }
 
 #[tokio::test]
+async fn capability_host_with_process_services_spawns_background_result_visible_to_host() {
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(package_from_manifest(WASM_MANIFEST))
+        .unwrap();
+    let dispatcher = Arc::new(RecordingSpawnDispatcher::default());
+    let executor = Arc::new(DispatchProcessExecutor::new(dispatcher.clone()));
+    let services = ProcessServices::in_memory();
+    let authorizer = GrantAuthorizer::new();
+    let context = execution_context(CapabilitySet {
+        grants: vec![grant_for(
+            CapabilityId::new("echo.say").unwrap(),
+            Principal::Extension(ExtensionId::new("caller").unwrap()),
+            vec![EffectKind::DispatchCapability, EffectKind::SpawnProcess],
+        )],
+    });
+    let scope = context.resource_scope.clone();
+    let host = CapabilityHost::new(&registry, dispatcher.as_ref(), &authorizer)
+        .with_process_services(&services, executor);
+
+    let spawned = host
+        .spawn_json(CapabilitySpawnRequest {
+            context,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: ResourceEstimate::default(),
+            input: json!({"message": "services background dispatch"}),
+        })
+        .await
+        .unwrap();
+
+    let process_host = services.host();
+    let result = process_host
+        .await_result(&scope, spawned.process.process_id)
+        .await
+        .unwrap();
+    assert_eq!(result.status, ProcessStatus::Completed);
+    assert_eq!(
+        process_host
+            .output(&scope, spawned.process.process_id)
+            .await
+            .unwrap(),
+        Some(json!({"message": "services background dispatch"}))
+    );
+}
+
+#[tokio::test]
+async fn capability_host_with_process_services_shares_cancellation_with_process_host() {
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(package_from_manifest(WASM_MANIFEST))
+        .unwrap();
+    let dispatcher = NoopDispatcher;
+    let observed_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let executor = Arc::new(CancellationObservingExecutor {
+        observed_cancel: observed_cancel.clone(),
+    });
+    let services = ProcessServices::in_memory();
+    let authorizer = GrantAuthorizer::new();
+    let context = execution_context(CapabilitySet {
+        grants: vec![grant_for(
+            CapabilityId::new("echo.say").unwrap(),
+            Principal::Extension(ExtensionId::new("caller").unwrap()),
+            vec![EffectKind::DispatchCapability, EffectKind::SpawnProcess],
+        )],
+    });
+    let scope = context.resource_scope.clone();
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+        .with_process_services(&services, executor);
+
+    let spawned = host
+        .spawn_json(CapabilitySpawnRequest {
+            context,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: ResourceEstimate::default(),
+            input: json!({"message": "cancel through services"}),
+        })
+        .await
+        .unwrap();
+
+    let process_host = services.host();
+    process_host
+        .kill(&scope, spawned.process.process_id)
+        .await
+        .unwrap();
+    wait_for_cancel_observed(observed_cancel.as_ref()).await;
+    let exit = process_host
+        .await_process(&scope, spawned.process.process_id)
+        .await
+        .unwrap();
+    assert_eq!(exit.status, ProcessStatus::Killed);
+}
+
+#[tokio::test]
 async fn capability_host_spawn_requires_process_manager() {
     let mut registry = ExtensionRegistry::new();
     registry
@@ -531,6 +624,25 @@ impl ProcessManager for InputAssertingProcessManager {
             estimated_resources: start.estimated_resources,
             resource_reservation_id: start.resource_reservation_id,
             error_kind: None,
+        })
+    }
+}
+
+struct CancellationObservingExecutor {
+    observed_cancel: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl ProcessExecutor for CancellationObservingExecutor {
+    async fn execute(
+        &self,
+        request: ProcessExecutionRequest,
+    ) -> Result<ProcessExecutionResult, ProcessExecutionError> {
+        request.cancellation.cancelled().await;
+        self.observed_cancel
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(ProcessExecutionResult {
+            output: json!({"cancelled": true}),
         })
     }
 }
@@ -629,6 +741,20 @@ async fn wait_for_event_count(events: &InMemoryEventSink, expected: usize) {
         assert!(
             Instant::now() < deadline,
             "event sink did not reach {expected} events; last count was {count}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+async fn wait_for_cancel_observed(flag: &std::sync::atomic::AtomicBool) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        if flag.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "executor did not observe process cancellation"
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
