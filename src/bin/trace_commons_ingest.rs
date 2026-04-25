@@ -497,6 +497,10 @@ fn app(state: Arc<AppState>) -> Router {
                 .put(put_tenant_policy_handler),
         )
         .route("/v1/admin/maintenance", post(maintenance_handler))
+        .route(
+            "/v1/workers/retention-maintenance",
+            post(retention_maintenance_handler),
+        )
         .route("/v1/workers/vector-index", post(vector_index_handler))
         .route("/v1/audit/events", get(audit_events_handler))
         .with_state(state)
@@ -2111,6 +2115,50 @@ async fn maintenance_handler(
 }
 
 #[derive(Debug, Deserialize)]
+struct TraceRetentionMaintenanceRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default = "default_true")]
+    prune_export_cache: bool,
+    #[serde(default)]
+    max_export_age_hours: Option<i64>,
+    #[serde(default)]
+    purge_expired_before: Option<DateTime<Utc>>,
+}
+
+async fn retention_maintenance_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceRetentionMaintenanceRequest>,
+) -> ApiResult<Json<TraceMaintenanceResponse>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_retention_operator(&tenant)?;
+    let response = run_maintenance(
+        state.as_ref(),
+        &tenant,
+        TraceMaintenanceRequest {
+            purpose: Some(
+                body.purpose
+                    .unwrap_or_else(|| "trace_commons_retention_worker".to_string()),
+            ),
+            dry_run: body.dry_run,
+            backfill_db_mirror: false,
+            index_vectors: false,
+            reconcile_db_mirror: false,
+            verify_audit_chain: false,
+            prune_export_cache: body.prune_export_cache,
+            max_export_age_hours: body.max_export_age_hours,
+            purge_expired_before: body.purge_expired_before,
+        },
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
 struct TraceVectorIndexRequest {
     #[serde(default)]
     purpose: Option<String>,
@@ -2636,6 +2684,17 @@ fn require_vector_operator(auth: &TenantAuth) -> ApiResult<()> {
         Err(api_error(
             StatusCode::FORBIDDEN,
             "reviewer, admin, or vector worker token required",
+        ))
+    }
+}
+
+fn require_retention_operator(auth: &TenantAuth) -> ApiResult<()> {
+    if auth.role.can_review() || auth.role == TokenRole::RetentionWorker {
+        Ok(())
+    } else {
+        Err(api_error(
+            StatusCode::FORBIDDEN,
+            "reviewer, admin, or retention worker token required",
         ))
     }
 }
@@ -8871,6 +8930,36 @@ mod tests {
         .await
         .expect("retention worker can run retention-scoped maintenance");
         assert_eq!(retention_dry_run.vector_entries_indexed, 0);
+
+        let vector_retention_route_error = retention_maintenance_handler(
+            State(state.clone()),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceRetentionMaintenanceRequest {
+                purpose: Some("vector_worker_retention_route_denied".to_string()),
+                dry_run: true,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect_err("vector worker cannot use dedicated retention route");
+        assert_eq!(vector_retention_route_error.0, StatusCode::FORBIDDEN);
+
+        let Json(retention_route_dry_run) = retention_maintenance_handler(
+            State(state.clone()),
+            auth_headers("retention-worker-token-a"),
+            Json(TraceRetentionMaintenanceRequest {
+                purpose: Some("retention_worker_route_dry_run".to_string()),
+                dry_run: true,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("retention worker can run dedicated retention route");
+        assert_eq!(retention_route_dry_run.vector_entries_indexed, 0);
 
         let retention_vector_error = maintenance_handler(
             State(state.clone()),
