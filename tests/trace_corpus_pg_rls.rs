@@ -40,6 +40,22 @@ async fn postgres_backend() -> Option<PgBackend> {
     }
 }
 
+async fn single_connection_postgres_backend() -> Option<PgBackend> {
+    let Some(mut config) = postgres_test_config() else {
+        eprintln!("skipping: IRONCLAW_PG_TEST_DATABASE_URL or DATABASE_URL not configured");
+        return None;
+    };
+    config.pool_size = 1;
+
+    match PgBackend::new(&config).await {
+        Ok(backend) => Some(backend),
+        Err(e) => {
+            eprintln!("skipping: database unavailable ({e})");
+            None
+        }
+    }
+}
+
 fn sample_submission(tenant_id: &str, submission_id: Uuid) -> TraceSubmissionWrite {
     let mut redaction_counts = BTreeMap::new();
     redaction_counts.insert("secret".to_string(), 1);
@@ -191,6 +207,84 @@ async fn assert_trace_rls_policies_installed(backend: &PgBackend) {
     let mut expected_tables = expected_tables;
     expected_tables.sort();
     assert_eq!(actual_tables, expected_tables);
+}
+
+#[tokio::test]
+async fn store_facade_sets_transaction_local_tenant_context() {
+    let Some(backend) = single_connection_postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+    assert_trace_rls_policies_installed(&backend).await;
+
+    let tenant_a = format!("rls-context-a-{}", Uuid::new_v4());
+    let tenant_b = format!("rls-context-b-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+
+    {
+        let client = backend.pool().get().await.expect("get pooled connection");
+        client
+            .execute(
+                "SELECT set_config('ironclaw.trace_tenant_id', $1, false)",
+                &[&tenant_b],
+            )
+            .await
+            .expect("poison pooled tenant context");
+    }
+
+    let inserted_a = backend
+        .upsert_trace_submission(sample_submission(&tenant_a, submission_id))
+        .await
+        .expect("insert tenant A submission despite stale session context");
+    assert_eq!(inserted_a.tenant_id, tenant_a);
+
+    let fetched_a = backend
+        .get_trace_submission(&tenant_a, submission_id)
+        .await
+        .expect("get tenant A submission despite stale session context")
+        .expect("tenant A submission exists");
+    assert_eq!(fetched_a.tenant_id, tenant_a);
+
+    let mut client = backend.pool().get().await.expect("get pooled connection");
+    let tenant_context: String = client
+        .query_one(
+            "SELECT current_setting('ironclaw.trace_tenant_id', true)",
+            &[],
+        )
+        .await
+        .expect("read pooled tenant context")
+        .get(0);
+    assert_eq!(tenant_context, tenant_b);
+
+    let role_bypasses_rls = current_role_bypasses_trace_rls(&mut client)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("skipping RLS role assertion: could not inspect role ({e})");
+            true
+        });
+    if role_bypasses_rls {
+        eprintln!(
+            "RLS role bypasses table policies; this test verifies transaction-local context cleanup, not policy enforcement"
+        );
+    }
+
+    let tx = client
+        .transaction()
+        .await
+        .expect("start cleanup transaction");
+    tx.execute(
+        "SELECT set_config('ironclaw.trace_tenant_id', $1, true)",
+        &[&tenant_a],
+    )
+    .await
+    .expect("set cleanup tenant context");
+    let _ = tx
+        .execute(
+            "DELETE FROM trace_tenants WHERE tenant_id = $1",
+            &[&tenant_a],
+        )
+        .await;
+    tx.commit().await.expect("commit cleanup transaction");
 }
 
 #[tokio::test]

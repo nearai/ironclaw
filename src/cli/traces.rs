@@ -152,6 +152,10 @@ pub enum TracesCommand {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+
+        /// Include aggregate submission and credit totals
+        #[arg(long)]
+        summary: bool,
     },
 
     /// Revoke a trace contribution locally and, optionally, at an ingestion API
@@ -759,7 +763,7 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
             endpoint,
             bearer_token_env,
         } => submit_envelope(&envelope, &endpoint, &bearer_token_env).await,
-        TracesCommand::ListSubmissions { json } => list_submissions(json).await,
+        TracesCommand::ListSubmissions { json, summary } => list_submissions(json, summary).await,
         TracesCommand::Revoke {
             submission_id,
             endpoint,
@@ -2516,28 +2520,46 @@ fn write_queue_hold_reason(path: &Path, reason: &str) -> anyhow::Result<()> {
     })
 }
 
-async fn list_submissions(json: bool) -> anyhow::Result<()> {
+async fn list_submissions(json: bool, summary: bool) -> anyhow::Result<()> {
     let policy = read_policy()?;
     if let Err(error) = sync_cli_submission_records(&policy).await {
         eprintln!("Warning: failed to sync remote trace credit status: {error}");
     }
     let records = read_local_records()?;
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&records)
-                .map_err(|e| anyhow::anyhow!("failed to serialize submission records: {}", e))?
-        );
+        if summary {
+            let body = serde_json::json!({
+                "summary": credit_summary(&records),
+                "submissions": records,
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&body).map_err(|e| {
+                    anyhow::anyhow!("failed to serialize submission records: {}", e)
+                })?
+            );
+        } else {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&records).map_err(|e| {
+                    anyhow::anyhow!("failed to serialize submission records: {}", e)
+                })?
+            );
+        }
         return Ok(());
     }
 
     if records.is_empty() {
         println!("No local trace contribution submissions recorded.");
+        if summary {
+            println!("Summary:");
+            print_credit_summary_fields(&credit_summary(&records), "  ");
+        }
         return Ok(());
     }
 
     println!("Trace contribution submissions:");
-    for record in records {
+    for record in &records {
         let local_status = match record.status {
             LocalSubmissionStatus::Submitted => "submitted",
             LocalSubmissionStatus::Revoked => "revoked",
@@ -2547,6 +2569,7 @@ async fn list_submissions(json: bool) -> anyhow::Result<()> {
         let status = record.server_status.as_deref().unwrap_or(local_status);
         let submitted = record
             .submitted_at
+            .as_ref()
             .map(|t| t.to_rfc3339())
             .unwrap_or_else(|| "not submitted".to_string());
         println!(
@@ -2557,6 +2580,10 @@ async fn list_submissions(json: bool) -> anyhow::Result<()> {
             record.credit_points_pending,
             submitted
         );
+    }
+    if summary {
+        println!("Summary:");
+        print_credit_summary_fields(&credit_summary(&records), "  ");
     }
     Ok(())
 }
@@ -2577,19 +2604,23 @@ async fn show_credit(json: bool) -> anyhow::Result<()> {
     }
 
     println!("Trace contribution credit:");
-    println!("  submissions: {}", summary.submissions_total);
-    println!("  submitted: {}", summary.submissions_submitted);
-    println!("  revoked: {}", summary.submissions_revoked);
-    println!("  expired: {}", summary.submissions_expired);
-    println!("  pending credit: +{:.2}", summary.pending_credit);
-    println!("  final credit: +{:.2}", summary.final_credit);
+    print_credit_summary_fields(&summary, "  ");
+    Ok(())
+}
+
+fn print_credit_summary_fields(summary: &CreditSummary, indent: &str) {
+    println!("{indent}submissions: {}", summary.submissions_total);
+    println!("{indent}submitted: {}", summary.submissions_submitted);
+    println!("{indent}revoked: {}", summary.submissions_revoked);
+    println!("{indent}expired: {}", summary.submissions_expired);
+    println!("{indent}pending credit: +{:.2}", summary.pending_credit);
+    println!("{indent}final credit: +{:.2}", summary.final_credit);
     if !summary.recent_explanations.is_empty() {
-        println!("  recent explanations:");
-        for explanation in summary.recent_explanations {
-            println!("    - {explanation}");
+        println!("{indent}recent explanations:");
+        for explanation in &summary.recent_explanations {
+            println!("{indent}  - {explanation}");
         }
     }
-    Ok(())
 }
 
 fn credit_summary(records: &[LocalSubmissionRecord]) -> CreditSummary {
@@ -2865,6 +2896,8 @@ fn redaction_summary(counts: &BTreeMap<String, u32>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::{Cli, Command};
+    use clap::Parser;
 
     #[test]
     fn trace_scope_arg_maps_to_consent_scope() {
@@ -2885,6 +2918,20 @@ mod tests {
         counts.insert("local_path".to_string(), 2);
         counts.insert("secret".to_string(), 1);
         assert_eq!(redaction_summary(&counts), "2 local_path, 1 secret");
+    }
+
+    #[test]
+    fn list_submissions_summary_flag_parses_through_cli() {
+        let cli = Cli::try_parse_from(["ironclaw", "traces", "list-submissions", "--summary"])
+            .expect("list-submissions --summary should parse");
+
+        let Some(Command::Traces(TracesCommand::ListSubmissions { json, summary })) = cli.command
+        else {
+            panic!("expected traces list-submissions command");
+        };
+
+        assert!(!json);
+        assert!(summary);
     }
 
     #[test]

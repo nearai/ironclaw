@@ -3812,15 +3812,18 @@ async fn run_maintenance(
     } else {
         0
     };
-    if !revoked_submission_ids.is_empty() || !expired_submission_ids.is_empty() {
-        invalidate_export_provenance_for_sources(
-            &state.root,
-            &tenant.tenant_id,
-            &revocation_reasons,
-            &expired_submission_ids,
-            request.dry_run,
-        )?;
-    }
+    let export_provenance_invalidated =
+        if !revoked_submission_ids.is_empty() || !expired_submission_ids.is_empty() {
+            invalidate_export_provenance_for_sources(
+                &state.root,
+                &tenant.tenant_id,
+                &revocation_reasons,
+                &expired_submission_ids,
+                request.dry_run,
+            )?
+        } else {
+            0
+        };
     let db_mirror_backfilled = backfill_db_mirror_from_files(
         state,
         tenant,
@@ -3849,6 +3852,7 @@ async fn run_maintenance(
         derived_marked_revoked,
         derived_marked_expired,
         export_cache_files_pruned,
+        export_provenance_invalidated,
         trace_object_files_deleted,
         encrypted_artifacts_deleted,
         db_mirror_backfilled,
@@ -3903,6 +3907,7 @@ async fn run_maintenance(
         derived_marked_revoked,
         derived_marked_expired,
         export_cache_files_pruned,
+        export_provenance_invalidated,
         trace_object_files_deleted,
         encrypted_artifacts_deleted,
         db_mirror_backfilled,
@@ -4242,6 +4247,7 @@ struct TraceMaintenanceAuditCounts {
     derived_marked_revoked: usize,
     derived_marked_expired: usize,
     export_cache_files_pruned: usize,
+    export_provenance_invalidated: usize,
     trace_object_files_deleted: usize,
     encrypted_artifacts_deleted: usize,
     db_mirror_backfilled: usize,
@@ -4274,6 +4280,10 @@ impl TraceMaintenanceAuditCounts {
         counts.insert(
             "export_cache_files_pruned".to_string(),
             self.export_cache_files_pruned.min(u32::MAX as usize) as u32,
+        );
+        counts.insert(
+            "export_provenance_invalidated".to_string(),
+            self.export_provenance_invalidated.min(u32::MAX as usize) as u32,
         );
         counts.insert(
             "trace_object_files_deleted".to_string(),
@@ -5350,6 +5360,7 @@ struct TraceMaintenanceResponse {
     derived_marked_revoked: usize,
     derived_marked_expired: usize,
     export_cache_files_pruned: usize,
+    export_provenance_invalidated: usize,
     trace_object_files_deleted: usize,
     encrypted_artifacts_deleted: usize,
     db_mirror_backfilled: usize,
@@ -5661,13 +5672,14 @@ impl TraceCommonsAuditEvent {
             actor_role: Some(auth.role),
             actor_principal_ref: Some(auth.principal_ref.clone()),
             reason: Some(format!(
-                "purpose={purpose};dry_run={dry_run};records_marked_revoked={};records_marked_expired={};records_marked_purged={};derived_marked_revoked={};derived_marked_expired={};export_cache_files_pruned={};trace_object_files_deleted={};encrypted_artifacts_deleted={};db_mirror_backfilled={};vector_entries_indexed={}",
+                "purpose={purpose};dry_run={dry_run};records_marked_revoked={};records_marked_expired={};records_marked_purged={};derived_marked_revoked={};derived_marked_expired={};export_cache_files_pruned={};export_provenance_invalidated={};trace_object_files_deleted={};encrypted_artifacts_deleted={};db_mirror_backfilled={};vector_entries_indexed={}",
                 counts.records_marked_revoked,
                 counts.records_marked_expired,
                 counts.records_marked_purged,
                 counts.derived_marked_revoked,
                 counts.derived_marked_expired,
                 counts.export_cache_files_pruned,
+                counts.export_provenance_invalidated,
                 counts.trace_object_files_deleted,
                 counts.encrypted_artifacts_deleted,
                 counts.db_mirror_backfilled,
@@ -6979,6 +6991,7 @@ mod tests {
         .await
         .expect("maintenance invalidates ranker provenance");
         assert_eq!(response.records_marked_revoked, 1);
+        assert_eq!(response.export_provenance_invalidated, 2);
 
         let invalidated_candidate: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(&candidate_provenance_path)
@@ -6999,6 +7012,19 @@ mod tests {
         assert_eq!(
             invalidated_pair["invalidation_reason"],
             "test_maintenance_revocation"
+        );
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("audit events read");
+        let maintenance_audit = audit_events
+            .iter()
+            .find(|event| event.event_id == response.audit_event_id)
+            .expect("maintenance audit event written");
+        assert!(
+            maintenance_audit
+                .reason
+                .as_deref()
+                .expect("maintenance audit reason")
+                .contains("export_provenance_invalidated=2")
         );
     }
 

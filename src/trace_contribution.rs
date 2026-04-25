@@ -677,6 +677,33 @@ pub struct CreditSummary {
     pub recent_explanations: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceCreditReport {
+    pub submissions_total: u32,
+    pub submissions_submitted: u32,
+    pub submissions_revoked: u32,
+    #[serde(default)]
+    pub submissions_expired: u32,
+    #[serde(default)]
+    pub submissions_accepted: u32,
+    #[serde(default)]
+    pub submissions_quarantined: u32,
+    #[serde(default)]
+    pub submissions_rejected: u32,
+    pub pending_credit: f32,
+    pub final_credit: f32,
+    #[serde(default)]
+    pub credit_events_total: u32,
+    #[serde(default)]
+    pub delayed_credit_delta: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_submission_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_credit_sync_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub explanation_lines: Vec<String>,
+}
+
 pub fn estimate_initial_credit(envelope: &TraceContributionEnvelope) -> CreditEstimate {
     let scorecard = compute_value_scorecard(envelope);
     let submission_score = scorecard.online_score;
@@ -3996,42 +4023,156 @@ pub fn read_local_trace_records_for_scope(
 }
 
 pub fn trace_credit_summary(records: &[LocalTraceSubmissionRecord]) -> CreditSummary {
-    let mut summary = CreditSummary {
+    let report = trace_credit_report(records);
+    CreditSummary {
+        submissions_total: report.submissions_total,
+        submissions_submitted: report.submissions_submitted,
+        submissions_revoked: report.submissions_revoked,
+        submissions_expired: report.submissions_expired,
+        pending_credit: report.pending_credit,
+        final_credit: report.final_credit,
+        recent_explanations: recent_trace_credit_explanations(records, 6),
+    }
+}
+
+pub fn trace_credit_report(records: &[LocalTraceSubmissionRecord]) -> TraceCreditReport {
+    let submissions_submitted = records
+        .iter()
+        .filter(|record| record.status == LocalTraceSubmissionStatus::Submitted)
+        .count() as u32;
+    let submissions_revoked = records
+        .iter()
+        .filter(|record| record.status == LocalTraceSubmissionStatus::Revoked)
+        .count() as u32;
+    let submissions_expired = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.status,
+                LocalTraceSubmissionStatus::Expired | LocalTraceSubmissionStatus::Purged
+            )
+        })
+        .count() as u32;
+
+    let submissions_accepted = records
+        .iter()
+        .filter(|record| local_trace_server_status_matches(record, "accepted"))
+        .count() as u32;
+    let submissions_quarantined = records
+        .iter()
+        .filter(|record| local_trace_server_status_matches(record, "quarantined"))
+        .count() as u32;
+    let submissions_rejected = records
+        .iter()
+        .filter(|record| local_trace_server_status_matches(record, "rejected"))
+        .count() as u32;
+
+    let pending_credit = records
+        .iter()
+        .map(|record| record.credit_points_pending)
+        .sum();
+    let final_credit = records
+        .iter()
+        .filter_map(|record| record.credit_points_final)
+        .sum();
+    let credit_events_total = records
+        .iter()
+        .map(|record| record.credit_events.len() as u32)
+        .sum();
+    let delayed_credit_delta = records
+        .iter()
+        .flat_map(|record| record.credit_events.iter())
+        .filter(|event| event.kind != TraceCreditEventKind::Accepted)
+        .map(|event| event.points_delta)
+        .sum();
+    let last_submission_at = records
+        .iter()
+        .filter_map(|record| record.submitted_at)
+        .max();
+    let last_credit_sync_at = records
+        .iter()
+        .flat_map(|record| record.credit_events.iter())
+        .filter(|event| event.kind == TraceCreditEventKind::CreditSynced)
+        .map(|event| event.created_at)
+        .max();
+
+    let explanation_lines = trace_credit_report_explanation_lines(
+        records,
+        submissions_accepted,
+        submissions_quarantined,
+        submissions_rejected,
+        pending_credit,
+        final_credit,
+        delayed_credit_delta,
+    );
+
+    TraceCreditReport {
         submissions_total: records.len() as u32,
-        submissions_submitted: records
-            .iter()
-            .filter(|record| record.status == LocalTraceSubmissionStatus::Submitted)
-            .count() as u32,
-        submissions_revoked: records
-            .iter()
-            .filter(|record| record.status == LocalTraceSubmissionStatus::Revoked)
-            .count() as u32,
-        submissions_expired: records
-            .iter()
-            .filter(|record| {
-                matches!(
-                    record.status,
-                    LocalTraceSubmissionStatus::Expired | LocalTraceSubmissionStatus::Purged
-                )
-            })
-            .count() as u32,
-        pending_credit: records
-            .iter()
-            .map(|record| record.credit_points_pending)
-            .sum(),
-        final_credit: records
-            .iter()
-            .filter_map(|record| record.credit_points_final)
-            .sum(),
-        recent_explanations: Vec::new(),
-    };
-    summary.recent_explanations = records
+        submissions_submitted,
+        submissions_revoked,
+        submissions_expired,
+        submissions_accepted,
+        submissions_quarantined,
+        submissions_rejected,
+        pending_credit,
+        final_credit,
+        credit_events_total,
+        delayed_credit_delta,
+        last_submission_at,
+        last_credit_sync_at,
+        explanation_lines,
+    }
+}
+
+fn local_trace_server_status_matches(record: &LocalTraceSubmissionRecord, expected: &str) -> bool {
+    record
+        .server_status
+        .as_deref()
+        .map(|status| status.eq_ignore_ascii_case(expected))
+        .unwrap_or(false)
+}
+
+fn trace_credit_report_explanation_lines(
+    records: &[LocalTraceSubmissionRecord],
+    submissions_accepted: u32,
+    submissions_quarantined: u32,
+    submissions_rejected: u32,
+    pending_credit: f32,
+    final_credit: f32,
+    delayed_credit_delta: f32,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "{} submitted trace(s): {} accepted, {} quarantined, {} rejected.",
+        records.len(),
+        submissions_accepted,
+        submissions_quarantined,
+        submissions_rejected
+    ));
+    lines.push(format!(
+        "Credit totals: pending +{:.2}, final confirmed +{:.2}.",
+        pending_credit, final_credit
+    ));
+    if delayed_credit_delta.abs() > f32::EPSILON {
+        lines.push(format!(
+            "Delayed ledger adjustments currently total {:+.2}.",
+            delayed_credit_delta
+        ));
+    }
+    lines.extend(recent_trace_credit_explanations(records, 6));
+    lines
+}
+
+fn recent_trace_credit_explanations(
+    records: &[LocalTraceSubmissionRecord],
+    limit: usize,
+) -> Vec<String> {
+    records
         .iter()
         .rev()
         .flat_map(|record| record.credit_explanation.iter().cloned())
-        .take(6)
-        .collect();
-    summary
+        .take(limit)
+        .collect()
 }
 
 pub async fn revoke_trace_submission_for_scope(
@@ -5382,6 +5523,163 @@ mod tests {
         assert_eq!(records[0].status, LocalTraceSubmissionStatus::Expired);
         assert_eq!(trace_credit_summary(&records).submissions_expired, 1);
         assert!(records[0].last_credit_notice_at.is_none());
+    }
+
+    #[test]
+    fn trace_credit_report_groups_remote_status_and_delayed_credit_events() {
+        let submitted_at = Utc::now();
+        let accepted_id = Uuid::new_v4();
+        let quarantined_id = Uuid::new_v4();
+        let rejected_id = Uuid::new_v4();
+        let sync_event_at = submitted_at + chrono::Duration::minutes(5);
+        let records = vec![
+            LocalTraceSubmissionRecord {
+                submission_id: accepted_id,
+                trace_id: Uuid::new_v4(),
+                endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                status: LocalTraceSubmissionStatus::Submitted,
+                server_status: Some("accepted".to_string()),
+                submitted_at: Some(submitted_at),
+                revoked_at: None,
+                privacy_risk: "Low".to_string(),
+                redaction_counts: BTreeMap::new(),
+                credit_points_pending: 2.0,
+                credit_points_final: Some(3.5),
+                credit_explanation: vec![
+                    "Accepted after privacy checks.".to_string(),
+                    "Regression coverage bonus: +1.5.".to_string(),
+                ],
+                credit_events: vec![
+                    TraceCreditEvent {
+                        event_id: Uuid::new_v4(),
+                        submission_id: accepted_id,
+                        contributor_pseudonym: "local".to_string(),
+                        kind: TraceCreditEventKind::Accepted,
+                        points_delta: 2.0,
+                        reason: "Accepted for private Trace Commons processing.".to_string(),
+                        created_at: submitted_at,
+                    },
+                    TraceCreditEvent {
+                        event_id: Uuid::new_v4(),
+                        submission_id: accepted_id,
+                        contributor_pseudonym: "local-sync".to_string(),
+                        kind: TraceCreditEventKind::CreditSynced,
+                        points_delta: 1.5,
+                        reason:
+                            "Server status synced as accepted; delayed ledger credit now +1.50."
+                                .to_string(),
+                        created_at: sync_event_at,
+                    },
+                ],
+                last_credit_notice_at: None,
+            },
+            LocalTraceSubmissionRecord {
+                submission_id: quarantined_id,
+                trace_id: Uuid::new_v4(),
+                endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                status: LocalTraceSubmissionStatus::Submitted,
+                server_status: Some("quarantined".to_string()),
+                submitted_at: Some(submitted_at + chrono::Duration::minutes(2)),
+                revoked_at: None,
+                privacy_risk: "Medium".to_string(),
+                redaction_counts: BTreeMap::new(),
+                credit_points_pending: 0.0,
+                credit_points_final: None,
+                credit_explanation: vec![
+                    "Submission is quarantined until privacy review completes.".to_string(),
+                ],
+                credit_events: Vec::new(),
+                last_credit_notice_at: None,
+            },
+            LocalTraceSubmissionRecord {
+                submission_id: rejected_id,
+                trace_id: Uuid::new_v4(),
+                endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                status: LocalTraceSubmissionStatus::Submitted,
+                server_status: Some("rejected".to_string()),
+                submitted_at: Some(submitted_at + chrono::Duration::minutes(1)),
+                revoked_at: None,
+                privacy_risk: "High".to_string(),
+                redaction_counts: BTreeMap::new(),
+                credit_points_pending: 0.0,
+                credit_points_final: Some(0.0),
+                credit_explanation: vec!["Rejected during privacy review.".to_string()],
+                credit_events: Vec::new(),
+                last_credit_notice_at: None,
+            },
+        ];
+
+        let report = trace_credit_report(&records);
+
+        assert_eq!(report.submissions_total, 3);
+        assert_eq!(report.submissions_submitted, 3);
+        assert_eq!(report.submissions_accepted, 1);
+        assert_eq!(report.submissions_quarantined, 1);
+        assert_eq!(report.submissions_rejected, 1);
+        assert_eq!(report.pending_credit, 2.0);
+        assert_eq!(report.final_credit, 3.5);
+        assert_eq!(report.credit_events_total, 2);
+        assert_eq!(report.delayed_credit_delta, 1.5);
+        assert_eq!(
+            report.last_submission_at,
+            Some(submitted_at + chrono::Duration::minutes(2))
+        );
+        assert_eq!(report.last_credit_sync_at, Some(sync_event_at));
+        assert!(
+            report
+                .explanation_lines
+                .iter()
+                .any(|line| line.contains("1 accepted"))
+        );
+        assert!(
+            report
+                .explanation_lines
+                .iter()
+                .any(|line| line.contains("1 quarantined"))
+        );
+        assert!(
+            report
+                .explanation_lines
+                .iter()
+                .any(|line| line.contains("1 rejected"))
+        );
+        assert!(
+            report
+                .explanation_lines
+                .iter()
+                .any(|line| line.contains("Regression coverage bonus"))
+        );
+    }
+
+    #[test]
+    fn trace_credit_summary_uses_richer_report_totals_without_changing_shape() {
+        let record = LocalTraceSubmissionRecord {
+            submission_id: Uuid::new_v4(),
+            trace_id: Uuid::new_v4(),
+            endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+            status: LocalTraceSubmissionStatus::Purged,
+            server_status: Some("expired".to_string()),
+            submitted_at: Some(Utc::now()),
+            revoked_at: None,
+            privacy_risk: "Low".to_string(),
+            redaction_counts: BTreeMap::new(),
+            credit_points_pending: 4.0,
+            credit_points_final: Some(4.0),
+            credit_explanation: vec!["Expired under retention policy.".to_string()],
+            credit_events: Vec::new(),
+            last_credit_notice_at: None,
+        };
+
+        let summary = trace_credit_summary(&[record]);
+
+        assert_eq!(summary.submissions_total, 1);
+        assert_eq!(summary.submissions_expired, 1);
+        assert_eq!(summary.pending_credit, 4.0);
+        assert_eq!(summary.final_credit, 4.0);
+        assert_eq!(
+            summary.recent_explanations,
+            vec!["Expired under retention policy.".to_string()]
+        );
     }
 
     #[tokio::test]

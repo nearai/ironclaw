@@ -12,6 +12,7 @@ As of the `gecko-pass` branch, Trace Commons has moved beyond the local-only MVP
 - `TraceCorpusStore` exists behind the shared database abstraction with backend implementations and libSQL-focused parity coverage.
 - Optional DB-backed read flags now cover contributor credit/status, reviewer metadata, replay export selection, and audit event reads.
 - The encrypted local artifact sidecar can store submitted redacted envelopes and keep DB/file records pointed at artifact receipts.
+- Local credit visibility now has a reusable report shape that separates local lifecycle state from central accepted/quarantined/rejected status, credit totals, delayed ledger deltas, and last submission/status-sync times.
 - Maintenance can backfill file-backed pilot records into the DB mirror, mark/purge expired records, prune invalid export caches, index deterministic vector metadata for canonical summaries, and run an initial file-vs-DB reconciliation report.
 - Export audit paths now carry deterministic source-list hashes, and replay export manifest metadata can be listed by reviewer/admin tokens.
 - Revocation and retention expiration already invalidate DB-mirrored submission status, object refs, derived records, vector metadata, replay export manifests, and replay export item rows.
@@ -35,7 +36,7 @@ Status: mostly complete on `gecko-pass`.
 
 Scope:
 
-- Local opt-in policy, preview, queue, flush, credit display, scoped web/runtime policy, and autonomous post-turn contribution.
+- Local opt-in policy, preview, queue, flush, credit display, list-submission summary visibility, scoped web/runtime policy, and autonomous post-turn contribution.
 - Deterministic local redaction, tool-aware payload redaction, stable placeholders, and Privacy Filter safe projection.
 - Internal ingestion service with submit, list, revoke, review, credit, analytics, replay export, benchmark candidate, maintenance, and audit surfaces.
 - DB dual-write metadata, encrypted local artifact sidecar, DB-backed reader flags, vector metadata indexing, compact replay manifest rows, and maintenance backfill/reconciliation.
@@ -112,6 +113,11 @@ Exit criteria:
 ### Phase 3: Tenant Policy, RBAC, ABAC, and Audit Hardening
 
 Status: partially represented by static token roles; production policy remains future work.
+The PostgreSQL store now sets `ironclaw.trace_tenant_id` transaction-locally around
+tenant-scoped Trace Commons operations while retaining explicit `tenant_id`
+predicates. This is an incremental guardrail only: table owners, superusers, and
+roles with `BYPASSRLS` can still bypass the V31 policies until production role
+ownership and/or forced RLS are settled.
 
 Scope:
 
