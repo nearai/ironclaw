@@ -7,7 +7,10 @@
 use std::{
     collections::HashMap,
     fmt,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use async_trait::async_trait;
@@ -23,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use tokio::{
-    sync::Mutex as AsyncMutex,
+    sync::{Mutex as AsyncMutex, Notify},
     time::{Duration, sleep},
 };
 
@@ -160,6 +163,7 @@ pub struct ProcessExecutionRequest {
     pub runtime: RuntimeKind,
     pub estimate: ResourceEstimate,
     pub input: Value,
+    pub cancellation: ProcessCancellationToken,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -192,10 +196,124 @@ pub trait ProcessManager: Send + Sync {
     async fn spawn(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError>;
 }
 
+#[derive(Clone)]
+pub struct ProcessCancellationToken {
+    inner: Arc<ProcessCancellationState>,
+}
+
+struct ProcessCancellationState {
+    cancelled: AtomicBool,
+    notify: Notify,
+}
+
+impl Default for ProcessCancellationToken {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ProcessCancellationToken {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(ProcessCancellationState {
+                cancelled: AtomicBool::new(false),
+                notify: Notify::new(),
+            }),
+        }
+    }
+
+    pub fn cancel(&self) {
+        if !self.inner.cancelled.swap(true, Ordering::SeqCst) {
+            self.inner.notify.notify_waiters();
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.inner.cancelled.load(Ordering::SeqCst)
+    }
+
+    pub async fn cancelled(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+        loop {
+            let notified = self.inner.notify.notified();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+            if self.is_cancelled() {
+                return;
+            }
+        }
+    }
+}
+
+impl fmt::Debug for ProcessCancellationToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProcessCancellationToken")
+            .field("cancelled", &self.is_cancelled())
+            .finish()
+    }
+}
+
+impl PartialEq for ProcessCancellationToken {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct ProcessCancellationRegistry {
+    tokens: Mutex<HashMap<ProcessKey, ProcessCancellationToken>>,
+}
+
+impl ProcessCancellationRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> ProcessCancellationToken {
+        let token = ProcessCancellationToken::new();
+        self.tokens_guard()
+            .insert(ProcessKey::new(scope, process_id), token.clone());
+        token
+    }
+
+    pub fn cancel(&self, scope: &ResourceScope, process_id: ProcessId) -> bool {
+        let token = self
+            .tokens_guard()
+            .remove(&ProcessKey::new(scope, process_id));
+        if let Some(token) = token {
+            token.cancel();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn unregister(&self, scope: &ResourceScope, process_id: ProcessId) {
+        self.tokens_guard()
+            .remove(&ProcessKey::new(scope, process_id));
+    }
+
+    fn tokens_guard(&self) -> MutexGuard<'_, HashMap<ProcessKey, ProcessCancellationToken>> {
+        self.tokens
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 /// Host-facing lifecycle API over process current state.
 pub struct ProcessHost<'a> {
     store: &'a dyn ProcessStore,
     poll_interval: Duration,
+    cancellation_registry: Option<Arc<ProcessCancellationRegistry>>,
 }
 
 impl<'a> ProcessHost<'a> {
@@ -203,11 +321,20 @@ impl<'a> ProcessHost<'a> {
         Self {
             store,
             poll_interval: Duration::from_millis(10),
+            cancellation_registry: None,
         }
     }
 
     pub fn with_poll_interval(mut self, interval: Duration) -> Self {
         self.poll_interval = interval;
+        self
+    }
+
+    pub fn with_cancellation_registry(
+        mut self,
+        registry: Arc<ProcessCancellationRegistry>,
+    ) -> Self {
+        self.cancellation_registry = Some(registry);
         self
     }
 
@@ -224,7 +351,11 @@ impl<'a> ProcessHost<'a> {
         scope: &ResourceScope,
         process_id: ProcessId,
     ) -> Result<ProcessRecord, ProcessError> {
-        self.store.kill(scope, process_id).await
+        let record = self.store.kill(scope, process_id).await?;
+        if let Some(registry) = &self.cancellation_registry {
+            registry.cancel(scope, process_id);
+        }
+        Ok(record)
     }
 
     pub async fn await_process(
@@ -568,6 +699,7 @@ where
 pub struct BackgroundProcessManager {
     store: Arc<dyn ProcessStore>,
     executor: Arc<dyn ProcessExecutor + 'static>,
+    cancellation_registry: Option<Arc<ProcessCancellationRegistry>>,
 }
 
 impl BackgroundProcessManager {
@@ -576,7 +708,19 @@ impl BackgroundProcessManager {
         S: ProcessStore + 'static,
         E: ProcessExecutor + 'static,
     {
-        Self { store, executor }
+        Self {
+            store,
+            executor,
+            cancellation_registry: None,
+        }
+    }
+
+    pub fn with_cancellation_registry(
+        mut self,
+        registry: Arc<ProcessCancellationRegistry>,
+    ) -> Self {
+        self.cancellation_registry = Some(registry);
+        self
     }
 }
 
@@ -589,6 +733,11 @@ impl ProcessManager for BackgroundProcessManager {
         let executor = Arc::clone(&self.executor);
         let scope = record.scope.clone();
         let process_id = record.process_id;
+        let cancellation_registry = self.cancellation_registry.clone();
+        let cancellation = cancellation_registry
+            .as_ref()
+            .map(|registry| registry.register(&record.scope, record.process_id))
+            .unwrap_or_default();
         let dispatch_estimate = if record.resource_reservation_id.is_some() {
             ResourceEstimate::default()
         } else {
@@ -603,6 +752,7 @@ impl ProcessManager for BackgroundProcessManager {
             runtime: record.runtime,
             estimate: dispatch_estimate,
             input,
+            cancellation,
         };
         tokio::spawn(async move {
             match executor.execute(request).await {
@@ -612,6 +762,9 @@ impl ProcessManager for BackgroundProcessManager {
                 Err(error) => {
                     let _ = store.fail(&scope, process_id, error.kind).await;
                 }
+            }
+            if let Some(registry) = cancellation_registry {
+                registry.unregister(&scope, process_id);
             }
         });
         Ok(record)
