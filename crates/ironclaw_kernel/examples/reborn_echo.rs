@@ -1,5 +1,6 @@
 use std::error::Error;
 
+use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extensions::ExtensionDiscovery;
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{
@@ -36,9 +37,11 @@ where
     let governor = InMemoryResourceGovernor::new();
     let wasm_runtime = WasmRuntime::for_testing()?;
     let script_runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), script_backend);
+    let events = InMemoryEventSink::new();
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
         .with_wasm_runtime(&wasm_runtime)
-        .with_script_runtime(&script_runtime);
+        .with_script_runtime(&script_runtime)
+        .with_event_sink(&events);
 
     let wasm = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
@@ -67,6 +70,8 @@ where
         })
         .await?;
 
+    let recorded_events = events.events();
+
     println!("reborn_vertical_slice=ok");
     println!("discovered_extensions={discovered_extensions}");
     println!(
@@ -84,6 +89,16 @@ where
         stable_json(&script.output),
         script.receipt.status
     );
+    println!("events={}", recorded_events.len());
+    for (index, event) in recorded_events.iter().enumerate() {
+        println!(
+            "event[{index}]={} capability={} runtime={} error={}",
+            event_kind_label(event.kind),
+            event.capability_id,
+            event.runtime.map(runtime_label).unwrap_or("none"),
+            event.error_kind.as_deref().unwrap_or("none")
+        );
+    }
     Ok(())
 }
 
@@ -158,6 +173,15 @@ fn sample_scope() -> Result<ResourceScope, Box<dyn Error>> {
         thread_id: None,
         invocation_id: InvocationId::new(),
     })
+}
+
+fn event_kind_label(kind: RuntimeEventKind) -> &'static str {
+    match kind {
+        RuntimeEventKind::DispatchRequested => "dispatch_requested",
+        RuntimeEventKind::RuntimeSelected => "runtime_selected",
+        RuntimeEventKind::DispatchSucceeded => "dispatch_succeeded",
+        RuntimeEventKind::DispatchFailed => "dispatch_failed",
+    }
 }
 
 fn runtime_label(runtime: RuntimeKind) -> &'static str {
