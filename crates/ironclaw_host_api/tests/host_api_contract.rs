@@ -87,6 +87,19 @@ fn scoped_path_rejects_raw_host_paths_urls_and_traversal() {
 }
 
 #[test]
+fn serde_deserialization_enforces_validated_newtype_invariants() {
+    assert!(serde_json::from_value::<ExtensionId>(json!("../evil")).is_err());
+    assert!(serde_json::from_value::<CapabilityId>(json!("github..search")).is_err());
+    assert!(serde_json::from_value::<TenantId>(json!("tenant/name")).is_err());
+    assert!(serde_json::from_value::<ScopedPath>(json!("/workspace/../../secret")).is_err());
+    assert!(serde_json::from_value::<VirtualPath>(json!("/unknown/root")).is_err());
+    assert!(serde_json::from_value::<MountAlias>(json!("relative")).is_err());
+
+    let valid: ExtensionId = serde_json::from_value(json!("github-mcp.v1")).unwrap();
+    assert_eq!(valid.as_str(), "github-mcp.v1");
+}
+
+#[test]
 fn virtual_path_requires_known_root_and_rejects_traversal() {
     assert!(VirtualPath::new("/projects/p1/threads/t1").is_ok());
     assert!(VirtualPath::new("/system/extensions/echo/state").is_ok());
@@ -102,6 +115,56 @@ fn virtual_path_requires_known_root_and_rejects_traversal() {
             "{invalid:?} should be rejected"
         );
     }
+}
+
+#[test]
+fn network_targets_and_policies_are_fail_closed_by_default() {
+    let deny_all = NetworkPolicy::default();
+    assert!(deny_all.allowed_targets.is_empty());
+    assert!(deny_all.deny_private_ip_ranges);
+
+    assert!(NetworkTarget::new(NetworkScheme::Https, "api.github.com", Some(443)).is_ok());
+    assert!(NetworkTarget::new(NetworkScheme::Https, "LOCALHOST", None).is_err());
+    assert!(NetworkTarget::new(NetworkScheme::Https, "localhost", None).is_err());
+    assert!(NetworkTarget::new(NetworkScheme::Https, "169.254.169.254", None).is_err());
+    assert!(NetworkTarget::new(NetworkScheme::Https, "api.github.com/path", None).is_err());
+    assert!(NetworkTarget::new(NetworkScheme::Https, "*.github.com", None).is_err());
+
+    assert!(NetworkTargetPattern::new(Some(NetworkScheme::Https), "api.github.com", None).is_ok());
+    assert!(NetworkTargetPattern::new(Some(NetworkScheme::Https), "*.github.com", None).is_ok());
+    assert!(NetworkTargetPattern::new(Some(NetworkScheme::Https), "*.*.github.com", None).is_err());
+    assert!(NetworkTargetPattern::new(Some(NetworkScheme::Https), "github.com*", None).is_err());
+    assert!(NetworkTargetPattern::new(Some(NetworkScheme::Https), "localhost", None).is_err());
+}
+
+#[test]
+fn network_target_deserialization_enforces_validation() {
+    assert!(
+        serde_json::from_value::<NetworkTarget>(json!({
+            "scheme": "https",
+            "host": "api.github.com",
+            "port": 443
+        }))
+        .is_ok()
+    );
+
+    assert!(
+        serde_json::from_value::<NetworkTarget>(json!({
+            "scheme": "https",
+            "host": "localhost",
+            "port": null
+        }))
+        .is_err()
+    );
+
+    assert!(
+        serde_json::from_value::<NetworkTargetPattern>(json!({
+            "scheme": "https",
+            "host_pattern": "github.com*",
+            "port": null
+        }))
+        .is_err()
+    );
 }
 
 #[test]

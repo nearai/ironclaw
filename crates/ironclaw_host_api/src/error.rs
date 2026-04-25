@@ -59,6 +59,16 @@ impl HostApiError {
         }
     }
 
+    pub(crate) fn invalid_network_target(
+        value: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self::InvalidNetworkTarget {
+            value: value.into(),
+            reason: reason.into(),
+        }
+    }
+
     pub(crate) fn invariant(reason: impl Into<String>) -> Self {
         Self::InvariantViolation {
             reason: reason.into(),

@@ -681,9 +681,17 @@ Rules:
 
 ```rust
 pub struct NetworkTarget {
-    pub scheme: NetworkScheme,
-    pub host: String,
-    pub port: Option<u16>,
+    scheme: NetworkScheme,
+    host: String,
+    port: Option<u16>,
+}
+
+impl NetworkTarget {
+    pub fn new(
+        scheme: NetworkScheme,
+        host: impl Into<String>,
+        port: Option<u16>,
+    ) -> Result<Self, HostApiError>;
 }
 
 #[serde(rename_all = "snake_case")]
@@ -703,9 +711,17 @@ pub enum NetworkMethod {
 }
 
 pub struct NetworkTargetPattern {
-    pub scheme: Option<NetworkScheme>,
-    pub host_pattern: String,
-    pub port: Option<u16>,
+    scheme: Option<NetworkScheme>,
+    host_pattern: String,
+    port: Option<u16>,
+}
+
+impl NetworkTargetPattern {
+    pub fn new(
+        scheme: Option<NetworkScheme>,
+        host_pattern: impl Into<String>,
+        port: Option<u16>,
+    ) -> Result<Self, HostApiError>;
 }
 
 pub struct NetworkPolicy {
@@ -715,12 +731,12 @@ pub struct NetworkPolicy {
 }
 ```
 
-`host_pattern` v0 should be intentionally simple: exact host or one leading wildcard label such as `*.github.com`. Do not support arbitrary regex in v0.
+`host` and `host_pattern` are validated contract values, not arbitrary strings. Constructors and deserialization must reject schemes, paths, whitespace/control characters, malformed labels, `localhost`, private/link-local/metadata IPs, and invalid wildcard syntax. `host_pattern` v0 should be intentionally simple: exact host or one leading wildcard label such as `*.github.com`. Do not support arbitrary regex in v0.
 
 Rules:
 
-- default `NetworkPolicy` denies outbound network
-- private IP / localhost / metadata endpoints are denied unless explicitly allowed
+- default `NetworkPolicy` denies outbound network and defaults `deny_private_ip_ranges` to `true`
+- private IP / localhost / metadata endpoints are denied unless explicitly allowed by a future admin-only policy path
 - runtime lanes do not create raw network clients that bypass `ironclaw_network`
 
 ---
@@ -918,6 +934,7 @@ The first `ironclaw_host_api` implementation is not accepted without tests for:
 - `ExtensionId` rejects slash, backslash, whitespace, NUL, uppercase, and `..`
 - `CapabilityId` requires `<extension>.<capability>`
 - scope IDs reject slash, backslash, NUL, controls, `.` and `..`
+- deserializing validated ID newtypes rejects the same invalid strings as constructors
 
 ### Paths
 
@@ -925,6 +942,7 @@ The first `ironclaw_host_api` implementation is not accepted without tests for:
 - `ScopedPath` rejects URL-looking paths
 - `ScopedPath` rejects traversal
 - `VirtualPath` requires a known root
+- deserializing validated path newtypes rejects invalid raw strings
 - `resolve_scoped_path` chooses longest alias match
 - `resolve_scoped_path` denies unknown alias
 - child `MountView` helper denies broader permissions than parent
@@ -935,8 +953,12 @@ The first `ironclaw_host_api` implementation is not accepted without tests for:
 - `ExecutionContext` validation rejects mismatched tenant/user between context and resource scope
 - child resource scope preserves tenant/user from parent
 
-### Action/decision serialization
+### Network/action/decision serialization
 
+- `NetworkPolicy::default()` is fail-closed, including private-IP denial
+- `NetworkTarget` rejects malformed hosts, paths, wildcards, localhost, and private/link-local IPs
+- `NetworkTargetPattern` accepts exact hosts or one leading wildcard label only
+- `NetworkTarget` and `NetworkTargetPattern` deserialization enforces constructor validation
 - `Action` variants serialize with stable snake_case tags
 - `Decision` variants serialize with stable snake_case tags
 - `DenyReason` variants serialize with stable snake_case names
@@ -947,6 +969,7 @@ The first `ironclaw_host_api` implementation is not accepted without tests for:
 - `Action` cannot contain `HostPath`
 - `AuditEnvelope` cannot contain raw host path fields
 - `ApprovalRequest` carries an action and explicit reusable scope when reusable
+- validated contract values cannot be forged through serde deserialization
 
 ---
 
