@@ -16,13 +16,15 @@ use crate::channels::web::server::GatewayState;
 use crate::trace_contribution::{
     ConsentScope, CreditSummary, DeterministicTraceRedactor, LocalTraceSubmissionRecord,
     RawTraceContribution, RecordedTraceContributionOptions, StandingTraceContributionPolicy,
-    TraceChannel, TraceContributionEnvelope, TraceQueueFlushReport, TraceRedactor,
+    TraceChannel, TraceContributionAcceptance, TraceContributionEnvelope,
+    TraceContributionPolicyRejection, TraceQueueFlushReport, TraceRedactor,
     apply_credit_estimate_to_envelope, capture_turns_from_conversation_messages,
     flush_trace_contribution_queue_for_scope, local_pseudonymous_contributor_id,
-    local_pseudonymous_tenant_scope_ref, queue_trace_envelope_for_scope,
-    read_local_trace_records_for_scope, read_trace_policy_for_scope,
-    revoke_trace_submission_for_scope, sync_remote_trace_submission_records_for_scope,
-    trace_credit_summary, write_trace_policy_for_scope,
+    local_pseudonymous_tenant_scope_ref, preflight_trace_contribution_policy,
+    queue_trace_envelope_for_scope, read_local_trace_records_for_scope,
+    read_trace_policy_for_scope, revoke_trace_submission_for_scope,
+    sync_remote_trace_submission_records_for_scope, trace_credit_summary,
+    write_trace_policy_for_scope,
 };
 
 #[derive(Debug, Deserialize)]
@@ -201,6 +203,13 @@ pub async fn traces_preview_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Json(body): Json<TraceContributionPreviewRequest>,
 ) -> Result<Json<TraceContributionPreviewResponse>, (StatusCode, String)> {
+    if body.enqueue {
+        preflight_trace_policy_for_user(
+            &user.user_id,
+            TraceContributionAcceptance::QueueFromPreview,
+        )?;
+    }
+
     let envelope = build_redacted_trace_envelope(
         &state,
         &user.user_id,
@@ -243,6 +252,7 @@ pub async fn traces_submit_handler(
             "Trace submission requires explicit preview acknowledgement".to_string(),
         ));
     }
+    preflight_trace_policy_for_user(&user.user_id, TraceContributionAcceptance::ManualSubmit)?;
 
     let envelope = build_redacted_trace_envelope(
         &state,
@@ -451,6 +461,18 @@ fn internal_error(error: impl std::fmt::Display) -> (StatusCode, String) {
         StatusCode::INTERNAL_SERVER_ERROR,
         "Trace contribution operation failed".to_string(),
     )
+}
+
+fn preflight_trace_policy_for_user(
+    user_id: &str,
+    intent: TraceContributionAcceptance,
+) -> Result<(), (StatusCode, String)> {
+    let policy = read_trace_policy_for_scope(Some(user_id)).map_err(internal_error)?;
+    preflight_trace_contribution_policy(&policy, intent).map_err(trace_policy_rejection)
+}
+
+fn trace_policy_rejection(rejection: TraceContributionPolicyRejection) -> (StatusCode, String) {
+    (StatusCode::CONFLICT, rejection.to_string())
 }
 
 #[cfg(test)]

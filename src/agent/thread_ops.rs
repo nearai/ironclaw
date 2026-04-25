@@ -1172,13 +1172,19 @@ impl Agent {
             let policy = match crate::trace_contribution::read_trace_policy_for_scope(Some(
                 &user_id,
             )) {
-                Ok(policy) if policy.enabled => policy,
-                Ok(_) => return,
+                Ok(policy) => policy,
                 Err(error) => {
                     tracing::debug!(%error, "Failed to read autonomous trace contribution policy");
                     return;
                 }
             };
+            if let Err(error) = crate::trace_contribution::preflight_trace_contribution_policy(
+                &policy,
+                crate::trace_contribution::TraceContributionAcceptance::AutonomousSubmit,
+            ) {
+                tracing::debug!(%error, %thread_id, "Skipping autonomous trace contribution by policy");
+                return;
+            }
 
             let owned = match store
                 .conversation_belongs_to_user(thread_id, &user_id)
@@ -3515,6 +3521,49 @@ mod tests {
         assert!(
             notice_seen,
             "autonomous trace credit status was not emitted"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_autonomous_trace_requires_endpoint_before_queue() {
+        let (agent, _db, _temp_dir) =
+            make_trace_capture_agent(Arc::new(StubLlm::new("done"))).await;
+        let user_id = format!("trace-runtime-policy-user-{}", Uuid::new_v4());
+        let mut policy = crate::trace_contribution::StandingTraceContributionPolicy {
+            enabled: true,
+            ..Default::default()
+        };
+        policy.auto_submit_high_value_traces = true;
+        policy.min_submission_score = 0.0;
+        crate::trace_contribution::write_trace_policy_for_scope(Some(&user_id), &policy)
+            .expect("trace policy writes");
+
+        let session = agent.session_manager.get_or_create_session(&user_id).await;
+        let thread_id = {
+            let mut sess = session.lock().await;
+            sess.create_thread(Some("test")).id
+        };
+        let message = IncomingMessage::new("test", &user_id, "finish it");
+
+        let result = agent
+            .process_user_input(
+                &message,
+                agent.tenant_ctx(&user_id).await,
+                Arc::clone(&session),
+                thread_id,
+                "finish it",
+            )
+            .await
+            .expect("process user input");
+        assert!(matches!(result, SubmissionResult::Response { .. }));
+
+        let queued =
+            crate::trace_contribution::queued_trace_envelope_paths_for_scope(Some(&user_id))
+                .expect("read trace queue");
+        assert!(
+            queued.is_empty(),
+            "endpoint-less autonomous policy must not queue traces"
         );
     }
 

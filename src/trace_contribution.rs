@@ -636,6 +636,47 @@ pub struct StandingTraceContributionPolicy {
     pub default_scope: ConsentScope,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceContributionAcceptance {
+    PreviewOnly,
+    QueueFromPreview,
+    ManualSubmit,
+    AutonomousSubmit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceContributionPolicyRejection {
+    OptInDisabled,
+    EndpointMissing,
+}
+
+impl std::fmt::Display for TraceContributionPolicyRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OptInDisabled => write!(f, "trace contribution opt-in is disabled"),
+            Self::EndpointMissing => write!(f, "trace contribution endpoint is not configured"),
+        }
+    }
+}
+
+impl std::error::Error for TraceContributionPolicyRejection {}
+
+pub fn preflight_trace_contribution_policy(
+    policy: &StandingTraceContributionPolicy,
+    intent: TraceContributionAcceptance,
+) -> Result<(), TraceContributionPolicyRejection> {
+    if intent == TraceContributionAcceptance::PreviewOnly {
+        return Ok(());
+    }
+    if !policy.enabled {
+        return Err(TraceContributionPolicyRejection::OptInDisabled);
+    }
+    if policy.ingestion_endpoint.is_none() {
+        return Err(TraceContributionPolicyRejection::EndpointMissing);
+    }
+    Ok(())
+}
+
 impl Default for StandingTraceContributionPolicy {
     fn default() -> Self {
         Self {
@@ -4441,6 +4482,60 @@ fn scope_hash(scope: &str) -> String {
 mod tests {
     use super::*;
     use crate::llm::recording::{TraceStep, TraceToolCall};
+
+    #[test]
+    fn trace_policy_preflight_gates_queue_and_submit_intents() {
+        let disabled = StandingTraceContributionPolicy::default();
+        assert_eq!(
+            preflight_trace_contribution_policy(
+                &disabled,
+                TraceContributionAcceptance::PreviewOnly
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            preflight_trace_contribution_policy(
+                &disabled,
+                TraceContributionAcceptance::QueueFromPreview
+            ),
+            Err(TraceContributionPolicyRejection::OptInDisabled)
+        );
+        assert_eq!(
+            preflight_trace_contribution_policy(
+                &disabled,
+                TraceContributionAcceptance::ManualSubmit
+            ),
+            Err(TraceContributionPolicyRejection::OptInDisabled)
+        );
+        assert_eq!(
+            preflight_trace_contribution_policy(
+                &disabled,
+                TraceContributionAcceptance::AutonomousSubmit
+            ),
+            Err(TraceContributionPolicyRejection::OptInDisabled)
+        );
+
+        let mut missing_endpoint = StandingTraceContributionPolicy {
+            enabled: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            preflight_trace_contribution_policy(
+                &missing_endpoint,
+                TraceContributionAcceptance::ManualSubmit
+            ),
+            Err(TraceContributionPolicyRejection::EndpointMissing)
+        );
+
+        missing_endpoint.ingestion_endpoint = Some("https://trace.example/v1/traces".to_string());
+        assert_eq!(
+            preflight_trace_contribution_policy(
+                &missing_endpoint,
+                TraceContributionAcceptance::ManualSubmit
+            ),
+            Ok(())
+        );
+    }
 
     struct FakePrivacyFilterAdapter;
 
