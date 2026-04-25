@@ -5,6 +5,7 @@
 //! itself, or execute product workflows. Those responsibilities stay in the
 //! owning service crates.
 
+use ironclaw_events::{EventError, EventSink, RuntimeEvent};
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
@@ -63,10 +64,18 @@ pub enum DispatchError {
         capability: CapabilityId,
         runtime: RuntimeKind,
     },
+    #[error("event sink failed: {0}")]
+    Event(Box<EventError>),
     #[error("script dispatch failed: {0}")]
     Script(Box<ScriptError>),
     #[error("WASM dispatch failed: {0}")]
     Wasm(Box<WasmError>),
+}
+
+impl From<EventError> for DispatchError {
+    fn from(error: EventError) -> Self {
+        Self::Event(Box::new(error))
+    }
 }
 
 impl From<ScriptError> for DispatchError {
@@ -92,6 +101,7 @@ where
     governor: &'a G,
     wasm_runtime: Option<&'a WasmRuntime>,
     script_runtime: Option<&'a dyn ScriptExecutor>,
+    event_sink: Option<&'a dyn EventSink>,
 }
 
 impl<'a, F, G> RuntimeDispatcher<'a, F, G>
@@ -106,6 +116,7 @@ where
             governor,
             wasm_runtime: None,
             script_runtime: None,
+            event_sink: None,
         }
     }
 
@@ -119,41 +130,95 @@ where
         self
     }
 
+    pub fn with_event_sink(mut self, sink: &'a dyn EventSink) -> Self {
+        self.event_sink = Some(sink);
+        self
+    }
+
     pub async fn dispatch_json(
         &self,
         request: CapabilityDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
-        let descriptor = self
-            .registry
-            .get_capability(&request.capability_id)
-            .ok_or_else(|| DispatchError::UnknownCapability {
-                capability: request.capability_id.clone(),
-            })?;
-        let package = self
-            .registry
-            .get_extension(&descriptor.provider)
-            .ok_or_else(|| DispatchError::UnknownProvider {
-                capability: request.capability_id.clone(),
-                provider: descriptor.provider.clone(),
-            })?;
+        let scope = request.scope.clone();
+        let capability_id = request.capability_id.clone();
+        self.emit_event(RuntimeEvent::dispatch_requested(
+            scope.clone(),
+            capability_id.clone(),
+        ))
+        .await?;
+
+        let descriptor = match self.registry.get_capability(&request.capability_id) {
+            Some(descriptor) => descriptor,
+            None => {
+                let error = DispatchError::UnknownCapability {
+                    capability: request.capability_id,
+                };
+                self.emit_dispatch_failure(scope, capability_id, None, None, &error)
+                    .await?;
+                return Err(error);
+            }
+        };
+        let package = match self.registry.get_extension(&descriptor.provider) {
+            Some(package) => package,
+            None => {
+                let error = DispatchError::UnknownProvider {
+                    capability: request.capability_id,
+                    provider: descriptor.provider.clone(),
+                };
+                self.emit_dispatch_failure(
+                    scope,
+                    capability_id,
+                    Some(descriptor.provider.clone()),
+                    Some(descriptor.runtime),
+                    &error,
+                )
+                .await?;
+                return Err(error);
+            }
+        };
         let package_runtime = package.manifest.runtime_kind();
         if descriptor.runtime != package_runtime {
-            return Err(DispatchError::RuntimeMismatch {
+            let error = DispatchError::RuntimeMismatch {
                 capability: request.capability_id,
                 descriptor_runtime: descriptor.runtime,
                 package_runtime,
-            });
+            };
+            self.emit_dispatch_failure(
+                scope,
+                capability_id,
+                Some(descriptor.provider.clone()),
+                Some(descriptor.runtime),
+                &error,
+            )
+            .await?;
+            return Err(error);
         }
 
         match descriptor.runtime {
             RuntimeKind::Wasm => {
-                let wasm_runtime =
-                    self.wasm_runtime
-                        .ok_or(DispatchError::MissingRuntimeBackend {
-                            runtime: RuntimeKind::Wasm,
-                        })?;
-                let capability_id = request.capability_id.clone();
-                let execution = wasm_runtime
+                let Some(wasm_runtime) = self.wasm_runtime else {
+                    let error = DispatchError::MissingRuntimeBackend {
+                        runtime: RuntimeKind::Wasm,
+                    };
+                    self.emit_dispatch_failure(
+                        scope,
+                        capability_id,
+                        Some(descriptor.provider.clone()),
+                        Some(RuntimeKind::Wasm),
+                        &error,
+                    )
+                    .await?;
+                    return Err(error);
+                };
+                self.emit_event(RuntimeEvent::runtime_selected(
+                    scope.clone(),
+                    capability_id.clone(),
+                    descriptor.provider.clone(),
+                    RuntimeKind::Wasm,
+                ))
+                .await?;
+
+                let execution = match wasm_runtime
                     .execute_extension_json(
                         self.filesystem,
                         self.governor,
@@ -167,7 +232,31 @@ where
                             },
                         },
                     )
-                    .await?;
+                    .await
+                {
+                    Ok(execution) => execution,
+                    Err(error) => {
+                        let error = DispatchError::from(error);
+                        self.emit_dispatch_failure(
+                            scope,
+                            capability_id,
+                            Some(descriptor.provider.clone()),
+                            Some(RuntimeKind::Wasm),
+                            &error,
+                        )
+                        .await?;
+                        return Err(error);
+                    }
+                };
+                let output_bytes = execution.result.output_bytes;
+                self.emit_event(RuntimeEvent::dispatch_succeeded(
+                    scope,
+                    capability_id.clone(),
+                    descriptor.provider.clone(),
+                    RuntimeKind::Wasm,
+                    output_bytes,
+                ))
+                .await?;
 
                 Ok(CapabilityDispatchResult {
                     capability_id,
@@ -179,13 +268,29 @@ where
                 })
             }
             RuntimeKind::Script => {
-                let script_runtime =
-                    self.script_runtime
-                        .ok_or(DispatchError::MissingRuntimeBackend {
-                            runtime: RuntimeKind::Script,
-                        })?;
-                let capability_id = request.capability_id.clone();
-                let execution = script_runtime.execute_extension_json(
+                let Some(script_runtime) = self.script_runtime else {
+                    let error = DispatchError::MissingRuntimeBackend {
+                        runtime: RuntimeKind::Script,
+                    };
+                    self.emit_dispatch_failure(
+                        scope,
+                        capability_id,
+                        Some(descriptor.provider.clone()),
+                        Some(RuntimeKind::Script),
+                        &error,
+                    )
+                    .await?;
+                    return Err(error);
+                };
+                self.emit_event(RuntimeEvent::runtime_selected(
+                    scope.clone(),
+                    capability_id.clone(),
+                    descriptor.provider.clone(),
+                    RuntimeKind::Script,
+                ))
+                .await?;
+
+                let execution = match script_runtime.execute_extension_json(
                     self.governor,
                     ScriptExecutionRequest {
                         package,
@@ -196,7 +301,30 @@ where
                             input: request.input,
                         },
                     },
-                )?;
+                ) {
+                    Ok(execution) => execution,
+                    Err(error) => {
+                        let error = DispatchError::from(error);
+                        self.emit_dispatch_failure(
+                            scope,
+                            capability_id,
+                            Some(descriptor.provider.clone()),
+                            Some(RuntimeKind::Script),
+                            &error,
+                        )
+                        .await?;
+                        return Err(error);
+                    }
+                };
+                let output_bytes = execution.result.output_bytes;
+                self.emit_event(RuntimeEvent::dispatch_succeeded(
+                    scope,
+                    capability_id.clone(),
+                    descriptor.provider.clone(),
+                    RuntimeKind::Script,
+                    output_bytes,
+                ))
+                .await?;
 
                 Ok(CapabilityDispatchResult {
                     capability_id,
@@ -208,11 +336,58 @@ where
                 })
             }
             runtime @ (RuntimeKind::Mcp | RuntimeKind::FirstParty | RuntimeKind::System) => {
-                Err(DispatchError::UnsupportedRuntime {
+                let error = DispatchError::UnsupportedRuntime {
                     capability: request.capability_id,
                     runtime,
-                })
+                };
+                self.emit_dispatch_failure(
+                    scope,
+                    capability_id,
+                    Some(descriptor.provider.clone()),
+                    Some(runtime),
+                    &error,
+                )
+                .await?;
+                Err(error)
             }
         }
+    }
+
+    async fn emit_dispatch_failure(
+        &self,
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        provider: Option<ExtensionId>,
+        runtime: Option<RuntimeKind>,
+        error: &DispatchError,
+    ) -> Result<(), DispatchError> {
+        self.emit_event(RuntimeEvent::dispatch_failed(
+            scope,
+            capability_id,
+            provider,
+            runtime,
+            dispatch_error_kind(error),
+        ))
+        .await
+    }
+
+    async fn emit_event(&self, event: RuntimeEvent) -> Result<(), DispatchError> {
+        if let Some(sink) = self.event_sink {
+            sink.emit(event).await?;
+        }
+        Ok(())
+    }
+}
+
+fn dispatch_error_kind(error: &DispatchError) -> &'static str {
+    match error {
+        DispatchError::UnknownCapability { .. } => "UnknownCapability",
+        DispatchError::UnknownProvider { .. } => "UnknownProvider",
+        DispatchError::RuntimeMismatch { .. } => "RuntimeMismatch",
+        DispatchError::MissingRuntimeBackend { .. } => "MissingRuntimeBackend",
+        DispatchError::UnsupportedRuntime { .. } => "UnsupportedRuntime",
+        DispatchError::Event(_) => "Event",
+        DispatchError::Script(_) => "Script",
+        DispatchError::Wasm(_) => "Wasm",
     }
 }

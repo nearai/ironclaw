@@ -1,0 +1,263 @@
+//! Runtime event and audit-history sinks for IronClaw Reborn.
+//!
+//! `ironclaw_events` defines the small event vocabulary used by the first live
+//! Reborn slice. Events carry typed scope and capability metadata, never raw
+//! host paths or raw secrets. The in-memory sink supports tests/live progress;
+//! the JSONL sink demonstrates durable history through the Reborn filesystem
+//! contract.
+
+use std::sync::{Arc, Mutex};
+
+use tokio::sync::Mutex as AsyncMutex;
+
+use async_trait::async_trait;
+use chrono::Utc;
+use ironclaw_filesystem::{FilesystemError, RootFilesystem};
+use ironclaw_host_api::{
+    CapabilityId, ExtensionId, ResourceScope, RuntimeKind, Timestamp, VirtualPath,
+};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use uuid::Uuid;
+
+/// Runtime event identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RuntimeEventId(Uuid);
+
+impl RuntimeEventId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl Default for RuntimeEventId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Event kinds emitted by the composition/runtime path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeEventKind {
+    DispatchRequested,
+    RuntimeSelected,
+    DispatchSucceeded,
+    DispatchFailed,
+}
+
+/// Redacted runtime event payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeEvent {
+    pub event_id: RuntimeEventId,
+    pub timestamp: Timestamp,
+    pub kind: RuntimeEventKind,
+    pub scope: ResourceScope,
+    pub capability_id: CapabilityId,
+    pub provider: Option<ExtensionId>,
+    pub runtime: Option<RuntimeKind>,
+    pub output_bytes: Option<u64>,
+    pub error_kind: Option<String>,
+}
+
+impl RuntimeEvent {
+    pub fn dispatch_requested(scope: ResourceScope, capability_id: CapabilityId) -> Self {
+        Self::new(
+            RuntimeEventKind::DispatchRequested,
+            scope,
+            capability_id,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    pub fn runtime_selected(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        provider: ExtensionId,
+        runtime: RuntimeKind,
+    ) -> Self {
+        Self::new(
+            RuntimeEventKind::RuntimeSelected,
+            scope,
+            capability_id,
+            Some(provider),
+            Some(runtime),
+            None,
+            None,
+        )
+    }
+
+    pub fn dispatch_succeeded(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        provider: ExtensionId,
+        runtime: RuntimeKind,
+        output_bytes: u64,
+    ) -> Self {
+        Self::new(
+            RuntimeEventKind::DispatchSucceeded,
+            scope,
+            capability_id,
+            Some(provider),
+            Some(runtime),
+            Some(output_bytes),
+            None,
+        )
+    }
+
+    pub fn dispatch_failed(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        provider: Option<ExtensionId>,
+        runtime: Option<RuntimeKind>,
+        error_kind: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            RuntimeEventKind::DispatchFailed,
+            scope,
+            capability_id,
+            provider,
+            runtime,
+            None,
+            Some(error_kind.into()),
+        )
+    }
+
+    fn new(
+        kind: RuntimeEventKind,
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        provider: Option<ExtensionId>,
+        runtime: Option<RuntimeKind>,
+        output_bytes: Option<u64>,
+        error_kind: Option<String>,
+    ) -> Self {
+        Self {
+            event_id: RuntimeEventId::new(),
+            timestamp: Utc::now(),
+            kind,
+            scope,
+            capability_id,
+            provider,
+            runtime,
+            output_bytes,
+            error_kind,
+        }
+    }
+}
+
+/// Event sink failures.
+#[derive(Debug, Error)]
+pub enum EventError {
+    #[error("event serialization failed: {reason}")]
+    Serialize { reason: String },
+    #[error("filesystem event sink failed: {0}")]
+    Filesystem(Box<FilesystemError>),
+    #[error("event sink failed: {reason}")]
+    Sink { reason: String },
+}
+
+impl From<FilesystemError> for EventError {
+    fn from(error: FilesystemError) -> Self {
+        Self::Filesystem(Box::new(error))
+    }
+}
+
+/// Async event sink used by runtime/composition services.
+#[async_trait]
+pub trait EventSink: Send + Sync {
+    async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError>;
+}
+
+/// In-memory event sink used by tests and live demos.
+#[derive(Debug, Clone, Default)]
+pub struct InMemoryEventSink {
+    events: Arc<Mutex<Vec<RuntimeEvent>>>,
+}
+
+impl InMemoryEventSink {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn events(&self) -> Vec<RuntimeEvent> {
+        self.events
+            .lock()
+            .map(|events| events.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+    }
+}
+
+#[async_trait]
+impl EventSink for InMemoryEventSink {
+    async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError> {
+        self.events
+            .lock()
+            .map_err(|_| EventError::Sink {
+                reason: "in-memory event sink lock poisoned".to_string(),
+            })?
+            .push(event);
+        Ok(())
+    }
+}
+
+/// Filesystem-backed JSONL event sink for durable runtime history.
+#[derive(Debug, Clone)]
+pub struct JsonlEventSink<F> {
+    filesystem: Arc<F>,
+    path: VirtualPath,
+    lock: Arc<AsyncMutex<()>>,
+}
+
+impl<F> JsonlEventSink<F>
+where
+    F: RootFilesystem,
+{
+    pub fn new(filesystem: Arc<F>, path: VirtualPath) -> Self {
+        Self {
+            filesystem,
+            path,
+            lock: Arc::new(AsyncMutex::new(())),
+        }
+    }
+
+    pub fn filesystem(&self) -> Arc<F> {
+        Arc::clone(&self.filesystem)
+    }
+
+    pub fn path(&self) -> &VirtualPath {
+        &self.path
+    }
+}
+
+#[async_trait]
+impl<F> EventSink for JsonlEventSink<F>
+where
+    F: RootFilesystem,
+{
+    async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError> {
+        let line = serde_json::to_vec(&event).map_err(|error| EventError::Serialize {
+            reason: error.to_string(),
+        })?;
+
+        let _guard = self.lock.lock().await;
+
+        let mut bytes = self
+            .filesystem
+            .read_file(&self.path)
+            .await
+            .unwrap_or_else(|_| Vec::new());
+        bytes.extend_from_slice(&line);
+        bytes.push(b'\n');
+        self.filesystem.write_file(&self.path, &bytes).await?;
+        Ok(())
+    }
+}
