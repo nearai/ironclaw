@@ -442,46 +442,71 @@ fn guest_error(status: i32, output_bytes: &[u8]) -> WasmError {
             value
                 .get("message")
                 .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
+                .map(sanitize_guest_message)
         })
         .unwrap_or_else(|| "guest returned an error without a valid message".to_string());
     WasmError::GuestError { status, message }
 }
 
+fn sanitize_guest_message(message: &str) -> String {
+    let sanitized = message
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>();
+    let collapsed = sanitized.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX_GUEST_ERROR_CHARS: usize = 256;
+    collapsed.chars().take(MAX_GUEST_ERROR_CHARS).collect()
+}
+
 fn validate_invocation_schema(schema: &Value, input: &Value) -> Result<(), WasmError> {
+    validate_schema_at(schema, input, "input")
+}
+
+fn validate_schema_at(schema: &Value, input: &Value, field: &str) -> Result<(), WasmError> {
     if schema.is_null() {
         return Ok(());
     }
 
     if let Some(expected_type) = schema.get("type").and_then(Value::as_str) {
-        validate_json_type(input, expected_type, "input")?;
+        validate_json_type(input, expected_type, field)?;
     }
 
-    let Some(input_object) = input.as_object() else {
-        return Ok(());
-    };
-
     if let Some(required) = schema.get("required").and_then(Value::as_array) {
-        for field in required {
-            let Some(field) = field.as_str() else {
+        let input_object = input
+            .as_object()
+            .ok_or_else(|| WasmError::InvalidInvocation {
+                reason: format!("input field '{field}' must be object"),
+            })?;
+        for required_field in required {
+            let Some(required_field) = required_field.as_str() else {
                 continue;
             };
-            if !input_object.contains_key(field) {
+            if !input_object.contains_key(required_field) {
                 return Err(WasmError::InvalidInvocation {
-                    reason: format!("missing required input field '{field}'"),
+                    reason: format!("missing required input field '{field}.{required_field}'"),
                 });
             }
         }
     }
 
     if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
-        for (field, property_schema) in properties {
-            let Some(value) = input_object.get(field) else {
+        let Some(input_object) = input.as_object() else {
+            return Ok(());
+        };
+        for (property, property_schema) in properties {
+            let Some(value) = input_object.get(property) else {
                 continue;
             };
-            if let Some(expected_type) = property_schema.get("type").and_then(Value::as_str) {
-                validate_json_type(value, expected_type, field)?;
-            }
+            validate_schema_at(property_schema, value, &format!("{field}.{property}"))?;
+        }
+    }
+
+    if let Some(item_schema) = schema.get("items") {
+        let Some(items) = input.as_array() else {
+            return Ok(());
+        };
+        for (index, value) in items.iter().enumerate() {
+            validate_schema_at(item_schema, value, &format!("{field}[{index}]"))?;
         }
     }
 

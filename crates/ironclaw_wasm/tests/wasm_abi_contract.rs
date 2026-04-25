@@ -22,7 +22,7 @@ fn json_abi_round_trips_input_and_records_usage() {
         .unwrap();
 
     assert_eq!(result.output, json!({"message": "hello"}));
-    assert_eq!(result.reservation_id, reservation.id);
+    assert_eq!(result.reservation_id, reservation.id());
     assert!(result.usage.wall_clock_ms > 0);
     assert!(result.usage.process_count >= 1);
     assert!(result.fuel_consumed > 0);
@@ -52,6 +52,47 @@ fn json_abi_validates_input_schema_before_guest_execution() {
 }
 
 #[test]
+fn json_abi_validates_nested_input_schema_before_guest_execution() {
+    let runtime = WasmRuntime::for_testing().unwrap();
+    let module = runtime.prepare(json_echo_spec()).unwrap();
+    let descriptor = make_descriptor(
+        "json",
+        "json.echo",
+        RuntimeKind::Wasm,
+        json!({
+            "type": "object",
+            "required": ["payload"],
+            "properties": {
+                "payload": {
+                    "type": "object",
+                    "required": ["message"],
+                    "properties": {
+                        "message": {"type": "string"}
+                    }
+                }
+            }
+        }),
+    );
+    let reservation = sample_active_reservation();
+
+    let err = runtime
+        .invoke_json(
+            &module,
+            &descriptor,
+            Some(&reservation),
+            CapabilityInvocation {
+                input: json!({"payload": {}}),
+            },
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        WasmError::InvalidInvocation { reason } if reason.contains("payload.message")
+    ));
+}
+
+#[test]
 fn json_abi_reports_guest_error_status_with_sanitized_message() {
     let runtime = WasmRuntime::for_testing().unwrap();
     let module = runtime.prepare(guest_error_spec()).unwrap();
@@ -77,6 +118,33 @@ fn json_abi_reports_guest_error_status_with_sanitized_message() {
     assert!(matches!(
         err,
         WasmError::GuestError { status: 7, message } if message == "bad input"
+    ));
+}
+
+#[test]
+fn json_abi_strips_control_characters_from_guest_error_message() {
+    let runtime = WasmRuntime::for_testing().unwrap();
+    let module = runtime.prepare(guest_control_error_spec()).unwrap();
+    let descriptor = make_descriptor(
+        "json",
+        "json.control_fail",
+        RuntimeKind::Wasm,
+        json!({"type":"object"}),
+    );
+    let reservation = sample_active_reservation();
+
+    let err = runtime
+        .invoke_json(
+            &module,
+            &descriptor,
+            Some(&reservation),
+            CapabilityInvocation { input: json!({}) },
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        WasmError::GuestError { status: 9, message } if message == "bad red" && !message.contains('\n')
     ));
 }
 
@@ -229,6 +297,36 @@ fn guest_error_spec() -> WasmModuleSpec {
                   i32.const 64)
                 (func (export "output_len") (result i32)
                   i32.const 42))"#,
+        )
+        .unwrap(),
+    }
+}
+
+fn guest_control_error_spec() -> WasmModuleSpec {
+    WasmModuleSpec {
+        provider: ExtensionId::new("json").unwrap(),
+        capability: CapabilityId::new("json.control_fail").unwrap(),
+        export: "run".to_string(),
+        bytes: wat::parse_str(
+            r#"(module
+                (memory (export "memory") 1)
+                (data (i32.const 64) "{\"message\":\"bad\\nred\"}")
+                (global $heap (mut i32) (i32.const 1024))
+                (func (export "alloc") (param $len i32) (result i32)
+                  (local $ptr i32)
+                  global.get $heap
+                  local.set $ptr
+                  global.get $heap
+                  local.get $len
+                  i32.add
+                  global.set $heap
+                  local.get $ptr)
+                (func (export "run") (param i32 i32) (result i32)
+                  i32.const 9)
+                (func (export "output_ptr") (result i32)
+                  i32.const 64)
+                (func (export "output_len") (result i32)
+                  i32.const 22))"#,
         )
         .unwrap(),
     }

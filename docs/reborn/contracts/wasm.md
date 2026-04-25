@@ -142,7 +142,7 @@ Host invocation flow:
 
 ```text
 1. validate CapabilityDescriptor runtime/provider/capability
-2. validate CapabilityInvocation.input against descriptor.parameters_schema
+2. recursively validate CapabilityInvocation.input against descriptor.parameters_schema
 3. instantiate a fresh module instance
 4. call alloc(input_json_len)
 5. write serialized JSON input bytes into guest memory
@@ -156,7 +156,7 @@ Host invocation flow:
 Status contract:
 
 - `status == 0`: output bytes are the JSON capability result.
-- `status != 0`: output bytes should be a JSON error object; the host surfaces `WasmError::GuestError`.
+- `status != 0`: output bytes should be a JSON error object; the host surfaces `WasmError::GuestError` with a bounded, control-character-stripped message.
 
 This ABI is a V1 compatibility layer. It can coexist with, or be replaced by, Component Model/WIT once the host ABI is mature enough to freeze.
 
@@ -244,8 +244,8 @@ Local contract tests should prove:
 - invocation requires a governor-issued active reservation guard
 - exported function is invoked successfully
 - JSON ABI writes input into guest memory and reads JSON output
-- JSON ABI validates invocation input against the descriptor schema before guest execution
-- guest non-zero status becomes a structured guest error
+- JSON ABI validates invocation input, including nested object properties, against the descriptor schema before guest execution
+- guest non-zero status becomes a structured guest error with sanitized message text
 - invalid guest JSON output fails closed
 - ABI memory/allocator/output accessor exports are required
 - output byte limit is enforced
