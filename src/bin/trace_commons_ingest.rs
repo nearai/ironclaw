@@ -1425,7 +1425,7 @@ async fn active_learning_review_queue_handler(
         .into_iter()
         .map(|record| (record.submission_id, record))
         .collect::<BTreeMap<_, _>>();
-    let limit = query.limit.unwrap_or(100).clamp(1, 501);
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
     let mut items = records
         .into_iter()
         .filter(|record| {
@@ -7738,6 +7738,30 @@ mod tests {
                 .iter()
                 .all(|item| item.submission_id != tenant_b_quarantined_id)
         );
+
+        let Json(limited_queue) = active_learning_review_queue_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(ActiveLearningQueueQuery {
+                limit: Some(0),
+                privacy_risk: None,
+            }),
+        )
+        .await
+        .expect("limit is clamped to at least one item");
+        assert_eq!(limited_queue.item_count, 1);
+
+        let Json(clamped_queue) = active_learning_review_queue_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Query(ActiveLearningQueueQuery {
+                limit: Some(usize::MAX),
+                privacy_risk: None,
+            }),
+        )
+        .await
+        .expect("limit is clamped to the reviewer page maximum");
+        assert_eq!(clamped_queue.item_count, 2);
     }
 
     #[tokio::test]
