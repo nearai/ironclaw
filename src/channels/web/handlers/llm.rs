@@ -662,6 +662,7 @@ mod tests {
         assert_eq!(nearai.get("builtin").and_then(|v| v.as_bool()), Some(true));
 
         // Clean up
+        // SAFETY: serialized via ENV_MUTEX.
         unsafe {
             std::env::remove_var("NEARAI_API_KEY");
             std::env::remove_var("NEARAI_MODEL");

@@ -37,6 +37,7 @@ pub mod runtime;
 pub mod session;
 pub mod smart_routing;
 mod token_refreshing;
+pub(crate) mod tool_schema;
 pub mod transcription;
 
 #[cfg(test)]
