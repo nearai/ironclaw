@@ -688,6 +688,7 @@ The architecture is real when:
 - `ProcessHost` exposes host-facing `status`, `kill`, `await_process`, `subscribe`, `result`, and `await_result` APIs over scoped process current state/results without moving process lifecycle back into `CapabilityHost`
 - `ProcessCancellationRegistry` lets `ProcessHost::kill` signal scoped cooperative cancellation tokens for background executors without allowing cross-tenant cancellation
 - `ProcessResultStore` records scoped terminal process output/error records; in-memory/dev stores can keep small JSON inline, while filesystem-backed stores write successful JSON output to scoped output refs for reviewable storage hygiene
+- `ProcessServices` composes process store, result store, cancellation registry, host, and background manager wiring so callers do not accidentally split lifecycle/result/cancellation state
 - `EventingProcessStore` emits tenant/user-scoped process_started/process_completed/process_failed/process_killed events without making dispatcher process-aware
 - `ResourceManagedProcessStore` reserves resources before process start, records reservation IDs, reconciles on completion, and releases on failure/kill/start failure
 - `ironclaw_resources` is the only path for costed/quota-limited invocation accounting

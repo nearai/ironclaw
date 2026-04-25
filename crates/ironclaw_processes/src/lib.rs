@@ -896,6 +896,105 @@ where
     }
 }
 
+pub struct ProcessServices<S, R>
+where
+    S: ProcessStore + 'static,
+    R: ProcessResultStore + 'static,
+{
+    process_store: Arc<S>,
+    result_store: Arc<R>,
+    cancellation_registry: Arc<ProcessCancellationRegistry>,
+}
+
+impl<S, R> Clone for ProcessServices<S, R>
+where
+    S: ProcessStore + 'static,
+    R: ProcessResultStore + 'static,
+{
+    fn clone(&self) -> Self {
+        Self {
+            process_store: Arc::clone(&self.process_store),
+            result_store: Arc::clone(&self.result_store),
+            cancellation_registry: Arc::clone(&self.cancellation_registry),
+        }
+    }
+}
+
+impl<S, R> ProcessServices<S, R>
+where
+    S: ProcessStore + 'static,
+    R: ProcessResultStore + 'static,
+{
+    pub fn new(process_store: Arc<S>, result_store: Arc<R>) -> Self {
+        Self::from_parts(
+            process_store,
+            result_store,
+            Arc::new(ProcessCancellationRegistry::new()),
+        )
+    }
+
+    pub fn from_parts(
+        process_store: Arc<S>,
+        result_store: Arc<R>,
+        cancellation_registry: Arc<ProcessCancellationRegistry>,
+    ) -> Self {
+        Self {
+            process_store,
+            result_store,
+            cancellation_registry,
+        }
+    }
+
+    pub fn process_store(&self) -> Arc<S> {
+        Arc::clone(&self.process_store)
+    }
+
+    pub fn result_store(&self) -> Arc<R> {
+        Arc::clone(&self.result_store)
+    }
+
+    pub fn cancellation_registry(&self) -> Arc<ProcessCancellationRegistry> {
+        Arc::clone(&self.cancellation_registry)
+    }
+
+    pub fn host(&self) -> ProcessHost<'_> {
+        ProcessHost::new(self.process_store.as_ref())
+            .with_cancellation_registry(Arc::clone(&self.cancellation_registry))
+            .with_result_store(Arc::clone(&self.result_store))
+    }
+
+    pub fn background_manager<E>(&self, executor: Arc<E>) -> BackgroundProcessManager
+    where
+        E: ProcessExecutor + 'static,
+    {
+        BackgroundProcessManager::new(Arc::clone(&self.process_store), executor)
+            .with_cancellation_registry(Arc::clone(&self.cancellation_registry))
+            .with_result_store(Arc::clone(&self.result_store))
+    }
+}
+
+impl ProcessServices<InMemoryProcessStore, InMemoryProcessResultStore> {
+    pub fn in_memory() -> Self {
+        Self::new(
+            Arc::new(InMemoryProcessStore::new()),
+            Arc::new(InMemoryProcessResultStore::new()),
+        )
+    }
+}
+
+impl<F>
+    ProcessServices<FilesystemProcessStore<'static, F>, FilesystemProcessResultStore<'static, F>>
+where
+    F: RootFilesystem + 'static,
+{
+    pub fn filesystem(filesystem: Arc<F>) -> Self {
+        Self::new(
+            Arc::new(FilesystemProcessStore::from_arc(Arc::clone(&filesystem))),
+            Arc::new(FilesystemProcessResultStore::from_arc(filesystem)),
+        )
+    }
+}
+
 pub struct BackgroundProcessManager {
     store: Arc<dyn ProcessStore>,
     executor: Arc<dyn ProcessExecutor + 'static>,

@@ -106,6 +106,16 @@ async fn await_result(scope, process_id) -> Result<ProcessResultRecord>;
 
 The V1 subscription is intentionally scoped and current-state based. It does not expose raw process input/output, host paths, or cross-tenant existence information, and it does not require `CapabilityHost` or `ironclaw_dispatcher` to own process lifecycle mechanics.
 
+`ProcessServices` is a composition helper that wires the process store, result store, and cancellation registry together so `ProcessHost` and `BackgroundProcessManager` share the same lifecycle/result/cancellation state:
+
+```rust
+let services = ProcessServices::in_memory();
+let host = services.host();
+let manager = services.background_manager(executor);
+```
+
+It also supports filesystem-backed composition from a shared filesystem handle. This helper is convenience wiring only; it does not move process lifecycle into `CapabilityHost`, `ironclaw_dispatcher`, or any runtime lane.
+
 `BackgroundProcessManager` composes a `ProcessStore` and `ProcessExecutor`:
 
 ```text
