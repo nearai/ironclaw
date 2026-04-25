@@ -3181,6 +3181,7 @@ async fn run_maintenance(
             &state.root,
             &tenant.tenant_id,
             &revoked_submission_ids,
+            &expired_submission_ids,
             request.max_export_age_hours,
             request.dry_run,
         )?
@@ -3641,6 +3642,7 @@ fn prune_export_cache_files(
     root: &Path,
     tenant_id: &str,
     revoked_submission_ids: &BTreeSet<Uuid>,
+    expired_submission_ids: &BTreeSet<Uuid>,
     max_export_age_hours: Option<i64>,
     dry_run: bool,
 ) -> anyhow::Result<usize> {
@@ -3668,12 +3670,16 @@ fn prune_export_cache_files(
             .source_submission_ids
             .iter()
             .any(|submission_id| revoked_submission_ids.contains(submission_id));
+        let contains_expired_source = manifest
+            .source_submission_ids
+            .iter()
+            .any(|submission_id| expired_submission_ids.contains(submission_id));
         let expired = max_export_age_hours
             .filter(|hours| *hours >= 0)
             .is_some_and(|hours| {
                 manifest.generated_at <= Utc::now() - chrono::Duration::hours(hours)
             });
-        if !contains_revoked_source && !expired {
+        if !contains_revoked_source && !contains_expired_source && !expired {
             continue;
         }
 
@@ -3695,8 +3701,10 @@ fn prune_export_cache_files(
             pruned_at: Utc::now(),
             reason: if contains_revoked_source {
                 "revoked_source".to_string()
+            } else if contains_expired_source {
+                "retention_expired_source".to_string()
             } else {
-                "expired".to_string()
+                "export_age_expired".to_string()
             },
             source_submission_ids: manifest.source_submission_ids,
         };
@@ -6096,6 +6104,30 @@ mod tests {
         let record = read_submission_record(temp.path(), "tenant-a", submission_id)
             .expect("record reads")
             .expect("record exists");
+        let Json(pre_expiry_export) = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("test_expired_export_cache".to_string()),
+                status: None,
+                privacy_risk: None,
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("pre-expiry export succeeds");
+        assert_eq!(pre_expiry_export.item_count, 1);
+        let cached_export_path =
+            export_artifact_dir(temp.path(), "tenant-a", pre_expiry_export.export_id)
+                .join("dataset.json");
+        write_json_file(
+            &cached_export_path,
+            &pre_expiry_export,
+            "test expired source export cache",
+        )
+        .expect("expired source cache writes");
+
         let metadata_path = temp
             .path()
             .join("tenants")
@@ -6125,6 +6157,16 @@ mod tests {
         .expect("maintenance expires traces");
         assert_eq!(response.records_marked_expired, 1);
         assert_eq!(response.derived_marked_expired, 1);
+        assert_eq!(response.export_cache_files_pruned, 1);
+        assert!(!cached_export_path.exists());
+        let pruned_marker_path =
+            export_artifact_dir(temp.path(), "tenant-a", pre_expiry_export.export_id)
+                .join("pruned.json");
+        let pruned_marker: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(pruned_marker_path).expect("pruned marker reads"),
+        )
+        .expect("pruned marker parses");
+        assert_eq!(pruned_marker["reason"], "retention_expired_source");
 
         let expired_metadata: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(&metadata_path).expect("expired metadata reads"),

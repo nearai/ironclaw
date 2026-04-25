@@ -30,6 +30,9 @@ pub const DETERMINISTIC_REDACTION_PIPELINE_VERSION: &str = "ironclaw-determinist
 pub const PRIVACY_FILTER_SIDECAR_PIPELINE_SUFFIX: &str = "privacy-filter-sidecar-v1";
 pub const SERVER_RESCRUB_PIPELINE_SUFFIX: &str = "server-rescrub-v1";
 pub const PRIVACY_FILTER_CANARY_VERSION: &str = "trace-privacy-filter-canary-v1";
+pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES: usize = 1024 * 1024;
+pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDOUT_BYTES: usize = 1024 * 1024;
+pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDERR_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceContributionEnvelope {
@@ -1311,6 +1314,8 @@ pub struct RedactionReport {
     pub counts: BTreeMap<String, u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pii_labels_present: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     pub blocked_secret_detected: bool,
 }
 
@@ -1326,6 +1331,13 @@ impl RedactionReport {
         }
     }
 
+    fn add_warning(&mut self, warning: impl Into<String>) {
+        let warning = warning.into();
+        if !self.warnings.contains(&warning) {
+            self.warnings.push(warning);
+        }
+    }
+
     fn merge(&mut self, other: RedactionReport) {
         for (key, value) in other.counts {
             *self.counts.entry(key).or_insert(0) += value;
@@ -1334,6 +1346,9 @@ impl RedactionReport {
             if !self.pii_labels_present.contains(&label) {
                 self.pii_labels_present.push(label);
             }
+        }
+        for warning in other.warnings {
+            self.add_warning(warning);
         }
         self.blocked_secret_detected |= other.blocked_secret_detected;
     }
@@ -1533,6 +1548,9 @@ pub struct CommandPrivacyFilterAdapter {
     command: PathBuf,
     args: Vec<String>,
     timeout: Duration,
+    max_input_bytes: usize,
+    max_stdout_bytes: usize,
+    max_stderr_bytes: usize,
 }
 
 impl CommandPrivacyFilterAdapter {
@@ -1541,6 +1559,9 @@ impl CommandPrivacyFilterAdapter {
             command: command.into(),
             args: Vec::new(),
             timeout: Duration::from_secs(10),
+            max_input_bytes: PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES,
+            max_stdout_bytes: PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDOUT_BYTES,
+            max_stderr_bytes: PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDERR_BYTES,
         }
     }
 
@@ -1551,6 +1572,17 @@ impl CommandPrivacyFilterAdapter {
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    pub fn with_input_limit(mut self, max_input_bytes: usize) -> Self {
+        self.max_input_bytes = max_input_bytes;
+        self
+    }
+
+    pub fn with_output_limits(mut self, max_stdout_bytes: usize, max_stderr_bytes: usize) -> Self {
+        self.max_stdout_bytes = max_stdout_bytes;
+        self.max_stderr_bytes = max_stderr_bytes;
         self
     }
 }
@@ -1564,20 +1596,39 @@ impl PrivacyFilterAdapter for CommandPrivacyFilterAdapter {
         if text.trim().is_empty() {
             return Ok(None);
         }
+        if text.len() > self.max_input_bytes {
+            return Err(TraceContributionError::RedactionFailed {
+                reason: format!(
+                    "privacy filter sidecar input exceeded limit: input_len={} max_input_bytes={}",
+                    text.len(),
+                    self.max_input_bytes
+                ),
+            });
+        }
 
-        let mut child = tokio::process::Command::new(&self.command)
+        let mut command = tokio::process::Command::new(&self.command);
+        command.env_clear();
+        for name in ["PATH", "LANG", "LC_ALL"] {
+            if let Ok(value) = std::env::var(name) {
+                command.env(name, value);
+            }
+        }
+        command
             .args(&self.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| TraceContributionError::RedactionFailed {
-                reason: format!(
-                    "failed to spawn privacy filter sidecar {}: {}",
-                    self.command.display(),
-                    error
-                ),
-            })?;
+            .kill_on_drop(true);
+        let mut child =
+            command
+                .spawn()
+                .map_err(|error| TraceContributionError::RedactionFailed {
+                    reason: format!(
+                        "failed to spawn privacy filter sidecar {}: {}",
+                        self.command.display(),
+                        error
+                    ),
+                })?;
 
         let mut stdin =
             child
@@ -1602,18 +1653,42 @@ impl PrivacyFilterAdapter for CommandPrivacyFilterAdapter {
         let output = tokio::time::timeout(self.timeout, child.wait_with_output())
             .await
             .map_err(|_| TraceContributionError::RedactionFailed {
-                reason: "privacy filter sidecar timed out".to_string(),
+                reason: format!(
+                    "privacy filter sidecar timed out after {}ms",
+                    self.timeout.as_millis()
+                ),
             })?
             .map_err(|error| TraceContributionError::RedactionFailed {
                 reason: format!("privacy filter sidecar failed: {error}"),
             })?;
 
+        if output.stdout.len() > self.max_stdout_bytes {
+            return Err(TraceContributionError::RedactionFailed {
+                reason: format!(
+                    "stdout exceeded privacy filter sidecar limit: stdout_len={} max_stdout_bytes={}",
+                    output.stdout.len(),
+                    self.max_stdout_bytes
+                ),
+            });
+        }
+        if output.stderr.len() > self.max_stderr_bytes {
+            return Err(TraceContributionError::RedactionFailed {
+                reason: format!(
+                    "stderr exceeded privacy filter sidecar limit: stderr_len={} stderr_hash={} max_stderr_bytes={}",
+                    output.stderr.len(),
+                    privacy_filter_bytes_hash(&output.stderr),
+                    self.max_stderr_bytes
+                ),
+            });
+        }
+
         if !output.status.success() {
             return Err(TraceContributionError::RedactionFailed {
                 reason: format!(
-                    "privacy filter sidecar exited with {}; stderr={}",
+                    "privacy filter sidecar exited with {}; stderr_len={} stderr_hash={}",
                     output.status,
-                    String::from_utf8_lossy(&output.stderr)
+                    output.stderr.len(),
+                    privacy_filter_bytes_hash(&output.stderr)
                 ),
             });
         }
@@ -1625,6 +1700,11 @@ impl PrivacyFilterAdapter for CommandPrivacyFilterAdapter {
         })?;
         safe_privacy_filter_redaction_from_output(&value).map(Some)
     }
+}
+
+fn privacy_filter_bytes_hash(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    format!("sha256:{}", hex::encode(digest))
 }
 
 pub fn privacy_filter_adapter_from_env() -> Option<Arc<dyn PrivacyFilterAdapter>> {
@@ -1642,9 +1722,29 @@ pub fn privacy_filter_adapter_from_env() -> Option<Arc<dyn PrivacyFilterAdapter>
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    Some(Arc::new(
-        CommandPrivacyFilterAdapter::new(command).with_args(args),
-    ))
+    let mut adapter = CommandPrivacyFilterAdapter::new(command).with_args(args);
+    if let Some(timeout_ms) = parse_usize_env("IRONCLAW_TRACE_PRIVACY_FILTER_TIMEOUT_MS") {
+        adapter = adapter.with_timeout(Duration::from_millis(timeout_ms as u64));
+    }
+    if let Some(max_input_bytes) = parse_usize_env("IRONCLAW_TRACE_PRIVACY_FILTER_MAX_INPUT_BYTES")
+    {
+        adapter = adapter.with_input_limit(max_input_bytes);
+    }
+    let max_stdout = parse_usize_env("IRONCLAW_TRACE_PRIVACY_FILTER_MAX_STDOUT_BYTES");
+    let max_stderr = parse_usize_env("IRONCLAW_TRACE_PRIVACY_FILTER_MAX_STDERR_BYTES");
+    if max_stdout.is_some() || max_stderr.is_some() {
+        adapter = adapter.with_output_limits(
+            max_stdout.unwrap_or(PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDOUT_BYTES),
+            max_stderr.unwrap_or(PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDERR_BYTES),
+        );
+    }
+    Some(Arc::new(adapter))
+}
+
+fn parse_usize_env(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
 }
 
 pub struct DeterministicTraceRedactor {
@@ -1696,8 +1796,18 @@ impl DeterministicTraceRedactor {
         let Some(adapter) = self.privacy_filter.as_ref() else {
             return Ok(text);
         };
-        let Some(redaction) = adapter.redact_text(&text).await? else {
-            return Ok(text);
+        let redaction = match adapter.redact_text(&text).await {
+            Ok(Some(redaction)) => redaction,
+            Ok(None) => return Ok(text),
+            Err(error) => {
+                let error_text = error.to_string();
+                report.increment("privacy_filter:sidecar_failure");
+                report.add_warning(format!(
+                    "Privacy Filter sidecar failed; deterministic redaction fallback was used. error_hash={}",
+                    canonical_hash(&error_text)
+                ));
+                return Ok(text);
+            }
         };
 
         merge_privacy_filter_summary(privacy_filter_summary, &redaction.summary);
@@ -1934,6 +2044,8 @@ impl TraceRedactor for DeterministicTraceRedactor {
 
         let residual_pii_risk = residual_risk(&trace.consent, &report);
         let redaction_hash = redaction_hash(&events, &report.counts);
+        let mut warnings = privacy_warnings(residual_pii_risk);
+        warnings.extend(report.warnings.clone());
         let privacy = PrivacyMetadata {
             redaction_pipeline_version: redaction_pipeline_version(
                 privacy_filter_summary.is_some(),
@@ -1943,7 +2055,7 @@ impl TraceRedactor for DeterministicTraceRedactor {
             pii_labels_present: report.pii_labels_present,
             residual_pii_risk,
             redaction_hash,
-            warnings: privacy_warnings(residual_pii_risk),
+            warnings,
         };
 
         let trace_card = build_trace_card(
@@ -2027,6 +2139,7 @@ pub fn rescrub_trace_envelope_with(
         &RedactionReport {
             counts: BTreeMap::new(),
             pii_labels_present: Vec::new(),
+            warnings: Vec::new(),
             blocked_secret_detected,
         },
     );
@@ -4101,6 +4214,52 @@ mod tests {
         }
     }
 
+    struct FailingPrivacyFilterAdapter;
+
+    #[async_trait]
+    impl PrivacyFilterAdapter for FailingPrivacyFilterAdapter {
+        async fn redact_text(
+            &self,
+            _text: &str,
+        ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+            Err(TraceContributionError::RedactionFailed {
+                reason: "sidecar stderr mentioned tc_canary_secret_0123456789abcdef".to_string(),
+            })
+        }
+    }
+
+    struct EnvVarRestore {
+        name: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarRestore {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var(name).ok();
+            // SAFETY: This test-scoped guard restores the variable in Drop.
+            // The sidecar isolation test needs a real process environment
+            // value to prove `CommandPrivacyFilterAdapter` clears child env.
+            unsafe {
+                std::env::set_var(name, value);
+            }
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvVarRestore {
+        fn drop(&mut self) {
+            // SAFETY: Restoring the exact test-scoped variable keeps process
+            // environment mutation bounded to this guard's lifetime.
+            unsafe {
+                if let Some(previous) = self.previous.as_ref() {
+                    std::env::set_var(self.name, previous);
+                } else {
+                    std::env::remove_var(self.name);
+                }
+            }
+        }
+    }
+
     fn sample_trace() -> TraceFile {
         TraceFile {
             model_name: "test-model".to_string(),
@@ -4334,6 +4493,111 @@ mod tests {
         }
         assert!(json.contains("sha256:"));
         assert!(!json.contains("tc_canary_secret_0123456789abcdef"));
+    }
+
+    #[tokio::test]
+    async fn privacy_filter_sidecar_failure_falls_back_without_raw_error_text() {
+        let trace = TraceFile {
+            model_name: "test-model".to_string(),
+            memory_snapshot: Vec::new(),
+            http_exchanges: Vec::new(),
+            steps: vec![TraceStep {
+                request_hint: None,
+                response: TraceResponse::UserInput {
+                    content: "Alice asked for a status update".to_string(),
+                },
+                expected_tool_results: Vec::new(),
+            }],
+        };
+        let raw = RawTraceContribution::from_recorded_trace(
+            &trace,
+            RecordedTraceContributionOptions {
+                include_message_text: true,
+                ..Default::default()
+            },
+        );
+
+        let envelope = DeterministicTraceRedactor::new(Vec::new())
+            .with_privacy_filter(Arc::new(FailingPrivacyFilterAdapter))
+            .redact_trace(raw)
+            .await
+            .expect("deterministic fallback should keep redaction non-fatal");
+        let json = serde_json::to_string(&envelope).expect("envelope serializes");
+
+        assert!(json.contains("Privacy Filter sidecar failed"));
+        assert!(json.contains("sha256:"));
+        assert!(!json.contains("tc_canary_secret_0123456789abcdef"));
+        assert!(envelope.privacy.privacy_filter_summary.is_none());
+        assert!(
+            envelope
+                .privacy
+                .redaction_counts
+                .contains_key("privacy_filter:sidecar_failure")
+        );
+    }
+
+    #[tokio::test]
+    async fn command_privacy_filter_error_does_not_echo_stderr() {
+        if !Path::new("/bin/sh").exists() {
+            return;
+        }
+        let adapter = CommandPrivacyFilterAdapter::new("/bin/sh").with_args([
+            "-c",
+            "cat >/dev/null; printf '%s' 'raw-secret-from-stderr' >&2; exit 7",
+        ]);
+
+        let error = adapter
+            .redact_text("hello")
+            .await
+            .expect_err("non-zero sidecar exit should fail")
+            .to_string();
+
+        assert!(error.contains("stderr_len="));
+        assert!(error.contains("stderr_hash="));
+        assert!(!error.contains("raw-secret-from-stderr"));
+    }
+
+    #[tokio::test]
+    async fn command_privacy_filter_adapter_does_not_inherit_trace_commons_tokens() {
+        if !Path::new("/bin/sh").exists() {
+            return;
+        }
+        let _env_guard =
+            EnvVarRestore::set("TRACE_COMMONS_TENANT_TOKENS", "tenant-a:super-secret-token");
+
+        let adapter = CommandPrivacyFilterAdapter::new("/bin/sh").with_args([
+            "-c",
+            "cat >/dev/null; printf '{\"redacted_text\":\"%s\"}' \"${TRACE_COMMONS_TENANT_TOKENS-unset}\"",
+        ]);
+        let redaction = adapter
+            .redact_text("hello")
+            .await
+            .expect("sidecar should run")
+            .expect("sidecar should return redaction");
+
+        assert_eq!(redaction.redacted_text, "unset");
+    }
+
+    #[tokio::test]
+    async fn command_privacy_filter_rejects_oversized_stdout() {
+        if !Path::new("/bin/sh").exists() {
+            return;
+        }
+        let adapter = CommandPrivacyFilterAdapter::new("/bin/sh")
+            .with_args([
+                "-c",
+                "cat >/dev/null; printf '%s' '{\"redacted_text\":\"012345678901234567890123456789\"}'",
+            ])
+            .with_output_limits(16, 16);
+
+        let error = adapter
+            .redact_text("hello")
+            .await
+            .expect_err("oversized stdout should fail")
+            .to_string();
+
+        assert!(error.contains("stdout exceeded privacy filter sidecar limit"));
+        assert!(!error.contains("0123456789"));
     }
 
     #[test]
