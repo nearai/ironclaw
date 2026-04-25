@@ -328,6 +328,19 @@ fn actions_and_decisions_serialize_with_stable_snake_case_tags() {
     let json = serde_json::to_value(&action).unwrap();
     assert_eq!(json["type"], "dispatch");
 
+    let spawn = Action::SpawnCapability {
+        capability: CapabilityId::new("github.watch_issues").unwrap(),
+        estimated_resources: ResourceEstimate {
+            concurrency_slots: Some(1),
+            ..ResourceEstimate::default()
+        },
+    };
+    let json = serde_json::to_value(&spawn).unwrap();
+    assert_eq!(json["type"], "spawn_capability");
+    assert_eq!(json["capability"], "github.watch_issues");
+    assert!(json.get("extension_id").is_none());
+    assert!(json.get("requested_capabilities").is_none());
+
     let decision = Decision::Deny {
         reason: DenyReason::MissingGrant,
     };

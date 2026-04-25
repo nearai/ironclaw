@@ -120,6 +120,39 @@ fn capability_access_denies_when_grant_does_not_cover_declared_effects() {
 }
 
 #[test]
+fn spawn_access_requires_spawn_process_effect_in_addition_to_capability_effects() {
+    let descriptor = wasm_descriptor();
+    let dispatch_only = execution_context(CapabilitySet {
+        grants: vec![grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(ExtensionId::new("caller").unwrap()),
+            vec![EffectKind::DispatchCapability],
+        )],
+    });
+    let spawn_grant = execution_context(CapabilitySet {
+        grants: vec![grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(ExtensionId::new("caller").unwrap()),
+            vec![EffectKind::DispatchCapability, EffectKind::SpawnProcess],
+        )],
+    });
+    let authorizer = GrantAuthorizer::new();
+
+    assert_eq!(
+        authorizer.authorize_spawn(&dispatch_only, &descriptor, &ResourceEstimate::default()),
+        Decision::Deny {
+            reason: DenyReason::PolicyDenied
+        }
+    );
+    assert_eq!(
+        authorizer.authorize_spawn(&spawn_grant, &descriptor, &ResourceEstimate::default()),
+        Decision::Allow {
+            obligations: vec![]
+        }
+    );
+}
+
+#[test]
 fn capability_access_denies_invalid_execution_context() {
     let grant = grant_for(
         CapabilityId::new("echo.say").unwrap(),

@@ -26,6 +26,17 @@ pub trait CapabilityDispatchAuthorizer: Send + Sync {
         descriptor: &CapabilityDescriptor,
         estimate: &ResourceEstimate,
     ) -> Decision;
+
+    fn authorize_spawn(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+    ) -> Decision {
+        Decision::Deny {
+            reason: DenyReason::MissingGrant,
+        }
+    }
 }
 
 /// Grant-backed capability dispatch authorizer.
@@ -46,6 +57,19 @@ impl CapabilityDispatchAuthorizer for GrantAuthorizer {
         _estimate: &ResourceEstimate,
     ) -> Decision {
         authorize_from_grants(context, descriptor, context.grants.grants.iter())
+    }
+
+    fn authorize_spawn(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+    ) -> Decision {
+        authorize_from_grants(
+            context,
+            &spawn_descriptor(descriptor),
+            context.grants.grants.iter(),
+        )
     }
 }
 
@@ -290,6 +314,34 @@ where
             context.grants.grants.iter().chain(lease_grants.iter()),
         )
     }
+
+    fn authorize_spawn(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+    ) -> Decision {
+        if context.validate().is_err() {
+            return Decision::Deny {
+                reason: DenyReason::InternalInvariantViolation,
+            };
+        }
+
+        let lease_grants = self.leases.active_grants_for_context(context);
+        authorize_from_grants(
+            context,
+            &spawn_descriptor(descriptor),
+            context.grants.grants.iter().chain(lease_grants.iter()),
+        )
+    }
+}
+
+fn spawn_descriptor(descriptor: &CapabilityDescriptor) -> CapabilityDescriptor {
+    let mut descriptor = descriptor.clone();
+    if !descriptor.effects.contains(&EffectKind::SpawnProcess) {
+        descriptor.effects.push(EffectKind::SpawnProcess);
+    }
+    descriptor
 }
 
 fn authorize_from_grants<'a>(

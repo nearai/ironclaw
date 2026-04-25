@@ -15,8 +15,9 @@ use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityId, Decision, DenyReason, ExecutionContext, HostApiError,
-    InvocationFingerprint, InvocationId, ResourceEstimate, ResourceScope,
+    InvocationFingerprint, InvocationId, ProcessId, ResourceEstimate, ResourceScope,
 };
+use ironclaw_processes::{ProcessError, ProcessManager, ProcessRecord, ProcessStart};
 use ironclaw_resources::ResourceGovernor;
 use ironclaw_run_state::{
     ApprovalRequestStore, ApprovalStatus, RunStart, RunStateError, RunStateStore, RunStatus,
@@ -43,10 +44,25 @@ pub struct CapabilityResumeRequest {
     pub input: Value,
 }
 
+/// Caller-facing capability spawn request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapabilitySpawnRequest {
+    pub context: ExecutionContext,
+    pub capability_id: CapabilityId,
+    pub estimate: ResourceEstimate,
+    pub input: Value,
+}
+
 /// Caller-facing capability invocation result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityInvocationResult {
     pub dispatch: CapabilityDispatchResult,
+}
+
+/// Caller-facing capability spawn result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilitySpawnResult {
+    pub process: ProcessRecord,
 }
 
 /// Interface for already-authorized runtime dispatch.
@@ -108,6 +124,8 @@ pub enum CapabilityInvocationError {
         capability: CapabilityId,
         store: &'static str,
     },
+    #[error("capability {capability} spawn requires a process manager")]
+    ProcessManagerMissing { capability: CapabilityId },
     #[error("capability {capability} cannot resume from run status {status:?}")]
     ResumeNotBlocked {
         capability: CapabilityId,
@@ -117,6 +135,8 @@ pub enum CapabilityInvocationError {
     Lease(Box<CapabilityLeaseError>),
     #[error("run-state update failed: {0}")]
     RunState(Box<RunStateError>),
+    #[error("process update failed: {0}")]
+    Process(Box<ProcessError>),
     #[error("dispatch failed: {0}")]
     Dispatch(Box<DispatchError>),
 }
@@ -124,6 +144,12 @@ pub enum CapabilityInvocationError {
 impl From<RunStateError> for CapabilityInvocationError {
     fn from(error: RunStateError) -> Self {
         Self::RunState(Box::new(error))
+    }
+}
+
+impl From<ProcessError> for CapabilityInvocationError {
+    fn from(error: ProcessError) -> Self {
+        Self::Process(Box::new(error))
     }
 }
 
@@ -144,6 +170,7 @@ where
     run_state: Option<&'a dyn RunStateStore>,
     approval_requests: Option<&'a dyn ApprovalRequestStore>,
     capability_leases: Option<&'a dyn CapabilityLeaseStore>,
+    process_manager: Option<&'a dyn ProcessManager>,
 }
 
 impl<'a, D> CapabilityHost<'a, D>
@@ -162,6 +189,7 @@ where
             run_state: None,
             approval_requests: None,
             capability_leases: None,
+            process_manager: None,
         }
     }
 
@@ -183,6 +211,11 @@ where
         capability_leases: &'a dyn CapabilityLeaseStore,
     ) -> Self {
         self.capability_leases = Some(capability_leases);
+        self
+    }
+
+    pub fn with_process_manager(mut self, process_manager: &'a dyn ProcessManager) -> Self {
+        self.process_manager = Some(process_manager);
         self
     }
 
@@ -339,6 +372,116 @@ where
         }
 
         Ok(CapabilityInvocationResult { dispatch })
+    }
+
+    pub async fn spawn_json(
+        &self,
+        request: CapabilitySpawnRequest,
+    ) -> Result<CapabilitySpawnResult, CapabilityInvocationError> {
+        let process_manager = self.process_manager.ok_or_else(|| {
+            CapabilityInvocationError::ProcessManagerMissing {
+                capability: request.capability_id.clone(),
+            }
+        })?;
+        let invocation_id = request.context.invocation_id;
+        let capability_id = request.capability_id.clone();
+        let scope = request.context.resource_scope.clone();
+        if request.context.validate().is_err() {
+            return Err(CapabilityInvocationError::AuthorizationDenied {
+                capability: request.capability_id,
+                reason: DenyReason::InternalInvariantViolation,
+            });
+        }
+
+        if let Some(run_state) = self.run_state {
+            run_state
+                .start(RunStart {
+                    invocation_id,
+                    capability_id: capability_id.clone(),
+                    scope: scope.clone(),
+                })
+                .await?;
+        }
+
+        let descriptor = match self.registry.get_capability(&request.capability_id) {
+            Some(descriptor) => descriptor,
+            None => {
+                if let Some(run_state) = self.run_state {
+                    run_state
+                        .fail(&scope, invocation_id, "UnknownCapability".to_string())
+                        .await?;
+                }
+                return Err(CapabilityInvocationError::UnknownCapability {
+                    capability: request.capability_id,
+                });
+            }
+        };
+
+        match self
+            .authorizer
+            .authorize_spawn(&request.context, descriptor, &request.estimate)
+        {
+            Decision::Allow { .. } => {}
+            Decision::Deny { reason } => {
+                if let Some(run_state) = self.run_state {
+                    run_state
+                        .fail(&scope, invocation_id, "AuthorizationDenied".to_string())
+                        .await?;
+                }
+                return Err(CapabilityInvocationError::AuthorizationDenied {
+                    capability: request.capability_id,
+                    reason,
+                });
+            }
+            Decision::RequireApproval { .. } => {
+                if let Some(run_state) = self.run_state {
+                    run_state
+                        .fail(
+                            &scope,
+                            invocation_id,
+                            "AuthorizationRequiresApproval".to_string(),
+                        )
+                        .await?;
+                }
+                return Err(CapabilityInvocationError::AuthorizationRequiresApproval {
+                    capability: request.capability_id,
+                });
+            }
+        }
+
+        let process = match process_manager
+            .spawn(ProcessStart {
+                process_id: ProcessId::new(),
+                parent_process_id: request.context.process_id,
+                invocation_id,
+                scope: scope.clone(),
+                extension_id: descriptor.provider.clone(),
+                capability_id: request.capability_id,
+                runtime: descriptor.runtime,
+                grants: request.context.grants,
+                mounts: request.context.mounts,
+                estimated_resources: request.estimate,
+                resource_reservation_id: None,
+                input: request.input,
+            })
+            .await
+        {
+            Ok(process) => process,
+            Err(error) => {
+                if let Some(run_state) = self.run_state {
+                    run_state
+                        .fail(&scope, invocation_id, "ProcessSpawn".to_string())
+                        .await?;
+                }
+                return Err(CapabilityInvocationError::from(error));
+            }
+        };
+
+        if let Some(run_state) = self.run_state {
+            run_state.complete(&scope, invocation_id).await?;
+        }
+
+        Ok(CapabilitySpawnResult { process })
     }
 
     pub async fn resume_json(
