@@ -4,6 +4,12 @@ use crate::settings::Settings;
 use crate::tools::ToolRegistry;
 use crate::tools::permissions::{PermissionState, effective_permission};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ToolPermissionResolution {
+    pub(crate) effective: PermissionState,
+    pub(crate) explicit: Option<PermissionState>,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct ToolPermissionSnapshot {
     overrides: HashMap<String, PermissionState>,
@@ -30,15 +36,18 @@ impl ToolPermissionSnapshot {
         }
     }
 
-    pub(crate) fn effective_permission(&self, tool_name: &str) -> PermissionState {
-        if let Some(permission) = self.explicit_permission(tool_name) {
-            return permission;
+    pub(crate) fn resolve_permission(&self, tool_name: &str) -> ToolPermissionResolution {
+        let explicit = self.explicit_permission(tool_name);
+        let effective = explicit.unwrap_or_else(|| {
+            effective_permission(&canonical_tool_name(tool_name), &self.overrides)
+        });
+        ToolPermissionResolution {
+            effective,
+            explicit,
         }
-
-        effective_permission(&canonical_tool_name(tool_name), &self.overrides)
     }
 
-    fn explicit_permission(&self, tool_name: &str) -> Option<PermissionState> {
+    pub(crate) fn explicit_permission(&self, tool_name: &str) -> Option<PermissionState> {
         let canonical = canonical_tool_name(tool_name);
         let hyphenated = canonical.replace('_', "-");
 

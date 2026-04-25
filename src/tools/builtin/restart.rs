@@ -165,6 +165,7 @@ impl Tool for RestartTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
 
     struct EnvLockGuard {
         _guard: std::sync::MutexGuard<'static, ()>,
@@ -180,15 +181,15 @@ mod tests {
 
     struct DockerEnvGuard {
         _lock: EnvLockGuard,
-        original_in_docker: Option<String>,
-        original_disable_restart: Option<String>,
+        original_in_docker: Option<OsString>,
+        original_disable_restart: Option<OsString>,
     }
 
     impl DockerEnvGuard {
         fn enable() -> Self {
             let lock = EnvLockGuard::new();
-            let original_in_docker = std::env::var("IRONCLAW_IN_DOCKER").ok();
-            let original_disable_restart = std::env::var("IRONCLAW_DISABLE_RESTART").ok();
+            let original_in_docker = std::env::var_os("IRONCLAW_IN_DOCKER");
+            let original_disable_restart = std::env::var_os("IRONCLAW_DISABLE_RESTART");
             // SAFETY: Tests serialize env access with lock_env().
             unsafe {
                 std::env::set_var("IRONCLAW_IN_DOCKER", "true");

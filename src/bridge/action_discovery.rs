@@ -143,6 +143,7 @@ mod tests {
     use super::ActionDiscovery;
     use ironclaw_engine::{
         ActionDef, ActionDiscoveryMetadata, ActionDiscoverySummary, ActionInventory,
+        ModelToolSurface,
     };
 
     fn action(name: &str) -> ActionDef {
@@ -158,6 +159,7 @@ mod tests {
             }),
             effects: vec![],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
             discovery: None,
         }
     }

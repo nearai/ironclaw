@@ -1,5 +1,7 @@
 use ironclaw_engine::{ActionDef, ActionDiscoveryMetadata, ActionDiscoverySummary};
 
+use crate::bridge::action_projector::default_model_tool_surface;
+
 fn action_discovery_summary(
     always_required: &[&str],
     conditional_requirements: &[&str],
@@ -36,6 +38,7 @@ fn mission_action(
         parameters_schema,
         effects: vec![],
         requires_approval: false,
+        model_tool_surface: default_model_tool_surface(name),
         discovery,
     }
 }

@@ -1150,6 +1150,30 @@ async fn preflight_action(
     call_id: &str,
     events: &mut Vec<EventKind>,
 ) -> PreflightResult {
+    let action_def = context
+        .available_actions_snapshot
+        .as_ref()
+        .and_then(|actions| {
+            actions
+                .iter()
+                .find(|action| action.matches_name(action_name))
+        });
+    if context.available_actions_snapshot.is_some() && action_def.is_none() {
+        let error = format!("action '{action_name}' is not callable in this execution context");
+        events.push(EventKind::ActionFailed {
+            step_id: context.step_id,
+            action_name: action_name.into(),
+            call_id: call_id.into(),
+            error: error.clone(),
+            duration_ms: 0,
+            params_summary: crate::types::event::summarize_params(action_name, params),
+        });
+        return PreflightResult::Denied(ExtFunctionResult::Error(MontyException::new(
+            ExcType::RuntimeError,
+            Some(error),
+        )));
+    }
+
     let lease = match leases.find_lease_for_action(thread.id, action_name).await {
         Some(l) => l,
         None => {
@@ -1168,14 +1192,6 @@ async fn preflight_action(
         }
     };
 
-    let action_def = context
-        .available_actions_snapshot
-        .as_ref()
-        .and_then(|actions| {
-            actions
-                .iter()
-                .find(|action| action.matches_name(action_name))
-        });
     let canonical_action_name = action_def
         .as_ref()
         .map(|action| action.name.as_str())
@@ -1950,7 +1966,9 @@ mod tests {
     use crate::capability::lease::LeaseManager;
     use crate::capability::policy::PolicyEngine;
     use crate::traits::effect::ThreadExecutionContext;
-    use crate::types::capability::{ActionDef, CapabilityLease, EffectType, GrantedActions};
+    use crate::types::capability::{
+        ActionDef, CapabilityLease, EffectType, GrantedActions, ModelToolSurface,
+    };
     use crate::types::project::ProjectId;
     use crate::types::step::{ActionResult, StepId};
     use crate::types::thread::{Thread, ThreadConfig, ThreadType};
@@ -2030,6 +2048,7 @@ mod tests {
             parameters_schema: serde_json::json!({"type": "object"}),
             effects: vec![EffectType::ReadLocal],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
             discovery: None,
         }
     }
@@ -2058,6 +2077,48 @@ mod tests {
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
         }
+    }
+
+    #[tokio::test]
+    async fn preflight_rejects_actions_outside_callable_snapshot() {
+        let thread = make_test_thread();
+        let leases = LeaseManager::new();
+        let policy = PolicyEngine::new();
+        let mut ctx = make_exec_context(&thread);
+        ctx.available_actions_snapshot = Some(Arc::from(vec![test_action("tool_info")]));
+        leases
+            .grant(thread.id, "tools", GrantedActions::All, None, Some(1))
+            .await
+            .expect("grant wildcard lease");
+
+        let mut events = Vec::new();
+        let result = preflight_action(
+            "gmail_send",
+            &serde_json::json!({"to": "user@example.com"}),
+            &thread,
+            &leases,
+            &policy,
+            &ctx,
+            &[],
+            "call-1",
+            &mut events,
+        )
+        .await;
+
+        assert!(matches!(result, PreflightResult::Denied(_)));
+        assert!(matches!(
+            events.as_slice(),
+            [EventKind::ActionFailed { action_name, error, .. }]
+                if action_name == "gmail_send"
+                    && error.contains("not callable in this execution context")
+        ));
+        assert!(
+            leases
+                .find_lease_for_action(thread.id, "gmail_send")
+                .await
+                .is_some(),
+            "denied snapshot misses must not consume the lease"
+        );
     }
 
     /// Stub LLM that always returns text "stub". Only used so execute_code
@@ -2191,6 +2252,7 @@ mod tests {
                         }),
                         effects: vec![EffectType::WriteLocal],
                         requires_approval: false,
+                        model_tool_surface: ModelToolSurface::CompactToolInfo,
                         discovery: None,
                     },
                 ],

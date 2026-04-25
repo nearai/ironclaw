@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use tokio::sync::RwLock;
 
-use ironclaw_engine::types::capability::{EffectType, LeaseId};
+use ironclaw_engine::types::capability::{EffectType, LeaseId, ModelToolSurface};
 use ironclaw_engine::{
     ActionDef, ActionInventory, ActionResult, Capability, CapabilityLease, CapabilityRegistry,
     DocId, EffectExecutor, EngineError, GrantedActions, LeaseManager, LlmBackend, LlmCallConfig,
@@ -293,6 +293,7 @@ impl EffectExecutor for InstallThenAliasEffects {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
                 discovery: None,
             },
             ActionDef {
@@ -301,6 +302,7 @@ impl EffectExecutor for InstallThenAliasEffects {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
                 discovery: None,
             },
         ])
@@ -418,6 +420,7 @@ impl EffectExecutor for GateMockEffects {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
                 discovery: None,
             },
             ActionDef {
@@ -426,6 +429,7 @@ impl EffectExecutor for GateMockEffects {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::ReadLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
                 discovery: None,
             },
             ActionDef {
@@ -434,6 +438,7 @@ impl EffectExecutor for GateMockEffects {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
                 discovery: None,
             },
         ])
@@ -521,6 +526,7 @@ impl EffectExecutor for ToolInfoCallableEffects {
             }),
             effects: vec![EffectType::ReadLocal],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
             discovery: None,
         };
         let gmail = ActionDef {
@@ -535,6 +541,7 @@ impl EffectExecutor for ToolInfoCallableEffects {
             }),
             effects: vec![EffectType::ReadExternal],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::CompactToolInfo,
             discovery: None,
         };
 
@@ -751,6 +758,7 @@ fn make_caps(require_approval: bool) -> CapabilityRegistry {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: require_approval,
+                model_tool_surface: ModelToolSurface::FullSchema,
                 discovery: None,
             },
             ActionDef {
@@ -759,6 +767,7 @@ fn make_caps(require_approval: bool) -> CapabilityRegistry {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::ReadLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
                 discovery: None,
             },
             ActionDef {
@@ -767,6 +776,7 @@ fn make_caps(require_approval: bool) -> CapabilityRegistry {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: require_approval,
+                model_tool_surface: ModelToolSurface::FullSchema,
                 discovery: None,
             },
         ],
@@ -787,6 +797,7 @@ fn make_caps_with_approval_tool() -> CapabilityRegistry {
             parameters_schema: serde_json::json!({"type": "object"}),
             effects: vec![EffectType::WriteExternal],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
             discovery: None,
         }],
         knowledge: vec![],
@@ -807,6 +818,7 @@ fn make_caps_with_install_and_alias_followup() -> CapabilityRegistry {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
                 discovery: None,
             },
             ActionDef {
@@ -815,6 +827,7 @@ fn make_caps_with_install_and_alias_followup() -> CapabilityRegistry {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::CompactToolInfo,
                 discovery: None,
             },
         ],
@@ -1993,6 +2006,7 @@ async fn lease_planner_mission_excludes_denylisted() {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::ReadLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
                 discovery: None,
             },
             ActionDef {
@@ -2001,6 +2015,7 @@ async fn lease_planner_mission_excludes_denylisted() {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::WriteLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::CompactToolInfo,
                 discovery: None,
             },
         ],
@@ -2141,6 +2156,7 @@ async fn lease_gate_denies_without_lease() {
         parameters_schema: serde_json::json!({}),
         effects: vec![EffectType::WriteLocal],
         requires_approval: true,
+        model_tool_surface: ModelToolSurface::CompactToolInfo,
         discovery: None,
     };
     let auto = std::collections::HashSet::new();
@@ -2188,6 +2204,7 @@ async fn lease_gate_allows_with_valid_lease() {
         parameters_schema: serde_json::json!({}),
         effects: vec![EffectType::WriteLocal],
         requires_approval: true,
+        model_tool_surface: ModelToolSurface::CompactToolInfo,
         discovery: None,
     };
     let auto = std::collections::HashSet::new();
@@ -2259,6 +2276,7 @@ async fn pipeline_first_deny_wins() {
         parameters_schema: serde_json::json!({}),
         effects: vec![],
         requires_approval: false,
+        model_tool_surface: ModelToolSurface::CompactToolInfo,
         discovery: None,
     };
     let auto = std::collections::HashSet::new();
@@ -2351,6 +2369,7 @@ async fn auto_approve_mode_still_pauses_always_tools() {
         parameters_schema: serde_json::json!({}),
         effects: vec![EffectType::WriteExternal],
         requires_approval: true, // This maps to Always in the real system
+        model_tool_surface: ModelToolSurface::CompactToolInfo,
         discovery: None,
     };
     let auto = std::collections::HashSet::new();

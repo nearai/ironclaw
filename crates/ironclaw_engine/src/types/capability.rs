@@ -139,9 +139,25 @@ pub struct ActionDef {
     pub effects: Vec<EffectType>,
     /// Whether this action requires user approval before execution.
     pub requires_approval: bool,
+    /// How this action should be surfaced to the model.
+    #[serde(default)]
+    pub model_tool_surface: ModelToolSurface,
     /// Optional discovery metadata used by `tool_info` and prompt guidance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discovery: Option<ActionDiscoveryMetadata>,
+}
+
+/// Whether an action should be emitted as a provider-native tool definition or
+/// only shown through compact prompt metadata with on-demand `tool_info`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelToolSurface {
+    /// Emit the full callable schema to the provider-native tool array.
+    #[default]
+    FullSchema,
+    /// Keep the action callable in-step, but surface it compactly in prompt
+    /// metadata and rely on `tool_info(..., detail="schema")` for parameters.
+    CompactToolInfo,
 }
 
 /// Model-visible action inventory for a single execution step.
@@ -188,6 +204,12 @@ pub struct ActionDiscoveryMetadata {
 }
 
 impl ActionDef {
+    /// Whether this action should be emitted as a provider-native tool
+    /// definition with its full schema.
+    pub fn emits_full_schema_tool(&self) -> bool {
+        matches!(self.model_tool_surface, ModelToolSurface::FullSchema)
+    }
+
     /// Canonical discovery name for this action.
     pub fn discovery_name(&self) -> &str {
         self.discovery
@@ -537,6 +559,7 @@ mod tests {
             parameters_schema: json!({"type": "object"}),
             effects: vec![],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
             discovery: None,
         };
 
@@ -554,6 +577,7 @@ mod tests {
             parameters_schema: json!({"type": "object"}),
             effects: vec![],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
             discovery: Some(ActionDiscoveryMetadata {
                 name: "mission-create".to_string(),
                 summary: None,
@@ -573,6 +597,7 @@ mod tests {
             parameters_schema: json!({"type": "object"}),
             effects: vec![],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
             discovery: None,
         };
 

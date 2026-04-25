@@ -444,6 +444,7 @@ pub async fn execute_orchestrator(
     event_tx: Option<&tokio::sync::broadcast::Sender<ThreadEvent>>,
     retrieval: Option<&RetrievalEngine>,
     store: Option<&Arc<dyn Store>>,
+    platform_info: Option<&crate::executor::prompt::PlatformInfo>,
     persisted_state: &serde_json::Value,
 ) -> Result<OrchestratorResult, EngineError> {
     let mut total_tokens = TokenUsage::default();
@@ -549,6 +550,7 @@ pub async fn execute_orchestrator(
                                 effects,
                                 leases,
                                 store,
+                                platform_info,
                             },
                             &mut total_tokens,
                         )
@@ -695,6 +697,7 @@ struct LlmCompleteDeps<'a> {
     effects: &'a Arc<dyn EffectExecutor>,
     leases: &'a Arc<LeaseManager>,
     store: Option<&'a Arc<dyn Store>>,
+    platform_info: Option<&'a crate::executor::prompt::PlatformInfo>,
 }
 
 /// Handle `__llm_complete__(messages, actions, config)`.
@@ -713,7 +716,7 @@ async fn handle_llm_complete(
 
     let explicit_messages = args.first().map(monty_to_json).filter(|v| !v.is_null());
     let explicit_config = args.get(2).map(monty_to_json).filter(|v| !v.is_null());
-    let messages = explicit_messages
+    let mut messages = explicit_messages
         .as_ref()
         .and_then(json_to_thread_messages)
         .unwrap_or_else(|| thread.messages.clone());
@@ -737,6 +740,17 @@ async fn handle_llm_complete(
         .available_actions(&active_leases, &actions_context)
         .await
         .unwrap_or_default();
+    refresh_llm_messages_for_current_surface(
+        &mut messages,
+        thread,
+        deps.effects,
+        deps.store,
+        deps.platform_info,
+        &active_leases,
+        &actions_context,
+        &actions,
+    )
+    .await;
 
     let config = LlmCallConfig {
         max_tokens: explicit_config
@@ -802,6 +816,50 @@ async fn handle_llm_complete(
             Some(format!("LLM call failed: {e}")),
         )),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn refresh_llm_messages_for_current_surface(
+    messages: &mut Vec<ThreadMessage>,
+    thread: &Thread,
+    effects: &Arc<dyn EffectExecutor>,
+    store: Option<&Arc<dyn Store>>,
+    platform_info: Option<&crate::executor::prompt::PlatformInfo>,
+    active_leases: &[crate::types::capability::CapabilityLease],
+    actions_context: &ThreadExecutionContext,
+    actions: &[crate::types::capability::ActionDef],
+) {
+    if !messages.iter().any(|message| {
+        message.role == crate::types::message::MessageRole::System
+            && crate::executor::prompt::is_codeact_system_prompt(&message.content)
+    }) {
+        return;
+    }
+
+    let capabilities = match effects
+        .available_capabilities(active_leases, actions_context)
+        .await
+    {
+        Ok(capabilities) => capabilities,
+        Err(error) => {
+            debug!(
+                thread_id = %thread.id,
+                "failed to load capabilities for llm_complete prompt refresh: {error}"
+            );
+            Vec::new()
+        }
+    };
+
+    let system_prompt = crate::executor::prompt::build_codeact_system_prompt(
+        &capabilities,
+        actions,
+        store,
+        thread.project_id,
+        platform_info,
+    )
+    .await;
+
+    crate::executor::prompt::upsert_codeact_system_prompt(messages, system_prompt);
 }
 
 /// Handle `__execute_code_step__(code, state)`.
@@ -1066,7 +1124,34 @@ async fn handle_execute_action(
         thread.updated_at = chrono::Utc::now();
     };
 
-    // 1. Find lease for this action
+    // 1. Find the action definition from the callable inventory.
+    let action_def = available_actions.iter().find(|a| a.matches_name(&name));
+    if exec_ctx.available_actions_snapshot.is_some() && action_def.is_none() {
+        let error = format!("action '{name}' is not callable in this execution context");
+        let output = serde_json::json!({"error": &error});
+        emit_and_record(
+            thread,
+            event_tx,
+            EventKind::ActionFailed {
+                step_id: exec_ctx.step_id,
+                action_name: name.clone(),
+                call_id: call_id.clone(),
+                error,
+                duration_ms: 0,
+                params_summary: summarize_params(&name, &params),
+            },
+            &call_id,
+            &name,
+            &output,
+        );
+        let result = serde_json::json!({
+            "output": output,
+            "is_error": true,
+        });
+        return ExtFunctionResult::Return(json_to_monty(&result));
+    }
+
+    // 2. Find lease for this action
     let lease = match leases.find_lease_for_action(thread.id, &name).await {
         Some(l) => l,
         None => {
@@ -1094,9 +1179,6 @@ async fn handle_execute_action(
             return ExtFunctionResult::Return(json_to_monty(&result));
         }
     };
-
-    // 2. Check policy
-    let action_def = available_actions.iter().find(|a| a.matches_name(&name));
 
     let canonical_name = action_def
         .as_ref()
@@ -1431,6 +1513,42 @@ async fn handle_execute_actions_parallel(
     let mut preflight: Vec<Option<PfOutcome>> = Vec::with_capacity(parsed.len());
 
     for pc in &parsed {
+        // Find the action definition from the callable inventory.
+        let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
+        if let Some(ref inventory) = inventory {
+            exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
+            exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(inventory));
+        }
+        let action_def = available_actions
+            .iter()
+            .find(|a| a.matches_name(&pc.name))
+            .cloned();
+        if inventory.is_some() && action_def.is_none() {
+            let error = format!(
+                "action '{}' is not callable in this execution context",
+                pc.name
+            );
+            let output = serde_json::json!({"error": &error});
+            let result_json = serde_json::json!({
+                "output": &output,
+                "is_error": true,
+            });
+            let event = EventKind::ActionFailed {
+                step_id,
+                action_name: pc.name.clone(),
+                call_id: pc.call_id.clone(),
+                error,
+                duration_ms: 0,
+                params_summary: summarize_params(&pc.name, &pc.params),
+            };
+            preflight.push(Some(PfOutcome::Error {
+                result_json,
+                event,
+                output,
+            }));
+            continue;
+        }
+
         // Find lease
         let lease = match leases.find_lease_for_action(thread.id, &pc.name).await {
             Some(l) => l,
@@ -1459,15 +1577,6 @@ async fn handle_execute_actions_parallel(
         };
 
         // Check policy
-        let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
-        if let Some(ref inventory) = inventory {
-            exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
-            exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(inventory));
-        }
-        let action_def = available_actions
-            .iter()
-            .find(|a| a.matches_name(&pc.name))
-            .cloned();
         let action_name = action_def
             .as_ref()
             .map(|action| action.name.clone())
@@ -3914,6 +4023,81 @@ mod tests {
         }
     }
 
+    struct PromptCapturingLlm {
+        captured_messages: tokio::sync::Mutex<Vec<Vec<ThreadMessage>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmBackend for PromptCapturingLlm {
+        fn model_name(&self) -> &str {
+            "prompt-capturing"
+        }
+
+        async fn complete(
+            &self,
+            messages: &[ThreadMessage],
+            _actions: &[crate::types::capability::ActionDef],
+            _config: &LlmCallConfig,
+        ) -> Result<crate::traits::llm::LlmOutput, EngineError> {
+            self.captured_messages.lock().await.push(messages.to_vec());
+            Ok(crate::traits::llm::LlmOutput {
+                response: crate::types::step::LlmResponse::Text("ok".into()),
+                usage: crate::types::step::TokenUsage::default(),
+            })
+        }
+    }
+
+    struct CompactActionEffects;
+
+    #[async_trait::async_trait]
+    impl EffectExecutor for CompactActionEffects {
+        async fn execute_action(
+            &self,
+            _: &str,
+            _: serde_json::Value,
+            _: &crate::types::capability::CapabilityLease,
+            _: &ThreadExecutionContext,
+        ) -> Result<crate::types::step::ActionResult, EngineError> {
+            Ok(crate::types::step::ActionResult {
+                call_id: String::new(),
+                action_name: String::new(),
+                output: serde_json::json!({}),
+                is_error: false,
+                duration: std::time::Duration::from_millis(1),
+            })
+        }
+
+        async fn available_actions(
+            &self,
+            _: &[crate::types::capability::CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::ActionDef>, EngineError> {
+            Ok(vec![crate::types::capability::ActionDef {
+                name: "gmail_send".into(),
+                description: "Send Gmail".into(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "to": {"type": "string"},
+                        "body": {"type": "string"}
+                    }
+                }),
+                effects: vec![crate::types::capability::EffectType::WriteExternal],
+                requires_approval: false,
+                model_tool_surface: crate::types::capability::ModelToolSurface::CompactToolInfo,
+                discovery: None,
+            }])
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[crate::types::capability::CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
+            Ok(vec![])
+        }
+    }
+
     struct InventoryErrorEffects;
 
     #[async_trait::async_trait]
@@ -3999,6 +4183,7 @@ mod tests {
                 effects: &effects,
                 leases: &leases,
                 store: Some(&store),
+                platform_info: None,
             },
             &mut total_tokens,
         )
@@ -4043,6 +4228,7 @@ mod tests {
                 effects: &effects,
                 leases: &leases,
                 store: Some(&store),
+                platform_info: None,
             },
             &mut total_tokens,
         )
@@ -4051,6 +4237,64 @@ mod tests {
         let captured = concrete.captured.lock().await;
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0], None);
+    }
+
+    #[tokio::test]
+    async fn llm_complete_refreshes_codeact_prompt_with_current_compact_actions() {
+        let concrete = Arc::new(PromptCapturingLlm {
+            captured_messages: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let llm: Arc<dyn LlmBackend> = Arc::clone(&concrete) as Arc<dyn LlmBackend>;
+        let effects: Arc<dyn EffectExecutor> = Arc::new(CompactActionEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let store: Arc<dyn Store> = Arc::new(crate::tests::InMemoryStore::with_docs(vec![]));
+
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+        thread.messages = vec![
+            ThreadMessage::system(
+                crate::executor::prompt::build_codeact_system_prompt_with_docs(&[], &[], &[], None),
+            ),
+            ThreadMessage::user("use gmail"),
+        ];
+        leases
+            .grant(
+                thread.id,
+                "tools",
+                crate::types::capability::GrantedActions::All,
+                None,
+                None,
+            )
+            .await
+            .expect("grant tool lease");
+
+        let mut total_tokens = TokenUsage::default();
+        let result = handle_llm_complete(
+            &[],
+            &[],
+            &mut thread,
+            LlmCompleteDeps {
+                llm: &llm,
+                effects: &effects,
+                leases: &leases,
+                store: Some(&store),
+                platform_info: None,
+            },
+            &mut total_tokens,
+        )
+        .await;
+
+        assert!(matches!(result, ExtFunctionResult::Return(_)));
+        let captured = concrete.captured_messages.lock().await;
+        let system_prompt = &captured[0][0].content;
+        assert!(system_prompt.contains("## Enabled Tools"));
+        assert!(system_prompt.contains("`gmail_send`"));
     }
 
     #[tokio::test]

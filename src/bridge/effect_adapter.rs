@@ -14,6 +14,8 @@ use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing::debug;
 
+#[cfg(test)]
+use ironclaw_engine::ModelToolSurface;
 use ironclaw_engine::{
     ActionDef, ActionInventory, ActionResult, CapabilityLease, CapabilityRegistry,
     CapabilitySummary, EffectExecutor, EngineError, MountError, Store, ThreadExecutionContext,
@@ -28,7 +30,7 @@ use crate::bridge::action_projector::ActionProjector;
 use crate::bridge::capability_projector::CapabilityProjector;
 use crate::bridge::router::synthetic_action_call_id;
 use crate::bridge::sandbox::{InterceptOutcome, maybe_intercept};
-use crate::bridge::tool_permissions::ToolPermissionSnapshot;
+use crate::bridge::tool_permissions::{ToolPermissionResolution, ToolPermissionSnapshot};
 use crate::context::JobContext;
 use crate::extensions::InstalledExtension;
 use crate::extensions::naming::extension_name_candidates;
@@ -308,27 +310,27 @@ impl EffectBridgeAdapter {
         &self,
         lookup_name: &str,
         context: &ThreadExecutionContext,
-    ) -> PermissionState {
+    ) -> ToolPermissionResolution {
         ToolPermissionSnapshot::load(self.tools.as_ref(), &context.user_id)
             .await
-            .effective_permission(lookup_name)
+            .resolve_permission(lookup_name)
     }
 
     fn apply_user_permission_override(
         base_requirement: ApprovalRequirement,
-        user_permission: PermissionState,
+        explicit_user_permission: Option<PermissionState>,
     ) -> ApprovalRequirement {
-        match user_permission {
-            PermissionState::AskEachTime => ApprovalRequirement::Always,
+        match explicit_user_permission {
+            Some(PermissionState::AskEachTime) => ApprovalRequirement::Always,
             _ => base_requirement,
         }
     }
 
     fn ensure_tool_not_disabled(
         action_name: &str,
-        user_permission: PermissionState,
+        user_permission: ToolPermissionResolution,
     ) -> Result<(), EngineError> {
-        if matches!(user_permission, PermissionState::Disabled) {
+        if matches!(user_permission.effective, PermissionState::Disabled) {
             return Err(EngineError::LeaseDenied {
                 reason: format!("Tool '{}' is disabled for this user.", action_name),
             });
@@ -342,7 +344,7 @@ impl EffectBridgeAdapter {
         tool: &dyn Tool,
         parameters: &serde_json::Value,
         context: &ThreadExecutionContext,
-        user_permission: PermissionState,
+        user_permission: ToolPermissionResolution,
         include_install_approval: bool,
     ) -> ApprovalRequirement {
         let base_requirement = if include_install_approval
@@ -354,14 +356,14 @@ impl EffectBridgeAdapter {
         } else {
             tool.requires_approval(parameters)
         };
-        Self::apply_user_permission_override(base_requirement, user_permission)
+        Self::apply_user_permission_override(base_requirement, user_permission.explicit)
     }
 
     async fn enforce_tool_approval(
         &self,
         approval: &ToolApprovalContext<'_>,
         tool: &dyn Tool,
-        user_permission: PermissionState,
+        user_permission: ToolPermissionResolution,
         include_install_approval: bool,
     ) -> Result<(), EngineError> {
         let requirement = self
@@ -397,7 +399,7 @@ impl EffectBridgeAdapter {
                         .read()
                         .await
                         .contains(approval.lookup_name)
-                    || matches!(user_permission, PermissionState::AlwaysAllow);
+                    || matches!(user_permission.effective, PermissionState::AlwaysAllow);
                 if !is_approved && !approval.approval_already_granted {
                     return Err(Self::gate_paused(
                         "approval",
@@ -3041,6 +3043,7 @@ mod tests {
                 }),
                 effects: vec![],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
                 discovery: Some(ironclaw_engine::ActionDiscoveryMetadata {
                     name: "mission_create".to_string(),
                     summary: Some(ironclaw_engine::ActionDiscoverySummary {
@@ -3093,6 +3096,7 @@ mod tests {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
                 discovery: None,
             }]
             .into(),
@@ -3167,6 +3171,7 @@ mod tests {
                 }),
                 effects: vec![],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
                 discovery: Some(ironclaw_engine::ActionDiscoveryMetadata {
                     name: "github_search".to_string(),
                     summary: Some(ironclaw_engine::ActionDiscoverySummary {
@@ -3213,6 +3218,7 @@ mod tests {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
                 discovery: None,
             }],
             discoverable: Vec::new(),
@@ -3250,6 +3256,7 @@ mod tests {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
                 discovery: None,
             }],
             discoverable: Vec::new(),
@@ -3274,12 +3281,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_tools_without_explicit_override_default_to_ask_each_time() {
+    async fn fallback_ask_each_time_does_not_override_unless_auto_approved_tools() {
         let adapter = make_approval_test_adapter_with_permission(None)
             .await
             .with_global_auto_approve(true);
 
-        let err = adapter
+        let result = adapter
             .execute_action(
                 "approval_test",
                 serde_json::json!({"value": "x"}),
@@ -3290,14 +3297,9 @@ mod tests {
                 ),
             )
             .await
-            .expect_err("unknown tools should default to ask_each_time");
+            .expect("fallback ask_each_time should not override an unless_auto_approved tool");
 
-        match err {
-            EngineError::GatePaused { gate_name, .. } => {
-                assert_eq!(gate_name, "approval");
-            }
-            other => panic!("expected GatePaused, got {other:?}"),
-        }
+        assert!(!result.is_error);
     }
 
     #[tokio::test]
@@ -3322,11 +3324,14 @@ mod tests {
         assert!(!result.is_error);
     }
 
+    // This test intentionally serializes process-global env mutation across the
+    // async restart path to avoid cross-test leakage from restart env toggles.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn restart_uses_default_permission_floor_without_explicit_override() {
         let _guard = crate::config::helpers::lock_env();
-        let original_in_docker = std::env::var("IRONCLAW_IN_DOCKER").ok();
-        let original_disable_restart = std::env::var("IRONCLAW_DISABLE_RESTART").ok();
+        let original_in_docker = std::env::var_os("IRONCLAW_IN_DOCKER");
+        let original_disable_restart = std::env::var_os("IRONCLAW_DISABLE_RESTART");
         // SAFETY: This test serializes env access with lock_env().
         unsafe {
             std::env::set_var("IRONCLAW_IN_DOCKER", "true");
@@ -5087,7 +5092,8 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
-        );
+        )
+        .with_global_auto_approve(true);
 
         let lease = ironclaw_engine::CapabilityLease {
             id: ironclaw_engine::types::capability::LeaseId::new(),
@@ -7493,6 +7499,7 @@ Use this skill to set up a Pika meeting.
                     parameters_schema: serde_json::json!({"type": "object"}),
                     effects: vec![],
                     requires_approval: false,
+                    model_tool_surface: ModelToolSurface::FullSchema,
                     discovery: None,
                 },
                 ActionDef {
@@ -7501,6 +7508,7 @@ Use this skill to set up a Pika meeting.
                     parameters_schema: serde_json::json!({"type": "object"}),
                     effects: vec![],
                     requires_approval: false,
+                    model_tool_surface: ModelToolSurface::FullSchema,
                     discovery: None,
                 },
                 ActionDef {
@@ -7509,6 +7517,7 @@ Use this skill to set up a Pika meeting.
                     parameters_schema: serde_json::json!({"type": "object"}),
                     effects: vec![],
                     requires_approval: false,
+                    model_tool_surface: ModelToolSurface::FullSchema,
                     discovery: None,
                 },
             ],

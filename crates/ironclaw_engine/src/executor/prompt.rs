@@ -16,7 +16,9 @@
 use std::sync::Arc;
 
 use crate::traits::store::Store;
-use crate::types::capability::{CapabilityStatus, CapabilitySummary, CapabilitySummaryKind};
+use crate::types::capability::{
+    ActionDef, CapabilityStatus, CapabilitySummary, CapabilitySummaryKind, ModelToolSurface,
+};
 use crate::types::message::{MessageRole, ThreadMessage};
 use crate::types::project::ProjectId;
 
@@ -90,6 +92,7 @@ const CODEACT_LEGACY_OPENING: &str = "You are an AI assistant with a Python REPL
 const CODEACT_STRATEGY_HEADING: &str = "\n## Strategy\n";
 const CODEACT_CAPABILITIES_HEADING: &str = "\n## Available capabilities (background status)\n";
 const CODEACT_BACKGROUND_CAPABILITIES_HEADING: &str = "\n## Capabilities\n";
+const CODEACT_ENABLED_TOOLS_HEADING: &str = "\n## Enabled Tools\n";
 const CODEACT_ACTIVATABLE_INTEGRATIONS_HEADING: &str = "\n## Activatable Integrations\n";
 const PRIOR_KNOWLEDGE_HEADING: &str = "\n\n## Prior Knowledge (from completed threads)\n";
 const ACTIVE_SKILLS_HEADING: &str = "\n\n## Active Skills\n";
@@ -120,6 +123,7 @@ const MAX_PROMPT_OVERLAY_CHARS: usize = 4000;
 /// mission to evolve the system prompt at runtime.
 pub async fn build_codeact_system_prompt(
     capabilities: &[CapabilitySummary],
+    compact_actions: &[ActionDef],
     store: Option<&Arc<dyn Store>>,
     project_id: ProjectId,
     platform: Option<&PlatformInfo>,
@@ -129,7 +133,7 @@ pub async fn build_codeact_system_prompt(
     } else {
         None
     };
-    build_codeact_system_prompt_inner(capabilities, overlay.as_deref(), platform)
+    build_codeact_system_prompt_inner(capabilities, compact_actions, overlay.as_deref(), platform)
 }
 
 /// Build the system prompt using pre-fetched memory docs.
@@ -139,16 +143,18 @@ pub async fn build_codeact_system_prompt(
 /// Store query.
 pub fn build_codeact_system_prompt_with_docs(
     capabilities: &[CapabilitySummary],
+    compact_actions: &[ActionDef],
     system_docs: &[crate::types::memory::MemoryDoc],
     platform: Option<&PlatformInfo>,
 ) -> String {
     let overlay = extract_prompt_overlay(system_docs);
-    build_codeact_system_prompt_inner(capabilities, overlay.as_deref(), platform)
+    build_codeact_system_prompt_inner(capabilities, compact_actions, overlay.as_deref(), platform)
 }
 
 /// Shared prompt builder used by both the async and pre-fetched-docs variants.
 fn build_codeact_system_prompt_inner(
     capabilities: &[CapabilitySummary],
+    compact_actions: &[ActionDef],
     overlay: Option<&str>,
     platform: Option<&PlatformInfo>,
 ) -> String {
@@ -175,6 +181,22 @@ fn build_codeact_system_prompt_inner(
         prompt.push('\n');
         for capability in background_capabilities {
             prompt.push_str(&render_background_capability(capability));
+        }
+    }
+
+    let compact_actions: Vec<_> = compact_actions
+        .iter()
+        .filter(|action| matches!(action.model_tool_surface, ModelToolSurface::CompactToolInfo))
+        .collect();
+
+    if !compact_actions.is_empty() {
+        prompt.push_str(CODEACT_ENABLED_TOOLS_HEADING);
+        prompt.push('\n');
+        prompt.push_str(
+            "These enabled tools are shown in compact form. Before calling one, always check its schema with `tool_info(name=\"<tool>\", detail=\"schema\")`.\n\n",
+        );
+        for action in compact_actions {
+            prompt.push_str(&render_enabled_tool(action));
         }
     }
 
@@ -323,6 +345,18 @@ fn render_background_capability(capability: &CapabilitySummary) -> String {
     line
 }
 
+fn render_enabled_tool(action: &ActionDef) -> String {
+    format!(
+        "- `{}` — {}\n",
+        action.discovery_name(),
+        compact_prompt_description(&action.description)
+    )
+}
+
+fn compact_prompt_description(description: &str) -> String {
+    description.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn render_activatable_integration(capability: &CapabilitySummary) -> String {
     let mut line = format!(
         "- `{}` [{}]",
@@ -393,7 +427,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_without_store_uses_compiled_preamble() {
         let prompt =
-            build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), None).await;
+            build_codeact_system_prompt(&[], &[], None, ProjectId(uuid::Uuid::nil()), None).await;
         assert!(prompt.contains("Python REPL environment"));
         assert!(prompt.contains("Strategy"));
         assert!(!prompt.contains("Learned Rules"));
@@ -417,9 +451,14 @@ mod tests {
         };
 
         let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![overlay]));
-        let prompt =
-            build_codeact_system_prompt(&[], Some(&(store as Arc<dyn Store>)), project_id, None)
-                .await;
+        let prompt = build_codeact_system_prompt(
+            &[],
+            &[],
+            Some(&(store as Arc<dyn Store>)),
+            project_id,
+            None,
+        )
+        .await;
         assert!(prompt.contains("Learned Rules"));
         assert!(prompt.contains("Never call web_fetch"));
     }
@@ -445,9 +484,14 @@ mod tests {
         };
 
         let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![overlay]));
-        let prompt =
-            build_codeact_system_prompt(&[], Some(&(store as Arc<dyn Store>)), project_id, None)
-                .await;
+        let prompt = build_codeact_system_prompt(
+            &[],
+            &[],
+            Some(&(store as Arc<dyn Store>)),
+            project_id,
+            None,
+        )
+        .await;
 
         let snowman_count = prompt.chars().filter(|c| *c == '\u{2603}').count();
         assert_eq!(snowman_count, MAX_PROMPT_OVERLAY_CHARS);
@@ -472,9 +516,14 @@ mod tests {
         };
 
         let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![overlay]));
-        let prompt =
-            build_codeact_system_prompt(&[], Some(&(store as Arc<dyn Store>)), project_id, None)
-                .await;
+        let prompt = build_codeact_system_prompt(
+            &[],
+            &[],
+            Some(&(store as Arc<dyn Store>)),
+            project_id,
+            None,
+        )
+        .await;
         assert!(!prompt.contains("Should not appear"));
         assert!(!prompt.contains("Learned Rules"));
     }
@@ -491,7 +540,8 @@ mod tests {
             repo_url: Some("https://github.com/nearai/ironclaw".into()),
         };
         let prompt =
-            build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), Some(&info)).await;
+            build_codeact_system_prompt(&[], &[], None, ProjectId(uuid::Uuid::nil()), Some(&info))
+                .await;
         assert!(prompt.contains("IronClaw"));
         assert!(prompt.contains("1.2.3"));
         assert!(prompt.contains("nearai"));
@@ -505,7 +555,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_without_platform_info_has_no_platform_section() {
         let prompt =
-            build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), None).await;
+            build_codeact_system_prompt(&[], &[], None, ProjectId(uuid::Uuid::nil()), None).await;
         assert!(!prompt.contains("## Platform"));
     }
 
@@ -533,6 +583,7 @@ mod tests {
                 },
             ],
             &[],
+            &[],
             None,
         );
 
@@ -548,8 +599,55 @@ mod tests {
     }
 
     #[test]
+    fn prompt_renders_compact_enabled_tools_once_with_schema_instruction() {
+        let prompt = build_codeact_system_prompt_with_docs(
+            &[CapabilitySummary {
+                name: "gmail".into(),
+                display_name: Some("Gmail".into()),
+                kind: CapabilitySummaryKind::Provider,
+                status: CapabilityStatus::NeedsAuth,
+                description: Some("Gmail integration".into()),
+                action_preview: vec!["gmail_send".into()],
+                routing_hint: None,
+            }],
+            &[
+                ActionDef {
+                    name: "mission_create".into(),
+                    description: "Create scheduled or event-driven missions.".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: Vec::new(),
+                    requires_approval: false,
+                    model_tool_surface: ModelToolSurface::CompactToolInfo,
+                    discovery: None,
+                },
+                ActionDef {
+                    name: "http".into(),
+                    description: "Make HTTP requests.".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: Vec::new(),
+                    requires_approval: false,
+                    model_tool_surface: ModelToolSurface::FullSchema,
+                    discovery: None,
+                },
+            ],
+            &[],
+            None,
+        );
+
+        assert!(prompt.contains("## Enabled Tools"));
+        assert_eq!(prompt.matches("## Enabled Tools").count(), 1);
+        assert!(prompt.contains(
+            "Before calling one, always check its schema with `tool_info(name=\"<tool>\", detail=\"schema\")`."
+        ));
+        assert!(prompt.contains("- `mission_create`"));
+        assert!(!prompt.contains("- `http`"));
+        assert!(prompt.contains("## Activatable Integrations"));
+        assert_eq!(prompt.matches("`gmail` [provider]").count(), 1);
+    }
+
+    #[test]
     fn prompt_no_longer_duplicates_callable_tool_inventory() {
-        let prompt = build_codeact_system_prompt_with_docs(&[], &[], None);
+        let prompt = build_codeact_system_prompt_with_docs(&[], &[], &[], None);
 
         assert!(!prompt.contains("## Available tools (call as Python functions)"));
         assert!(!prompt.contains("`message(text)`"));
@@ -557,7 +655,7 @@ mod tests {
 
     #[test]
     fn prompt_keeps_callable_tools_out_of_extra_prompt_sections() {
-        let prompt = build_codeact_system_prompt_with_docs(&[], &[], None);
+        let prompt = build_codeact_system_prompt_with_docs(&[], &[], &[], None);
 
         assert!(!prompt.contains("## Lookup-only tools"));
         assert!(!prompt.contains("## Deferred large tools"));
@@ -568,7 +666,7 @@ mod tests {
 
     #[test]
     fn upsert_replaces_engine_owned_system_prompt() {
-        let old_prompt = build_codeact_system_prompt_with_docs(&[], &[], None);
+        let old_prompt = build_codeact_system_prompt_with_docs(&[], &[], &[], None);
         let new_prompt = build_codeact_system_prompt_with_docs(
             &[CapabilitySummary {
                 name: "telegram".into(),
@@ -579,6 +677,7 @@ mod tests {
                 action_preview: Vec::new(),
                 routing_hint: Some("Usable through message".into()),
             }],
+            &[],
             &[],
             None,
         );
@@ -595,7 +694,7 @@ mod tests {
 
     #[test]
     fn refresh_preserves_step_zero_system_appends() {
-        let old_prompt = build_codeact_system_prompt_with_docs(&[], &[], None);
+        let old_prompt = build_codeact_system_prompt_with_docs(&[], &[], &[], None);
         let existing = format!(
             "{old_prompt}\n\n## Prior Knowledge (from completed threads)\n\n### [LESSON] Use http\n\n<skill name=\"github\" version=\"1\">\nGitHub API Skill\n</skill>\n\nThe user explicitly requested slash skill(s) that are not installed."
         );
@@ -609,6 +708,7 @@ mod tests {
                 action_preview: vec!["slack_send".into()],
                 routing_hint: None,
             }],
+            &[],
             &[],
             None,
         );
@@ -625,7 +725,7 @@ mod tests {
         let legacy_prompt = format!(
             "{CODEACT_LEGACY_OPENING}\n\nLegacy prompt body.\n\n```repl\nprint('hi')\n```\n{CODEACT_STRATEGY_HEADING}\nLegacy strategy text.\n"
         );
-        let new_prompt = build_codeact_system_prompt_with_docs(&[], &[], None);
+        let new_prompt = build_codeact_system_prompt_with_docs(&[], &[], &[], None);
         let mut messages = vec![
             ThreadMessage::system(legacy_prompt),
             ThreadMessage::user("resume me"),
@@ -653,6 +753,7 @@ mod tests {
                 action_preview: vec!["slack_send".into()],
                 routing_hint: None,
             }],
+            &[],
             &[],
             None,
         );

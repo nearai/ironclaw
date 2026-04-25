@@ -1196,6 +1196,7 @@ fn truncate_for_error(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use tempfile::TempDir;
 
     struct EnvLockGuard {
@@ -1212,12 +1213,12 @@ mod tests {
 
     struct EnvVarGuard {
         key: &'static str,
-        original: Option<String>,
+        original: Option<OsString>,
     }
 
     impl EnvVarGuard {
         fn set(key: &'static str, value: &str) -> Self {
-            let original = std::env::var(key).ok();
+            let original = std::env::var_os(key);
             // SAFETY: Tests serialize env access with lock_env().
             unsafe {
                 std::env::set_var(key, value);

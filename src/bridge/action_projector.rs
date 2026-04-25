@@ -5,7 +5,7 @@ use tracing::debug;
 
 use ironclaw_engine::{
     ActionDef, ActionDiscoveryMetadata, ActionDiscoverySummary, ActionInventory, CapabilityLease,
-    CapabilityRegistry, CapabilityStatus, EngineError, ThreadExecutionContext,
+    CapabilityRegistry, CapabilityStatus, EngineError, ModelToolSurface, ThreadExecutionContext,
 };
 
 use crate::auth::extension::AuthManager;
@@ -165,7 +165,11 @@ fn classify_projected_actions(
 
     let mut seen_discoverable: HashSet<String> = seen_inline.clone();
     for latent in latent_actions {
-        if tool_permissions.effective_permission(&latent.action_name) == PermissionState::Disabled {
+        if tool_permissions
+            .resolve_permission(&latent.action_name)
+            .effective
+            == PermissionState::Disabled
+        {
             continue;
         }
         let action = project_latent_action(latent);
@@ -203,7 +207,7 @@ fn classify_registered_tool(
     if hidden_from_model_callable_surface(tool.name()) {
         return ProjectedAction::Hidden;
     }
-    if tool_permissions.effective_permission(tool.name()) == PermissionState::Disabled {
+    if tool_permissions.resolve_permission(tool.name()).effective == PermissionState::Disabled {
         return ProjectedAction::Hidden;
     }
 
@@ -278,6 +282,7 @@ fn project_tool_action(tool: &dyn crate::tools::Tool) -> ActionDef {
             summary,
             schema_override,
         });
+    let model_tool_surface = default_model_tool_surface(&callable_name);
 
     ActionDef {
         name: callable_name,
@@ -285,18 +290,33 @@ fn project_tool_action(tool: &dyn crate::tools::Tool) -> ActionDef {
         parameters_schema: callable_schema,
         effects: vec![],
         requires_approval: false,
+        model_tool_surface,
         discovery,
     }
 }
 
 fn project_latent_action(action: LatentProviderAction) -> ActionDef {
+    let callable_name = action.action_name.replace('-', "_");
     ActionDef {
-        name: action.action_name.replace('-', "_"),
+        name: callable_name.clone(),
         description: action.description,
         parameters_schema: action.parameters_schema,
         effects: vec![],
         requires_approval: false,
+        model_tool_surface: default_model_tool_surface(&callable_name),
         discovery: None,
+    }
+}
+
+pub(crate) fn default_model_tool_surface(action_name: &str) -> ModelToolSurface {
+    if matches!(action_name, "echo" | "http" | "json" | "time")
+        || action_name.starts_with("memory_")
+        || action_name.starts_with("skill_")
+        || action_name.starts_with("tool_")
+    {
+        ModelToolSurface::FullSchema
+    } else {
+        ModelToolSurface::CompactToolInfo
     }
 }
 
@@ -327,9 +347,11 @@ mod tests {
     use std::collections::HashMap;
 
     use async_trait::async_trait;
-    use ironclaw_engine::{ActionInventory, ThreadExecutionContext};
+    use ironclaw_engine::{ActionInventory, ModelToolSurface, ThreadExecutionContext};
 
-    use super::{ActionProjector, project_tool_action, provider_extension_status};
+    use super::{
+        ActionProjector, default_model_tool_surface, project_tool_action, provider_extension_status,
+    };
     use crate::extensions::{ExtensionKind, InstalledExtension};
     use crate::tools::ToolRegistry;
 
@@ -696,6 +718,72 @@ mod tests {
 
         assert_eq!(action.description, "Plain helper");
         assert!(action.discovery.is_none());
+    }
+
+    #[test]
+    fn default_model_tool_surface_matches_allowlist_contract() {
+        assert_eq!(
+            default_model_tool_surface("echo"),
+            ModelToolSurface::FullSchema
+        );
+        assert_eq!(
+            default_model_tool_surface("http"),
+            ModelToolSurface::FullSchema
+        );
+        assert_eq!(
+            default_model_tool_surface("json"),
+            ModelToolSurface::FullSchema
+        );
+        assert_eq!(
+            default_model_tool_surface("time"),
+            ModelToolSurface::FullSchema
+        );
+        assert_eq!(
+            default_model_tool_surface("memory_read"),
+            ModelToolSurface::FullSchema
+        );
+        assert_eq!(
+            default_model_tool_surface("skill_install"),
+            ModelToolSurface::FullSchema
+        );
+        assert_eq!(
+            default_model_tool_surface("tool_info"),
+            ModelToolSurface::FullSchema
+        );
+
+        assert_eq!(
+            default_model_tool_surface("mission_create"),
+            ModelToolSurface::CompactToolInfo
+        );
+        assert_eq!(
+            default_model_tool_surface("gmail_send"),
+            ModelToolSurface::CompactToolInfo
+        );
+        assert_eq!(
+            default_model_tool_surface("notion_search"),
+            ModelToolSurface::CompactToolInfo
+        );
+    }
+
+    #[test]
+    fn project_tool_action_sets_model_surface_from_allowlist() {
+        let full_schema_tool = BuiltinTool {
+            name: "memory_read",
+        };
+        let compact_tool = BuiltinTool {
+            name: "mission_create",
+        };
+        let full_schema_action = project_tool_action(&full_schema_tool);
+        let compact_action = project_tool_action(&compact_tool);
+
+        assert_eq!(
+            full_schema_action.model_tool_surface,
+            ModelToolSurface::FullSchema
+        );
+        assert_eq!(
+            compact_action.model_tool_surface,
+            ModelToolSurface::CompactToolInfo
+        );
     }
 
     #[tokio::test]

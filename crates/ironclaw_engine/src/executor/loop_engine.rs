@@ -266,19 +266,36 @@ impl ExecutionLoop {
                 Vec::new()
             }
         };
-        if (!system_docs_loaded || !capabilities_loaded)
+        let actions_result = self
+            .effects
+            .available_actions(&active_leases, &prompt_context)
+            .await;
+        let actions_loaded = actions_result.is_ok();
+        let compact_actions = match actions_result {
+            Ok(actions) => actions,
+            Err(error) => {
+                debug!(
+                    thread_id = %self.thread.id,
+                    "failed to load actions for system prompt refresh: {error}"
+                );
+                Vec::new()
+            }
+        };
+        if (!system_docs_loaded || !capabilities_loaded || !actions_loaded)
             && self.has_engine_owned_system_prompt(checkpoint)
         {
             debug!(
                 thread_id = %self.thread.id,
                 system_docs_loaded,
                 capabilities_loaded,
+                actions_loaded,
                 "skipping system prompt refresh because prompt inputs are incomplete"
             );
             return;
         }
         let system_prompt = crate::executor::prompt::build_codeact_system_prompt_with_docs(
             &capabilities,
+            &compact_actions,
             system_docs,
             self.platform_info.as_ref(),
         );
@@ -411,6 +428,7 @@ impl ExecutionLoop {
             self.event_tx.as_ref(),
             self.retrieval.as_ref(),
             self.store.as_ref(),
+            self.platform_info.as_ref(),
             &checkpoint.persisted_state,
         )
         .await;
@@ -546,7 +564,7 @@ mod tests {
     use crate::traits::llm::{LlmCallConfig, LlmOutput};
     use crate::types::capability::{
         ActionDef, ActionInventory, CapabilityLease, CapabilityStatus, CapabilitySummary,
-        CapabilitySummaryKind, EffectType, GrantedActions,
+        CapabilitySummaryKind, EffectType, GrantedActions, ModelToolSurface,
     };
     use crate::types::message::ThreadMessage;
     use crate::types::project::ProjectId;
@@ -689,6 +707,7 @@ mod tests {
             parameters_schema: serde_json::json!({"type": "object"}),
             effects: vec![EffectType::ReadLocal],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
             discovery: None,
         }
     }
@@ -1926,6 +1945,7 @@ mod tests {
             parameters_schema: serde_json::json!({"type": "object"}),
             effects: vec![EffectType::WriteExternal],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
             discovery: None,
         };
 

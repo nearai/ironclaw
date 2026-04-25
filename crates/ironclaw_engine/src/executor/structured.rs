@@ -526,7 +526,9 @@ fn interrupted_call_needs_refund(result: &Result<ActionResult, EngineError>) -> 
 mod tests {
     use super::*;
     use crate::traits::effect::ThreadExecutionContext;
-    use crate::types::capability::{ActionDef, CapabilityLease, EffectType, GrantedActions};
+    use crate::types::capability::{
+        ActionDef, CapabilityLease, EffectType, GrantedActions, ModelToolSurface,
+    };
     use crate::types::project::ProjectId;
     use crate::types::step::StepId;
     use crate::types::thread::{Thread, ThreadConfig, ThreadType};
@@ -595,6 +597,7 @@ mod tests {
             parameters_schema: serde_json::json!({"type": "object"}),
             effects: vec![EffectType::ReadLocal],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
             discovery: None,
         }
     }
@@ -888,6 +891,7 @@ mod tests {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: true,
+                model_tool_surface: ModelToolSurface::FullSchema,
                 discovery: None,
             }],
             vec![Ok(ActionResult {
@@ -1340,6 +1344,7 @@ mod tests {
                     }),
                     effects: vec![],
                     requires_approval: false,
+                    model_tool_surface: ModelToolSurface::CompactToolInfo,
                     discovery: None,
                 }],
             })
@@ -1456,6 +1461,7 @@ mod tests {
                     parameters_schema: serde_json::json!({"type": "object"}),
                     effects: vec![],
                     requires_approval: false,
+                    model_tool_surface: ModelToolSurface::CompactToolInfo,
                     discovery: None,
                 }],
             })
@@ -1557,6 +1563,7 @@ mod tests {
                     parameters_schema: serde_json::json!({"type": "object"}),
                     effects: vec![],
                     requires_approval: false,
+                    model_tool_surface: ModelToolSurface::CompactToolInfo,
                     discovery: None,
                 }],
             })

@@ -38,7 +38,7 @@ pub mod workspace;
 pub use types::capability::{
     ActionDef, ActionDiscoveryMetadata, ActionDiscoverySummary, ActionInventory, Capability,
     CapabilityLease, CapabilityStatus, CapabilitySummary, CapabilitySummaryKind, EffectType,
-    GrantedActions, LeaseId, PolicyCondition, PolicyEffect, PolicyRule,
+    GrantedActions, LeaseId, ModelToolSurface, PolicyCondition, PolicyEffect, PolicyRule,
 };
 pub use types::error::{CapabilityError, EngineError, StepError, ThreadError};
 pub use types::event::{EventId, EventKind, ThreadEvent};

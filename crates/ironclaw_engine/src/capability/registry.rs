@@ -76,7 +76,7 @@ impl CapabilityRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::capability::EffectType;
+    use crate::types::capability::{EffectType, ModelToolSurface};
 
     fn test_capability() -> Capability {
         Capability {
@@ -89,6 +89,7 @@ mod tests {
                     parameters_schema: serde_json::json!({"type": "object"}),
                     effects: vec![EffectType::WriteExternal, EffectType::CredentialedNetwork],
                     requires_approval: false,
+                    model_tool_surface: ModelToolSurface::FullSchema,
                     discovery: None,
                 },
                 ActionDef {
@@ -97,6 +98,7 @@ mod tests {
                     parameters_schema: serde_json::json!({"type": "object"}),
                     effects: vec![EffectType::ReadExternal, EffectType::CredentialedNetwork],
                     requires_approval: false,
+                    model_tool_surface: ModelToolSurface::FullSchema,
                     discovery: None,
                 },
             ],
@@ -146,6 +148,7 @@ mod tests {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::ReadLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
                 discovery: None,
             }],
             knowledge: vec![],

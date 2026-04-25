@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use tokio::sync::RwLock;
 
-use ironclaw_engine::types::capability::{EffectType, LeaseId};
+use ironclaw_engine::types::capability::{EffectType, LeaseId, ModelToolSurface};
 use ironclaw_engine::{
     ActionDef, ActionResult, Capability, CapabilityLease, CapabilityRegistry, DocId, DocType,
     EffectExecutor, EngineError, LeaseManager, LlmBackend, LlmCallConfig, LlmOutput, LlmResponse,
@@ -215,6 +215,7 @@ impl EffectExecutor for HttpMockEffects {
             }),
             effects: vec![EffectType::ReadExternal],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
             discovery: None,
         }])
     }
@@ -298,6 +299,7 @@ impl EffectExecutor for PausingHttpMockEffects {
             }),
             effects: vec![EffectType::ReadExternal],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
             discovery: None,
         }])
     }
@@ -603,6 +605,7 @@ FINAL(str(result))
             parameters_schema: serde_json::json!({"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
             effects: vec![EffectType::ReadExternal],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
             discovery: None,
         }],
         knowledge: vec![],
@@ -711,6 +714,7 @@ FINAL(str(result))
             parameters_schema: serde_json::json!({"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
             effects: vec![EffectType::ReadExternal],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
             discovery: None,
         }],
         knowledge: vec![],
@@ -855,6 +859,7 @@ async fn skill_prompt_context_survives_pause_and_resume() {
             parameters_schema: serde_json::json!({"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
             effects: vec![EffectType::ReadExternal],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
             discovery: None,
         }],
         knowledge: vec![],
@@ -978,6 +983,7 @@ async fn skill_prompt_context_survives_compaction_and_resume() {
             parameters_schema: serde_json::json!({"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
             effects: vec![EffectType::ReadExternal],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
             discovery: None,
         }],
         knowledge: vec![],
