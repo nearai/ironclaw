@@ -3,6 +3,7 @@ use ironclaw_filesystem::*;
 use ironclaw_host_api::*;
 use ironclaw_kernel::*;
 use ironclaw_resources::*;
+use ironclaw_scripts::*;
 use ironclaw_wasm::*;
 use serde_json::json;
 
@@ -46,6 +47,64 @@ async fn dispatcher_routes_wasm_capability_through_real_wasm_executor() {
     assert_eq!(result.receipt.status, ReservationStatus::Reconciled);
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert!(governor.usage_for(&account).output_bytes > 0);
+}
+
+#[tokio::test]
+async fn dispatcher_routes_script_capability_through_script_runtime() {
+    let fs = mounted_empty_extension_root();
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(package_from_manifest(SCRIPT_MANIFEST))
+        .unwrap();
+    let backend = RecordingScriptBackend::new(ScriptBackendOutput::json(json!({
+        "message": "hello script kernel"
+    })));
+    let script_runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), backend.clone());
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor.set_limit(
+        account.clone(),
+        ResourceLimits {
+            max_concurrency_slots: Some(1),
+            max_process_count: Some(10),
+            max_output_bytes: Some(10_000),
+            ..ResourceLimits::default()
+        },
+    );
+
+    let dispatcher =
+        RuntimeDispatcher::new(&registry, &fs, &governor).with_script_runtime(&script_runtime);
+    let result = dispatcher
+        .dispatch_json(CapabilityDispatchRequest {
+            capability_id: CapabilityId::new("script.echo").unwrap(),
+            scope,
+            estimate: ResourceEstimate {
+                concurrency_slots: Some(1),
+                process_count: Some(1),
+                output_bytes: Some(10_000),
+                ..ResourceEstimate::default()
+            },
+            input: json!({"message": "hello script kernel"}),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.capability_id,
+        CapabilityId::new("script.echo").unwrap()
+    );
+    assert_eq!(result.provider, ExtensionId::new("script").unwrap());
+    assert_eq!(result.runtime, RuntimeKind::Script);
+    assert_eq!(result.output, json!({"message": "hello script kernel"}));
+    assert_eq!(result.receipt.status, ReservationStatus::Reconciled);
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(governor.usage_for(&account).process_count, 1);
+
+    let requests = backend.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].command, "script-echo");
+    assert_eq!(requests[0].args, vec!["--json".to_string()]);
 }
 
 #[tokio::test]
@@ -114,9 +173,8 @@ async fn dispatcher_fails_closed_when_descriptor_runtime_does_not_match_package_
 }
 
 #[tokio::test]
-async fn dispatcher_recognizes_script_and_mcp_lanes_but_does_not_execute_without_backends() {
+async fn dispatcher_recognizes_mcp_and_host_lanes_but_does_not_execute_without_backends() {
     for (manifest, capability) in [
-        (SCRIPT_MANIFEST, "script.echo"),
         (MCP_MANIFEST, "github-mcp.search"),
         (FIRST_PARTY_MANIFEST, "conversation.ingest"),
         (SYSTEM_MANIFEST, "system.audit"),
@@ -151,6 +209,42 @@ async fn dispatcher_recognizes_script_and_mcp_lanes_but_does_not_execute_without
         assert_eq!(governor.reserved_for(&account), ResourceTally::default());
         assert_eq!(governor.usage_for(&account), ResourceTally::default());
     }
+}
+
+#[tokio::test]
+async fn dispatcher_requires_script_backend_before_reserving_resources() {
+    let fs = mounted_empty_extension_root();
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(package_from_manifest(SCRIPT_MANIFEST))
+        .unwrap();
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
+    let err = dispatcher
+        .dispatch_json(CapabilityDispatchRequest {
+            capability_id: CapabilityId::new("script.echo").unwrap(),
+            scope,
+            estimate: ResourceEstimate {
+                concurrency_slots: Some(1),
+                process_count: Some(1),
+                ..ResourceEstimate::default()
+            },
+            input: json!({"message": "blocked"}),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        DispatchError::MissingRuntimeBackend {
+            runtime: RuntimeKind::Script
+        }
+    ));
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(governor.usage_for(&account), ResourceTally::default());
 }
 
 #[tokio::test]
@@ -247,6 +341,28 @@ fn json_echo_module() -> Vec<u8> {
     .unwrap()
 }
 
+#[derive(Clone)]
+struct RecordingScriptBackend {
+    output: ScriptBackendOutput,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<ScriptBackendRequest>>>,
+}
+
+impl RecordingScriptBackend {
+    fn new(output: ScriptBackendOutput) -> Self {
+        Self {
+            output,
+            requests: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl ScriptBackend for RecordingScriptBackend {
+    fn execute(&self, request: ScriptBackendRequest) -> Result<ScriptBackendOutput, String> {
+        self.requests.lock().unwrap().push(request);
+        Ok(self.output.clone())
+    }
+}
+
 fn sample_scope() -> ResourceScope {
     ResourceScope {
         tenant_id: TenantId::new("tenant1").unwrap(),
@@ -288,7 +404,8 @@ trust = "sandbox"
 kind = "script"
 backend = "docker"
 image = "alpine:latest"
-command = "echo"
+command = "script-echo"
+args = ["--json"]
 
 [[capabilities]]
 id = "script.echo"

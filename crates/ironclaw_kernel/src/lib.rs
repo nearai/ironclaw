@@ -11,6 +11,7 @@ use ironclaw_host_api::{
     CapabilityId, ExtensionId, ResourceEstimate, ResourceScope, ResourceUsage, RuntimeKind,
 };
 use ironclaw_resources::{ResourceGovernor, ResourceReceipt};
+use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
 use ironclaw_wasm::{CapabilityInvocation, WasmError, WasmExecutionRequest, WasmRuntime};
 use serde_json::Value;
 use thiserror::Error;
@@ -62,8 +63,16 @@ pub enum DispatchError {
         capability: CapabilityId,
         runtime: RuntimeKind,
     },
+    #[error("script dispatch failed: {0}")]
+    Script(Box<ScriptError>),
     #[error("WASM dispatch failed: {0}")]
     Wasm(Box<WasmError>),
+}
+
+impl From<ScriptError> for DispatchError {
+    fn from(error: ScriptError) -> Self {
+        Self::Script(Box::new(error))
+    }
 }
 
 impl From<WasmError> for DispatchError {
@@ -82,6 +91,7 @@ where
     filesystem: &'a F,
     governor: &'a G,
     wasm_runtime: Option<&'a WasmRuntime>,
+    script_runtime: Option<&'a dyn ScriptExecutor>,
 }
 
 impl<'a, F, G> RuntimeDispatcher<'a, F, G>
@@ -95,11 +105,17 @@ where
             filesystem,
             governor,
             wasm_runtime: None,
+            script_runtime: None,
         }
     }
 
     pub fn with_wasm_runtime(mut self, runtime: &'a WasmRuntime) -> Self {
         self.wasm_runtime = Some(runtime);
+        self
+    }
+
+    pub fn with_script_runtime(mut self, runtime: &'a dyn ScriptExecutor) -> Self {
+        self.script_runtime = Some(runtime);
         self
     }
 
@@ -162,13 +178,41 @@ where
                     receipt: execution.receipt,
                 })
             }
-            runtime @ (RuntimeKind::Script
-            | RuntimeKind::Mcp
-            | RuntimeKind::FirstParty
-            | RuntimeKind::System) => Err(DispatchError::UnsupportedRuntime {
-                capability: request.capability_id,
-                runtime,
-            }),
+            RuntimeKind::Script => {
+                let script_runtime =
+                    self.script_runtime
+                        .ok_or(DispatchError::MissingRuntimeBackend {
+                            runtime: RuntimeKind::Script,
+                        })?;
+                let capability_id = request.capability_id.clone();
+                let execution = script_runtime.execute_extension_json(
+                    self.governor,
+                    ScriptExecutionRequest {
+                        package,
+                        capability_id: &request.capability_id,
+                        scope: request.scope,
+                        estimate: request.estimate,
+                        invocation: ScriptInvocation {
+                            input: request.input,
+                        },
+                    },
+                )?;
+
+                Ok(CapabilityDispatchResult {
+                    capability_id,
+                    provider: descriptor.provider.clone(),
+                    runtime: RuntimeKind::Script,
+                    output: execution.result.output,
+                    usage: execution.result.usage,
+                    receipt: execution.receipt,
+                })
+            }
+            runtime @ (RuntimeKind::Mcp | RuntimeKind::FirstParty | RuntimeKind::System) => {
+                Err(DispatchError::UnsupportedRuntime {
+                    capability: request.capability_id,
+                    runtime,
+                })
+            }
         }
     }
 }
