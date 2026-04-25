@@ -6568,6 +6568,96 @@ mod tests {
         }));
     }
 
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn maintenance_purge_updates_db_mirror_status_and_invalidates_refs() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-purge-mirror.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let metadata_path = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"))
+            .join("metadata")
+            .join(format!("{submission_id}.json"));
+        let mut metadata_json = serde_json::to_value(record).expect("record serializes");
+        metadata_json["expires_at"] =
+            serde_json::json!((Utc::now() - chrono::Duration::days(1)).to_rfc3339());
+        write_json_file(&metadata_path, &metadata_json, "expired trace metadata")
+            .expect("expired metadata writes");
+
+        let Json(response) = maintenance_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_db_purge".to_string()),
+                dry_run: false,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: Some(Utc::now()),
+            }),
+        )
+        .await
+        .expect("maintenance purges traces");
+        assert_eq!(response.records_marked_expired, 1);
+        assert_eq!(response.records_marked_purged, 1);
+
+        let mirrored = db
+            .get_trace_submission("tenant-a", submission_id)
+            .await
+            .expect("mirrored submission reads")
+            .expect("mirrored submission exists");
+        assert_eq!(mirrored.status, StorageTraceCorpusStatus::Purged);
+        assert!(mirrored.purged_at.is_some());
+        let object_refs = db
+            .list_trace_object_refs("tenant-a", submission_id)
+            .await
+            .expect("object refs read");
+        assert!(!object_refs.is_empty());
+        assert!(
+            object_refs
+                .iter()
+                .all(|record| record.invalidated_at.is_some())
+        );
+        let derived = db
+            .list_trace_derived_records("tenant-a")
+            .await
+            .expect("derived records read");
+        assert!(derived.iter().any(|record| {
+            record.submission_id == submission_id
+                && record.status == StorageTraceDerivedStatus::Expired
+        }));
+    }
+
     #[tokio::test]
     async fn maintenance_purges_expired_trace_objects_only_with_explicit_cutoff() {
         let temp = tempfile::tempdir().expect("temp dir");
