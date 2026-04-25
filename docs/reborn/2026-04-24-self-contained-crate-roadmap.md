@@ -685,8 +685,9 @@ The architecture is real when:
 - `CapabilityHost::spawn_json` authorizes `SpawnProcess` plus target capability effects before creating a tracked process record
 - `ironclaw_processes` stores tenant/user-scoped `ProcessRecord` lifecycle state without owning authorization policy
 - `BackgroundProcessManager` can run spawned work through `ProcessExecutor` and update process state on executor success/failure without letting late completion overwrite killed processes
-- `ProcessHost` exposes host-facing `status`, `kill`, `await_process`, and `subscribe` APIs over scoped process current state without moving process lifecycle back into `CapabilityHost`
+- `ProcessHost` exposes host-facing `status`, `kill`, `await_process`, `subscribe`, `result`, and `await_result` APIs over scoped process current state/results without moving process lifecycle back into `CapabilityHost`
 - `ProcessCancellationRegistry` lets `ProcessHost::kill` signal scoped cooperative cancellation tokens for background executors without allowing cross-tenant cancellation
+- `ProcessResultStore` records scoped terminal process output/error records as inline JSON for V1; later output work should move large/sensitive/streaming payloads behind filesystem/artifact references
 - `EventingProcessStore` emits tenant/user-scoped process_started/process_completed/process_failed/process_killed events without making dispatcher process-aware
 - `ResourceManagedProcessStore` reserves resources before process start, records reservation IDs through an internal process reservation handle, reconciles on completion, and releases on failure/kill/start failure
 - `CapabilityDispatcher` request/result/failure contracts live in `ironclaw_host_api`, so `ironclaw_capabilities` does not depend on concrete `ironclaw_dispatcher`

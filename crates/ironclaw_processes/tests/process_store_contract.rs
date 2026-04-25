@@ -140,6 +140,60 @@ async fn background_process_manager_marks_process_completed_after_executor_succe
 }
 
 #[tokio::test]
+async fn background_process_manager_stores_success_output_result() {
+    let store = Arc::new(InMemoryProcessStore::new());
+    let result_store = Arc::new(InMemoryProcessResultStore::new());
+    let executor = Arc::new(CountingExecutor::success());
+    let manager = BackgroundProcessManager::new(store.clone(), executor)
+        .with_result_store(result_store.clone());
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let host = ProcessHost::new(store.as_ref())
+        .with_result_store(result_store.clone())
+        .with_poll_interval(Duration::from_millis(5));
+
+    manager
+        .spawn(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+
+    wait_for_status(store.as_ref(), &scope, process_id, ProcessStatus::Completed).await;
+    let result = host.result(&scope, process_id).await.unwrap().unwrap();
+    assert_eq!(result.process_id, process_id);
+    assert_eq!(result.scope, scope);
+    assert_eq!(result.status, ProcessStatus::Completed);
+    assert_eq!(result.output, Some(serde_json::json!({"ok": true})));
+    assert_eq!(result.error_kind, None);
+}
+
+#[tokio::test]
+async fn background_process_manager_stores_failure_error_result() {
+    let store = Arc::new(InMemoryProcessStore::new());
+    let result_store = Arc::new(InMemoryProcessResultStore::new());
+    let manager = BackgroundProcessManager::new(
+        store.clone(),
+        Arc::new(CountingExecutor::failure("RuntimeDispatch")),
+    )
+    .with_result_store(result_store.clone());
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let host = ProcessHost::new(store.as_ref()).with_result_store(result_store.clone());
+
+    manager
+        .spawn(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+
+    wait_for_status(store.as_ref(), &scope, process_id, ProcessStatus::Failed).await;
+    let result = host.result(&scope, process_id).await.unwrap().unwrap();
+    assert_eq!(result.status, ProcessStatus::Failed);
+    assert_eq!(result.output, None);
+    assert_eq!(result.error_kind.as_deref(), Some("RuntimeDispatch"));
+}
+
+#[tokio::test]
 async fn background_process_manager_marks_process_failed_after_executor_error() {
     let store = Arc::new(InMemoryProcessStore::new());
     let executor = Arc::new(CountingExecutor::failure("RuntimeDispatch"));
@@ -868,6 +922,145 @@ async fn process_host_cooperative_kill_releases_process_reservation() {
     );
     assert_eq!(governor.reserved_for(&tenant).process_count, 0);
     assert_eq!(governor.usage_for(&tenant).process_count, 0);
+}
+
+#[tokio::test]
+async fn process_host_kill_records_killed_result_without_output() {
+    let store = Arc::new(InMemoryProcessStore::new());
+    let result_store = Arc::new(InMemoryProcessResultStore::new());
+    let cancellation_registry = Arc::new(ProcessCancellationRegistry::new());
+    let executor = Arc::new(CancellationAwareExecutor::default());
+    let manager = BackgroundProcessManager::new(store.clone(), executor.clone())
+        .with_cancellation_registry(cancellation_registry.clone())
+        .with_result_store(result_store.clone());
+    let host = ProcessHost::new(store.as_ref())
+        .with_cancellation_registry(cancellation_registry)
+        .with_result_store(result_store.clone())
+        .with_poll_interval(Duration::from_millis(5));
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+
+    manager
+        .spawn(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+
+    host.kill(&scope, process_id).await.unwrap();
+    timeout(Duration::from_millis(200), executor.wait_for_cancellation())
+        .await
+        .unwrap();
+
+    let result = host.result(&scope, process_id).await.unwrap().unwrap();
+    assert_eq!(result.status, ProcessStatus::Killed);
+    assert_eq!(result.output, None);
+    assert_eq!(result.error_kind, None);
+}
+
+#[tokio::test]
+async fn process_host_await_result_waits_for_background_success() {
+    let store = Arc::new(InMemoryProcessStore::new());
+    let result_store = Arc::new(InMemoryProcessResultStore::new());
+    let manager = BackgroundProcessManager::new(
+        store.clone(),
+        Arc::new(CountingExecutor::delayed_success(Duration::from_millis(25))),
+    )
+    .with_result_store(result_store.clone());
+    let host = ProcessHost::new(store.as_ref())
+        .with_result_store(result_store.clone())
+        .with_poll_interval(Duration::from_millis(5));
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+
+    manager
+        .spawn(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+
+    let result = host.await_result(&scope, process_id).await.unwrap();
+    assert_eq!(result.status, ProcessStatus::Completed);
+    assert_eq!(result.output, Some(serde_json::json!({"ok": true})));
+}
+
+#[tokio::test]
+async fn process_result_lookup_is_tenant_user_scoped() {
+    let store = Arc::new(InMemoryProcessStore::new());
+    let result_store = Arc::new(InMemoryProcessResultStore::new());
+    let manager =
+        BackgroundProcessManager::new(store.clone(), Arc::new(CountingExecutor::success()))
+            .with_result_store(result_store.clone());
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let owner_scope = sample_scope(invocation_id, "tenant1", "user1");
+    let other_tenant = sample_scope(invocation_id, "tenant2", "user1");
+    let other_user = sample_scope(invocation_id, "tenant1", "user2");
+    let host = ProcessHost::new(store.as_ref()).with_result_store(result_store.clone());
+
+    manager
+        .spawn(process_start(
+            process_id,
+            invocation_id,
+            owner_scope.clone(),
+        ))
+        .await
+        .unwrap();
+    wait_for_status(
+        store.as_ref(),
+        &owner_scope,
+        process_id,
+        ProcessStatus::Completed,
+    )
+    .await;
+
+    assert!(
+        host.result(&owner_scope, process_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        host.result(&other_tenant, process_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        host.result(&other_user, process_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn filesystem_process_result_store_persists_under_tenant_user_scope() {
+    let fs = engine_filesystem();
+    let store = FilesystemProcessResultStore::new(&fs);
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let other_scope = sample_scope(invocation_id, "tenant2", "user1");
+
+    store
+        .complete(&scope, process_id, serde_json::json!({"ok": true}))
+        .await
+        .unwrap();
+
+    let reloaded = FilesystemProcessResultStore::new(&fs)
+        .get(&scope, process_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reloaded.status, ProcessStatus::Completed);
+    assert_eq!(reloaded.output, Some(serde_json::json!({"ok": true})));
+    assert!(
+        FilesystemProcessResultStore::new(&fs)
+            .get(&other_scope, process_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]

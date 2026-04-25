@@ -109,6 +109,15 @@ pub struct ProcessExit {
     pub error_kind: Option<ErrorKind>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProcessResultRecord {
+    pub process_id: ProcessId,
+    pub scope: ResourceScope,
+    pub status: ProcessStatus,
+    pub output: Option<Value>,
+    pub error_kind: Option<String>,
+}
+
 impl ProcessExit {
     fn from_terminal(record: ProcessRecord) -> Self {
         debug_assert!(record.status.is_terminal());
@@ -144,6 +153,10 @@ pub enum ProcessError {
     },
     #[error("resource lifecycle error: {0}")]
     Resource(ResourceError),
+    #[error("process result store is not configured")]
+    ProcessResultStoreUnavailable,
+    #[error("process result is unavailable for {process_id}")]
+    ProcessResultUnavailable { process_id: ProcessId },
     #[error("invalid storage path: {0}")]
     InvalidPath(String),
     #[error("filesystem error: {0}")]
@@ -214,6 +227,35 @@ pub trait ProcessExecutor: Send + Sync {
 #[async_trait]
 pub trait ProcessManager: Send + Sync {
     async fn spawn(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError>;
+}
+
+#[async_trait]
+pub trait ProcessResultStore: Send + Sync {
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        output: Value,
+    ) -> Result<ProcessResultRecord, ProcessError>;
+
+    async fn fail(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        error_kind: String,
+    ) -> Result<ProcessResultRecord, ProcessError>;
+
+    async fn kill(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ProcessResultRecord, ProcessError>;
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<Option<ProcessResultRecord>, ProcessError>;
 }
 
 #[derive(Clone)]
@@ -334,6 +376,7 @@ pub struct ProcessHost<'a> {
     store: &'a dyn ProcessStore,
     poll_interval: Duration,
     cancellation_registry: Option<Arc<ProcessCancellationRegistry>>,
+    result_store: Option<Arc<dyn ProcessResultStore>>,
 }
 
 impl<'a> ProcessHost<'a> {
@@ -342,6 +385,7 @@ impl<'a> ProcessHost<'a> {
             store,
             poll_interval: Duration::from_millis(10),
             cancellation_registry: None,
+            result_store: None,
         }
     }
 
@@ -356,6 +400,20 @@ impl<'a> ProcessHost<'a> {
     ) -> Self {
         self.cancellation_registry = Some(registry);
         self
+    }
+
+    pub fn with_result_store<S>(mut self, store: Arc<S>) -> Self
+    where
+        S: ProcessResultStore + 'static,
+    {
+        self.result_store = Some(store);
+        self
+    }
+
+    fn result_store(&self) -> Result<&dyn ProcessResultStore, ProcessError> {
+        self.result_store
+            .as_deref()
+            .ok_or(ProcessError::ProcessResultStoreUnavailable)
     }
 
     pub async fn status(
@@ -375,7 +433,39 @@ impl<'a> ProcessHost<'a> {
         if let Some(registry) = &self.cancellation_registry {
             registry.cancel(scope, process_id);
         }
+        if let Some(result_store) = &self.result_store {
+            result_store.kill(&record.scope, record.process_id).await?;
+        }
         Ok(record)
+    }
+
+    pub async fn result(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<Option<ProcessResultRecord>, ProcessError> {
+        self.result_store()?.get(scope, process_id).await
+    }
+
+    pub async fn await_result(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ProcessResultRecord, ProcessError> {
+        loop {
+            if let Some(result) = self.result(scope, process_id).await? {
+                return Ok(result);
+            }
+            let record = self
+                .store
+                .get(scope, process_id)
+                .await?
+                .ok_or(ProcessError::UnknownProcess { process_id })?;
+            if record.status.is_terminal() {
+                return Err(ProcessError::ProcessResultUnavailable { process_id });
+            }
+            sleep(self.poll_interval).await;
+        }
     }
 
     pub async fn await_process(
@@ -473,6 +563,95 @@ impl ProcessSubscription<'_> {
             }
             sleep(self.poll_interval).await;
         }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct InMemoryProcessResultStore {
+    records: Mutex<HashMap<ProcessKey, ProcessResultRecord>>,
+}
+
+impl InMemoryProcessResultStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn records_guard(&self) -> MutexGuard<'_, HashMap<ProcessKey, ProcessResultRecord>> {
+        self.records
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn store_result(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        status: ProcessStatus,
+        output: Option<Value>,
+        error_kind: Option<String>,
+    ) -> ProcessResultRecord {
+        let record = ProcessResultRecord {
+            process_id,
+            scope: scope.clone(),
+            status,
+            output,
+            error_kind,
+        };
+        self.records_guard()
+            .insert(ProcessKey::new(scope, process_id), record.clone());
+        record
+    }
+}
+
+#[async_trait]
+impl ProcessResultStore for InMemoryProcessResultStore {
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        output: Value,
+    ) -> Result<ProcessResultRecord, ProcessError> {
+        Ok(self.store_result(
+            scope,
+            process_id,
+            ProcessStatus::Completed,
+            Some(output),
+            None,
+        ))
+    }
+
+    async fn fail(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        error_kind: String,
+    ) -> Result<ProcessResultRecord, ProcessError> {
+        Ok(self.store_result(
+            scope,
+            process_id,
+            ProcessStatus::Failed,
+            None,
+            Some(error_kind),
+        ))
+    }
+
+    async fn kill(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ProcessResultRecord, ProcessError> {
+        Ok(self.store_result(scope, process_id, ProcessStatus::Killed, None, None))
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<Option<ProcessResultRecord>, ProcessError> {
+        Ok(self
+            .records_guard()
+            .get(&ProcessKey::new(scope, process_id))
+            .cloned())
     }
 }
 
@@ -720,6 +899,7 @@ pub struct BackgroundProcessManager {
     store: Arc<dyn ProcessStore>,
     executor: Arc<dyn ProcessExecutor + 'static>,
     cancellation_registry: Option<Arc<ProcessCancellationRegistry>>,
+    result_store: Option<Arc<dyn ProcessResultStore>>,
 }
 
 impl BackgroundProcessManager {
@@ -732,6 +912,7 @@ impl BackgroundProcessManager {
             store,
             executor,
             cancellation_registry: None,
+            result_store: None,
         }
     }
 
@@ -740,6 +921,14 @@ impl BackgroundProcessManager {
         registry: Arc<ProcessCancellationRegistry>,
     ) -> Self {
         self.cancellation_registry = Some(registry);
+        self
+    }
+
+    pub fn with_result_store<S>(mut self, store: Arc<S>) -> Self
+    where
+        S: ProcessResultStore + 'static,
+    {
+        self.result_store = Some(store);
         self
     }
 }
@@ -754,6 +943,7 @@ impl ProcessManager for BackgroundProcessManager {
         let scope = record.scope.clone();
         let process_id = record.process_id;
         let cancellation_registry = self.cancellation_registry.clone();
+        let result_store = self.result_store.clone();
         let cancellation = cancellation_registry
             .as_ref()
             .map(|registry| registry.register(&record.scope, record.process_id))
@@ -777,11 +967,24 @@ impl ProcessManager for BackgroundProcessManager {
         };
         tokio::spawn(async move {
             match executor.execute(request).await {
-                Ok(_result) => {
-                    let _ = store.complete(&scope, process_id).await;
+                Ok(result) => {
+                    if let Ok(record) = store.complete(&scope, process_id).await
+                        && let Some(result_store) = &result_store
+                    {
+                        let _ = result_store
+                            .complete(&record.scope, record.process_id, result.output)
+                            .await;
+                    }
                 }
                 Err(error) => {
-                    let _ = store.fail(&scope, process_id, error.kind.to_string()).await;
+                    if let Ok(record) = store.fail(&scope, process_id, error.kind.to_string()).await
+                        && let Some(result_store) = &result_store
+                        && let Some(error_kind) = record.error_kind.clone()
+                    {
+                        let _ = result_store
+                            .fail(&record.scope, record.process_id, error_kind.to_string())
+                            .await;
+                    }
                 }
             }
             if let Some(registry) = cancellation_registry {
@@ -1146,6 +1349,122 @@ where
     }
 }
 
+pub struct FilesystemProcessResultStore<'a, F>
+where
+    F: RootFilesystem,
+{
+    filesystem: FilesystemHandle<'a, F>,
+}
+
+impl<'a, F> FilesystemProcessResultStore<'a, F>
+where
+    F: RootFilesystem,
+{
+    pub fn new(filesystem: &'a F) -> Self {
+        Self {
+            filesystem: FilesystemHandle::Borrowed(filesystem),
+        }
+    }
+
+    pub fn from_arc(filesystem: Arc<F>) -> FilesystemProcessResultStore<'static, F> {
+        FilesystemProcessResultStore {
+            filesystem: FilesystemHandle::Shared(filesystem),
+        }
+    }
+
+    async fn write_result(&self, record: &ProcessResultRecord) -> Result<(), ProcessError> {
+        let path = process_result_path(&record.scope, record.process_id)?;
+        let bytes = serialize_pretty(record)?;
+        self.filesystem.as_ref().write_file(&path, &bytes).await?;
+        Ok(())
+    }
+
+    async fn store_result(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        status: ProcessStatus,
+        output: Option<Value>,
+        error_kind: Option<String>,
+    ) -> Result<ProcessResultRecord, ProcessError> {
+        let record = ProcessResultRecord {
+            process_id,
+            scope: scope.clone(),
+            status,
+            output,
+            error_kind,
+        };
+        self.write_result(&record).await?;
+        Ok(record)
+    }
+}
+
+#[async_trait]
+impl<F> ProcessResultStore for FilesystemProcessResultStore<'_, F>
+where
+    F: RootFilesystem,
+{
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        output: Value,
+    ) -> Result<ProcessResultRecord, ProcessError> {
+        self.store_result(
+            scope,
+            process_id,
+            ProcessStatus::Completed,
+            Some(output),
+            None,
+        )
+        .await
+    }
+
+    async fn fail(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        error_kind: String,
+    ) -> Result<ProcessResultRecord, ProcessError> {
+        self.store_result(
+            scope,
+            process_id,
+            ProcessStatus::Failed,
+            None,
+            Some(error_kind),
+        )
+        .await
+    }
+
+    async fn kill(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ProcessResultRecord, ProcessError> {
+        self.store_result(scope, process_id, ProcessStatus::Killed, None, None)
+            .await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<Option<ProcessResultRecord>, ProcessError> {
+        let path = process_result_path(scope, process_id)?;
+        let bytes = match self.filesystem.as_ref().read_file(&path).await {
+            Ok(bytes) => bytes,
+            Err(error) if is_not_found(&error) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let record = deserialize::<ProcessResultRecord>(&bytes)?;
+        if same_tenant_user(&record.scope, scope) {
+            Ok(Some(record))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
 fn ensure_status_transition(
     process_id: ProcessId,
     from: ProcessStatus,
@@ -1174,6 +1493,21 @@ fn process_record_path(
 
 fn process_records_root(scope: &ResourceScope) -> Result<VirtualPath, ProcessError> {
     VirtualPath::new(format!("{}/processes", tenant_user_root(scope))).map_err(Into::into)
+}
+
+fn process_result_path(
+    scope: &ResourceScope,
+    process_id: ProcessId,
+) -> Result<VirtualPath, ProcessError> {
+    VirtualPath::new(format!(
+        "{}/{process_id}.json",
+        process_results_root(scope)?.as_str()
+    ))
+    .map_err(Into::into)
+}
+
+fn process_results_root(scope: &ResourceScope) -> Result<VirtualPath, ProcessError> {
+    VirtualPath::new(format!("{}/process-results", tenant_user_root(scope))).map_err(Into::into)
 }
 
 fn tenant_user_root(scope: &ResourceScope) -> String {
