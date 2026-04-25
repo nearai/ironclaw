@@ -126,7 +126,7 @@ Tenant/user scope still comes from `ExecutionContext.resource_scope`, and all pe
 
 ## 5. Live example
 
-A non-Docker live example is available at:
+A non-Docker in-memory live example is available at:
 
 ```text
 crates/ironclaw_host_runtime/examples/reborn_host_runtime.rs
@@ -138,7 +138,26 @@ Run it with:
 cargo run -p ironclaw_host_runtime --example reborn_host_runtime
 ```
 
-The example uses an in-process `ScriptBackend` with a manifest-declared script capability so it can demonstrate the full composition path without requiring Docker:
+A non-Docker filesystem-backed live example is available at:
+
+```text
+crates/ironclaw_host_runtime/examples/reborn_host_runtime_filesystem.rs
+```
+
+Run it with:
+
+```bash
+cargo run -p ironclaw_host_runtime --example reborn_host_runtime_filesystem
+```
+
+The filesystem example uses `ProcessServices::filesystem(...)` and verifies that result metadata and JSON output are written under scoped artifact refs:
+
+```text
+/engine/tenants/{tenant_id}/users/{user_id}/process-results/{process_id}.json
+/engine/tenants/{tenant_id}/users/{user_id}/process-outputs/{process_id}/output.json
+```
+
+Both examples use an in-process `ScriptBackend` with a manifest-declared script capability so they can demonstrate the full composition path without requiring Docker:
 
 ```text
 HostRuntimeServices
