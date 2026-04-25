@@ -1,6 +1,7 @@
 #[cfg(feature = "libsql")]
 mod libsql_trace_corpus_store {
     use std::collections::BTreeMap;
+    use std::time::Duration;
 
     use chrono::Utc;
     use ironclaw::db::{Database, libsql::LibSqlBackend};
@@ -118,6 +119,133 @@ mod libsql_trace_corpus_store {
             })
             .await
             .expect("append object ref");
+
+        let object_refs = backend
+            .list_trace_object_refs(tenant_id, submission_id)
+            .await
+            .expect("list object refs for tenant submission");
+        assert_eq!(object_refs.len(), 1);
+        assert_eq!(object_refs[0].tenant_id, tenant_id);
+        assert_eq!(object_refs[0].submission_id, submission_id);
+        assert_eq!(object_refs[0].object_ref_id, object_ref_id);
+        assert_eq!(
+            object_refs[0].artifact_kind,
+            TraceObjectArtifactKind::SubmittedEnvelope
+        );
+        assert_eq!(object_refs[0].object_store, "s3://private-corpus");
+        assert_eq!(object_refs[0].object_key, "tenant-alpha/submission.json");
+        assert_eq!(object_refs[0].content_sha256, "sha256:object");
+        assert_eq!(object_refs[0].encryption_key_ref, "kms:tenant-alpha");
+        assert_eq!(object_refs[0].size_bytes, 4096);
+        assert!(object_refs[0].compression.is_none());
+        assert!(object_refs[0].created_by_job_id.is_none());
+        assert!(object_refs[0].invalidated_at.is_none());
+        assert!(object_refs[0].deleted_at.is_none());
+        assert!(object_refs[0].created_at <= object_refs[0].updated_at);
+
+        backend
+            .upsert_trace_submission(sample_submission("tenant-beta", submission_id))
+            .await
+            .expect("insert same submission id for other tenant");
+        backend
+            .append_trace_object_ref(TraceObjectRefWrite {
+                tenant_id: "tenant-beta".to_string(),
+                object_ref_id: Uuid::new_v4(),
+                submission_id,
+                artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
+                object_store: "s3://private-corpus".to_string(),
+                object_key: "tenant-beta/submission.json".to_string(),
+                content_sha256: "sha256:other-tenant-object".to_string(),
+                encryption_key_ref: "kms:tenant-beta".to_string(),
+                size_bytes: 2048,
+                compression: Some("zstd".to_string()),
+                created_by_job_id: None,
+            })
+            .await
+            .expect("append object ref for other tenant");
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        let latest_object_ref_id = Uuid::new_v4();
+        backend
+            .append_trace_object_ref(TraceObjectRefWrite {
+                tenant_id: tenant_id.to_string(),
+                object_ref_id: latest_object_ref_id,
+                submission_id,
+                artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
+                object_store: "s3://private-corpus".to_string(),
+                object_key: "tenant-alpha/submission-v2.json".to_string(),
+                content_sha256: "sha256:object-v2".to_string(),
+                encryption_key_ref: "kms:tenant-alpha".to_string(),
+                size_bytes: 8192,
+                compression: Some("zstd".to_string()),
+                created_by_job_id: Some(Uuid::new_v4()),
+            })
+            .await
+            .expect("append newer object ref");
+
+        let object_refs = backend
+            .list_trace_object_refs(tenant_id, submission_id)
+            .await
+            .expect("list object refs after newer append");
+        assert_eq!(object_refs.len(), 2);
+        assert!(object_refs.iter().all(|ref_| ref_.tenant_id == tenant_id));
+        assert!(
+            object_refs
+                .iter()
+                .all(|ref_| ref_.submission_id == submission_id)
+        );
+        assert_eq!(object_refs[0].object_ref_id, object_ref_id);
+        assert_eq!(object_refs[1].object_ref_id, latest_object_ref_id);
+
+        let other_tenant_object_refs = backend
+            .list_trace_object_refs("tenant-beta", submission_id)
+            .await
+            .expect("list object refs for other tenant submission");
+        assert_eq!(other_tenant_object_refs.len(), 1);
+        assert_eq!(
+            other_tenant_object_refs[0].object_key,
+            "tenant-beta/submission.json"
+        );
+
+        let latest_active = backend
+            .get_latest_active_trace_object_ref(
+                tenant_id,
+                submission_id,
+                TraceObjectArtifactKind::SubmittedEnvelope,
+            )
+            .await
+            .expect("get latest active object ref")
+            .expect("latest active object ref exists");
+        assert_eq!(latest_active.object_ref_id, latest_object_ref_id);
+        assert_eq!(latest_active.object_key, "tenant-alpha/submission-v2.json");
+        assert_eq!(latest_active.content_sha256, "sha256:object-v2");
+        assert_eq!(latest_active.compression.as_deref(), Some("zstd"));
+        assert!(latest_active.created_by_job_id.is_some());
+
+        let other_tenant_latest_active = backend
+            .get_latest_active_trace_object_ref(
+                "tenant-beta",
+                submission_id,
+                TraceObjectArtifactKind::SubmittedEnvelope,
+            )
+            .await
+            .expect("get latest active object ref for other tenant")
+            .expect("other tenant latest active object ref exists");
+        assert_eq!(
+            other_tenant_latest_active.object_key,
+            "tenant-beta/submission.json"
+        );
+
+        let missing_kind = backend
+            .get_latest_active_trace_object_ref(
+                tenant_id,
+                submission_id,
+                TraceObjectArtifactKind::ReviewSnapshot,
+            )
+            .await
+            .expect("get latest active object ref for missing kind");
+        assert!(missing_kind.is_none());
 
         let derived_id = Uuid::new_v4();
         backend
@@ -378,11 +506,19 @@ mod libsql_trace_corpus_store {
             .expect("get submission");
         assert!(same_tenant.is_some());
 
-        let other_tenant = backend
+        let other_tenant_same_submission = backend
             .get_trace_submission("tenant-beta", submission_id)
             .await
+            .expect("get same submission id for other tenant")
+            .expect("other tenant submission should exist independently");
+        assert_eq!(other_tenant_same_submission.tenant_id, "tenant-beta");
+        assert_eq!(other_tenant_same_submission.submission_id, submission_id);
+
+        let missing_tenant = backend
+            .get_trace_submission("tenant-gamma", submission_id)
+            .await
             .expect("tenant-isolated get");
-        assert!(other_tenant.is_none());
+        assert!(missing_tenant.is_none());
 
         backend
             .update_trace_submission_status(
@@ -403,8 +539,34 @@ mod libsql_trace_corpus_store {
             )
             .await
             .expect("invalidate submission artifacts");
-        assert_eq!(invalidated.object_refs_invalidated, 1);
+        assert_eq!(invalidated.object_refs_invalidated, 2);
         assert_eq!(invalidated.derived_records_invalidated, 1);
+
+        let latest_after_invalidation = backend
+            .get_latest_active_trace_object_ref(
+                tenant_id,
+                submission_id,
+                TraceObjectArtifactKind::SubmittedEnvelope,
+            )
+            .await
+            .expect("get latest active object ref after invalidation");
+        assert!(latest_after_invalidation.is_none());
+
+        let invalidated_object_refs = backend
+            .list_trace_object_refs(tenant_id, submission_id)
+            .await
+            .expect("list object refs after invalidation");
+        assert_eq!(invalidated_object_refs.len(), 2);
+        assert!(
+            invalidated_object_refs
+                .iter()
+                .all(|ref_| ref_.invalidated_at.is_some())
+        );
+        assert!(
+            invalidated_object_refs
+                .iter()
+                .all(|ref_| ref_.deleted_at.is_none())
+        );
 
         let idempotent = backend
             .invalidate_trace_submission_artifacts(

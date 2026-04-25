@@ -11,11 +11,16 @@ use crate::trace_corpus_storage::{
     TenantScopedTraceObjectRef, TraceArtifactInvalidationCounts, TraceAuditEventRecord,
     TraceAuditEventWrite, TraceAuditSafeMetadata, TraceCorpusStatus, TraceCorpusStore,
     TraceCreditEventRecord, TraceCreditEventWrite, TraceCreditSettlementState, TraceDerivedRecord,
-    TraceDerivedRecordWrite, TraceDerivedStatus, TraceObjectRefWrite, TraceSubmissionRecord,
-    TraceSubmissionWrite, TraceTombstoneWrite, TraceVectorEntryRecord,
-    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
-    TraceWorkerKind,
+    TraceDerivedRecordWrite, TraceDerivedStatus, TraceObjectArtifactKind, TraceObjectRefRecord,
+    TraceObjectRefWrite, TraceSubmissionRecord, TraceSubmissionWrite, TraceTombstoneWrite,
+    TraceVectorEntryRecord, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
+    TraceVectorEntryWrite, TraceWorkerKind,
 };
+
+const TRACE_OBJECT_REF_COLUMNS: &str = "\
+    tenant_id, submission_id, object_ref_id, artifact_kind, object_store, object_key, \
+    content_sha256, encryption_key_ref, size_bytes, compression, created_by_job_id, \
+    invalidated_at, deleted_at, updated_at, created_at";
 
 fn json_array_strings(
     value: serde_json::Value,
@@ -77,6 +82,30 @@ fn row_to_submission(row: &Row) -> Result<TraceSubmissionRecord, DatabaseError> 
         revoked_at: row.get("revoked_at"),
         expires_at: row.get("expires_at"),
         purged_at: row.get("purged_at"),
+    })
+}
+
+fn row_to_object_ref(row: &Row) -> Result<TraceObjectRefRecord, DatabaseError> {
+    let artifact_kind: String = row.get("artifact_kind");
+    Ok(TraceObjectRefRecord {
+        tenant_id: row.get("tenant_id"),
+        submission_id: row.get("submission_id"),
+        object_ref_id: row.get("object_ref_id"),
+        artifact_kind: enum_from_storage::<TraceObjectArtifactKind>(
+            &artifact_kind,
+            "TraceObjectArtifactKind",
+        )?,
+        object_store: row.get("object_store"),
+        object_key: row.get("object_key"),
+        content_sha256: row.get("content_sha256"),
+        encryption_key_ref: row.get("encryption_key_ref"),
+        size_bytes: row.get("size_bytes"),
+        compression: row.get("compression"),
+        created_by_job_id: row.get("created_by_job_id"),
+        invalidated_at: row.get("invalidated_at"),
+        deleted_at: row.get("deleted_at"),
+        updated_at: row.get("updated_at"),
+        created_at: row.get("created_at"),
     })
 }
 
@@ -471,6 +500,55 @@ impl TraceCorpusStore for PgBackend {
             .await
             .map_err(DatabaseError::Postgres)?;
         Ok(())
+    }
+
+    async fn list_trace_object_refs(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<Vec<TraceObjectRefRecord>, DatabaseError> {
+        let client = self.pool().get().await?;
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT {TRACE_OBJECT_REF_COLUMNS}
+                     FROM trace_object_refs
+                     WHERE tenant_id = $1 AND submission_id = $2
+                     ORDER BY created_at ASC"
+                ),
+                &[&tenant_id, &submission_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        rows.iter().map(row_to_object_ref).collect()
+    }
+
+    async fn get_latest_active_trace_object_ref(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        artifact_kind: TraceObjectArtifactKind,
+    ) -> Result<Option<TraceObjectRefRecord>, DatabaseError> {
+        let client = self.pool().get().await?;
+        let artifact_kind = enum_to_storage(artifact_kind)?;
+        let row = client
+            .query_opt(
+                &format!(
+                    "SELECT {TRACE_OBJECT_REF_COLUMNS}
+                     FROM trace_object_refs
+                     WHERE tenant_id = $1
+                       AND submission_id = $2
+                       AND artifact_kind = $3
+                       AND invalidated_at IS NULL
+                       AND deleted_at IS NULL
+                     ORDER BY created_at DESC
+                     LIMIT 1"
+                ),
+                &[&tenant_id, &submission_id, &artifact_kind],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        row.as_ref().map(row_to_object_ref).transpose()
     }
 
     async fn append_trace_derived_record(

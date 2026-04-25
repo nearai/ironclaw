@@ -12,10 +12,10 @@ use crate::trace_corpus_storage::{
     TenantScopedTraceObjectRef, TraceArtifactInvalidationCounts, TraceAuditEventRecord,
     TraceAuditEventWrite, TraceAuditSafeMetadata, TraceCorpusStatus, TraceCorpusStore,
     TraceCreditEventRecord, TraceCreditEventWrite, TraceCreditSettlementState, TraceDerivedRecord,
-    TraceDerivedRecordWrite, TraceDerivedStatus, TraceObjectRefWrite, TraceSubmissionRecord,
-    TraceSubmissionWrite, TraceTombstoneWrite, TraceVectorEntryRecord,
-    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
-    TraceWorkerKind,
+    TraceDerivedRecordWrite, TraceDerivedStatus, TraceObjectArtifactKind, TraceObjectRefRecord,
+    TraceObjectRefWrite, TraceSubmissionRecord, TraceSubmissionWrite, TraceTombstoneWrite,
+    TraceVectorEntryRecord, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
+    TraceVectorEntryWrite, TraceWorkerKind,
 };
 
 const TRACE_SUBMISSION_COLUMNS: &str = "\
@@ -26,6 +26,11 @@ const TRACE_SUBMISSION_COLUMNS: &str = "\
     redaction_counts, canonical_summary_hash, submission_score, \
     credit_points_pending, credit_points_final, received_at, updated_at, \
     reviewed_at, revoked_at, expires_at, purged_at";
+
+const TRACE_OBJECT_REF_COLUMNS: &str = "\
+    tenant_id, submission_id, object_ref_id, artifact_kind, object_store, object_key, \
+    content_sha256, encryption_key_ref, size_bytes, compression, created_by_job_id, \
+    invalidated_at, deleted_at, updated_at, created_at";
 
 fn opt_f32(value: Option<f32>) -> libsql::Value {
     match value {
@@ -136,6 +141,33 @@ fn row_to_submission(row: &libsql::Row) -> Result<TraceSubmissionRecord, Databas
         revoked_at: get_opt_ts(row, 23),
         expires_at: get_opt_ts(row, 24),
         purged_at: get_opt_ts(row, 25),
+    })
+}
+
+fn row_to_object_ref(row: &libsql::Row) -> Result<TraceObjectRefRecord, DatabaseError> {
+    Ok(TraceObjectRefRecord {
+        tenant_id: get_text(row, 0),
+        submission_id: parse_uuid(&get_text(row, 1), "trace_object_refs.submission_id")?,
+        object_ref_id: parse_uuid(&get_text(row, 2), "trace_object_refs.object_ref_id")?,
+        artifact_kind: enum_from_storage::<TraceObjectArtifactKind>(
+            &get_text(row, 3),
+            "TraceObjectArtifactKind",
+        )?,
+        object_store: get_text(row, 4),
+        object_key: get_text(row, 5),
+        content_sha256: get_text(row, 6),
+        encryption_key_ref: get_text(row, 7),
+        size_bytes: row.get::<i64>(8).map_err(|e| {
+            DatabaseError::Serialization(format!("trace size_bytes column read failed: {e}"))
+        })?,
+        compression: get_opt_text(row, 9),
+        created_by_job_id: get_opt_text(row, 10)
+            .map(|id| parse_uuid(&id, "trace_object_refs.created_by_job_id"))
+            .transpose()?,
+        invalidated_at: get_opt_ts(row, 11),
+        deleted_at: get_opt_ts(row, 12),
+        updated_at: get_ts(row, 13),
+        created_at: get_ts(row, 14),
     })
 }
 
@@ -543,6 +575,70 @@ impl TraceCorpusStore for LibSqlBackend {
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(())
+    }
+
+    async fn list_trace_object_refs(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<Vec<TraceObjectRefRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {TRACE_OBJECT_REF_COLUMNS}
+                     FROM trace_object_refs
+                     WHERE tenant_id = ?1 AND submission_id = ?2
+                     ORDER BY created_at ASC"
+                ),
+                libsql::params![tenant_id, submission_id.to_string()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut object_refs = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            object_refs.push(row_to_object_ref(&row)?);
+        }
+        Ok(object_refs)
+    }
+
+    async fn get_latest_active_trace_object_ref(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        artifact_kind: TraceObjectArtifactKind,
+    ) -> Result<Option<TraceObjectRefRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let artifact_kind = enum_to_storage(artifact_kind)?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {TRACE_OBJECT_REF_COLUMNS}
+                     FROM trace_object_refs
+                     WHERE tenant_id = ?1
+                       AND submission_id = ?2
+                       AND artifact_kind = ?3
+                       AND invalidated_at IS NULL
+                       AND deleted_at IS NULL
+                     ORDER BY created_at DESC
+                     LIMIT 1"
+                ),
+                libsql::params![tenant_id, submission_id.to_string(), artifact_kind],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        match rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            Some(row) => Ok(Some(row_to_object_ref(&row)?)),
+            None => Ok(None),
+        }
     }
 
     async fn append_trace_derived_record(

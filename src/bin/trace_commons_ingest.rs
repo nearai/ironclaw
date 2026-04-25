@@ -1253,6 +1253,8 @@ struct TraceMaintenanceRequest {
     backfill_db_mirror: bool,
     #[serde(default)]
     index_vectors: bool,
+    #[serde(default)]
+    reconcile_db_mirror: bool,
     #[serde(default = "default_true")]
     prune_export_cache: bool,
     #[serde(default)]
@@ -3056,6 +3058,14 @@ async fn run_maintenance(
     let vector_entries_indexed =
         index_vector_metadata_from_db(state, tenant, request.index_vectors, request.dry_run)
             .await?;
+    let db_reconciliation = reconcile_db_mirror(
+        state,
+        tenant,
+        &records,
+        &derived,
+        request.reconcile_db_mirror,
+    )
+    .await?;
 
     let maintenance_counts = TraceMaintenanceAuditCounts {
         records_marked_revoked,
@@ -3111,6 +3121,7 @@ async fn run_maintenance(
         export_cache_files_pruned,
         db_mirror_backfilled,
         vector_entries_indexed,
+        db_reconciliation,
     })
 }
 
@@ -3274,6 +3285,152 @@ async fn index_vector_metadata_from_db(
         .context("failed to upsert trace vector entry")?;
     }
     Ok(indexed)
+}
+
+async fn reconcile_db_mirror(
+    state: &AppState,
+    tenant: &TenantAuth,
+    file_records: &[TraceCommonsSubmissionRecord],
+    file_derived: &[TraceCommonsDerivedRecord],
+    enabled: bool,
+) -> anyhow::Result<Option<TraceDbReconciliationReport>> {
+    if !enabled {
+        return Ok(None);
+    }
+    let db = state
+        .db_mirror
+        .as_ref()
+        .context("Trace Commons DB reconciliation requires TRACE_COMMONS_DB_DUAL_WRITE")?;
+    let db_records = db
+        .list_trace_submissions(&tenant.tenant_id)
+        .await
+        .context("failed to list trace submissions for DB reconciliation")?;
+    let db_derived = db
+        .list_trace_derived_records(&tenant.tenant_id)
+        .await
+        .context("failed to list trace derived records for DB reconciliation")?;
+    let db_vectors = db
+        .list_trace_vector_entries(&tenant.tenant_id)
+        .await
+        .context("failed to list trace vector entries for DB reconciliation")?;
+    let mut db_object_ref_count = 0usize;
+    let mut accepted_without_active_envelope_object_ref = Vec::new();
+    for record in &db_records {
+        let object_refs = db
+            .list_trace_object_refs(&tenant.tenant_id, record.submission_id)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to list trace object refs for submission {}",
+                    record.submission_id
+                )
+            })?;
+        db_object_ref_count += object_refs.len();
+        if record.status == StorageTraceCorpusStatus::Accepted
+            && record.revoked_at.is_none()
+            && record.purged_at.is_none()
+            && db
+                .get_latest_active_trace_object_ref(
+                    &tenant.tenant_id,
+                    record.submission_id,
+                    StorageTraceObjectArtifactKind::SubmittedEnvelope,
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to get latest active trace object ref for submission {}",
+                        record.submission_id
+                    )
+                })?
+                .is_none()
+        {
+            accepted_without_active_envelope_object_ref.push(record.submission_id);
+        }
+    }
+
+    let file_by_submission = file_records
+        .iter()
+        .map(|record| (record.submission_id, record))
+        .collect::<BTreeMap<_, _>>();
+    let db_by_submission = db_records
+        .iter()
+        .map(|record| (record.submission_id, record))
+        .collect::<BTreeMap<_, _>>();
+    let file_derived_by_submission = file_derived
+        .iter()
+        .map(|record| (record.submission_id, record))
+        .collect::<BTreeMap<_, _>>();
+    let db_derived_by_submission = db_derived
+        .iter()
+        .map(|record| (record.submission_id, record))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut missing_submission_ids_in_db = Vec::new();
+    let mut status_mismatches = Vec::new();
+    for (submission_id, file_record) in &file_by_submission {
+        let Some(db_record) = db_by_submission.get(submission_id) else {
+            missing_submission_ids_in_db.push(*submission_id);
+            continue;
+        };
+        let file_status = storage_corpus_status(file_record.status);
+        if db_record.status != file_status {
+            status_mismatches.push(TraceDbStatusMismatch {
+                submission_id: *submission_id,
+                file_status,
+                db_status: db_record.status,
+            });
+        }
+    }
+
+    let missing_submission_ids_in_files = db_by_submission
+        .keys()
+        .filter(|submission_id| !file_by_submission.contains_key(submission_id))
+        .copied()
+        .collect::<Vec<_>>();
+    let missing_derived_submission_ids_in_db = file_derived_by_submission
+        .keys()
+        .filter(|submission_id| !db_derived_by_submission.contains_key(submission_id))
+        .copied()
+        .collect::<Vec<_>>();
+
+    let accepted_submission_ids = db_records
+        .iter()
+        .filter(|record| record.status == StorageTraceCorpusStatus::Accepted)
+        .filter(|record| record.revoked_at.is_none() && record.purged_at.is_none())
+        .map(|record| record.submission_id)
+        .collect::<BTreeSet<_>>();
+    let current_derived_ids = db_derived
+        .iter()
+        .filter(|record| record.status == StorageTraceDerivedStatus::Current)
+        .map(|record| (record.submission_id, record.derived_id))
+        .collect::<BTreeSet<_>>();
+    let active_vector_entries = db_vectors
+        .iter()
+        .filter(|entry| entry.status == StorageTraceVectorEntryStatus::Active)
+        .count();
+    let invalid_active_vector_entries = db_vectors
+        .iter()
+        .filter(|entry| entry.status == StorageTraceVectorEntryStatus::Active)
+        .filter(|entry| {
+            !accepted_submission_ids.contains(&entry.submission_id)
+                || !current_derived_ids.contains(&(entry.submission_id, entry.derived_id))
+        })
+        .count();
+
+    Ok(Some(TraceDbReconciliationReport {
+        file_submission_count: file_records.len(),
+        db_submission_count: db_records.len(),
+        missing_submission_ids_in_db,
+        missing_submission_ids_in_files,
+        status_mismatches,
+        file_derived_count: file_derived.len(),
+        db_derived_count: db_derived.len(),
+        missing_derived_submission_ids_in_db,
+        db_object_ref_count,
+        accepted_without_active_envelope_object_ref,
+        active_vector_entries,
+        invalid_active_vector_entries,
+    }))
 }
 
 fn deterministic_vector_entry_uuid(
@@ -4121,6 +4278,31 @@ struct TraceMaintenanceResponse {
     export_cache_files_pruned: usize,
     db_mirror_backfilled: usize,
     vector_entries_indexed: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    db_reconciliation: Option<TraceDbReconciliationReport>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceDbReconciliationReport {
+    file_submission_count: usize,
+    db_submission_count: usize,
+    missing_submission_ids_in_db: Vec<Uuid>,
+    missing_submission_ids_in_files: Vec<Uuid>,
+    status_mismatches: Vec<TraceDbStatusMismatch>,
+    file_derived_count: usize,
+    db_derived_count: usize,
+    missing_derived_submission_ids_in_db: Vec<Uuid>,
+    db_object_ref_count: usize,
+    accepted_without_active_envelope_object_ref: Vec<Uuid>,
+    active_vector_entries: usize,
+    invalid_active_vector_entries: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceDbStatusMismatch {
+    submission_id: Uuid,
+    file_status: StorageTraceCorpusStatus,
+    db_status: StorageTraceCorpusStatus,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -5593,6 +5775,7 @@ mod tests {
                 dry_run: false,
                 backfill_db_mirror: false,
                 index_vectors: false,
+                reconcile_db_mirror: false,
                 prune_export_cache: true,
                 max_export_age_hours: None,
             }),
@@ -5609,6 +5792,7 @@ mod tests {
                 dry_run: false,
                 backfill_db_mirror: false,
                 index_vectors: false,
+                reconcile_db_mirror: false,
                 prune_export_cache: true,
                 max_export_age_hours: None,
             }),
@@ -5684,6 +5868,7 @@ mod tests {
                 dry_run: false,
                 backfill_db_mirror: true,
                 index_vectors: false,
+                reconcile_db_mirror: false,
                 prune_export_cache: false,
                 max_export_age_hours: None,
             }),
@@ -5721,6 +5906,7 @@ mod tests {
                 dry_run: false,
                 backfill_db_mirror: false,
                 index_vectors: true,
+                reconcile_db_mirror: false,
                 prune_export_cache: false,
                 max_export_age_hours: None,
             }),
@@ -5751,6 +5937,7 @@ mod tests {
                 dry_run: false,
                 backfill_db_mirror: false,
                 index_vectors: true,
+                reconcile_db_mirror: false,
                 prune_export_cache: false,
                 max_export_age_hours: None,
             }),
@@ -5758,6 +5945,37 @@ mod tests {
         .await
         .expect("vector indexing can be rerun");
         assert_eq!(vector_idempotent_response.vector_entries_indexed, 0);
+
+        let Json(reconciliation_response) = maintenance_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_db_reconciliation".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: true,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+            }),
+        )
+        .await
+        .expect("reviewer can reconcile DB mirror");
+        let reconciliation = reconciliation_response
+            .db_reconciliation
+            .expect("reconciliation report exists");
+        assert_eq!(reconciliation.file_submission_count, 1);
+        assert_eq!(reconciliation.db_submission_count, 1);
+        assert!(reconciliation.missing_submission_ids_in_db.is_empty());
+        assert!(reconciliation.status_mismatches.is_empty());
+        assert_eq!(reconciliation.db_object_ref_count, 1);
+        assert!(
+            reconciliation
+                .accepted_without_active_envelope_object_ref
+                .is_empty()
+        );
+        assert_eq!(reconciliation.active_vector_entries, 1);
+        assert_eq!(reconciliation.invalid_active_vector_entries, 0);
 
         let revoke_status = revoke_trace_handler(
             State(state.clone()),
@@ -5784,6 +6002,7 @@ mod tests {
                 dry_run: false,
                 backfill_db_mirror: true,
                 index_vectors: false,
+                reconcile_db_mirror: false,
                 prune_export_cache: false,
                 max_export_age_hours: None,
             }),

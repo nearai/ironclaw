@@ -179,6 +179,25 @@ pub struct TraceObjectRefWrite {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceObjectRefRecord {
+    pub tenant_id: String,
+    pub submission_id: Uuid,
+    pub object_ref_id: Uuid,
+    pub artifact_kind: TraceObjectArtifactKind,
+    pub object_store: String,
+    pub object_key: String,
+    pub content_sha256: String,
+    pub encryption_key_ref: String,
+    pub size_bytes: i64,
+    pub compression: Option<String>,
+    pub created_by_job_id: Option<Uuid>,
+    pub invalidated_at: Option<DateTime<Utc>>,
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TenantScopedTraceObjectRef {
     pub tenant_id: String,
     pub submission_id: Uuid,
@@ -432,6 +451,19 @@ pub trait TraceCorpusStore: Send + Sync {
         &self,
         object_ref: TraceObjectRefWrite,
     ) -> Result<(), DatabaseError>;
+
+    async fn list_trace_object_refs(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<Vec<TraceObjectRefRecord>, DatabaseError>;
+
+    async fn get_latest_active_trace_object_ref(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        artifact_kind: TraceObjectArtifactKind,
+    ) -> Result<Option<TraceObjectRefRecord>, DatabaseError>;
 
     async fn append_trace_derived_record(
         &self,
