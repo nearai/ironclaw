@@ -21,6 +21,7 @@ CapabilityHost::spawn_json(...)
 
 ironclaw_processes
   -> stores process identity and lifecycle
+  -> optionally starts background execution through ProcessExecutor
   -> exposes status transitions such as complete/fail/kill
 ```
 
@@ -67,7 +68,7 @@ pub enum ProcessStatus {
 }
 ```
 
-`spawn_json` creates a `Running` process record. Future runtime-backed process managers can drive transitions from actual runtime exit, cancellation, or kill signals.
+`spawn_json` creates a `Running` process record. `BackgroundProcessManager` then drives `Running -> Completed` or `Running -> Failed` from the attached `ProcessExecutor`. Terminal states are protected: `Completed`, `Failed`, and `Killed` cannot be overwritten by a late background completion.
 
 ---
 
@@ -86,7 +87,20 @@ async fn records_for_scope(scope) -> Result<Vec<ProcessRecord>>;
 
 `ProcessManager::spawn` is the lower-level lifecycle mechanic used by `CapabilityHost`. It receives the spawn input in `ProcessStart` so runtime-backed managers can start work, but `ProcessRecord` does not persist raw input. The in-memory and filesystem stores implement the manager by recording a new `Running` process.
 
-`start` rejects duplicate process IDs within the same tenant/user partition. Callers must transition existing records instead of overwriting lifecycle state.
+`BackgroundProcessManager` composes a `ProcessStore` and `ProcessExecutor`:
+
+```text
+start ProcessRecord as Running
+  -> spawn background executor task
+  -> executor success: complete(scope, process_id)
+  -> executor failure: fail(scope, process_id, error_kind)
+```
+
+The executor receives a redaction-friendly `ProcessExecutionRequest` containing process identity, scope, target capability, estimate, and raw input. It returns `ProcessExecutionResult` for future output/event handling; this slice does not persist process output.
+
+`FilesystemProcessStore::from_arc(...)` provides an owned store handle for detached background managers. The filesystem store serializes start/status writes within a store instance; production DB/object-store implementations should use compare-and-swap or transactional updates for cross-process terminal-state protection.
+
+`start` rejects duplicate process IDs within the same tenant/user partition. Callers must transition existing records instead of overwriting lifecycle state. `complete`, `fail`, and `kill` only transition from `Running`; late executor completions after `kill` are ignored by the background manager because the store rejects the terminal-state overwrite.
 
 ---
 
@@ -106,7 +120,8 @@ Cross-tenant and cross-user reads return `None`, empty lists, or `UnknownProcess
 
 This slice does not implement:
 
-- runtime execution loops for background WASM/Script/MCP processes
+- direct WASM/Script/MCP process loops inside `ironclaw_processes`; runtime work is delegated through `ProcessExecutor`
+- cooperative cancellation/abort handles for running executor tasks
 - `await`, `subscribe`, or streaming output APIs
 - durable append-only process event history
 - process tree queries beyond parent process ID storage

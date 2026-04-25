@@ -36,7 +36,7 @@ pub struct CapabilityDispatchRequest {
 }
 ```
 
-The dispatcher is constructed from references to service boundaries:
+The dispatcher can be constructed from borrowed service boundaries for request-scoped composition:
 
 ```rust
 RuntimeDispatcher::new(&registry, &root_filesystem, &resource_governor)
@@ -44,6 +44,15 @@ RuntimeDispatcher::new(&registry, &root_filesystem, &resource_governor)
     .with_script_runtime(&script_runtime)
     .with_mcp_runtime(&mcp_runtime)
 ```
+
+For detached background execution, it can also own shared service handles:
+
+```rust
+RuntimeDispatcher::from_arcs(registry, root_filesystem, resource_governor)
+    .with_wasm_runtime_arc(wasm_runtime)
+```
+
+The owned form keeps dispatcher composition-only while allowing `DispatchProcessExecutor` to run capability-backed processes without leaking borrowed app state into a spawned task.
 
 `ExtensionRegistry` remains the authority for what can run. Runtime crates remain the authority for how a lane runs.
 
