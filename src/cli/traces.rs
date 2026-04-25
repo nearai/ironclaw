@@ -425,6 +425,21 @@ pub enum TracesCommand {
         json: bool,
     },
 
+    /// List replay export manifest metadata from the central corpus
+    ReplayExportManifests {
+        /// Trace Commons ingestion base URL or /v1/traces URL
+        #[arg(long)]
+        endpoint: String,
+
+        /// Environment variable containing a reviewer/admin bearer token
+        #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
+        bearer_token_env: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Export approved ranker training candidates
     RankerTrainingCandidates {
         /// Trace Commons ingestion base URL or /v1/traces URL
@@ -933,6 +948,11 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
             })
             .await
         }
+        TracesCommand::ReplayExportManifests {
+            endpoint,
+            bearer_token_env,
+            json,
+        } => trace_commons_replay_export_manifests(&endpoint, &bearer_token_env, json).await,
         TracesCommand::RankerTrainingCandidates {
             endpoint,
             consent_scope,
@@ -1797,6 +1817,44 @@ async fn trace_commons_replay_dataset_export(
     }
 
     print_trace_commons_json(&response)
+}
+
+async fn trace_commons_replay_export_manifests(
+    endpoint: &str,
+    bearer_token_env: &str,
+    json: bool,
+) -> anyhow::Result<()> {
+    let Some(response) = trace_commons_optional_api_request(
+        Method::GET,
+        endpoint,
+        "/v1/datasets/replay/manifests",
+        &[],
+        Some(bearer_token_env),
+        None,
+    )
+    .await?
+    else {
+        print_trace_commons_unsupported("/v1/datasets/replay/manifests");
+        return Ok(());
+    };
+
+    if json {
+        print_trace_commons_json(&response)
+    } else {
+        print_trace_commons_items(
+            "Central replay export manifests",
+            response.json.as_ref(),
+            &[
+                "export_manifest_id",
+                "purpose_code",
+                "item_count",
+                "source_submission_ids_hash",
+                "generated_at",
+                "invalidated_at",
+            ],
+        );
+        Ok(())
+    }
 }
 
 struct TraceCommonsRankerTrainingExportOptions<'a> {
@@ -3175,6 +3233,21 @@ mod tests {
         assert_eq!(
             url,
             "https://trace.example/internal/v1/ranker/training-pairs?privacy_risk=low"
+        );
+    }
+
+    #[test]
+    fn replay_export_manifests_use_ingest_endpoint() {
+        let url = trace_commons_api_url(
+            "https://trace.example/internal/v1/traces",
+            "/v1/datasets/replay/manifests",
+            &[],
+        )
+        .expect("url builds");
+
+        assert_eq!(
+            url,
+            "https://trace.example/internal/v1/datasets/replay/manifests"
         );
     }
 
