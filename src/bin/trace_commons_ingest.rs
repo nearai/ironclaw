@@ -2861,7 +2861,7 @@ fn eligible_credit_events_for_records(
 ) -> Vec<TraceCommonsCreditLedgerRecord> {
     let eligible_submissions = records
         .iter()
-        .filter(|record| !record.is_revoked())
+        .filter(|record| !record.is_terminal())
         .map(|record| record.submission_id)
         .collect::<BTreeSet<_>>();
     events
@@ -3435,32 +3435,43 @@ fn submission_status_from_record(
         .iter()
         .filter(|event| event.submission_id == record.submission_id)
         .collect::<Vec<_>>();
-    let ledger_points = delayed_events
-        .iter()
-        .map(|event| event.credit_points_delta)
-        .sum::<f32>();
+    let ledger_points = if delayed_credit_applies_to_record(record) {
+        delayed_events
+            .iter()
+            .map(|event| event.credit_points_delta)
+            .sum::<f32>()
+    } else {
+        0.0
+    };
     let base_final = record.credit_points_final.unwrap_or(0.0);
     let credit_points_total = if delayed_events.is_empty() {
         None
     } else {
         Some(base_final + ledger_points)
     };
-    let delayed_credit_explanations = delayed_events
-        .iter()
-        .rev()
-        .take(5)
-        .map(|event| {
-            let reason = event
-                .reason
-                .as_deref()
-                .filter(|reason| !reason.trim().is_empty())
-                .unwrap_or("delayed utility credit");
-            format!(
-                "{:?}: {:+.2} ({})",
-                event.event_type, event.credit_points_delta, reason
-            )
-        })
-        .collect::<Vec<_>>();
+    let delayed_credit_explanations = if record.is_terminal() && !delayed_events.is_empty() {
+        vec![format!(
+            "Delayed credit ledger events are retained for audit but excluded because the trace is {}.",
+            record.status.as_str()
+        )]
+    } else {
+        delayed_events
+            .iter()
+            .rev()
+            .take(5)
+            .map(|event| {
+                let reason = event
+                    .reason
+                    .as_deref()
+                    .filter(|reason| !reason.trim().is_empty())
+                    .unwrap_or("delayed utility credit");
+                format!(
+                    "{:?}: {:+.2} ({})",
+                    event.event_type, event.credit_points_delta, reason
+                )
+            })
+            .collect::<Vec<_>>()
+    };
     TraceSubmissionStatusUpdate {
         submission_id: record.submission_id,
         trace_id: record.trace_id,
@@ -3472,6 +3483,10 @@ fn submission_status_from_record(
         explanation: receipt.explanation,
         delayed_credit_explanations,
     }
+}
+
+fn delayed_credit_applies_to_record(record: &TraceCommonsSubmissionRecord) -> bool {
+    !record.is_terminal()
 }
 
 #[derive(Debug, Clone)]
@@ -8206,7 +8221,13 @@ impl TraceCommonsTenantCreditResponse {
             credit_points_total: 0.0,
         };
 
-        for record in records {
+        let delayed_credit_eligible_submission_ids = records
+            .iter()
+            .filter(|record| delayed_credit_applies_to_record(record))
+            .map(|record| record.submission_id)
+            .collect::<BTreeSet<_>>();
+
+        for record in &records {
             match record.status {
                 TraceCorpusStatus::Accepted => {
                     response.accepted += 1;
@@ -8222,6 +8243,7 @@ impl TraceCommonsTenantCreditResponse {
 
         response.credit_points_ledger = credit_events
             .iter()
+            .filter(|event| delayed_credit_eligible_submission_ids.contains(&event.submission_id))
             .map(|event| event.credit_points_delta)
             .sum();
         response.credit_points_total = response.credit_points_final + response.credit_points_ledger;
@@ -9853,6 +9875,104 @@ mod tests {
             }),
             "DB-backed contributor credit events should round-trip ranking utility"
         );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn revoked_trace_delayed_credit_is_excluded_from_db_backed_totals() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-db-revoked-credit.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db_contributor_reads(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let Json(appended) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 3.0,
+                reason: Some("training job selected this trace".to_string()),
+                external_ref: Some("training-job:revoked-credit".to_string()),
+            }),
+        )
+        .await
+        .expect("credit append succeeds");
+        assert_eq!(appended.credit_points_delta, 3.0);
+
+        let status = revoke_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            AxumPath(submission_id),
+        )
+        .await
+        .expect("revocation succeeds");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let tenant_dir = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"));
+        std::fs::remove_file(
+            tenant_dir
+                .join("metadata")
+                .join(format!("{submission_id}.json")),
+        )
+        .expect("remove file-backed metadata to prove DB read path");
+        std::fs::remove_file(tenant_dir.join("credit_ledger").join("events.jsonl"))
+            .expect("remove file-backed ledger to prove DB read path");
+
+        let Json(events) = credit_events_handler(State(state.clone()), auth_headers("token-a"))
+            .await
+            .expect("credit events load from DB");
+        assert!(
+            events.is_empty(),
+            "terminal trace credit events remain in the audit ledger but are hidden from contributor credit projections"
+        );
+
+        let Json(credit) = credit_handler(State(state.clone()), auth_headers("token-a"))
+            .await
+            .expect("credit summary loads from DB");
+        assert_eq!(credit.revoked, 1);
+        assert_eq!(credit.credit_points_ledger, 0.0);
+        assert_eq!(credit.credit_points_final, 0.0);
+        assert_eq!(credit.credit_points_total, 0.0);
+
+        let Json(statuses) = submission_status_handler(
+            State(state),
+            auth_headers("token-a"),
+            Json(TraceSubmissionStatusRequest {
+                submission_ids: vec![submission_id],
+            }),
+        )
+        .await
+        .expect("status loads from DB");
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].status, "revoked");
+        assert_eq!(statuses[0].credit_points_ledger, 0.0);
+        assert_eq!(statuses[0].credit_points_final, Some(0.0));
+        assert_eq!(statuses[0].credit_points_total, None);
     }
 
     #[cfg(feature = "libsql")]
@@ -15198,7 +15318,7 @@ mod tests {
         assert_eq!(credit.credit_points_total, 1.75);
 
         let Json(statuses) = submission_status_handler(
-            State(state),
+            State(state.clone()),
             auth_headers("token-a"),
             Json(TraceSubmissionStatusRequest {
                 submission_ids: vec![submission_id],
@@ -15215,6 +15335,56 @@ mod tests {
                 .delayed_credit_explanations
                 .iter()
                 .any(|explanation| explanation.contains("TrainingUtility"))
+        );
+
+        let revoke_status = revoke_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            AxumPath(submission_id),
+        )
+        .await
+        .expect("contributor can revoke trace with existing delayed credit");
+        assert_eq!(revoke_status, StatusCode::NO_CONTENT);
+
+        let Json(events_after_revoke) =
+            credit_events_handler(State(state.clone()), auth_headers("token-a"))
+                .await
+                .expect(
+                    "credit events remain hidden from contributor projections after revocation",
+                );
+        assert!(
+            events_after_revoke.is_empty(),
+            "terminal trace credit events remain in the audit ledger but are hidden from contributor credit projections"
+        );
+
+        let Json(credit_after_revoke) =
+            credit_handler(State(state.clone()), auth_headers("token-a"))
+                .await
+                .expect("credit summary succeeds after revocation");
+        assert_eq!(credit_after_revoke.revoked, 1);
+        assert_eq!(credit_after_revoke.credit_points_ledger, 0.0);
+        assert_eq!(credit_after_revoke.credit_points_final, 0.0);
+        assert_eq!(credit_after_revoke.credit_points_total, 0.0);
+
+        let Json(statuses_after_revoke) = submission_status_handler(
+            State(state),
+            auth_headers("token-a"),
+            Json(TraceSubmissionStatusRequest {
+                submission_ids: vec![submission_id],
+            }),
+        )
+        .await
+        .expect("contributor can sync revoked delayed credit status");
+        assert_eq!(statuses_after_revoke.len(), 1);
+        assert_eq!(statuses_after_revoke[0].status, "revoked");
+        assert_eq!(statuses_after_revoke[0].credit_points_ledger, 0.0);
+        assert_eq!(statuses_after_revoke[0].credit_points_final, Some(0.0));
+        assert_eq!(statuses_after_revoke[0].credit_points_total, None);
+        assert!(
+            statuses_after_revoke[0]
+                .explanation
+                .iter()
+                .any(|explanation| explanation.contains("Revoked"))
         );
     }
 

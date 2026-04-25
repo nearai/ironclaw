@@ -708,6 +708,14 @@ impl TraceCorpusStore for LibSqlBackend {
                  purged_at = CASE
                      WHEN ?3 = 'purged' THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                      ELSE purged_at
+                 END,
+                 credit_points_pending = CASE
+                     WHEN ?3 IN ('revoked', 'expired', 'purged') THEN 0
+                     ELSE credit_points_pending
+                 END,
+                 credit_points_final = CASE
+                     WHEN ?3 IN ('revoked', 'expired', 'purged') THEN 0
+                     ELSE credit_points_final
                  END
              WHERE tenant_id = ?1 AND submission_id = ?2",
                 libsql::params![tenant_id, submission_id.to_string(), status_value],

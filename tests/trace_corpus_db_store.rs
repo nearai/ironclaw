@@ -628,6 +628,14 @@ mod libsql_trace_corpus_store {
             )
             .await
             .expect("update status");
+        let revoked_submission = backend
+            .get_trace_submission(tenant_id, submission_id)
+            .await
+            .expect("get revoked submission")
+            .expect("revoked submission exists");
+        assert_eq!(revoked_submission.status, TraceCorpusStatus::Revoked);
+        assert_eq!(revoked_submission.credit_points_pending, Some(0.0));
+        assert_eq!(revoked_submission.credit_points_final, Some(0.0));
 
         let invalidated = backend
             .invalidate_trace_submission_artifacts(
