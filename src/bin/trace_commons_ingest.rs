@@ -1323,6 +1323,8 @@ async fn benchmark_convert_handler(
 struct RankerTrainingExportQuery {
     limit: Option<usize>,
     #[serde(default)]
+    status: Option<TraceCorpusStatus>,
+    #[serde(default)]
     consent_scope: Option<String>,
     #[serde(default)]
     privacy_risk: Option<ResidualPiiRisk>,
@@ -1336,7 +1338,12 @@ async fn ranker_training_candidates_handler(
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_reviewer(&tenant)?;
     let consent_scope = parse_ranker_consent_scope_filter(query.consent_scope.as_deref())?;
-    enforce_ranker_export_guardrails(state.as_ref(), query.privacy_risk, consent_scope)?;
+    enforce_ranker_export_guardrails(
+        state.as_ref(),
+        query.status,
+        query.privacy_risk,
+        consent_scope,
+    )?;
     let mut candidate_query = query;
     candidate_query.limit = Some(candidate_query.limit.unwrap_or(100).clamp(1, 500));
     let candidates = collect_ranker_training_candidates(
@@ -1419,7 +1426,12 @@ async fn ranker_training_pairs_handler(
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_reviewer(&tenant)?;
     let consent_scope = parse_ranker_consent_scope_filter(query.consent_scope.as_deref())?;
-    enforce_ranker_export_guardrails(state.as_ref(), query.privacy_risk, consent_scope)?;
+    enforce_ranker_export_guardrails(
+        state.as_ref(),
+        query.status,
+        query.privacy_risk,
+        consent_scope,
+    )?;
     let mut pair_query = query;
     let pair_limit = pair_query.limit.unwrap_or(100).clamp(1, 500);
     pair_query.limit = Some(pair_limit.saturating_add(1));
@@ -1656,8 +1668,10 @@ async fn collect_ranker_training_candidates(
         .map(|record| (record.submission_id, record))
         .collect::<BTreeMap<_, _>>();
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let requested_status = query.status.unwrap_or(TraceCorpusStatus::Accepted);
     let mut candidates = records
         .into_iter()
+        .filter(|record| record.status == requested_status)
         .filter(|record| matches!(record.status, TraceCorpusStatus::Accepted))
         .filter(|record| !record.is_revoked())
         .filter(|record| {
@@ -1813,6 +1827,7 @@ fn enforce_dataset_export_guardrails(
 
 fn enforce_ranker_export_guardrails(
     state: &AppState,
+    status: Option<TraceCorpusStatus>,
     privacy_risk: Option<ResidualPiiRisk>,
     consent_scope: Option<ConsentScope>,
 ) -> ApiResult<()> {
@@ -1820,6 +1835,12 @@ fn enforce_ranker_export_guardrails(
         return Ok(());
     }
 
+    if status != Some(TraceCorpusStatus::Accepted) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ranker training export requires status=accepted",
+        ));
+    }
     if privacy_risk != Some(ResidualPiiRisk::Low) {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
@@ -8076,6 +8097,7 @@ mod tests {
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                status: None,
                 consent_scope: None,
                 privacy_risk: None,
             }),
@@ -8089,6 +8111,7 @@ mod tests {
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                status: Some(TraceCorpusStatus::Accepted),
                 consent_scope: Some("ranking_training".to_string()),
                 privacy_risk: Some(ResidualPiiRisk::Low),
             }),
@@ -8102,6 +8125,7 @@ mod tests {
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                status: Some(TraceCorpusStatus::Accepted),
                 consent_scope: Some("model_training".to_string()),
                 privacy_risk: Some(ResidualPiiRisk::Low),
             }),
@@ -8341,6 +8365,7 @@ mod tests {
             auth_headers("token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                status: None,
                 consent_scope: None,
                 privacy_risk: None,
             }),
@@ -8354,6 +8379,7 @@ mod tests {
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                status: None,
                 consent_scope: Some("ranking-training".to_string()),
                 privacy_risk: None,
             }),
@@ -8405,6 +8431,7 @@ mod tests {
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                status: None,
                 consent_scope: Some("ranking-training".to_string()),
                 privacy_risk: None,
             }),
@@ -8432,6 +8459,7 @@ mod tests {
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(1),
+                status: None,
                 consent_scope: Some("ranking-training".to_string()),
                 privacy_risk: None,
             }),
@@ -8445,6 +8473,7 @@ mod tests {
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                status: None,
                 consent_scope: Some("debugging-evaluation".to_string()),
                 privacy_risk: None,
             }),
@@ -8488,6 +8517,7 @@ mod tests {
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                status: None,
                 consent_scope: Some("ranking-training".to_string()),
                 privacy_risk: None,
             }),
@@ -8499,6 +8529,7 @@ mod tests {
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                status: None,
                 consent_scope: Some("ranking-training".to_string()),
                 privacy_risk: None,
             }),
@@ -9831,6 +9862,7 @@ mod tests {
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                status: None,
                 consent_scope: Some("ranking-training".to_string()),
                 privacy_risk: Some(ResidualPiiRisk::Low),
             }),
@@ -10379,6 +10411,7 @@ mod tests {
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                status: None,
                 consent_scope: None,
                 privacy_risk: Some(ResidualPiiRisk::Low),
             }),

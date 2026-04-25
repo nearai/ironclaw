@@ -454,6 +454,10 @@ pub enum TracesCommand {
         #[arg(long, value_enum)]
         consent_scope: Option<TraceScopeArg>,
 
+        /// Filter by corpus status
+        #[arg(long, value_enum)]
+        status: Option<TraceCorpusStatusArg>,
+
         /// Filter by residual privacy risk
         #[arg(long, value_enum)]
         privacy_risk: Option<TracePrivacyRiskArg>,
@@ -484,6 +488,10 @@ pub enum TracesCommand {
         /// Filter by consent scope
         #[arg(long, value_enum)]
         consent_scope: Option<TraceScopeArg>,
+
+        /// Filter by corpus status
+        #[arg(long, value_enum)]
+        status: Option<TraceCorpusStatusArg>,
 
         /// Filter by residual privacy risk
         #[arg(long, value_enum)]
@@ -962,6 +970,7 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
         TracesCommand::RankerTrainingCandidates {
             endpoint,
             consent_scope,
+            status,
             privacy_risk,
             limit,
             output,
@@ -972,6 +981,7 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
                 endpoint: &endpoint,
                 bearer_token_env: &bearer_token_env,
                 consent_scope,
+                status,
                 privacy_risk,
                 limit,
                 output,
@@ -985,6 +995,7 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
         TracesCommand::RankerTrainingPairs {
             endpoint,
             consent_scope,
+            status,
             privacy_risk,
             limit,
             output,
@@ -995,6 +1006,7 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
                 endpoint: &endpoint,
                 bearer_token_env: &bearer_token_env,
                 consent_scope,
+                status,
                 privacy_risk,
                 limit,
                 output,
@@ -1874,6 +1886,7 @@ struct TraceCommonsRankerTrainingExportOptions<'a> {
     endpoint: &'a str,
     bearer_token_env: &'a str,
     consent_scope: Option<TraceScopeArg>,
+    status: Option<TraceCorpusStatusArg>,
     privacy_risk: Option<TracePrivacyRiskArg>,
     limit: Option<usize>,
     output: Option<PathBuf>,
@@ -1892,6 +1905,9 @@ async fn trace_commons_ranker_training_export(
     }
     if let Some(consent_scope) = options.consent_scope {
         query.push(("consent_scope", consent_scope.to_string()));
+    }
+    if let Some(status) = options.status {
+        query.push(("status", status.to_string()));
     }
     if let Some(privacy_risk) = options.privacy_risk {
         query.push(("privacy_risk", privacy_risk.to_string()));
@@ -3256,13 +3272,16 @@ mod tests {
         let url = trace_commons_api_url(
             "https://trace.example/internal",
             "/v1/ranker/training-candidates",
-            &[("consent_scope", "ranking-training".to_string())],
+            &[
+                ("consent_scope", "ranking-training".to_string()),
+                ("status", "accepted".to_string()),
+            ],
         )
         .expect("url builds");
 
         assert_eq!(
             url,
-            "https://trace.example/internal/v1/ranker/training-candidates?consent_scope=ranking-training"
+            "https://trace.example/internal/v1/ranker/training-candidates?consent_scope=ranking-training&status=accepted"
         );
     }
 
