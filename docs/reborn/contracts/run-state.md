@@ -88,6 +88,8 @@ Approval requests have a separate store because they are durable objects that ne
 pub trait ApprovalRequestStore {
     async fn save_pending(&self, scope, request) -> Result<ApprovalRecord, RunStateError>;
     async fn get(&self, scope, request_id) -> Result<Option<ApprovalRecord>, RunStateError>;
+    async fn approve(&self, scope, request_id) -> Result<ApprovalRecord, RunStateError>;
+    async fn deny(&self, scope, request_id) -> Result<ApprovalRecord, RunStateError>;
     async fn records_for_scope(&self, scope) -> Result<Vec<ApprovalRecord>, RunStateError>;
 }
 ```
@@ -114,7 +116,7 @@ Stores partition durable data by tenant and user from `ResourceScope`:
 
 The full `ResourceScope` remains inside each record for project/mission/thread/invocation metadata. The first hard isolation boundary is tenant/user; later projection/index layers can add project/thread views without weakening tenant/user partitioning.
 
-Store APIs hide cross-tenant and cross-user records by returning `None`, an empty list, or `UnknownInvocation`. They must not expose whether another tenant/user has a matching UUID. This applies to in-memory stores too: test/dev backends use tenant/user/UUID composite keys rather than UUID-only maps.
+Store APIs hide cross-tenant and cross-user records by returning `None`, an empty list, `UnknownInvocation`, or `UnknownApprovalRequest`. They must not expose whether another tenant/user has a matching UUID. This applies to in-memory stores too: test/dev backends use tenant/user/UUID composite keys rather than UUID-only maps.
 
 ---
 
@@ -156,8 +158,8 @@ The dispatcher remains run-state-unaware. It still routes already-authorized dis
 
 This slice does not implement:
 
-- approval resolution/resume
-- grant/lease issuance from approved requests
+- invocation resume after approval
+- durable grant/lease persistence
 - append-only transition history
 - atomic transactions across run-state and approval stores
 - project/thread secondary indexes
