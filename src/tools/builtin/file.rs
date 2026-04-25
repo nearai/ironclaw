@@ -745,6 +745,13 @@ impl Tool for ApplyPatchTool {
             ));
         }
 
+        // Reject empty old_string before attempting any matching
+        if old_string.is_empty() {
+            return Err(ToolError::InvalidParameters(
+                "old_string must not be empty.".to_string(),
+            ));
+        }
+
         let replace_all = params
             .get("replace_all")
             .and_then(|v| v.as_bool())
@@ -787,11 +794,16 @@ impl Tool for ApplyPatchTool {
         let (content, encoding, line_ending) =
             file_edit_guard::read_file_with_encoding(&path).await?;
 
-        // Collect all match ranges using a single find_match_from loop.
+        // Collect match ranges using a single find_match_from loop.
         // This eliminates a dual-path inconsistency where count_matches and
         // find_match_from could disagree on the number of matches.
+        // When replace_all is false (the default), we short-circuit after
+        // detecting a second match to avoid scanning the entire file.
         let mut all_matches = Vec::new();
         let mut match_method = file_edit_guard::MatchMethod::Exact;
+        // Tracks whether we stopped scanning early so the ambiguous-match
+        // error can report "2 or more" rather than an exact count.
+        let mut short_circuited = false;
         {
             let mut search_offset = 0usize;
             while let Some(m) =
@@ -802,14 +814,25 @@ impl Tool for ApplyPatchTool {
                         "Internal error: apply_patch produced an empty match.".to_string(),
                     ));
                 }
-                // Record the match method from the first match (all matches
-                // use the same normalization level since find_match_from
-                // applies the same fallback chain each time).
+                // Record the match method from the first hit. Each call to
+                // find_match_from tries exact match first, then trailing-
+                // whitespace normalization, then quote normalization, then
+                // both combined -- returning whichever level succeeds first.
+                // The first hit's method is representative for reporting.
                 if all_matches.is_empty() {
                     match_method = m.method;
                 }
                 all_matches.push((m.start, m.end));
                 search_offset = m.end;
+
+                // Short-circuit: when replace_all is false we only need to
+                // know whether there is exactly one match or more than one.
+                // Stop as soon as we find a second match to avoid building a
+                // large Vec on files with many occurrences.
+                if !replace_all && all_matches.len() > 1 {
+                    short_circuited = true;
+                    break;
+                }
             }
         }
 
@@ -834,10 +857,15 @@ impl Tool for ApplyPatchTool {
 
         // Uniqueness validation
         if !replace_all && match_count > 1 {
+            let count_phrase = if short_circuited {
+                format!("{} or more matches", match_count)
+            } else {
+                format!("{} matches", match_count)
+            };
             return Err(ToolError::ExecutionFailed(format!(
-                "Found {} matches for the specified text in {}. \
+                "Found {} for the specified text in {}. \
                  Provide more context in old_string to make it unique, or set replace_all=true.",
-                match_count,
+                count_phrase,
                 path.display()
             )));
         }
@@ -858,7 +886,12 @@ impl Tool for ApplyPatchTool {
         };
 
         let new_content = {
-            let mut rebuilt = String::with_capacity(content.len());
+            // Compute exact capacity: original length minus matched spans
+            // plus replacement text for each match, avoiding reallocations.
+            let matched_bytes: usize = matches_to_apply.iter().map(|(s, e)| e - s).sum();
+            let capacity =
+                content.len() - matched_bytes + (new_string.len() * matches_to_apply.len());
+            let mut rebuilt = String::with_capacity(capacity);
             let mut last = 0usize;
             for &(start, end) in matches_to_apply {
                 rebuilt.push_str(&content[last..start]);
@@ -1444,9 +1477,12 @@ mod tests {
             .unwrap_err();
 
         let msg = err.to_string();
+        // Non-replace_all path short-circuits after detecting a second
+        // match, so the error reports "2 or more matches" rather than
+        // the exact count of 3.
         assert!(
-            msg.contains("3 matches"),
-            "Should report 3 matches: {}",
+            msg.contains("2 or more matches"),
+            "Should report 2 or more matches (short-circuited): {}",
             msg
         );
         assert!(
@@ -1627,6 +1663,73 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(err.to_string().contains("Found 2 matches"));
+        // Non-replace_all path short-circuits after detecting a second
+        // match; the exact total isn't computed, so the error reports
+        // "2 or more matches".
+        assert!(err.to_string().contains("2 or more matches"));
+    }
+
+    /// Regression: empty old_string should return InvalidParameters, not
+    /// an internal error about empty match spans.
+    #[tokio::test]
+    async fn test_apply_patch_empty_old_string_rejected() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "hello world").unwrap();
+
+        let tool = ApplyPatchTool::new().with_base_dir(dir.path().to_path_buf());
+        let ctx = JobContext::default();
+
+        let err = tool
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str().unwrap(),
+                    "old_string": "",
+                    "new_string": "x"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "Expected parameter error for empty old_string, got: {}",
+            err
+        );
+    }
+
+    /// Regression: non-replace_all should short-circuit after detecting a
+    /// second match instead of scanning the entire file. We verify it still
+    /// reports the correct "Found N matches" error (N >= 2).
+    #[tokio::test]
+    async fn test_apply_patch_short_circuits_on_many_matches() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("repeated.txt");
+        // 1000 occurrences -- without short-circuit this builds a huge Vec
+        let content = "needle\n".repeat(1000);
+        std::fs::write(&file_path, &content).unwrap();
+
+        let tool = ApplyPatchTool::new().with_base_dir(dir.path().to_path_buf());
+        let ctx = JobContext::default();
+
+        let err = tool
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str().unwrap(),
+                    "old_string": "needle",
+                    "new_string": "replacement"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+
+        // Should report "2 or more matches" (short-circuited), not 1000
+        assert!(
+            err.to_string().contains("2 or more matches"),
+            "Expected short-circuited match count, got: {}",
+            err
+        );
     }
 }
