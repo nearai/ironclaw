@@ -14,9 +14,10 @@ use ironclaw_events::{EventSink, RuntimeEvent};
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     CapabilityId, CapabilitySet, ExtensionId, HostApiError, InvocationId, MountView, ProcessId,
-    ResourceEstimate, ResourceReservationId, ResourceScope, RuntimeKind, TenantId, UserId,
-    VirtualPath,
+    ResourceEstimate, ResourceReservationId, ResourceScope, ResourceUsage, RuntimeKind, TenantId,
+    UserId, VirtualPath,
 };
+use ironclaw_resources::{ResourceError, ResourceGovernor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -76,6 +77,14 @@ pub enum ProcessError {
         from: ProcessStatus,
         to: ProcessStatus,
     },
+    #[error("process {process_id} returned reservation {actual:?}, expected {expected}")]
+    ResourceReservationMismatch {
+        process_id: ProcessId,
+        expected: ResourceReservationId,
+        actual: Option<ResourceReservationId>,
+    },
+    #[error("resource lifecycle error: {0}")]
+    Resource(ResourceError),
     #[error("invalid storage path: {0}")]
     InvalidPath(String),
     #[error("filesystem error: {0}")]
@@ -95,6 +104,12 @@ impl From<HostApiError> for ProcessError {
 impl From<FilesystemError> for ProcessError {
     fn from(error: FilesystemError) -> Self {
         Self::Filesystem(error.to_string())
+    }
+}
+
+impl From<ResourceError> for ProcessError {
+    fn from(error: ResourceError) -> Self {
+        Self::Resource(error)
     }
 }
 
@@ -251,6 +266,135 @@ where
     }
 }
 
+pub struct ResourceManagedProcessStore<S, G>
+where
+    S: ProcessStore,
+    G: ResourceGovernor + ?Sized,
+{
+    inner: S,
+    governor: Arc<G>,
+    completion_usage: ResourceUsage,
+}
+
+impl<S, G> ResourceManagedProcessStore<S, G>
+where
+    S: ProcessStore,
+    G: ResourceGovernor + ?Sized,
+{
+    pub fn new(inner: S, governor: Arc<G>) -> Self {
+        Self {
+            inner,
+            governor,
+            completion_usage: ResourceUsage::default(),
+        }
+    }
+
+    pub fn with_completion_usage(mut self, usage: ResourceUsage) -> Self {
+        self.completion_usage = usage;
+        self
+    }
+
+    fn release_reservation(
+        &self,
+        reservation_id: Option<ResourceReservationId>,
+    ) -> Result<(), ProcessError> {
+        if let Some(reservation_id) = reservation_id {
+            self.governor.release(reservation_id)?;
+        }
+        Ok(())
+    }
+
+    fn reconcile_reservation(
+        &self,
+        reservation_id: Option<ResourceReservationId>,
+    ) -> Result<(), ProcessError> {
+        if let Some(reservation_id) = reservation_id {
+            self.governor
+                .reconcile(reservation_id, self.completion_usage.clone())?;
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl<S, G> ProcessStore for ResourceManagedProcessStore<S, G>
+where
+    S: ProcessStore,
+    G: ResourceGovernor + ?Sized,
+{
+    async fn start(&self, mut start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
+        if start.resource_reservation_id.is_some() {
+            return self.inner.start(start).await;
+        }
+
+        let reservation = self
+            .governor
+            .reserve(start.scope.clone(), start.estimated_resources.clone())?;
+        start.resource_reservation_id = Some(reservation.id);
+        match self.inner.start(start).await {
+            Ok(record) if record.resource_reservation_id == Some(reservation.id) => Ok(record),
+            Ok(record) => {
+                self.release_reservation(Some(reservation.id))?;
+                Err(ProcessError::ResourceReservationMismatch {
+                    process_id: record.process_id,
+                    expected: reservation.id,
+                    actual: record.resource_reservation_id,
+                })
+            }
+            Err(error) => {
+                self.release_reservation(Some(reservation.id))?;
+                Err(error)
+            }
+        }
+    }
+
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ProcessRecord, ProcessError> {
+        let record = self.inner.complete(scope, process_id).await?;
+        self.reconcile_reservation(record.resource_reservation_id)?;
+        Ok(record)
+    }
+
+    async fn fail(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        error_kind: String,
+    ) -> Result<ProcessRecord, ProcessError> {
+        let record = self.inner.fail(scope, process_id, error_kind).await?;
+        self.release_reservation(record.resource_reservation_id)?;
+        Ok(record)
+    }
+
+    async fn kill(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ProcessRecord, ProcessError> {
+        let record = self.inner.kill(scope, process_id).await?;
+        self.release_reservation(record.resource_reservation_id)?;
+        Ok(record)
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<Option<ProcessRecord>, ProcessError> {
+        self.inner.get(scope, process_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<ProcessRecord>, ProcessError> {
+        self.inner.records_for_scope(scope).await
+    }
+}
+
 pub struct BackgroundProcessManager {
     store: Arc<dyn ProcessStore>,
     executor: Arc<dyn ProcessExecutor + 'static>,
@@ -269,22 +413,28 @@ impl BackgroundProcessManager {
 #[async_trait]
 impl ProcessManager for BackgroundProcessManager {
     async fn spawn(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
-        let record = self.store.start(start.clone()).await?;
+        let input = start.input.clone();
+        let record = self.store.start(start).await?;
         let store = Arc::clone(&self.store);
         let executor = Arc::clone(&self.executor);
-        let scope = start.scope.clone();
-        let process_id = start.process_id;
+        let scope = record.scope.clone();
+        let process_id = record.process_id;
+        let dispatch_estimate = if record.resource_reservation_id.is_some() {
+            ResourceEstimate::default()
+        } else {
+            record.estimated_resources.clone()
+        };
+        let request = ProcessExecutionRequest {
+            process_id: record.process_id,
+            invocation_id: record.invocation_id,
+            scope: record.scope.clone(),
+            extension_id: record.extension_id.clone(),
+            capability_id: record.capability_id.clone(),
+            runtime: record.runtime,
+            estimate: dispatch_estimate,
+            input,
+        };
         tokio::spawn(async move {
-            let request = ProcessExecutionRequest {
-                process_id: start.process_id,
-                invocation_id: start.invocation_id,
-                scope: start.scope,
-                extension_id: start.extension_id,
-                capability_id: start.capability_id,
-                runtime: start.runtime,
-                estimate: start.estimated_resources,
-                input: start.input,
-            };
             match executor.execute(request).await {
                 Ok(_result) => {
                     let _ = store.complete(&scope, process_id).await;

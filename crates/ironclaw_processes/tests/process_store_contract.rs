@@ -11,6 +11,9 @@ use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::*;
 use ironclaw_processes::*;
+use ironclaw_resources::{
+    InMemoryResourceGovernor, ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
+};
 
 #[tokio::test]
 async fn in_memory_process_store_starts_capability_process_record() {
@@ -366,6 +369,314 @@ async fn background_process_manager_does_not_emit_completed_after_kill() {
 }
 
 #[tokio::test]
+async fn resource_managed_store_reserves_and_records_reservation_id() {
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let store = ResourceManagedProcessStore::new(InMemoryProcessStore::new(), governor.clone());
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+
+    let record = store
+        .start(process_start_with_estimate(
+            process_id,
+            invocation_id,
+            scope.clone(),
+            process_estimate(),
+        ))
+        .await
+        .unwrap();
+
+    assert!(record.resource_reservation_id.is_some());
+    assert_eq!(
+        store.get(&scope, process_id).await.unwrap().unwrap(),
+        record
+    );
+    let tenant = ResourceAccount::tenant(scope.tenant_id.clone());
+    let reserved = governor.reserved_for(&tenant);
+    assert_eq!(reserved.process_count, 1);
+    assert_eq!(reserved.concurrency_slots, 1);
+}
+
+#[tokio::test]
+async fn resource_managed_store_denies_before_process_record_creation() {
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    governor.set_limit(
+        ResourceAccount::tenant(scope.tenant_id.clone()),
+        ResourceLimits {
+            max_process_count: Some(0),
+            ..ResourceLimits::default()
+        },
+    );
+    let store = ResourceManagedProcessStore::new(InMemoryProcessStore::new(), governor.clone());
+
+    let err = store
+        .start(process_start_with_estimate(
+            process_id,
+            invocation_id,
+            scope.clone(),
+            process_estimate(),
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ProcessError::Resource(ResourceError::LimitExceeded(_))
+    ));
+    assert!(store.get(&scope, process_id).await.unwrap().is_none());
+    assert_eq!(
+        governor
+            .reserved_for(&ResourceAccount::tenant(scope.tenant_id.clone()))
+            .process_count,
+        0
+    );
+}
+
+#[tokio::test]
+async fn resource_managed_store_releases_when_inner_store_drops_reservation_id() {
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let store = ResourceManagedProcessStore::new(ReservationDroppingStore, governor.clone());
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+
+    let err = store
+        .start(process_start_with_estimate(
+            process_id,
+            invocation_id,
+            scope.clone(),
+            process_estimate(),
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ProcessError::ResourceReservationMismatch {
+            process_id: id,
+            actual: None,
+            ..
+        } if id == process_id
+    ));
+    assert_eq!(
+        governor
+            .reserved_for(&ResourceAccount::tenant(scope.tenant_id.clone()))
+            .process_count,
+        0
+    );
+}
+
+#[tokio::test]
+async fn resource_managed_store_releases_reservation_when_inner_start_fails() {
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let inner = InMemoryProcessStore::new();
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    inner
+        .start(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+    let store = ResourceManagedProcessStore::new(inner, governor.clone());
+
+    let err = store
+        .start(process_start_with_estimate(
+            process_id,
+            InvocationId::new(),
+            scope.clone(),
+            process_estimate(),
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, ProcessError::ProcessAlreadyExists { .. }));
+    assert_eq!(
+        governor
+            .reserved_for(&ResourceAccount::tenant(scope.tenant_id.clone()))
+            .process_count,
+        0
+    );
+}
+
+#[tokio::test]
+async fn resource_managed_store_reconciles_on_complete_and_releases_on_failure_or_kill() {
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let completion_usage = ResourceUsage {
+        process_count: 1,
+        output_tokens: 7,
+        ..ResourceUsage::default()
+    };
+    let store = ResourceManagedProcessStore::new(InMemoryProcessStore::new(), governor.clone())
+        .with_completion_usage(completion_usage);
+    let complete_invocation_id = InvocationId::new();
+    let complete_process_id = ProcessId::new();
+    let complete_scope = sample_scope(complete_invocation_id, "tenant1", "user1");
+    store
+        .start(process_start_with_estimate(
+            complete_process_id,
+            complete_invocation_id,
+            complete_scope.clone(),
+            process_estimate(),
+        ))
+        .await
+        .unwrap();
+    store
+        .complete(&complete_scope, complete_process_id)
+        .await
+        .unwrap();
+    let tenant = ResourceAccount::tenant(complete_scope.tenant_id.clone());
+    assert_eq!(governor.reserved_for(&tenant).process_count, 0);
+    assert_eq!(governor.usage_for(&tenant).process_count, 1);
+    assert_eq!(governor.usage_for(&tenant).output_tokens, 7);
+
+    let fail_invocation_id = InvocationId::new();
+    let fail_process_id = ProcessId::new();
+    let fail_scope = sample_scope(fail_invocation_id, "tenant1", "user1");
+    store
+        .start(process_start_with_estimate(
+            fail_process_id,
+            fail_invocation_id,
+            fail_scope.clone(),
+            process_estimate(),
+        ))
+        .await
+        .unwrap();
+    store
+        .fail(&fail_scope, fail_process_id, "RuntimeDispatch".to_string())
+        .await
+        .unwrap();
+    assert_eq!(governor.reserved_for(&tenant).process_count, 0);
+    assert_eq!(governor.usage_for(&tenant).process_count, 1);
+
+    let kill_invocation_id = InvocationId::new();
+    let kill_process_id = ProcessId::new();
+    let kill_scope = sample_scope(kill_invocation_id, "tenant1", "user1");
+    store
+        .start(process_start_with_estimate(
+            kill_process_id,
+            kill_invocation_id,
+            kill_scope.clone(),
+            process_estimate(),
+        ))
+        .await
+        .unwrap();
+    store.kill(&kill_scope, kill_process_id).await.unwrap();
+    assert_eq!(governor.reserved_for(&tenant).process_count, 0);
+    assert_eq!(governor.usage_for(&tenant).process_count, 1);
+}
+
+#[tokio::test]
+async fn background_process_manager_cleans_up_process_resource_reservations() {
+    let success_governor = Arc::new(InMemoryResourceGovernor::new());
+    let success_store = Arc::new(
+        ResourceManagedProcessStore::new(InMemoryProcessStore::new(), success_governor.clone())
+            .with_completion_usage(ResourceUsage {
+                process_count: 1,
+                ..ResourceUsage::default()
+            }),
+    );
+    let success_manager =
+        BackgroundProcessManager::new(success_store.clone(), Arc::new(CountingExecutor::success()));
+    let success_invocation_id = InvocationId::new();
+    let success_process_id = ProcessId::new();
+    let success_scope = sample_scope(success_invocation_id, "tenant1", "user1");
+    success_manager
+        .spawn(process_start_with_estimate(
+            success_process_id,
+            success_invocation_id,
+            success_scope.clone(),
+            process_estimate(),
+        ))
+        .await
+        .unwrap();
+    wait_for_status(
+        success_store.as_ref(),
+        &success_scope,
+        success_process_id,
+        ProcessStatus::Completed,
+    )
+    .await;
+    let success_tenant = ResourceAccount::tenant(success_scope.tenant_id.clone());
+    assert_eq!(
+        success_governor.reserved_for(&success_tenant).process_count,
+        0
+    );
+    assert_eq!(success_governor.usage_for(&success_tenant).process_count, 1);
+
+    let failure_governor = Arc::new(InMemoryResourceGovernor::new());
+    let failure_store = Arc::new(ResourceManagedProcessStore::new(
+        InMemoryProcessStore::new(),
+        failure_governor.clone(),
+    ));
+    let failure_manager = BackgroundProcessManager::new(
+        failure_store.clone(),
+        Arc::new(CountingExecutor::failure("RuntimeDispatch")),
+    );
+    let failure_invocation_id = InvocationId::new();
+    let failure_process_id = ProcessId::new();
+    let failure_scope = sample_scope(failure_invocation_id, "tenant1", "user1");
+    failure_manager
+        .spawn(process_start_with_estimate(
+            failure_process_id,
+            failure_invocation_id,
+            failure_scope.clone(),
+            process_estimate(),
+        ))
+        .await
+        .unwrap();
+    wait_for_status(
+        failure_store.as_ref(),
+        &failure_scope,
+        failure_process_id,
+        ProcessStatus::Failed,
+    )
+    .await;
+    let failure_tenant = ResourceAccount::tenant(failure_scope.tenant_id.clone());
+    assert_eq!(
+        failure_governor.reserved_for(&failure_tenant).process_count,
+        0
+    );
+    assert_eq!(failure_governor.usage_for(&failure_tenant).process_count, 0);
+}
+
+#[tokio::test]
+async fn background_process_manager_releases_process_reservation_after_kill_before_late_success() {
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let store = Arc::new(ResourceManagedProcessStore::new(
+        InMemoryProcessStore::new(),
+        governor.clone(),
+    ));
+    let executor = Arc::new(CountingExecutor::delayed_success(Duration::from_millis(25)));
+    let manager = BackgroundProcessManager::new(store.clone(), executor);
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+
+    manager
+        .spawn(process_start_with_estimate(
+            process_id,
+            invocation_id,
+            scope.clone(),
+            process_estimate(),
+        ))
+        .await
+        .unwrap();
+    store.kill(&scope, process_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    let tenant = ResourceAccount::tenant(scope.tenant_id.clone());
+    assert_eq!(
+        store.get(&scope, process_id).await.unwrap().unwrap().status,
+        ProcessStatus::Killed
+    );
+    assert_eq!(governor.reserved_for(&tenant).process_count, 0);
+    assert_eq!(governor.usage_for(&tenant).process_count, 0);
+}
+
+#[tokio::test]
 async fn filesystem_process_store_persists_under_tenant_user_engine_processes() {
     let fs = engine_filesystem();
     let store = FilesystemProcessStore::new(&fs);
@@ -393,6 +704,69 @@ async fn filesystem_process_store_persists_under_tenant_user_engine_processes() 
             .len(),
         1
     );
+}
+
+struct ReservationDroppingStore;
+
+#[async_trait]
+impl ProcessStore for ReservationDroppingStore {
+    async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
+        Ok(ProcessRecord {
+            process_id: start.process_id,
+            parent_process_id: start.parent_process_id,
+            invocation_id: start.invocation_id,
+            scope: start.scope,
+            extension_id: start.extension_id,
+            capability_id: start.capability_id,
+            runtime: start.runtime,
+            status: ProcessStatus::Running,
+            grants: start.grants,
+            mounts: start.mounts,
+            estimated_resources: start.estimated_resources,
+            resource_reservation_id: None,
+            error_kind: None,
+        })
+    }
+
+    async fn complete(
+        &self,
+        _scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ProcessRecord, ProcessError> {
+        Err(ProcessError::UnknownProcess { process_id })
+    }
+
+    async fn fail(
+        &self,
+        _scope: &ResourceScope,
+        process_id: ProcessId,
+        _error_kind: String,
+    ) -> Result<ProcessRecord, ProcessError> {
+        Err(ProcessError::UnknownProcess { process_id })
+    }
+
+    async fn kill(
+        &self,
+        _scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ProcessRecord, ProcessError> {
+        Err(ProcessError::UnknownProcess { process_id })
+    }
+
+    async fn get(
+        &self,
+        _scope: &ResourceScope,
+        _process_id: ProcessId,
+    ) -> Result<Option<ProcessRecord>, ProcessError> {
+        Ok(None)
+    }
+
+    async fn records_for_scope(
+        &self,
+        _scope: &ResourceScope,
+    ) -> Result<Vec<ProcessRecord>, ProcessError> {
+        Ok(Vec::new())
+    }
 }
 
 struct CountingExecutor {
@@ -497,6 +871,20 @@ fn process_start(
     invocation_id: InvocationId,
     scope: ResourceScope,
 ) -> ProcessStart {
+    process_start_with_estimate(
+        process_id,
+        invocation_id,
+        scope,
+        ResourceEstimate::default(),
+    )
+}
+
+fn process_start_with_estimate(
+    process_id: ProcessId,
+    invocation_id: InvocationId,
+    scope: ResourceScope,
+    estimated_resources: ResourceEstimate,
+) -> ProcessStart {
     ProcessStart {
         process_id,
         parent_process_id: None,
@@ -523,9 +911,17 @@ fn process_start(
             }],
         },
         mounts: MountView::default(),
-        estimated_resources: ResourceEstimate::default(),
+        estimated_resources,
         resource_reservation_id: None,
         input: serde_json::json!({"message": "runtime payload"}),
+    }
+}
+
+fn process_estimate() -> ResourceEstimate {
+    ResourceEstimate {
+        process_count: Some(1),
+        concurrency_slots: Some(1),
+        ..ResourceEstimate::default()
     }
 }
 

@@ -12,7 +12,10 @@ use ironclaw_extensions::*;
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::*;
 use ironclaw_processes::*;
-use ironclaw_resources::{InMemoryResourceGovernor, ReservationStatus, ResourceReceipt};
+use ironclaw_resources::{
+    InMemoryResourceGovernor, ReservationStatus, ResourceAccount, ResourceGovernor, ResourceLimits,
+    ResourceReceipt,
+};
 use ironclaw_wasm::WasmRuntime;
 use serde_json::json;
 
@@ -279,6 +282,48 @@ async fn capability_host_spawn_can_run_background_dispatch_process() {
 }
 
 #[tokio::test]
+async fn capability_host_spawn_records_process_resource_reservation() {
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(package_from_manifest(WASM_MANIFEST))
+        .unwrap();
+    let dispatcher = NoopDispatcher;
+    let authorizer = GrantAuthorizer::new();
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let process_store =
+        ResourceManagedProcessStore::new(InMemoryProcessStore::new(), governor.clone());
+    let context = execution_context(CapabilitySet {
+        grants: vec![grant_for(
+            CapabilityId::new("echo.say").unwrap(),
+            Principal::Extension(ExtensionId::new("caller").unwrap()),
+            vec![EffectKind::DispatchCapability, EffectKind::SpawnProcess],
+        )],
+    });
+    let scope = context.resource_scope.clone();
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+        .with_process_manager(&process_store);
+
+    let result = host
+        .spawn_json(CapabilitySpawnRequest {
+            context,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: ResourceEstimate {
+                process_count: Some(1),
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+            input: json!({"message": "run in background"}),
+        })
+        .await
+        .unwrap();
+
+    assert!(result.process.resource_reservation_id.is_some());
+    let reserved = governor.reserved_for(&ResourceAccount::tenant(scope.tenant_id.clone()));
+    assert_eq!(reserved.process_count, 1);
+    assert_eq!(reserved.concurrency_slots, 1);
+}
+
+#[tokio::test]
 async fn capability_host_spawn_emits_scoped_process_events_without_raw_input() {
     let mut registry = ExtensionRegistry::new();
     registry
@@ -343,13 +388,23 @@ async fn capability_host_spawn_can_run_background_runtime_dispatcher_process() {
     let registry = Arc::new(registry);
     let fs = Arc::new(fs);
     let governor = Arc::new(InMemoryResourceGovernor::new());
+    governor.set_limit(
+        ResourceAccount::tenant(TenantId::new("tenant1").unwrap()),
+        ResourceLimits {
+            max_process_count: Some(1),
+            ..ResourceLimits::default()
+        },
+    );
     let wasm_runtime = Arc::new(WasmRuntime::for_testing().unwrap());
     let dispatcher = Arc::new(
-        RuntimeDispatcher::from_arcs(registry.clone(), fs, governor)
+        RuntimeDispatcher::from_arcs(registry.clone(), fs, governor.clone())
             .with_wasm_runtime_arc(wasm_runtime),
     );
     let executor = Arc::new(DispatchProcessExecutor::new(dispatcher.clone()));
-    let process_store = Arc::new(InMemoryProcessStore::new());
+    let process_store = Arc::new(ResourceManagedProcessStore::new(
+        InMemoryProcessStore::new(),
+        governor.clone(),
+    ));
     let process_manager = BackgroundProcessManager::new(process_store.clone(), executor);
     let authorizer = GrantAuthorizer::new();
     let context = execution_context(CapabilitySet {
@@ -367,7 +422,10 @@ async fn capability_host_spawn_can_run_background_runtime_dispatcher_process() {
         .spawn_json(CapabilitySpawnRequest {
             context,
             capability_id: CapabilityId::new("echo.say").unwrap(),
-            estimate: ResourceEstimate::default(),
+            estimate: ResourceEstimate {
+                process_count: Some(1),
+                ..ResourceEstimate::default()
+            },
             input: json!({"message": "real runtime dispatch"}),
         })
         .await
@@ -380,6 +438,12 @@ async fn capability_host_spawn_can_run_background_runtime_dispatcher_process() {
         ProcessStatus::Completed,
     )
     .await;
+    assert_eq!(
+        governor
+            .reserved_for(&ResourceAccount::tenant(scope.tenant_id.clone()))
+            .process_count,
+        0
+    );
 }
 
 #[tokio::test]
