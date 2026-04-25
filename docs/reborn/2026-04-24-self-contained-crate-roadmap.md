@@ -677,6 +677,8 @@ The architecture is real when:
 - `ironclaw_approvals` resolves pending approval records into scoped leases without touching dispatcher/runtime execution
 - `ironclaw_authorization` enforces scoped lease visibility, expiration, consumption, and revocation before dispatch
 - `ironclaw_capabilities` binds approval-required dispatches to an invocation fingerprint before persistence/resume
+- `CapabilityHost::resume_json` resumes approved dispatches through the same authorization/dispatcher path and consumes the matching lease
+- long-running `Action::Spawn` remains the next capability-host workflow after dispatch resume is stable
 - `ironclaw_resources` is the only path for costed/quota-limited invocation accounting
 - `ironclaw_wasm` does not discover extensions
 - `ironclaw_mcp` tools are adapted into capabilities and still go through policy/audit
