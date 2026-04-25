@@ -49,7 +49,7 @@ pub struct ProcessRecord {
     pub mounts: MountView,
     pub estimated_resources: ResourceEstimate,
     pub resource_reservation_id: Option<ResourceReservationId>,
-    pub error_kind: Option<String>,
+    pub error_kind: Option<ErrorKind>,
 }
 ```
 
@@ -98,7 +98,7 @@ start ProcessRecord as Running
   -> executor failure: fail(scope, process_id, error_kind)
 ```
 
-The executor receives a redaction-friendly `ProcessExecutionRequest` containing process identity, scope, target capability, estimate, and raw input. When the process record already carries a process-owned reservation ID, `BackgroundProcessManager` sends a zero/default dispatch estimate so a runtime-backed process does not reserve the same process estimate twice. It returns `ProcessExecutionResult` for future output/event handling; this slice does not persist process output.
+The executor receives a redaction-friendly `ProcessExecutionRequest` containing process identity, scope, target capability, estimate, optional process-owned reservation ID, and raw input. `BackgroundProcessManager` passes the original process estimate through to the executor; dispatch-specific adapters decide how to avoid duplicate reservation against their target runtime protocol. It returns `ProcessExecutionResult` for future output/event handling; this slice does not persist process output.
 
 `FilesystemProcessStore::from_arc(...)` provides an owned store handle for detached background managers. The filesystem store serializes start/status writes within a store instance; production DB/object-store implementations should use compare-and-swap or transactional updates for cross-process terminal-state protection.
 
@@ -107,7 +107,7 @@ The executor receives a redaction-friendly `ProcessExecutionRequest` containing 
 ```text
 start
   -> ResourceGovernor::reserve(scope, estimate)
-  -> attach resource_reservation_id to ProcessStart
+  -> attach an internal non-forgeable process reservation handle to ProcessStart
   -> inner.start(...)
   -> on inner start failure: release reservation
 
@@ -120,7 +120,7 @@ fail / kill
   -> release reservation without recording usage
 ```
 
-Resource denial fails before process record creation. The wrapper verifies that the inner store preserves the reservation ID it created and releases the reservation if start fails. The wrapper is deliberately below `CapabilityHost` and above concrete stores so resource ownership can compose with in-memory, filesystem, eventing, and future durable stores without making `ironclaw_dispatcher` process-aware.
+Resource denial fails before process record creation. Public callers create `ProcessStart` with `ProcessResourceReservation::none()`; only `ResourceManagedProcessStore` can attach a reserved handle. The wrapper verifies that the inner store preserves the reservation ID it created and releases the reservation if start fails. The wrapper is deliberately below `CapabilityHost` and above concrete stores so resource ownership can compose with in-memory, filesystem, eventing, and future durable stores without making `ironclaw_dispatcher` process-aware.
 
 `EventingProcessStore` wraps any `ProcessStore` and emits best-effort lifecycle events after successful state transitions:
 
@@ -131,7 +131,7 @@ fail     -> process_failed
 kill     -> process_killed
 ```
 
-These events include tenant/user `ResourceScope`, `CapabilityId`, provider `ExtensionId`, `RuntimeKind`, and `ProcessId`. The wrapper does not make `ironclaw_dispatcher` process-aware; process observability stays in the process lifecycle service.
+These events include tenant/user `ResourceScope`, `CapabilityId`, provider `ExtensionId`, `RuntimeKind`, and `ProcessId`. Error kinds are stored and emitted through the shared sanitized `ErrorKind` contract. The wrapper does not make `ironclaw_dispatcher` process-aware; process observability stays in the process lifecycle service.
 
 `start` rejects duplicate process IDs within the same tenant/user partition. Callers must transition existing records instead of overwriting lifecycle state. `complete`, `fail`, and `kill` only transition from `Running`; late executor completions after `kill` are ignored by the background manager because the store rejects the terminal-state overwrite. Because event emission happens after successful transitions, a killed process does not emit a misleading late `process_completed` event when the background executor finishes after kill.
 

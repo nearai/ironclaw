@@ -24,7 +24,9 @@ It is not a runtime, policy engine, filesystem, budget ledger, or extension mana
 - capability descriptors and grants
 - actions and decisions
 - approvals and obligations
-- resource estimates/usages
+- resource estimates/usages/reservation receipts
+- neutral capability dispatch port request/result/failure kinds
+- host-safe redacted error kinds
 - audit/event envelopes
 
 The first implementation PR should create this crate before implementing `ironclaw_filesystem`, `ironclaw_resources`, `ironclaw_extensions`, `ironclaw_wasm`, or `ironclaw_dispatcher`.
@@ -41,6 +43,7 @@ The first implementation PR should create this crate before implementing `ironcl
 - `chrono` or `time`
 - `rust_decimal`
 - `thiserror`
+- `async-trait` for neutral async host port traits
 - optionally `schemars` if JSON schema generation is useful
 
 ### Must not depend on
@@ -77,6 +80,7 @@ crates/ironclaw_host_api/src/
   runtime.rs
   capability.rs
   resource.rs
+  dispatch.rs
   approval.rs
   action.rs
   decision.rs
@@ -84,7 +88,7 @@ crates/ironclaw_host_api/src/
   error.rs
 ```
 
-Keep modules small. If a module starts needing runtime behavior, that behavior belongs in a service crate.
+Keep modules small. If a module starts needing runtime behavior, that behavior belongs in a service crate. The dispatch module defines only the neutral already-authorized runtime port shape; concrete routing remains in `ironclaw_dispatcher`.
 
 ---
 

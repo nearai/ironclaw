@@ -22,7 +22,7 @@ process failed
 process killed
 ```
 
-Events carry typed scope/capability/runtime/process metadata. They must not contain raw host paths, raw secrets, or unredacted request payloads. Event `error_kind` fields are constrained to short classification strings; unsafe detail-like values are collapsed to `Unclassified`.
+Events carry typed scope/capability/runtime/process metadata. They must not contain raw host paths, raw secrets, or unredacted request payloads. Event `error_kind` fields use the shared host-safe `ErrorKind` contract; unsafe detail-like values are collapsed to `Unclassified`.
 
 ---
 
@@ -104,7 +104,7 @@ dispatch_requested
 dispatch_failed
 ```
 
-`MissingRuntimeBackend`, unknown capability, runtime mismatch, unsupported runtime, and runtime execution failures all emit a failed event without leaking internal paths or secret values.
+`MissingRuntimeBackend`, unknown capability, runtime mismatch, unsupported runtime, and runtime execution failures all emit a failed event without leaking internal paths or secret values. Event sink failures are best-effort observability failures; they must not fail an otherwise successful dispatch or overwrite the real dispatch failure kind.
 
 The live vertical slice currently emits nine events for its three successful lanes: WASM, Script, and MCP.
 
@@ -132,7 +132,7 @@ ProcessId
 optional sanitized error_kind for process_failed
 ```
 
-Process event emission is observability for this slice. It is deliberately outside `ironclaw_dispatcher`, so dispatcher remains process-blind and continues to route only already-authorized runtime dispatch requests.
+Process event emission is observability for this slice. It is deliberately outside `ironclaw_dispatcher`, so dispatcher remains process-blind and continues to route only already-authorized runtime dispatch requests. Process records and lifecycle events use the same sanitized `ErrorKind` contract for status/error classifications.
 
 ---
 
