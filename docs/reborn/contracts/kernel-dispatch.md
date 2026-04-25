@@ -42,6 +42,7 @@ The dispatcher is constructed from references to service boundaries:
 RuntimeDispatcher::new(&registry, &root_filesystem, &resource_governor)
     .with_wasm_runtime(&wasm_runtime)
     .with_script_runtime(&script_runtime)
+    .with_mcp_runtime(&mcp_runtime)
 ```
 
 `ExtensionRegistry` remains the authority for what can run. Runtime crates remain the authority for how a lane runs.
@@ -73,6 +74,12 @@ For `RuntimeKind::Script`, the dispatcher calls:
 ironclaw_scripts::ScriptExecutor::execute_extension_json(...)
 ```
 
+For `RuntimeKind::Mcp`, the dispatcher calls:
+
+```text
+ironclaw_mcp::McpExecutor::execute_extension_json(...)
+```
+
 Each runtime lane still owns its local reserve/prepare/invoke/reconcile/release lifecycle. The dispatcher does not duplicate the resource-governor protocol.
 
 ---
@@ -85,11 +92,11 @@ V1 routes these runtime kinds explicitly:
 | --- | --- |
 | `Wasm` | Executes through configured `WasmRuntime` |
 | `Script` | Executes through configured `ScriptExecutor` |
-| `Mcp` | Recognized, returns `UnsupportedRuntime` until MCP adapter crate lands |
+| `Mcp` | Executes through configured `McpExecutor` adapter |
 | `FirstParty` | Recognized, returns `UnsupportedRuntime` until host service adapters land |
 | `System` | Recognized, returns `UnsupportedRuntime` until system service adapters land |
 
-If the selected WASM or Script runtime is not configured, dispatch returns `MissingRuntimeBackend` before reserving resources.
+If the selected WASM, Script, or MCP runtime is not configured, dispatch returns `MissingRuntimeBackend` before reserving resources.
 
 ---
 
@@ -132,9 +139,9 @@ This PR does not add:
 
 - authorization/grant evaluation
 - approval prompts
-- audit/event persistence
+- full audit/event projection persistence
 - script filesystem mounts, artifact export, network access, or secret injection
-- MCP client execution
+- MCP protocol handshake/lifecycle management beyond the adapter contract
 - host service dispatch for first-party/system capabilities
 - filesystem mount selection
 - network or secret injection
@@ -153,7 +160,8 @@ The crate test suite covers:
 - unknown capability failure before resource reservation
 - descriptor/package runtime mismatch failure before execution
 - Script capability dispatch through a configured script executor
-- MCP, first-party, and system lanes recognized but not executed
-- missing WASM or Script backend failure before resource reservation
+- MCP capability dispatch through a configured MCP executor
+- first-party and system lanes recognized but not executed
+- missing WASM, Script, or MCP backend failure before resource reservation
 
 These tests are intentionally caller-level: they drive `RuntimeDispatcher::dispatch_json`, not only helper functions.
