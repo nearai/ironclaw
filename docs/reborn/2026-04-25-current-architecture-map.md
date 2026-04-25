@@ -186,7 +186,7 @@ Implemented/current pieces:
 - `BackgroundProcessManager`, `ProcessExecutor`, and `DispatchProcessExecutor` establish the detachable execution seam.
 - `RuntimeDispatcher::from_arcs` exists so background execution can hold owned service handles without leaking borrowed request state into spawned tasks.
 - Process persistence exists through in-memory and filesystem-backed stores.
-- `ProcessHost` exists as the current host-facing `status`, `kill`, and `await_process` API over scoped process current state.
+- `ProcessHost` exists as the current host-facing `status`, `kill`, `await_process`, and `subscribe` API over scoped process current state.
 - Process lifecycle events exist through `EventingProcessStore` and shared `EventSink` implementations.
 - Process resource reservation ownership exists through `ResourceManagedProcessStore`; public process starts cannot forge reserved handles, and runtime-backed process dispatch suppresses duplicate reservation through the process-dispatch adapter.
 
@@ -194,7 +194,7 @@ Still missing for process/product completeness:
 
 - productized process event projections/read APIs
 - cooperative cancellation/abort handles
-- process output streaming, subscribe APIs, and event fanout
+- process output streaming, durable subscription cursors, and event fanout
 - dynamic executor-reported process resource usage
 - richer process tree/query APIs beyond parent id storage
 
@@ -219,7 +219,7 @@ The current implemented or contract-backed Reborn stack includes these slices:
 | WASM lane | `[exists]` configured `WasmRuntime` dispatch path in the live vertical slice |
 | Script lane | `[exists]` `ScriptExecutor` path, including in-process demo backend and optional Docker backend in the demo |
 | MCP lane | `[exists]` adapter/executor contract path in the live vertical slice; not a full MCP lifecycle product yet |
-| Process persistence | `[exists]` process store/manager records, host-facing `ProcessHost` status/kill/await APIs, background completion/failure transition protection, lifecycle events, and resource reservation ownership/cleanup |
+| Process persistence | `[exists]` process store/manager records, host-facing `ProcessHost` status/kill/await/subscribe APIs, background completion/failure transition protection, lifecycle events, and resource reservation ownership/cleanup |
 | Live vertical slice | `[exists]` runnable demo through discovery -> registry -> `CapabilityHost` -> authorization -> dispatcher -> WASM/Script/MCP -> resources/events |
 
 ---
@@ -233,7 +233,7 @@ These are explicit gaps, not architecture contradictions:
 | Real Telegram/channel adapters | Telegram/Slack/Web/CLI should be transport drivers over the shared host request/event contracts; product-grade channel adapters still need to be built or ported into this shape. |
 | Turn service | The shared service that owns one-active-run-per-thread, turn lifecycle, checkpoint/resume edge, and handoff to the loop is not implemented yet. |
 | First-party agent loop runtime | The default parent agent loop should be hosted as a first-party service/extension that emits `Reply | CapabilityCalls`; it is not yet a Reborn runtime/service. |
-| Process product APIs | Process records, scoped status/kill/await APIs, lifecycle events, and resource cleanup ownership exist as service slices; output streams, cancellation handles, richer scoped read/projection APIs, and subscribe APIs are not complete. |
+| Process product APIs | Process records, scoped status/kill/await/subscribe APIs, lifecycle events, and resource cleanup ownership exist as service slices; output streams, cancellation handles, richer scoped read/projection APIs, durable subscription cursors, and event fanout are not complete. |
 | Durable leases | Approval leases currently have narrow/in-memory semantics; durable, revocable, auditable lease storage is not complete. |
 | User-facing scoped event API | Dispatcher events and JSONL/in-memory sinks exist, but scoped SSE/WebSocket/reconnect APIs and projection reducers are not productized. |
 | FirstParty/System runtime execution | `RuntimeKind::FirstParty` and `RuntimeKind::System` are recognized host API/runtime markers, but dispatch returns unsupported until trusted host service adapters land. |
