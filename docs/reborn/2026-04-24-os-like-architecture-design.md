@@ -731,6 +731,8 @@ The agent loop should be a first-party privileged extension that uses:
 
 It should write durable thread/step state into the mounted filesystem, not hide that state inside its own runtime memory.
 
+The parent model protocol should stay `Text | ToolCalls`. CodeAct/Monty-style execution can exist as worker modes behind explicit capabilities such as `spawn_subagent(mode = "codeact")` or `create_job(mode = "codeact")`; they should not become a third parent-loop response mode. Detailed workflow ownership and run-state rules live in `docs/reborn/contracts/runtime-workflows.md` and `docs/reborn/contracts/run-state.md`.
+
 ---
 
 ## 14. Filesystem-based configuration

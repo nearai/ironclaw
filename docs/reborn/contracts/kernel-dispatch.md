@@ -123,7 +123,7 @@ The shape intentionally exposes common host-level facts and avoids leaking WASM-
 
 This PR does not add:
 
-- authorization/grant evaluation
+- authorization/grant evaluation; see `docs/reborn/contracts/capability-access.md` for the planned boundary
 - approval prompts
 - audit/event persistence
 - script execution
