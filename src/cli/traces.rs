@@ -3252,6 +3252,24 @@ mod tests {
     }
 
     #[test]
+    fn list_traces_purpose_query_uses_ingest_endpoint() {
+        let url = trace_commons_api_url(
+            "https://trace.example/internal/v1/traces",
+            "/v1/traces",
+            &[
+                ("purpose", "ranker_training_pairs_export".to_string()),
+                ("limit", "20".to_string()),
+            ],
+        )
+        .expect("url builds");
+
+        assert_eq!(
+            url,
+            "https://trace.example/internal/v1/traces?purpose=ranker_training_pairs_export&limit=20"
+        );
+    }
+
+    #[test]
     fn maintenance_reconciliation_lines_summarize_counts_without_ids() {
         let value = serde_json::json!({
             "db_reconciliation": {

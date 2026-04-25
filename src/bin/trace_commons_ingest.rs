@@ -630,6 +630,7 @@ async fn analytics_handler(
 struct TraceListQuery {
     status: Option<TraceCorpusStatus>,
     limit: Option<usize>,
+    purpose: Option<String>,
     coverage_tag: Option<String>,
     tool: Option<String>,
     privacy_risk: Option<ResidualPiiRisk>,
@@ -653,6 +654,10 @@ async fn list_traces_handler(
         .collect::<BTreeMap<_, _>>();
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
     let consent_scope = parse_consent_scope_filter(query.consent_scope.as_deref())?;
+    let purpose_submission_ids =
+        trace_list_purpose_submission_ids(state.as_ref(), &tenant, query.purpose.as_deref())
+            .await
+            .map_err(internal_error)?;
 
     let items: Vec<_> = records
         .into_iter()
@@ -665,6 +670,11 @@ async fn list_traces_handler(
                 .is_none_or(|risk| record.privacy_risk == risk)
         })
         .filter(|record| consent_scope.is_none_or(|scope| record.consent_scopes.contains(&scope)))
+        .filter(|record| {
+            purpose_submission_ids
+                .as_ref()
+                .is_none_or(|submission_ids| submission_ids.contains(&record.submission_id))
+        })
         .filter(|record| {
             trace_matches_derived_filters(
                 derived_by_submission.get(&record.submission_id),
@@ -1860,6 +1870,50 @@ async fn read_replay_export_manifest_summaries(
         .into_iter()
         .map(TraceExportManifestSummary::from_replay_manifest)
         .collect())
+}
+
+async fn trace_list_purpose_submission_ids(
+    state: &AppState,
+    tenant: &TenantAuth,
+    purpose: Option<&str>,
+) -> anyhow::Result<Option<BTreeSet<Uuid>>> {
+    let Some(purpose) = purpose.map(str::trim).filter(|purpose| !purpose.is_empty()) else {
+        return Ok(None);
+    };
+
+    if state.db_reviewer_reads {
+        let db = state
+            .db_mirror
+            .as_ref()
+            .context("TRACE_COMMONS_DB_REVIEWER_READS is enabled without a DB mirror")?;
+        let submission_ids = db
+            .list_trace_export_manifests(&tenant.tenant_id)
+            .await
+            .context("failed to read Trace Commons export manifests from DB mirror")?
+            .into_iter()
+            .filter(|manifest| {
+                manifest.deleted_at.is_none()
+                    && manifest.invalidated_at.is_none()
+                    && manifest.purpose_code.as_deref() == Some(purpose)
+            })
+            .flat_map(|manifest| manifest.source_submission_ids)
+            .collect::<BTreeSet<_>>();
+        return Ok(Some(submission_ids));
+    }
+
+    let mut submission_ids = BTreeSet::new();
+    for manifest in read_all_export_manifests(&state.root, &tenant.tenant_id)? {
+        if manifest.purpose == purpose {
+            submission_ids.extend(manifest.source_submission_ids);
+        }
+    }
+    for path in read_export_provenance_paths(&state.root, &tenant.tenant_id)? {
+        let provenance = read_export_provenance(&path)?;
+        if provenance.purpose == purpose && provenance.invalidated_at.is_none() {
+            submission_ids.extend(provenance.source_submission_ids);
+        }
+    }
+    Ok(Some(submission_ids))
 }
 
 async fn read_reviewer_metadata_view_from_db(
@@ -8738,6 +8792,7 @@ mod tests {
             Query(TraceListQuery {
                 status: Some(TraceCorpusStatus::Accepted),
                 limit: Some(10),
+                purpose: None,
                 coverage_tag: Some("tool:shell".to_string()),
                 tool: Some("shell".to_string()),
                 privacy_risk: Some(ResidualPiiRisk::Low),
@@ -8774,6 +8829,24 @@ mod tests {
         .expect("benchmark conversion can read DB metadata");
         assert_eq!(benchmark.item_count, 1);
         assert_eq!(benchmark.candidates[0].summary_model, "db-summary-v1");
+
+        let Json(purpose_list) = list_traces_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(TraceListQuery {
+                status: None,
+                limit: Some(10),
+                purpose: Some("db_metadata_benchmark".to_string()),
+                coverage_tag: None,
+                tool: None,
+                privacy_risk: None,
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("trace list filters by DB export purpose");
+        assert_eq!(purpose_list.len(), 1);
+        assert_eq!(purpose_list[0].submission_id, accepted_id);
 
         let Json(candidates) = ranker_training_candidates_handler(
             State(state),
@@ -9464,6 +9537,7 @@ mod tests {
             Query(TraceListQuery {
                 status: None,
                 limit: Some(10),
+                purpose: None,
                 coverage_tag: None,
                 tool: None,
                 privacy_risk: None,
@@ -9673,6 +9747,7 @@ mod tests {
             Query(TraceListQuery {
                 status: None,
                 limit: Some(10),
+                purpose: None,
                 coverage_tag: None,
                 tool: None,
                 privacy_risk: None,
@@ -9689,6 +9764,7 @@ mod tests {
             Query(TraceListQuery {
                 status: Some(TraceCorpusStatus::Revoked),
                 limit: Some(10),
+                purpose: None,
                 coverage_tag: None,
                 tool: None,
                 privacy_risk: None,
@@ -9751,6 +9827,7 @@ mod tests {
             Query(TraceListQuery {
                 status: None,
                 limit: None,
+                purpose: None,
                 coverage_tag: None,
                 tool: None,
                 privacy_risk: None,
@@ -9806,6 +9883,7 @@ mod tests {
             Query(TraceListQuery {
                 status: Some(TraceCorpusStatus::Accepted),
                 limit: Some(10),
+                purpose: None,
                 coverage_tag: Some("tool:shell".to_string()),
                 tool: Some("shell".to_string()),
                 privacy_risk: Some(ResidualPiiRisk::Low),
@@ -9834,6 +9912,7 @@ mod tests {
             Query(TraceListQuery {
                 status: Some(TraceCorpusStatus::Accepted),
                 limit: Some(10),
+                purpose: None,
                 coverage_tag: None,
                 tool: None,
                 privacy_risk: Some(ResidualPiiRisk::Low),
@@ -9855,6 +9934,7 @@ mod tests {
             Query(TraceListQuery {
                 status: Some(TraceCorpusStatus::Accepted),
                 limit: Some(10),
+                purpose: None,
                 coverage_tag: None,
                 tool: None,
                 privacy_risk: Some(ResidualPiiRisk::Low),
@@ -9871,6 +9951,7 @@ mod tests {
             Query(TraceListQuery {
                 status: Some(TraceCorpusStatus::Accepted),
                 limit: Some(10),
+                purpose: None,
                 coverage_tag: None,
                 tool: None,
                 privacy_risk: Some(ResidualPiiRisk::Low),
@@ -9887,6 +9968,7 @@ mod tests {
             Query(TraceListQuery {
                 status: Some(TraceCorpusStatus::Quarantined),
                 limit: Some(10),
+                purpose: None,
                 coverage_tag: None,
                 tool: None,
                 privacy_risk: Some(ResidualPiiRisk::Medium),
@@ -9897,6 +9979,85 @@ mod tests {
         .expect("reviewer can list quarantined traces");
         assert_eq!(quarantined_records.len(), 1);
         assert_eq!(quarantined_records[0].submission_id, quarantined_id);
+    }
+
+    #[tokio::test]
+    async fn reviewer_trace_list_filters_by_export_purpose() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut accepted = sample_envelope().await;
+        make_metadata_only_low_risk(&mut accepted);
+        accepted.replay.replayable = true;
+        let accepted_id = accepted.submission_id;
+        let quarantined = sample_envelope().await;
+        let quarantined_id = quarantined.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(accepted),
+        )
+        .await
+        .expect("accepted submission succeeds");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(quarantined),
+        )
+        .await
+        .expect("quarantined submission succeeds");
+
+        let Json(export) = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("purpose_filter_export".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("replay export writes purpose manifest");
+        assert_eq!(export.item_count, 1);
+        assert_eq!(export.items[0].submission_id, accepted_id);
+
+        let Json(purpose_records) = list_traces_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(TraceListQuery {
+                status: None,
+                limit: Some(10),
+                purpose: Some("purpose_filter_export".to_string()),
+                coverage_tag: None,
+                tool: None,
+                privacy_risk: None,
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("reviewer can list traces by export purpose");
+        assert_eq!(purpose_records.len(), 1);
+        assert_eq!(purpose_records[0].submission_id, accepted_id);
+        assert_ne!(purpose_records[0].submission_id, quarantined_id);
+
+        let Json(missing_purpose_records) = list_traces_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Query(TraceListQuery {
+                status: None,
+                limit: Some(10),
+                purpose: Some("missing_export_purpose".to_string()),
+                coverage_tag: None,
+                tool: None,
+                privacy_risk: None,
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("missing purpose returns no records");
+        assert!(missing_purpose_records.is_empty());
     }
 
     #[tokio::test]
@@ -9952,6 +10113,7 @@ mod tests {
             Query(TraceListQuery {
                 status: None,
                 limit: Some(50),
+                purpose: None,
                 coverage_tag: None,
                 tool: None,
                 privacy_risk: None,
@@ -9970,6 +10132,7 @@ mod tests {
             Query(TraceListQuery {
                 status: None,
                 limit: Some(50),
+                purpose: None,
                 coverage_tag: None,
                 tool: None,
                 privacy_risk: None,

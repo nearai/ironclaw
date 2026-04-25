@@ -120,7 +120,7 @@ The service exposes:
 
 - `GET /health`
 - `POST /v1/traces`
-- `GET /v1/traces`
+- `GET /v1/traces` with reviewer filters for status, privacy risk, consent scope, derived tool/tag metadata, and export/provenance `purpose`
 - `DELETE /v1/traces` with `{ "submission_id": "..." }`
 - `DELETE /v1/traces/{submission_id}`
 - `POST /v1/traces/{submission_id}/revoke`
@@ -298,7 +298,7 @@ The web settings panel includes a Trace Commons tab for standing opt-in, autonom
 | Privacy Filter sidecar integration | Implemented MVP | Local command/stdin/stdout path exists with safe output projection, non-fatal fallback, minimal child environment, stderr hashing, IO limits, and canary tests. Production container sandboxing and stricter output contracts remain. |
 | Autonomous post-turn contribution | Implemented MVP | Runtime queues/flushed scoped envelopes after persisted or failed turns when policy permits. |
 | Web Trace Commons settings and preview endpoints | Implemented MVP | Authenticated gateway endpoints and UI controls exist; server-side tenant/user checks remain the trust boundary. |
-| Private ingestion service | Implemented MVP | Development/internal binary validates schema, reruns redaction, computes hashes/credit, stores accepted/quarantined records, and serves review/status/export routes. It can now dark-launch DB dual-write metadata and encrypted envelope artifacts. |
+| Private ingestion service | Implemented MVP | Development/internal binary validates schema, reruns redaction, computes hashes/credit, stores accepted/quarantined records, and serves review/status/export routes, including reviewer trace-list filtering by export/provenance purpose. It can now dark-launch DB dual-write metadata and encrypted envelope artifacts. |
 | Tenant token roles | Partial | Static tenant tokens support contributor/reviewer/admin behavior. Production needs short-lived credentials, central policy, RBAC/ABAC, and row-level tenant enforcement. |
 | Contributor credit ledger and delayed credit sync | Partial | Append-only local and central credit events exist, reviewer/admin delayed credit mutation requires a reason, downstream utility credit must carry an external artifact/job reference, DB audit rows include typed credit-mutation metadata with hashed reason/reference fields, and autonomous clients periodically notify opted-in users when submitted or later-revoked records receive ledger changes. Production needs anti-abuse review, stricter settlement policy, and audit reconciliation. |
 | Quarantine/review workflow | Partial | Reviewer/admin routes can list and decide on quarantined redacted traces. Production needs durable DB state, audit, assignment, escalation, and retention/revocation gates. |
