@@ -497,6 +497,7 @@ fn app(state: Arc<AppState>) -> Router {
                 .put(put_tenant_policy_handler),
         )
         .route("/v1/admin/maintenance", post(maintenance_handler))
+        .route("/v1/workers/vector-index", post(vector_index_handler))
         .route("/v1/audit/events", get(audit_events_handler))
         .with_state(state)
         .layer(DefaultBodyLimit::max(MAX_INGEST_BODY_BYTES))
@@ -2110,6 +2111,44 @@ async fn maintenance_handler(
 }
 
 #[derive(Debug, Deserialize)]
+struct TraceVectorIndexRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+async fn vector_index_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceVectorIndexRequest>,
+) -> ApiResult<Json<TraceMaintenanceResponse>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_vector_operator(&tenant)?;
+    let response = run_maintenance(
+        state.as_ref(),
+        &tenant,
+        TraceMaintenanceRequest {
+            purpose: Some(
+                body.purpose
+                    .unwrap_or_else(|| "trace_commons_vector_index_worker".to_string()),
+            ),
+            dry_run: body.dry_run,
+            backfill_db_mirror: false,
+            index_vectors: true,
+            reconcile_db_mirror: false,
+            verify_audit_chain: false,
+            prune_export_cache: false,
+            max_export_age_hours: None,
+            purge_expired_before: None,
+        },
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
 struct AuditEventsQuery {
     limit: Option<usize>,
 }
@@ -2586,6 +2625,17 @@ fn require_benchmarker(auth: &TenantAuth) -> ApiResult<()> {
         Err(api_error(
             StatusCode::FORBIDDEN,
             "reviewer, admin, or benchmark worker token required",
+        ))
+    }
+}
+
+fn require_vector_operator(auth: &TenantAuth) -> ApiResult<()> {
+    if auth.role.can_review() || auth.role == TokenRole::VectorWorker {
+        Ok(())
+    } else {
+        Err(api_error(
+            StatusCode::FORBIDDEN,
+            "reviewer, admin, or vector worker token required",
         ))
     }
 }
@@ -8841,6 +8891,30 @@ mod tests {
         .expect_err("retention worker cannot index vectors");
         assert_eq!(retention_vector_error.0, StatusCode::FORBIDDEN);
 
+        let retention_vector_route_error = vector_index_handler(
+            State(state.clone()),
+            auth_headers("retention-worker-token-a"),
+            Json(TraceVectorIndexRequest {
+                purpose: Some("retention_worker_vector_route_denied".to_string()),
+                dry_run: true,
+            }),
+        )
+        .await
+        .expect_err("retention worker cannot use dedicated vector route");
+        assert_eq!(retention_vector_route_error.0, StatusCode::FORBIDDEN);
+
+        let Json(vector_route_index) = vector_index_handler(
+            State(state.clone()),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceVectorIndexRequest {
+                purpose: Some("vector_worker_route_index".to_string()),
+                dry_run: false,
+            }),
+        )
+        .await
+        .expect("vector worker can run dedicated vector index route");
+        assert_eq!(vector_route_index.vector_entries_indexed, 1);
+
         let Json(vector_index) = maintenance_handler(
             State(state.clone()),
             auth_headers("vector-worker-token-a"),
@@ -8858,7 +8932,7 @@ mod tests {
         )
         .await
         .expect("vector worker can run vector-scoped maintenance");
-        assert_eq!(vector_index.vector_entries_indexed, 1);
+        assert_eq!(vector_index.vector_entries_indexed, 0);
 
         let vector_retention_error = maintenance_handler(
             State(state),
