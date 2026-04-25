@@ -690,6 +690,7 @@ The architecture is real when:
 - `ProcessResultStore` records scoped terminal process output/error records; in-memory/dev stores can keep small JSON inline, while filesystem-backed stores write successful JSON output to scoped output refs for reviewable storage hygiene
 - `ProcessServices` composes process store, result store, cancellation registry, host, and background manager wiring so callers do not accidentally split lifecycle/result/cancellation state
 - `CapabilityHost::with_process_services(...)` derives its spawn manager from the same `ProcessServices` bundle while leaving lifecycle/result/output APIs in `ironclaw_processes::ProcessHost`
+- `HostRuntimeServices` in `ironclaw_host_runtime` composes registry/filesystem/governor/authorizer/runtime/process services into `RuntimeDispatcher`, `CapabilityHost`, and `ProcessHost` handles without moving ownership boundaries
 - `EventingProcessStore` emits tenant/user-scoped process_started/process_completed/process_failed/process_killed events without making dispatcher process-aware
 - `ResourceManagedProcessStore` reserves resources before process start, records reservation IDs, reconciles on completion, and releases on failure/kill/start failure
 - `ironclaw_resources` is the only path for costed/quota-limited invocation accounting
