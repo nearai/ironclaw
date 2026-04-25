@@ -33,6 +33,7 @@ use ironclaw::trace_corpus_storage::{
     TraceCreditEventType as StorageTraceCreditEventType,
     TraceCreditEventWrite as StorageTraceCreditEventWrite,
     TraceCreditSettlementState as StorageTraceCreditSettlementState,
+    TraceDerivedRecord as StorageTraceDerivedRecord,
     TraceDerivedRecordWrite as StorageTraceDerivedRecordWrite,
     TraceDerivedStatus as StorageTraceDerivedStatus,
     TraceObjectArtifactKind as StorageTraceObjectArtifactKind,
@@ -74,6 +75,7 @@ struct AppState {
     tokens: Arc<BTreeMap<String, TenantAuth>>,
     db_mirror: Option<Arc<dyn Database>>,
     db_contributor_reads: bool,
+    db_reviewer_reads: bool,
     artifact_store: Option<Arc<LocalEncryptedTraceArtifactStore>>,
 }
 
@@ -125,12 +127,17 @@ impl AppState {
                 "TRACE_COMMONS_DB_CONTRIBUTOR_READS requires TRACE_COMMONS_DB_DUAL_WRITE"
             );
         }
+        let db_reviewer_reads = env_truthy("TRACE_COMMONS_DB_REVIEWER_READS");
+        if db_reviewer_reads && db_mirror.is_none() {
+            anyhow::bail!("TRACE_COMMONS_DB_REVIEWER_READS requires TRACE_COMMONS_DB_DUAL_WRITE");
+        }
         let artifact_store = trace_artifact_store_from_env(&root)?;
         Ok(Self {
             root,
             tokens: Arc::new(tokens),
             db_mirror,
             db_contributor_reads,
+            db_reviewer_reads,
             artifact_store,
         })
     }
@@ -557,10 +564,10 @@ async fn analytics_handler(
 ) -> ApiResult<Json<TraceCommonsAnalyticsResponse>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_reviewer(&tenant)?;
-    let records =
-        read_all_submission_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
-    let derived =
-        read_all_derived_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let TraceCommonsMetadataView { records, derived } =
+        read_reviewer_metadata_view(state.as_ref(), &tenant)
+            .await
+            .map_err(internal_error)?;
     Ok(Json(TraceCommonsAnalyticsResponse::from_records(
         tenant.tenant_id,
         records,
@@ -585,10 +592,10 @@ async fn list_traces_handler(
 ) -> ApiResult<Json<Vec<TraceCommonsTraceListItem>>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_reviewer(&tenant)?;
-    let records =
-        read_all_submission_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
-    let derived =
-        read_all_derived_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let TraceCommonsMetadataView { records, derived } =
+        read_reviewer_metadata_view(state.as_ref(), &tenant)
+            .await
+            .map_err(internal_error)?;
     let derived_by_submission = derived
         .into_iter()
         .map(|record| (record.submission_id, record))
@@ -626,10 +633,10 @@ async fn review_quarantine_handler(
 ) -> ApiResult<Json<Vec<TraceReviewQueueItem>>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_reviewer(&tenant)?;
-    let records =
-        read_all_submission_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
-    let derived =
-        read_all_derived_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let TraceCommonsMetadataView { records, derived } =
+        read_reviewer_metadata_view(state.as_ref(), &tenant)
+            .await
+            .map_err(internal_error)?;
     let derived_by_submission = derived
         .into_iter()
         .map(|record| (record.submission_id, record))
@@ -928,8 +935,10 @@ async fn benchmark_convert_handler(
 ) -> ApiResult<Json<TraceBenchmarkConversionArtifact>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_reviewer(&tenant)?;
-    let records =
-        read_all_submission_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let TraceCommonsMetadataView { records, derived } =
+        read_reviewer_metadata_view(state.as_ref(), &tenant)
+            .await
+            .map_err(internal_error)?;
     let consent_scope = parse_consent_scope_filter(body.consent_scope.as_deref())?;
     let accepted_by_submission = records
         .into_iter()
@@ -948,8 +957,6 @@ async fn benchmark_convert_handler(
         .filter(|purpose| !purpose.trim().is_empty())
         .unwrap_or_else(|| "trace_commons_benchmark_candidate_conversion".to_string());
 
-    let derived =
-        read_all_derived_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
     let mut candidates = Vec::new();
     for derived in derived
         .into_iter()
@@ -1019,6 +1026,7 @@ async fn ranker_training_candidates_handler(
         &candidate_query,
         consent_scope,
     )
+    .await
     .map_err(internal_error)?;
     let export_id = Uuid::new_v4();
     let audit_event = TraceCommonsAuditEvent::ranker_training_export(
@@ -1053,6 +1061,7 @@ async fn ranker_training_pairs_handler(
     pair_query.limit = Some(pair_limit.saturating_add(1));
     let candidates =
         collect_ranker_training_candidates(state.as_ref(), &tenant, &pair_query, consent_scope)
+            .await
             .map_err(internal_error)?;
     let pairs = build_ranker_training_pairs(&candidates, pair_limit);
     let export_id = Uuid::new_v4();
@@ -1089,10 +1098,10 @@ async fn active_learning_review_queue_handler(
 ) -> ApiResult<Json<TraceActiveLearningReviewQueue>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_reviewer(&tenant)?;
-    let records =
-        read_all_submission_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
-    let derived =
-        read_all_derived_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let TraceCommonsMetadataView { records, derived } =
+        read_reviewer_metadata_view(state.as_ref(), &tenant)
+            .await
+            .map_err(internal_error)?;
     let derived_by_submission = derived
         .into_iter()
         .map(|record| (record.submission_id, record))
@@ -1213,14 +1222,14 @@ fn trace_matches_derived_filters(
     coverage_matches && tool_matches
 }
 
-fn collect_ranker_training_candidates(
+async fn collect_ranker_training_candidates(
     state: &AppState,
     tenant: &TenantAuth,
     query: &RankerTrainingExportQuery,
     consent_scope: Option<ConsentScope>,
 ) -> anyhow::Result<Vec<TraceRankerTrainingCandidate>> {
-    let records = read_all_submission_records(&state.root, &tenant.tenant_id)?;
-    let derived = read_all_derived_records(&state.root, &tenant.tenant_id)?;
+    let TraceCommonsMetadataView { records, derived } =
+        read_reviewer_metadata_view(state, tenant).await?;
     let derived_by_submission = derived
         .into_iter()
         .map(|record| (record.submission_id, record))
@@ -1429,6 +1438,62 @@ struct TraceContributorCreditView {
     credit_events: Vec<TraceCommonsCreditLedgerRecord>,
 }
 
+#[derive(Debug)]
+struct TraceCommonsMetadataView {
+    records: Vec<TraceCommonsSubmissionRecord>,
+    derived: Vec<TraceCommonsDerivedRecord>,
+}
+
+async fn read_reviewer_metadata_view(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<TraceCommonsMetadataView> {
+    if state.db_reviewer_reads {
+        return read_reviewer_metadata_view_from_db(state, tenant).await;
+    }
+
+    Ok(TraceCommonsMetadataView {
+        records: read_all_submission_records(&state.root, &tenant.tenant_id)?,
+        derived: read_all_derived_records(&state.root, &tenant.tenant_id)?,
+    })
+}
+
+async fn read_reviewer_metadata_view_from_db(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<TraceCommonsMetadataView> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .context("TRACE_COMMONS_DB_REVIEWER_READS is enabled without a DB mirror")?;
+    let records = db
+        .list_trace_submissions(&tenant.tenant_id)
+        .await
+        .context("failed to read Trace Commons submissions from DB mirror")?
+        .into_iter()
+        .filter_map(trace_commons_record_from_storage_submission)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let submission_metadata = records
+        .iter()
+        .map(|record| {
+            (
+                record.submission_id,
+                (record.status, record.privacy_risk, record.tenant_id.clone()),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let derived = db
+        .list_trace_derived_records(&tenant.tenant_id)
+        .await
+        .context("failed to read Trace Commons derived records from DB mirror")?
+        .into_iter()
+        .filter_map(|record| {
+            trace_commons_derived_record_from_storage(record, &submission_metadata)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(TraceCommonsMetadataView { records, derived })
+}
+
 async fn read_contributor_credit_view(
     state: &AppState,
     tenant: &TenantAuth,
@@ -1503,6 +1568,7 @@ fn trace_commons_record_from_storage_submission(
 ) -> Option<anyhow::Result<TraceCommonsSubmissionRecord>> {
     let status = trace_corpus_status_from_storage(record.status)?;
     Some((|| {
+        let object_key = trace_envelope_object_key(&record.tenant_id, status, record.submission_id);
         Ok(TraceCommonsSubmissionRecord {
             tenant_storage_ref: tenant_storage_ref(&record.tenant_id),
             tenant_id: record.tenant_id,
@@ -1521,10 +1587,53 @@ fn trace_commons_record_from_storage_submission(
                 .iter()
                 .map(|scope| storage_string_as(scope, "consent_scope"))
                 .collect::<anyhow::Result<Vec<_>>>()?,
-            redaction_counts: BTreeMap::new(),
+            redaction_counts: record.redaction_counts,
             received_at: record.received_at,
-            object_key: String::new(),
+            object_key,
             artifact_receipt: None,
+        })
+    })())
+}
+
+fn trace_commons_derived_record_from_storage(
+    record: StorageTraceDerivedRecord,
+    submission_metadata: &BTreeMap<Uuid, (TraceCorpusStatus, ResidualPiiRisk, String)>,
+) -> Option<anyhow::Result<TraceCommonsDerivedRecord>> {
+    let (submission_status, submission_privacy_risk, tenant_id) =
+        submission_metadata.get(&record.submission_id)?;
+    let status = match record.status {
+        StorageTraceDerivedStatus::Current => *submission_status,
+        StorageTraceDerivedStatus::Revoked => TraceCorpusStatus::Revoked,
+        StorageTraceDerivedStatus::Invalidated
+        | StorageTraceDerivedStatus::Superseded
+        | StorageTraceDerivedStatus::Expired => return None,
+    };
+    Some((|| {
+        let privacy_risk = match record.privacy_risk.as_deref() {
+            Some(raw) => storage_string_as(raw, "derived_privacy_risk")?,
+            None => *submission_privacy_risk,
+        };
+        Ok(TraceCommonsDerivedRecord {
+            tenant_storage_ref: tenant_storage_ref(tenant_id),
+            tenant_id: tenant_id.clone(),
+            submission_id: record.submission_id,
+            trace_id: record.trace_id,
+            status,
+            privacy_risk,
+            task_success: record.task_success.unwrap_or_else(|| "unknown".to_string()),
+            canonical_summary: record.canonical_summary.unwrap_or_default(),
+            canonical_summary_hash: record.canonical_summary_hash.unwrap_or_default(),
+            summary_model: record.summary_model,
+            event_count: record
+                .event_count
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or_default(),
+            tool_sequence: record.tool_sequence,
+            tool_categories: record.tool_categories,
+            coverage_tags: record.coverage_tags,
+            duplicate_score: record.duplicate_score.unwrap_or_default(),
+            novelty_score: record.novelty_score.unwrap_or_default(),
+            created_at: record.created_at,
         })
     })())
 }
@@ -1700,12 +1809,7 @@ fn store_envelope(
     status: TraceCorpusStatus,
     envelope: &TraceContributionEnvelope,
 ) -> anyhow::Result<StoredTraceEnvelope> {
-    let tenant_key = tenant_storage_key(tenant_id);
-    let object_key = format!(
-        "tenants/{tenant_key}/objects/{}/{}.json",
-        status.as_str(),
-        envelope.submission_id
-    );
+    let object_key = trace_envelope_object_key(tenant_id, status, envelope.submission_id);
     let path = state.root.join(&object_key);
     write_json_file(&path, envelope, "trace contribution envelope")?;
     let artifact_receipt = if let Some(store) = state.artifact_store.as_ref() {
@@ -1722,6 +1826,19 @@ fn store_envelope(
         object_key,
         artifact_receipt,
     })
+}
+
+fn trace_envelope_object_key(
+    tenant_id: &str,
+    status: TraceCorpusStatus,
+    submission_id: Uuid,
+) -> String {
+    let tenant_key = tenant_storage_key(tenant_id);
+    format!(
+        "tenants/{tenant_key}/objects/{}/{}.json",
+        status.as_str(),
+        submission_id
+    )
 }
 
 async fn mirror_submission_to_db(
@@ -3843,18 +3960,25 @@ mod tests {
     use ironclaw::trace_corpus_storage::TraceCorpusStore;
 
     fn test_state(root: PathBuf) -> Arc<AppState> {
-        test_state_with_options(root, None, None, false)
+        test_state_with_options(root, None, None, false, false)
     }
 
     fn test_state_with_db(root: PathBuf, db_mirror: Option<Arc<dyn Database>>) -> Arc<AppState> {
-        test_state_with_options(root, db_mirror, None, false)
+        test_state_with_options(root, db_mirror, None, false, false)
     }
 
     fn test_state_with_db_contributor_reads(
         root: PathBuf,
         db_mirror: Option<Arc<dyn Database>>,
     ) -> Arc<AppState> {
-        test_state_with_options(root, db_mirror, None, true)
+        test_state_with_options(root, db_mirror, None, true, false)
+    }
+
+    fn test_state_with_db_reviewer_reads(
+        root: PathBuf,
+        db_mirror: Option<Arc<dyn Database>>,
+    ) -> Arc<AppState> {
+        test_state_with_options(root, db_mirror, None, false, true)
     }
 
     fn test_state_with_options(
@@ -3862,6 +3986,7 @@ mod tests {
         db_mirror: Option<Arc<dyn Database>>,
         artifact_store: Option<Arc<LocalEncryptedTraceArtifactStore>>,
         db_contributor_reads: bool,
+        db_reviewer_reads: bool,
     ) -> Arc<AppState> {
         let mut tokens = BTreeMap::new();
         insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Contributor);
@@ -3884,6 +4009,7 @@ mod tests {
             tokens: Arc::new(tokens),
             db_mirror,
             db_contributor_reads,
+            db_reviewer_reads,
             artifact_store,
         })
     }
@@ -3979,6 +4105,7 @@ mod tests {
             temp.path().to_path_buf(),
             None,
             Some(artifact_store.clone()),
+            false,
             false,
         );
         let mut envelope = sample_envelope().await;
@@ -5015,6 +5142,212 @@ mod tests {
         .await
         .expect("backfill can be rerun");
         assert_eq!(second_response.db_mirror_backfilled, 0);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn reviewer_metadata_reads_can_use_db_mirror_without_file_records() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-mirror-reviewer-reads.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+
+        let accepted_id = Uuid::new_v4();
+        let accepted_trace_id = Uuid::new_v4();
+        let mut accepted_redactions = BTreeMap::new();
+        accepted_redactions.insert("secret".to_string(), 1);
+        db.upsert_trace_submission(StorageTraceSubmissionWrite {
+            tenant_id: "tenant-a".to_string(),
+            submission_id: accepted_id,
+            trace_id: accepted_trace_id,
+            auth_principal_ref: principal_storage_ref("token-a"),
+            contributor_pseudonym: Some("contributor-a".to_string()),
+            submitted_tenant_scope_ref: Some("tenant-scope-a".to_string()),
+            schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION.to_string(),
+            consent_policy_version: "2026-04-24".to_string(),
+            consent_scopes: vec!["ranking_training".to_string()],
+            allowed_uses: vec!["ranking_training".to_string()],
+            retention_policy_id: "private_corpus_revocable".to_string(),
+            status: StorageTraceCorpusStatus::Accepted,
+            privacy_risk: "low".to_string(),
+            redaction_pipeline_version: "server-rescrub-v1".to_string(),
+            redaction_counts: accepted_redactions,
+            redaction_hash: "sha256:accepted-redaction".to_string(),
+            canonical_summary_hash: Some("sha256:accepted-summary".to_string()),
+            submission_score: Some(0.92),
+            credit_points_pending: Some(1.4),
+            credit_points_final: None,
+            expires_at: None,
+        })
+        .await
+        .expect("accepted submission writes");
+        db.append_trace_derived_record(StorageTraceDerivedRecordWrite {
+            derived_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id: accepted_id,
+            trace_id: accepted_trace_id,
+            status: StorageTraceDerivedStatus::Current,
+            worker_kind: StorageTraceWorkerKind::DuplicatePrecheck,
+            worker_version: "trace_commons_ingest_v1".to_string(),
+            input_object_ref: None,
+            input_hash: "sha256:accepted-input".to_string(),
+            output_object_ref: None,
+            canonical_summary: Some("Accepted DB-only trace summary.".to_string()),
+            canonical_summary_hash: Some("sha256:accepted-summary".to_string()),
+            summary_model: "db-summary-v1".to_string(),
+            task_success: Some("success".to_string()),
+            privacy_risk: Some("low".to_string()),
+            event_count: Some(4),
+            tool_sequence: vec!["shell".to_string()],
+            tool_categories: vec!["filesystem".to_string()],
+            coverage_tags: vec!["tool:shell".to_string(), "privacy:low".to_string()],
+            duplicate_score: Some(0.2),
+            novelty_score: Some(0.8),
+            cluster_id: Some("cluster:db-only".to_string()),
+        })
+        .await
+        .expect("accepted derived record writes");
+
+        let quarantined_id = Uuid::new_v4();
+        let quarantined_trace_id = Uuid::new_v4();
+        let mut quarantined_redactions = BTreeMap::new();
+        quarantined_redactions.insert("private_email".to_string(), 2);
+        db.upsert_trace_submission(StorageTraceSubmissionWrite {
+            tenant_id: "tenant-a".to_string(),
+            submission_id: quarantined_id,
+            trace_id: quarantined_trace_id,
+            auth_principal_ref: principal_storage_ref("token-a"),
+            contributor_pseudonym: Some("contributor-a".to_string()),
+            submitted_tenant_scope_ref: Some("tenant-scope-a".to_string()),
+            schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION.to_string(),
+            consent_policy_version: "2026-04-24".to_string(),
+            consent_scopes: vec!["debugging_evaluation".to_string()],
+            allowed_uses: vec!["debugging_evaluation".to_string()],
+            retention_policy_id: "private_corpus_revocable".to_string(),
+            status: StorageTraceCorpusStatus::Quarantined,
+            privacy_risk: "medium".to_string(),
+            redaction_pipeline_version: "server-rescrub-v1".to_string(),
+            redaction_counts: quarantined_redactions,
+            redaction_hash: "sha256:quarantined-redaction".to_string(),
+            canonical_summary_hash: Some("sha256:quarantined-summary".to_string()),
+            submission_score: Some(0.35),
+            credit_points_pending: Some(0.0),
+            credit_points_final: None,
+            expires_at: None,
+        })
+        .await
+        .expect("quarantined submission writes");
+        db.append_trace_derived_record(StorageTraceDerivedRecordWrite {
+            derived_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id: quarantined_id,
+            trace_id: quarantined_trace_id,
+            status: StorageTraceDerivedStatus::Current,
+            worker_kind: StorageTraceWorkerKind::DuplicatePrecheck,
+            worker_version: "trace_commons_ingest_v1".to_string(),
+            input_object_ref: None,
+            input_hash: "sha256:quarantined-input".to_string(),
+            output_object_ref: None,
+            canonical_summary: Some("Quarantined DB-only trace summary.".to_string()),
+            canonical_summary_hash: Some("sha256:quarantined-summary".to_string()),
+            summary_model: "db-summary-v1".to_string(),
+            task_success: Some("partial".to_string()),
+            privacy_risk: Some("medium".to_string()),
+            event_count: Some(2),
+            tool_sequence: vec!["calendar_create".to_string()],
+            tool_categories: vec!["calendar".to_string()],
+            coverage_tags: vec![
+                "tool:calendar_create".to_string(),
+                "privacy:medium".to_string(),
+            ],
+            duplicate_score: Some(0.4),
+            novelty_score: Some(0.6),
+            cluster_id: Some("cluster:db-review".to_string()),
+        })
+        .await
+        .expect("quarantined derived record writes");
+
+        let state = test_state_with_db_reviewer_reads(
+            temp.path().to_path_buf(),
+            Some(db as Arc<dyn Database>),
+        );
+
+        let Json(analytics) =
+            analytics_handler(State(state.clone()), auth_headers("review-token-a"))
+                .await
+                .expect("analytics can read DB mirror");
+        assert_eq!(analytics.submissions_total, 2);
+        assert_eq!(analytics.by_tool.get("shell"), Some(&1));
+        assert_eq!(
+            analytics.by_tool_category.get("calendar"),
+            Some(&1),
+            "derived tool categories should come from DB"
+        );
+
+        let Json(list) = list_traces_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(TraceListQuery {
+                status: Some(TraceCorpusStatus::Accepted),
+                limit: Some(10),
+                coverage_tag: Some("tool:shell".to_string()),
+                tool: Some("shell".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: Some("ranking-training".to_string()),
+            }),
+        )
+        .await
+        .expect("trace list can read DB mirror");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].submission_id, accepted_id);
+        assert_eq!(list[0].redaction_counts.get("secret"), Some(&1));
+
+        let Json(queue) =
+            review_quarantine_handler(State(state.clone()), auth_headers("review-token-a"))
+                .await
+                .expect("quarantine queue can read DB mirror");
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].submission_id, quarantined_id);
+        assert_eq!(queue[0].redaction_counts.get("private_email"), Some(&2));
+
+        let Json(benchmark) = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("db_metadata_benchmark".to_string()),
+                consent_scope: None,
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("benchmark conversion can read DB metadata");
+        assert_eq!(benchmark.item_count, 1);
+        assert_eq!(benchmark.candidates[0].summary_model, "db-summary-v1");
+
+        let Json(candidates) = ranker_training_candidates_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect("ranker candidates can read DB metadata");
+        assert_eq!(candidates.item_count, 1);
+        assert_eq!(candidates.candidates[0].submission_id, accepted_id);
+        assert_eq!(candidates.candidates[0].tool_sequence, vec!["shell"]);
     }
 
     #[tokio::test]

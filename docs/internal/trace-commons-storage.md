@@ -49,7 +49,7 @@ Do not put bearer tokens, raw local paths, raw sidecar spans, unredacted trace t
 
 ## Concrete DB Migration Slice
 
-This first production-storage slice has now been implemented as a dark-launch bridge. It creates the relational control plane only: envelope payloads belong in encrypted artifact storage, and vector payloads can stay in a vector store or backend-specific index. `src/bin/trace_commons_ingest.rs` can mirror metadata into the DB when `TRACE_COMMONS_DB_DUAL_WRITE=true`, including submission redaction counts and derived summary/tool/coverage metadata. File-backed APIs remain the default source of pilot responses. `TRACE_COMMONS_DB_CONTRIBUTOR_READS=true` can now switch contributor credit, credit-event, and submission-status reads to the DB mirror after dual-write or backfill is in place.
+This first production-storage slice has now been implemented as a dark-launch bridge. It creates the relational control plane only: envelope payloads belong in encrypted artifact storage, and vector payloads can stay in a vector store or backend-specific index. `src/bin/trace_commons_ingest.rs` can mirror metadata into the DB when `TRACE_COMMONS_DB_DUAL_WRITE=true`, including submission redaction counts and derived summary/tool/coverage metadata. File-backed APIs remain the default source of pilot responses. `TRACE_COMMONS_DB_CONTRIBUTOR_READS=true` can switch contributor credit, credit-event, and submission-status reads to the DB mirror after dual-write or backfill is in place. `TRACE_COMMONS_DB_REVIEWER_READS=true` can switch reviewer/admin metadata reads for analytics, trace listing, quarantine queue, active-learning queue, benchmark candidate conversion, and ranker exports to the DB mirror.
 
 ### Safe Migration Naming
 
@@ -1059,7 +1059,7 @@ Implementation checklist for the first real storage migration:
 - Keep DB writes behind a dark-launch or dual-write flag until parity checks pass. Completed with `TRACE_COMMONS_DB_DUAL_WRITE=true`.
 - Keep DB reads behind surface-specific rollout flags until parity checks pass. Initial contributor credit/status reads are gated by `TRACE_COMMONS_DB_CONTRIBUTOR_READS=true`.
 - Keep object payloads in encrypted artifact/object storage; write only object refs and hashes into DB. Completed for the local encrypted artifact sidecar; service-owned object storage remains future work.
-- Propagate revocation to DB metadata before DB-first reads. Completed for submission status, tombstones, object-ref invalidation, derived-record invalidation, and an audit event for invalidation counts.
+- Propagate revocation to DB metadata before DB-first reads. Completed for submission status, tombstones, object-ref invalidation, derived-record invalidation, contributor credit/status reads, reviewer metadata reads, and an audit event for invalidation counts.
 - Add a backfill tool that reads the file-backed tenant directories, validates envelopes, recomputes redaction and summary hashes, writes metadata, and emits audit import events. Initial maintenance-triggered DB mirror backfill exists for already-derived file-backed submissions; full recompute/import manifests remain future work.
 - Add a reconciliation command that compares file-backed responses with DB-backed metadata for status, review queues, credit, analytics, replay export, object refs, and tombstones.
 
