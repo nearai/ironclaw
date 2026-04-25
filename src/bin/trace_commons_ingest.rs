@@ -62,6 +62,10 @@ use uuid::Uuid;
 
 const DEFAULT_BIND: &str = "127.0.0.1:3907";
 const MAX_INGEST_BODY_BYTES: usize = 2 * 1024 * 1024;
+const TRACE_COMMONS_FILE_OBJECT_STORE: &str = "trace_commons_file_store";
+const TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE: &str = "trace_commons_encrypted_artifact_store";
+const TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE: &str =
+    "trace_commons_service_local_encrypted";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -93,7 +97,77 @@ struct AppState {
     db_replay_export_require_object_refs: bool,
     db_audit_reads: bool,
     require_export_guardrails: bool,
-    artifact_store: Option<Arc<LocalEncryptedTraceArtifactStore>>,
+    artifact_store: Option<ConfiguredTraceArtifactStore>,
+}
+
+#[derive(Clone)]
+struct ConfiguredTraceArtifactStore {
+    object_store_name: String,
+    store: Arc<LocalEncryptedTraceArtifactStore>,
+}
+
+impl ConfiguredTraceArtifactStore {
+    fn new(
+        object_store_name: impl Into<String>,
+        store: Arc<LocalEncryptedTraceArtifactStore>,
+    ) -> Self {
+        Self {
+            object_store_name: object_store_name.into(),
+            store,
+        }
+    }
+
+    #[cfg(test)]
+    fn legacy(store: Arc<LocalEncryptedTraceArtifactStore>) -> Self {
+        Self::new(TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE, store)
+    }
+
+    fn object_store_name(&self) -> &str {
+        &self.object_store_name
+    }
+
+    fn put_json<T: Serialize>(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        value: &T,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        self.store
+            .put_json(tenant_storage_ref, artifact_kind, object_id, value)
+    }
+
+    fn get_json<T: DeserializeOwned>(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<T> {
+        self.store.get_json(expected_tenant_storage_ref, receipt)
+    }
+
+    fn get_json_by_object_key<T: DeserializeOwned>(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<T> {
+        self.store.get_json_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
+    }
+
+    fn delete_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        self.store
+            .delete_artifact(expected_tenant_storage_ref, receipt)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -205,21 +279,55 @@ impl AppState {
 
 fn trace_artifact_store_from_env(
     default_root: &Path,
-) -> anyhow::Result<Option<Arc<LocalEncryptedTraceArtifactStore>>> {
-    let key = std::env::var("TRACE_COMMONS_ARTIFACT_KEY_HEX").ok();
-    if key.is_none() && !env_truthy("TRACE_COMMONS_ENCRYPTED_ARTIFACTS") {
+) -> anyhow::Result<Option<ConfiguredTraceArtifactStore>> {
+    let object_store_mode = std::env::var("TRACE_COMMONS_OBJECT_STORE")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty());
+    if matches!(object_store_mode.as_deref(), Some("file" | "none")) {
         return Ok(None);
     }
-    let key =
-        key.context("TRACE_COMMONS_ENCRYPTED_ARTIFACTS requires TRACE_COMMONS_ARTIFACT_KEY_HEX")?;
-    let root = std::env::var("TRACE_COMMONS_ARTIFACT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| default_root.join("encrypted_artifacts"));
+    let service_local_mode = matches!(
+        object_store_mode.as_deref(),
+        Some("local_service" | "local_service_encrypted" | "service_local_encrypted")
+    );
+    if let Some(mode) = object_store_mode.as_deref() {
+        anyhow::ensure!(
+            service_local_mode || matches!(mode, "local_encrypted" | "encrypted_artifact"),
+            "unsupported TRACE_COMMONS_OBJECT_STORE value: {mode}"
+        );
+    }
+    let key = std::env::var("TRACE_COMMONS_ARTIFACT_KEY_HEX").ok();
+    if key.is_none()
+        && !env_truthy("TRACE_COMMONS_ENCRYPTED_ARTIFACTS")
+        && object_store_mode.is_none()
+    {
+        return Ok(None);
+    }
+    let key = key.context(
+        "encrypted Trace Commons object storage requires TRACE_COMMONS_ARTIFACT_KEY_HEX",
+    )?;
+    let root = if service_local_mode {
+        std::env::var("TRACE_COMMONS_SERVICE_OBJECT_STORE_DIR")
+            .or_else(|_| std::env::var("TRACE_COMMONS_ARTIFACT_DIR"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| default_root.join("service_object_store"))
+    } else {
+        std::env::var("TRACE_COMMONS_ARTIFACT_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| default_root.join("encrypted_artifacts"))
+    };
+    let object_store_name = if service_local_mode {
+        TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+    } else {
+        TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE
+    };
     let crypto = SecretsCrypto::new(SecretString::from(key))
         .context("failed to initialize Trace Commons artifact encryption")?;
-    Ok(Some(Arc::new(LocalEncryptedTraceArtifactStore::new(
-        root, crypto,
-    ))))
+    Ok(Some(ConfiguredTraceArtifactStore::new(
+        object_store_name,
+        Arc::new(LocalEncryptedTraceArtifactStore::new(root, crypto)),
+    )))
 }
 
 async fn trace_corpus_db_mirror_from_env() -> anyhow::Result<Option<Arc<dyn Database>>> {
@@ -2732,13 +2840,17 @@ async fn mirror_submission_to_db(
     let (object_store, object_key, content_sha256) =
         if let Some(receipt) = record.artifact_receipt.as_ref() {
             (
-                "trace_commons_encrypted_artifact_store".to_string(),
+                state
+                    .artifact_store
+                    .as_ref()
+                    .map(|store| store.object_store_name().to_string())
+                    .unwrap_or_else(|| TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE.to_string()),
                 receipt.object_key.clone(),
                 format!("sha256:{}", receipt.ciphertext_sha256),
             )
         } else {
             (
-                "trace_commons_file_store".to_string(),
+                TRACE_COMMONS_FILE_OBJECT_STORE.to_string(),
                 record.object_key.clone(),
                 plaintext_sha256,
             )
@@ -3753,7 +3865,7 @@ fn read_envelope_from_object_ref(
     );
 
     match object_ref.object_store.as_str() {
-        "trace_commons_encrypted_artifact_store" => {
+        object_store if is_encrypted_trace_object_store(object_store) => {
             let store = state
                 .artifact_store
                 .as_ref()
@@ -3765,9 +3877,19 @@ fn read_envelope_from_object_ref(
                 &object_ref.content_sha256,
             )
         }
-        "trace_commons_file_store" => read_file_store_envelope_from_object_ref(state, object_ref),
+        TRACE_COMMONS_FILE_OBJECT_STORE => {
+            read_file_store_envelope_from_object_ref(state, object_ref)
+        }
         other => anyhow::bail!("unsupported trace object store: {other}"),
     }
+}
+
+fn is_encrypted_trace_object_store(object_store: &str) -> bool {
+    matches!(
+        object_store,
+        TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE
+            | TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+    )
 }
 
 fn read_file_store_envelope_from_object_ref(
@@ -7299,6 +7421,34 @@ mod tests {
         require_tenant_submission_policy: bool,
         require_export_guardrails: bool,
     ) -> Arc<AppState> {
+        test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            root,
+            db_mirror,
+            artifact_store.map(ConfiguredTraceArtifactStore::legacy),
+            db_contributor_reads,
+            db_reviewer_reads,
+            db_replay_export_reads,
+            db_replay_export_require_object_refs,
+            db_audit_reads,
+            tenant_policies,
+            require_tenant_submission_policy,
+            require_export_guardrails,
+        )
+    }
+
+    fn test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        root: PathBuf,
+        db_mirror: Option<Arc<dyn Database>>,
+        artifact_store: Option<ConfiguredTraceArtifactStore>,
+        db_contributor_reads: bool,
+        db_reviewer_reads: bool,
+        db_replay_export_reads: bool,
+        db_replay_export_require_object_refs: bool,
+        db_audit_reads: bool,
+        tenant_policies: BTreeMap<String, TenantSubmissionPolicy>,
+        require_tenant_submission_policy: bool,
+        require_export_guardrails: bool,
+    ) -> Arc<AppState> {
         let mut tokens = BTreeMap::new();
         insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Contributor);
         insert_token(&mut tokens, "tenant-a", "token-a-2", TokenRole::Contributor);
@@ -10335,6 +10485,107 @@ mod tests {
         assert_eq!(export.item_count, 1);
         assert_eq!(export.items[0].submission_id, submission_id);
         assert_eq!(export.items[0].required_tools, vec!["shell"]);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn replay_export_reads_service_local_object_store_ref_without_file_objects() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_root = temp.path().join("service-object-store");
+        let artifact_store = test_artifact_store(&artifact_root);
+        let configured_store = ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            artifact_store,
+        );
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp
+            .path()
+            .join("trace-mirror-replay-export-service-object-store.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let submit_state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+            Some(configured_store.clone()),
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.replay.replayable = true;
+        envelope.replay.required_tools.push("shell".to_string());
+        let submission_id = envelope.submission_id;
+
+        let Json(receipt) =
+            submit_trace_handler(State(submit_state), auth_headers("token-a"), Json(envelope))
+                .await
+                .expect("submission dual-writes to DB mirror and service object store");
+        assert_eq!(receipt.status, "accepted");
+        let object_ref = db
+            .get_latest_active_trace_object_ref(
+                "tenant-a",
+                submission_id,
+                StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            )
+            .await
+            .expect("object ref reads")
+            .expect("submitted envelope object ref exists");
+        assert_eq!(
+            object_ref.object_store,
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+        );
+        assert!(object_ref.content_sha256.starts_with("sha256:"));
+
+        let tenant_dir = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"));
+        std::fs::remove_dir_all(tenant_dir.join("metadata")).expect("remove file metadata");
+        std::fs::remove_dir_all(tenant_dir.join("derived")).expect("remove derived metadata");
+        std::fs::remove_dir_all(tenant_dir.join("objects")).expect("remove plaintext objects");
+
+        let replay_state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            Some(db),
+            Some(configured_store),
+            false,
+            false,
+            true,
+            true,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+        let Json(export) = dataset_replay_handler(
+            State(replay_state),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("db_service_object_store_replay_export".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("replay export reads service object store through DB object ref");
+        assert_eq!(export.item_count, 1);
+        assert_eq!(export.items[0].submission_id, submission_id);
+        assert_eq!(export.items[0].required_tools, vec!["shell"]);
+        assert!(export.items[0].object_ref_id.is_some());
     }
 
     #[cfg(feature = "libsql")]
