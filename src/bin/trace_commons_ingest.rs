@@ -977,6 +977,15 @@ async fn dataset_replay_handler(
         .take(limit)
     {
         let envelope = read_envelope_by_record(state.as_ref(), &record).map_err(internal_error)?;
+        append_trace_content_read_audit(
+            state.as_ref(),
+            &tenant,
+            record.submission_id,
+            "replay_dataset_export",
+            Some(&purpose),
+        )
+        .await
+        .map_err(internal_error)?;
         items.push(TraceReplayDatasetItem::from_record(
             &record,
             derived_by_submission.get(&record.submission_id),
@@ -1846,7 +1855,16 @@ fn trace_commons_record_from_storage_submission(
 fn trace_commons_audit_event_from_storage(
     event: StorageTraceAuditEventRecord,
 ) -> anyhow::Result<TraceCommonsAuditEvent> {
-    let kind = storage_audit_event_kind(event.action, &event.metadata);
+    let mut kind = storage_audit_event_kind(event.action, &event.metadata);
+    if event.action == StorageTraceAuditAction::Read
+        && event.submission_id.is_some()
+        && event
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("surface=replay_dataset_export"))
+    {
+        kind = "trace_content_read".to_string();
+    }
     let (status, reason, export_count) = match &event.metadata {
         StorageTraceAuditSafeMetadata::Submission {
             status,
@@ -2985,6 +3003,23 @@ async fn append_audit_event_with_db_mirror(
         );
     }
     Ok(())
+}
+
+async fn append_trace_content_read_audit(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_id: Uuid,
+    surface: &str,
+    purpose: Option<&str>,
+) -> anyhow::Result<()> {
+    append_audit_event_with_db_mirror(
+        state,
+        tenant,
+        TraceCommonsAuditEvent::trace_content_read(tenant, submission_id, surface, purpose),
+        StorageTraceAuditAction::Read,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await
 }
 
 async fn mirror_audit_event_to_db(
@@ -4699,6 +4734,33 @@ impl TraceCommonsAuditEvent {
         }
     }
 
+    fn trace_content_read(
+        auth: &TenantAuth,
+        submission_id: Uuid,
+        surface: &str,
+        purpose: Option<&str>,
+    ) -> Self {
+        let mut reason = format!("surface={surface}");
+        if let Some(purpose) = purpose.map(str::trim).filter(|purpose| !purpose.is_empty()) {
+            reason.push_str(";purpose=");
+            reason.push_str(purpose);
+        }
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id,
+            kind: "trace_content_read".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: Some(reason),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+        }
+    }
+
     fn dataset_export(
         auth: &TenantAuth,
         export_id: Uuid,
@@ -5623,6 +5685,14 @@ mod tests {
                 && event.kind == "dataset_export"
                 && event.decision_inputs_hash
                     == Some(export.manifest.source_submission_ids_hash.clone())
+        }));
+        assert!(audit_events.iter().any(|event| {
+            event.submission_id == submission_id
+                && event.kind == "trace_content_read"
+                && event.reason.as_deref().is_some_and(|reason| {
+                    reason.contains("surface=replay_dataset_export")
+                        && reason.contains("purpose=trace_commons_replay_dataset")
+                })
         }));
 
         let contributor_export_error = dataset_replay_handler(
@@ -7006,6 +7076,14 @@ mod tests {
                 && event.kind == "dataset_export"
                 && event.decision_inputs_hash
                     == Some(export.manifest.source_submission_ids_hash.clone())
+        }));
+        assert!(events.iter().any(|event| {
+            event.submission_id == submission_id
+                && event.kind == "trace_content_read"
+                && event.reason.as_deref().is_some_and(|reason| {
+                    reason.contains("surface=replay_dataset_export")
+                        && reason.contains("purpose=db_audit_export")
+                })
         }));
     }
 
