@@ -1180,6 +1180,17 @@ CREATE INDEX IF NOT EXISTS idx_trace_object_refs_lifecycle
     ON trace_object_refs (tenant_id, submission_id, invalidated_at, deleted_at);
 "#,
     ),
+    (
+        27,
+        "trace_corpus_rich_metadata",
+        r#"
+ALTER TABLE trace_submissions ADD COLUMN redaction_counts TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE trace_derived_records ADD COLUMN summary_model TEXT NOT NULL DEFAULT 'redacted-summary-hash-precheck-v1';
+ALTER TABLE trace_derived_records ADD COLUMN tool_sequence TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE trace_derived_records ADD COLUMN tool_categories TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE trace_derived_records ADD COLUMN coverage_tags TEXT NOT NULL DEFAULT '[]';
+"#,
+    ),
 ];
 
 /// Migrations whose ADD COLUMN should be skipped when the column already
@@ -1193,6 +1204,11 @@ const IDEMPOTENT_ADD_COLUMN_MIGRATIONS: &[(i64, &str, &str)] = &[
     (26, "trace_object_refs", "invalidated_at"),
     (26, "trace_object_refs", "deleted_at"),
     (26, "trace_object_refs", "updated_at"),
+    (27, "trace_submissions", "redaction_counts"),
+    (27, "trace_derived_records", "summary_model"),
+    (27, "trace_derived_records", "tool_sequence"),
+    (27, "trace_derived_records", "tool_categories"),
+    (27, "trace_derived_records", "coverage_tags"),
 ];
 
 /// Check whether `table` already contains `column` via `pragma_table_info`.

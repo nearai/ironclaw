@@ -30,6 +30,7 @@ fn submission_write_keeps_auth_tenant_separate_from_envelope_scope() {
         status: TraceCorpusStatus::Accepted,
         privacy_risk: "low".to_string(),
         redaction_pipeline_version: "server-rescrub-v1".to_string(),
+        redaction_counts: Default::default(),
         redaction_hash: "redaction-hash".to_string(),
         canonical_summary_hash: Some("summary-hash".to_string()),
         submission_score: Some(0.75),

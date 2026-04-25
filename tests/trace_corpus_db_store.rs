@@ -1,5 +1,7 @@
 #[cfg(feature = "libsql")]
 mod libsql_trace_corpus_store {
+    use std::collections::BTreeMap;
+
     use chrono::Utc;
     use ironclaw::db::{Database, libsql::LibSqlBackend};
     use ironclaw::trace_corpus_storage::{
@@ -12,6 +14,9 @@ mod libsql_trace_corpus_store {
     use uuid::Uuid;
 
     fn sample_submission(tenant_id: &str, submission_id: Uuid) -> TraceSubmissionWrite {
+        let mut redaction_counts = BTreeMap::new();
+        redaction_counts.insert("secret".to_string(), 2);
+        redaction_counts.insert("private_email".to_string(), 1);
         TraceSubmissionWrite {
             tenant_id: tenant_id.to_string(),
             submission_id,
@@ -27,6 +32,7 @@ mod libsql_trace_corpus_store {
             status: TraceCorpusStatus::Accepted,
             privacy_risk: "low".to_string(),
             redaction_pipeline_version: "deterministic-v1".to_string(),
+            redaction_counts,
             redaction_hash: "sha256:redaction".to_string(),
             canonical_summary_hash: Some("sha256:canonical".to_string()),
             submission_score: Some(0.82),
@@ -66,6 +72,8 @@ mod libsql_trace_corpus_store {
         assert_eq!(inserted.retention_policy_id, "standard");
         assert_eq!(inserted.privacy_risk, "low");
         assert_eq!(inserted.redaction_pipeline_version, "deterministic-v1");
+        assert_eq!(inserted.redaction_counts.get("secret"), Some(&2));
+        assert_eq!(inserted.redaction_counts.get("private_email"), Some(&1));
         assert!(
             inserted
                 .submission_score
@@ -128,9 +136,16 @@ mod libsql_trace_corpus_store {
                 output_object_ref: None,
                 canonical_summary: Some("Converted into a benchmark candidate.".to_string()),
                 canonical_summary_hash: Some("sha256:canonical".to_string()),
+                summary_model: "summary-model-v1".to_string(),
                 task_success: Some("success".to_string()),
                 privacy_risk: Some("low".to_string()),
                 event_count: Some(3),
+                tool_sequence: vec!["calendar_create".to_string(), "memory_search".to_string()],
+                tool_categories: vec!["calendar".to_string(), "memory".to_string()],
+                coverage_tags: vec![
+                    "tool:calendar_create".to_string(),
+                    "privacy:low".to_string(),
+                ],
                 duplicate_score: Some(0.1),
                 novelty_score: Some(0.7),
                 cluster_id: Some("cluster:test".to_string()),
@@ -153,6 +168,19 @@ mod libsql_trace_corpus_store {
         assert_eq!(
             derived_records[0].canonical_summary.as_deref(),
             Some("Converted into a benchmark candidate.")
+        );
+        assert_eq!(derived_records[0].summary_model, "summary-model-v1");
+        assert_eq!(
+            derived_records[0].tool_sequence,
+            vec!["calendar_create", "memory_search"]
+        );
+        assert_eq!(
+            derived_records[0].tool_categories,
+            vec!["calendar", "memory"]
+        );
+        assert_eq!(
+            derived_records[0].coverage_tags,
+            vec!["tool:calendar_create", "privacy:low"]
         );
         assert_eq!(derived_records[0].duplicate_score, Some(0.1));
         assert_eq!(derived_records[0].novelty_score, Some(0.7));

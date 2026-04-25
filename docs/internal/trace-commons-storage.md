@@ -8,7 +8,7 @@ The MVP ingestion service still serves tenant-scoped JSON files under `TRACE_COM
 
 This branch now contains the first production-storage bridge:
 
-- `migrations/V25__trace_corpus_storage.sql`, `migrations/V26__trace_object_ref_lifecycle.sql`, and matching libSQL incremental migrations.
+- `migrations/V25__trace_corpus_storage.sql`, `migrations/V26__trace_object_ref_lifecycle.sql`, `migrations/V27__trace_corpus_rich_metadata.sql`, and matching libSQL incremental migrations.
 - `src/trace_corpus_storage.rs` and `TraceCorpusStore` implementations for PostgreSQL and libSQL.
 - Optional ingest-service DB dual-write behind `TRACE_COMMONS_DB_DUAL_WRITE=true`.
 - Optional encrypted local artifact storage behind `TRACE_COMMONS_ARTIFACT_KEY_HEX`.
@@ -49,7 +49,7 @@ Do not put bearer tokens, raw local paths, raw sidecar spans, unredacted trace t
 
 ## Concrete DB Migration Slice
 
-This first production-storage slice has now been implemented as a dark-launch bridge. It creates the relational control plane only: envelope payloads belong in encrypted artifact storage, and vector payloads can stay in a vector store or backend-specific index. `src/bin/trace_commons_ingest.rs` can mirror metadata into the DB when `TRACE_COMMONS_DB_DUAL_WRITE=true`, while file-backed APIs remain the default source of pilot responses. `TRACE_COMMONS_DB_CONTRIBUTOR_READS=true` can now switch contributor credit, credit-event, and submission-status reads to the DB mirror after dual-write or backfill is in place.
+This first production-storage slice has now been implemented as a dark-launch bridge. It creates the relational control plane only: envelope payloads belong in encrypted artifact storage, and vector payloads can stay in a vector store or backend-specific index. `src/bin/trace_commons_ingest.rs` can mirror metadata into the DB when `TRACE_COMMONS_DB_DUAL_WRITE=true`, including submission redaction counts and derived summary/tool/coverage metadata. File-backed APIs remain the default source of pilot responses. `TRACE_COMMONS_DB_CONTRIBUTOR_READS=true` can now switch contributor credit, credit-event, and submission-status reads to the DB mirror after dual-write or backfill is in place.
 
 ### Safe Migration Naming
 
@@ -776,6 +776,7 @@ Access grants authorize service operations. Envelope contributor fields remain a
 | `status` | `received`, `accepted`, `quarantined`, `rejected`, `revoked`, `expired`, `purged`. |
 | `privacy_risk` | Server-computed residual risk. |
 | `redaction_pipeline_version` | Server accepted/re-scrubbed pipeline. |
+| `redaction_counts` | Safe aggregate redaction label counts; never raw Privacy Filter spans. |
 | `redaction_hash` | Hash over redacted content projection. |
 | `canonical_summary_hash` | Duplicate precheck key. |
 | `submission_score` | Current scoring result. |
@@ -822,6 +823,7 @@ Object keys must not reveal raw user ids, local paths, prompt content, or secret
 | `output_object_ref_id` | Optional large output, resolved only through `(tenant_id, submission_id, object_ref_id)`. |
 | `canonical_summary` | Redacted short summary when safe for DB. |
 | `canonical_summary_hash` | Hash for duplicate checks. |
+| `summary_model` | Producing summarizer/model or deterministic summary policy id. |
 | `task_success`, `privacy_risk`, `event_count` | Queryable attributes. |
 | `tool_sequence`, `tool_categories`, `coverage_tags` | Queryable arrays or join tables. |
 | `duplicate_score`, `novelty_score`, `cluster_id` | Utility metadata. |

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use uuid::Uuid;
 
@@ -19,9 +21,9 @@ const TRACE_SUBMISSION_COLUMNS: &str = "\
     contributor_pseudonym, submitted_tenant_scope_ref, schema_version, \
     consent_policy_version, consent_scopes, allowed_uses, retention_policy_id, \
     privacy_risk, redaction_pipeline_version, redaction_hash, \
-    canonical_summary_hash, submission_score, credit_points_pending, \
-    credit_points_final, received_at, updated_at, reviewed_at, revoked_at, \
-    expires_at, purged_at";
+    redaction_counts, canonical_summary_hash, submission_score, \
+    credit_points_pending, credit_points_final, received_at, updated_at, \
+    reviewed_at, revoked_at, expires_at, purged_at";
 
 fn opt_f32(value: Option<f32>) -> libsql::Value {
     match value {
@@ -88,6 +90,12 @@ fn json_array_strings(raw: &str, column: &str) -> Result<Vec<String>, DatabaseEr
         .collect()
 }
 
+fn json_u32_map(raw: &str, column: &str) -> Result<BTreeMap<String, u32>, DatabaseError> {
+    serde_json::from_str(raw).map_err(|e| {
+        DatabaseError::Serialization(format!("trace {column} column JSON decode failed: {e}"))
+    })
+}
+
 fn row_to_submission(row: &libsql::Row) -> Result<TraceSubmissionRecord, DatabaseError> {
     let status = enum_from_storage::<TraceCorpusStatus>(&get_text(row, 3), "TraceCorpusStatus")?;
     Ok(TraceSubmissionRecord {
@@ -106,16 +114,17 @@ fn row_to_submission(row: &libsql::Row) -> Result<TraceSubmissionRecord, Databas
         privacy_risk: get_text(row, 12),
         redaction_pipeline_version: get_text(row, 13),
         redaction_hash: get_text(row, 14),
-        canonical_summary_hash: get_opt_text(row, 15),
-        submission_score: get_opt_f32(row, 16),
-        credit_points_pending: get_opt_f32(row, 17),
-        credit_points_final: get_opt_f32(row, 18),
-        received_at: get_ts(row, 19),
-        updated_at: get_ts(row, 20),
-        reviewed_at: get_opt_ts(row, 21),
-        revoked_at: get_opt_ts(row, 22),
-        expires_at: get_opt_ts(row, 23),
-        purged_at: get_opt_ts(row, 24),
+        redaction_counts: json_u32_map(&get_text(row, 15), "redaction_counts")?,
+        canonical_summary_hash: get_opt_text(row, 16),
+        submission_score: get_opt_f32(row, 17),
+        credit_points_pending: get_opt_f32(row, 18),
+        credit_points_final: get_opt_f32(row, 19),
+        received_at: get_ts(row, 20),
+        updated_at: get_ts(row, 21),
+        reviewed_at: get_opt_ts(row, 22),
+        revoked_at: get_opt_ts(row, 23),
+        expires_at: get_opt_ts(row, 24),
+        purged_at: get_opt_ts(row, 25),
     })
 }
 
@@ -170,14 +179,18 @@ fn row_to_derived_record(row: &libsql::Row) -> Result<TraceDerivedRecord, Databa
         }),
         canonical_summary: get_opt_text(row, 10),
         canonical_summary_hash: get_opt_text(row, 11),
-        task_success: get_opt_text(row, 12),
-        privacy_risk: get_opt_text(row, 13),
-        event_count: get_opt_i32(row, 14),
-        duplicate_score: get_opt_f32(row, 15),
-        novelty_score: get_opt_f32(row, 16),
-        cluster_id: get_opt_text(row, 17),
-        created_at: get_ts(row, 18),
-        updated_at: get_ts(row, 19),
+        summary_model: get_text(row, 12),
+        task_success: get_opt_text(row, 13),
+        privacy_risk: get_opt_text(row, 14),
+        event_count: get_opt_i32(row, 15),
+        tool_sequence: json_array_strings(&get_text(row, 16), "tool_sequence")?,
+        tool_categories: json_array_strings(&get_text(row, 17), "tool_categories")?,
+        coverage_tags: json_array_strings(&get_text(row, 18), "coverage_tags")?,
+        duplicate_score: get_opt_f32(row, 19),
+        novelty_score: get_opt_f32(row, 20),
+        cluster_id: get_opt_text(row, 21),
+        created_at: get_ts(row, 22),
+        updated_at: get_ts(row, 23),
     })
 }
 
@@ -206,17 +219,18 @@ impl TraceCorpusStore for LibSqlBackend {
         let status = enum_to_storage(submission.status)?;
         let consent_scopes = json_string(&submission.consent_scopes)?;
         let allowed_uses = json_string(&submission.allowed_uses)?;
+        let redaction_counts = json_string(&submission.redaction_counts)?;
 
         conn.execute(
             "INSERT INTO trace_submissions (
                 tenant_id, submission_id, trace_id, auth_principal_ref, contributor_pseudonym,
                 submitted_tenant_scope_ref, schema_version, consent_policy_version,
                 consent_scopes, allowed_uses, retention_policy_id, status, privacy_risk,
-                redaction_pipeline_version, redaction_hash, canonical_summary_hash,
+                redaction_pipeline_version, redaction_hash, redaction_counts, canonical_summary_hash,
                 submission_score, credit_points_pending, credit_points_final, expires_at
              ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                ?16, ?17, ?18, ?19, ?20
+                ?16, ?17, ?18, ?19, ?20, ?21
              )
              ON CONFLICT (tenant_id, submission_id) DO UPDATE SET
                 trace_id = excluded.trace_id,
@@ -232,6 +246,7 @@ impl TraceCorpusStore for LibSqlBackend {
                 privacy_risk = excluded.privacy_risk,
                 redaction_pipeline_version = excluded.redaction_pipeline_version,
                 redaction_hash = excluded.redaction_hash,
+                redaction_counts = excluded.redaction_counts,
                 canonical_summary_hash = excluded.canonical_summary_hash,
                 submission_score = excluded.submission_score,
                 credit_points_pending = excluded.credit_points_pending,
@@ -254,6 +269,7 @@ impl TraceCorpusStore for LibSqlBackend {
                 submission.privacy_risk.as_str(),
                 submission.redaction_pipeline_version.as_str(),
                 submission.redaction_hash.as_str(),
+                redaction_counts,
                 opt_string(submission.canonical_summary_hash.clone()),
                 opt_f32(submission.submission_score),
                 opt_f32(submission.credit_points_pending),
@@ -471,14 +487,21 @@ impl TraceCorpusStore for LibSqlBackend {
             .output_object_ref
             .as_ref()
             .map(|object_ref| object_ref.object_ref_id);
+        let tool_sequence = json_string(&derived_record.tool_sequence)?;
+        let tool_categories = json_string(&derived_record.tool_categories)?;
+        let coverage_tags = json_string(&derived_record.coverage_tags)?;
 
         conn.execute(
             "INSERT INTO trace_derived_records (
                 tenant_id, derived_id, submission_id, trace_id, status, worker_kind,
                 worker_version, input_object_ref_id, input_hash, output_object_ref_id,
-                canonical_summary, canonical_summary_hash, task_success, privacy_risk,
-                event_count, duplicate_score, novelty_score, cluster_id
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                canonical_summary, canonical_summary_hash, summary_model, task_success,
+                privacy_risk, event_count, tool_sequence, tool_categories, coverage_tags,
+                duplicate_score, novelty_score, cluster_id
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                ?16, ?17, ?18, ?19, ?20, ?21, ?22
+             )
              ON CONFLICT (tenant_id, derived_id) DO UPDATE SET
                 status = excluded.status,
                 worker_kind = excluded.worker_kind,
@@ -488,9 +511,13 @@ impl TraceCorpusStore for LibSqlBackend {
                 output_object_ref_id = excluded.output_object_ref_id,
                 canonical_summary = excluded.canonical_summary,
                 canonical_summary_hash = excluded.canonical_summary_hash,
+                summary_model = excluded.summary_model,
                 task_success = excluded.task_success,
                 privacy_risk = excluded.privacy_risk,
                 event_count = excluded.event_count,
+                tool_sequence = excluded.tool_sequence,
+                tool_categories = excluded.tool_categories,
+                coverage_tags = excluded.coverage_tags,
                 duplicate_score = excluded.duplicate_score,
                 novelty_score = excluded.novelty_score,
                 cluster_id = excluded.cluster_id,
@@ -508,9 +535,13 @@ impl TraceCorpusStore for LibSqlBackend {
                 opt_uuid(output_object_ref_id),
                 opt_string(derived_record.canonical_summary),
                 opt_string(derived_record.canonical_summary_hash),
+                derived_record.summary_model.as_str(),
                 opt_string(derived_record.task_success),
                 opt_string(derived_record.privacy_risk),
                 opt_i32(derived_record.event_count),
+                tool_sequence,
+                tool_categories,
+                coverage_tags,
                 opt_f32(derived_record.duplicate_score),
                 opt_f32(derived_record.novelty_score),
                 opt_string(derived_record.cluster_id),
@@ -531,8 +562,9 @@ impl TraceCorpusStore for LibSqlBackend {
                 "SELECT
                     tenant_id, derived_id, submission_id, trace_id, status, worker_kind,
                     worker_version, input_object_ref_id, input_hash, output_object_ref_id,
-                    canonical_summary, canonical_summary_hash, task_success, privacy_risk,
-                    event_count, duplicate_score, novelty_score, cluster_id, created_at, updated_at
+                    canonical_summary, canonical_summary_hash, summary_model, task_success,
+                    privacy_risk, event_count, tool_sequence, tool_categories, coverage_tags,
+                    duplicate_score, novelty_score, cluster_id, created_at, updated_at
                  FROM trace_derived_records
                  WHERE tenant_id = ?1
                  ORDER BY created_at ASC",

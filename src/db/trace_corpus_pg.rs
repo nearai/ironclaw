@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use tokio_postgres::Row;
 use uuid::Uuid;
@@ -32,10 +34,20 @@ fn json_array_strings(
         .collect()
 }
 
+fn json_u32_map(
+    value: serde_json::Value,
+    column: &str,
+) -> Result<BTreeMap<String, u32>, DatabaseError> {
+    serde_json::from_value(value).map_err(|e| {
+        DatabaseError::Serialization(format!("trace {column} column JSON decode failed: {e}"))
+    })
+}
+
 fn row_to_submission(row: &Row) -> Result<TraceSubmissionRecord, DatabaseError> {
     let status: String = row.get("status");
     let consent_scopes: serde_json::Value = row.get("consent_scopes");
     let allowed_uses: serde_json::Value = row.get("allowed_uses");
+    let redaction_counts: serde_json::Value = row.get("redaction_counts");
     Ok(TraceSubmissionRecord {
         tenant_id: row.get("tenant_id"),
         submission_id: row.get("submission_id"),
@@ -51,6 +63,7 @@ fn row_to_submission(row: &Row) -> Result<TraceSubmissionRecord, DatabaseError> 
         retention_policy_id: row.get("retention_policy_id"),
         privacy_risk: row.get("privacy_risk"),
         redaction_pipeline_version: row.get("redaction_pipeline_version"),
+        redaction_counts: json_u32_map(redaction_counts, "redaction_counts")?,
         redaction_hash: row.get("redaction_hash"),
         canonical_summary_hash: row.get("canonical_summary_hash"),
         submission_score: row.get("submission_score"),
@@ -95,6 +108,9 @@ fn row_to_derived_record(row: &Row) -> Result<TraceDerivedRecord, DatabaseError>
     let submission_id: Uuid = row.get("submission_id");
     let input_object_ref_id: Option<Uuid> = row.get("input_object_ref_id");
     let output_object_ref_id: Option<Uuid> = row.get("output_object_ref_id");
+    let tool_sequence: serde_json::Value = row.get("tool_sequence");
+    let tool_categories: serde_json::Value = row.get("tool_categories");
+    let coverage_tags: serde_json::Value = row.get("coverage_tags");
     Ok(TraceDerivedRecord {
         derived_id: row.get("derived_id"),
         tenant_id: tenant_id.clone(),
@@ -116,9 +132,13 @@ fn row_to_derived_record(row: &Row) -> Result<TraceDerivedRecord, DatabaseError>
         }),
         canonical_summary: row.get("canonical_summary"),
         canonical_summary_hash: row.get("canonical_summary_hash"),
+        summary_model: row.get("summary_model"),
         task_success: row.get("task_success"),
         privacy_risk: row.get("privacy_risk"),
         event_count: row.get("event_count"),
+        tool_sequence: json_array_strings(tool_sequence, "tool_sequence")?,
+        tool_categories: json_array_strings(tool_categories, "tool_categories")?,
+        coverage_tags: json_array_strings(coverage_tags, "coverage_tags")?,
         duplicate_score: row.get("duplicate_score"),
         novelty_score: row.get("novelty_score"),
         cluster_id: row.get("cluster_id"),
@@ -157,6 +177,9 @@ impl TraceCorpusStore for PgBackend {
         let allowed_uses = serde_json::to_value(&submission.allowed_uses).map_err(|e| {
             DatabaseError::Serialization(format!("trace allowed uses encode failed: {e}"))
         })?;
+        let redaction_counts = serde_json::to_value(&submission.redaction_counts).map_err(|e| {
+            DatabaseError::Serialization(format!("trace redaction counts encode failed: {e}"))
+        })?;
 
         let row = client
             .query_one(
@@ -164,11 +187,11 @@ impl TraceCorpusStore for PgBackend {
                     tenant_id, submission_id, trace_id, auth_principal_ref, contributor_pseudonym,
                     submitted_tenant_scope_ref, schema_version, consent_policy_version,
                     consent_scopes, allowed_uses, retention_policy_id, status, privacy_risk,
-                    redaction_pipeline_version, redaction_hash, canonical_summary_hash,
+                    redaction_pipeline_version, redaction_hash, redaction_counts, canonical_summary_hash,
                     submission_score, credit_points_pending, credit_points_final, expires_at
                  ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+                    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
                  )
                  ON CONFLICT (tenant_id, submission_id) DO UPDATE SET
                     trace_id = excluded.trace_id,
@@ -184,6 +207,7 @@ impl TraceCorpusStore for PgBackend {
                     privacy_risk = excluded.privacy_risk,
                     redaction_pipeline_version = excluded.redaction_pipeline_version,
                     redaction_hash = excluded.redaction_hash,
+                    redaction_counts = excluded.redaction_counts,
                     canonical_summary_hash = excluded.canonical_summary_hash,
                     submission_score = excluded.submission_score,
                     credit_points_pending = excluded.credit_points_pending,
@@ -195,7 +219,7 @@ impl TraceCorpusStore for PgBackend {
                     contributor_pseudonym, submitted_tenant_scope_ref, schema_version,
                     consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
                     privacy_risk, redaction_pipeline_version, redaction_hash,
-                    canonical_summary_hash, submission_score, credit_points_pending,
+                    redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
                     credit_points_final, received_at, updated_at, reviewed_at, revoked_at,
                     expires_at, purged_at",
                 &[
@@ -214,6 +238,7 @@ impl TraceCorpusStore for PgBackend {
                     &submission.privacy_risk,
                     &submission.redaction_pipeline_version,
                     &submission.redaction_hash,
+                    &redaction_counts,
                     &submission.canonical_summary_hash,
                     &submission.submission_score,
                     &submission.credit_points_pending,
@@ -239,7 +264,7 @@ impl TraceCorpusStore for PgBackend {
                     contributor_pseudonym, submitted_tenant_scope_ref, schema_version,
                     consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
                     privacy_risk, redaction_pipeline_version, redaction_hash,
-                    canonical_summary_hash, submission_score, credit_points_pending,
+                    redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
                     credit_points_final, received_at, updated_at, reviewed_at, revoked_at,
                     expires_at, purged_at
                  FROM trace_submissions
@@ -263,7 +288,7 @@ impl TraceCorpusStore for PgBackend {
                     contributor_pseudonym, submitted_tenant_scope_ref, schema_version,
                     consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
                     privacy_risk, redaction_pipeline_version, redaction_hash,
-                    canonical_summary_hash, submission_score, credit_points_pending,
+                    redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
                     credit_points_final, received_at, updated_at, reviewed_at, revoked_at,
                     expires_at, purged_at
                  FROM trace_submissions
@@ -410,15 +435,29 @@ impl TraceCorpusStore for PgBackend {
             .output_object_ref
             .as_ref()
             .map(|object_ref| object_ref.object_ref_id);
+        let tool_sequence = serde_json::to_value(&derived_record.tool_sequence).map_err(|e| {
+            DatabaseError::Serialization(format!("trace tool sequence encode failed: {e}"))
+        })?;
+        let tool_categories =
+            serde_json::to_value(&derived_record.tool_categories).map_err(|e| {
+                DatabaseError::Serialization(format!("trace tool categories encode failed: {e}"))
+            })?;
+        let coverage_tags = serde_json::to_value(&derived_record.coverage_tags).map_err(|e| {
+            DatabaseError::Serialization(format!("trace coverage tags encode failed: {e}"))
+        })?;
 
         client
             .execute(
                 "INSERT INTO trace_derived_records (
                     tenant_id, derived_id, submission_id, trace_id, status, worker_kind,
                     worker_version, input_object_ref_id, input_hash, output_object_ref_id,
-                    canonical_summary, canonical_summary_hash, task_success, privacy_risk,
-                    event_count, duplicate_score, novelty_score, cluster_id
-                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+                    canonical_summary, canonical_summary_hash, summary_model, task_success,
+                    privacy_risk, event_count, tool_sequence, tool_categories, coverage_tags,
+                    duplicate_score, novelty_score, cluster_id
+                 ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                    $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
+                 )
                  ON CONFLICT (tenant_id, derived_id) DO UPDATE SET
                     status = excluded.status,
                     worker_kind = excluded.worker_kind,
@@ -428,9 +467,13 @@ impl TraceCorpusStore for PgBackend {
                     output_object_ref_id = excluded.output_object_ref_id,
                     canonical_summary = excluded.canonical_summary,
                     canonical_summary_hash = excluded.canonical_summary_hash,
+                    summary_model = excluded.summary_model,
                     task_success = excluded.task_success,
                     privacy_risk = excluded.privacy_risk,
                     event_count = excluded.event_count,
+                    tool_sequence = excluded.tool_sequence,
+                    tool_categories = excluded.tool_categories,
+                    coverage_tags = excluded.coverage_tags,
                     duplicate_score = excluded.duplicate_score,
                     novelty_score = excluded.novelty_score,
                     cluster_id = excluded.cluster_id,
@@ -448,9 +491,13 @@ impl TraceCorpusStore for PgBackend {
                     &output_object_ref_id,
                     &derived_record.canonical_summary,
                     &derived_record.canonical_summary_hash,
+                    &derived_record.summary_model,
                     &derived_record.task_success,
                     &derived_record.privacy_risk,
                     &derived_record.event_count,
+                    &tool_sequence,
+                    &tool_categories,
+                    &coverage_tags,
                     &derived_record.duplicate_score,
                     &derived_record.novelty_score,
                     &derived_record.cluster_id,
@@ -471,8 +518,9 @@ impl TraceCorpusStore for PgBackend {
                 "SELECT
                     tenant_id, derived_id, submission_id, trace_id, status, worker_kind,
                     worker_version, input_object_ref_id, input_hash, output_object_ref_id,
-                    canonical_summary, canonical_summary_hash, task_success, privacy_risk,
-                    event_count, duplicate_score, novelty_score, cluster_id, created_at, updated_at
+                    canonical_summary, canonical_summary_hash, summary_model, task_success,
+                    privacy_risk, event_count, tool_sequence, tool_categories, coverage_tags,
+                    duplicate_score, novelty_score, cluster_id, created_at, updated_at
                  FROM trace_derived_records
                  WHERE tenant_id = $1
                  ORDER BY created_at ASC",
