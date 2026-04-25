@@ -932,9 +932,20 @@ async fn dataset_replay_handler(
             &envelope,
         ));
     }
+    let source_submission_ids = items
+        .iter()
+        .map(|item| item.submission_id)
+        .collect::<Vec<_>>();
+    let source_submission_ids_hash =
+        source_submission_ids_hash("replay_dataset", &source_submission_ids);
 
     let export_id = Uuid::new_v4();
-    let audit_event = TraceCommonsAuditEvent::dataset_export(&tenant, export_id, items.len());
+    let audit_event = TraceCommonsAuditEvent::dataset_export(
+        &tenant,
+        export_id,
+        items.len(),
+        source_submission_ids_hash.clone(),
+    );
     let audit_event_id = audit_event.event_id;
     let manifest = TraceReplayExportManifest::from_items(
         &tenant.tenant_id,
@@ -948,6 +959,7 @@ async fn dataset_replay_handler(
             privacy_risk: query.privacy_risk,
         },
         &items,
+        source_submission_ids_hash,
     );
     write_export_manifest(&state.root, &tenant.tenant_id, &manifest).map_err(internal_error)?;
     append_audit_event_with_db_mirror(
@@ -1034,8 +1046,18 @@ async fn benchmark_convert_handler(
     }
 
     let conversion_id = Uuid::new_v4();
-    let audit_event =
-        TraceCommonsAuditEvent::benchmark_conversion(&tenant, conversion_id, candidates.len());
+    let source_submission_ids = candidates
+        .iter()
+        .map(|candidate| candidate.submission_id)
+        .collect::<Vec<_>>();
+    let source_submission_ids_hash =
+        source_submission_ids_hash("benchmark_conversion", &source_submission_ids);
+    let audit_event = TraceCommonsAuditEvent::benchmark_conversion(
+        &tenant,
+        conversion_id,
+        candidates.len(),
+        source_submission_ids_hash.clone(),
+    );
     let audit_event_id = audit_event.event_id;
     let artifact = TraceBenchmarkConversionArtifact {
         tenant_id: tenant.tenant_id.clone(),
@@ -1050,10 +1072,8 @@ async fn benchmark_convert_handler(
             privacy_risk: body.privacy_risk,
             external_ref: body.external_ref,
         },
-        source_submission_ids: candidates
-            .iter()
-            .map(|candidate| candidate.submission_id)
-            .collect(),
+        source_submission_ids,
+        source_submission_ids_hash,
         generated_at: Utc::now(),
         item_count: candidates.len(),
         candidates,
@@ -1103,11 +1123,18 @@ async fn ranker_training_candidates_handler(
     .await
     .map_err(internal_error)?;
     let export_id = Uuid::new_v4();
+    let source_submission_ids = candidates
+        .iter()
+        .map(|candidate| candidate.submission_id)
+        .collect::<Vec<_>>();
+    let source_item_list_hash =
+        source_submission_ids_hash("ranker_training_candidates_export", &source_submission_ids);
     let audit_event = TraceCommonsAuditEvent::ranker_training_export(
         &tenant,
         export_id,
         "ranker_training_candidates_export",
         candidates.len(),
+        source_item_list_hash.clone(),
     );
     let audit_event_id = audit_event.event_id;
     append_audit_event_with_db_mirror(
@@ -1130,6 +1157,7 @@ async fn ranker_training_candidates_handler(
         audit_event_id,
         generated_at: Utc::now(),
         item_count: candidates.len(),
+        source_item_list_hash,
         candidates,
     }))
 }
@@ -1151,11 +1179,13 @@ async fn ranker_training_pairs_handler(
             .map_err(internal_error)?;
     let pairs = build_ranker_training_pairs(&candidates, pair_limit);
     let export_id = Uuid::new_v4();
+    let source_item_list_hash = ranker_pair_list_hash(&pairs);
     let audit_event = TraceCommonsAuditEvent::ranker_training_export(
         &tenant,
         export_id,
         "ranker_training_pairs_export",
         pairs.len(),
+        source_item_list_hash.clone(),
     );
     let audit_event_id = audit_event.event_id;
     append_audit_event_with_db_mirror(
@@ -1178,6 +1208,7 @@ async fn ranker_training_pairs_handler(
         audit_event_id,
         generated_at: Utc::now(),
         item_count: pairs.len(),
+        source_item_list_hash,
         pairs,
     }))
 }
@@ -1410,6 +1441,26 @@ fn build_ranker_training_pairs(
         })
         .take(limit)
         .collect()
+}
+
+fn source_submission_ids_hash(kind: &str, source_submission_ids: &[Uuid]) -> String {
+    let mut payload = String::from(kind);
+    for submission_id in source_submission_ids {
+        payload.push('\n');
+        payload.push_str(&submission_id.to_string());
+    }
+    sha256_prefixed(&payload)
+}
+
+fn ranker_pair_list_hash(pairs: &[TraceRankerTrainingPair]) -> String {
+    let mut payload = String::from("ranker_training_pairs_export");
+    for pair in pairs {
+        payload.push('\n');
+        payload.push_str(&pair.preferred_submission_id.to_string());
+        payload.push('>');
+        payload.push_str(&pair.rejected_submission_id.to_string());
+    }
+    sha256_prefixed(&payload)
 }
 
 fn parse_consent_scope_filter(value: Option<&str>) -> ApiResult<Option<ConsentScope>> {
@@ -1802,6 +1853,7 @@ fn trace_commons_audit_event_from_storage(
         reason,
         export_count,
         export_id: event.export_manifest_id,
+        decision_inputs_hash: event.decision_inputs_hash,
     })
 }
 
@@ -2864,7 +2916,7 @@ async fn mirror_audit_event_to_db(
         submission_id: (event.submission_id != Uuid::nil()).then_some(event.submission_id),
         object_ref_id: None,
         export_manifest_id: event.export_id,
-        decision_inputs_hash: None,
+        decision_inputs_hash: event.decision_inputs_hash.clone(),
         metadata,
     })
     .await
@@ -3861,6 +3913,7 @@ struct TraceReplayExportManifest {
     purpose: String,
     filters: TraceReplayExportFilters,
     source_submission_ids: Vec<Uuid>,
+    source_submission_ids_hash: String,
     consent_scopes: Vec<ConsentScope>,
     generated_at: DateTime<Utc>,
     audit_event_id: Uuid,
@@ -3874,6 +3927,7 @@ impl TraceReplayExportManifest {
         purpose: String,
         filters: TraceReplayExportFilters,
         items: &[TraceReplayDatasetItem],
+        source_submission_ids_hash: String,
     ) -> Self {
         Self {
             tenant_id: tenant_id.to_string(),
@@ -3882,6 +3936,7 @@ impl TraceReplayExportManifest {
             purpose,
             filters,
             source_submission_ids: items.iter().map(|item| item.submission_id).collect(),
+            source_submission_ids_hash,
             consent_scopes: items
                 .iter()
                 .flat_map(|item| item.consent_scopes.clone())
@@ -3955,6 +4010,7 @@ struct TraceBenchmarkConversionArtifact {
     purpose: String,
     filters: TraceBenchmarkConversionFilters,
     source_submission_ids: Vec<Uuid>,
+    source_submission_ids_hash: String,
     generated_at: DateTime<Utc>,
     item_count: usize,
     candidates: Vec<TraceBenchmarkCandidate>,
@@ -4023,6 +4079,7 @@ struct TraceRankerTrainingCandidateExport {
     audit_event_id: Uuid,
     generated_at: DateTime<Utc>,
     item_count: usize,
+    source_item_list_hash: String,
     candidates: Vec<TraceRankerTrainingCandidate>,
 }
 
@@ -4034,6 +4091,7 @@ struct TraceRankerTrainingPairExport {
     audit_event_id: Uuid,
     generated_at: DateTime<Utc>,
     item_count: usize,
+    source_item_list_hash: String,
     pairs: Vec<TraceRankerTrainingPair>,
 }
 
@@ -4332,6 +4390,8 @@ struct TraceCommonsAuditEvent {
     export_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     export_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    decision_inputs_hash: Option<String>,
 }
 
 impl TraceCommonsAuditEvent {
@@ -4348,6 +4408,7 @@ impl TraceCommonsAuditEvent {
             reason: None,
             export_count: None,
             export_id: None,
+            decision_inputs_hash: None,
         }
     }
 
@@ -4364,6 +4425,7 @@ impl TraceCommonsAuditEvent {
             reason: None,
             export_count: None,
             export_id: None,
+            decision_inputs_hash: None,
         }
     }
 
@@ -4380,6 +4442,7 @@ impl TraceCommonsAuditEvent {
             reason: None,
             export_count: None,
             export_id: None,
+            decision_inputs_hash: None,
         }
     }
 
@@ -4401,6 +4464,7 @@ impl TraceCommonsAuditEvent {
             reason: reason.map(ToOwned::to_owned),
             export_count: None,
             export_id: None,
+            decision_inputs_hash: None,
         }
     }
 
@@ -4425,6 +4489,7 @@ impl TraceCommonsAuditEvent {
             reason: Some(format!("points_delta={credit_points_delta:.4};{reason}")),
             export_count: None,
             export_id: None,
+            decision_inputs_hash: None,
         }
     }
 
@@ -4441,10 +4506,16 @@ impl TraceCommonsAuditEvent {
             reason: Some(format!("surface={surface};item_count={item_count}")),
             export_count: Some(item_count),
             export_id: None,
+            decision_inputs_hash: None,
         }
     }
 
-    fn dataset_export(auth: &TenantAuth, export_id: Uuid, export_count: usize) -> Self {
+    fn dataset_export(
+        auth: &TenantAuth,
+        export_id: Uuid,
+        export_count: usize,
+        source_submission_ids_hash: String,
+    ) -> Self {
         Self {
             event_id: Uuid::new_v4(),
             tenant_id: auth.tenant_id.clone(),
@@ -4454,9 +4525,12 @@ impl TraceCommonsAuditEvent {
             status: None,
             actor_role: Some(auth.role),
             actor_principal_ref: Some(auth.principal_ref.clone()),
-            reason: None,
+            reason: Some(format!(
+                "source_submission_ids_hash={source_submission_ids_hash}"
+            )),
             export_count: Some(export_count),
             export_id: Some(export_id),
+            decision_inputs_hash: Some(source_submission_ids_hash),
         }
     }
 
@@ -4464,6 +4538,7 @@ impl TraceCommonsAuditEvent {
         auth: &TenantAuth,
         conversion_id: Uuid,
         candidate_count: usize,
+        source_submission_ids_hash: String,
     ) -> Self {
         Self {
             event_id: Uuid::new_v4(),
@@ -4474,9 +4549,12 @@ impl TraceCommonsAuditEvent {
             status: None,
             actor_role: Some(auth.role),
             actor_principal_ref: Some(auth.principal_ref.clone()),
-            reason: None,
+            reason: Some(format!(
+                "source_submission_ids_hash={source_submission_ids_hash}"
+            )),
             export_count: Some(candidate_count),
             export_id: Some(conversion_id),
+            decision_inputs_hash: Some(source_submission_ids_hash),
         }
     }
 
@@ -4485,6 +4563,7 @@ impl TraceCommonsAuditEvent {
         export_id: Uuid,
         kind: &str,
         item_count: usize,
+        source_item_list_hash: String,
     ) -> Self {
         Self {
             event_id: Uuid::new_v4(),
@@ -4495,9 +4574,10 @@ impl TraceCommonsAuditEvent {
             status: None,
             actor_role: Some(auth.role),
             actor_principal_ref: Some(auth.principal_ref.clone()),
-            reason: None,
+            reason: Some(format!("source_item_list_hash={source_item_list_hash}")),
             export_count: Some(item_count),
             export_id: Some(export_id),
+            decision_inputs_hash: Some(source_item_list_hash),
         }
     }
 
@@ -4516,6 +4596,7 @@ impl TraceCommonsAuditEvent {
             )),
             export_count: Some(vector_entries_indexed),
             export_id: None,
+            decision_inputs_hash: None,
         }
     }
 
@@ -4544,6 +4625,7 @@ impl TraceCommonsAuditEvent {
             )),
             export_count: Some(counts.export_cache_files_pruned),
             export_id: None,
+            decision_inputs_hash: None,
         }
     }
 }
@@ -5332,12 +5414,21 @@ mod tests {
         .expect("dataset export succeeds");
         assert_eq!(export.item_count, 1);
         assert_eq!(export.items[0].submission_id, submission_id);
+        assert_eq!(export.manifest.source_submission_ids, vec![submission_id]);
+        assert!(
+            export
+                .manifest
+                .source_submission_ids_hash
+                .starts_with("sha256:")
+        );
         let audit_events =
             read_all_audit_events(temp.path(), "tenant-a").expect("audit events read");
         assert!(audit_events.iter().any(|event| {
             event.event_id == export.audit_event_id
                 && event.export_id == Some(export.export_id)
                 && event.kind == "dataset_export"
+                && event.decision_inputs_hash
+                    == Some(export.manifest.source_submission_ids_hash.clone())
         }));
 
         let contributor_export_error = dataset_replay_handler(
@@ -5398,6 +5489,12 @@ mod tests {
         assert_eq!(export.items[0].submission_id, kept_id);
         assert_eq!(export.manifest.source_submission_ids, vec![kept_id]);
         assert_eq!(export.manifest.audit_event_id, export.audit_event_id);
+        assert!(
+            export
+                .manifest
+                .source_submission_ids_hash
+                .starts_with("sha256:")
+        );
         assert!(!export.manifest.source_submission_ids.contains(&revoked_id));
         assert!(
             export_artifact_dir(temp.path(), "tenant-a", export.export_id)
@@ -5421,6 +5518,7 @@ mod tests {
         .expect("benchmark conversion succeeds");
         assert_eq!(benchmark.item_count, 1);
         assert_eq!(benchmark.source_submission_ids, vec![kept_id]);
+        assert!(benchmark.source_submission_ids_hash.starts_with("sha256:"));
         assert_eq!(benchmark.candidates[0].submission_id, kept_id);
         assert!(!benchmark.source_submission_ids.contains(&revoked_id));
         assert!(benchmark_artifact_path(temp.path(), "tenant-a", benchmark.conversion_id).exists());
@@ -5428,7 +5526,9 @@ mod tests {
         let audit_events =
             read_all_audit_events(temp.path(), "tenant-a").expect("audit events read");
         assert!(audit_events.iter().any(|event| {
-            event.event_id == benchmark.audit_event_id && event.kind == "benchmark_conversion"
+            event.event_id == benchmark.audit_event_id
+                && event.kind == "benchmark_conversion"
+                && event.decision_inputs_hash == Some(benchmark.source_submission_ids_hash.clone())
         }));
     }
 
@@ -5562,6 +5662,7 @@ mod tests {
                 .iter()
                 .all(|candidate| candidate.submission_id != tenant_b_id)
         );
+        assert!(candidates.source_item_list_hash.starts_with("sha256:"));
 
         let Json(pairs) = ranker_training_pairs_handler(
             State(state.clone()),
@@ -5575,6 +5676,7 @@ mod tests {
         .await
         .expect("reviewer can export ranker pairs");
         assert_eq!(pairs.item_count, 1);
+        assert!(pairs.source_item_list_hash.starts_with("sha256:"));
         assert_eq!(pairs.pairs[0].preferred_submission_id, tenant_a_best_id);
         assert_eq!(pairs.pairs[0].rejected_submission_id, tenant_a_lower_id);
         assert!(
@@ -5750,6 +5852,10 @@ mod tests {
                 privacy_risk: None,
             },
             source_submission_ids: vec![tenant_a_id],
+            source_submission_ids_hash: source_submission_ids_hash(
+                "test_export_cache",
+                &[tenant_a_id],
+            ),
             consent_scopes: read_submission_record(temp.path(), "tenant-a", tenant_a_id)
                 .expect("tenant a record reads")
                 .expect("tenant a record exists")
@@ -6438,6 +6544,12 @@ mod tests {
         .await
         .expect("dataset export mirrors audit event");
         assert_eq!(export.item_count, 1);
+        assert!(
+            export
+                .manifest
+                .source_submission_ids_hash
+                .starts_with("sha256:")
+        );
 
         let Json(events) = audit_events_handler(
             State(audit_state),
@@ -6459,7 +6571,10 @@ mod tests {
             event.submission_id == submission_id && event.kind == "credit_mutate"
         }));
         assert!(events.iter().any(|event| {
-            event.export_id == Some(export.export_id) && event.kind == "dataset_export"
+            event.export_id == Some(export.export_id)
+                && event.kind == "dataset_export"
+                && event.decision_inputs_hash
+                    == Some(export.manifest.source_submission_ids_hash.clone())
         }));
     }
 
