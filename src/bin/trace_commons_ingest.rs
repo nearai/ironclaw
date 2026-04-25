@@ -1628,13 +1628,22 @@ async fn audit_events_handler(
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_reviewer(&tenant)?;
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
-    let events = read_audit_events(state.as_ref(), &tenant)
+    let events: Vec<_> = read_audit_events(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?
         .into_iter()
         .rev()
         .take(limit)
         .collect();
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::read(&tenant, "audit_events", events.len()),
+        StorageTraceAuditAction::Read,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(events))
 }
 
@@ -11103,6 +11112,17 @@ mod tests {
                     reason.contains("surface=replay_dataset_export")
                         && reason.contains("purpose=db_audit_export")
                 })
+        }));
+        let db_audit_events_after_read = db
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("audit read event mirrors to db");
+        assert!(db_audit_events_after_read.iter().any(|event| {
+            event.action == StorageTraceAuditAction::Read
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("surface=audit_events"))
         }));
     }
 
