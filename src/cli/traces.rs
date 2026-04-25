@@ -300,7 +300,7 @@ pub enum TracesCommand {
         json: bool,
     },
 
-    /// Run central retention/revocation maintenance
+    /// Run central retention/revocation and DB reconciliation maintenance
     MaintenanceRun {
         /// Trace Commons ingestion base URL or /v1/traces URL
         #[arg(long)]
@@ -317,6 +317,10 @@ pub enum TracesCommand {
         /// RFC3339 cutoff; expired submissions at or before this time are purged
         #[arg(long)]
         purge_expired_before: Option<String>,
+
+        /// Include DB mirror reconciliation and reader parity diagnostics
+        #[arg(long)]
+        reconcile_db_mirror: bool,
 
         /// Environment variable containing an admin bearer token
         #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
@@ -845,6 +849,7 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
             purpose,
             dry_run,
             purge_expired_before,
+            reconcile_db_mirror,
             bearer_token_env,
             json,
         } => {
@@ -854,6 +859,7 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
                 purpose,
                 dry_run,
                 purge_expired_before,
+                reconcile_db_mirror,
                 json,
             )
             .await
@@ -1547,16 +1553,12 @@ async fn trace_commons_maintenance_run(
     purpose: String,
     dry_run: bool,
     purge_expired_before: Option<String>,
+    reconcile_db_mirror: bool,
     json: bool,
 ) -> anyhow::Result<()> {
     require_non_empty_purpose(&purpose)?;
-    let mut body = serde_json::json!({
-        "purpose": purpose,
-        "dry_run": dry_run,
-    });
-    if let Some(purge_expired_before) = purge_expired_before {
-        body["purge_expired_before"] = serde_json::Value::String(purge_expired_before);
-    }
+    let body =
+        trace_commons_maintenance_body(purpose, dry_run, purge_expired_before, reconcile_db_mirror);
     let response = trace_commons_api_request(
         Method::POST,
         endpoint,
@@ -1603,11 +1605,32 @@ async fn trace_commons_maintenance_run(
             value,
             "encrypted_artifacts_deleted",
         );
+        print_optional_json_field("  DB mirror backfilled", value, "db_mirror_backfilled");
+        print_optional_json_field("  vectors indexed", value, "vector_entries_indexed");
         for line in maintenance_reconciliation_lines(value) {
             println!("{line}");
         }
     }
     Ok(())
+}
+
+fn trace_commons_maintenance_body(
+    purpose: String,
+    dry_run: bool,
+    purge_expired_before: Option<String>,
+    reconcile_db_mirror: bool,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "purpose": purpose,
+        "dry_run": dry_run,
+    });
+    if let Some(purge_expired_before) = purge_expired_before {
+        body["purge_expired_before"] = serde_json::Value::String(purge_expired_before);
+    }
+    if reconcile_db_mirror {
+        body["reconcile_db_mirror"] = serde_json::Value::Bool(true);
+    }
+    body
 }
 
 struct TraceCommonsBenchmarkConvertOptions<'a> {
@@ -2294,6 +2317,23 @@ fn maintenance_reconciliation_lines(value: &serde_json::Value) -> Vec<String> {
                 "file_revocation_tombstones",
             ),
             ("db_tombstone_count", "db_tombstones"),
+        ],
+    ) {
+        lines.push(line);
+    }
+    if let Some(line) = compact_json_items(
+        reconciliation,
+        "    reader parity",
+        &[
+            ("contributor_credit_reader_parity_ok", "contributor_credit"),
+            ("reviewer_metadata_reader_parity_ok", "reviewer_metadata"),
+            ("analytics_reader_parity_ok", "analytics"),
+            ("audit_reader_parity_ok", "audit"),
+            (
+                "replay_export_manifest_reader_parity_ok",
+                "replay_export_manifests",
+            ),
+            ("db_reader_parity_failures", "failures"),
         ],
     ) {
         lines.push(line);
@@ -3139,6 +3179,14 @@ mod tests {
                 "db_export_manifest_item_count": 3,
                 "file_revocation_tombstone_count": 1,
                 "db_tombstone_count": 1,
+                "contributor_credit_reader_parity_ok": true,
+                "reviewer_metadata_reader_parity_ok": false,
+                "analytics_reader_parity_ok": true,
+                "audit_reader_parity_ok": true,
+                "replay_export_manifest_reader_parity_ok": true,
+                "db_reader_parity_failures": [
+                    "reviewer_metadata: file_submissions=3 db_submissions=2 file_derived=4 db_derived=3"
+                ],
                 "active_vector_entries": 7,
                 "invalid_active_vector_entries": 1
             }
@@ -3155,11 +3203,27 @@ mod tests {
                 "    object refs: db=2 accepted_without_active_envelope=1".to_string(),
                 "    ledger/audit: file_credit_events=5 db_credit_events=4 file_audit_events=6 db_audit_events=6".to_string(),
                 "    exports/tombstones: file_replay_manifests=1 db_export_manifests=2 db_export_items=3 file_revocation_tombstones=1 db_tombstones=1".to_string(),
+                "    reader parity: contributor_credit=true reviewer_metadata=false analytics=true audit=true replay_export_manifests=true failures=1".to_string(),
                 "    vectors: active=7 invalid_active=1".to_string(),
             ]
         );
         let rendered = lines.join("\n");
         assert!(!rendered.contains("11111111-1111-1111-1111-111111111111"));
         assert!(!rendered.contains("33333333-3333-3333-3333-333333333333"));
+    }
+
+    #[test]
+    fn maintenance_request_body_includes_reconcile_flag() {
+        let body = trace_commons_maintenance_body(
+            "db-read-cutover".to_string(),
+            true,
+            Some("2026-04-25T00:00:00Z".to_string()),
+            true,
+        );
+
+        assert_eq!(body["purpose"], "db-read-cutover");
+        assert_eq!(body["dry_run"], true);
+        assert_eq!(body["purge_expired_before"], "2026-04-25T00:00:00Z");
+        assert_eq!(body["reconcile_db_mirror"], true);
     }
 }

@@ -13,7 +13,7 @@ As of the `gecko-pass` branch, Trace Commons has moved beyond the local-only MVP
 - Optional DB-backed read flags now cover contributor credit/status, reviewer metadata, replay export selection, and audit event reads.
 - The encrypted local artifact sidecar can store submitted redacted envelopes and keep DB/file records pointed at artifact receipts.
 - Local credit visibility now has a reusable report shape that separates local lifecycle state from central accepted/quarantined/rejected status, credit totals, delayed ledger deltas, and last submission/status-sync times.
-- Maintenance can backfill file-backed pilot records into the DB mirror, mark/purge expired records, prune invalid export caches, index deterministic vector metadata for canonical summaries, and run an initial file-vs-DB reconciliation report.
+- Maintenance can backfill file-backed pilot records into the DB mirror, mark/purge expired records, prune invalid export caches, index deterministic vector metadata for canonical summaries, and run file-vs-DB reconciliation with reader-projection parity diagnostics.
 - Export audit paths now carry deterministic source-list hashes, and replay export manifest metadata can be listed by reviewer/admin tokens.
 - Revocation and retention expiration already invalidate DB-mirrored submission status, object refs, derived records, vector metadata, replay export manifests, and replay export item rows.
 
@@ -61,13 +61,14 @@ Exit criteria:
 
 Status: in progress. Reconciliation now covers submissions, derived records,
 object refs, vectors, credit-ledger counts, audit-event counts, replay/export
-manifest counts, export item counts, and revocation/tombstone counts; remaining
-cutover work is parity enforcement, PostgreSQL coverage breadth, and rollout
-diagnostics.
+manifest counts, export item counts, revocation/tombstone counts, and
+reader-projection parity for contributor credit, reviewer metadata, analytics,
+audit, and replay/export manifest surfaces; remaining cutover work is parity
+enforcement, PostgreSQL coverage breadth, and rollout diagnostics.
 
 Scope:
 
-- Expand reconciliation beyond submission status, derived records, and active vector metadata to include review queues, contributor credit totals, analytics, replay export selection, audit event reads, object refs, tombstones, and compact export manifests.
+- Use reconciliation parity diagnostics as the promotion gate for contributor, reviewer metadata, analytics, audit, and replay/export manifest DB read flags.
 - Add PostgreSQL integration coverage for the same logical store operations already covered in libSQL.
 - Make DB-backed reader flags safe to enable per tenant or per deployment surface, with visible diagnostics when parity checks fail.
 - Keep file-backed fallback for pilot data and rollback during the cutover window.
@@ -254,7 +255,7 @@ These lanes can proceed in parallel as long as their write scopes stay disjoint 
 
 - Redaction gate: accepted envelopes and derived summaries never contain raw trace text, raw sidecar spans, secrets, local paths, bearer tokens, or raw tool payloads outside explicit policy.
 - Tenant gate: every read/write/mutation/export path is driven by auth-derived tenant and actor context, with same-id cross-tenant tests.
-- Parity gate: DB-backed reads match file-backed pilot responses before a surface-specific read flag is promoted.
+- Parity gate: DB-backed reader-projection diagnostics are green before a surface-specific read flag is promoted.
 - Object gate: every trace body read verifies object ref tenant linkage, hash, decryptability, source status, consent scope, and allowed use.
 - Audit gate: privileged mutations and content reads emit typed, tenant-scoped, append-only audit events with reason and decision input hashes where needed.
 - Revocation gate: revoke and retention flows invalidate or block submissions, object refs, derived rows, vectors, benchmarks, exports, worker queues, and credit settlement.

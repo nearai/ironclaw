@@ -4244,6 +4244,113 @@ async fn reconcile_db_mirror(
         })
         .count();
 
+    let file_credit_view =
+        contributor_credit_view_from_file_records(tenant, file_records, &file_credit_events);
+    let db_credit_view = read_contributor_credit_view_from_db(state, tenant).await?;
+    let file_metadata_view = metadata_view_from_file_records(file_records, file_derived);
+    let db_metadata_view = read_reviewer_metadata_view_from_db(state, tenant).await?;
+    let file_analytics = TraceCommonsAnalyticsResponse::from_records(
+        tenant.tenant_id.clone(),
+        file_metadata_view.records.clone(),
+        file_metadata_view.derived.clone(),
+    );
+    let db_analytics = TraceCommonsAnalyticsResponse::from_records(
+        tenant.tenant_id.clone(),
+        db_metadata_view.records.clone(),
+        db_metadata_view.derived.clone(),
+    );
+    let db_audit_events_for_reader = read_audit_events_from_db(state, tenant).await?;
+    let file_export_manifest_projection = export_manifest_reader_projection(
+        file_replay_export_manifests
+            .iter()
+            .cloned()
+            .map(TraceExportManifestSummary::from_replay_manifest)
+            .collect(),
+    );
+    let db_export_manifest_projection = export_manifest_reader_projection(
+        db_export_manifests
+            .iter()
+            .cloned()
+            .map(TraceExportManifestSummary::from_storage_record)
+            .collect(),
+    );
+
+    let mut db_reader_parity_failures = Vec::new();
+    let contributor_credit_reader_parity_ok = {
+        let file_submissions = submission_reader_projection(&file_credit_view.records);
+        let db_submissions = submission_reader_projection(&db_credit_view.records);
+        let file_events = credit_event_reader_projection(&file_credit_view.credit_events);
+        let db_events = credit_event_reader_projection(&db_credit_view.credit_events);
+        record_reader_parity(
+            &mut db_reader_parity_failures,
+            "contributor_credit",
+            file_submissions == db_submissions && file_events == db_events,
+            format!(
+                "file_submissions={} db_submissions={} file_events={} db_events={}",
+                file_submissions.len(),
+                db_submissions.len(),
+                file_events.len(),
+                db_events.len()
+            ),
+        )
+    };
+    let reviewer_metadata_reader_parity_ok = {
+        let file_submissions = submission_reader_projection(&file_metadata_view.records);
+        let db_submissions = submission_reader_projection(&db_metadata_view.records);
+        let file_derived = derived_reader_projection(&file_metadata_view.derived);
+        let db_derived = derived_reader_projection(&db_metadata_view.derived);
+        record_reader_parity(
+            &mut db_reader_parity_failures,
+            "reviewer_metadata",
+            file_submissions == db_submissions && file_derived == db_derived,
+            format!(
+                "file_submissions={} db_submissions={} file_derived={} db_derived={}",
+                file_submissions.len(),
+                db_submissions.len(),
+                file_derived.len(),
+                db_derived.len()
+            ),
+        )
+    };
+    let analytics_reader_parity_ok = {
+        let file_projection = analytics_reader_projection(file_analytics);
+        let db_projection = analytics_reader_projection(db_analytics);
+        record_reader_parity(
+            &mut db_reader_parity_failures,
+            "analytics",
+            file_projection == db_projection,
+            format!(
+                "file_submissions={} db_submissions={} file_duplicate_groups={} db_duplicate_groups={}",
+                file_projection.submissions_total,
+                db_projection.submissions_total,
+                file_projection.duplicate_groups,
+                db_projection.duplicate_groups
+            ),
+        )
+    };
+    let audit_reader_parity_ok = {
+        record_reader_parity(
+            &mut db_reader_parity_failures,
+            "audit",
+            file_audit_events.len() == db_audit_events_for_reader.len(),
+            format!(
+                "file_events={} db_events={}",
+                file_audit_events.len(),
+                db_audit_events_for_reader.len()
+            ),
+        )
+    };
+    let replay_export_manifest_reader_parity_ok = record_reader_parity(
+        &mut db_reader_parity_failures,
+        "replay_export_manifests",
+        file_export_manifest_projection == db_export_manifest_projection,
+        format!(
+            "file_manifests={} db_manifests={}",
+            file_export_manifest_projection.len(),
+            db_export_manifest_projection.len()
+        ),
+    );
+
     Ok(Some(TraceDbReconciliationReport {
         file_submission_count: file_records.len(),
         db_submission_count: db_records.len(),
@@ -4264,6 +4371,12 @@ async fn reconcile_db_mirror(
         db_tombstone_count: db_tombstones.len(),
         db_object_ref_count,
         accepted_without_active_envelope_object_ref,
+        contributor_credit_reader_parity_ok,
+        reviewer_metadata_reader_parity_ok,
+        analytics_reader_parity_ok,
+        audit_reader_parity_ok,
+        replay_export_manifest_reader_parity_ok,
+        db_reader_parity_failures,
         active_vector_entries,
         invalid_active_vector_entries,
     }))
@@ -5432,6 +5545,12 @@ struct TraceDbReconciliationReport {
     db_tombstone_count: usize,
     db_object_ref_count: usize,
     accepted_without_active_envelope_object_ref: Vec<Uuid>,
+    contributor_credit_reader_parity_ok: bool,
+    reviewer_metadata_reader_parity_ok: bool,
+    analytics_reader_parity_ok: bool,
+    audit_reader_parity_ok: bool,
+    replay_export_manifest_reader_parity_ok: bool,
+    db_reader_parity_failures: Vec<String>,
     active_vector_entries: usize,
     invalid_active_vector_entries: usize,
 }
@@ -5441,6 +5560,243 @@ struct TraceDbStatusMismatch {
     submission_id: Uuid,
     file_status: StorageTraceCorpusStatus,
     db_status: StorageTraceCorpusStatus,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TraceReaderSubmissionProjection {
+    trace_id: Uuid,
+    status: TraceCorpusStatus,
+    privacy_risk: ResidualPiiRisk,
+    auth_principal_ref: String,
+    submitted_tenant_scope_ref: Option<String>,
+    contributor_pseudonym: Option<String>,
+    submission_score_bits: u32,
+    credit_points_pending_bits: u32,
+    credit_points_final_bits: Option<u32>,
+    consent_scopes: Vec<ConsentScope>,
+    redaction_counts: BTreeMap<String, u32>,
+    retention_policy_id: String,
+    expires_at_millis: Option<i64>,
+    purged_at_millis: Option<i64>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TraceReaderDerivedProjection {
+    trace_id: Uuid,
+    status: TraceCorpusStatus,
+    privacy_risk: ResidualPiiRisk,
+    task_success: String,
+    canonical_summary_hash: String,
+    summary_model: String,
+    event_count: usize,
+    tool_sequence: Vec<String>,
+    tool_categories: Vec<String>,
+    coverage_tags: Vec<String>,
+    duplicate_score_bits: u32,
+    novelty_score_bits: u32,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TraceReaderCreditEventProjection {
+    submission_id: Uuid,
+    trace_id: Uuid,
+    event_type: TraceCreditLedgerEventType,
+    credit_points_delta_bits: u32,
+    reason: Option<String>,
+    external_ref: Option<String>,
+    actor_role: TokenRole,
+    actor_principal_ref: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TraceReaderAnalyticsProjection {
+    submissions_total: usize,
+    by_status: BTreeMap<String, usize>,
+    by_privacy_risk: BTreeMap<String, usize>,
+    by_task_success: BTreeMap<String, usize>,
+    by_tool: BTreeMap<String, usize>,
+    by_tool_category: BTreeMap<String, usize>,
+    coverage_tags: BTreeMap<String, usize>,
+    duplicate_groups: usize,
+    average_novelty_score_bits: u32,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TraceReaderExportManifestProjection {
+    artifact_kind: StorageTraceObjectArtifactKind,
+    purpose_code: Option<String>,
+    audit_event_id: Option<Uuid>,
+    source_submission_ids: Vec<Uuid>,
+    source_submission_ids_hash: String,
+    item_count: u32,
+    generated_at_millis: i64,
+    invalidated_at_millis: Option<i64>,
+    deleted_at_millis: Option<i64>,
+}
+
+fn contributor_credit_view_from_file_records(
+    tenant: &TenantAuth,
+    records: &[TraceCommonsSubmissionRecord],
+    credit_events: &[TraceCommonsCreditLedgerRecord],
+) -> TraceContributorCreditView {
+    let records = visible_submission_records(tenant, records.to_vec());
+    let credit_events = eligible_credit_events_for_records(
+        &records,
+        visible_credit_events(tenant, credit_events.to_vec()),
+    );
+    TraceContributorCreditView {
+        records,
+        credit_events,
+    }
+}
+
+fn metadata_view_from_file_records(
+    records: &[TraceCommonsSubmissionRecord],
+    derived: &[TraceCommonsDerivedRecord],
+) -> TraceCommonsMetadataView {
+    TraceCommonsMetadataView {
+        records: records.to_vec(),
+        derived: derived.to_vec(),
+    }
+}
+
+fn timestamp_millis(timestamp: DateTime<Utc>) -> i64 {
+    timestamp.timestamp_millis()
+}
+
+fn optional_timestamp_millis(timestamp: Option<DateTime<Utc>>) -> Option<i64> {
+    timestamp.map(timestamp_millis)
+}
+
+fn submission_reader_projection(
+    records: &[TraceCommonsSubmissionRecord],
+) -> BTreeMap<Uuid, TraceReaderSubmissionProjection> {
+    records
+        .iter()
+        .map(|record| {
+            (
+                record.submission_id,
+                TraceReaderSubmissionProjection {
+                    trace_id: record.trace_id,
+                    status: record.status,
+                    privacy_risk: record.privacy_risk,
+                    auth_principal_ref: record.auth_principal_ref.clone(),
+                    submitted_tenant_scope_ref: record.submitted_tenant_scope_ref.clone(),
+                    contributor_pseudonym: record.contributor_pseudonym.clone(),
+                    submission_score_bits: record.submission_score.to_bits(),
+                    credit_points_pending_bits: record.credit_points_pending.to_bits(),
+                    credit_points_final_bits: record.credit_points_final.map(f32::to_bits),
+                    consent_scopes: record.consent_scopes.clone(),
+                    redaction_counts: record.redaction_counts.clone(),
+                    retention_policy_id: record.retention_policy_id.clone(),
+                    expires_at_millis: optional_timestamp_millis(record.expires_at),
+                    purged_at_millis: optional_timestamp_millis(record.purged_at),
+                },
+            )
+        })
+        .collect()
+}
+
+fn derived_reader_projection(
+    records: &[TraceCommonsDerivedRecord],
+) -> BTreeMap<Uuid, TraceReaderDerivedProjection> {
+    records
+        .iter()
+        .map(|record| {
+            (
+                record.submission_id,
+                TraceReaderDerivedProjection {
+                    trace_id: record.trace_id,
+                    status: record.status,
+                    privacy_risk: record.privacy_risk,
+                    task_success: record.task_success.clone(),
+                    canonical_summary_hash: record.canonical_summary_hash.clone(),
+                    summary_model: record.summary_model.clone(),
+                    event_count: record.event_count,
+                    tool_sequence: record.tool_sequence.clone(),
+                    tool_categories: record.tool_categories.clone(),
+                    coverage_tags: record.coverage_tags.clone(),
+                    duplicate_score_bits: record.duplicate_score.to_bits(),
+                    novelty_score_bits: record.novelty_score.to_bits(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn credit_event_reader_projection(
+    events: &[TraceCommonsCreditLedgerRecord],
+) -> BTreeMap<Uuid, TraceReaderCreditEventProjection> {
+    events
+        .iter()
+        .map(|event| {
+            (
+                event.event_id,
+                TraceReaderCreditEventProjection {
+                    submission_id: event.submission_id,
+                    trace_id: event.trace_id,
+                    event_type: event.event_type,
+                    credit_points_delta_bits: event.credit_points_delta.to_bits(),
+                    reason: event.reason.clone(),
+                    external_ref: event.external_ref.clone(),
+                    actor_role: event.actor_role,
+                    actor_principal_ref: event.actor_principal_ref.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn analytics_reader_projection(
+    response: TraceCommonsAnalyticsResponse,
+) -> TraceReaderAnalyticsProjection {
+    TraceReaderAnalyticsProjection {
+        submissions_total: response.submissions_total,
+        by_status: response.by_status,
+        by_privacy_risk: response.by_privacy_risk,
+        by_task_success: response.by_task_success,
+        by_tool: response.by_tool,
+        by_tool_category: response.by_tool_category,
+        coverage_tags: response.coverage_tags,
+        duplicate_groups: response.duplicate_groups,
+        average_novelty_score_bits: response.average_novelty_score.to_bits(),
+    }
+}
+
+fn export_manifest_reader_projection(
+    summaries: Vec<TraceExportManifestSummary>,
+) -> BTreeMap<Uuid, TraceReaderExportManifestProjection> {
+    summaries
+        .into_iter()
+        .map(|summary| {
+            (
+                summary.export_manifest_id,
+                TraceReaderExportManifestProjection {
+                    artifact_kind: summary.artifact_kind,
+                    purpose_code: summary.purpose_code,
+                    audit_event_id: summary.audit_event_id,
+                    source_submission_ids: summary.source_submission_ids,
+                    source_submission_ids_hash: summary.source_submission_ids_hash,
+                    item_count: summary.item_count,
+                    generated_at_millis: timestamp_millis(summary.generated_at),
+                    invalidated_at_millis: optional_timestamp_millis(summary.invalidated_at),
+                    deleted_at_millis: optional_timestamp_millis(summary.deleted_at),
+                },
+            )
+        })
+        .collect()
+}
+
+fn record_reader_parity(
+    failures: &mut Vec<String>,
+    name: &'static str,
+    ok: bool,
+    detail: String,
+) -> bool {
+    if !ok {
+        failures.push(format!("{name}: {detail}"));
+    }
+    ok
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -7899,6 +8255,32 @@ mod tests {
         assert_eq!(reconciliation.db_export_manifest_item_count, 0);
         assert_eq!(reconciliation.file_revocation_tombstone_count, 0);
         assert_eq!(reconciliation.db_tombstone_count, 0);
+        assert!(
+            reconciliation.contributor_credit_reader_parity_ok,
+            "{:?}",
+            reconciliation.db_reader_parity_failures
+        );
+        assert!(
+            reconciliation.reviewer_metadata_reader_parity_ok,
+            "{:?}",
+            reconciliation.db_reader_parity_failures
+        );
+        assert!(
+            reconciliation.analytics_reader_parity_ok,
+            "{:?}",
+            reconciliation.db_reader_parity_failures
+        );
+        assert!(
+            reconciliation.audit_reader_parity_ok,
+            "{:?}",
+            reconciliation.db_reader_parity_failures
+        );
+        assert!(
+            reconciliation.replay_export_manifest_reader_parity_ok,
+            "{:?}",
+            reconciliation.db_reader_parity_failures
+        );
+        assert!(reconciliation.db_reader_parity_failures.is_empty());
         assert!(
             reconciliation
                 .accepted_without_active_envelope_object_ref
