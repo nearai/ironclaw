@@ -4691,10 +4691,30 @@ fn read_file_store_envelope_from_object_ref(
     let content_sha256 = sha256_prefixed(&body);
     anyhow::ensure!(
         content_sha256 == object_ref.content_sha256,
-        "trace object ref content hash mismatch"
+        TRACE_OBJECT_REF_CONTENT_HASH_MISMATCH
     );
     serde_json::from_str(&body)
         .with_context(|| format!("failed to parse trace object {}", path.display()))
+}
+
+const TRACE_OBJECT_REF_CONTENT_HASH_MISMATCH: &str = "trace object ref content hash mismatch";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TraceObjectRefReadFailureKind {
+    HashMismatch,
+    Unreadable,
+}
+
+fn classify_trace_object_ref_read_failure(error: &anyhow::Error) -> TraceObjectRefReadFailureKind {
+    if error.chain().any(|cause| {
+        cause
+            .to_string()
+            .contains(TRACE_OBJECT_REF_CONTENT_HASH_MISMATCH)
+    }) {
+        TraceObjectRefReadFailureKind::HashMismatch
+    } else {
+        TraceObjectRefReadFailureKind::Unreadable
+    }
 }
 
 fn trace_object_ref_file_path(root: &Path, object_key: &str) -> anyhow::Result<PathBuf> {
@@ -5944,6 +5964,7 @@ async fn reconcile_db_mirror(
     let mut db_object_ref_count = 0usize;
     let mut accepted_without_active_envelope_object_ref = Vec::new();
     let mut unreadable_active_envelope_object_refs = Vec::new();
+    let mut hash_mismatched_active_envelope_object_refs = Vec::new();
     for record in &db_records {
         let object_refs = db
             .list_trace_object_refs(&tenant.tenant_id, record.submission_id)
@@ -5973,8 +5994,17 @@ async fn reconcile_db_mirror(
                     )
                 })?;
             if let Some(object_ref) = active_object_ref {
-                if read_envelope_from_object_ref(state, &tenant.tenant_id, &object_ref).is_err() {
-                    unreadable_active_envelope_object_refs.push(record.submission_id);
+                if let Err(error) =
+                    read_envelope_from_object_ref(state, &tenant.tenant_id, &object_ref)
+                {
+                    match classify_trace_object_ref_read_failure(&error) {
+                        TraceObjectRefReadFailureKind::HashMismatch => {
+                            hash_mismatched_active_envelope_object_refs.push(record.submission_id);
+                        }
+                        TraceObjectRefReadFailureKind::Unreadable => {
+                            unreadable_active_envelope_object_refs.push(record.submission_id);
+                        }
+                    }
                 }
             } else {
                 accepted_without_active_envelope_object_ref.push(record.submission_id);
@@ -6180,6 +6210,7 @@ async fn reconcile_db_mirror(
         db_object_ref_count,
         accepted_without_active_envelope_object_ref,
         unreadable_active_envelope_object_refs,
+        hash_mismatched_active_envelope_object_refs,
         contributor_credit_reader_parity_ok,
         reviewer_metadata_reader_parity_ok,
         analytics_reader_parity_ok,
@@ -7396,6 +7427,7 @@ struct TraceDbReconciliationReport {
     db_object_ref_count: usize,
     accepted_without_active_envelope_object_ref: Vec<Uuid>,
     unreadable_active_envelope_object_refs: Vec<Uuid>,
+    hash_mismatched_active_envelope_object_refs: Vec<Uuid>,
     contributor_credit_reader_parity_ok: bool,
     reviewer_metadata_reader_parity_ok: bool,
     analytics_reader_parity_ok: bool,
@@ -12091,6 +12123,11 @@ mod tests {
                 .unreadable_active_envelope_object_refs
                 .is_empty()
         );
+        assert!(
+            reconciliation
+                .hash_mismatched_active_envelope_object_refs
+                .is_empty()
+        );
         assert_eq!(reconciliation.active_vector_entries, 1);
         assert_eq!(reconciliation.invalid_active_vector_entries, 0);
 
@@ -12171,7 +12208,7 @@ mod tests {
             .expect("active submitted envelope object ref exists");
         let object_path = trace_object_ref_file_path(temp.path(), &object_ref.object_key)
             .expect("file object ref path is safe");
-        std::fs::write(&object_path, "{}").expect("corrupt object ref body");
+        std::fs::remove_file(&object_path).expect("remove object ref body");
 
         let Json(reconciliation_response) = maintenance_handler(
             State(state),
@@ -12200,6 +12237,89 @@ mod tests {
         );
         assert_eq!(
             reconciliation.unreadable_active_envelope_object_refs,
+            vec![submission_id]
+        );
+        assert!(
+            reconciliation
+                .hash_mismatched_active_envelope_object_refs
+                .is_empty()
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn maintenance_reconciliation_reports_hash_mismatched_active_object_refs() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-reconcile-hash-mismatch.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let object_ref = db
+            .get_latest_active_trace_object_ref(
+                "tenant-a",
+                submission_id,
+                StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            )
+            .await
+            .expect("active object ref reads")
+            .expect("active submitted envelope object ref exists");
+        let object_path = trace_object_ref_file_path(temp.path(), &object_ref.object_key)
+            .expect("file object ref path is safe");
+        std::fs::write(&object_path, "{}").expect("corrupt object ref body");
+
+        let Json(reconciliation_response) = maintenance_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_hash_mismatched_object_ref_reconciliation".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: true,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("reviewer can reconcile DB mirror");
+        let reconciliation = reconciliation_response
+            .db_reconciliation
+            .expect("reconciliation report exists");
+        assert!(
+            reconciliation
+                .accepted_without_active_envelope_object_ref
+                .is_empty()
+        );
+        assert!(
+            reconciliation
+                .unreadable_active_envelope_object_refs
+                .is_empty()
+        );
+        assert_eq!(
+            reconciliation.hash_mismatched_active_envelope_object_refs,
             vec![submission_id]
         );
     }
