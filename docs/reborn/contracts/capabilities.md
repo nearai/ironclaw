@@ -3,7 +3,7 @@
 **Date:** 2026-04-25
 **Status:** V1 contract slice
 **Crate:** `crates/ironclaw_capabilities`
-**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/capability-access.md`, `docs/reborn/contracts/dispatcher.md`
+**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/capability-access.md`, `docs/reborn/contracts/run-state.md`, `docs/reborn/contracts/dispatcher.md`
 
 ---
 
@@ -17,6 +17,7 @@ It keeps callers simple without making the runtime dispatcher own authorization:
 caller/channel/agent/conversation
   -> CapabilityHost::invoke_json(...)
       -> AuthorizationService / GrantAuthorizer
+      -> optional RunStateStore
       -> RuntimeDispatcher
           -> WASM / Script / MCP
 ```
@@ -31,12 +32,14 @@ This service is the middle communication layer between authorization and dispatc
 
 ```text
 1. receive ExecutionContext + capability id + input + estimate
-2. lookup CapabilityDescriptor in ExtensionRegistry
-3. call CapabilityDispatchAuthorizer
-4. if denied, return a typed invocation error before dispatch/resource reservation
-5. if approval is required, return a typed approval-required error for future run-state handling
-6. if allowed, call RuntimeDispatcher with context.resource_scope
-7. return the normalized dispatch result
+2. if configured, mark invocation `Running` in `RunStateStore`
+3. lookup CapabilityDescriptor in ExtensionRegistry
+4. call CapabilityDispatchAuthorizer
+5. if denied, mark `Failed` and return a typed invocation error before dispatch/resource reservation
+6. if approval is required, mark `BlockedApproval` and return a typed approval-required error
+7. if allowed, call RuntimeDispatcher with context.resource_scope
+8. mark `Completed` or `Failed` after dispatch
+9. return the normalized dispatch result
 ```
 
 It does not implement grant matching itself; that belongs to `ironclaw_authorization`.
@@ -69,7 +72,20 @@ so callers cannot accidentally provide an authorization context for one scope an
 
 ---
 
-## 4. Relationship to dispatcher
+## 4. Relationship to run-state
+
+`CapabilityHost` is the first owner of invocation workflow state:
+
+```rust
+CapabilityHost::new(&registry, &dispatcher, &authorizer)
+    .with_run_state(&run_state)
+```
+
+The run-state store is optional for low-level tests, but host-facing invocation should configure it so approvals and failures are visible outside the call stack.
+
+---
+
+## 5. Relationship to dispatcher
 
 `RuntimeDispatcher` is now deliberately lower level:
 
@@ -81,12 +97,11 @@ It has no dependency on `ironclaw_authorization`, no `ExecutionContext`, and no 
 
 ---
 
-## 5. Current non-goals
+## 6. Current non-goals
 
 This slice does not implement:
 
-- approval request persistence
-- run-state transitions such as `blocked_approval`
+- approval request persistence or resume
 - grant storage, revocation, or expiration enforcement
 - invocation count tracking
 - obligation application beyond returning allowed/denied
