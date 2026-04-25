@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-25
 **Status:** Runnable V1 demo
-**Crates:** `ironclaw_filesystem`, `ironclaw_extensions`, `ironclaw_resources`, `ironclaw_wasm`, `ironclaw_scripts`, `ironclaw_kernel`
+**Crates:** `ironclaw_filesystem`, `ironclaw_extensions`, `ironclaw_resources`, `ironclaw_wasm`, `ironclaw_scripts`, `ironclaw_events`, `ironclaw_kernel`
 
 ---
 
@@ -18,10 +18,11 @@ LocalFilesystem mounted at /system/extensions
 -> WasmRuntime executes a WASM capability
 -> ScriptRuntime executes a script capability
 -> InMemoryResourceGovernor reserves and reconciles both invocations
+-> InMemoryEventSink records requested/selected/succeeded events
 -> JSON outputs are returned through one dispatch path
 ```
 
-It is intentionally not a product agent loop, gateway, TUI, MCP adapter, secret flow, or event bus.
+It is intentionally not a product agent loop, gateway, TUI, MCP adapter, secret flow, or full event bus. The current event slice is dispatcher-level observability only.
 
 ---
 
@@ -38,9 +39,16 @@ reborn_vertical_slice=ok
 discovered_extensions=2
 dispatch=echo-wasm.say runtime=wasm output={"message":"hello wasm"} reservation_status=Reconciled
 dispatch=echo-script.say runtime=script script_backend=in_process_echo output={"message":"hello script"} reservation_status=Reconciled
+events=6
+event[0]=dispatch_requested capability=echo-wasm.say runtime=none error=none
+event[1]=runtime_selected capability=echo-wasm.say runtime=wasm error=none
+event[2]=dispatch_succeeded capability=echo-wasm.say runtime=wasm error=none
+event[3]=dispatch_requested capability=echo-script.say runtime=none error=none
+event[4]=runtime_selected capability=echo-script.say runtime=script error=none
+event[5]=dispatch_succeeded capability=echo-script.say runtime=script error=none
 ```
 
-The default example uses an in-process echo script backend so the demo works without Docker installed. It still exercises the real `ScriptRuntime`, manifest-derived command metadata, `RuntimeDispatcher`, and resource lifecycle.
+The default example uses an in-process echo script backend so the demo works without Docker installed. It still exercises the real `ScriptRuntime`, manifest-derived command metadata, `RuntimeDispatcher`, resource lifecycle, and event emission path.
 
 ---
 
@@ -84,6 +92,7 @@ The integration test `crates/ironclaw_kernel/tests/vertical_slice_contract.rs` v
 - WASM dispatch goes through `RuntimeDispatcher` and `WasmRuntime`
 - Script dispatch goes through `RuntimeDispatcher` and `ScriptRuntime`
 - both invocations reserve and reconcile resource usage
+- both lanes emit dispatch requested/runtime selected/dispatch succeeded events
 - both lanes return JSON output through the same normalized kernel result type
 
 ---
@@ -92,7 +101,7 @@ The integration test `crates/ironclaw_kernel/tests/vertical_slice_contract.rs` v
 
 This slice does not add:
 
-- realtime event emission
+- full realtime event bus fanout/reconnect
 - durable transcript/job state
 - approval/auth gates
 - scoped script filesystem mounts
