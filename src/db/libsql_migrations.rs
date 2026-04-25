@@ -1122,6 +1122,7 @@ CREATE TABLE IF NOT EXISTS trace_audit_events (
     decision_inputs_hash TEXT,
     previous_event_hash TEXT,
     event_hash TEXT,
+    canonical_event_json TEXT,
     metadata_json TEXT NOT NULL DEFAULT '{}',
     occurred_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     PRIMARY KEY (tenant_id, audit_event_id)
@@ -1383,6 +1384,13 @@ CREATE TABLE IF NOT EXISTS trace_tenant_policies (
 );
 "#,
     ),
+    (
+        33,
+        "trace_audit_canonical_payload",
+        r#"
+ALTER TABLE trace_audit_events ADD COLUMN canonical_event_json TEXT;
+"#,
+    ),
 ];
 
 /// Migrations whose ADD COLUMN should be skipped when the column already
@@ -1403,6 +1411,7 @@ const IDEMPOTENT_ADD_COLUMN_MIGRATIONS: &[(i64, &str, &str)] = &[
     (27, "trace_derived_records", "coverage_tags"),
     (31, "trace_audit_events", "previous_event_hash"),
     (31, "trace_audit_events", "event_hash"),
+    (33, "trace_audit_events", "canonical_event_json"),
 ];
 
 /// Check whether `table` already contains `column` via `pragma_table_info`.

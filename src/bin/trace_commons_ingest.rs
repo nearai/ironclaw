@@ -3681,6 +3681,7 @@ async fn mirror_submission_to_db_with_options(
             decision_inputs_hash: Some(derived_record.canonical_summary_hash.clone()),
             previous_event_hash: None,
             event_hash: None,
+            canonical_event_json: None,
             metadata: StorageTraceAuditSafeMetadata::Submission {
                 status: storage_corpus_status(record.status),
                 privacy_risk: privacy_risk.clone(),
@@ -3834,6 +3835,7 @@ async fn mirror_revocation_to_db(
             decision_inputs_hash: None,
             previous_event_hash: None,
             event_hash: None,
+            canonical_event_json: None,
             metadata: StorageTraceAuditSafeMetadata::Maintenance {
                 dry_run: false,
                 action_counts,
@@ -4023,6 +4025,7 @@ async fn append_lifecycle_invalidation_audit_to_db(
         decision_inputs_hash: None,
         previous_event_hash: None,
         event_hash: None,
+        canonical_event_json: None,
         metadata: StorageTraceAuditSafeMetadata::Maintenance {
             dry_run: false,
             action_counts,
@@ -5154,14 +5157,30 @@ fn compute_audit_event_hash(
     previous_event_hash: &str,
     event: &TraceCommonsAuditEvent,
 ) -> anyhow::Result<String> {
+    let canonical_event = canonical_audit_event_json(previous_event_hash, event)?;
+    Ok(compute_audit_event_hash_from_canonical(
+        previous_event_hash,
+        &canonical_event,
+    ))
+}
+
+fn canonical_audit_event_json(
+    previous_event_hash: &str,
+    event: &TraceCommonsAuditEvent,
+) -> anyhow::Result<String> {
     let mut event_for_hash = event.clone();
     event_for_hash.previous_event_hash = Some(previous_event_hash.to_string());
     event_for_hash.event_hash = None;
-    let canonical_event =
-        serde_json::to_string(&event_for_hash).context("failed to serialize audit event hash")?;
-    Ok(sha256_prefixed(&format!(
+    serde_json::to_string(&event_for_hash).context("failed to serialize audit event hash")
+}
+
+fn compute_audit_event_hash_from_canonical(
+    previous_event_hash: &str,
+    canonical_event: &str,
+) -> String {
+    sha256_prefixed(&format!(
         "{TRACE_AUDIT_EVENT_HASH_DOMAIN}\n{previous_event_hash}\n{canonical_event}"
-    )))
+    ))
 }
 
 async fn append_audit_event_with_db_mirror(
@@ -5232,6 +5251,11 @@ async fn mirror_audit_event_to_db_with_object_ref(
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
     };
+    let canonical_event_json = event
+        .previous_event_hash
+        .as_deref()
+        .map(|previous_event_hash| canonical_audit_event_json(previous_event_hash, event))
+        .transpose()?;
     db.append_trace_audit_event(StorageTraceAuditEventWrite {
         audit_event_id: event.event_id,
         tenant_id: tenant.tenant_id.clone(),
@@ -5253,6 +5277,7 @@ async fn mirror_audit_event_to_db_with_object_ref(
         decision_inputs_hash: event.decision_inputs_hash.clone(),
         previous_event_hash: event.previous_event_hash.clone(),
         event_hash: event.event_hash.clone(),
+        canonical_event_json,
         metadata,
     })
     .await
@@ -5812,12 +5837,158 @@ async fn verify_db_audit_chain(
                 event.audit_event_id
             ));
         }
+        if let Some(canonical_event_json) = event.canonical_event_json.as_deref() {
+            report.payload_verified_event_count += 1;
+            let recomputed =
+                compute_audit_event_hash_from_canonical(previous_event_hash, canonical_event_json);
+            if recomputed != event_hash {
+                report.failures.push(format!(
+                    "db row {row_number} event {}: canonical payload hash mismatch",
+                    event.audit_event_id
+                ));
+            }
+            let canonical_event: TraceCommonsAuditEvent =
+                serde_json::from_str(canonical_event_json).with_context(|| {
+                    format!(
+                        "failed to parse canonical audit payload for DB audit event {}",
+                        event.audit_event_id
+                    )
+                })?;
+            verify_db_audit_projection(row_number, &event, &canonical_event, &mut report);
+        } else {
+            report.payload_unverified_event_count += 1;
+        }
         expected_previous_hash = event_hash.to_string();
         report.last_event_hash = Some(event_hash.to_string());
     }
     report.mismatch_count = report.failures.len();
     report.verified = report.mismatch_count == 0;
     Ok(report)
+}
+
+fn verify_db_audit_projection(
+    row_number: usize,
+    event: &StorageTraceAuditEventRecord,
+    canonical_event: &TraceCommonsAuditEvent,
+    report: &mut TraceDbAuditChainReport,
+) {
+    let event_ref = event.audit_event_id;
+    if canonical_event.event_id != event.audit_event_id {
+        report.failures.push(format!(
+            "db row {row_number} event {event_ref}: canonical event_id mismatch"
+        ));
+    }
+    if canonical_event.tenant_id != event.tenant_id {
+        report.failures.push(format!(
+            "db row {row_number} event {event_ref}: canonical tenant_id mismatch"
+        ));
+    }
+    if Some(canonical_event.submission_id).filter(|id| *id != Uuid::nil()) != event.submission_id {
+        report.failures.push(format!(
+            "db row {row_number} event {event_ref}: canonical submission_id mismatch"
+        ));
+    }
+    if canonical_event.kind != storage_audit_canonical_kind(event) {
+        report.failures.push(format!(
+            "db row {row_number} event {event_ref}: canonical kind/action mismatch"
+        ));
+    }
+    if canonical_event.status != storage_audit_canonical_status(event) {
+        report.failures.push(format!(
+            "db row {row_number} event {event_ref}: canonical status mismatch"
+        ));
+    }
+    if let Some(actor_role) = canonical_event.actor_role
+        && actor_role.storage_name() != event.actor_role
+    {
+        report.failures.push(format!(
+            "db row {row_number} event {event_ref}: canonical actor_role mismatch"
+        ));
+    }
+    if let Some(actor_principal_ref) = canonical_event.actor_principal_ref.as_deref()
+        && actor_principal_ref != event.actor_principal_ref
+    {
+        report.failures.push(format!(
+            "db row {row_number} event {event_ref}: canonical actor_principal_ref mismatch"
+        ));
+    }
+    if canonical_event.reason != event.reason {
+        report.failures.push(format!(
+            "db row {row_number} event {event_ref}: canonical reason mismatch"
+        ));
+    }
+    if canonical_event.export_id != event.export_manifest_id {
+        report.failures.push(format!(
+            "db row {row_number} event {event_ref}: canonical export_id mismatch"
+        ));
+    }
+    if canonical_event.decision_inputs_hash != event.decision_inputs_hash {
+        report.failures.push(format!(
+            "db row {row_number} event {event_ref}: canonical decision_inputs_hash mismatch"
+        ));
+    }
+    if canonical_event.previous_event_hash != event.previous_event_hash {
+        report.failures.push(format!(
+            "db row {row_number} event {event_ref}: canonical previous_event_hash mismatch"
+        ));
+    }
+    if canonical_event.event_hash.is_some() {
+        report.failures.push(format!(
+            "db row {row_number} event {event_ref}: canonical payload should not include event_hash"
+        ));
+    }
+    if let Some(projected_export_count) = storage_audit_canonical_export_count(event)
+        && canonical_event.export_count != Some(projected_export_count)
+    {
+        report.failures.push(format!(
+            "db row {row_number} event {event_ref}: canonical export_count mismatch"
+        ));
+    }
+}
+
+fn storage_audit_canonical_kind(event: &StorageTraceAuditEventRecord) -> String {
+    if event.action == StorageTraceAuditAction::Read
+        && event.submission_id.is_some()
+        && event
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("surface=replay_dataset_export"))
+    {
+        return "trace_content_read".to_string();
+    }
+    if event.action == StorageTraceAuditAction::Retain
+        && matches!(
+            &event.metadata,
+            StorageTraceAuditSafeMetadata::Maintenance { .. }
+        )
+        && event
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("purpose="))
+    {
+        return "maintenance".to_string();
+    }
+    storage_audit_event_kind(event.action, &event.metadata)
+}
+
+fn storage_audit_canonical_status(
+    event: &StorageTraceAuditEventRecord,
+) -> Option<TraceCorpusStatus> {
+    match &event.metadata {
+        StorageTraceAuditSafeMetadata::Submission { status, .. }
+        | StorageTraceAuditSafeMetadata::ReviewDecision {
+            resulting_status: status,
+            ..
+        } => trace_corpus_status_from_storage(*status),
+        _ => None,
+    }
+}
+
+fn storage_audit_canonical_export_count(event: &StorageTraceAuditEventRecord) -> Option<usize> {
+    match &event.metadata {
+        StorageTraceAuditSafeMetadata::Export { item_count, .. } => Some(*item_count as usize),
+        _ => None,
+    }
 }
 
 async fn backfill_db_mirror_from_files(
@@ -7762,6 +7933,8 @@ struct TraceDbAuditChainReport {
     verified: bool,
     event_count: usize,
     legacy_event_count: usize,
+    payload_verified_event_count: usize,
+    payload_unverified_event_count: usize,
     mismatch_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_event_hash: Option<String>,
@@ -15258,6 +15431,8 @@ mod tests {
         assert!(db_report.verified, "{db_report:?}");
         assert!(db_report.event_count >= 3);
         assert!(db_report.legacy_event_count >= 1);
+        assert!(db_report.payload_verified_event_count >= 2);
+        assert_eq!(db_report.payload_unverified_event_count, 0);
         assert_eq!(db_report.mismatch_count, 0);
 
         let conn = db.connect().await.expect("connect to mirror");
@@ -15307,6 +15482,143 @@ mod tests {
                 .failures
                 .iter()
                 .any(|failure| failure.contains("previous_event_hash mismatch"))
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn maintenance_detects_db_audit_projection_tampering() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-db-audit-projection.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let _ = maintenance_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("db_audit_projection_backfill".to_string()),
+                dry_run: false,
+                backfill_db_mirror: true,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("backfill file audit events before export");
+        let Json(export) = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("projection_tamper".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("dataset export creates canonical DB audit event");
+        assert_eq!(export.item_count, 1);
+
+        let Json(response) = maintenance_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("db_audit_projection_verify".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: true,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("maintenance verifies canonical DB audit projection");
+        let db_report = response
+            .audit_chain
+            .expect("audit chain report exists")
+            .db_mirror
+            .expect("DB audit chain report exists");
+        assert!(db_report.verified, "{db_report:?}");
+
+        let conn = db.connect().await.expect("connect to mirror");
+        conn.execute(
+            "UPDATE trace_audit_events
+             SET action = 'read',
+                 metadata_json = ?3
+             WHERE tenant_id = ?1
+               AND export_manifest_id = ?2",
+            libsql::params![
+                "tenant-a",
+                export.export_id.to_string(),
+                r#"{"kind":"export","artifact_kind":"export_artifact","purpose_code":"projection_tamper","item_count":99}"#,
+            ],
+        )
+        .await
+        .expect("tamper DB audit projection");
+
+        let Json(response) = maintenance_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("db_audit_projection_after_tamper".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: true,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("maintenance reports projection tampering");
+        let db_report = response
+            .audit_chain
+            .expect("audit chain report exists")
+            .db_mirror
+            .expect("DB audit chain report exists");
+        assert!(!db_report.verified);
+        assert!(
+            db_report
+                .failures
+                .iter()
+                .any(|failure| failure.contains("canonical kind/action mismatch"))
+        );
+        assert!(
+            db_report
+                .failures
+                .iter()
+                .any(|failure| failure.contains("canonical export_count mismatch"))
         );
     }
 

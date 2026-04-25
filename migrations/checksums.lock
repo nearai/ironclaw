@@ -46,3 +46,4 @@ V30__trace_export_manifest_items = 10956829887877574295
 V31__trace_corpus_rls = 12469740360422252274
 V32__trace_audit_hash_chain = 17248238007992263100
 V33__trace_tenant_policies = 17916190992036103581
+V34__trace_audit_canonical_payload = 631088394933991355

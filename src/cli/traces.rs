@@ -2409,6 +2409,8 @@ fn maintenance_audit_chain_lines(value: &serde_json::Value) -> Vec<String> {
                 ("verified", "verified"),
                 ("event_count", "events"),
                 ("legacy_event_count", "legacy"),
+                ("payload_verified_event_count", "payload_verified"),
+                ("payload_unverified_event_count", "payload_unverified"),
                 ("mismatch_count", "mismatches"),
             ],
         ) {
@@ -3527,6 +3529,8 @@ mod tests {
                     "verified": false,
                     "event_count": 3,
                     "legacy_event_count": 1,
+                    "payload_verified_event_count": 2,
+                    "payload_unverified_event_count": 1,
                     "mismatch_count": 1,
                     "last_event_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                     "failures": [
@@ -3544,7 +3548,7 @@ mod tests {
                 "    status: verified=false events=4 legacy=1 mismatches=2".to_string(),
                 "    failures: 2".to_string(),
                 "    db mirror:".to_string(),
-                "      status: verified=false events=3 legacy=1 mismatches=1".to_string(),
+                "      status: verified=false events=3 legacy=1 payload_verified=2 payload_unverified=1 mismatches=1".to_string(),
                 "      failures: 1".to_string(),
             ]
         );

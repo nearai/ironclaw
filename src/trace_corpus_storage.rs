@@ -409,6 +409,7 @@ pub struct TraceAuditEventWrite {
     pub decision_inputs_hash: Option<String>,
     pub previous_event_hash: Option<String>,
     pub event_hash: Option<String>,
+    pub canonical_event_json: Option<String>,
     pub metadata: TraceAuditSafeMetadata,
 }
 
@@ -427,6 +428,7 @@ pub struct TraceAuditEventRecord {
     pub decision_inputs_hash: Option<String>,
     pub previous_event_hash: Option<String>,
     pub event_hash: Option<String>,
+    pub canonical_event_json: Option<String>,
     pub metadata: TraceAuditSafeMetadata,
     pub occurred_at: DateTime<Utc>,
 }
