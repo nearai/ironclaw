@@ -119,12 +119,13 @@ where
 
         let invocation_id = request.context.invocation_id;
         let capability_id = request.capability_id.clone();
+        let scope = request.context.resource_scope.clone();
         if let Some(run_state) = self.run_state {
             run_state
                 .start(RunStart {
                     invocation_id,
                     capability_id,
-                    scope: request.context.resource_scope.clone(),
+                    scope: scope.clone(),
                 })
                 .await?;
         }
@@ -134,7 +135,7 @@ where
             None => {
                 if let Some(run_state) = self.run_state {
                     run_state
-                        .fail(invocation_id, "UnknownCapability".to_string())
+                        .fail(&scope, invocation_id, "UnknownCapability".to_string())
                         .await?;
                 }
                 return Err(CapabilityInvocationError::UnknownCapability {
@@ -151,7 +152,7 @@ where
             Decision::Deny { reason } => {
                 if let Some(run_state) = self.run_state {
                     run_state
-                        .block_auth(invocation_id, "AuthorizationDenied".to_string())
+.block_auth(&scope, invocation_id, "AuthorizationDenied".to_string())
                         .await?;
                 }
                 return Err(CapabilityInvocationError::AuthorizationDenied {
@@ -161,10 +162,14 @@ where
             }
             Decision::RequireApproval { request: approval } => {
                 if let Some(approval_requests) = self.approval_requests {
-                    approval_requests.save_pending(approval.clone()).await?;
+                    approval_requests
+                        .save_pending(scope.clone(), approval.clone())
+                        .await?;
                 }
                 if let Some(run_state) = self.run_state {
-                    run_state.block_approval(invocation_id, approval).await?;
+                    run_state
+                        .block_approval(&scope, invocation_id, approval)
+                        .await?;
                 }
                 return Err(CapabilityInvocationError::AuthorizationRequiresApproval {
                     capability: request.capability_id,
@@ -176,7 +181,7 @@ where
             .dispatcher
             .dispatch_json(CapabilityDispatchRequest {
                 capability_id: request.capability_id,
-                scope: request.context.resource_scope,
+                scope: scope.clone(),
                 estimate: request.estimate,
                 input: request.input,
             })
@@ -186,7 +191,7 @@ where
             Err(error) => {
                 if let Some(run_state) = self.run_state {
                     run_state
-                        .fail(invocation_id, "Dispatch".to_string())
+                        .fail(&scope, invocation_id, "Dispatch".to_string())
                         .await?;
                 }
                 return Err(CapabilityInvocationError::from(error));
@@ -194,7 +199,7 @@ where
         };
 
         if let Some(run_state) = self.run_state {
-            run_state.complete(invocation_id).await?;
+            run_state.complete(&scope, invocation_id).await?;
         }
 
         Ok(CapabilityInvocationResult { dispatch })

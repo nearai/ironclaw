@@ -61,6 +61,7 @@ pub enum ApprovalStatus {
 /// Durable approval request record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApprovalRecord {
+    pub scope: ResourceScope,
     pub request: ApprovalRequest,
     pub status: ApprovalStatus,
 }
@@ -98,34 +99,55 @@ pub trait RunStateStore: Send + Sync {
     async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError>;
     async fn block_approval(
         &self,
+        scope: &ResourceScope,
         invocation_id: InvocationId,
         approval: ApprovalRequest,
     ) -> Result<RunRecord, RunStateError>;
     async fn block_auth(
         &self,
+        scope: &ResourceScope,
         invocation_id: InvocationId,
         error_kind: String,
     ) -> Result<RunRecord, RunStateError>;
-    async fn complete(&self, invocation_id: InvocationId) -> Result<RunRecord, RunStateError>;
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<RunRecord, RunStateError>;
     async fn fail(
         &self,
+        scope: &ResourceScope,
         invocation_id: InvocationId,
         error_kind: String,
     ) -> Result<RunRecord, RunStateError>;
-    async fn get(&self, invocation_id: InvocationId) -> Result<Option<RunRecord>, RunStateError>;
-    async fn records(&self) -> Result<Vec<RunRecord>, RunStateError>;
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<Option<RunRecord>, RunStateError>;
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<RunRecord>, RunStateError>;
 }
 
 /// Store for approval requests emitted by authorization decisions.
 #[async_trait]
 pub trait ApprovalRequestStore: Send + Sync {
-    async fn save_pending(&self, request: ApprovalRequest)
-    -> Result<ApprovalRecord, RunStateError>;
+    async fn save_pending(
+        &self,
+        scope: ResourceScope,
+        request: ApprovalRequest,
+    ) -> Result<ApprovalRecord, RunStateError>;
     async fn get(
         &self,
+        scope: &ResourceScope,
         request_id: ApprovalRequestId,
     ) -> Result<Option<ApprovalRecord>, RunStateError>;
-    async fn records(&self) -> Result<Vec<ApprovalRecord>, RunStateError>;
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<ApprovalRecord>, RunStateError>;
 }
 
 /// In-memory run-state store for tests and early host wiring.
@@ -141,12 +163,14 @@ impl InMemoryRunStateStore {
 
     fn update(
         &self,
+        scope: &ResourceScope,
         invocation_id: InvocationId,
         update: impl FnOnce(&mut RunRecord),
     ) -> Result<RunRecord, RunStateError> {
         let mut records = self.records_guard();
         let record = records
             .get_mut(&invocation_id)
+            .filter(|record| same_tenant_user(&record.scope, scope))
             .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
         update(record);
         Ok(record.clone())
@@ -177,10 +201,11 @@ impl RunStateStore for InMemoryRunStateStore {
 
     async fn block_approval(
         &self,
+        scope: &ResourceScope,
         invocation_id: InvocationId,
         approval: ApprovalRequest,
     ) -> Result<RunRecord, RunStateError> {
-        self.update(invocation_id, |record| {
+        self.update(scope, invocation_id, |record| {
             record.status = RunStatus::BlockedApproval;
             record.approval_request_id = Some(approval.id);
             record.error_kind = None;
@@ -189,17 +214,22 @@ impl RunStateStore for InMemoryRunStateStore {
 
     async fn block_auth(
         &self,
+        scope: &ResourceScope,
         invocation_id: InvocationId,
         error_kind: String,
     ) -> Result<RunRecord, RunStateError> {
-        self.update(invocation_id, |record| {
+        self.update(scope, invocation_id, |record| {
             record.status = RunStatus::BlockedAuth;
             record.error_kind = Some(error_kind);
         })
     }
 
-    async fn complete(&self, invocation_id: InvocationId) -> Result<RunRecord, RunStateError> {
-        self.update(invocation_id, |record| {
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<RunRecord, RunStateError> {
+        self.update(scope, invocation_id, |record| {
             record.status = RunStatus::Completed;
             record.error_kind = None;
         })
@@ -207,21 +237,38 @@ impl RunStateStore for InMemoryRunStateStore {
 
     async fn fail(
         &self,
+        scope: &ResourceScope,
         invocation_id: InvocationId,
         error_kind: String,
     ) -> Result<RunRecord, RunStateError> {
-        self.update(invocation_id, |record| {
+        self.update(scope, invocation_id, |record| {
             record.status = RunStatus::Failed;
             record.error_kind = Some(error_kind);
         })
     }
 
-    async fn get(&self, invocation_id: InvocationId) -> Result<Option<RunRecord>, RunStateError> {
-        Ok(self.records_guard().get(&invocation_id).cloned())
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<Option<RunRecord>, RunStateError> {
+        Ok(self
+            .records_guard()
+            .get(&invocation_id)
+            .filter(|record| same_tenant_user(&record.scope, scope))
+            .cloned())
     }
 
-    async fn records(&self) -> Result<Vec<RunRecord>, RunStateError> {
-        let mut records = self.records_guard().values().cloned().collect::<Vec<_>>();
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<RunRecord>, RunStateError> {
+        let mut records = self
+            .records_guard()
+            .values()
+            .filter(|record| same_tenant_user(&record.scope, scope))
+            .cloned()
+            .collect::<Vec<_>>();
         records.sort_by_key(|record| record.invocation_id.as_uuid());
         Ok(records)
     }
@@ -249,9 +296,11 @@ impl InMemoryApprovalRequestStore {
 impl ApprovalRequestStore for InMemoryApprovalRequestStore {
     async fn save_pending(
         &self,
+        scope: ResourceScope,
         request: ApprovalRequest,
     ) -> Result<ApprovalRecord, RunStateError> {
         let record = ApprovalRecord {
+            scope,
             request,
             status: ApprovalStatus::Pending,
         };
@@ -262,19 +311,32 @@ impl ApprovalRequestStore for InMemoryApprovalRequestStore {
 
     async fn get(
         &self,
+        scope: &ResourceScope,
         request_id: ApprovalRequestId,
     ) -> Result<Option<ApprovalRecord>, RunStateError> {
-        Ok(self.records_guard().get(&request_id).cloned())
+        Ok(self
+            .records_guard()
+            .get(&request_id)
+            .filter(|record| same_tenant_user(&record.scope, scope))
+            .cloned())
     }
 
-    async fn records(&self) -> Result<Vec<ApprovalRecord>, RunStateError> {
-        let mut records = self.records_guard().values().cloned().collect::<Vec<_>>();
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<ApprovalRecord>, RunStateError> {
+        let mut records = self
+            .records_guard()
+            .values()
+            .filter(|record| same_tenant_user(&record.scope, scope))
+            .cloned()
+            .collect::<Vec<_>>();
         records.sort_by_key(|record| record.request.id.as_uuid());
         Ok(records)
     }
 }
 
-/// Filesystem-backed run-state store under `/engine/runs`.
+/// Filesystem-backed run-state store under tenant/user-scoped `/engine/tenants/.../runs`.
 pub struct FilesystemRunStateStore<'a, F>
 where
     F: RootFilesystem,
@@ -291,7 +353,7 @@ where
     }
 
     async fn write_record(&self, record: &RunRecord) -> Result<(), RunStateError> {
-        let path = run_record_path(record.invocation_id)?;
+        let path = run_record_path(&record.scope, record.invocation_id)?;
         let bytes = serialize_pretty(record)?;
         self.filesystem.write_file(&path, &bytes).await?;
         Ok(())
@@ -318,11 +380,12 @@ where
 
     async fn block_approval(
         &self,
+        scope: &ResourceScope,
         invocation_id: InvocationId,
         approval: ApprovalRequest,
     ) -> Result<RunRecord, RunStateError> {
         let mut record = self
-            .get(invocation_id)
+            .get(scope, invocation_id)
             .await?
             .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
         record.status = RunStatus::BlockedApproval;
@@ -334,11 +397,12 @@ where
 
     async fn block_auth(
         &self,
+        scope: &ResourceScope,
         invocation_id: InvocationId,
         error_kind: String,
     ) -> Result<RunRecord, RunStateError> {
         let mut record = self
-            .get(invocation_id)
+            .get(scope, invocation_id)
             .await?
             .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
         record.status = RunStatus::BlockedAuth;
@@ -347,9 +411,13 @@ where
         Ok(record)
     }
 
-    async fn complete(&self, invocation_id: InvocationId) -> Result<RunRecord, RunStateError> {
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<RunRecord, RunStateError> {
         let mut record = self
-            .get(invocation_id)
+            .get(scope, invocation_id)
             .await?
             .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
         record.status = RunStatus::Completed;
@@ -360,11 +428,12 @@ where
 
     async fn fail(
         &self,
+        scope: &ResourceScope,
         invocation_id: InvocationId,
         error_kind: String,
     ) -> Result<RunRecord, RunStateError> {
         let mut record = self
-            .get(invocation_id)
+            .get(scope, invocation_id)
             .await?
             .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
         record.status = RunStatus::Failed;
@@ -373,18 +442,30 @@ where
         Ok(record)
     }
 
-    async fn get(&self, invocation_id: InvocationId) -> Result<Option<RunRecord>, RunStateError> {
-        let path = run_record_path(invocation_id)?;
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<Option<RunRecord>, RunStateError> {
+        let path = run_record_path(scope, invocation_id)?;
         let bytes = match self.filesystem.read_file(&path).await {
             Ok(bytes) => bytes,
             Err(error) if is_not_found(&error) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        deserialize(&bytes).map(Some)
+        let record = deserialize::<RunRecord>(&bytes)?;
+        if same_tenant_user(&record.scope, scope) {
+            Ok(Some(record))
+        } else {
+            Ok(None)
+        }
     }
 
-    async fn records(&self) -> Result<Vec<RunRecord>, RunStateError> {
-        let root = VirtualPath::new("/engine/runs")?;
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<RunRecord>, RunStateError> {
+        let root = run_records_root(scope)?;
         let entries = match self.filesystem.list_dir(&root).await {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
@@ -394,7 +475,10 @@ where
         for entry in entries {
             if entry.name.ends_with(".json") {
                 let bytes = self.filesystem.read_file(&entry.path).await?;
-                records.push(deserialize::<RunRecord>(&bytes)?);
+                let record = deserialize::<RunRecord>(&bytes)?;
+                if same_tenant_user(&record.scope, scope) {
+                    records.push(record);
+                }
             }
         }
         records.sort_by_key(|record| record.invocation_id.as_uuid());
@@ -402,7 +486,7 @@ where
     }
 }
 
-/// Filesystem-backed approval request store under `/engine/approvals`.
+/// Filesystem-backed approval request store under tenant/user-scoped `/engine/tenants/.../approvals`.
 pub struct FilesystemApprovalRequestStore<'a, F>
 where
     F: RootFilesystem,
@@ -419,7 +503,7 @@ where
     }
 
     async fn write_record(&self, record: &ApprovalRecord) -> Result<(), RunStateError> {
-        let path = approval_record_path(record.request.id)?;
+        let path = approval_record_path(&record.scope, record.request.id)?;
         let bytes = serialize_pretty(record)?;
         self.filesystem.write_file(&path, &bytes).await?;
         Ok(())
@@ -433,9 +517,11 @@ where
 {
     async fn save_pending(
         &self,
+        scope: ResourceScope,
         request: ApprovalRequest,
     ) -> Result<ApprovalRecord, RunStateError> {
         let record = ApprovalRecord {
+            scope,
             request,
             status: ApprovalStatus::Pending,
         };
@@ -445,19 +531,28 @@ where
 
     async fn get(
         &self,
+        scope: &ResourceScope,
         request_id: ApprovalRequestId,
     ) -> Result<Option<ApprovalRecord>, RunStateError> {
-        let path = approval_record_path(request_id)?;
+        let path = approval_record_path(scope, request_id)?;
         let bytes = match self.filesystem.read_file(&path).await {
             Ok(bytes) => bytes,
             Err(error) if is_not_found(&error) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        deserialize(&bytes).map(Some)
+        let record = deserialize::<ApprovalRecord>(&bytes)?;
+        if same_tenant_user(&record.scope, scope) {
+            Ok(Some(record))
+        } else {
+            Ok(None)
+        }
     }
 
-    async fn records(&self) -> Result<Vec<ApprovalRecord>, RunStateError> {
-        let root = VirtualPath::new("/engine/approvals")?;
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<ApprovalRecord>, RunStateError> {
+        let root = approval_records_root(scope)?;
         let entries = match self.filesystem.list_dir(&root).await {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
@@ -467,7 +562,10 @@ where
         for entry in entries {
             if entry.name.ends_with(".json") {
                 let bytes = self.filesystem.read_file(&entry.path).await?;
-                records.push(deserialize::<ApprovalRecord>(&bytes)?);
+                let record = deserialize::<ApprovalRecord>(&bytes)?;
+                if same_tenant_user(&record.scope, scope) {
+                    records.push(record);
+                }
             }
         }
         records.sort_by_key(|record| record.request.id.as_uuid());
@@ -475,12 +573,46 @@ where
     }
 }
 
-fn run_record_path(invocation_id: InvocationId) -> Result<VirtualPath, RunStateError> {
-    VirtualPath::new(format!("/engine/runs/{invocation_id}.json")).map_err(Into::into)
+fn run_record_path(
+    scope: &ResourceScope,
+    invocation_id: InvocationId,
+) -> Result<VirtualPath, RunStateError> {
+    VirtualPath::new(format!(
+        "{}/{invocation_id}.json",
+        run_records_root(scope)?.as_str()
+    ))
+    .map_err(Into::into)
 }
 
-fn approval_record_path(request_id: ApprovalRequestId) -> Result<VirtualPath, RunStateError> {
-    VirtualPath::new(format!("/engine/approvals/{request_id}.json")).map_err(Into::into)
+fn run_records_root(scope: &ResourceScope) -> Result<VirtualPath, RunStateError> {
+    VirtualPath::new(format!("{}/runs", tenant_user_root(scope))).map_err(Into::into)
+}
+
+fn approval_record_path(
+    scope: &ResourceScope,
+    request_id: ApprovalRequestId,
+) -> Result<VirtualPath, RunStateError> {
+    VirtualPath::new(format!(
+        "{}/{request_id}.json",
+        approval_records_root(scope)?.as_str()
+    ))
+    .map_err(Into::into)
+}
+
+fn approval_records_root(scope: &ResourceScope) -> Result<VirtualPath, RunStateError> {
+    VirtualPath::new(format!("{}/approvals", tenant_user_root(scope))).map_err(Into::into)
+}
+
+fn tenant_user_root(scope: &ResourceScope) -> String {
+    format!(
+        "/engine/tenants/{}/users/{}",
+        scope.tenant_id.as_str(),
+        scope.user_id.as_str()
+    )
+}
+
+fn same_tenant_user(left: &ResourceScope, right: &ResourceScope) -> bool {
+    left.tenant_id == right.tenant_id && left.user_id == right.user_id
 }
 
 fn serialize_pretty<T>(value: &T) -> Result<Vec<u8>, RunStateError>
