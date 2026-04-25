@@ -1,10 +1,12 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use ironclaw_events::*;
 use ironclaw_extensions::*;
 use ironclaw_filesystem::*;
 use ironclaw_host_api::*;
 use ironclaw_kernel::*;
+use ironclaw_mcp::*;
 use ironclaw_resources::*;
 use ironclaw_scripts::*;
 use ironclaw_wasm::*;
@@ -83,6 +85,51 @@ async fn dispatcher_emits_events_for_wasm_and_script_success() {
         recorded[5].provider,
         Some(ExtensionId::new("echo-script").unwrap())
     );
+}
+
+#[tokio::test]
+async fn dispatcher_emits_events_for_mcp_success() {
+    let fs = filesystem_with_echo_extensions();
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(package_from_manifest(MCP_MANIFEST))
+        .unwrap();
+    let governor = InMemoryResourceGovernor::new();
+    let mcp_runtime = McpRuntime::new(
+        McpRuntimeConfig::for_testing(),
+        RecordingMcpClient::new(McpClientOutput::json(json!({"matches": ["ironclaw"]}))),
+    );
+    let events = InMemoryEventSink::new();
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
+        .with_mcp_runtime(&mcp_runtime)
+        .with_event_sink(&events);
+
+    dispatcher
+        .dispatch_json(CapabilityDispatchRequest {
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: sample_scope(),
+            estimate: ResourceEstimate {
+                concurrency_slots: Some(1),
+                process_count: Some(1),
+                output_bytes: Some(10_000),
+                ..ResourceEstimate::default()
+            },
+            input: json!({"query": "ironclaw"}),
+        })
+        .await
+        .unwrap();
+
+    let recorded = events.events();
+    assert_eq!(recorded.len(), 3);
+    assert_eq!(recorded[0].kind, RuntimeEventKind::DispatchRequested);
+    assert_eq!(recorded[1].kind, RuntimeEventKind::RuntimeSelected);
+    assert_eq!(recorded[1].runtime, Some(RuntimeKind::Mcp));
+    assert_eq!(recorded[2].kind, RuntimeEventKind::DispatchSucceeded);
+    assert_eq!(
+        recorded[2].provider,
+        Some(ExtensionId::new("github-mcp").unwrap())
+    );
+    assert!(recorded[2].output_bytes.unwrap() > 0);
 }
 
 #[tokio::test]
@@ -177,6 +224,29 @@ async fn dispatcher_emits_failed_event_for_missing_backend_without_reserving() {
 }
 
 #[derive(Clone)]
+struct RecordingMcpClient {
+    output: McpClientOutput,
+    requests: Arc<Mutex<Vec<McpClientRequest>>>,
+}
+
+impl RecordingMcpClient {
+    fn new(output: McpClientOutput) -> Self {
+        Self {
+            output,
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl McpClient for RecordingMcpClient {
+    async fn call_tool(&self, request: McpClientRequest) -> Result<McpClientOutput, String> {
+        self.requests.lock().unwrap().push(request);
+        Ok(self.output.clone())
+    }
+}
+
+#[derive(Clone)]
 struct EchoScriptBackend;
 
 impl ScriptBackend for EchoScriptBackend {
@@ -240,6 +310,12 @@ fn write_echo_extensions(root: &std::path::Path) {
     std::fs::write(script_root.join("manifest.toml"), SCRIPT_MANIFEST).unwrap();
 }
 
+fn package_from_manifest(manifest: &str) -> ExtensionPackage {
+    let manifest = ExtensionManifest::parse(manifest).unwrap();
+    let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
+    ExtensionPackage::from_manifest(manifest, root).unwrap()
+}
+
 fn json_echo_module() -> Vec<u8> {
     wat::parse_str(
         r#"(module
@@ -297,6 +373,27 @@ id = "echo-wasm.say"
 description = "Echo WASM"
 effects = ["dispatch_capability"]
 default_permission = "allow"
+parameters_schema = { type = "object" }
+"#;
+
+const MCP_MANIFEST: &str = r#"
+id = "github-mcp"
+name = "GitHub MCP"
+version = "0.1.0"
+description = "GitHub MCP adapter"
+trust = "sandbox"
+
+[runtime]
+kind = "mcp"
+transport = "stdio"
+command = "github-mcp"
+args = ["--stdio"]
+
+[[capabilities]]
+id = "github-mcp.search"
+description = "Search GitHub"
+effects = ["network", "dispatch_capability"]
+default_permission = "ask"
 parameters_schema = { type = "object" }
 "#;
 

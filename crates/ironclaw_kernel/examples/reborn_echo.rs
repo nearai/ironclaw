@@ -1,5 +1,6 @@
 use std::{error::Error, sync::Arc};
 
+use async_trait::async_trait;
 use ironclaw_events::{JsonlEventSink, RuntimeEventKind};
 use ironclaw_extensions::ExtensionDiscovery;
 use ironclaw_filesystem::LocalFilesystem;
@@ -8,6 +9,7 @@ use ironclaw_host_api::{
     TenantId, UserId, VirtualPath,
 };
 use ironclaw_kernel::{CapabilityDispatchRequest, RuntimeDispatcher};
+use ironclaw_mcp::{McpClient, McpClientOutput, McpClientRequest, McpRuntime, McpRuntimeConfig};
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_scripts::{
     DockerScriptBackend, ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime,
@@ -37,11 +39,13 @@ where
     let governor = InMemoryResourceGovernor::new();
     let wasm_runtime = WasmRuntime::for_testing()?;
     let script_runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), script_backend);
+    let mcp_runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), EchoMcpClient);
     let event_path = VirtualPath::new("/engine/events/reborn-demo.jsonl")?;
     let events = JsonlEventSink::new(Arc::clone(&fs), event_path.clone());
     let dispatcher = RuntimeDispatcher::new(&registry, fs.as_ref(), &governor)
         .with_wasm_runtime(&wasm_runtime)
         .with_script_runtime(&script_runtime)
+        .with_mcp_runtime(&mcp_runtime)
         .with_event_sink(&events);
 
     let wasm = dispatcher
@@ -71,6 +75,20 @@ where
         })
         .await?;
 
+    let mcp = dispatcher
+        .dispatch_json(CapabilityDispatchRequest {
+            capability_id: CapabilityId::new("echo-mcp.say")?,
+            scope: sample_scope()?,
+            estimate: ResourceEstimate {
+                concurrency_slots: Some(1),
+                process_count: Some(1),
+                output_bytes: Some(10_000),
+                ..ResourceEstimate::default()
+            },
+            input: json!({"message": "hello mcp"}),
+        })
+        .await?;
+
     let recorded_events = events.read_events().await?;
 
     println!("reborn_vertical_slice=ok");
@@ -90,6 +108,13 @@ where
         stable_json(&script.output),
         script.receipt.status
     );
+    println!(
+        "dispatch={} runtime={} mcp_transport=stdio output={} reservation_status={:?}",
+        mcp.capability_id,
+        runtime_label(mcp.runtime),
+        stable_json(&mcp.output),
+        mcp.receipt.status
+    );
     println!("durable_event_path={event_path:?}");
     println!("events={}", recorded_events.len());
     for (index, event) in recorded_events.iter().enumerate() {
@@ -102,6 +127,16 @@ where
         );
     }
     Ok(())
+}
+
+#[derive(Clone)]
+struct EchoMcpClient;
+
+#[async_trait]
+impl McpClient for EchoMcpClient {
+    async fn call_tool(&self, request: McpClientRequest) -> Result<McpClientOutput, String> {
+        Ok(McpClientOutput::json(request.input))
+    }
 }
 
 #[derive(Clone)]
@@ -133,6 +168,10 @@ fn filesystem_with_echo_extensions() -> Result<LocalFilesystem, Box<dyn Error>> 
     let script_root = extensions_root.join("echo-script");
     std::fs::create_dir_all(&script_root)?;
     std::fs::write(script_root.join("manifest.toml"), SCRIPT_MANIFEST)?;
+
+    let mcp_root = extensions_root.join("echo-mcp");
+    std::fs::create_dir_all(&mcp_root)?;
+    std::fs::write(mcp_root.join("manifest.toml"), MCP_MANIFEST)?;
 
     let mut fs = LocalFilesystem::new();
     fs.mount_local(
@@ -225,6 +264,27 @@ id = "echo-wasm.say"
 description = "Echo text through WASM"
 effects = ["dispatch_capability"]
 default_permission = "allow"
+parameters_schema = { type = "object", required = ["message"], properties = { message = { type = "string" } } }
+"#;
+
+const MCP_MANIFEST: &str = r#"
+id = "echo-mcp"
+name = "MCP Echo"
+version = "0.1.0"
+description = "MCP echo demo adapter"
+trust = "sandbox"
+
+[runtime]
+kind = "mcp"
+transport = "stdio"
+command = "echo-mcp"
+args = ["--stdio"]
+
+[[capabilities]]
+id = "echo-mcp.say"
+description = "Echo text through MCP adapter"
+effects = ["network", "dispatch_capability"]
+default_permission = "ask"
 parameters_schema = { type = "object", required = ["message"], properties = { message = { type = "string" } } }
 "#;
 
