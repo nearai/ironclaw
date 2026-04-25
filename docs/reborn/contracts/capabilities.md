@@ -15,9 +15,9 @@ It keeps callers simple without making the runtime dispatcher own authorization:
 
 ```text
 caller/channel/agent/conversation
-  -> CapabilityHost::invoke_json(...)
-      -> AuthorizationService / GrantAuthorizer
-      -> optional RunStateStore / ApprovalRequestStore
+  -> CapabilityHost::invoke_json(...) or CapabilityHost::resume_json(...)
+      -> AuthorizationService / GrantAuthorizer / LeaseBackedAuthorizer
+      -> optional RunStateStore / ApprovalRequestStore / CapabilityLeaseStore
       -> RuntimeDispatcher
           -> WASM / Script / MCP
 ```
@@ -42,6 +42,20 @@ This service is the middle communication layer between authorization and dispatc
 9. if allowed, call CapabilityDispatcher with context.resource_scope
 10. mark `Completed` or `Failed` after dispatch
 11. return the normalized dispatch result
+```
+
+`CapabilityHost::resume_json` owns the approved-resume workflow:
+
+```text
+1. receive ExecutionContext + approval request id + capability id + input + estimate
+2. validate ExecutionContext/resource_scope consistency
+3. load the blocked run from RunStateStore under the same scope
+4. load the approval record and require status Approved
+5. recompute InvocationFingerprint and compare it to the approved request fingerprint
+6. find an unexpired active lease for the same tenant/user/invocation, capability, and fingerprint
+7. call CapabilityDispatchAuthorizer, then CapabilityDispatcher
+8. consume the lease after successful dispatch
+9. mark Completed or Failed
 ```
 
 It does not implement grant matching itself; that belongs to `ironclaw_authorization`.
@@ -82,6 +96,7 @@ so callers cannot accidentally provide an authorization context for one scope an
 CapabilityHost::new(&registry, &dispatcher, &authorizer)
     .with_run_state(&run_state)
     .with_approval_requests(&approval_requests)
+    .with_capability_leases(&leases)
 ```
 
 The stores are optional for low-level tests, but host-facing invocation should configure them so approvals and failures are visible outside the call stack and can survive process restarts. The durable implementations write through tenant/user partitions under the `/engine` filesystem namespace, so production can provide a DB-backed filesystem implementation without coupling this crate to a specific database.
@@ -89,6 +104,8 @@ The stores are optional for low-level tests, but host-facing invocation should c
 The capability host is responsible for preserving `ExecutionContext.resource_scope` across run-state, approval persistence, and dispatch. A caller cannot authorize under one tenant/user and persist or bill under another.
 
 For approval-required dispatches, `CapabilityHost` also binds the approval to the exact invocation request by attaching an `InvocationFingerprint`. If an authorizer supplies a conflicting fingerprint, the host fails the run with `InvocationFingerprintMismatch` and persists no approval request.
+
+For approved resume, `CapabilityHost` compares the replayed request fingerprint to the approved fingerprint before dispatch and consumes the matching lease after successful dispatch. Denied/expired/non-approved approvals, missing leases, and fingerprint mismatches fail before runtime dispatch.
 
 ---
 
@@ -108,9 +125,8 @@ It has no dependency on `ironclaw_authorization`, no `ExecutionContext`, and no 
 
 This slice does not implement:
 
-- invocation resume after approval resolution
-- durable grant/lease storage, revocation, or expiration enforcement
-- automatic lease consumption during dispatch resume
+- durable grant/lease storage, revocation, or expiration persistence
+- resume of non-dispatch actions such as `Action::Spawn`
 - obligation application beyond returning allowed/denied
 - transcript/job history
 

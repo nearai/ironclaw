@@ -29,6 +29,11 @@ ApprovalResolver
 LeaseBackedAuthorizer
   -> combines ExecutionContext.grants with active scoped leases
   -> returns Allow/Deny before CapabilityHost dispatches runtime work
+
+CapabilityHost::resume_json
+  -> reloads the approved record and matching lease
+  -> compares the replayed invocation fingerprint
+  -> dispatches and consumes the lease on success
 ```
 
 ---
@@ -78,7 +83,7 @@ ResourceEstimate
 canonical JSON input with object keys sorted recursively
 ```
 
-The stored value is a `sha256:` digest, not raw JSON input. This gives the later resume path something stable to compare without putting potentially sensitive input directly in approval records.
+The stored value is a `sha256:` digest, not raw JSON input. The resume path compares this digest before dispatch so an approval for one input cannot be replayed with a different input.
 
 If an authorizer returns `Decision::RequireApproval` with no fingerprint, `CapabilityHost` attaches the computed one. If it returns a different fingerprint, `CapabilityHost` fails closed before saving the approval request.
 
@@ -119,7 +124,7 @@ pub enum CapabilityLeaseStatus {
 
 V1 includes an in-memory lease store with exact tenant/user/invocation scoped lookup, consumption, and revocation. Lease lookup, consumption, and revocation are not global by ID; the authorizer asks for unexpired active leases visible to the current `ExecutionContext.resource_scope`. This slice treats issued approval leases as one-off invocation leases: a lease only authorizes a context with the same invocation ID as the approved request. Broader reusable approval scopes are a later policy slice.
 
-Leases preserve the approval request fingerprint so resume can validate that the replayed invocation request matches what was approved.
+Leases preserve the approval request fingerprint so resume can validate that the replayed invocation request matches what was approved. Resume only considers unexpired active leases visible to the exact tenant/user/invocation scope.
 
 Lease consumption enforces `GrantConstraints.max_invocations`:
 
@@ -202,8 +207,6 @@ The dispatcher remains auth-blind and state-blind. It never resolves approvals o
 This slice intentionally keeps approval resolution narrow:
 
 - no UI/user prompt implementation
-- no invocation resume API in `CapabilityHost` yet
-- no resume-time fingerprint comparison yet
 - no durable lease store yet
 - no atomic transaction across approval status update and lease issuance yet
 - no approval resolution audit event yet
@@ -212,7 +215,7 @@ This slice intentionally keeps approval resolution narrow:
 - no `Action::Spawn`/long-running task approval workflow yet; that follows after dispatch resume mechanics
 - no reusable approval-scope expansion yet; V1 leases are exact-invocation only
 
-Before user-facing approval resume ships, the host should revisit atomic persistence for:
+Before a durable/user-facing approval resume UI ships, the host should revisit atomic persistence for:
 
 ```text
 approval record update + lease/grant write + run-state transition
