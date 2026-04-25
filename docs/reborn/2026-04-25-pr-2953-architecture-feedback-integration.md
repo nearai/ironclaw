@@ -87,15 +87,20 @@ Promoted into:
 
 - `docs/reborn/contracts/events-projections.md`
 
-### Parent model protocol remains `Text | ToolCalls`
+### Parent model protocol sharpens to `Reply | CapabilityCalls`
 
-Adopt the PR's recommendation that CodeAct is not a third top-level parent-loop response mode.
+Adopt the PR's recommendation that CodeAct is not a third top-level parent-loop response mode, but use more precise Reborn wording for the host-facing parent-loop envelope.
 
 The parent loop should stay:
 
 ```text
-Text | ToolCalls
+Reply | CapabilityCalls
 ```
+
+Where:
+
+- `Reply` = user-visible assistant output for the active thread. Loop implementations may still internally classify replies as `FinalReply` vs `AskUser`; that stronger typing remains loop-owned metadata.
+- `CapabilityCalls` = explicit capability requests. Provider-native tool calls are one encoding of this host contract, but the host should reason about capabilities, not a generic tool surface.
 
 CodeAct can exist behind explicit capabilities:
 
@@ -104,11 +109,12 @@ spawn_subagent(mode = "codeact")
 create_job(mode = "codeact")
 ```
 
-This aligns with the existing Reborn decision that CodeAct/Monty are optional and not foundational.
+This aligns with the existing Reborn decision that CodeAct/Monty are optional and not foundational while still allowing richer internal loop typing.
 
 Promoted into:
 
 - `docs/reborn/contracts/runtime-workflows.md`
+- `docs/reborn/contracts/agent-loop-protocol.md`
 
 ---
 
@@ -194,6 +200,7 @@ This branch adds the source feedback doc and these integration docs:
 docs/reborn/2026-04-24-os-like-architecture-feedback.md
 docs/reborn/2026-04-25-pr-2953-architecture-feedback-integration.md
 docs/reborn/contracts/runtime-workflows.md
+docs/reborn/contracts/agent-loop-protocol.md
 docs/reborn/contracts/run-state.md
 docs/reborn/contracts/events-projections.md
 docs/reborn/contracts/capability-access.md

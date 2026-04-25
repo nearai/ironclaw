@@ -48,11 +48,11 @@ The main doc lists core service crates, but it does not yet define the interface
 
 | Service | Ownership |
 | --- | --- |
-| `ScopeManager` | Resolves instance, user, project, thread, and invocation scopes. Produces typed filesystem, tool, resource, audit, and prompt views. |
+| `ScopeManager` | Resolves instance, user, project, thread, and invocation scopes. Produces typed filesystem, capability, resource, audit, and prompt views. |
 | `ConversationManager` | Owns durable thread lifecycle, transcript state, pending gates, and thread history reads. It should not own run-state, live streams, or projections. |
 | `InstructionAssembler` | Builds deterministic instruction bundles from identity, context, capabilities, skills, attachments, and runtime metadata. |
-| `ToolManager` | Owns tool existence, descriptors, registry plumbing, execution, and normalized tool results. |
-| `ToolAccessManager` | Owns visible tools, callable tools, grants, scope filtering, policy checks, and action-time authorization. |
+| `CapabilityCatalog` | Owns capability existence, descriptors, provider mapping, and registry/catalog plumbing. |
+| `CapabilityAccessManager` | Owns visible capabilities, callable capabilities, grants, scope filtering, policy checks, and action-time authorization. |
 | `ApprovalManager` | Owns pending approval requests, stable request ids, approve/deny/always decisions, and replay-safe resolution. |
 | `AuthFlowManager` | Owns auth-required state, OAuth/token prompting, callback completion, and retry-after-auth behavior. |
 | `RunStateManager` | Owns one-active-run-per-thread, blocked states, cancel, interrupt, resume, terminal transitions, and checkpoints. |
@@ -76,22 +76,26 @@ TransportAdapter
 -> ConversationManager
 -> ScopeManager
 -> RunStateManager
--> build ScopeSnapshot / InstructionBundleSnapshot / VisibleToolSnapshot
+-> build ScopeSnapshot / InstructionBundleSnapshot / VisibleCapabilitySnapshot
 -> LLM call
--> Text | ToolCalls
--> ToolAccessManager.authorize
--> ToolManager.execute
+-> Reply | CapabilityCalls
+-> CapabilityAccessManager.authorize
+-> RuntimeDispatcher.dispatch_json
 -> emit events, persist milestones, refresh projections
 -> continue | pause | complete
 ```
 
-The top-level LLM contract should stay:
+The top-level parent-loop envelope should stay:
 
 ```text
-Text | ToolCalls
+Reply | CapabilityCalls
 ```
 
-CodeAct should not be a third top-level response mode in the parent loop. It is better modeled as a worker mode behind explicit tool calls:
+`Reply` means user-visible assistant output for the active thread. A loop can still normalize replies internally into stronger types like `FinalReply` or `AskUser`; that typing just should not become a separate host-wide protocol branch.
+
+`CapabilityCalls` means explicit capability requests. Provider-native tool calls can be one encoding of this host contract, but the host should reason about capabilities rather than a product-specific tool abstraction.
+
+CodeAct should not be a third top-level response mode in the parent loop. It is better modeled as a worker mode behind explicit capability calls:
 
 ```text
 spawn_subagent(mode = "codeact") -> child thread owned by the parent run
@@ -125,22 +129,22 @@ TransportAdapter
 -> ScopeManager
 -> RunStateManager
 -> InstructionAssembler
--> ToolAccessManager.visible_tools
+-> CapabilityAccessManager.visible_capabilities
 -> LLM
--> ToolAccessManager.authorize
--> ToolManager.execute
+-> CapabilityAccessManager.authorize
+-> RuntimeDispatcher.dispatch_json
 -> ConversationManager persist
 -> EventStreamManager publish
 -> ProjectionReducer update
 ```
 
-Key point: scope, instructions, and visible tools are warm-path snapshots. Tool authorization is an action-time check.
+Key point: scope, instructions, and visible capabilities are warm-path snapshots. Capability authorization is an action-time check.
 
-### Approval-blocked tool
+### Approval-blocked capability
 
 ```text
-Tool call
--> ToolAccessManager.authorize
+Capability call
+-> CapabilityAccessManager.authorize
 -> ApprovalManager.open_pending_gate
 -> RunStateManager.blocked(approval)
 -> EventStreamManager publish approval_needed
@@ -150,10 +154,10 @@ Tool call
 
 Key point: approval should not be generic chat text. It is a structured run-state transition.
 
-### Auth-blocked tool
+### Auth-blocked capability
 
 ```text
-Tool call
+Capability call
 -> auth required
 -> AuthFlowManager.begin
 -> RunStateManager.blocked(auth)
@@ -164,16 +168,16 @@ Tool call
 
 Key point: auth-blocked and approval-blocked are distinct. They can both resume work, but they are not the same workflow.
 
-### Extension activation changing visible tools
+### Extension activation changing visible capabilities
 
 ```text
 ExtensionManager activates extension
--> ToolManager updates catalog
--> ToolAccessManager invalidates visible tool snapshot
+-> CapabilityCatalog updates descriptors
+-> CapabilityAccessManager invalidates visible capability snapshot
 -> InstructionAssembler rebuilds only if model-visible capability text changed
 ```
 
-Key point: tool visibility refresh is not the same as action-time authorization.
+Key point: visible capability refresh is not the same as action-time authorization.
 
 ### Reconnect and live stream resume
 
@@ -229,14 +233,14 @@ These should be stated explicitly in the main architecture discussion or a direc
 
 - One active run per thread.
 - Transcript persistence and live progress are different products.
-- Scope, instruction, and visible-tool snapshots are built on warm paths and refreshed only on typed invalidation.
-- Tool authorization is checked at action time.
-- Visible tool surface is not the same as action authorization.
+- Scope, instruction, and visible-capability snapshots are built on warm paths and refreshed only on typed invalidation.
+- Capability authorization is checked at action time.
+- Visible capability surface is not the same as action authorization.
 - Approval-blocked and auth-blocked resumes are distinct.
 - Transport adapters do not own business policy.
 - Projections are derived read models, not durable state ownership.
 - Kernel wires services; it does not coordinate product behavior.
-- CodeAct is a worker mode behind tools, not the parent loop protocol.
+- CodeAct is a worker mode behind capabilities, not the parent loop protocol.
 
 ---
 
@@ -258,7 +262,7 @@ The main doc's OS/service model is stronger than these systems at the macro leve
 
 The main architecture doc should stay readable. The deeper mechanics can live in focused follow-on docs:
 
-- engine loop contract
+- `docs/reborn/contracts/agent-loop-protocol.md`
 - run-state lifecycle and transition table
 - event vocabulary
 - transport adapter contract
@@ -279,7 +283,7 @@ The highest-value changes are:
 - narrow overloaded crates
 - add missing service contracts
 - make event/projection/run-state first-class
-- keep the top-level LLM protocol to `Text | ToolCalls`
+- keep the top-level parent-loop envelope to `Reply | CapabilityCalls`
 - put CodeAct behind `spawn_subagent` and `create_job`
 
 That gives the reboot a cleaner path from architecture to implementation without recreating the current blob under newer names.

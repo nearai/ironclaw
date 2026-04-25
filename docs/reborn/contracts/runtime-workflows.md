@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-25
 **Status:** Draft contract
-**Depends on:** `docs/reborn/2026-04-24-os-like-architecture-design.md`, `docs/reborn/2026-04-24-os-like-architecture-feedback.md`
+**Depends on:** `docs/reborn/2026-04-24-os-like-architecture-design.md`, `docs/reborn/2026-04-24-os-like-architecture-feedback.md`, `docs/reborn/contracts/agent-loop-protocol.md`
 
 ---
 
@@ -47,22 +47,28 @@ These are logical service contracts. They do not all need to become crates immed
 
 ## 3. Parent model protocol
 
-The default parent agent loop protocol remains:
+The default parent agent loop protocol is:
 
 ```text
-Text | ToolCalls
+Reply | CapabilityCalls
 ```
 
-The parent model can speak or request explicit capabilities. It cannot switch the entire engine protocol into an ad hoc execution mode.
+Where:
 
-CodeAct, Monty, or similar modes are worker modes behind explicit tools/capabilities:
+- `Reply` = user-visible assistant output for the active thread. Loop implementations may internally classify a reply as `FinalReply` vs `AskUser`, but that classification stays loop-owned metadata rather than becoming a new host-wide protocol branch.
+- `CapabilityCalls` = one or more explicit capability invocations against the visible capability surface. Provider-native tool calls are normalized into this host contract before action-time authorization and dispatch.
+
+The parent model can reply or request explicit capabilities. It cannot switch the entire engine protocol into an ad hoc execution mode.
+
+CodeAct, Monty, scripting, delegation, or similar modes are worker paths behind explicit capabilities:
 
 ```text
 spawn_subagent(mode = "codeact") -> child thread owned by parent run
 create_job(mode = "codeact")     -> standalone/background thread with output sink
+script.run(...)                   -> explicit capability call
 ```
 
-This keeps the parent boundary simple and preserves `RuntimeDispatcher` as the capability execution boundary.
+This keeps the parent boundary simple, preserves `RuntimeDispatcher` as the capability execution boundary, and still allows loop implementations to keep stronger internal typing.
 
 ---
 
@@ -75,7 +81,7 @@ TransportAdapter
 -> RunStateManager.begin
 -> InstructionBundleAssembler
 -> CapabilityAccessManager.visible_capabilities
--> LLM(Text | ToolCalls)
+-> LLM(Reply | CapabilityCalls)
 -> CapabilityAccessManager.authorize(action-time)
 -> RuntimeDispatcher.dispatch_json
 -> ConversationManager persist transcript milestones
@@ -87,7 +93,7 @@ TransportAdapter
 Key rules:
 
 - scope, instruction, and visible-capability snapshots are warm-path snapshots
-- action-time authorization is still required for every tool/capability call
+- action-time authorization is still required for every capability call
 - live progress is not the durable transcript
 - kernel wires these services but does not own the chat workflow
 
@@ -96,7 +102,7 @@ Key rules:
 ## 5. Approval-blocked capability
 
 ```text
-ToolCall/CapabilityCall
+CapabilityCall
 -> CapabilityAccessManager.authorize
 -> Decision::RequireApproval
 -> ApprovalManager.open_pending_gate
@@ -204,7 +210,7 @@ spawn_subagent(...)
 -> creates child thread linked to parent run
 -> child RunStateManager begins independent run
 -> child uses same capability/resource/audit services
--> parent consumes child terminal result as tool output
+-> parent consumes child terminal result as capability output
 ```
 
 Key rules:
