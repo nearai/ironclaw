@@ -55,7 +55,7 @@ async fn approving_pending_dispatch_request_issues_scoped_capability_lease() {
 }
 
 #[tokio::test]
-async fn lease_from_approved_request_authorizes_future_dispatch_without_context_grant() {
+async fn lease_from_approved_request_is_resume_only_and_not_plain_authority() {
     let approvals = InMemoryApprovalRequestStore::new();
     let leases = InMemoryCapabilityLeaseStore::new();
     let resolver = ApprovalResolver::new(&approvals, &leases);
@@ -85,7 +85,12 @@ async fn lease_from_approved_request_authorizes_future_dispatch_without_context_
     let decision =
         authorizer.authorize_dispatch(&context, &descriptor, &ResourceEstimate::default());
 
-    assert!(matches!(decision, Decision::Allow { .. }));
+    assert!(matches!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::MissingGrant
+        }
+    ));
 }
 
 #[tokio::test]

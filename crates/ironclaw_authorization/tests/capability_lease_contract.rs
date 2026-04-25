@@ -29,6 +29,129 @@ fn lease_authorizer_allows_matching_active_lease_without_context_grant() {
 }
 
 #[test]
+fn fingerprinted_approval_lease_does_not_authorize_plain_dispatch() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let fingerprint = InvocationFingerprint::for_dispatch(
+        &context.resource_scope,
+        &descriptor.id,
+        &ResourceEstimate::default(),
+        &serde_json::json!({"message": "approved"}),
+    )
+    .unwrap();
+    let mut lease = CapabilityLease::new(
+        context.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    lease.invocation_fingerprint = Some(fingerprint);
+    leases.issue(lease);
+
+    let authorizer = LeaseBackedAuthorizer::new(&leases);
+    let decision =
+        authorizer.authorize_dispatch(&context, &descriptor, &ResourceEstimate::default());
+
+    assert!(matches!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::MissingGrant
+        }
+    ));
+}
+
+#[test]
+fn claim_marks_fingerprinted_lease_claimed_and_hides_it_from_authorizer() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let fingerprint = InvocationFingerprint::for_dispatch(
+        &context.resource_scope,
+        &descriptor.id,
+        &ResourceEstimate::default(),
+        &serde_json::json!({"message": "approved"}),
+    )
+    .unwrap();
+    let mut lease = CapabilityLease::new(
+        context.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    lease.invocation_fingerprint = Some(fingerprint.clone());
+    let lease_id = lease.grant.id;
+    leases.issue(lease);
+
+    let claimed = leases
+        .claim(&context.resource_scope, lease_id, &fingerprint)
+        .unwrap();
+
+    assert_eq!(claimed.status, CapabilityLeaseStatus::Claimed);
+    let authorizer = LeaseBackedAuthorizer::new(&leases);
+    let decision =
+        authorizer.authorize_dispatch(&context, &descriptor, &ResourceEstimate::default());
+    assert!(matches!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::MissingGrant
+        }
+    ));
+}
+
+#[test]
+fn claim_rejects_fingerprint_mismatch_without_mutating_lease() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let fingerprint = InvocationFingerprint::for_dispatch(
+        &context.resource_scope,
+        &descriptor.id,
+        &ResourceEstimate::default(),
+        &serde_json::json!({"message": "approved"}),
+    )
+    .unwrap();
+    let other_fingerprint = InvocationFingerprint::for_dispatch(
+        &context.resource_scope,
+        &descriptor.id,
+        &ResourceEstimate::default(),
+        &serde_json::json!({"message": "tampered"}),
+    )
+    .unwrap();
+    let mut lease = CapabilityLease::new(
+        context.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    lease.invocation_fingerprint = Some(fingerprint);
+    let lease_id = lease.grant.id;
+    leases.issue(lease);
+
+    let err = leases
+        .claim(&context.resource_scope, lease_id, &other_fingerprint)
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityLeaseError::FingerprintMismatch { lease_id: id } if id == lease_id
+    ));
+    assert_eq!(
+        leases
+            .get(&context.resource_scope, lease_id)
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Active
+    );
+}
+
+#[test]
 fn lease_authorizer_hides_leases_across_tenant_scope() {
     let leases = InMemoryCapabilityLeaseStore::new();
     let context = execution_context(CapabilitySet::default());

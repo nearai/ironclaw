@@ -105,6 +105,8 @@ impl ApprovalKey {
 pub enum RunStateError {
     #[error("unknown invocation {invocation_id}")]
     UnknownInvocation { invocation_id: InvocationId },
+    #[error("invocation {invocation_id} already exists")]
+    InvocationAlreadyExists { invocation_id: InvocationId },
     #[error("unknown approval request {request_id}")]
     UnknownApprovalRequest { request_id: ApprovalRequestId },
     #[error("invalid storage path: {0}")]
@@ -240,10 +242,14 @@ impl RunStateStore for InMemoryRunStateStore {
             approval_request_id: None,
             error_kind: None,
         };
-        self.records_guard().insert(
-            RunStateKey::new(&record.scope, record.invocation_id),
-            record.clone(),
-        );
+        let key = RunStateKey::new(&record.scope, record.invocation_id);
+        let mut records = self.records_guard();
+        if records.contains_key(&key) {
+            return Err(RunStateError::InvocationAlreadyExists {
+                invocation_id: record.invocation_id,
+            });
+        }
+        records.insert(key, record.clone());
         Ok(record)
     }
 
@@ -444,6 +450,11 @@ where
     F: RootFilesystem,
 {
     async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
+        if self.get(&start.scope, start.invocation_id).await?.is_some() {
+            return Err(RunStateError::InvocationAlreadyExists {
+                invocation_id: start.invocation_id,
+            });
+        }
         let record = RunRecord {
             invocation_id: start.invocation_id,
             capability_id: start.capability_id,
