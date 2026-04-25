@@ -372,21 +372,48 @@ fn script_runtime_requires_docker_backend_in_v1() {
 }
 
 #[test]
-fn first_party_and_system_runtimes_parse_but_do_not_execute() {
+fn first_party_and_system_manifests_require_trusted_package_path() {
     let first_party = ExtensionManifest::parse(FIRST_PARTY_MANIFEST).unwrap();
     assert_eq!(first_party.runtime_kind(), RuntimeKind::FirstParty);
     assert_eq!(first_party.trust, TrustClass::FirstParty);
+    let err = ExtensionPackage::from_manifest(
+        first_party,
+        VirtualPath::new("/system/extensions/conversation").unwrap(),
+    )
+    .unwrap_err();
     assert!(matches!(
-        first_party.runtime,
-        ExtensionRuntime::FirstParty { ref service } if service == "conversation"
+        err,
+        ExtensionError::InvalidManifest { reason }
+            if reason.contains("privileged") && reason.contains("trusted provenance")
     ));
 
     let system = ExtensionManifest::parse(SYSTEM_MANIFEST).unwrap();
     assert_eq!(system.runtime_kind(), RuntimeKind::System);
     assert_eq!(system.trust, TrustClass::System);
+    let err = ExtensionPackage::from_manifest(
+        system,
+        VirtualPath::new("/system/extensions/audit").unwrap(),
+    )
+    .unwrap_err();
     assert!(matches!(
-        system.runtime,
-        ExtensionRuntime::System { ref service } if service == "audit"
+        err,
+        ExtensionError::InvalidManifest { reason }
+            if reason.contains("privileged") && reason.contains("trusted provenance")
+    ));
+}
+
+#[test]
+fn mcp_remote_url_is_rejected_until_network_contract_validation_exists() {
+    let remote_manifest = MCP_MANIFEST.replace(
+        "args = [\"--stdio\"]",
+        "args = [\"--stdio\"]\nurl = \"http://localhost:3000/mcp\"",
+    );
+    let err = ExtensionManifest::parse(&remote_manifest).unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExtensionError::InvalidManifest { reason }
+            if reason.contains("mcp url") && reason.contains("not supported")
     ));
 }
 

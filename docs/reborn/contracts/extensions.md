@@ -156,8 +156,8 @@ Manifest runtime kinds map to `ironclaw_host_api::RuntimeKind`:
 | `wasm` | `Wasm` | portable module lane |
 | `script` | `Script` | native CLI/script lane; V1 backend is Docker/container |
 | `mcp` | `Mcp` | MCP adapter lane |
-| `first_party` | `FirstParty` | trusted first-party service extension |
-| `system` | `System` | host-owned system fixture/service only |
+| `first_party` | `FirstParty` | trusted first-party service extension; public package loading must reject this without trusted provenance |
+| `system` | `System` | host-owned system fixture/service only; public package loading must reject this without trusted provenance |
 
 Runtime metadata is declarative. It is passed to the appropriate runtime crate later.
 
@@ -165,8 +165,8 @@ Rules:
 
 - WASM declarations may name module assets but must not load modules.
 - Script declarations may name Docker image/command/args but must not execute or expose raw Docker flags.
-- MCP declarations may describe stdio/remote transport but must not connect during manifest parsing/registry insertion.
-- Host/system declarations require matching trust ceilings and should be rare/first-party only.
+- MCP declarations may describe stdio transport but must not connect during manifest parsing/registry insertion. Remote `url` declarations are rejected in V1 until they can be represented by validated network target contracts.
+- Host/system declarations require matching trust ceilings and trusted provenance. The default/public package path must reject `first_party` and `system` manifests unless a host-vetted allowlist or signed bundle path is used.
 
 ---
 
@@ -259,7 +259,7 @@ pub struct ExtensionPackage {
 pub enum ExtensionRuntime {
     Wasm { module: ExtensionAssetPath },
     Script { backend: ScriptBackend, image: String, command: String, args: Vec<String> },
-    Mcp { transport: McpTransport, command: Option<String>, args: Vec<String>, url: Option<String> },
+    Mcp { transport: McpTransport, command: Option<String>, args: Vec<String> },
     FirstParty { service: String },
     System { service: String },
 }
@@ -291,7 +291,9 @@ Local contract tests should prove:
 - capability ID must be provider-prefixed.
 - runtime kind and trust ceiling parse correctly.
 - script runtime declaration stores Docker backend metadata without executing it.
-- MCP runtime declaration stores transport metadata without connecting.
+- MCP runtime declaration stores stdio transport metadata without connecting.
+- remote MCP URL declarations are rejected until validated network target contracts exist.
+- public package loading rejects first-party/system trust without trusted provenance.
 - invalid manifest-local asset paths are rejected.
 - registry rejects duplicate extension IDs.
 - registry rejects duplicate capability IDs.

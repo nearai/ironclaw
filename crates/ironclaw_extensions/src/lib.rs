@@ -209,6 +209,19 @@ impl ExtensionPackage {
         root: VirtualPath,
     ) -> Result<Self, ExtensionError> {
         ensure_extension_root_matches(&manifest.id, &root)?;
+        ensure_unprivileged_manifest(&manifest)?;
+        Self::from_trusted_manifest(manifest, root)
+    }
+
+    /// Constructs a package for host-vetted first-party/system manifests.
+    ///
+    /// Callers must only use this path after independently establishing package
+    /// provenance, such as a built-in allowlist or signed first-party bundle.
+    pub fn from_trusted_manifest(
+        manifest: ExtensionManifest,
+        root: VirtualPath,
+    ) -> Result<Self, ExtensionError> {
+        ensure_extension_root_matches(&manifest.id, &root)?;
         let expected_prefix = format!("{}.", manifest.id.as_str());
         let mut seen_capabilities = HashSet::new();
         let capabilities = manifest
@@ -436,6 +449,10 @@ impl RawRuntime {
                 }
                 if let Some(url) = &url {
                     validate_non_empty("mcp url", url)?;
+                    return Err(ExtensionError::InvalidManifest {
+                        reason: "mcp url is not supported until network target validation exists"
+                            .to_string(),
+                    });
                 }
                 Ok(ExtensionRuntime::Mcp {
                     transport,
@@ -466,6 +483,21 @@ struct RawCapability {
     parameters_schema: serde_json::Value,
     #[serde(default)]
     resource_profile: Option<ResourceProfile>,
+}
+
+fn ensure_unprivileged_manifest(manifest: &ExtensionManifest) -> Result<(), ExtensionError> {
+    if matches!(manifest.trust, TrustClass::FirstParty | TrustClass::System)
+        || matches!(
+            manifest.runtime,
+            ExtensionRuntime::FirstParty { .. } | ExtensionRuntime::System { .. }
+        )
+    {
+        return Err(ExtensionError::InvalidManifest {
+            reason: "privileged first_party/system manifests require trusted provenance"
+                .to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn ensure_extension_root_matches(
