@@ -1782,7 +1782,28 @@ async fn run_benchmark_conversion(
         &provenance,
     )
     .map_err(internal_error)?;
-    if let Err(error) = mirror_benchmark_export_provenance_to_db(state, &artifact).await {
+    let artifact_object_ref_material = if state.db_mirror.is_some() {
+        Some(
+            trace_export_artifact_object_ref_material(
+                state,
+                &tenant.tenant_id,
+                TraceArtifactKind::BenchmarkConversion,
+                conversion_id,
+                &benchmark_artifact_path(&state.root, &tenant.tenant_id, conversion_id),
+                &artifact,
+            )
+            .map_err(internal_error)?,
+        )
+    } else {
+        None
+    };
+    if let Err(error) = mirror_benchmark_export_provenance_to_db(
+        state,
+        &artifact,
+        artifact_object_ref_material.as_ref(),
+    )
+    .await
+    {
         tracing::warn!(
             %error,
             export_id = %conversion_id,
@@ -1893,9 +1914,28 @@ async fn ranker_training_candidates_handler(
         &provenance,
     )
     .map_err(internal_error)?;
-    if let Err(error) =
-        mirror_ranker_candidate_export_provenance_to_db(state.as_ref(), &provenance, &candidates)
-            .await
+    let artifact_object_ref_material = if state.db_mirror.is_some() {
+        Some(
+            trace_export_artifact_object_ref_material(
+                state.as_ref(),
+                &tenant.tenant_id,
+                TraceArtifactKind::RankerTrainingExport,
+                export_id,
+                &ranker_provenance_path(&state.root, &tenant.tenant_id, export_id),
+                &provenance,
+            )
+            .map_err(internal_error)?,
+        )
+    } else {
+        None
+    };
+    if let Err(error) = mirror_ranker_candidate_export_provenance_to_db(
+        state.as_ref(),
+        &provenance,
+        &candidates,
+        artifact_object_ref_material.as_ref(),
+    )
+    .await
     {
         tracing::warn!(
             %error,
@@ -1991,8 +2031,28 @@ async fn ranker_training_pairs_handler(
         &provenance,
     )
     .map_err(internal_error)?;
-    if let Err(error) =
-        mirror_ranker_pair_export_provenance_to_db(state.as_ref(), &provenance, &pairs).await
+    let artifact_object_ref_material = if state.db_mirror.is_some() {
+        Some(
+            trace_export_artifact_object_ref_material(
+                state.as_ref(),
+                &tenant.tenant_id,
+                TraceArtifactKind::RankerTrainingExport,
+                export_id,
+                &ranker_provenance_path(&state.root, &tenant.tenant_id, export_id),
+                &provenance,
+            )
+            .map_err(internal_error)?,
+        )
+    } else {
+        None
+    };
+    if let Err(error) = mirror_ranker_pair_export_provenance_to_db(
+        state.as_ref(),
+        &provenance,
+        &pairs,
+        artifact_object_ref_material.as_ref(),
+    )
+    .await
     {
         tracing::warn!(
             %error,
@@ -3495,6 +3555,15 @@ struct StoredTraceEnvelope {
     artifact_receipt: Option<EncryptedTraceArtifactReceipt>,
 }
 
+#[derive(Debug, Clone)]
+struct TraceExportArtifactObjectRefMaterial {
+    object_store: String,
+    object_key: String,
+    content_sha256: String,
+    encryption_key_ref: String,
+    size_bytes: i64,
+}
+
 fn store_envelope(
     state: &AppState,
     tenant_id: &str,
@@ -3577,6 +3646,107 @@ fn trace_object_ref_write_from_record(
         },
         content_sha256,
     ))
+}
+
+fn trace_export_artifact_object_ref_material<T: Serialize>(
+    state: &AppState,
+    tenant_id: &str,
+    artifact_kind: TraceArtifactKind,
+    object_id: Uuid,
+    file_path: &Path,
+    value: &T,
+) -> anyhow::Result<TraceExportArtifactObjectRefMaterial> {
+    let json = serde_json::to_string_pretty(value)
+        .context("failed to serialize trace export artifact for object ref")?;
+    let tenant_ref = tenant_storage_ref(tenant_id);
+    let (object_store, object_key, content_sha256) = if let Some(store) =
+        state.artifact_store.as_ref()
+    {
+        let receipt = store.put_json(&tenant_ref, artifact_kind, &object_id.to_string(), value)?;
+        (
+            store.object_store_name().to_string(),
+            receipt.object_key,
+            format!("sha256:{}", receipt.ciphertext_sha256),
+        )
+    } else {
+        (
+            TRACE_COMMONS_FILE_OBJECT_STORE.to_string(),
+            trace_file_object_key(&state.root, file_path)?,
+            sha256_prefixed(&json),
+        )
+    };
+
+    Ok(TraceExportArtifactObjectRefMaterial {
+        object_store,
+        object_key,
+        content_sha256,
+        encryption_key_ref: format!("tenant:{tenant_ref}"),
+        size_bytes: i64::try_from(json.len()).unwrap_or(i64::MAX),
+    })
+}
+
+fn trace_file_object_key(root: &Path, path: &Path) -> anyhow::Result<String> {
+    let relative = path.strip_prefix(root).with_context(|| {
+        format!(
+            "trace object file {} is outside root {}",
+            path.display(),
+            root.display()
+        )
+    })?;
+    anyhow::ensure!(
+        relative
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_))),
+        "trace object file key contains unsafe path components"
+    );
+    let segments = relative
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(segment) => segment.to_string_lossy().into_owned(),
+            _ => String::new(),
+        })
+        .collect::<Vec<_>>();
+    anyhow::ensure!(!segments.is_empty(), "trace object file key is empty");
+    Ok(segments.join("/"))
+}
+
+fn trace_export_artifact_object_ref_write(
+    tenant_id: &str,
+    submission_id: Uuid,
+    artifact_kind: StorageTraceObjectArtifactKind,
+    export_id: Uuid,
+    material: &TraceExportArtifactObjectRefMaterial,
+) -> StorageTraceObjectRefWrite {
+    StorageTraceObjectRefWrite {
+        object_ref_id: deterministic_trace_export_object_ref_uuid(
+            tenant_id,
+            export_id,
+            submission_id,
+            artifact_kind,
+        ),
+        tenant_id: tenant_id.to_string(),
+        submission_id,
+        artifact_kind,
+        object_store: material.object_store.clone(),
+        object_key: material.object_key.clone(),
+        content_sha256: material.content_sha256.clone(),
+        encryption_key_ref: material.encryption_key_ref.clone(),
+        size_bytes: material.size_bytes,
+        compression: None,
+        created_by_job_id: Some(export_id),
+    }
+}
+
+fn deterministic_trace_export_object_ref_uuid(
+    tenant_id: &str,
+    export_id: Uuid,
+    submission_id: Uuid,
+    artifact_kind: StorageTraceObjectArtifactKind,
+) -> Uuid {
+    let input = format!(
+        "ironclaw.trace_commons.export_artifact_object_ref:{tenant_id}:{export_id}:{submission_id}:{artifact_kind:?}"
+    );
+    Uuid::new_v5(&Uuid::NAMESPACE_URL, input.as_bytes())
 }
 
 async fn mirror_submission_to_db(
@@ -4185,6 +4355,7 @@ async fn mirror_export_manifest_to_db(
 async fn mirror_benchmark_export_provenance_to_db(
     state: &AppState,
     artifact: &TraceBenchmarkConversionArtifact,
+    artifact_object_ref_material: Option<&TraceExportArtifactObjectRefMaterial>,
 ) -> anyhow::Result<()> {
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
@@ -4212,7 +4383,15 @@ async fn mirror_benchmark_export_provenance_to_db(
             submission_id: candidate.submission_id,
             trace_id: candidate.trace_id,
             derived_id: Some(candidate.derived_id),
-            object_ref_id: None,
+            object_ref_id: append_export_artifact_object_ref_to_db(
+                db.as_ref(),
+                &artifact.tenant_id,
+                candidate.submission_id,
+                StorageTraceObjectArtifactKind::BenchmarkArtifact,
+                artifact.conversion_id,
+                artifact_object_ref_material,
+            )
+            .await?,
             vector_entry_id: vector_entry_ids
                 .get(&(
                     candidate.submission_id,
@@ -4238,6 +4417,7 @@ async fn mirror_ranker_candidate_export_provenance_to_db(
     state: &AppState,
     provenance: &TraceExportProvenanceManifest,
     candidates: &[TraceRankerTrainingCandidate],
+    artifact_object_ref_material: Option<&TraceExportArtifactObjectRefMaterial>,
 ) -> anyhow::Result<()> {
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
@@ -4260,7 +4440,15 @@ async fn mirror_ranker_candidate_export_provenance_to_db(
             submission_id: candidate.submission_id,
             trace_id: candidate.trace_id,
             derived_id: Some(candidate.derived_id),
-            object_ref_id: None,
+            object_ref_id: append_export_artifact_object_ref_to_db(
+                db.as_ref(),
+                &provenance.tenant_id,
+                candidate.submission_id,
+                StorageTraceObjectArtifactKind::ExportArtifact,
+                provenance.export_id,
+                artifact_object_ref_material,
+            )
+            .await?,
             vector_entry_id: vector_entry_ids
                 .get(&(
                     candidate.submission_id,
@@ -4286,6 +4474,7 @@ async fn mirror_ranker_pair_export_provenance_to_db(
     state: &AppState,
     provenance: &TraceExportProvenanceManifest,
     pairs: &[TraceRankerTrainingPair],
+    artifact_object_ref_material: Option<&TraceExportArtifactObjectRefMaterial>,
 ) -> anyhow::Result<()> {
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
@@ -4309,7 +4498,15 @@ async fn mirror_ranker_pair_export_provenance_to_db(
                 submission_id: candidate.submission_id,
                 trace_id: candidate.trace_id,
                 derived_id: Some(candidate.derived_id),
-                object_ref_id: None,
+                object_ref_id: append_export_artifact_object_ref_to_db(
+                    db.as_ref(),
+                    &provenance.tenant_id,
+                    candidate.submission_id,
+                    StorageTraceObjectArtifactKind::ExportArtifact,
+                    provenance.export_id,
+                    artifact_object_ref_material,
+                )
+                .await?,
                 vector_entry_id: vector_entry_ids
                     .get(&(
                         candidate.submission_id,
@@ -4330,6 +4527,35 @@ async fn mirror_ranker_pair_export_provenance_to_db(
         }
     }
     Ok(())
+}
+
+async fn append_export_artifact_object_ref_to_db(
+    db: &dyn Database,
+    tenant_id: &str,
+    submission_id: Uuid,
+    artifact_kind: StorageTraceObjectArtifactKind,
+    export_id: Uuid,
+    material: Option<&TraceExportArtifactObjectRefMaterial>,
+) -> anyhow::Result<Option<Uuid>> {
+    let Some(material) = material else {
+        return Ok(None);
+    };
+    let object_ref = trace_export_artifact_object_ref_write(
+        tenant_id,
+        submission_id,
+        artifact_kind,
+        export_id,
+        material,
+    );
+    let object_ref_id = object_ref.object_ref_id;
+    db.append_trace_object_ref(object_ref)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to mirror trace export artifact object ref for submission {submission_id}"
+            )
+        })?;
+    Ok(Some(object_ref_id))
 }
 
 async fn active_vector_entry_lookup_for_export(
@@ -14796,12 +15022,14 @@ mod tests {
             .expect("benchmark provenance items read");
         assert_eq!(benchmark_items.len(), 1);
         assert_eq!(benchmark_items[0].derived_id, Some(derived_id));
+        assert!(benchmark_items[0].object_ref_id.is_some());
         assert_eq!(benchmark_items[0].vector_entry_id, Some(vector_entry_id));
         let ranker_items = db
             .list_trace_export_manifest_items("tenant-a", ranker.export_id)
             .await
             .expect("ranker provenance items read");
         assert_eq!(ranker_items.len(), 2);
+        assert!(ranker_items.iter().all(|item| item.object_ref_id.is_some()));
         assert!(ranker_items.iter().any(|item| {
             item.submission_id == submission_id
                 && item.derived_id == Some(derived_id)
@@ -14817,6 +15045,11 @@ mod tests {
             .await
             .expect("ranker pair provenance items read");
         assert_eq!(ranker_pair_items.len(), 2);
+        assert!(
+            ranker_pair_items
+                .iter()
+                .all(|item| item.object_ref_id.is_some())
+        );
         assert!(
             ranker_pair_items
                 .iter()
@@ -14868,6 +15101,171 @@ mod tests {
         assert_eq!(manifests.len(), 1);
         assert_eq!(manifests[0].export_manifest_id, export.export_id);
         assert!(manifests[0].invalidated_at.is_some());
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn benchmark_and_ranker_exports_write_service_local_object_refs() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_root = temp.path().join("service-object-store");
+        let artifact_store = test_artifact_store(&artifact_root);
+        let configured_store = ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            artifact_store,
+        );
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp
+            .path()
+            .join("trace-derived-export-service-object-store.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+            Some(configured_store.clone()),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+        let mut benchmark_source = sample_envelope().await;
+        make_metadata_only_low_risk(&mut benchmark_source);
+        benchmark_source.consent.scopes = vec![
+            ConsentScope::DebuggingEvaluation,
+            ConsentScope::RankingTraining,
+        ];
+        let benchmark_submission_id = benchmark_source.submission_id;
+        let mut ranker_source = sample_envelope().await;
+        make_metadata_only_low_risk(&mut ranker_source);
+        ranker_source.consent.scopes = vec![ConsentScope::RankingTraining];
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(benchmark_source),
+        )
+        .await
+        .expect("benchmark/ranker source submission succeeds");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(ranker_source),
+        )
+        .await
+        .expect("ranker source submission succeeds");
+
+        let Json(benchmark) = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("service_local_benchmark".to_string()),
+                consent_scope: Some("debugging-evaluation".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("benchmark conversion succeeds");
+        assert_eq!(benchmark.item_count, 1);
+        let benchmark_items = db
+            .list_trace_export_manifest_items("tenant-a", benchmark.conversion_id)
+            .await
+            .expect("benchmark item metadata reads");
+        let benchmark_object_ref_id = benchmark_items[0]
+            .object_ref_id
+            .expect("benchmark item has artifact object ref");
+        let benchmark_object_ref = db
+            .list_trace_object_refs("tenant-a", benchmark_submission_id)
+            .await
+            .expect("benchmark object refs read")
+            .into_iter()
+            .find(|object_ref| object_ref.object_ref_id == benchmark_object_ref_id)
+            .expect("benchmark artifact object ref exists");
+        assert_eq!(
+            benchmark_object_ref.artifact_kind,
+            StorageTraceObjectArtifactKind::BenchmarkArtifact
+        );
+        assert_eq!(
+            benchmark_object_ref.object_store,
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+        );
+        let benchmark_artifact: TraceBenchmarkConversionArtifact = configured_store
+            .get_json_by_object_key(
+                &tenant_storage_ref("tenant-a"),
+                TraceArtifactKind::BenchmarkConversion,
+                &benchmark_object_ref.object_key,
+                &benchmark_object_ref.content_sha256,
+            )
+            .expect("benchmark artifact reads from service-local object store");
+        assert_eq!(benchmark_artifact.conversion_id, benchmark.conversion_id);
+        configured_store
+            .get_json_by_object_key::<TraceBenchmarkConversionArtifact>(
+                &tenant_storage_ref("tenant-b"),
+                TraceArtifactKind::BenchmarkConversion,
+                &benchmark_object_ref.object_key,
+                &benchmark_object_ref.content_sha256,
+            )
+            .expect_err("benchmark artifact object ref is tenant-scoped");
+
+        let Json(ranker) = ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect("ranker candidate export succeeds");
+        assert_eq!(ranker.item_count, 2);
+        let ranker_items = db
+            .list_trace_export_manifest_items("tenant-a", ranker.export_id)
+            .await
+            .expect("ranker item metadata reads");
+        let ranker_object_ref_id = ranker_items
+            .iter()
+            .find(|item| item.submission_id == benchmark_submission_id)
+            .and_then(|item| item.object_ref_id)
+            .expect("ranker item has artifact object ref");
+        let ranker_object_ref = db
+            .list_trace_object_refs("tenant-a", benchmark_submission_id)
+            .await
+            .expect("ranker object refs read")
+            .into_iter()
+            .find(|object_ref| object_ref.object_ref_id == ranker_object_ref_id)
+            .expect("ranker artifact object ref exists");
+        assert_eq!(
+            ranker_object_ref.artifact_kind,
+            StorageTraceObjectArtifactKind::ExportArtifact
+        );
+        assert_eq!(
+            ranker_object_ref.object_store,
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+        );
+        let provenance: TraceExportProvenanceManifest = configured_store
+            .get_json_by_object_key(
+                &tenant_storage_ref("tenant-a"),
+                TraceArtifactKind::RankerTrainingExport,
+                &ranker_object_ref.object_key,
+                &ranker_object_ref.content_sha256,
+            )
+            .expect("ranker provenance reads from service-local object store");
+        assert_eq!(provenance.export_id, ranker.export_id);
     }
 
     #[cfg(feature = "libsql")]
