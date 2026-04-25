@@ -25,6 +25,7 @@ use ironclaw::trace_contribution::{
     canonical_summary_for_embedding, rescrub_trace_envelope, retention_policy_for_trace,
 };
 use ironclaw::trace_corpus_storage::{
+    TraceArtifactInvalidationCounts as StorageTraceArtifactInvalidationCounts,
     TraceAuditAction as StorageTraceAuditAction,
     TraceAuditEventRecord as StorageTraceAuditEventRecord,
     TraceAuditEventWrite as StorageTraceAuditEventWrite,
@@ -2714,14 +2715,13 @@ async fn mirror_expiration_to_db(
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
     };
-    if db
+    let Some(record) = db
         .get_trace_submission(&tenant.tenant_id, submission_id)
         .await
         .context("failed to check trace submission before expiration mirror")?
-        .is_none()
-    {
+    else {
         return Ok(());
-    }
+    };
     db.update_trace_submission_status(
         &tenant.tenant_id,
         submission_id,
@@ -2731,26 +2731,46 @@ async fn mirror_expiration_to_db(
     )
     .await
     .context("failed to mirror trace expiration status")?;
-    db.invalidate_trace_submission_artifacts(
-        &tenant.tenant_id,
-        submission_id,
-        StorageTraceDerivedStatus::Expired,
-    )
-    .await
-    .context("failed to mirror trace expiration artifact invalidation")?;
-    db.invalidate_trace_vector_entries_for_submission(&tenant.tenant_id, submission_id)
+    let invalidation_counts = db
+        .invalidate_trace_submission_artifacts(
+            &tenant.tenant_id,
+            submission_id,
+            StorageTraceDerivedStatus::Expired,
+        )
+        .await
+        .context("failed to mirror trace expiration artifact invalidation")?;
+    let vector_entries_invalidated = db
+        .invalidate_trace_vector_entries_for_submission(&tenant.tenant_id, submission_id)
         .await
         .context("failed to mirror trace expiration vector invalidation")?;
-    db.invalidate_trace_export_manifests_for_submission(&tenant.tenant_id, submission_id)
+    let export_manifests_invalidated = db
+        .invalidate_trace_export_manifests_for_submission(&tenant.tenant_id, submission_id)
         .await
         .context("failed to mirror trace expiration export manifest invalidation")?;
-    db.invalidate_trace_export_manifest_items_for_submission(
-        &tenant.tenant_id,
-        submission_id,
-        StorageTraceExportManifestItemInvalidationReason::Expired,
+    let export_manifest_items_invalidated = db
+        .invalidate_trace_export_manifest_items_for_submission(
+            &tenant.tenant_id,
+            submission_id,
+            StorageTraceExportManifestItemInvalidationReason::Expired,
+        )
+        .await
+        .context("failed to mirror trace expiration export manifest item invalidation")?;
+    append_lifecycle_invalidation_audit_to_db(
+        db.as_ref(),
+        tenant,
+        &record,
+        TraceLifecycleInvalidationAuditInput {
+            action: StorageTraceAuditAction::Retain,
+            audit_id_label: "retention-expiration-artifact-invalidation",
+            reason: "retention_expired_artifact_invalidation",
+            status_count_label: "records_marked_expired",
+            invalidation_counts,
+            vector_entries_invalidated,
+            export_manifests_invalidated,
+            export_manifest_items_invalidated,
+        },
     )
-    .await
-    .context("failed to mirror trace expiration export manifest item invalidation")?;
+    .await?;
     Ok(())
 }
 
@@ -2762,14 +2782,13 @@ async fn mirror_purge_to_db(
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
     };
-    if db
+    let Some(record) = db
         .get_trace_submission(&tenant.tenant_id, submission_id)
         .await
         .context("failed to check trace submission before purge mirror")?
-        .is_none()
-    {
+    else {
         return Ok(());
-    }
+    };
     db.update_trace_submission_status(
         &tenant.tenant_id,
         submission_id,
@@ -2779,27 +2798,132 @@ async fn mirror_purge_to_db(
     )
     .await
     .context("failed to mirror trace purge status")?;
-    db.invalidate_trace_submission_artifacts(
-        &tenant.tenant_id,
-        submission_id,
-        StorageTraceDerivedStatus::Expired,
-    )
-    .await
-    .context("failed to mirror trace purge artifact invalidation")?;
-    db.invalidate_trace_vector_entries_for_submission(&tenant.tenant_id, submission_id)
+    let invalidation_counts = db
+        .invalidate_trace_submission_artifacts(
+            &tenant.tenant_id,
+            submission_id,
+            StorageTraceDerivedStatus::Expired,
+        )
+        .await
+        .context("failed to mirror trace purge artifact invalidation")?;
+    let vector_entries_invalidated = db
+        .invalidate_trace_vector_entries_for_submission(&tenant.tenant_id, submission_id)
         .await
         .context("failed to mirror trace purge vector invalidation")?;
-    db.invalidate_trace_export_manifests_for_submission(&tenant.tenant_id, submission_id)
+    let export_manifests_invalidated = db
+        .invalidate_trace_export_manifests_for_submission(&tenant.tenant_id, submission_id)
         .await
         .context("failed to mirror trace purge export manifest invalidation")?;
-    db.invalidate_trace_export_manifest_items_for_submission(
-        &tenant.tenant_id,
-        submission_id,
-        StorageTraceExportManifestItemInvalidationReason::Purged,
+    let export_manifest_items_invalidated = db
+        .invalidate_trace_export_manifest_items_for_submission(
+            &tenant.tenant_id,
+            submission_id,
+            StorageTraceExportManifestItemInvalidationReason::Purged,
+        )
+        .await
+        .context("failed to mirror trace purge export manifest item invalidation")?;
+    append_lifecycle_invalidation_audit_to_db(
+        db.as_ref(),
+        tenant,
+        &record,
+        TraceLifecycleInvalidationAuditInput {
+            action: StorageTraceAuditAction::Purge,
+            audit_id_label: "retention-purge-artifact-invalidation",
+            reason: "retention_purged_artifact_invalidation",
+            status_count_label: "records_marked_purged",
+            invalidation_counts,
+            vector_entries_invalidated,
+            export_manifests_invalidated,
+            export_manifest_items_invalidated,
+        },
     )
-    .await
-    .context("failed to mirror trace purge export manifest item invalidation")?;
+    .await?;
     Ok(())
+}
+
+struct TraceLifecycleInvalidationAuditInput {
+    action: StorageTraceAuditAction,
+    audit_id_label: &'static str,
+    reason: &'static str,
+    status_count_label: &'static str,
+    invalidation_counts: StorageTraceArtifactInvalidationCounts,
+    vector_entries_invalidated: u64,
+    export_manifests_invalidated: u64,
+    export_manifest_items_invalidated: u64,
+}
+
+async fn append_lifecycle_invalidation_audit_to_db(
+    db: &dyn Database,
+    tenant: &TenantAuth,
+    record: &StorageTraceSubmissionRecord,
+    input: TraceLifecycleInvalidationAuditInput,
+) -> anyhow::Result<()> {
+    let mut action_counts = lifecycle_invalidation_action_counts(
+        input.invalidation_counts,
+        input.vector_entries_invalidated,
+        input.export_manifests_invalidated,
+        input.export_manifest_items_invalidated,
+    );
+    action_counts.insert(input.status_count_label.to_string(), 1);
+
+    db.append_trace_audit_event(StorageTraceAuditEventWrite {
+        audit_event_id: deterministic_trace_uuid_for(
+            input.audit_id_label,
+            &record.tenant_id,
+            record.submission_id,
+        ),
+        tenant_id: record.tenant_id.clone(),
+        actor_principal_ref: tenant.principal_ref.clone(),
+        actor_role: format!("{:?}", tenant.role).to_ascii_lowercase(),
+        action: input.action,
+        reason: Some(input.reason.to_string()),
+        request_id: None,
+        submission_id: Some(record.submission_id),
+        object_ref_id: None,
+        export_manifest_id: None,
+        decision_inputs_hash: None,
+        metadata: StorageTraceAuditSafeMetadata::Maintenance {
+            dry_run: false,
+            action_counts,
+        },
+    })
+    .await
+    .context("failed to mirror trace lifecycle artifact invalidation audit")?;
+    Ok(())
+}
+
+fn lifecycle_invalidation_action_counts(
+    invalidation_counts: StorageTraceArtifactInvalidationCounts,
+    vector_entries_invalidated: u64,
+    export_manifests_invalidated: u64,
+    export_manifest_items_invalidated: u64,
+) -> BTreeMap<String, u32> {
+    let mut action_counts = BTreeMap::new();
+    action_counts.insert(
+        "object_refs_invalidated".to_string(),
+        invalidation_counts
+            .object_refs_invalidated
+            .min(u64::from(u32::MAX)) as u32,
+    );
+    action_counts.insert(
+        "derived_records_invalidated".to_string(),
+        invalidation_counts
+            .derived_records_invalidated
+            .min(u64::from(u32::MAX)) as u32,
+    );
+    action_counts.insert(
+        "vector_entries_invalidated".to_string(),
+        vector_entries_invalidated.min(u64::from(u32::MAX)) as u32,
+    );
+    action_counts.insert(
+        "export_manifests_invalidated".to_string(),
+        export_manifests_invalidated.min(u64::from(u32::MAX)) as u32,
+    );
+    action_counts.insert(
+        "export_manifest_items_invalidated".to_string(),
+        export_manifest_items_invalidated.min(u64::from(u32::MAX)) as u32,
+    );
+    action_counts
 }
 
 async fn mirror_review_decision_to_db(
@@ -8206,6 +8330,48 @@ mod tests {
             record.submission_id == submission_id
                 && record.status == StorageTraceDerivedStatus::Expired
         }));
+        let audit_events = db
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("audit events read");
+        let expiration_audit = audit_events
+            .iter()
+            .find(|event| {
+                event.action == StorageTraceAuditAction::Retain
+                    && event.submission_id == Some(submission_id)
+                    && event.reason.as_deref() == Some("retention_expired_artifact_invalidation")
+            })
+            .expect("expiration invalidation audit is mirrored");
+        match &expiration_audit.metadata {
+            StorageTraceAuditSafeMetadata::Maintenance {
+                dry_run,
+                action_counts,
+            } => {
+                assert!(!dry_run);
+                assert_eq!(
+                    action_counts
+                        .get("records_marked_expired")
+                        .copied()
+                        .unwrap_or_default(),
+                    1
+                );
+                assert!(
+                    action_counts
+                        .get("object_refs_invalidated")
+                        .copied()
+                        .unwrap_or_default()
+                        >= 1
+                );
+                assert!(
+                    action_counts
+                        .get("derived_records_invalidated")
+                        .copied()
+                        .unwrap_or_default()
+                        >= 1
+                );
+            }
+            metadata => panic!("unexpected expiration audit metadata: {metadata:?}"),
+        }
     }
 
     #[cfg(feature = "libsql")]
@@ -8296,6 +8462,35 @@ mod tests {
             record.submission_id == submission_id
                 && record.status == StorageTraceDerivedStatus::Expired
         }));
+        let audit_events = db
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("audit events read");
+        let purge_audit = audit_events
+            .iter()
+            .find(|event| {
+                event.action == StorageTraceAuditAction::Purge
+                    && event.submission_id == Some(submission_id)
+                    && event.reason.as_deref() == Some("retention_purged_artifact_invalidation")
+            })
+            .expect("purge invalidation audit is mirrored");
+        match &purge_audit.metadata {
+            StorageTraceAuditSafeMetadata::Maintenance {
+                dry_run,
+                action_counts,
+            } => {
+                assert!(!dry_run);
+                assert_eq!(
+                    action_counts
+                        .get("records_marked_purged")
+                        .copied()
+                        .unwrap_or_default(),
+                    1
+                );
+                assert!(action_counts.contains_key("object_refs_invalidated"));
+            }
+            metadata => panic!("unexpected purge audit metadata: {metadata:?}"),
+        }
     }
 
     #[tokio::test]
