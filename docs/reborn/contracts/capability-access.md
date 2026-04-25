@@ -11,7 +11,7 @@
 
 `ironclaw_authorization` evaluates authority-bearing host API contracts before runtime execution.
 
-The first slice adds a grant-backed capability dispatch gate:
+The first slices add grant- and lease-backed capability dispatch gates:
 
 ```text
 ExecutionContext + CapabilityDescriptor + ResourceEstimate
@@ -27,7 +27,7 @@ The authorizer does not execute capabilities, reserve resources, prompt users, i
 
 A registered capability is only a possibility. It is not authority.
 
-V1 dispatch authorization requires a matching `CapabilityGrant` in `ExecutionContext.grants`:
+V1 dispatch authorization requires a matching `CapabilityGrant` from `ExecutionContext.grants` or from an active tenant/user-scoped `CapabilityLease`:
 
 ```text
 grant.capability == descriptor.id
@@ -70,7 +70,27 @@ The V1 `GrantAuthorizer` can match grants issued to:
 
 ---
 
-## 4. Capability host integration
+## 4. Lease-backed authorization
+
+Approved requests can issue `CapabilityLease` values:
+
+```rust
+pub struct CapabilityLease {
+    pub scope: ResourceScope,
+    pub grant: CapabilityGrant,
+    pub status: CapabilityLeaseStatus,
+}
+```
+
+`LeaseBackedAuthorizer` combines request-local grants with active leases visible to the current `ExecutionContext.resource_scope` and then applies the same grant matching rules. Lease lookup is tenant/user scoped; a lease issued under one tenant/user must not authorize another tenant/user, even when UUIDs collide. V1 approval leases are also exact-invocation leases: they must not authorize a different invocation in the same tenant/user until reusable approval scopes are explicitly implemented.
+
+V1 supports active and revoked lease state. Revocation is tenant/user scoped, and revoked leases are ignored by authorization.
+
+See `docs/reborn/contracts/approvals.md` for how approval resolution issues leases.
+
+---
+
+## 5. Capability host integration
 
 `ironclaw_authorization` is consumed by the caller-facing capability invocation service, not by the dispatcher.
 
@@ -86,12 +106,12 @@ The dispatcher remains auth-unaware: it receives already-authorized `CapabilityD
 
 ---
 
-## 5. Current limits
+## 6. Current limits
 
 This slice intentionally keeps authorization narrow:
 
-- no approval prompt orchestration yet
-- no grant persistence or revocation store
+- no approval prompt UI/orchestration yet
+- no durable grant/lease persistence yet
 - no invocation count tracking for `max_invocations`
 - no expiration enforcement yet
 - no resource ceiling obligation enforcement yet

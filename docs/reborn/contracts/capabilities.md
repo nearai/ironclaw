@@ -3,7 +3,7 @@
 **Date:** 2026-04-25
 **Status:** V1 contract slice
 **Crate:** `crates/ironclaw_capabilities`
-**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/capability-access.md`, `docs/reborn/contracts/run-state.md`, `docs/reborn/contracts/dispatcher.md`
+**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/capability-access.md`, `docs/reborn/contracts/approvals.md`, `docs/reborn/contracts/run-state.md`, `docs/reborn/contracts/dispatcher.md`
 
 ---
 
@@ -105,8 +105,8 @@ It has no dependency on `ironclaw_authorization`, no `ExecutionContext`, and no 
 
 This slice does not implement:
 
-- approval resolution or resume
-- grant storage, revocation, or expiration enforcement
+- invocation resume after approval resolution
+- durable grant/lease storage, revocation, or expiration enforcement
 - invocation count tracking
 - obligation application beyond returning allowed/denied
 - transcript/job history
