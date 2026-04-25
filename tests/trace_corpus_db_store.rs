@@ -430,6 +430,8 @@ mod libsql_trace_corpus_store {
                 object_ref_id: None,
                 export_manifest_id: None,
                 decision_inputs_hash: None,
+                previous_event_hash: Some("sha256:genesis".to_string()),
+                event_hash: Some("sha256:test-audit-event".to_string()),
                 metadata: TraceAuditSafeMetadata::Submission {
                     status: TraceCorpusStatus::Accepted,
                     privacy_risk: "low".to_string(),
@@ -447,6 +449,14 @@ mod libsql_trace_corpus_store {
         assert_eq!(audit_events[0].action, TraceAuditAction::Submit);
         assert_eq!(audit_events[0].actor_principal_ref, "principal:test-user");
         assert_eq!(audit_events[0].request_id.as_deref(), Some("request:test"));
+        assert_eq!(
+            audit_events[0].previous_event_hash.as_deref(),
+            Some("sha256:genesis")
+        );
+        assert_eq!(
+            audit_events[0].event_hash.as_deref(),
+            Some("sha256:test-audit-event")
+        );
         assert_eq!(
             audit_events[0].metadata,
             TraceAuditSafeMetadata::Submission {

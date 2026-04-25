@@ -1110,6 +1110,8 @@ CREATE TABLE IF NOT EXISTS trace_audit_events (
     object_ref_id TEXT,
     export_manifest_id TEXT,
     decision_inputs_hash TEXT,
+    previous_event_hash TEXT,
+    event_hash TEXT,
     metadata_json TEXT NOT NULL DEFAULT '{}',
     occurred_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     PRIMARY KEY (tenant_id, audit_event_id)
@@ -1348,6 +1350,14 @@ CREATE INDEX IF NOT EXISTS idx_trace_export_manifest_items_manifest
     ON trace_export_manifest_items (tenant_id, export_manifest_id, created_at ASC);
 "#,
     ),
+    (
+        31,
+        "trace_audit_hash_chain",
+        r#"
+ALTER TABLE trace_audit_events ADD COLUMN previous_event_hash TEXT;
+ALTER TABLE trace_audit_events ADD COLUMN event_hash TEXT;
+"#,
+    ),
 ];
 
 /// Migrations whose ADD COLUMN should be skipped when the column already
@@ -1366,6 +1376,8 @@ const IDEMPOTENT_ADD_COLUMN_MIGRATIONS: &[(i64, &str, &str)] = &[
     (27, "trace_derived_records", "tool_sequence"),
     (27, "trace_derived_records", "tool_categories"),
     (27, "trace_derived_records", "coverage_tags"),
+    (31, "trace_audit_events", "previous_event_hash"),
+    (31, "trace_audit_events", "event_hash"),
 ];
 
 /// Check whether `table` already contains `column` via `pragma_table_info`.

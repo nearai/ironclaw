@@ -382,7 +382,7 @@ fn row_to_audit_event(row: &libsql::Row) -> Result<TraceAuditEventRecord, Databa
     let export_manifest_id = get_opt_text(row, 9)
         .map(|id| parse_uuid(&id, "trace_audit_events.export_manifest_id"))
         .transpose()?;
-    let metadata = serde_json::from_str(&get_text(row, 11)).map_err(|e| {
+    let metadata = serde_json::from_str(&get_text(row, 13)).map_err(|e| {
         DatabaseError::Serialization(format!("trace audit metadata JSON decode failed: {e}"))
     })?;
     Ok(TraceAuditEventRecord {
@@ -397,8 +397,10 @@ fn row_to_audit_event(row: &libsql::Row) -> Result<TraceAuditEventRecord, Databa
         object_ref_id,
         export_manifest_id,
         decision_inputs_hash: get_opt_text(row, 10),
+        previous_event_hash: get_opt_text(row, 11),
+        event_hash: get_opt_text(row, 12),
         metadata,
-        occurred_at: get_ts(row, 12),
+        occurred_at: get_ts(row, 14),
     })
 }
 
@@ -650,6 +652,8 @@ impl TraceCorpusStore for LibSqlBackend {
             object_ref_id: None,
             export_manifest_id: None,
             decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
             metadata: TraceAuditSafeMetadata::ReviewDecision {
                 decision: enum_to_storage(status)?,
                 resulting_status: status,
@@ -1259,8 +1263,8 @@ impl TraceCorpusStore for LibSqlBackend {
             "INSERT INTO trace_audit_events (
                 tenant_id, audit_event_id, actor_principal_ref, actor_role, action, reason,
                 request_id, submission_id, object_ref_id, export_manifest_id,
-                decision_inputs_hash, metadata_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                decision_inputs_hash, previous_event_hash, event_hash, metadata_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             libsql::params![
                 audit_event.tenant_id.as_str(),
                 audit_event.audit_event_id.to_string(),
@@ -1273,6 +1277,8 @@ impl TraceCorpusStore for LibSqlBackend {
                 opt_uuid(audit_event.object_ref_id),
                 opt_uuid(audit_event.export_manifest_id),
                 opt_string(audit_event.decision_inputs_hash),
+                opt_string(audit_event.previous_event_hash),
+                opt_string(audit_event.event_hash),
                 json_string(&audit_event.metadata)?,
             ],
         )
@@ -1291,7 +1297,8 @@ impl TraceCorpusStore for LibSqlBackend {
                 "SELECT
                     tenant_id, audit_event_id, actor_principal_ref, actor_role, action, reason,
                     request_id, submission_id, object_ref_id, export_manifest_id,
-                    decision_inputs_hash, metadata_json, occurred_at
+                    decision_inputs_hash, previous_event_hash, event_hash, metadata_json,
+                    occurred_at
                  FROM trace_audit_events
                  WHERE tenant_id = ?1
                  ORDER BY occurred_at ASC",

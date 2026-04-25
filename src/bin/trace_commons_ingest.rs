@@ -2416,8 +2416,8 @@ fn trace_commons_audit_event_from_storage(
         export_count,
         export_id: event.export_manifest_id,
         decision_inputs_hash: event.decision_inputs_hash,
-        previous_event_hash: None,
-        event_hash: None,
+        previous_event_hash: event.previous_event_hash,
+        event_hash: event.event_hash,
     })
 }
 
@@ -2814,6 +2814,8 @@ async fn mirror_submission_to_db(
         object_ref_id: Some(object_ref_id),
         export_manifest_id: None,
         decision_inputs_hash: Some(derived_record.canonical_summary_hash.clone()),
+        previous_event_hash: None,
+        event_hash: None,
         metadata: StorageTraceAuditSafeMetadata::Submission {
             status: storage_corpus_status(record.status),
             privacy_risk: privacy_risk.clone(),
@@ -2950,6 +2952,8 @@ async fn mirror_revocation_to_db(
             object_ref_id: None,
             export_manifest_id: None,
             decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
             metadata: StorageTraceAuditSafeMetadata::Maintenance {
                 dry_run: false,
                 action_counts,
@@ -3137,6 +3141,8 @@ async fn append_lifecycle_invalidation_audit_to_db(
         object_ref_id: None,
         export_manifest_id: None,
         decision_inputs_hash: None,
+        previous_event_hash: None,
+        event_hash: None,
         metadata: StorageTraceAuditSafeMetadata::Maintenance {
             dry_run: false,
             action_counts,
@@ -4048,7 +4054,7 @@ fn append_audit_event(
     root: &Path,
     tenant_id: &str,
     mut event: TraceCommonsAuditEvent,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<TraceCommonsAuditEvent> {
     let tenant_key = tenant_storage_key(tenant_id);
     let path = root
         .join("tenants")
@@ -4071,7 +4077,8 @@ fn append_audit_event(
         .with_context(|| format!("failed to open audit log {}", path.display()))?;
     let line = serde_json::to_string(&event).context("failed to serialize audit event")?;
     writeln!(file, "{line}")
-        .with_context(|| format!("failed to append audit log {}", path.display()))
+        .with_context(|| format!("failed to append audit log {}", path.display()))?;
+    Ok(event)
 }
 
 const TRACE_AUDIT_EVENT_GENESIS_HASH: &str = "sha256:genesis";
@@ -4121,7 +4128,7 @@ async fn append_audit_event_with_db_mirror(
     action: StorageTraceAuditAction,
     metadata: StorageTraceAuditSafeMetadata,
 ) -> anyhow::Result<()> {
-    append_audit_event(&state.root, &tenant.tenant_id, event.clone())?;
+    let event = append_audit_event(&state.root, &tenant.tenant_id, event)?;
     if let Err(error) = mirror_audit_event_to_db(state, tenant, &event, action, metadata).await {
         tracing::warn!(
             %error,
@@ -4141,7 +4148,7 @@ async fn append_trace_content_read_audit(
     purpose: Option<&str>,
 ) -> anyhow::Result<()> {
     let event = TraceCommonsAuditEvent::trace_content_read(tenant, submission_id, surface, purpose);
-    append_audit_event(&state.root, &tenant.tenant_id, event.clone())?;
+    let event = append_audit_event(&state.root, &tenant.tenant_id, event)?;
     if let Err(error) = mirror_audit_event_to_db_with_object_ref(
         state,
         tenant,
@@ -4201,6 +4208,8 @@ async fn mirror_audit_event_to_db_with_object_ref(
         object_ref_id,
         export_manifest_id: event.export_id,
         decision_inputs_hash: event.decision_inputs_hash.clone(),
+        previous_event_hash: event.previous_event_hash.clone(),
+        event_hash: event.event_hash.clone(),
         metadata,
     })
     .await
@@ -10718,8 +10727,9 @@ mod tests {
             .list_trace_audit_events("tenant-a")
             .await
             .expect("audit events read from db");
-        assert!(
-            db_audit_events.iter().any(|event| {
+        let db_content_read_audit = db_audit_events
+            .iter()
+            .find(|event| {
                 event.action == StorageTraceAuditAction::Read
                     && event.submission_id == Some(submission_id)
                     && event.object_ref_id == Some(active_object_ref.object_ref_id)
@@ -10727,8 +10737,23 @@ mod tests {
                         reason.contains("surface=replay_dataset_export")
                             && reason.contains("purpose=db_audit_export")
                     })
-            }),
-            "DB content-read audit events should name the object ref that passed the read gate"
+            })
+            .expect(
+                "DB content-read audit event should name the object ref that passed the read gate",
+            );
+        assert!(
+            db_content_read_audit
+                .previous_event_hash
+                .as_deref()
+                .is_some_and(|hash| hash.starts_with("sha256:")),
+            "DB content-read audit events should retain their previous file audit hash"
+        );
+        assert!(
+            db_content_read_audit
+                .event_hash
+                .as_deref()
+                .is_some_and(|hash| hash.starts_with("sha256:")),
+            "DB content-read audit events should retain the file audit hash chain"
         );
         let credit_audit_event = db_audit_events
             .iter()
@@ -10789,6 +10814,10 @@ mod tests {
         assert!(events.iter().any(|event| {
             event.submission_id == submission_id
                 && event.kind == "trace_content_read"
+                && event
+                    .event_hash
+                    .as_deref()
+                    .is_some_and(|hash| hash.starts_with("sha256:"))
                 && event.reason.as_deref().is_some_and(|reason| {
                     reason.contains("surface=replay_dataset_export")
                         && reason.contains("purpose=db_audit_export")

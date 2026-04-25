@@ -385,6 +385,8 @@ pub struct TraceAuditEventWrite {
     pub object_ref_id: Option<Uuid>,
     pub export_manifest_id: Option<Uuid>,
     pub decision_inputs_hash: Option<String>,
+    pub previous_event_hash: Option<String>,
+    pub event_hash: Option<String>,
     pub metadata: TraceAuditSafeMetadata,
 }
 
@@ -401,6 +403,8 @@ pub struct TraceAuditEventRecord {
     pub object_ref_id: Option<Uuid>,
     pub export_manifest_id: Option<Uuid>,
     pub decision_inputs_hash: Option<String>,
+    pub previous_event_hash: Option<String>,
+    pub event_hash: Option<String>,
     pub metadata: TraceAuditSafeMetadata,
     pub occurred_at: DateTime<Utc>,
 }

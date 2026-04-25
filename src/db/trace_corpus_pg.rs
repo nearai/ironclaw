@@ -296,6 +296,8 @@ fn row_to_audit_event(row: &Row) -> Result<TraceAuditEventRecord, DatabaseError>
         object_ref_id: row.get("object_ref_id"),
         export_manifest_id: row.get("export_manifest_id"),
         decision_inputs_hash: row.get("decision_inputs_hash"),
+        previous_event_hash: row.get("previous_event_hash"),
+        event_hash: row.get("event_hash"),
         metadata: serde_json::from_value(metadata).map_err(|e| {
             DatabaseError::Serialization(format!("trace audit metadata JSON decode failed: {e}"))
         })?,
@@ -571,6 +573,8 @@ impl TraceCorpusStore for PgBackend {
             object_ref_id: None,
             export_manifest_id: None,
             decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
             metadata: TraceAuditSafeMetadata::ReviewDecision {
                 decision: status_value,
                 resulting_status: status,
@@ -1129,8 +1133,8 @@ impl TraceCorpusStore for PgBackend {
             "INSERT INTO trace_audit_events (
                     tenant_id, audit_event_id, actor_principal_ref, actor_role, action,
                     reason, request_id, submission_id, object_ref_id, export_manifest_id,
-                    decision_inputs_hash, metadata_json
-                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                    decision_inputs_hash, previous_event_hash, event_hash, metadata_json
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
             &[
                 &audit_event.tenant_id,
                 &audit_event.audit_event_id,
@@ -1143,6 +1147,8 @@ impl TraceCorpusStore for PgBackend {
                 &audit_event.object_ref_id,
                 &audit_event.export_manifest_id,
                 &audit_event.decision_inputs_hash,
+                &audit_event.previous_event_hash,
+                &audit_event.event_hash,
                 &metadata_json,
             ],
         )
@@ -1163,7 +1169,8 @@ impl TraceCorpusStore for PgBackend {
                 "SELECT
                     tenant_id, audit_event_id, actor_principal_ref, actor_role, action, reason,
                     request_id, submission_id, object_ref_id, export_manifest_id,
-                    decision_inputs_hash, metadata_json, occurred_at
+                    decision_inputs_hash, previous_event_hash, event_hash, metadata_json,
+                    occurred_at
                  FROM trace_audit_events
                  WHERE tenant_id = $1
                  ORDER BY occurred_at ASC",
