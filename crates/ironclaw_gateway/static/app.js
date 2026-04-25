@@ -7765,7 +7765,14 @@ function flushTraceCommonsQueue() {
 
 function traceFlushToast(report) {
   report = report || {};
-  return 'Trace queue flushed: ' + (report.submitted || 0) + ' submitted, ' + (report.held || 0) + ' held';
+  return 'Trace queue flushed: ' + (report.submitted || 0) + ' submitted, ' + (report.held || 0) + ' held'
+    + traceCreditNoticeToast(report.credit_notice);
+}
+
+function traceCreditNoticeToast(summary) {
+  if (!summary) return '';
+  return '. Credit: pending +' + Number(summary.pending_credit || 0).toFixed(2)
+    + ', final +' + Number(summary.final_credit || 0).toFixed(2);
 }
 
 function revokeTraceSubmission(submissionId) {
@@ -8831,10 +8838,12 @@ function requestTraceSubmitEndpoint() {
 
 function traceSubmitToast(report) {
   if (report && report.fallback && report.flush) {
-    return 'Trace queued and flushed: ' + (report.flush.submitted || 0) + ' submitted, ' + (report.flush.held || 0) + ' held';
+    return 'Trace queued and flushed: ' + (report.flush.submitted || 0) + ' submitted, ' + (report.flush.held || 0) + ' held'
+      + traceCreditNoticeToast(report.flush.credit_notice);
   }
   if (report && report.submitted !== undefined) {
-    return 'Trace submitted: ' + (report.submitted || 0) + ' submitted, ' + (report.held || 0) + ' held';
+    return 'Trace submitted: ' + (report.submitted || 0) + ' submitted, ' + (report.held || 0) + ' held'
+      + traceCreditNoticeToast(report.credit_notice);
   }
   return 'Trace submitted';
 }

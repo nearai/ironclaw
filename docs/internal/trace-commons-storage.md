@@ -49,7 +49,7 @@ Do not put bearer tokens, raw local paths, raw sidecar spans, unredacted trace t
 
 ## Concrete DB Migration Slice
 
-This first production-storage slice has now been implemented as a dark-launch bridge. It creates the relational control plane only: envelope payloads belong in encrypted artifact storage, and vector payloads can stay in a vector store or backend-specific index. `src/bin/trace_commons_ingest.rs` can mirror metadata into the DB when `TRACE_COMMONS_DB_DUAL_WRITE=true`, including submission redaction counts, derived summary/tool/coverage metadata, vector-entry metadata, replay export manifest metadata, replay export source item rows, and read/export/credit audit events. Export audit rows now carry deterministic source-list hashes in `decision_inputs_hash` for replay datasets, benchmark conversion artifacts, and ranker training exports; replay dataset exports also mirror durable tenant-scoped manifest rows with source ids, source-list hashes, and per-source status/hash snapshots. The maintenance endpoint can expire past-due pilot records, mirror expiration status plus artifact invalidation into the DB, backfill pilot file records into the DB, index accepted canonical summaries into deterministic vector metadata rows with `index_vectors: true`, and return a file-vs-DB reconciliation report with `reconcile_db_mirror: true`. File-backed APIs remain the default source of pilot responses. `TRACE_COMMONS_DB_CONTRIBUTOR_READS=true` can switch contributor credit, credit-event, and submission-status reads to the DB mirror after dual-write or backfill is in place. `TRACE_COMMONS_DB_REVIEWER_READS=true` can switch reviewer/admin metadata reads for analytics, trace listing, quarantine queue, active-learning queue, benchmark candidate conversion, and ranker exports to the DB mirror. `TRACE_COMMONS_DB_REPLAY_EXPORT_READS=true` can select replay export records from DB metadata while still loading the redacted envelope body through the existing object path. `TRACE_COMMONS_DB_AUDIT_READS=true` can serve reviewer audit reads from the DB mirror.
+This first production-storage slice has now been implemented as a dark-launch bridge. It creates the relational control plane only: envelope payloads belong in encrypted artifact storage, and vector payloads can stay in a vector store or backend-specific index. `src/bin/trace_commons_ingest.rs` can mirror metadata into the DB when `TRACE_COMMONS_DB_DUAL_WRITE=true`, including submission redaction counts, derived summary/tool/coverage metadata, vector-entry metadata, replay export manifest metadata, replay export source item rows, benchmark/ranker export provenance metadata, and read/export/credit audit events. Export audit rows now carry deterministic source-list hashes in `decision_inputs_hash` for replay datasets, benchmark conversion artifacts, and ranker training exports; replay dataset exports also mirror durable tenant-scoped manifest rows with source ids, source-list hashes, and per-source status/hash snapshots. Benchmark and ranker exports write file-backed provenance manifests and opportunistically mirror them into the same export manifest/item tables without schema changes. The maintenance endpoint can expire past-due pilot records, mirror expiration status plus artifact invalidation into the DB, invalidate benchmark/ranker provenance manifests, backfill pilot file records into the DB, index accepted canonical summaries into deterministic vector metadata rows with `index_vectors: true`, and return a file-vs-DB reconciliation report with `reconcile_db_mirror: true`. File-backed APIs remain the default source of pilot responses. `TRACE_COMMONS_DB_CONTRIBUTOR_READS=true` can switch contributor credit, credit-event, and submission-status reads to the DB mirror after dual-write or backfill is in place. `TRACE_COMMONS_DB_REVIEWER_READS=true` can switch reviewer/admin metadata reads for analytics, trace listing, quarantine queue, active-learning queue, benchmark candidate conversion, and ranker exports to the DB mirror. `TRACE_COMMONS_DB_REPLAY_EXPORT_READS=true` can select replay export records from DB metadata while still loading the redacted envelope body through the existing object path. `TRACE_COMMONS_DB_AUDIT_READS=true` can serve reviewer audit reads from the DB mirror.
 
 ### Safe Migration Naming
 
@@ -374,16 +374,16 @@ CREATE TABLE trace_retention_job_items (
 );
 ```
 
-Before production cutover, add RLS in the same or a follow-up migration once the service role model is settled:
+V31 adds the first PostgreSQL RLS policy layer for the tenant-scoped Trace Commons metadata tables:
 
 ```sql
 ALTER TABLE trace_submissions ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_submissions_tenant_isolation ON trace_submissions
-    USING (tenant_id = current_setting('app.tenant_id'))
-    WITH CHECK (tenant_id = current_setting('app.tenant_id'));
+    USING (tenant_id = current_setting('ironclaw.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('ironclaw.trace_tenant_id', true));
 ```
 
-Apply the same RLS pattern to every tenant-scoped `trace_*` table. Worker roles should get explicit policy variants, not blanket bypass.
+The migration intentionally does not use `FORCE ROW LEVEL SECURITY`, so table owners still bypass policies for safe migrations, backfills, and repairs while the runtime moves to transaction-local tenant context. Before production cutover, every PG-backed Trace Commons store path should set `SELECT set_config('ironclaw.trace_tenant_id', $1, true)` inside the operation transaction, and worker roles should get explicit policy variants, not blanket bypass.
 
 ### libSQL DDL Sketch
 
@@ -915,7 +915,7 @@ Do not mutate historical ledger rows. Materialized credit totals can be cached s
 | `source_status_at_export`, `source_hash_at_export` | Verification snapshot. |
 | `source_invalidated_at`, `source_invalidation_reason` | Set when revocation, expiration, or purge invalidates a prior export item. |
 
-Every export item needs an audit event or an audit batch event with a cryptographic item list hash. The pilot replay, benchmark, and ranker export paths already write a deterministic source-list hash into both the exported artifact/manifest and the mirrored audit `decision_inputs_hash`; replay dataset exports also promote that hash plus item-level source snapshots into durable DB manifests.
+Every export item needs an audit event or an audit batch event with a cryptographic item list hash. The pilot replay, benchmark, and ranker export paths already write a deterministic source-list hash into both the exported artifact/manifest and the mirrored audit `decision_inputs_hash`; benchmark and ranker exports also persist file-backed provenance manifests, and replay dataset exports promote that hash plus item-level source snapshots into durable DB manifests.
 
 Pilot `V29` implements the compact `trace_export_manifests` control row for replay dataset exports in both PostgreSQL and libSQL. It stores tenant id, export manifest id, artifact kind, purpose, audit event id, source submission ids, source-list hash, item count, generation time, and invalidation/deletion timestamps. Pilot `V30` adds `trace_export_manifest_items` rows for each replay export source, including source status/hash snapshots and per-item revocation, expiration, or purge invalidation.
 
@@ -1061,7 +1061,7 @@ Implementation checklist for the first real storage migration:
 - Keep DB writes behind a dark-launch or dual-write flag until parity checks pass. Completed with `TRACE_COMMONS_DB_DUAL_WRITE=true`.
 - Keep DB reads behind surface-specific rollout flags until parity checks pass. Contributor credit/status reads are gated by `TRACE_COMMONS_DB_CONTRIBUTOR_READS=true`, reviewer metadata reads by `TRACE_COMMONS_DB_REVIEWER_READS=true`, replay export selection by `TRACE_COMMONS_DB_REPLAY_EXPORT_READS=true`, and audit event reads by `TRACE_COMMONS_DB_AUDIT_READS=true`.
 - Keep object payloads in encrypted artifact/object storage; write only object refs and hashes into DB. Completed for the local encrypted artifact sidecar; service-owned object storage remains future work.
-- Propagate revocation and retention expiration to DB metadata before DB-first reads. Completed for submission status, tombstones, object-ref invalidation, derived-record invalidation, vector-entry invalidation, replay export manifest/item invalidation, contributor credit/status reads, reviewer metadata reads, retention-expired submission/object/derived/export invalidation, and audit events for invalidation counts.
+- Propagate revocation and retention expiration to DB metadata before DB-first reads. Completed for submission status, tombstones, object-ref invalidation, derived-record invalidation, vector-entry invalidation, replay export manifest/item invalidation, file-backed benchmark/ranker provenance invalidation, contributor credit/status reads, reviewer metadata reads, retention-expired submission/object/derived/export invalidation, and audit events for invalidation counts.
 - Add a backfill tool that reads the file-backed tenant directories, validates envelopes, recomputes redaction and summary hashes, writes metadata, and emits audit import events. Initial maintenance-triggered DB mirror backfill exists for already-derived file-backed submissions; full recompute/import manifests remain future work.
 - Add a reconciliation command that compares file-backed responses with DB-backed metadata for status, review queues, credit, analytics, replay export, object refs, and tombstones. Initial maintenance reconciliation now covers submission status, derived records, and active vector-entry consistency.
 
@@ -1111,8 +1111,8 @@ The trusted tenant id comes from authentication. Production request handling sho
 PostgreSQL policy model:
 
 - Enable row-level security on all `trace_*` tables except global policy dictionaries.
-- Set a transaction-local tenant setting such as `app.tenant_id` after authentication.
-- Add `USING (tenant_id = current_setting('app.tenant_id'))` and matching `WITH CHECK` policies for tenant rows.
+- Set a transaction-local tenant setting such as `ironclaw.trace_tenant_id` after authentication.
+- Add `USING (tenant_id = current_setting('ironclaw.trace_tenant_id', true))` and matching `WITH CHECK` policies for tenant rows.
 - Give service-worker roles narrow policies for only their job type.
 - Keep admin cross-tenant access behind explicit system-scope methods that always emit audit events.
 
@@ -1130,7 +1130,7 @@ Tenant isolation tests:
 - Reviewer/admin token for tenant A cannot access tenant B quarantine, analytics, audit, object refs, vectors, exports, or credit ledger rows.
 - Same `submission_id`, `trace_id`, `canonical_summary_hash`, and contributor pseudonym can exist in two tenants without collisions.
 - DB-backed queries include tenant predicates at the caller level, not just in low-level helpers.
-- PostgreSQL RLS tests run with `app.tenant_id` set to tenant A and confirm tenant B rows are invisible.
+- PostgreSQL RLS tests run with `ironclaw.trace_tenant_id` set to tenant A and confirm tenant B rows are invisible.
 - libSQL integration tests use a shared database with two tenants and assert every public repository method scopes by tenant.
 
 Revocation propagation tests:

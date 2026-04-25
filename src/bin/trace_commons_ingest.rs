@@ -524,6 +524,13 @@ async fn revoke_submission(
         derived.status = TraceCorpusStatus::Revoked;
         write_derived_record(&state.root, &derived).map_err(internal_error)?;
     }
+    invalidate_export_provenance_for_source(
+        &state.root,
+        &tenant.tenant_id,
+        submission_id,
+        "contributor_revocation",
+    )
+    .map_err(internal_error)?;
 
     append_audit_event(
         &state.root,
@@ -1183,6 +1190,27 @@ async fn benchmark_convert_handler(
         candidates,
     };
     write_benchmark_artifact(&state.root, &tenant.tenant_id, &artifact).map_err(internal_error)?;
+    let provenance = TraceExportProvenanceManifest::new(
+        &tenant.tenant_id,
+        conversion_id,
+        audit_event_id,
+        TraceExportProvenanceKind::BenchmarkConversion,
+        artifact.purpose.clone(),
+        artifact.source_submission_ids.clone(),
+        artifact.source_submission_ids_hash.clone(),
+    );
+    write_export_provenance(
+        &benchmark_provenance_path(&state.root, &tenant.tenant_id, conversion_id),
+        &provenance,
+    )
+    .map_err(internal_error)?;
+    if let Err(error) = mirror_benchmark_export_provenance_to_db(state.as_ref(), &artifact).await {
+        tracing::warn!(
+            %error,
+            export_id = %conversion_id,
+            "Trace Commons DB dual-write benchmark provenance mirror failed"
+        );
+    }
     append_audit_event_with_db_mirror(
         state.as_ref(),
         &tenant,
@@ -1241,6 +1269,30 @@ async fn ranker_training_candidates_handler(
         source_item_list_hash.clone(),
     );
     let audit_event_id = audit_event.event_id;
+    let provenance = TraceExportProvenanceManifest::new(
+        &tenant.tenant_id,
+        export_id,
+        audit_event_id,
+        TraceExportProvenanceKind::RankerTrainingCandidates,
+        "ranker_training_candidates_export".to_string(),
+        source_submission_ids,
+        source_item_list_hash.clone(),
+    );
+    write_export_provenance(
+        &ranker_provenance_path(&state.root, &tenant.tenant_id, export_id),
+        &provenance,
+    )
+    .map_err(internal_error)?;
+    if let Err(error) =
+        mirror_ranker_candidate_export_provenance_to_db(state.as_ref(), &provenance, &candidates)
+            .await
+    {
+        tracing::warn!(
+            %error,
+            export_id = %export_id,
+            "Trace Commons DB dual-write ranker candidate provenance mirror failed"
+        );
+    }
     append_audit_event_with_db_mirror(
         state.as_ref(),
         &tenant,
@@ -1292,6 +1344,30 @@ async fn ranker_training_pairs_handler(
         source_item_list_hash.clone(),
     );
     let audit_event_id = audit_event.event_id;
+    let source_submission_ids = ranker_pair_source_submission_ids(&pairs);
+    let provenance = TraceExportProvenanceManifest::new(
+        &tenant.tenant_id,
+        export_id,
+        audit_event_id,
+        TraceExportProvenanceKind::RankerTrainingPairs,
+        "ranker_training_pairs_export".to_string(),
+        source_submission_ids,
+        source_item_list_hash.clone(),
+    );
+    write_export_provenance(
+        &ranker_provenance_path(&state.root, &tenant.tenant_id, export_id),
+        &provenance,
+    )
+    .map_err(internal_error)?;
+    if let Err(error) =
+        mirror_ranker_pair_export_provenance_to_db(state.as_ref(), &provenance, &pairs).await
+    {
+        tracing::warn!(
+            %error,
+            export_id = %export_id,
+            "Trace Commons DB dual-write ranker pair provenance mirror failed"
+        );
+    }
     append_audit_event_with_db_mirror(
         state.as_ref(),
         &tenant,
@@ -1567,6 +1643,15 @@ fn ranker_pair_list_hash(pairs: &[TraceRankerTrainingPair]) -> String {
         payload.push_str(&pair.rejected_submission_id.to_string());
     }
     sha256_prefixed(&payload)
+}
+
+fn ranker_pair_source_submission_ids(pairs: &[TraceRankerTrainingPair]) -> Vec<Uuid> {
+    pairs
+        .iter()
+        .flat_map(|pair| [pair.preferred_submission_id, pair.rejected_submission_id])
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn parse_consent_scope_filter(value: Option<&str>) -> ApiResult<Option<ConsentScope>> {
@@ -2733,6 +2818,149 @@ async fn mirror_export_manifest_to_db(
     Ok(())
 }
 
+async fn mirror_benchmark_export_provenance_to_db(
+    state: &AppState,
+    artifact: &TraceBenchmarkConversionArtifact,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    db.upsert_trace_export_manifest(StorageTraceExportManifestWrite {
+        tenant_id: artifact.tenant_id.clone(),
+        export_manifest_id: artifact.conversion_id,
+        artifact_kind: StorageTraceObjectArtifactKind::BenchmarkArtifact,
+        purpose_code: Some(artifact.purpose.clone()),
+        audit_event_id: Some(artifact.audit_event_id),
+        source_submission_ids: artifact.source_submission_ids.clone(),
+        source_submission_ids_hash: artifact.source_submission_ids_hash.clone(),
+        item_count: artifact.item_count.min(u32::MAX as usize) as u32,
+        generated_at: artifact.generated_at,
+    })
+    .await
+    .context("failed to mirror benchmark provenance manifest metadata")?;
+    for candidate in &artifact.candidates {
+        db.upsert_trace_export_manifest_item(StorageTraceExportManifestItemWrite {
+            tenant_id: artifact.tenant_id.clone(),
+            export_manifest_id: artifact.conversion_id,
+            submission_id: candidate.submission_id,
+            trace_id: candidate.trace_id,
+            derived_id: None,
+            object_ref_id: None,
+            vector_entry_id: None,
+            source_status_at_export: StorageTraceCorpusStatus::Accepted,
+            source_hash_at_export: candidate.canonical_summary_hash.clone(),
+        })
+        .await
+        .with_context(|| {
+            format!(
+                "failed to mirror benchmark provenance item metadata for {}",
+                candidate.submission_id
+            )
+        })?;
+    }
+    Ok(())
+}
+
+async fn mirror_ranker_candidate_export_provenance_to_db(
+    state: &AppState,
+    provenance: &TraceExportProvenanceManifest,
+    candidates: &[TraceRankerTrainingCandidate],
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    upsert_provenance_manifest_to_db(
+        db.as_ref(),
+        provenance,
+        StorageTraceObjectArtifactKind::ExportArtifact,
+        candidates.len(),
+    )
+    .await?;
+    for candidate in candidates {
+        db.upsert_trace_export_manifest_item(StorageTraceExportManifestItemWrite {
+            tenant_id: provenance.tenant_id.clone(),
+            export_manifest_id: provenance.export_id,
+            submission_id: candidate.submission_id,
+            trace_id: candidate.trace_id,
+            derived_id: None,
+            object_ref_id: None,
+            vector_entry_id: None,
+            source_status_at_export: storage_corpus_status(candidate.status),
+            source_hash_at_export: candidate.canonical_summary_hash.clone(),
+        })
+        .await
+        .with_context(|| {
+            format!(
+                "failed to mirror ranker candidate provenance item metadata for {}",
+                candidate.submission_id
+            )
+        })?;
+    }
+    Ok(())
+}
+
+async fn mirror_ranker_pair_export_provenance_to_db(
+    state: &AppState,
+    provenance: &TraceExportProvenanceManifest,
+    pairs: &[TraceRankerTrainingPair],
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    upsert_provenance_manifest_to_db(
+        db.as_ref(),
+        provenance,
+        StorageTraceObjectArtifactKind::ExportArtifact,
+        provenance.source_submission_ids.len(),
+    )
+    .await?;
+    for pair in pairs {
+        for candidate in [&pair.preferred, &pair.rejected] {
+            db.upsert_trace_export_manifest_item(StorageTraceExportManifestItemWrite {
+                tenant_id: provenance.tenant_id.clone(),
+                export_manifest_id: provenance.export_id,
+                submission_id: candidate.submission_id,
+                trace_id: candidate.trace_id,
+                derived_id: None,
+                object_ref_id: None,
+                vector_entry_id: None,
+                source_status_at_export: storage_corpus_status(candidate.status),
+                source_hash_at_export: candidate.canonical_summary_hash.clone(),
+            })
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to mirror ranker pair provenance item metadata for {}",
+                    candidate.submission_id
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+async fn upsert_provenance_manifest_to_db(
+    db: &dyn Database,
+    provenance: &TraceExportProvenanceManifest,
+    artifact_kind: StorageTraceObjectArtifactKind,
+    item_count: usize,
+) -> anyhow::Result<()> {
+    db.upsert_trace_export_manifest(StorageTraceExportManifestWrite {
+        tenant_id: provenance.tenant_id.clone(),
+        export_manifest_id: provenance.export_id,
+        artifact_kind,
+        purpose_code: Some(provenance.purpose.clone()),
+        audit_event_id: Some(provenance.audit_event_id),
+        source_submission_ids: provenance.source_submission_ids.clone(),
+        source_submission_ids_hash: provenance.source_submission_ids_hash.clone(),
+        item_count: item_count.min(u32::MAX as usize) as u32,
+        generated_at: provenance.generated_at,
+    })
+    .await
+    .context("failed to mirror export provenance manifest metadata")?;
+    Ok(())
+}
+
 fn storage_submission_write_from_record(
     record: &TraceCommonsSubmissionRecord,
     envelope: &TraceContributionEnvelope,
@@ -3415,6 +3643,46 @@ fn benchmark_artifact_path(root: &Path, tenant_id: &str, conversion_id: Uuid) ->
         .join("artifact.json")
 }
 
+fn benchmark_provenance_path(root: &Path, tenant_id: &str, conversion_id: Uuid) -> PathBuf {
+    let tenant_key = tenant_storage_key(tenant_id);
+    root.join("tenants")
+        .join(tenant_key)
+        .join("benchmarks")
+        .join(conversion_id.to_string())
+        .join("provenance.json")
+}
+
+fn ranker_provenance_path(root: &Path, tenant_id: &str, export_id: Uuid) -> PathBuf {
+    let tenant_key = tenant_storage_key(tenant_id);
+    root.join("tenants")
+        .join(tenant_key)
+        .join("ranker_exports")
+        .join(export_id.to_string())
+        .join("provenance.json")
+}
+
+fn write_export_provenance(
+    path: &Path,
+    provenance: &TraceExportProvenanceManifest,
+) -> anyhow::Result<()> {
+    write_json_file(path, provenance, "trace export provenance manifest")
+}
+
+fn read_export_provenance(path: &Path) -> anyhow::Result<TraceExportProvenanceManifest> {
+    let body = std::fs::read_to_string(path).with_context(|| {
+        format!(
+            "failed to read trace export provenance manifest {}",
+            path.display()
+        )
+    })?;
+    serde_json::from_str(&body).with_context(|| {
+        format!(
+            "failed to parse trace export provenance manifest {}",
+            path.display()
+        )
+    })
+}
+
 fn export_artifact_dir(root: &Path, tenant_id: &str, export_id: Uuid) -> PathBuf {
     let tenant_key = tenant_storage_key(tenant_id);
     root.join("tenants")
@@ -3435,10 +3703,11 @@ async fn run_maintenance(
         .filter(|purpose| !purpose.is_empty())
         .unwrap_or("trace_commons_retention_revocation_maintenance")
         .to_string();
-    let mut revoked_submission_ids = read_all_revocations(&state.root, &tenant.tenant_id)?
+    let revocation_reasons = read_all_revocations(&state.root, &tenant.tenant_id)?
         .into_iter()
-        .map(|revocation| revocation.submission_id)
-        .collect::<BTreeSet<_>>();
+        .map(|revocation| (revocation.submission_id, revocation.reason))
+        .collect::<BTreeMap<_, _>>();
+    let mut revoked_submission_ids = revocation_reasons.keys().copied().collect::<BTreeSet<_>>();
     let mut expired_submission_ids = BTreeSet::new();
 
     let mut records = read_all_submission_records(&state.root, &tenant.tenant_id)?;
@@ -3543,6 +3812,15 @@ async fn run_maintenance(
     } else {
         0
     };
+    if !revoked_submission_ids.is_empty() || !expired_submission_ids.is_empty() {
+        invalidate_export_provenance_for_sources(
+            &state.root,
+            &tenant.tenant_id,
+            &revocation_reasons,
+            &expired_submission_ids,
+            request.dry_run,
+        )?;
+    }
     let db_mirror_backfilled = backfill_db_mirror_from_files(
         state,
         tenant,
@@ -4097,6 +4375,94 @@ fn prune_export_cache_files(
     Ok(pruned)
 }
 
+fn invalidate_export_provenance_for_source(
+    root: &Path,
+    tenant_id: &str,
+    submission_id: Uuid,
+    reason: &str,
+) -> anyhow::Result<usize> {
+    let mut revoked_sources = BTreeMap::new();
+    revoked_sources.insert(submission_id, reason.to_string());
+    invalidate_export_provenance_for_sources(
+        root,
+        tenant_id,
+        &revoked_sources,
+        &BTreeSet::new(),
+        false,
+    )
+}
+
+fn invalidate_export_provenance_for_sources(
+    root: &Path,
+    tenant_id: &str,
+    revoked_submission_reasons: &BTreeMap<Uuid, String>,
+    expired_submission_ids: &BTreeSet<Uuid>,
+    dry_run: bool,
+) -> anyhow::Result<usize> {
+    let provenance_paths = read_export_provenance_paths(root, tenant_id)?;
+    let mut invalidated = 0usize;
+    for path in provenance_paths {
+        let mut provenance = read_export_provenance(&path)?;
+        if provenance.invalidated_at.is_some() {
+            continue;
+        }
+        let reason = provenance
+            .source_submission_ids
+            .iter()
+            .find_map(|submission_id| {
+                revoked_submission_reasons
+                    .get(submission_id)
+                    .cloned()
+                    .or_else(|| {
+                        expired_submission_ids
+                            .contains(submission_id)
+                            .then(|| "retention_expired_source".to_string())
+                    })
+            });
+        let Some(reason) = reason else {
+            continue;
+        };
+        invalidated += 1;
+        if dry_run {
+            continue;
+        }
+        provenance.invalidated_at = Some(Utc::now());
+        provenance.invalidation_reason = Some(reason);
+        write_export_provenance(&path, &provenance)?;
+    }
+    Ok(invalidated)
+}
+
+fn read_export_provenance_paths(root: &Path, tenant_id: &str) -> anyhow::Result<Vec<PathBuf>> {
+    let tenant_key = tenant_storage_key(tenant_id);
+    let tenant_dir = root.join("tenants").join(tenant_key);
+    let mut paths = Vec::new();
+    for child_dir_name in ["benchmarks", "ranker_exports"] {
+        let child_dir = tenant_dir.join(child_dir_name);
+        if !child_dir.exists() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&child_dir)
+            .with_context(|| format!("failed to read provenance dir {}", child_dir.display()))?
+        {
+            let entry = entry.context("failed to read provenance dir entry")?;
+            if !entry
+                .file_type()
+                .context("failed to inspect provenance dir entry")?
+                .is_dir()
+            {
+                continue;
+            }
+            let provenance_path = entry.path().join("provenance.json");
+            if provenance_path.exists() {
+                paths.push(provenance_path);
+            }
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
 fn write_json_file<T: Serialize + ?Sized>(
     path: &Path,
     value: &T,
@@ -4489,6 +4855,57 @@ struct TraceReplayExportManifest {
     consent_scopes: Vec<ConsentScope>,
     generated_at: DateTime<Utc>,
     audit_event_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceExportProvenanceManifest {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    export_id: Uuid,
+    audit_event_id: Uuid,
+    export_kind: TraceExportProvenanceKind,
+    purpose: String,
+    source_submission_ids: Vec<Uuid>,
+    source_submission_ids_hash: String,
+    generated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    invalidated_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    invalidation_reason: Option<String>,
+}
+
+impl TraceExportProvenanceManifest {
+    fn new(
+        tenant_id: &str,
+        export_id: Uuid,
+        audit_event_id: Uuid,
+        export_kind: TraceExportProvenanceKind,
+        purpose: String,
+        source_submission_ids: Vec<Uuid>,
+        source_submission_ids_hash: String,
+    ) -> Self {
+        Self {
+            tenant_id: tenant_id.to_string(),
+            tenant_storage_ref: tenant_storage_ref(tenant_id),
+            export_id,
+            audit_event_id,
+            export_kind,
+            purpose,
+            source_submission_ids,
+            source_submission_ids_hash,
+            generated_at: Utc::now(),
+            invalidated_at: None,
+            invalidation_reason: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum TraceExportProvenanceKind {
+    BenchmarkConversion,
+    RankerTrainingCandidates,
+    RankerTrainingPairs,
 }
 
 impl TraceReplayExportManifest {
@@ -6177,6 +6594,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn benchmark_conversion_writes_provenance_and_revocation_invalidates_it() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("benchmark source submission succeeds");
+
+        let Json(benchmark) = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("provenance_benchmark".to_string()),
+                consent_scope: None,
+                status: None,
+                privacy_risk: None,
+                external_ref: Some("benchmark:provenance".to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark conversion succeeds");
+
+        let provenance_path = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"))
+            .join("benchmarks")
+            .join(benchmark.conversion_id.to_string())
+            .join("provenance.json");
+        let provenance: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&provenance_path).expect("benchmark provenance reads"),
+        )
+        .expect("benchmark provenance parses");
+        assert_eq!(provenance["tenant_id"], "tenant-a");
+        assert_eq!(provenance["export_id"], benchmark.conversion_id.to_string());
+        assert_eq!(provenance["purpose"], "provenance_benchmark");
+        assert_eq!(
+            provenance["source_submission_ids"][0],
+            submission_id.to_string()
+        );
+        assert_eq!(
+            provenance["source_submission_ids_hash"],
+            benchmark.source_submission_ids_hash
+        );
+        assert!(provenance["invalidated_at"].is_null());
+
+        revoke_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            AxumPath(submission_id),
+        )
+        .await
+        .expect("contributor can revoke benchmark source");
+
+        let invalidated: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&provenance_path)
+                .expect("invalidated benchmark provenance reads"),
+        )
+        .expect("invalidated benchmark provenance parses");
+        assert!(invalidated["invalidated_at"].as_str().is_some());
+        assert_eq!(invalidated["invalidation_reason"], "contributor_revocation");
+    }
+
+    #[tokio::test]
     async fn ranker_training_exports_are_tenant_scoped_and_exclude_revoked_traces() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
@@ -6360,6 +6849,157 @@ mod tests {
         .await
         .expect_err("ranker exports require training consent");
         assert_eq!(debugging_scope_error.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn ranker_exports_write_provenance_and_maintenance_invalidates_sources() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut preferred = sample_envelope().await;
+        make_metadata_only_low_risk(&mut preferred);
+        preferred.consent.scopes = vec![ConsentScope::RankingTraining];
+        let preferred_id = preferred.submission_id;
+        let mut rejected = sample_envelope().await;
+        make_metadata_only_low_risk(&mut rejected);
+        rejected.consent.scopes = vec![ConsentScope::RankingTraining];
+        rejected.value.submission_score = 0.1;
+        let rejected_id = rejected.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(preferred),
+        )
+        .await
+        .expect("preferred ranker source submission succeeds");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(rejected),
+        )
+        .await
+        .expect("rejected ranker source submission succeeds");
+
+        let Json(candidates) = ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: None,
+            }),
+        )
+        .await
+        .expect("ranker candidates export succeeds");
+        let Json(pairs) = ranker_training_pairs_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: None,
+            }),
+        )
+        .await
+        .expect("ranker pairs export succeeds");
+
+        let candidate_provenance_path = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"))
+            .join("ranker_exports")
+            .join(candidates.export_id.to_string())
+            .join("provenance.json");
+        let pair_provenance_path = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"))
+            .join("ranker_exports")
+            .join(pairs.export_id.to_string())
+            .join("provenance.json");
+        let candidate_provenance: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&candidate_provenance_path)
+                .expect("candidate provenance reads"),
+        )
+        .expect("candidate provenance parses");
+        assert_eq!(
+            candidate_provenance["source_submission_ids_hash"],
+            candidates.source_item_list_hash
+        );
+        assert!(
+            candidate_provenance["source_submission_ids"]
+                .as_array()
+                .expect("candidate source ids are an array")
+                .iter()
+                .any(|value| value == &serde_json::Value::String(preferred_id.to_string()))
+        );
+
+        let pair_provenance: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&pair_provenance_path).expect("pair provenance reads"),
+        )
+        .expect("pair provenance parses");
+        assert_eq!(
+            pair_provenance["source_submission_ids_hash"],
+            pairs.source_item_list_hash
+        );
+        assert_eq!(pair_provenance["export_kind"], "ranker_training_pairs");
+        assert!(
+            pair_provenance["source_submission_ids"]
+                .as_array()
+                .expect("pair source ids are an array")
+                .iter()
+                .any(|value| value == &serde_json::Value::String(rejected_id.to_string()))
+        );
+
+        write_revocation(
+            temp.path(),
+            &TraceCommonsRevocation {
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                submission_id: preferred_id,
+                revoked_at: Utc::now(),
+                reason: "test_maintenance_revocation".to_string(),
+            },
+        )
+        .expect("revocation tombstone writes");
+        let Json(response) = maintenance_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                dry_run: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purpose: Some("ranker_provenance_invalidation".to_string()),
+                backfill_db_mirror: false,
+                purge_expired_before: None,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+            }),
+        )
+        .await
+        .expect("maintenance invalidates ranker provenance");
+        assert_eq!(response.records_marked_revoked, 1);
+
+        let invalidated_candidate: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&candidate_provenance_path)
+                .expect("invalidated candidate provenance reads"),
+        )
+        .expect("invalidated candidate provenance parses");
+        assert!(invalidated_candidate["invalidated_at"].as_str().is_some());
+        assert_eq!(
+            invalidated_candidate["invalidation_reason"],
+            "test_maintenance_revocation"
+        );
+        let invalidated_pair: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&pair_provenance_path)
+                .expect("invalidated pair provenance reads"),
+        )
+        .expect("invalidated pair provenance parses");
+        assert!(invalidated_pair["invalidated_at"].as_str().is_some());
+        assert_eq!(
+            invalidated_pair["invalidation_reason"],
+            "test_maintenance_revocation"
+        );
     }
 
     #[tokio::test]

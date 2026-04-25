@@ -5,7 +5,7 @@
 //! consent, privacy, replayability, scoring, and revocation metadata needed
 //! before a trace can leave a user's machine.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, LazyLock};
@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
+use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 
 use crate::llm::recording::{TraceFile, TraceResponse};
@@ -3450,6 +3451,43 @@ pub fn local_pseudonymous_tenant_scope_ref(scope: &str) -> String {
     format!("tenant_sha256:{}", scope_hash(scope))
 }
 
+static TRACE_SCOPE_MUTATION_LOCKS: LazyLock<
+    std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+> = LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+fn trace_scope_mutation_lock_key(scope: Option<&str>) -> String {
+    match scope {
+        Some(scope) if !scope.trim().is_empty() => format!("scope:{}", scope_hash(scope)),
+        _ => "global".to_string(),
+    }
+}
+
+fn trace_scope_mutation_lock(scope: Option<&str>) -> Arc<tokio::sync::Mutex<()>> {
+    let key = trace_scope_mutation_lock_key(scope);
+    let mut locks = match TRACE_SCOPE_MUTATION_LOCKS.lock() {
+        Ok(locks) => locks,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    locks
+        .entry(key)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+async fn lock_trace_scope_for_mutation(scope: Option<&str>) -> OwnedMutexGuard<()> {
+    trace_scope_mutation_lock(scope).lock_owned().await
+}
+
+fn lock_trace_scope_for_mutation_blocking(scope: Option<&str>) -> OwnedMutexGuard<()> {
+    let lock = trace_scope_mutation_lock(scope);
+    loop {
+        if let Ok(guard) = lock.clone().try_lock_owned() {
+            return guard;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 pub fn read_trace_policy_for_scope(
     scope: Option<&str>,
 ) -> anyhow::Result<StandingTraceContributionPolicy> {
@@ -3471,6 +3509,14 @@ pub fn write_trace_policy_for_scope(
 }
 
 pub fn queue_trace_envelope_for_scope(
+    scope: Option<&str>,
+    envelope: &TraceContributionEnvelope,
+) -> anyhow::Result<PathBuf> {
+    let _guard = lock_trace_scope_for_mutation_blocking(scope);
+    queue_trace_envelope_for_scope_unlocked(scope, envelope)
+}
+
+fn queue_trace_envelope_for_scope_unlocked(
     scope: Option<&str>,
     envelope: &TraceContributionEnvelope,
 ) -> anyhow::Result<PathBuf> {
@@ -3563,6 +3609,16 @@ pub fn record_submitted_trace_envelope_for_scope(
     endpoint: &str,
     receipt: TraceSubmissionReceipt,
 ) -> anyhow::Result<()> {
+    let _guard = lock_trace_scope_for_mutation_blocking(scope);
+    record_submitted_trace_envelope_for_scope_unlocked(scope, envelope, endpoint, receipt)
+}
+
+fn record_submitted_trace_envelope_for_scope_unlocked(
+    scope: Option<&str>,
+    envelope: &TraceContributionEnvelope,
+    endpoint: &str,
+    receipt: TraceSubmissionReceipt,
+) -> anyhow::Result<()> {
     let credit_points_pending = receipt
         .credit_points_pending
         .unwrap_or(envelope.value.credit_points_pending);
@@ -3610,6 +3666,7 @@ pub async fn flush_trace_contribution_queue_for_scope(
     scope: Option<&str>,
     limit: usize,
 ) -> anyhow::Result<TraceQueueFlushReport> {
+    let _guard = lock_trace_scope_for_mutation(scope).await;
     let policy = read_trace_policy_for_scope(scope)?;
     if !policy.enabled {
         anyhow::bail!("trace contribution opt-in is disabled");
@@ -3654,7 +3711,9 @@ pub async fn flush_trace_contribution_queue_for_scope(
                         continue;
                     }
                 };
-                record_submitted_trace_envelope_for_scope(scope, &envelope, endpoint, receipt)?;
+                record_submitted_trace_envelope_for_scope_unlocked(
+                    scope, &envelope, endpoint, receipt,
+                )?;
                 std::fs::remove_file(&path).map_err(|e| {
                     anyhow::anyhow!("failed to remove queued envelope {}: {}", path.display(), e)
                 })?;
@@ -3670,12 +3729,14 @@ pub async fn flush_trace_contribution_queue_for_scope(
         }
     }
 
-    if let Err(error) = sync_remote_trace_submission_records_for_scope(scope).await {
+    // Flush keeps the scoped lock through submission and status-sync network calls
+    // so another same-scope flush cannot submit or remove the same queue file.
+    if let Err(error) = sync_remote_trace_submission_records_for_scope_unlocked(scope).await {
         tracing::debug!(%error, "Failed to sync remote Trace Commons credit status");
     }
 
     let credit_notice =
-        mark_trace_credit_noticed_if_due(scope, policy.credit_notice_interval_hours)?;
+        mark_trace_credit_noticed_if_due_unlocked(scope, policy.credit_notice_interval_hours)?;
     Ok(TraceQueueFlushReport {
         submitted,
         held: holds.len(),
@@ -3685,6 +3746,41 @@ pub async fn flush_trace_contribution_queue_for_scope(
 }
 
 pub async fn sync_remote_trace_submission_records_for_scope(
+    scope: Option<&str>,
+) -> anyhow::Result<usize> {
+    let policy = read_trace_policy_for_scope(scope)?;
+    if !policy.enabled {
+        return Ok(0);
+    }
+    let Some(endpoint) = policy.ingestion_endpoint.as_deref() else {
+        return Ok(0);
+    };
+
+    let submission_ids = {
+        let _guard = lock_trace_scope_for_mutation(scope).await;
+        let records = read_local_trace_records_for_scope(scope)?;
+        records
+            .iter()
+            .filter(|record| record.status == LocalTraceSubmissionStatus::Submitted)
+            .map(|record| record.submission_id)
+            .collect::<Vec<_>>()
+    };
+    if submission_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let status_endpoint = trace_submission_status_endpoint(endpoint)?;
+    let updates = fetch_trace_submission_statuses(
+        &status_endpoint,
+        &policy.bearer_token_env,
+        &submission_ids,
+    )
+    .await?;
+    let _guard = lock_trace_scope_for_mutation(scope).await;
+    apply_remote_trace_submission_statuses_for_scope_unlocked(scope, &updates)
+}
+
+async fn sync_remote_trace_submission_records_for_scope_unlocked(
     scope: Option<&str>,
 ) -> anyhow::Result<usize> {
     let policy = read_trace_policy_for_scope(scope)?;
@@ -3712,7 +3808,7 @@ pub async fn sync_remote_trace_submission_records_for_scope(
         &submission_ids,
     )
     .await?;
-    apply_remote_trace_submission_statuses_for_scope(scope, &updates)
+    apply_remote_trace_submission_statuses_for_scope_unlocked(scope, &updates)
 }
 
 pub fn trace_submission_status_endpoint(submission_endpoint: &str) -> anyhow::Result<String> {
@@ -3790,6 +3886,14 @@ pub async fn fetch_trace_submission_statuses(
 }
 
 pub fn apply_remote_trace_submission_statuses_for_scope(
+    scope: Option<&str>,
+    updates: &[TraceSubmissionStatusUpdate],
+) -> anyhow::Result<usize> {
+    let _guard = lock_trace_scope_for_mutation_blocking(scope);
+    apply_remote_trace_submission_statuses_for_scope_unlocked(scope, updates)
+}
+
+fn apply_remote_trace_submission_statuses_for_scope_unlocked(
     scope: Option<&str>,
     updates: &[TraceSubmissionStatusUpdate],
 ) -> anyhow::Result<usize> {
@@ -3957,7 +4061,8 @@ pub async fn revoke_trace_submission_for_scope(
         }
     }
 
-    mark_local_trace_revoked_for_scope(scope, submission_id)
+    let _guard = lock_trace_scope_for_mutation(scope).await;
+    mark_local_trace_revoked_for_scope_unlocked(scope, submission_id)
 }
 
 pub fn trace_autonomous_eligibility(
@@ -4032,7 +4137,7 @@ fn upsert_local_trace_record_for_scope(
     write_local_trace_records_for_scope(scope, &records)
 }
 
-fn mark_local_trace_revoked_for_scope(
+fn mark_local_trace_revoked_for_scope_unlocked(
     scope: Option<&str>,
     submission_id: Uuid,
 ) -> anyhow::Result<()> {
@@ -4067,7 +4172,16 @@ fn mark_local_trace_revoked_for_scope(
     write_local_trace_records_for_scope(scope, &records)
 }
 
+#[cfg(test)]
 fn mark_trace_credit_noticed_if_due(
+    scope: Option<&str>,
+    interval_hours: u32,
+) -> anyhow::Result<Option<CreditSummary>> {
+    let _guard = lock_trace_scope_for_mutation_blocking(scope);
+    mark_trace_credit_noticed_if_due_unlocked(scope, interval_hours)
+}
+
+fn mark_trace_credit_noticed_if_due_unlocked(
     scope: Option<&str>,
     interval_hours: u32,
 ) -> anyhow::Result<Option<CreditSummary>> {
@@ -5040,6 +5154,53 @@ mod tests {
             local_pseudonymous_contributor_id("tenant-b:user-bob")
         );
         assert!(local_pseudonymous_tenant_scope_ref("tenant-a").starts_with("tenant_sha256:"));
+    }
+
+    #[tokio::test]
+    async fn trace_scope_flushes_serialize_same_scope_without_blocking_other_scopes() {
+        let scope = format!("trace-lock-test-{}", Uuid::new_v4());
+        let other_scope = format!("trace-lock-other-test-{}", Uuid::new_v4());
+        let first_guard = lock_trace_scope_for_mutation(Some(&scope)).await;
+
+        let same_scope = scope.clone();
+        let mut same_scope_waiter = Box::pin(tokio::spawn(async move {
+            flush_trace_contribution_queue_for_scope(Some(&same_scope), 1).await
+        }));
+
+        let other_scope_waiter = tokio::spawn(async move {
+            flush_trace_contribution_queue_for_scope(Some(&other_scope), 1).await
+        });
+
+        let other_scope_result =
+            tokio::time::timeout(Duration::from_millis(200), other_scope_waiter)
+                .await
+                .expect("different scope should not be blocked")
+                .expect("different scope waiter should complete");
+        assert!(
+            other_scope_result
+                .expect_err("default disabled policy should make flush exit")
+                .to_string()
+                .contains("opt-in is disabled")
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), same_scope_waiter.as_mut())
+                .await
+                .is_err(),
+            "same scope waiter should remain serialized behind the first guard"
+        );
+
+        drop(first_guard);
+        let same_scope_result =
+            tokio::time::timeout(Duration::from_millis(200), same_scope_waiter.as_mut())
+                .await
+                .expect("same scope waiter should complete after the first guard is dropped")
+                .expect("same scope waiter should not panic");
+        assert!(
+            same_scope_result
+                .expect_err("default disabled policy should make flush exit")
+                .to_string()
+                .contains("opt-in is disabled")
+        );
     }
 
     #[test]
