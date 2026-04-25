@@ -1280,7 +1280,10 @@ async fn review_decision_handler(
             "terminal trace submissions are not eligible for review approval",
         ));
     }
-    let mut envelope = read_envelope_by_record(state.as_ref(), &record).map_err(internal_error)?;
+    let mut envelope = read_envelope_for_review_decision(state.as_ref(), &tenant, &record)
+        .await
+        .map_err(internal_error)?
+        .envelope;
 
     match body.decision {
         TraceReviewDecision::Approve => {
@@ -4131,6 +4134,50 @@ async fn read_envelope_for_replay_export(
     )
     .await?;
     Ok(body_read)
+}
+
+async fn read_envelope_for_review_decision(
+    state: &AppState,
+    tenant: &TenantAuth,
+    record: &TraceCommonsSubmissionRecord,
+) -> anyhow::Result<TraceEnvelopeBodyRead> {
+    anyhow::ensure!(
+        tenant.role.can_review(),
+        "trace review body read requires reviewer or admin role"
+    );
+    anyhow::ensure!(
+        record.tenant_id == tenant.tenant_id,
+        "trace review body read tenant mismatch"
+    );
+    let body_read = read_envelope_body_for_review_decision(state, tenant, record).await?;
+    append_trace_content_read_audit(
+        state,
+        tenant,
+        record.submission_id,
+        body_read.object_ref_id,
+        "review_decision",
+        None,
+    )
+    .await?;
+    Ok(body_read)
+}
+
+async fn read_envelope_body_for_review_decision(
+    state: &AppState,
+    tenant: &TenantAuth,
+    record: &TraceCommonsSubmissionRecord,
+) -> anyhow::Result<TraceEnvelopeBodyRead> {
+    if state.db_reviewer_reads
+        && let Some(envelope) =
+            read_envelope_from_active_db_object_ref(state, &tenant.tenant_id, record.submission_id)
+                .await?
+    {
+        return Ok(envelope);
+    }
+    Ok(TraceEnvelopeBodyRead {
+        envelope: read_envelope_by_record(state, record)?,
+        object_ref_id: None,
+    })
 }
 
 async fn read_envelope_body_for_replay_export(
@@ -11754,6 +11801,109 @@ mod tests {
         assert_eq!(export.items[0].submission_id, submission_id);
         assert_eq!(export.items[0].required_tools, vec!["shell"]);
         assert!(export.items[0].object_ref_id.is_some());
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn review_decision_reads_service_local_object_ref_when_db_reviewer_reads_enabled() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_root = temp.path().join("review-service-object-store");
+        let artifact_store = test_artifact_store(&artifact_root);
+        let configured_store = ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            artifact_store,
+        );
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-review-service-object-store.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let submit_state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+            Some(configured_store.clone()),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+        let envelope = sample_envelope().await;
+        let submission_id = envelope.submission_id;
+
+        let Json(receipt) =
+            submit_trace_handler(State(submit_state), auth_headers("token-a"), Json(envelope))
+                .await
+                .expect("quarantined submission dual-writes object ref");
+        assert_eq!(receipt.status, "quarantined");
+        let object_ref = db
+            .get_latest_active_trace_object_ref(
+                "tenant-a",
+                submission_id,
+                StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            )
+            .await
+            .expect("object ref reads")
+            .expect("submitted envelope object ref exists");
+        assert_eq!(
+            object_ref.object_store,
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+        );
+
+        let mut record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("file record reads")
+            .expect("file record exists");
+        record.object_key = "missing-review-body.json".to_string();
+        record.artifact_receipt = None;
+        write_submission_record(temp.path(), &record).expect("file record points at missing body");
+
+        let review_state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+            Some(configured_store),
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+        let Json(review_receipt) = review_decision_handler(
+            State(review_state),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Approve,
+                reason: Some("db object-ref-backed review".to_string()),
+                credit_points_pending: Some(1.25),
+            }),
+        )
+        .await
+        .expect("review decision reads body from DB object ref");
+        assert_eq!(review_receipt.status, "accepted");
+
+        let db_audit_events = db
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("DB audit events read");
+        assert!(db_audit_events.iter().any(|event| {
+            event.action == StorageTraceAuditAction::Read
+                && event.submission_id == Some(submission_id)
+                && event.object_ref_id == Some(object_ref.object_ref_id)
+                && event.reason.as_deref() == Some("surface=review_decision")
+        }));
     }
 
     #[cfg(feature = "libsql")]
