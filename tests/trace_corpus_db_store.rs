@@ -540,22 +540,57 @@ mod libsql_trace_corpus_store {
             })
             .await
             .expect("append credit event");
+        backend
+            .append_trace_credit_event(TraceCreditEventWrite {
+                tenant_id: tenant_id.to_string(),
+                credit_event_id: Uuid::new_v4(),
+                submission_id,
+                trace_id: inserted.trace_id,
+                credit_account_ref: "credit:test".to_string(),
+                event_type: TraceCreditEventType::RankingUtility,
+                points_delta: "0.75".to_string(),
+                reason: "Ranker pair utility.".to_string(),
+                external_ref: Some("ranker_training_pairs_export:test".to_string()),
+                actor_principal_ref: "principal:reviewer".to_string(),
+                actor_role: "reviewer".to_string(),
+                settlement_state: TraceCreditSettlementState::Final,
+            })
+            .await
+            .expect("append ranking utility credit event");
 
         let credit_events = backend
             .list_trace_credit_events(tenant_id)
             .await
             .expect("list credit events for tenant");
-        assert_eq!(credit_events.len(), 1);
-        assert_eq!(credit_events[0].submission_id, submission_id);
-        assert_eq!(credit_events[0].trace_id, inserted.trace_id);
-        assert_eq!(credit_events[0].credit_account_ref, "credit:test");
-        assert_eq!(credit_events[0].event_type, TraceCreditEventType::Accepted);
-        assert_eq!(credit_events[0].points_delta, "1.0");
+        assert_eq!(credit_events.len(), 2);
+        let accepted_credit = credit_events
+            .iter()
+            .find(|event| event.event_type == TraceCreditEventType::Accepted)
+            .expect("accepted credit event round-trips");
+        assert_eq!(accepted_credit.submission_id, submission_id);
+        assert_eq!(accepted_credit.trace_id, inserted.trace_id);
+        assert_eq!(accepted_credit.credit_account_ref, "credit:test");
+        assert_eq!(accepted_credit.points_delta, "1.0");
         assert_eq!(
-            credit_events[0].settlement_state,
+            accepted_credit.settlement_state,
             TraceCreditSettlementState::Pending
         );
-        assert_eq!(credit_events[0].actor_role, "contributor");
+        assert_eq!(accepted_credit.actor_role, "contributor");
+        let ranking_credit = credit_events
+            .iter()
+            .find(|event| event.event_type == TraceCreditEventType::RankingUtility)
+            .expect("ranking utility credit event round-trips");
+        assert_eq!(ranking_credit.submission_id, submission_id);
+        assert_eq!(ranking_credit.points_delta, "0.75");
+        assert_eq!(
+            ranking_credit.external_ref.as_deref(),
+            Some("ranker_training_pairs_export:test")
+        );
+        assert_eq!(
+            ranking_credit.settlement_state,
+            TraceCreditSettlementState::Final
+        );
+        assert_eq!(ranking_credit.actor_role, "reviewer");
 
         let other_tenant_credit_events = backend
             .list_trace_credit_events("tenant-beta")

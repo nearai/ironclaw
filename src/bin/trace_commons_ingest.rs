@@ -3376,6 +3376,9 @@ fn trace_credit_event_type_from_storage(
         StorageTraceCreditEventType::TrainingUtility => {
             Some(TraceCreditLedgerEventType::TrainingUtility)
         }
+        StorageTraceCreditEventType::RankingUtility => {
+            Some(TraceCreditLedgerEventType::RankingUtility)
+        }
         StorageTraceCreditEventType::ReviewerBonus => {
             Some(TraceCreditLedgerEventType::ReviewerBonus)
         }
@@ -4417,10 +4420,8 @@ fn storage_credit_event_type(
             StorageTraceCreditEventType::BenchmarkConversion
         }
         TraceCreditLedgerEventType::RegressionCatch => StorageTraceCreditEventType::RegressionCatch,
-        TraceCreditLedgerEventType::TrainingUtility
-        | TraceCreditLedgerEventType::RankingUtility => {
-            StorageTraceCreditEventType::TrainingUtility
-        }
+        TraceCreditLedgerEventType::TrainingUtility => StorageTraceCreditEventType::TrainingUtility,
+        TraceCreditLedgerEventType::RankingUtility => StorageTraceCreditEventType::RankingUtility,
         TraceCreditLedgerEventType::ReviewerBonus => StorageTraceCreditEventType::ReviewerBonus,
         TraceCreditLedgerEventType::AbusePenalty => StorageTraceCreditEventType::AbusePenalty,
     }
@@ -9774,6 +9775,84 @@ mod tests {
         .await
         .expect_err("DB tombstone blocks reingest without file tombstone");
         assert_eq!(duplicate_error.0, StatusCode::CONFLICT);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn ranking_utility_credit_preserves_db_event_type() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-ranking-utility-credit.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db_contributor_reads(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let Json(appended) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::RankingUtility,
+                credit_points_delta: 1.75,
+                reason: Some("ranker pair improved ordering".to_string()),
+                external_ref: Some("ranker_training_pairs_export:test".to_string()),
+            }),
+        )
+        .await
+        .expect("ranking utility credit append succeeds");
+        assert_eq!(
+            appended.event_type,
+            TraceCreditLedgerEventType::RankingUtility
+        );
+
+        let db_credit_events = db
+            .list_trace_credit_events("tenant-a")
+            .await
+            .expect("DB credit events read");
+        assert!(
+            db_credit_events.iter().any(|event| {
+                event.submission_id == submission_id
+                    && event.event_type == StorageTraceCreditEventType::RankingUtility
+            }),
+            "DB mirror should retain ranking utility rather than collapsing it into training utility"
+        );
+
+        let tenant_dir = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"));
+        std::fs::remove_file(tenant_dir.join("credit_ledger").join("events.jsonl"))
+            .expect("remove file-backed ledger to prove DB read path");
+        let Json(events) = credit_events_handler(State(state), auth_headers("token-a"))
+            .await
+            .expect("credit events load from DB");
+        assert!(
+            events.iter().any(|event| {
+                event.submission_id == submission_id
+                    && event.event_type == TraceCreditLedgerEventType::RankingUtility
+                    && (event.credit_points_delta - 1.75).abs() < f32::EPSILON
+            }),
+            "DB-backed contributor credit events should round-trip ranking utility"
+        );
     }
 
     #[cfg(feature = "libsql")]

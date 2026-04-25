@@ -76,7 +76,7 @@ fn audit_metadata_contract_is_typed_not_arbitrary_json() {
 #[test]
 fn credit_mutation_audit_metadata_hashes_sensitive_refs() {
     let metadata = TraceAuditSafeMetadata::CreditMutation {
-        event_type: TraceCreditEventType::TrainingUtility,
+        event_type: TraceCreditEventType::RankingUtility,
         credit_points_delta_micros: 1_250_000,
         reason_hash: "sha256:reason".to_string(),
         external_ref_hash: Some("sha256:artifact-ref".to_string()),
@@ -84,7 +84,7 @@ fn credit_mutation_audit_metadata_hashes_sensitive_refs() {
     let json = serde_json::to_value(metadata).unwrap();
 
     assert_eq!(json["kind"], "credit_mutation");
-    assert_eq!(json["event_type"], "training_utility");
+    assert_eq!(json["event_type"], "ranking_utility");
     assert_eq!(json["credit_points_delta_micros"], 1_250_000);
     assert_eq!(json["external_ref_hash"], "sha256:artifact-ref");
     assert!(json.get("reason").is_none());

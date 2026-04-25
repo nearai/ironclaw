@@ -97,6 +97,7 @@ pub enum TraceCreditEventType {
     BenchmarkConversion,
     RegressionCatch,
     TrainingUtility,
+    RankingUtility,
     ReviewerBonus,
     AbusePenalty,
 }
