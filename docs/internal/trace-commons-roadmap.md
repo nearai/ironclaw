@@ -11,7 +11,7 @@ As of the `gecko-pass` branch, Trace Commons has moved beyond the local-only MVP
 - PostgreSQL and libSQL schema slices exist through the current Trace Commons storage work: core corpus rows, object refs, derived records, vector metadata, audit events, credit ledger rows, tombstones, retention/export metadata, compact replay export manifests, and replay export item snapshots.
 - `TraceCorpusStore` exists behind the shared database abstraction with backend implementations and libSQL-focused parity coverage.
 - Optional DB-backed read flags now cover contributor credit/status, reviewer metadata, replay export selection, and audit event reads.
-- The encrypted local artifact sidecar can store submitted redacted envelopes and keep DB/file records pointed at artifact receipts.
+- The encrypted local artifact sidecar stores submitted redacted envelopes, and DB-backed replay export can resolve bodies through active DB object refs for file-backed objects or those encrypted artifacts.
 - Local credit visibility now has a reusable report shape that separates local lifecycle state from central accepted/quarantined/rejected status, credit totals, delayed ledger deltas, and last submission/status-sync times.
 - Maintenance can backfill file-backed pilot records into the DB mirror, mark/purge expired records, prune invalid export caches, index deterministic vector metadata for canonical summaries, and run file-vs-DB reconciliation with reader-projection parity diagnostics.
 - Export audit paths now carry deterministic source-list hashes, and replay export manifest metadata can be listed by reviewer/admin tokens.
@@ -161,7 +161,7 @@ Scope:
 
 Dependencies:
 
-- Phase 2 object-primary artifact reads.
+- Phase 2 object-primary artifact reads for all trace-body surfaces.
 - Phase 3 worker roles, audit, and ABAC checks.
 - Revocation checks before source read and before artifact publish.
 
@@ -266,7 +266,7 @@ These lanes can proceed in parallel as long as their write scopes stay disjoint 
 The highest-value next work is:
 
 1. Finish DB-read parity and reconciliation so reviewer, analytics, replay, audit, and contributor surfaces can graduate from optional flags with confidence.
-2. Introduce service-owned encrypted object storage and route replay/review/export body reads through object refs.
+2. Introduce service-owned encrypted object storage and route remaining review/export body reads through object refs.
 3. Add tenant policy/RLS hardening before broadening reviewer/admin/export access.
 4. Complete retention/revocation propagation for benchmark, ranking, worker, and already-published export artifacts.
 5. Build the private vector worker and benchmark conversion workers only after object-primary reads and worker authorization are in place.

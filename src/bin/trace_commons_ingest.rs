@@ -42,6 +42,7 @@ use ironclaw::trace_corpus_storage::{
     TraceExportManifestRecord as StorageTraceExportManifestRecord,
     TraceExportManifestWrite as StorageTraceExportManifestWrite,
     TraceObjectArtifactKind as StorageTraceObjectArtifactKind,
+    TraceObjectRefRecord as StorageTraceObjectRefRecord,
     TraceObjectRefWrite as StorageTraceObjectRefWrite,
     TraceSubmissionRecord as StorageTraceSubmissionRecord,
     TraceSubmissionWrite as StorageTraceSubmissionWrite,
@@ -992,7 +993,9 @@ async fn dataset_replay_handler(
         .filter(TraceCommonsSubmissionRecord::is_export_eligible)
         .take(limit)
     {
-        let envelope = read_envelope_by_record(state.as_ref(), &record).map_err(internal_error)?;
+        let envelope = read_envelope_for_replay_export(state.as_ref(), &tenant, &record)
+            .await
+            .map_err(internal_error)?;
         append_trace_content_read_audit(
             state.as_ref(),
             &tenant,
@@ -3102,6 +3105,114 @@ fn read_envelope_by_record(
         .with_context(|| format!("failed to read trace object {}", path.display()))?;
     serde_json::from_str(&body)
         .with_context(|| format!("failed to parse trace object {}", path.display()))
+}
+
+async fn read_envelope_for_replay_export(
+    state: &AppState,
+    tenant: &TenantAuth,
+    record: &TraceCommonsSubmissionRecord,
+) -> anyhow::Result<TraceContributionEnvelope> {
+    if state.db_replay_export_reads
+        && let Some(envelope) =
+            read_envelope_from_active_db_object_ref(state, &tenant.tenant_id, record.submission_id)
+                .await?
+    {
+        return Ok(envelope);
+    }
+    read_envelope_by_record(state, record)
+}
+
+async fn read_envelope_from_active_db_object_ref(
+    state: &AppState,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> anyhow::Result<Option<TraceContributionEnvelope>> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(None);
+    };
+    let Some(object_ref) = db
+        .get_latest_active_trace_object_ref(
+            tenant_id,
+            submission_id,
+            StorageTraceObjectArtifactKind::SubmittedEnvelope,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to read active submitted envelope object ref for submission {submission_id}"
+            )
+        })?
+    else {
+        return Ok(None);
+    };
+    read_envelope_from_object_ref(state, tenant_id, &object_ref).map(Some)
+}
+
+fn read_envelope_from_object_ref(
+    state: &AppState,
+    tenant_id: &str,
+    object_ref: &StorageTraceObjectRefRecord,
+) -> anyhow::Result<TraceContributionEnvelope> {
+    anyhow::ensure!(
+        object_ref.tenant_id == tenant_id,
+        "trace object ref tenant mismatch"
+    );
+    anyhow::ensure!(
+        object_ref.artifact_kind == StorageTraceObjectArtifactKind::SubmittedEnvelope,
+        "trace object ref artifact kind mismatch"
+    );
+    anyhow::ensure!(
+        object_ref.compression.is_none(),
+        "compressed trace object refs are not supported"
+    );
+
+    match object_ref.object_store.as_str() {
+        "trace_commons_encrypted_artifact_store" => {
+            let store = state
+                .artifact_store
+                .as_ref()
+                .context("encrypted trace artifact store is not configured")?;
+            store.get_json_by_object_key(
+                &tenant_storage_ref(tenant_id),
+                TraceArtifactKind::ContributionEnvelope,
+                &object_ref.object_key,
+                &object_ref.content_sha256,
+            )
+        }
+        "trace_commons_file_store" => read_file_store_envelope_from_object_ref(state, object_ref),
+        other => anyhow::bail!("unsupported trace object store: {other}"),
+    }
+}
+
+fn read_file_store_envelope_from_object_ref(
+    state: &AppState,
+    object_ref: &StorageTraceObjectRefRecord,
+) -> anyhow::Result<TraceContributionEnvelope> {
+    let path = trace_object_ref_file_path(&state.root, &object_ref.object_key)?;
+    let body = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read trace object {}", path.display()))?;
+    let content_sha256 = sha256_prefixed(&body);
+    anyhow::ensure!(
+        content_sha256 == object_ref.content_sha256,
+        "trace object ref content hash mismatch"
+    );
+    serde_json::from_str(&body)
+        .with_context(|| format!("failed to parse trace object {}", path.display()))
+}
+
+fn trace_object_ref_file_path(root: &Path, object_key: &str) -> anyhow::Result<PathBuf> {
+    let relative_path = Path::new(object_key);
+    anyhow::ensure!(
+        relative_path.is_relative(),
+        "trace object ref file key must be relative"
+    );
+    anyhow::ensure!(
+        relative_path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_))),
+        "trace object ref file key contains unsafe path components"
+    );
+    Ok(root.join(relative_path))
 }
 
 #[derive(Debug, Default)]
@@ -8587,6 +8698,93 @@ mod tests {
         assert_eq!(export.items[0].submission_id, submission_id);
         assert_eq!(export.items[0].required_tools, vec!["shell"]);
         assert!(export.items[0].canonical_summary_hash.is_some());
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn replay_export_can_read_encrypted_artifact_from_db_object_ref_without_file_objects() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_root = temp.path().join("encrypted-artifacts");
+        let artifact_store = test_artifact_store(&artifact_root);
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp
+            .path()
+            .join("trace-mirror-replay-export-artifact.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let submit_state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+            Some(artifact_store.clone()),
+            false,
+            false,
+            false,
+            false,
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.replay.replayable = true;
+        envelope.replay.required_tools.push("shell".to_string());
+        let submission_id = envelope.submission_id;
+
+        let Json(receipt) =
+            submit_trace_handler(State(submit_state), auth_headers("token-a"), Json(envelope))
+                .await
+                .expect("submission dual-writes to DB mirror and artifact store");
+        assert_eq!(receipt.status, "accepted");
+        let object_ref = db
+            .get_latest_active_trace_object_ref(
+                "tenant-a",
+                submission_id,
+                StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            )
+            .await
+            .expect("object ref reads")
+            .expect("submitted envelope object ref exists");
+        assert_eq!(
+            object_ref.object_store,
+            "trace_commons_encrypted_artifact_store"
+        );
+
+        let tenant_dir = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"));
+        std::fs::remove_dir_all(tenant_dir.join("metadata")).expect("remove file metadata");
+        std::fs::remove_dir_all(tenant_dir.join("derived")).expect("remove derived metadata");
+        std::fs::remove_dir_all(tenant_dir.join("objects")).expect("remove plaintext objects");
+
+        let replay_state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db),
+            Some(artifact_store),
+            false,
+            false,
+            true,
+            false,
+        );
+        let Json(export) = dataset_replay_handler(
+            State(replay_state),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("db_artifact_replay_export".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("replay export reads encrypted artifact through DB object ref");
+        assert_eq!(export.item_count, 1);
+        assert_eq!(export.items[0].submission_id, submission_id);
+        assert_eq!(export.items[0].required_tools, vec!["shell"]);
     }
 
     #[cfg(feature = "libsql")]

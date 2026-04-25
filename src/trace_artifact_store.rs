@@ -113,18 +113,68 @@ impl LocalEncryptedTraceArtifactStore {
         receipt: &EncryptedTraceArtifactReceipt,
     ) -> anyhow::Result<T> {
         let artifact = self.read_artifact(expected_tenant_storage_ref, receipt)?;
+        decrypt_artifact_json(&self.crypto, &artifact)
+    }
+
+    pub fn get_json_by_object_key<T: DeserializeOwned>(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<T> {
+        let artifact = self.read_artifact_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )?;
+        decrypt_artifact_json(&self.crypto, &artifact)
+    }
+
+    pub fn read_artifact_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<EncryptedTraceArtifact> {
+        let expected_ciphertext_sha256 = expected_ciphertext_sha256
+            .strip_prefix("sha256:")
+            .unwrap_or(expected_ciphertext_sha256);
+        let path = self.artifact_path(expected_tenant_storage_ref, object_key)?;
+        let body = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read trace artifact {}", path.display()))?;
+        let artifact: EncryptedTraceArtifact =
+            serde_json::from_str(&body).context("failed to parse encrypted trace artifact")?;
+        anyhow::ensure!(
+            artifact.schema_version == TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_VERSION,
+            "unsupported encrypted trace artifact schema version"
+        );
+        anyhow::ensure!(
+            artifact.receipt.tenant_storage_ref == expected_tenant_storage_ref,
+            "encrypted trace artifact tenant mismatch"
+        );
+        anyhow::ensure!(
+            artifact.receipt.artifact_kind == expected_artifact_kind,
+            "encrypted trace artifact kind mismatch"
+        );
+        anyhow::ensure!(
+            artifact.receipt.object_key == object_key,
+            "encrypted trace artifact object key mismatch"
+        );
+        anyhow::ensure!(
+            artifact.receipt.ciphertext_sha256 == expected_ciphertext_sha256,
+            "encrypted trace artifact receipt hash mismatch"
+        );
         let ciphertext = base64::engine::general_purpose::STANDARD
             .decode(artifact.ciphertext_base64.as_bytes())
-            .context("failed to decode trace artifact ciphertext")?;
-        let salt = base64::engine::general_purpose::STANDARD
-            .decode(artifact.salt_base64.as_bytes())
-            .context("failed to decode trace artifact salt")?;
-        let decrypted = self
-            .crypto
-            .decrypt(&ciphertext, &salt)
-            .context("failed to decrypt trace artifact")?;
-        let plaintext = decrypted.expose().as_bytes();
-        serde_json::from_slice(plaintext).context("failed to deserialize trace artifact")
+            .context("failed to decode trace artifact ciphertext for hash check")?;
+        anyhow::ensure!(
+            sha256_hex(&ciphertext) == expected_ciphertext_sha256,
+            "trace artifact ciphertext hash mismatch"
+        );
+        Ok(artifact)
     }
 
     pub fn read_artifact(
@@ -203,6 +253,23 @@ impl LocalEncryptedTraceArtifactStore {
             .join(sha256_text_hex(tenant_storage_ref))
             .join("artifacts"))
     }
+}
+
+fn decrypt_artifact_json<T: DeserializeOwned>(
+    crypto: &SecretsCrypto,
+    artifact: &EncryptedTraceArtifact,
+) -> anyhow::Result<T> {
+    let ciphertext = base64::engine::general_purpose::STANDARD
+        .decode(artifact.ciphertext_base64.as_bytes())
+        .context("failed to decode trace artifact ciphertext")?;
+    let salt = base64::engine::general_purpose::STANDARD
+        .decode(artifact.salt_base64.as_bytes())
+        .context("failed to decode trace artifact salt")?;
+    let decrypted = crypto
+        .decrypt(&ciphertext, &salt)
+        .context("failed to decrypt trace artifact")?;
+    let plaintext = decrypted.expose().as_bytes();
+    serde_json::from_slice(plaintext).context("failed to deserialize trace artifact")
 }
 
 fn validate_object_key(object_key: &str) -> anyhow::Result<()> {
@@ -313,6 +380,41 @@ mod tests {
             .get_json::<serde_json::Value>("tenant:sha256:other", &receipt)
             .expect_err("cross-tenant receipt must fail");
         assert!(error.to_string().contains("tenant mismatch"));
+    }
+
+    #[test]
+    fn encrypted_artifact_reads_by_object_key_and_hash() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = test_store(&temp);
+        let payload = json!({"safe": true, "summary": "<redacted>"});
+        let receipt = store
+            .put_json(
+                "tenant:sha256:abc123",
+                TraceArtifactKind::ContributionEnvelope,
+                "object-ref-read",
+                &payload,
+            )
+            .expect("artifact writes");
+
+        let round_trip: serde_json::Value = store
+            .get_json_by_object_key(
+                "tenant:sha256:abc123",
+                TraceArtifactKind::ContributionEnvelope,
+                &receipt.object_key,
+                &format!("sha256:{}", receipt.ciphertext_sha256),
+            )
+            .expect("artifact reads by object key and hash");
+        assert_eq!(round_trip, payload);
+
+        let error = store
+            .get_json_by_object_key::<serde_json::Value>(
+                "tenant:sha256:abc123",
+                TraceArtifactKind::ContributionEnvelope,
+                &receipt.object_key,
+                "sha256:wrong",
+            )
+            .expect_err("wrong object hash must fail");
+        assert!(error.to_string().contains("receipt hash mismatch"));
     }
 
     #[test]
