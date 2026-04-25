@@ -607,26 +607,58 @@ Skills do not directly execute privileged behavior.
 
 ## 23. What are the V1 runtime/capability lanes?
 
-V1 should use three lanes:
+V1 should use three execution lanes plus one required adapter path:
 
 ```text
-WASM + MCP + Script Runner
+Host | WASM | Script Runner
++ MCP adapter
 ```
 
-### WASM
+### Host
 
-Stable installable capabilities.
+Trusted first-party services.
 
 Use for:
 
-- reusable tools
+- filesystem mediation
+- resource governance
+- auth/secrets
+- audit
+- extension discovery
+- first-party conversation, mission, gateway, and TUI services
+
+Host execution is privileged but not policy-free. It still carries execution context, resource scope, and audit identity.
+
+### WASM
+
+Stable portable capabilities.
+
+Use for:
+
+- reusable deterministic tools
+- fine-grained host imports
 - weaker-model reliability
 - hosted/multi-tenant safety
 - shareable/installable capabilities
 
-### MCP
+### Script runner
 
-Compatibility and ecosystem lane.
+Native software and dynamic creativity lane.
+
+Use for:
+
+- existing CLIs
+- Python/bash/JS snippets
+- project-local helpers
+- package managers and test runners
+- self-repair experiments
+- pi-mono-style model-written scripting
+
+V1 uses Docker/container as the first script runner backend. The public contract is `script`/`cli`; Docker is an implementation backend selected by policy, not the security model itself. Script runs receive scoped mounts, explicit network policy, approved secret handles, resource limits, bounded output/artifact export, and durable audit.
+
+### MCP adapter
+
+Compatibility and ecosystem adapter.
 
 Use for:
 
@@ -634,20 +666,9 @@ Use for:
 - stdio or remote MCP integrations
 - tools users already depend on
 
-MCP tools are adapted into IronClaw capabilities and still go through IronClaw policy, scope, approval, and audit.
+MCP tools are adapted into IronClaw capabilities and still go through IronClaw policy, scope, approval, resources, network controls, and audit. Stdio MCP servers use the same mediated process/sandbox substrate as script runner where needed.
 
-### Script runner
-
-Dynamic creativity lane.
-
-Use for:
-
-- Python/bash/JS snippets
-- project-local helpers
-- self-repair experiments
-- pi-mono-style model-written scripting
-
-**Decision:** V1 capability/runtime lanes are WASM, MCP, and script runner. Generic arbitrary process extensions are deferred as a public extension model.
+**Decision:** V1 execution lanes are Host, WASM, and Docker-backed script runner, with MCP as a required adapter path. Generic arbitrary process extensions are deferred as a public extension model.
 
 ---
 
@@ -662,7 +683,7 @@ strong model -> can use script runner for missing glue
 weak model   -> should prefer WASM/MCP/stable capabilities
 ```
 
-Scripts are discovery and creativity. WASM/MCP capabilities are stabilization and reliability.
+Scripts are discovery, native CLI compatibility, and creativity. WASM/MCP capabilities are stabilization and reliability.
 
 **Decision:** Do not rely on dynamic scripting as the only path. Use scripting for exploration and helper generation; promote stable workflows into WASM/MCP capabilities when reliability matters.
 
@@ -924,7 +945,7 @@ These should be resolved during implementation planning, not by expanding the ke
 | Secrets | Handles in config, raw material mediated by auth |
 | Network | Mediated by `ironclaw_network` |
 | Sandboxing | Mechanism under `ironclaw_processes`, tiered profiles |
-| Runtime lanes | V1 uses WASM + MCP + script runner |
+| Runtime lanes | V1 uses Host + WASM + Docker-backed script runner, with MCP as a required adapter path |
 | Hot reload | Safe-boundary reload only, no live in-flight migration |
 | Agent loop | First-party extension, not kernel |
 | Channels | Transport extensions |
@@ -932,7 +953,7 @@ These should be resolved during implementation planning, not by expanding the ke
 | Skills | Filesystem-backed cognitive artifacts |
 | CodeAct | Optional/experimental, not foundation |
 | Monty | Optional constrained backend, not default scripting path |
-| Scripting | Prefer sandboxed real Python/bash/Node |
+| Scripting | Prefer sandboxed real Python/bash/Node/native CLIs; Docker is the first V1 backend |
 | Missions | Mission engine is an extension; mission definitions are filesystem data |
 | Self-repair | Reflection/repair/evals extensions, not kernel magic |
 | Scaling | Use pools, quotas, project runtimes, and tiered isolation |

@@ -8,6 +8,7 @@
 - `docs/reborn/2026-04-24-architecture-faq-decisions.md`
 - `docs/reborn/2026-04-24-self-contained-crate-roadmap.md`
 - `docs/reborn/2026-04-24-existing-code-reuse-map.md`
+- `docs/reborn/contracts/host-api.md`
 
 ---
 
