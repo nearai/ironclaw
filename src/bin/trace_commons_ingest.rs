@@ -49,6 +49,7 @@ use ironclaw::trace_corpus_storage::{
     TraceSubmissionWrite as StorageTraceSubmissionWrite,
     TraceTenantPolicyRecord as StorageTraceTenantPolicyRecord,
     TraceTenantPolicyWrite as StorageTraceTenantPolicyWrite,
+    TraceTombstoneRecord as StorageTraceTombstoneRecord,
     TraceTombstoneWrite as StorageTraceTombstoneWrite,
     TraceVectorEntrySourceProjection as StorageTraceVectorEntrySourceProjection,
     TraceVectorEntryStatus as StorageTraceVectorEntryStatus,
@@ -801,8 +802,9 @@ async fn submit_trace_handler(
     )?;
 
     rescrub_trace_envelope(&mut envelope);
-    let existing_revocations =
-        read_all_revocations(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let existing_revocations = read_revocations_for_submit(state.as_ref(), &tenant.tenant_id)
+        .await
+        .map_err(internal_error)?;
     let existing_derived =
         read_all_derived_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
     let derived_precheck = build_derived_precheck(&envelope, &existing_derived);
@@ -5273,6 +5275,40 @@ fn read_all_revocations(
     Ok(revocations)
 }
 
+async fn read_revocations_for_submit(
+    state: &AppState,
+    tenant_id: &str,
+) -> anyhow::Result<Vec<TraceCommonsRevocation>> {
+    let mut revocations = read_all_revocations(&state.root, tenant_id)?;
+    if let Some(db) = state.db_mirror.as_ref() {
+        let db_revocations = db
+            .list_trace_tombstones(tenant_id)
+            .await
+            .context("failed to list trace tombstones for submit preflight")?;
+        revocations.extend(
+            db_revocations
+                .into_iter()
+                .map(trace_revocation_from_storage_tombstone),
+        );
+        revocations.sort_by_key(|revocation| revocation.revoked_at);
+    }
+    Ok(revocations)
+}
+
+fn trace_revocation_from_storage_tombstone(
+    tombstone: StorageTraceTombstoneRecord,
+) -> TraceCommonsRevocation {
+    TraceCommonsRevocation {
+        tenant_storage_ref: tenant_storage_ref(&tombstone.tenant_id),
+        tenant_id: tombstone.tenant_id,
+        submission_id: tombstone.submission_id,
+        revoked_at: tombstone.effective_at,
+        reason: tombstone.reason,
+        redaction_hash: tombstone.redaction_hash,
+        canonical_summary_hash: tombstone.canonical_summary_hash,
+    }
+}
+
 fn write_export_manifest(
     root: &Path,
     tenant_id: &str,
@@ -9502,6 +9538,80 @@ mod tests {
         )
         .await
         .expect_err("reingesting revoked trace content is blocked");
+        assert_eq!(duplicate_error.0, StatusCode::CONFLICT);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn submit_rejects_reingest_matching_db_revocation_tombstone_without_file_tombstone() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-db-tombstone-reingest.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let original_submission_id = envelope.submission_id;
+        let mut duplicate_envelope = envelope.clone();
+        duplicate_envelope.submission_id = Uuid::new_v4();
+        duplicate_envelope.trace_id = Uuid::new_v4();
+        duplicate_envelope.contributor.revocation_handle = Uuid::new_v4();
+        duplicate_envelope.trace_card.revocation_handle =
+            duplicate_envelope.contributor.revocation_handle.to_string();
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let status = revoke_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            AxumPath(original_submission_id),
+        )
+        .await
+        .expect("revocation succeeds");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            db.list_trace_tombstones("tenant-a")
+                .await
+                .expect("DB tombstones read")
+                .len(),
+            1
+        );
+
+        let file_tombstone_path = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"))
+            .join("revocations")
+            .join(format!("{original_submission_id}.json"));
+        std::fs::remove_file(file_tombstone_path).expect("remove file-backed tombstone");
+        assert!(
+            read_all_revocations(temp.path(), "tenant-a")
+                .expect("file tombstones read")
+                .is_empty()
+        );
+
+        let duplicate_error = submit_trace_handler(
+            State(state),
+            auth_headers("token-a"),
+            Json(duplicate_envelope),
+        )
+        .await
+        .expect_err("DB tombstone blocks reingest without file tombstone");
         assert_eq!(duplicate_error.0, StatusCode::CONFLICT);
     }
 
