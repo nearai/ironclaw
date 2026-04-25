@@ -88,14 +88,16 @@ fn needs_top_level_flatten(schema: &JsonValue) -> bool {
         JsonValue::Object(map) => {
             let has_forbidden = FORBIDDEN_TOP_LEVEL.iter().any(|k| map.contains_key(*k));
             let has_properties = map.contains_key("properties");
-            let is_object_type = match map.get("type") {
+            let type_value = map.get("type");
+            let is_object_type = match type_value {
                 Some(JsonValue::String(s)) => s == "object",
                 Some(JsonValue::Array(arr)) => arr
                     .iter()
                     .any(|v| matches!(v, JsonValue::String(s) if s == "object")),
                 _ => false,
             };
-            has_forbidden || (!is_object_type && !has_properties)
+            let missing_type_with_properties = type_value.is_none() && has_properties;
+            has_forbidden || (!is_object_type && !missing_type_with_properties)
         }
         _ => true,
     }
@@ -480,5 +482,35 @@ mod tests {
         );
         assert_eq!(result["additionalProperties"], false);
         assert_eq!(description, "Message tool");
+    }
+
+    #[test]
+    fn test_non_object_top_level_type_with_properties_still_flattens() {
+        for policy in [
+            ToolSchemaPolicy::FlattenOnly,
+            ToolSchemaPolicy::StrictOpenAi,
+        ] {
+            let input = serde_json::json!({
+                "type": "string",
+                "properties": {
+                    "content": { "type": "string" }
+                },
+                "required": ["content"]
+            });
+            let mut description = "Malformed tool".to_string();
+
+            let result = shape_tool_schema(policy, &input, &mut description);
+
+            assert_eq!(result["type"], "object");
+            assert!(
+                result["properties"]
+                    .as_object()
+                    .expect("properties")
+                    .is_empty()
+            );
+            assert_eq!(result["additionalProperties"], true);
+            assert_eq!(result["required"], serde_json::json!([]));
+            assert!(description.contains("Upstream JSON schema"));
+        }
     }
 }
