@@ -78,15 +78,18 @@ Approved requests can issue `CapabilityLease` values:
 pub struct CapabilityLease {
     pub scope: ResourceScope,
     pub grant: CapabilityGrant,
+    pub invocation_fingerprint: Option<InvocationFingerprint>,
     pub status: CapabilityLeaseStatus,
 }
 ```
 
-`LeaseBackedAuthorizer` combines request-local grants with active leases visible to the current `ExecutionContext.resource_scope` and then applies the same grant matching rules. Lease lookup is tenant/user/invocation scoped; a lease issued under one tenant/user/invocation must not authorize another tenant/user/invocation, even when UUIDs collide. V1 approval leases are exact-invocation leases until reusable approval scopes are explicitly implemented.
+`LeaseBackedAuthorizer` combines request-local grants with active non-fingerprinted leases visible to the current `ExecutionContext.resource_scope` and then applies the same grant matching rules. Fingerprinted approval leases are resume-only authority: they are not exposed as generic grants to `CapabilityHost::invoke_json`, because replay must first compare the approved `InvocationFingerprint` and claim the lease through `CapabilityHost::resume_json`.
 
-V1 supports active, consumed, and revoked lease state. Revocation and consumption are tenant/user/invocation scoped. Consumed, revoked, expired, and exhausted leases are ignored by authorization.
+Lease lookup is tenant/user/invocation scoped; a lease issued under one tenant/user/invocation must not authorize another tenant/user/invocation, even when UUIDs collide. V1 approval leases are exact-invocation leases until reusable approval scopes are explicitly implemented.
 
-See `docs/reborn/contracts/approvals.md` for how approval resolution issues leases.
+V1 supports active, claimed, consumed, and revoked lease state. Revocation, claim, and consumption are tenant/user/invocation scoped. Consumed, claimed, revoked, expired, exhausted, and fingerprinted approval leases are ignored by generic lease-backed authorization.
+
+See `docs/reborn/contracts/approvals.md` for how approval resolution issues leases and how resume claims/consumes them.
 
 ---
 
