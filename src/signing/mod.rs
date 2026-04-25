@@ -41,33 +41,28 @@ impl SigningService {
     /// On first run, generates a new Ed25519 keypair and saves it to
     /// `~/.signet/keys/ironclaw.key` + `~/.signet/keys/ironclaw.pub`.
     pub fn init(skip_tools: HashSet<String>) -> Result<Self, SigningError> {
+        // signet-core's `load_signing_key`, `generate_and_save`, `audit::append`,
+        // and `audit::verify_chain` all internally append `keys/` and `audit/`
+        // to the base directory. Pass the base directly — joining here would
+        // produce nested `~/.signet/keys/keys/` and `~/.signet/audit/audit/`
+        // paths and break compatibility with the `signet` CLI layout.
         let signet_dir = signet_core::default_signet_dir();
-        let keys_dir = signet_dir.join("keys");
 
-        // Ensure the keys directory exists
-        std::fs::create_dir_all(&keys_dir)
-            .map_err(|e| SigningError::KeyInit(format!("Failed to create keys dir: {e}")))?;
-
-        let signing_key = match signet_core::load_signing_key(&keys_dir, "ironclaw", None) {
+        let signing_key = match signet_core::load_signing_key(&signet_dir, "ironclaw", None) {
             Ok(key) => {
                 tracing::debug!("Loaded existing signing key 'ironclaw'");
                 key
             }
             Err(_) => {
                 tracing::info!("No signing key found, generating new Ed25519 keypair");
-                signet_core::generate_and_save(&keys_dir, "ironclaw", None, None, None)
+                signet_core::generate_and_save(&signet_dir, "ironclaw", None, None, None)
                     .map_err(|e| SigningError::KeyInit(e.to_string()))?;
 
                 // Load the key we just generated
-                signet_core::load_signing_key(&keys_dir, "ironclaw", None)
+                signet_core::load_signing_key(&signet_dir, "ironclaw", None)
                     .map_err(|e| SigningError::KeyInit(e.to_string()))?
             }
         };
-
-        // Ensure audit directory exists
-        let audit_dir = signet_dir.join("audit");
-        std::fs::create_dir_all(&audit_dir)
-            .map_err(|e| SigningError::AuditAppend(format!("Failed to create audit dir: {e}")))?;
 
         Ok(Self {
             signing_key,
@@ -128,8 +123,8 @@ impl SigningService {
             }
         };
 
-        let audit_dir = self.signet_dir.join("audit");
-        if let Err(e) = audit::append(&audit_dir, &receipt_json) {
+        // `audit::append` joins `audit/` internally — pass the base dir.
+        if let Err(e) = audit::append(&self.signet_dir, &receipt_json) {
             tracing::warn!(tool = %tool_name, error = %e, "Failed to append audit record");
         }
 
@@ -138,8 +133,8 @@ impl SigningService {
 
     /// Verify the integrity of the audit chain.
     pub fn verify_chain(&self) -> Result<audit::ChainStatus, SigningError> {
-        let audit_dir = self.signet_dir.join("audit");
-        audit::verify_chain(&audit_dir).map_err(|e| SigningError::AuditAppend(e.to_string()))
+        // `verify_chain` joins `audit/` internally — pass the base dir.
+        audit::verify_chain(&self.signet_dir).map_err(|e| SigningError::AuditAppend(e.to_string()))
     }
 }
 
