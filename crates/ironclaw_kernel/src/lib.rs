@@ -11,6 +11,7 @@ use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, ResourceEstimate, ResourceScope, ResourceUsage, RuntimeKind,
 };
+use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_resources::{ResourceGovernor, ResourceReceipt};
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
 use ironclaw_wasm::{CapabilityInvocation, WasmError, WasmExecutionRequest, WasmRuntime};
@@ -66,6 +67,8 @@ pub enum DispatchError {
     },
     #[error("event sink failed: {0}")]
     Event(Box<EventError>),
+    #[error("MCP dispatch failed: {0}")]
+    Mcp(Box<McpError>),
     #[error("script dispatch failed: {0}")]
     Script(Box<ScriptError>),
     #[error("WASM dispatch failed: {0}")]
@@ -75,6 +78,12 @@ pub enum DispatchError {
 impl From<EventError> for DispatchError {
     fn from(error: EventError) -> Self {
         Self::Event(Box::new(error))
+    }
+}
+
+impl From<McpError> for DispatchError {
+    fn from(error: McpError) -> Self {
+        Self::Mcp(Box::new(error))
     }
 }
 
@@ -101,6 +110,7 @@ where
     governor: &'a G,
     wasm_runtime: Option<&'a WasmRuntime>,
     script_runtime: Option<&'a dyn ScriptExecutor>,
+    mcp_runtime: Option<&'a dyn McpExecutor>,
     event_sink: Option<&'a dyn EventSink>,
 }
 
@@ -116,6 +126,7 @@ where
             governor,
             wasm_runtime: None,
             script_runtime: None,
+            mcp_runtime: None,
             event_sink: None,
         }
     }
@@ -127,6 +138,11 @@ where
 
     pub fn with_script_runtime(mut self, runtime: &'a dyn ScriptExecutor) -> Self {
         self.script_runtime = Some(runtime);
+        self
+    }
+
+    pub fn with_mcp_runtime(mut self, runtime: &'a dyn McpExecutor) -> Self {
+        self.mcp_runtime = Some(runtime);
         self
     }
 
@@ -335,7 +351,78 @@ where
                     receipt: execution.receipt,
                 })
             }
-            runtime @ (RuntimeKind::Mcp | RuntimeKind::FirstParty | RuntimeKind::System) => {
+            RuntimeKind::Mcp => {
+                let Some(mcp_runtime) = self.mcp_runtime else {
+                    let error = DispatchError::MissingRuntimeBackend {
+                        runtime: RuntimeKind::Mcp,
+                    };
+                    self.emit_dispatch_failure(
+                        scope,
+                        capability_id,
+                        Some(descriptor.provider.clone()),
+                        Some(RuntimeKind::Mcp),
+                        &error,
+                    )
+                    .await?;
+                    return Err(error);
+                };
+                self.emit_event(RuntimeEvent::runtime_selected(
+                    scope.clone(),
+                    capability_id.clone(),
+                    descriptor.provider.clone(),
+                    RuntimeKind::Mcp,
+                ))
+                .await?;
+
+                let execution = match mcp_runtime
+                    .execute_extension_json(
+                        self.governor,
+                        McpExecutionRequest {
+                            package,
+                            capability_id: &request.capability_id,
+                            scope: request.scope,
+                            estimate: request.estimate,
+                            invocation: McpInvocation {
+                                input: request.input,
+                            },
+                        },
+                    )
+                    .await
+                {
+                    Ok(execution) => execution,
+                    Err(error) => {
+                        let error = DispatchError::from(error);
+                        self.emit_dispatch_failure(
+                            scope,
+                            capability_id,
+                            Some(descriptor.provider.clone()),
+                            Some(RuntimeKind::Mcp),
+                            &error,
+                        )
+                        .await?;
+                        return Err(error);
+                    }
+                };
+                let output_bytes = execution.result.output_bytes;
+                self.emit_event(RuntimeEvent::dispatch_succeeded(
+                    scope,
+                    capability_id.clone(),
+                    descriptor.provider.clone(),
+                    RuntimeKind::Mcp,
+                    output_bytes,
+                ))
+                .await?;
+
+                Ok(CapabilityDispatchResult {
+                    capability_id,
+                    provider: descriptor.provider.clone(),
+                    runtime: RuntimeKind::Mcp,
+                    output: execution.result.output,
+                    usage: execution.result.usage,
+                    receipt: execution.receipt,
+                })
+            }
+            runtime @ (RuntimeKind::FirstParty | RuntimeKind::System) => {
                 let error = DispatchError::UnsupportedRuntime {
                     capability: request.capability_id,
                     runtime,
@@ -386,6 +473,7 @@ fn dispatch_error_kind(error: &DispatchError) -> &'static str {
         DispatchError::MissingRuntimeBackend { .. } => "MissingRuntimeBackend",
         DispatchError::UnsupportedRuntime { .. } => "UnsupportedRuntime",
         DispatchError::Event(_) => "Event",
+        DispatchError::Mcp(_) => "Mcp",
         DispatchError::Script(_) => "Script",
         DispatchError::Wasm(_) => "Wasm",
     }

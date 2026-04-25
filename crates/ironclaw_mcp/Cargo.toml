@@ -1,23 +1,16 @@
 [package]
-name = "ironclaw_kernel"
+name = "ironclaw_mcp"
 version = "0.1.0"
 edition = "2024"
 publish = false
 
 [dependencies]
-ironclaw_events = { path = "../ironclaw_events" }
+async-trait = "0.1"
 ironclaw_extensions = { path = "../ironclaw_extensions" }
-ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
-ironclaw_mcp = { path = "../ironclaw_mcp" }
 ironclaw_resources = { path = "../ironclaw_resources" }
-ironclaw_scripts = { path = "../ironclaw_scripts" }
-ironclaw_wasm = { path = "../ironclaw_wasm" }
 serde_json = "1"
 thiserror = "2"
 
 [dev-dependencies]
-async-trait = "0.1"
-tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }
-wat = "1"

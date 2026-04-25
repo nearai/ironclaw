@@ -1,7 +1,11 @@
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
 use ironclaw_extensions::*;
 use ironclaw_filesystem::*;
 use ironclaw_host_api::*;
 use ironclaw_kernel::*;
+use ironclaw_mcp::*;
 use ironclaw_resources::*;
 use ironclaw_scripts::*;
 use ironclaw_wasm::*;
@@ -108,6 +112,65 @@ async fn dispatcher_routes_script_capability_through_script_runtime() {
 }
 
 #[tokio::test]
+async fn dispatcher_routes_mcp_capability_through_mcp_runtime() {
+    let fs = mounted_empty_extension_root();
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(package_from_manifest(MCP_MANIFEST))
+        .unwrap();
+    let client = RecordingMcpClient::new(McpClientOutput::json(json!({
+        "matches": ["ironclaw"]
+    })));
+    let mcp_runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client.clone());
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor.set_limit(
+        account.clone(),
+        ResourceLimits {
+            max_concurrency_slots: Some(1),
+            max_process_count: Some(1),
+            max_output_bytes: Some(10_000),
+            ..ResourceLimits::default()
+        },
+    );
+
+    let dispatcher =
+        RuntimeDispatcher::new(&registry, &fs, &governor).with_mcp_runtime(&mcp_runtime);
+    let result = dispatcher
+        .dispatch_json(CapabilityDispatchRequest {
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope,
+            estimate: ResourceEstimate {
+                concurrency_slots: Some(1),
+                process_count: Some(1),
+                output_bytes: Some(10_000),
+                ..ResourceEstimate::default()
+            },
+            input: json!({"query": "ironclaw"}),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.capability_id,
+        CapabilityId::new("github-mcp.search").unwrap()
+    );
+    assert_eq!(result.provider, ExtensionId::new("github-mcp").unwrap());
+    assert_eq!(result.runtime, RuntimeKind::Mcp);
+    assert_eq!(result.output, json!({"matches": ["ironclaw"]}));
+    assert_eq!(result.receipt.status, ReservationStatus::Reconciled);
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert!(governor.usage_for(&account).output_bytes > 0);
+
+    let requests = client.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].transport, "stdio");
+    assert_eq!(requests[0].command.as_deref(), Some("github-mcp"));
+    assert_eq!(requests[0].input, json!({"query": "ironclaw"}));
+}
+
+#[tokio::test]
 async fn dispatcher_fails_unknown_capability_without_reserving_resources() {
     let fs = mounted_empty_extension_root();
     let registry = ExtensionRegistry::new();
@@ -173,9 +236,8 @@ async fn dispatcher_fails_closed_when_descriptor_runtime_does_not_match_package_
 }
 
 #[tokio::test]
-async fn dispatcher_recognizes_mcp_and_host_lanes_but_does_not_execute_without_backends() {
+async fn dispatcher_recognizes_host_lanes_but_does_not_execute_without_backends() {
     for (manifest, capability) in [
-        (MCP_MANIFEST, "github-mcp.search"),
         (FIRST_PARTY_MANIFEST, "conversation.ingest"),
         (SYSTEM_MANIFEST, "system.audit"),
     ] {
@@ -209,6 +271,42 @@ async fn dispatcher_recognizes_mcp_and_host_lanes_but_does_not_execute_without_b
         assert_eq!(governor.reserved_for(&account), ResourceTally::default());
         assert_eq!(governor.usage_for(&account), ResourceTally::default());
     }
+}
+
+#[tokio::test]
+async fn dispatcher_requires_mcp_backend_before_reserving_resources() {
+    let fs = mounted_empty_extension_root();
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(package_from_manifest(MCP_MANIFEST))
+        .unwrap();
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
+    let err = dispatcher
+        .dispatch_json(CapabilityDispatchRequest {
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope,
+            estimate: ResourceEstimate {
+                concurrency_slots: Some(1),
+                process_count: Some(1),
+                ..ResourceEstimate::default()
+            },
+            input: json!({"query": "blocked"}),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        DispatchError::MissingRuntimeBackend {
+            runtime: RuntimeKind::Mcp
+        }
+    ));
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(governor.usage_for(&account), ResourceTally::default());
 }
 
 #[tokio::test]
@@ -343,6 +441,29 @@ fn json_echo_module() -> Vec<u8> {
               global.get $out_len))"#,
     )
     .unwrap()
+}
+
+#[derive(Clone)]
+struct RecordingMcpClient {
+    output: McpClientOutput,
+    requests: Arc<Mutex<Vec<McpClientRequest>>>,
+}
+
+impl RecordingMcpClient {
+    fn new(output: McpClientOutput) -> Self {
+        Self {
+            output,
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl McpClient for RecordingMcpClient {
+    async fn call_tool(&self, request: McpClientRequest) -> Result<McpClientOutput, String> {
+        self.requests.lock().unwrap().push(request);
+        Ok(self.output.clone())
+    }
 }
 
 #[derive(Clone)]
