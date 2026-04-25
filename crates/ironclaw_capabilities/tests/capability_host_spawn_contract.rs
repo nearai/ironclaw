@@ -218,6 +218,7 @@ async fn dispatch_process_executor_routes_process_request_to_capability_dispatch
             estimate: ResourceEstimate::default(),
             resource_reservation_id: None,
             input: json!({"message": "background dispatch"}),
+            cancellation: ProcessCancellationToken::new(),
         })
         .await
         .unwrap();
@@ -299,6 +300,7 @@ async fn dispatch_process_executor_rejects_provider_or_runtime_mismatch() {
             estimate: ResourceEstimate::default(),
             resource_reservation_id: None,
             input: json!({"message": "background dispatch"}),
+            cancellation: ProcessCancellationToken::default(),
         })
         .await
         .unwrap_err();

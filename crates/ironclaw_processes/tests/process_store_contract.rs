@@ -14,6 +14,7 @@ use ironclaw_processes::*;
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
 };
+use tokio::{sync::Notify, time::timeout};
 
 #[tokio::test]
 async fn in_memory_process_store_starts_capability_process_record() {
@@ -186,6 +187,97 @@ async fn background_process_manager_does_not_overwrite_killed_process_on_late_su
         store.get(&scope, process_id).await.unwrap().unwrap().status,
         ProcessStatus::Killed
     );
+}
+
+#[tokio::test]
+async fn process_host_kill_signals_background_executor_cancellation() {
+    let store = Arc::new(InMemoryProcessStore::new());
+    let cancellation_registry = Arc::new(ProcessCancellationRegistry::new());
+    let executor = Arc::new(CancellationAwareExecutor::default());
+    let manager = BackgroundProcessManager::new(store.clone(), executor.clone())
+        .with_cancellation_registry(cancellation_registry.clone());
+    let host = ProcessHost::new(store.as_ref())
+        .with_cancellation_registry(cancellation_registry)
+        .with_poll_interval(Duration::from_millis(5));
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+
+    manager
+        .spawn(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+
+    let mut subscription = host.subscribe(&scope, process_id).await.unwrap();
+    assert_eq!(
+        subscription.next().await.unwrap().unwrap().status,
+        ProcessStatus::Running
+    );
+
+    let killed = host.kill(&scope, process_id).await.unwrap();
+    assert_eq!(killed.status, ProcessStatus::Killed);
+    timeout(Duration::from_millis(200), executor.wait_for_cancellation())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        subscription.next().await.unwrap().unwrap().status,
+        ProcessStatus::Killed
+    );
+    assert_eq!(subscription.next().await.unwrap(), None);
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert_eq!(
+        store.get(&scope, process_id).await.unwrap().unwrap().status,
+        ProcessStatus::Killed
+    );
+}
+
+#[tokio::test]
+async fn process_host_kill_does_not_cancel_other_tenant_process() {
+    let store = Arc::new(InMemoryProcessStore::new());
+    let cancellation_registry = Arc::new(ProcessCancellationRegistry::new());
+    let executor = Arc::new(CancellationAwareExecutor::default());
+    let manager = BackgroundProcessManager::new(store.clone(), executor.clone())
+        .with_cancellation_registry(cancellation_registry.clone());
+    let host = ProcessHost::new(store.as_ref())
+        .with_cancellation_registry(cancellation_registry)
+        .with_poll_interval(Duration::from_millis(5));
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let owner_scope = sample_scope(invocation_id, "tenant1", "user1");
+    let other_scope = sample_scope(invocation_id, "tenant2", "user1");
+
+    manager
+        .spawn(process_start(
+            process_id,
+            invocation_id,
+            owner_scope.clone(),
+        ))
+        .await
+        .unwrap();
+
+    let err = host.kill(&other_scope, process_id).await.unwrap_err();
+    assert!(matches!(err, ProcessError::UnknownProcess { process_id: id } if id == process_id));
+    assert!(
+        timeout(Duration::from_millis(30), executor.wait_for_cancellation())
+            .await
+            .is_err(),
+        "cross-tenant kill must not signal the owner's cancellation token"
+    );
+    assert_eq!(
+        store
+            .get(&owner_scope, process_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        ProcessStatus::Running
+    );
+
+    host.kill(&owner_scope, process_id).await.unwrap();
+    timeout(Duration::from_millis(200), executor.wait_for_cancellation())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -707,7 +799,7 @@ async fn process_failures_store_sanitized_error_kinds() {
 }
 
 #[tokio::test]
-async fn background_process_manager_preserves_reserved_process_estimate_for_executor() {
+async fn background_process_manager_suppresses_duplicate_reserved_process_estimate_for_executor() {
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let store = Arc::new(ResourceManagedProcessStore::new(
         InMemoryProcessStore::new(),
@@ -731,7 +823,51 @@ async fn background_process_manager_preserves_reserved_process_estimate_for_exec
         .unwrap();
     wait_for_status(store.as_ref(), &scope, process_id, ProcessStatus::Completed).await;
 
-    assert_eq!(executor.last_estimate(), Some(estimate));
+    assert_eq!(executor.last_estimate(), Some(ResourceEstimate::default()));
+}
+
+#[tokio::test]
+async fn process_host_cooperative_kill_releases_process_reservation() {
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let store = Arc::new(ResourceManagedProcessStore::new(
+        InMemoryProcessStore::new(),
+        governor.clone(),
+    ));
+    let cancellation_registry = Arc::new(ProcessCancellationRegistry::new());
+    let executor = Arc::new(CancellationAwareExecutor::default());
+    let manager = BackgroundProcessManager::new(store.clone(), executor.clone())
+        .with_cancellation_registry(cancellation_registry.clone());
+    let host = ProcessHost::new(store.as_ref())
+        .with_cancellation_registry(cancellation_registry)
+        .with_poll_interval(Duration::from_millis(5));
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let tenant = ResourceAccount::tenant(scope.tenant_id.clone());
+
+    manager
+        .spawn(process_start_with_estimate(
+            process_id,
+            invocation_id,
+            scope.clone(),
+            process_estimate(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(governor.reserved_for(&tenant).process_count, 1);
+
+    host.kill(&scope, process_id).await.unwrap();
+    timeout(Duration::from_millis(200), executor.wait_for_cancellation())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(25)).await;
+
+    assert_eq!(
+        store.get(&scope, process_id).await.unwrap().unwrap().status,
+        ProcessStatus::Killed
+    );
+    assert_eq!(governor.reserved_for(&tenant).process_count, 0);
+    assert_eq!(governor.usage_for(&tenant).process_count, 0);
 }
 
 #[tokio::test]
@@ -848,6 +984,39 @@ impl ProcessStore for ReservationDroppingStore {
         _scope: &ResourceScope,
     ) -> Result<Vec<ProcessRecord>, ProcessError> {
         Ok(Vec::new())
+    }
+}
+
+#[derive(Default)]
+struct CancellationAwareExecutor {
+    cancellations: AtomicUsize,
+    notified: Notify,
+}
+
+impl CancellationAwareExecutor {
+    async fn wait_for_cancellation(&self) {
+        loop {
+            let notified = self.notified.notified();
+            if self.cancellations.load(Ordering::SeqCst) > 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+#[async_trait]
+impl ProcessExecutor for CancellationAwareExecutor {
+    async fn execute(
+        &self,
+        request: ProcessExecutionRequest,
+    ) -> Result<ProcessExecutionResult, ProcessExecutionError> {
+        request.cancellation.cancelled().await;
+        self.cancellations.fetch_add(1, Ordering::SeqCst);
+        self.notified.notify_waiters();
+        Ok(ProcessExecutionResult {
+            output: serde_json::json!({"cancelled": true}),
+        })
     }
 }
 

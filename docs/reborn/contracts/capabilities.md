@@ -162,8 +162,7 @@ This slice does not implement:
 
 - durable grant/lease storage, revocation, or expiration persistence
 - approval/resume of `Action::SpawnCapability`
-- cooperative cancellation/abort handles for background executor tasks
-- process lifecycle APIs inside `CapabilityHost`; `status`/`kill`/`await_process`/`subscribe` live in `ProcessHost`
+- process lifecycle/cancellation APIs inside `CapabilityHost`; `status`/`kill`/`await_process`/`subscribe` and cooperative cancellation live in `ProcessHost`/`BackgroundProcessManager`
 - streaming output APIs
 - obligation application beyond returning allowed/denied
 - transcript/job history
