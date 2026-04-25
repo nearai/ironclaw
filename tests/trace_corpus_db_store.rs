@@ -9,6 +9,7 @@ mod libsql_trace_corpus_store {
         TraceCorpusStatus, TraceCorpusStore, TraceCreditEventType, TraceCreditEventWrite,
         TraceCreditSettlementState, TraceDerivedRecordWrite, TraceDerivedStatus,
         TraceObjectArtifactKind, TraceObjectRefWrite, TraceSubmissionWrite, TraceTombstoneWrite,
+        TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
         TraceWorkerKind,
     };
     use uuid::Uuid;
@@ -118,10 +119,11 @@ mod libsql_trace_corpus_store {
             .await
             .expect("append object ref");
 
+        let derived_id = Uuid::new_v4();
         backend
             .append_trace_derived_record(TraceDerivedRecordWrite {
                 tenant_id: tenant_id.to_string(),
-                derived_id: Uuid::new_v4(),
+                derived_id,
                 submission_id,
                 trace_id: inserted.trace_id,
                 status: TraceDerivedStatus::Current,
@@ -197,6 +199,94 @@ mod libsql_trace_corpus_store {
             .await
             .expect("list derived records for other tenant");
         assert!(other_tenant_derived_records.is_empty());
+
+        let vector_entry_id = Uuid::new_v4();
+        backend
+            .upsert_trace_vector_entry(TraceVectorEntryWrite {
+                tenant_id: tenant_id.to_string(),
+                submission_id,
+                derived_id,
+                vector_entry_id,
+                vector_store: "trace-commons-main".to_string(),
+                embedding_model: "text-embedding-3-small".to_string(),
+                embedding_dimension: 1536,
+                embedding_version: "embedding-v1".to_string(),
+                source_projection: TraceVectorEntrySourceProjection::CanonicalSummary,
+                source_hash: "sha256:canonical".to_string(),
+                status: TraceVectorEntryStatus::Active,
+                nearest_trace_ids: vec!["trace:near-1".to_string(), "trace:near-2".to_string()],
+                cluster_id: Some("cluster:test".to_string()),
+                duplicate_score: Some(0.1),
+                novelty_score: Some(0.7),
+                indexed_at: Some(Utc::now()),
+                invalidated_at: None,
+                deleted_at: None,
+            })
+            .await
+            .expect("upsert vector entry");
+
+        let vector_entries = backend
+            .list_trace_vector_entries(tenant_id)
+            .await
+            .expect("list vector entries for tenant");
+        assert_eq!(vector_entries.len(), 1);
+        assert_eq!(vector_entries[0].tenant_id, tenant_id);
+        assert_eq!(vector_entries[0].submission_id, submission_id);
+        assert_eq!(vector_entries[0].derived_id, derived_id);
+        assert_eq!(vector_entries[0].vector_entry_id, vector_entry_id);
+        assert_eq!(vector_entries[0].vector_store, "trace-commons-main");
+        assert_eq!(vector_entries[0].embedding_model, "text-embedding-3-small");
+        assert_eq!(vector_entries[0].embedding_dimension, 1536);
+        assert_eq!(vector_entries[0].embedding_version, "embedding-v1");
+        assert_eq!(
+            vector_entries[0].source_projection,
+            TraceVectorEntrySourceProjection::CanonicalSummary
+        );
+        assert_eq!(vector_entries[0].source_hash, "sha256:canonical");
+        assert_eq!(vector_entries[0].status, TraceVectorEntryStatus::Active);
+        assert_eq!(
+            vector_entries[0].nearest_trace_ids,
+            vec!["trace:near-1", "trace:near-2"]
+        );
+        assert_eq!(
+            vector_entries[0].cluster_id.as_deref(),
+            Some("cluster:test")
+        );
+        assert_eq!(vector_entries[0].duplicate_score, Some(0.1));
+        assert_eq!(vector_entries[0].novelty_score, Some(0.7));
+        assert!(vector_entries[0].indexed_at.is_some());
+        assert!(vector_entries[0].invalidated_at.is_none());
+        assert!(vector_entries[0].deleted_at.is_none());
+        assert!(vector_entries[0].created_at <= vector_entries[0].updated_at);
+
+        let other_tenant_vector_entries = backend
+            .list_trace_vector_entries("tenant-beta")
+            .await
+            .expect("list vector entries for other tenant");
+        assert!(other_tenant_vector_entries.is_empty());
+
+        let invalidated_vectors = backend
+            .invalidate_trace_vector_entries_for_submission(tenant_id, submission_id)
+            .await
+            .expect("invalidate vector entries");
+        assert_eq!(invalidated_vectors, 1);
+
+        let vector_entries = backend
+            .list_trace_vector_entries(tenant_id)
+            .await
+            .expect("list invalidated vector entries");
+        assert_eq!(vector_entries.len(), 1);
+        assert_eq!(
+            vector_entries[0].status,
+            TraceVectorEntryStatus::Invalidated
+        );
+        assert!(vector_entries[0].invalidated_at.is_some());
+
+        let idempotent_vectors = backend
+            .invalidate_trace_vector_entries_for_submission(tenant_id, submission_id)
+            .await
+            .expect("repeat vector invalidation");
+        assert_eq!(idempotent_vectors, 0);
 
         backend
             .append_trace_audit_event(TraceAuditEventWrite {

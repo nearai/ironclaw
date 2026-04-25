@@ -40,3 +40,4 @@ V24__llm_calls_created_at_index = 2650126284755685421
 V25__trace_corpus_storage = 7513074511449975742
 V26__trace_object_ref_lifecycle = 4402544856181702752
 V27__trace_corpus_rich_metadata = 11922777310942114302
+V28__trace_vector_entries = 2093783216834565796

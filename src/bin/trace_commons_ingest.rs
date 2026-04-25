@@ -110,6 +110,14 @@ impl TokenRole {
     fn can_review(self) -> bool {
         matches!(self, Self::Reviewer | Self::Admin)
     }
+
+    fn storage_name(self) -> &'static str {
+        match self {
+            Self::Contributor => "contributor",
+            Self::Reviewer => "reviewer",
+            Self::Admin => "admin",
+        }
+    }
 }
 
 impl AppState {
@@ -618,7 +626,7 @@ async fn list_traces_handler(
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
     let consent_scope = parse_consent_scope_filter(query.consent_scope.as_deref())?;
 
-    let items = records
+    let items: Vec<_> = records
         .into_iter()
         .rev()
         .filter(|record| query.status == Some(TraceCorpusStatus::Revoked) || !record.is_revoked())
@@ -639,6 +647,15 @@ async fn list_traces_handler(
         .take(limit)
         .map(|record| TraceCommonsTraceListItem::from_record(record, &derived_by_submission))
         .collect();
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::read(&tenant, "trace_list", items.len()),
+        StorageTraceAuditAction::Read,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(items))
 }
 
@@ -737,13 +754,27 @@ async fn append_credit_event_handler(
         reason: body.reason,
         external_ref: body.external_ref,
         actor_role: tenant.role,
-        actor_principal_ref: tenant.principal_ref,
+        actor_principal_ref: tenant.principal_ref.clone(),
         created_at: Utc::now(),
     };
     append_credit_event(&state.root, &tenant.tenant_id, &event).map_err(internal_error)?;
     if let Err(error) = mirror_credit_event_to_db(&state, &event).await {
         tracing::warn!(%error, submission_id = %event.submission_id, "Trace Commons DB dual-write credit mirror failed");
     }
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::credit_mutation(
+            &tenant,
+            submission_id,
+            body.credit_points_delta,
+            event.reason.as_deref(),
+        ),
+        StorageTraceAuditAction::CreditMutate,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(event))
 }
 
@@ -915,7 +946,19 @@ async fn dataset_replay_handler(
         &items,
     );
     write_export_manifest(&state.root, &tenant.tenant_id, &manifest).map_err(internal_error)?;
-    append_audit_event(&state.root, &tenant.tenant_id, audit_event).map_err(internal_error)?;
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        audit_event,
+        StorageTraceAuditAction::Export,
+        StorageTraceAuditSafeMetadata::Export {
+            artifact_kind: StorageTraceObjectArtifactKind::ExportArtifact,
+            purpose_code: Some(manifest.purpose.clone()),
+            item_count: items.len().min(u32::MAX as usize) as u32,
+        },
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(TraceReplayDatasetExport {
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
@@ -1012,7 +1055,19 @@ async fn benchmark_convert_handler(
         candidates,
     };
     write_benchmark_artifact(&state.root, &tenant.tenant_id, &artifact).map_err(internal_error)?;
-    append_audit_event(&state.root, &tenant.tenant_id, audit_event).map_err(internal_error)?;
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        audit_event,
+        StorageTraceAuditAction::BenchmarkConvert,
+        StorageTraceAuditSafeMetadata::Export {
+            artifact_kind: StorageTraceObjectArtifactKind::BenchmarkArtifact,
+            purpose_code: Some(artifact.purpose.clone()),
+            item_count: artifact.item_count.min(u32::MAX as usize) as u32,
+        },
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(artifact))
 }
 
@@ -1051,7 +1106,19 @@ async fn ranker_training_candidates_handler(
         candidates.len(),
     );
     let audit_event_id = audit_event.event_id;
-    append_audit_event(&state.root, &tenant.tenant_id, audit_event).map_err(internal_error)?;
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        audit_event,
+        StorageTraceAuditAction::Export,
+        StorageTraceAuditSafeMetadata::Export {
+            artifact_kind: StorageTraceObjectArtifactKind::ExportArtifact,
+            purpose_code: Some("ranker_training_candidates_export".to_string()),
+            item_count: candidates.len().min(u32::MAX as usize) as u32,
+        },
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(TraceRankerTrainingCandidateExport {
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
@@ -1087,7 +1154,19 @@ async fn ranker_training_pairs_handler(
         pairs.len(),
     );
     let audit_event_id = audit_event.event_id;
-    append_audit_event(&state.root, &tenant.tenant_id, audit_event).map_err(internal_error)?;
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        audit_event,
+        StorageTraceAuditAction::Export,
+        StorageTraceAuditSafeMetadata::Export {
+            artifact_kind: StorageTraceObjectArtifactKind::ExportArtifact,
+            purpose_code: Some("ranker_training_pairs_export".to_string()),
+            item_count: pairs.len().min(u32::MAX as usize) as u32,
+        },
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(TraceRankerTrainingPairExport {
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
@@ -1655,6 +1734,7 @@ fn trace_commons_record_from_storage_submission(
 fn trace_commons_audit_event_from_storage(
     event: StorageTraceAuditEventRecord,
 ) -> anyhow::Result<TraceCommonsAuditEvent> {
+    let kind = storage_audit_event_kind(event.action, &event.metadata);
     let (status, reason, export_count) = match &event.metadata {
         StorageTraceAuditSafeMetadata::Submission {
             status,
@@ -1706,7 +1786,7 @@ fn trace_commons_audit_event_from_storage(
         event_id: event.audit_event_id,
         tenant_id: event.tenant_id,
         submission_id: event.submission_id.unwrap_or_else(Uuid::nil),
-        kind: storage_audit_action_kind(event.action).to_string(),
+        kind,
         created_at: event.occurred_at,
         status,
         actor_role: TokenRole::parse(&event.actor_role).ok(),
@@ -1715,6 +1795,25 @@ fn trace_commons_audit_event_from_storage(
         export_count,
         export_id: event.export_manifest_id,
     })
+}
+
+fn storage_audit_event_kind(
+    action: StorageTraceAuditAction,
+    metadata: &StorageTraceAuditSafeMetadata,
+) -> String {
+    if let StorageTraceAuditAction::Export = action
+        && let StorageTraceAuditSafeMetadata::Export {
+            purpose_code: Some(purpose_code),
+            ..
+        } = metadata
+        && matches!(
+            purpose_code.as_str(),
+            "ranker_training_candidates_export" | "ranker_training_pairs_export"
+        )
+    {
+        return purpose_code.clone();
+    }
+    storage_audit_action_kind(action).to_string()
 }
 
 fn storage_audit_action_kind(action: StorageTraceAuditAction) -> &'static str {
@@ -2700,6 +2799,59 @@ fn append_audit_event(
     let line = serde_json::to_string(&event).context("failed to serialize audit event")?;
     writeln!(file, "{line}")
         .with_context(|| format!("failed to append audit log {}", path.display()))
+}
+
+async fn append_audit_event_with_db_mirror(
+    state: &AppState,
+    tenant: &TenantAuth,
+    event: TraceCommonsAuditEvent,
+    action: StorageTraceAuditAction,
+    metadata: StorageTraceAuditSafeMetadata,
+) -> anyhow::Result<()> {
+    append_audit_event(&state.root, &tenant.tenant_id, event.clone())?;
+    if let Err(error) = mirror_audit_event_to_db(state, tenant, &event, action, metadata).await {
+        tracing::warn!(
+            %error,
+            event_id = %event.event_id,
+            "Trace Commons DB dual-write audit mirror failed"
+        );
+    }
+    Ok(())
+}
+
+async fn mirror_audit_event_to_db(
+    state: &AppState,
+    tenant: &TenantAuth,
+    event: &TraceCommonsAuditEvent,
+    action: StorageTraceAuditAction,
+    metadata: StorageTraceAuditSafeMetadata,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    db.append_trace_audit_event(StorageTraceAuditEventWrite {
+        audit_event_id: event.event_id,
+        tenant_id: tenant.tenant_id.clone(),
+        actor_principal_ref: event
+            .actor_principal_ref
+            .clone()
+            .unwrap_or_else(|| tenant.principal_ref.clone()),
+        actor_role: event
+            .actor_role
+            .unwrap_or(tenant.role)
+            .storage_name()
+            .to_string(),
+        action,
+        reason: event.reason.clone(),
+        request_id: None,
+        submission_id: (event.submission_id != Uuid::nil()).then_some(event.submission_id),
+        object_ref_id: None,
+        export_manifest_id: event.export_id,
+        decision_inputs_hash: None,
+        metadata,
+    })
+    .await
+    .context("failed to mirror trace audit event")
 }
 
 fn read_all_audit_events(
@@ -3767,7 +3919,7 @@ struct TraceCommonsRevocation {
     reason: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TraceCommonsAuditEvent {
     event_id: Uuid,
     tenant_id: String,
@@ -3853,6 +4005,46 @@ impl TraceCommonsAuditEvent {
             actor_principal_ref: Some(auth.principal_ref.clone()),
             reason: reason.map(ToOwned::to_owned),
             export_count: None,
+            export_id: None,
+        }
+    }
+
+    fn credit_mutation(
+        auth: &TenantAuth,
+        submission_id: Uuid,
+        credit_points_delta: f32,
+        reason: Option<&str>,
+    ) -> Self {
+        let reason = reason
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| "delayed credit event".to_string());
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id,
+            kind: "credit_mutate".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: Some(format!("points_delta={credit_points_delta:.4};{reason}")),
+            export_count: None,
+            export_id: None,
+        }
+    }
+
+    fn read(auth: &TenantAuth, surface: &str, item_count: usize) -> Self {
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: "read".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: Some(format!("surface={surface};item_count={item_count}")),
+            export_count: Some(item_count),
             export_id: None,
         }
     }
@@ -5682,10 +5874,56 @@ mod tests {
         std::fs::remove_dir_all(tenant_dir.join("audit")).expect("remove file audit events");
 
         let audit_state = test_state_with_db_audit_reads(temp.path().to_path_buf(), Some(db));
+        let Json(list) = list_traces_handler(
+            State(audit_state.clone()),
+            auth_headers("review-token-a"),
+            Query(TraceListQuery {
+                status: None,
+                limit: Some(10),
+                coverage_tag: None,
+                tool: None,
+                privacy_risk: None,
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("trace list read mirrors audit event");
+        assert_eq!(list.len(), 1);
+
+        let Json(credit_event) = append_credit_event_handler(
+            State(audit_state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::ReviewerBonus,
+                credit_points_delta: 0.25,
+                reason: Some("useful privacy-safe example".to_string()),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("credit mutation mirrors audit event");
+        assert_eq!(credit_event.submission_id, submission_id);
+
+        let Json(export) = dataset_replay_handler(
+            State(audit_state.clone()),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("db_audit_export".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("dataset export mirrors audit event");
+        assert_eq!(export.item_count, 1);
+
         let Json(events) = audit_events_handler(
             State(audit_state),
             auth_headers("review-token-a"),
-            Query(AuditEventsQuery { limit: Some(10) }),
+            Query(AuditEventsQuery { limit: Some(50) }),
         )
         .await
         .expect("audit events can read DB mirror");
@@ -5693,6 +5931,16 @@ mod tests {
             event.submission_id == submission_id
                 && event.kind == "submitted"
                 && event.status == Some(TraceCorpusStatus::Accepted)
+        }));
+        assert!(events.iter().any(|event| {
+            event.kind == "read"
+                && event.reason.as_deref() == Some("surface=trace_list;item_count=1")
+        }));
+        assert!(events.iter().any(|event| {
+            event.submission_id == submission_id && event.kind == "credit_mutate"
+        }));
+        assert!(events.iter().any(|event| {
+            event.export_id == Some(export.export_id) && event.kind == "dataset_export"
         }));
     }
 

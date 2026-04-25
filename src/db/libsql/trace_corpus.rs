@@ -13,7 +13,9 @@ use crate::trace_corpus_storage::{
     TraceAuditEventWrite, TraceAuditSafeMetadata, TraceCorpusStatus, TraceCorpusStore,
     TraceCreditEventRecord, TraceCreditEventWrite, TraceCreditSettlementState, TraceDerivedRecord,
     TraceDerivedRecordWrite, TraceDerivedStatus, TraceObjectRefWrite, TraceSubmissionRecord,
-    TraceSubmissionWrite, TraceTombstoneWrite, TraceWorkerKind,
+    TraceSubmissionWrite, TraceTombstoneWrite, TraceVectorEntryRecord,
+    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
+    TraceWorkerKind,
 };
 
 const TRACE_SUBMISSION_COLUMNS: &str = "\
@@ -64,6 +66,15 @@ fn get_opt_i32(row: &libsql::Row, idx: i32) -> Option<i32> {
     row.get::<i64>(idx)
         .ok()
         .and_then(|value| i32::try_from(value).ok())
+}
+
+fn get_i32(row: &libsql::Row, idx: i32, column: &str) -> Result<i32, DatabaseError> {
+    let value = row.get::<i64>(idx).map_err(|e| {
+        DatabaseError::Serialization(format!("trace {column} column read failed: {e}"))
+    })?;
+    i32::try_from(value).map_err(|e| {
+        DatabaseError::Serialization(format!("invalid trace {column} column value: {e}"))
+    })
 }
 
 fn json_string<T: serde::Serialize>(value: &T) -> Result<String, DatabaseError> {
@@ -191,6 +202,37 @@ fn row_to_derived_record(row: &libsql::Row) -> Result<TraceDerivedRecord, Databa
         cluster_id: get_opt_text(row, 21),
         created_at: get_ts(row, 22),
         updated_at: get_ts(row, 23),
+    })
+}
+
+fn row_to_vector_entry(row: &libsql::Row) -> Result<TraceVectorEntryRecord, DatabaseError> {
+    Ok(TraceVectorEntryRecord {
+        tenant_id: get_text(row, 0),
+        submission_id: parse_uuid(&get_text(row, 1), "trace_vector_entries.submission_id")?,
+        derived_id: parse_uuid(&get_text(row, 2), "trace_vector_entries.derived_id")?,
+        vector_entry_id: parse_uuid(&get_text(row, 3), "trace_vector_entries.vector_entry_id")?,
+        vector_store: get_text(row, 4),
+        embedding_model: get_text(row, 5),
+        embedding_dimension: get_i32(row, 6, "embedding_dimension")?,
+        embedding_version: get_text(row, 7),
+        source_projection: enum_from_storage::<TraceVectorEntrySourceProjection>(
+            &get_text(row, 8),
+            "TraceVectorEntrySourceProjection",
+        )?,
+        source_hash: get_text(row, 9),
+        status: enum_from_storage::<TraceVectorEntryStatus>(
+            &get_text(row, 10),
+            "TraceVectorEntryStatus",
+        )?,
+        nearest_trace_ids: json_array_strings(&get_text(row, 11), "nearest_trace_ids")?,
+        cluster_id: get_opt_text(row, 12),
+        duplicate_score: get_opt_f32(row, 13),
+        novelty_score: get_opt_f32(row, 14),
+        indexed_at: get_opt_ts(row, 15),
+        invalidated_at: get_opt_ts(row, 16),
+        deleted_at: get_opt_ts(row, 17),
+        created_at: get_ts(row, 18),
+        updated_at: get_ts(row, 19),
     })
 }
 
@@ -611,6 +653,146 @@ impl TraceCorpusStore for LibSqlBackend {
             records.push(row_to_derived_record(&row)?);
         }
         Ok(records)
+    }
+
+    async fn upsert_trace_vector_entry(
+        &self,
+        vector_entry: TraceVectorEntryWrite,
+    ) -> Result<TraceVectorEntryRecord, DatabaseError> {
+        self.ensure_trace_tenant(&vector_entry.tenant_id).await?;
+        let conn = self.connect().await?;
+        let nearest_trace_ids = json_string(&vector_entry.nearest_trace_ids)?;
+        conn.execute(
+            "INSERT INTO trace_vector_entries (
+                tenant_id, submission_id, derived_id, vector_entry_id, vector_store,
+                embedding_model, embedding_dimension, embedding_version, source_projection,
+                source_hash, status, nearest_trace_ids, cluster_id, duplicate_score,
+                novelty_score, indexed_at, invalidated_at, deleted_at
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                ?15, ?16, ?17, ?18
+             )
+             ON CONFLICT (tenant_id, submission_id, vector_entry_id) DO UPDATE SET
+                derived_id = excluded.derived_id,
+                vector_store = excluded.vector_store,
+                embedding_model = excluded.embedding_model,
+                embedding_dimension = excluded.embedding_dimension,
+                embedding_version = excluded.embedding_version,
+                source_projection = excluded.source_projection,
+                source_hash = excluded.source_hash,
+                status = excluded.status,
+                nearest_trace_ids = excluded.nearest_trace_ids,
+                cluster_id = excluded.cluster_id,
+                duplicate_score = excluded.duplicate_score,
+                novelty_score = excluded.novelty_score,
+                indexed_at = excluded.indexed_at,
+                invalidated_at = excluded.invalidated_at,
+                deleted_at = excluded.deleted_at,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+            libsql::params![
+                vector_entry.tenant_id.as_str(),
+                vector_entry.submission_id.to_string(),
+                vector_entry.derived_id.to_string(),
+                vector_entry.vector_entry_id.to_string(),
+                vector_entry.vector_store.as_str(),
+                vector_entry.embedding_model.as_str(),
+                vector_entry.embedding_dimension,
+                vector_entry.embedding_version.as_str(),
+                enum_to_storage(vector_entry.source_projection)?,
+                vector_entry.source_hash.as_str(),
+                enum_to_storage(vector_entry.status)?,
+                nearest_trace_ids,
+                opt_string(vector_entry.cluster_id),
+                opt_f32(vector_entry.duplicate_score),
+                opt_f32(vector_entry.novelty_score),
+                fmt_opt_ts(&vector_entry.indexed_at),
+                fmt_opt_ts(&vector_entry.invalidated_at),
+                fmt_opt_ts(&vector_entry.deleted_at),
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut rows = conn
+            .query(
+                "SELECT
+                    tenant_id, submission_id, derived_id, vector_entry_id, vector_store,
+                    embedding_model, embedding_dimension, embedding_version, source_projection,
+                    source_hash, status, nearest_trace_ids, cluster_id, duplicate_score,
+                    novelty_score, indexed_at, invalidated_at, deleted_at, created_at, updated_at
+                 FROM trace_vector_entries
+                 WHERE tenant_id = ?1 AND submission_id = ?2 AND vector_entry_id = ?3",
+                libsql::params![
+                    vector_entry.tenant_id.as_str(),
+                    vector_entry.submission_id.to_string(),
+                    vector_entry.vector_entry_id.to_string(),
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        match rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            Some(row) => row_to_vector_entry(&row),
+            None => Err(DatabaseError::NotFound {
+                entity: "trace_vector_entry".to_string(),
+                id: vector_entry.vector_entry_id.to_string(),
+            }),
+        }
+    }
+
+    async fn list_trace_vector_entries(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceVectorEntryRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT
+                    tenant_id, submission_id, derived_id, vector_entry_id, vector_store,
+                    embedding_model, embedding_dimension, embedding_version, source_projection,
+                    source_hash, status, nearest_trace_ids, cluster_id, duplicate_score,
+                    novelty_score, indexed_at, invalidated_at, deleted_at, created_at, updated_at
+                 FROM trace_vector_entries
+                 WHERE tenant_id = ?1
+                 ORDER BY created_at ASC",
+                libsql::params![tenant_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut entries = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            entries.push(row_to_vector_entry(&row)?);
+        }
+        Ok(entries)
+    }
+
+    async fn invalidate_trace_vector_entries_for_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        let conn = self.connect().await?;
+        let invalidated = enum_to_storage(TraceVectorEntryStatus::Invalidated)?;
+        conn.execute(
+            "UPDATE trace_vector_entries
+             SET status = ?3,
+                 invalidated_at = COALESCE(invalidated_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE tenant_id = ?1
+               AND submission_id = ?2
+               AND status <> ?3
+               AND deleted_at IS NULL",
+            libsql::params![tenant_id, submission_id.to_string(), invalidated],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))
     }
 
     async fn append_trace_audit_event(

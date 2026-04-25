@@ -47,6 +47,22 @@ pub enum TraceDerivedStatus {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum TraceVectorEntryStatus {
+    Active,
+    Invalidated,
+    Deleted,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceVectorEntrySourceProjection {
+    CanonicalSummary,
+    RedactedMessages,
+    RedactedToolSequence,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum TraceWorkerKind {
     ServerRescrub,
     Summary,
@@ -224,6 +240,52 @@ pub struct TraceDerivedRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceVectorEntryWrite {
+    pub tenant_id: String,
+    pub submission_id: Uuid,
+    pub derived_id: Uuid,
+    pub vector_entry_id: Uuid,
+    pub vector_store: String,
+    pub embedding_model: String,
+    pub embedding_dimension: i32,
+    pub embedding_version: String,
+    pub source_projection: TraceVectorEntrySourceProjection,
+    pub source_hash: String,
+    pub status: TraceVectorEntryStatus,
+    pub nearest_trace_ids: Vec<String>,
+    pub cluster_id: Option<String>,
+    pub duplicate_score: Option<f32>,
+    pub novelty_score: Option<f32>,
+    pub indexed_at: Option<DateTime<Utc>>,
+    pub invalidated_at: Option<DateTime<Utc>>,
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceVectorEntryRecord {
+    pub tenant_id: String,
+    pub submission_id: Uuid,
+    pub derived_id: Uuid,
+    pub vector_entry_id: Uuid,
+    pub vector_store: String,
+    pub embedding_model: String,
+    pub embedding_dimension: i32,
+    pub embedding_version: String,
+    pub source_projection: TraceVectorEntrySourceProjection,
+    pub source_hash: String,
+    pub status: TraceVectorEntryStatus,
+    pub nearest_trace_ids: Vec<String>,
+    pub cluster_id: Option<String>,
+    pub duplicate_score: Option<f32>,
+    pub novelty_score: Option<f32>,
+    pub indexed_at: Option<DateTime<Utc>>,
+    pub invalidated_at: Option<DateTime<Utc>>,
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceAuditEventWrite {
     pub audit_event_id: Uuid,
     pub tenant_id: String,
@@ -380,6 +442,22 @@ pub trait TraceCorpusStore: Send + Sync {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceDerivedRecord>, DatabaseError>;
+
+    async fn upsert_trace_vector_entry(
+        &self,
+        vector_entry: TraceVectorEntryWrite,
+    ) -> Result<TraceVectorEntryRecord, DatabaseError>;
+
+    async fn list_trace_vector_entries(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceVectorEntryRecord>, DatabaseError>;
+
+    async fn invalidate_trace_vector_entries_for_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<u64, DatabaseError>;
 
     async fn append_trace_audit_event(
         &self,

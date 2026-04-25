@@ -12,7 +12,9 @@ use crate::trace_corpus_storage::{
     TraceAuditEventWrite, TraceAuditSafeMetadata, TraceCorpusStatus, TraceCorpusStore,
     TraceCreditEventRecord, TraceCreditEventWrite, TraceCreditSettlementState, TraceDerivedRecord,
     TraceDerivedRecordWrite, TraceDerivedStatus, TraceObjectRefWrite, TraceSubmissionRecord,
-    TraceSubmissionWrite, TraceTombstoneWrite, TraceWorkerKind,
+    TraceSubmissionWrite, TraceTombstoneWrite, TraceVectorEntryRecord,
+    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
+    TraceWorkerKind,
 };
 
 fn json_array_strings(
@@ -142,6 +144,36 @@ fn row_to_derived_record(row: &Row) -> Result<TraceDerivedRecord, DatabaseError>
         duplicate_score: row.get("duplicate_score"),
         novelty_score: row.get("novelty_score"),
         cluster_id: row.get("cluster_id"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    })
+}
+
+fn row_to_vector_entry(row: &Row) -> Result<TraceVectorEntryRecord, DatabaseError> {
+    let source_projection: String = row.get("source_projection");
+    let status: String = row.get("status");
+    Ok(TraceVectorEntryRecord {
+        tenant_id: row.get("tenant_id"),
+        submission_id: row.get("submission_id"),
+        derived_id: row.get("derived_id"),
+        vector_entry_id: row.get("vector_entry_id"),
+        vector_store: row.get("vector_store"),
+        embedding_model: row.get("embedding_model"),
+        embedding_dimension: row.get("embedding_dimension"),
+        embedding_version: row.get("embedding_version"),
+        source_projection: enum_from_storage::<TraceVectorEntrySourceProjection>(
+            &source_projection,
+            "TraceVectorEntrySourceProjection",
+        )?,
+        source_hash: row.get("source_hash"),
+        status: enum_from_storage::<TraceVectorEntryStatus>(&status, "TraceVectorEntryStatus")?,
+        nearest_trace_ids: row.get("nearest_trace_ids"),
+        cluster_id: row.get("cluster_id"),
+        duplicate_score: row.get("duplicate_score"),
+        novelty_score: row.get("novelty_score"),
+        indexed_at: row.get("indexed_at"),
+        invalidated_at: row.get("invalidated_at"),
+        deleted_at: row.get("deleted_at"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
@@ -551,6 +583,118 @@ impl TraceCorpusStore for PgBackend {
             .await
             .map_err(DatabaseError::Postgres)?;
         rows.iter().map(row_to_derived_record).collect()
+    }
+
+    async fn upsert_trace_vector_entry(
+        &self,
+        vector_entry: TraceVectorEntryWrite,
+    ) -> Result<TraceVectorEntryRecord, DatabaseError> {
+        self.ensure_trace_tenant(&vector_entry.tenant_id).await?;
+        let client = self.pool().get().await?;
+        let source_projection = enum_to_storage(vector_entry.source_projection)?;
+        let status = enum_to_storage(vector_entry.status)?;
+        let row = client
+            .query_one(
+                "INSERT INTO trace_vector_entries (
+                    tenant_id, submission_id, derived_id, vector_entry_id, vector_store,
+                    embedding_model, embedding_dimension, embedding_version, source_projection,
+                    source_hash, status, nearest_trace_ids, cluster_id, duplicate_score,
+                    novelty_score, indexed_at, invalidated_at, deleted_at
+                 ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                    $14, $15, $16, $17, $18
+                 )
+                 ON CONFLICT (tenant_id, submission_id, vector_entry_id) DO UPDATE SET
+                    derived_id = excluded.derived_id,
+                    vector_store = excluded.vector_store,
+                    embedding_model = excluded.embedding_model,
+                    embedding_dimension = excluded.embedding_dimension,
+                    embedding_version = excluded.embedding_version,
+                    source_projection = excluded.source_projection,
+                    source_hash = excluded.source_hash,
+                    status = excluded.status,
+                    nearest_trace_ids = excluded.nearest_trace_ids,
+                    cluster_id = excluded.cluster_id,
+                    duplicate_score = excluded.duplicate_score,
+                    novelty_score = excluded.novelty_score,
+                    indexed_at = excluded.indexed_at,
+                    invalidated_at = excluded.invalidated_at,
+                    deleted_at = excluded.deleted_at,
+                    updated_at = NOW()
+                 RETURNING
+                    tenant_id, submission_id, derived_id, vector_entry_id, vector_store,
+                    embedding_model, embedding_dimension, embedding_version, source_projection,
+                    source_hash, status, nearest_trace_ids, cluster_id, duplicate_score,
+                    novelty_score, indexed_at, invalidated_at, deleted_at, created_at, updated_at",
+                &[
+                    &vector_entry.tenant_id,
+                    &vector_entry.submission_id,
+                    &vector_entry.derived_id,
+                    &vector_entry.vector_entry_id,
+                    &vector_entry.vector_store,
+                    &vector_entry.embedding_model,
+                    &vector_entry.embedding_dimension,
+                    &vector_entry.embedding_version,
+                    &source_projection,
+                    &vector_entry.source_hash,
+                    &status,
+                    &vector_entry.nearest_trace_ids,
+                    &vector_entry.cluster_id,
+                    &vector_entry.duplicate_score,
+                    &vector_entry.novelty_score,
+                    &vector_entry.indexed_at,
+                    &vector_entry.invalidated_at,
+                    &vector_entry.deleted_at,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        row_to_vector_entry(&row)
+    }
+
+    async fn list_trace_vector_entries(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceVectorEntryRecord>, DatabaseError> {
+        let client = self.pool().get().await?;
+        let rows = client
+            .query(
+                "SELECT
+                    tenant_id, submission_id, derived_id, vector_entry_id, vector_store,
+                    embedding_model, embedding_dimension, embedding_version, source_projection,
+                    source_hash, status, nearest_trace_ids, cluster_id, duplicate_score,
+                    novelty_score, indexed_at, invalidated_at, deleted_at, created_at, updated_at
+                 FROM trace_vector_entries
+                 WHERE tenant_id = $1
+                 ORDER BY created_at ASC",
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        rows.iter().map(row_to_vector_entry).collect()
+    }
+
+    async fn invalidate_trace_vector_entries_for_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        let client = self.pool().get().await?;
+        let invalidated = enum_to_storage(TraceVectorEntryStatus::Invalidated)?;
+        client
+            .execute(
+                "UPDATE trace_vector_entries
+                 SET status = $3,
+                     invalidated_at = COALESCE(invalidated_at, NOW()),
+                     updated_at = NOW()
+                 WHERE tenant_id = $1
+                   AND submission_id = $2
+                   AND status <> $3
+                   AND deleted_at IS NULL",
+                &[&tenant_id, &submission_id, &invalidated],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)
     }
 
     async fn append_trace_audit_event(
