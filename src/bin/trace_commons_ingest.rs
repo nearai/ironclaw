@@ -3309,6 +3309,9 @@ async fn mirror_benchmark_export_provenance_to_db(
     })
     .await
     .context("failed to mirror benchmark provenance manifest metadata")?;
+    let vector_entry_ids = active_vector_entry_lookup_for_export(db.as_ref(), &artifact.tenant_id)
+        .await
+        .context("failed to read active vector entries for benchmark provenance")?;
     for candidate in &artifact.candidates {
         db.upsert_trace_export_manifest_item(StorageTraceExportManifestItemWrite {
             tenant_id: artifact.tenant_id.clone(),
@@ -3317,7 +3320,13 @@ async fn mirror_benchmark_export_provenance_to_db(
             trace_id: candidate.trace_id,
             derived_id: Some(candidate.derived_id),
             object_ref_id: None,
-            vector_entry_id: None,
+            vector_entry_id: vector_entry_ids
+                .get(&(
+                    candidate.submission_id,
+                    candidate.derived_id,
+                    candidate.canonical_summary_hash.clone(),
+                ))
+                .copied(),
             source_status_at_export: StorageTraceCorpusStatus::Accepted,
             source_hash_at_export: candidate.canonical_summary_hash.clone(),
         })
@@ -3347,6 +3356,10 @@ async fn mirror_ranker_candidate_export_provenance_to_db(
         candidates.len(),
     )
     .await?;
+    let vector_entry_ids =
+        active_vector_entry_lookup_for_export(db.as_ref(), &provenance.tenant_id)
+            .await
+            .context("failed to read active vector entries for ranker candidate provenance")?;
     for candidate in candidates {
         db.upsert_trace_export_manifest_item(StorageTraceExportManifestItemWrite {
             tenant_id: provenance.tenant_id.clone(),
@@ -3355,7 +3368,13 @@ async fn mirror_ranker_candidate_export_provenance_to_db(
             trace_id: candidate.trace_id,
             derived_id: Some(candidate.derived_id),
             object_ref_id: None,
-            vector_entry_id: None,
+            vector_entry_id: vector_entry_ids
+                .get(&(
+                    candidate.submission_id,
+                    candidate.derived_id,
+                    candidate.canonical_summary_hash.clone(),
+                ))
+                .copied(),
             source_status_at_export: storage_corpus_status(candidate.status),
             source_hash_at_export: candidate.canonical_summary_hash.clone(),
         })
@@ -3385,6 +3404,10 @@ async fn mirror_ranker_pair_export_provenance_to_db(
         provenance.source_submission_ids.len(),
     )
     .await?;
+    let vector_entry_ids =
+        active_vector_entry_lookup_for_export(db.as_ref(), &provenance.tenant_id)
+            .await
+            .context("failed to read active vector entries for ranker pair provenance")?;
     for pair in pairs {
         for candidate in [&pair.preferred, &pair.rejected] {
             db.upsert_trace_export_manifest_item(StorageTraceExportManifestItemWrite {
@@ -3394,7 +3417,13 @@ async fn mirror_ranker_pair_export_provenance_to_db(
                 trace_id: candidate.trace_id,
                 derived_id: Some(candidate.derived_id),
                 object_ref_id: None,
-                vector_entry_id: None,
+                vector_entry_id: vector_entry_ids
+                    .get(&(
+                        candidate.submission_id,
+                        candidate.derived_id,
+                        candidate.canonical_summary_hash.clone(),
+                    ))
+                    .copied(),
                 source_status_at_export: storage_corpus_status(candidate.status),
                 source_hash_at_export: candidate.canonical_summary_hash.clone(),
             })
@@ -3408,6 +3437,29 @@ async fn mirror_ranker_pair_export_provenance_to_db(
         }
     }
     Ok(())
+}
+
+async fn active_vector_entry_lookup_for_export(
+    db: &dyn Database,
+    tenant_id: &str,
+) -> anyhow::Result<BTreeMap<(Uuid, Uuid, String), Uuid>> {
+    let entries = db
+        .list_trace_vector_entries(tenant_id)
+        .await
+        .context("failed to list trace vector entries")?;
+    Ok(entries
+        .into_iter()
+        .filter(|entry| entry.status == StorageTraceVectorEntryStatus::Active)
+        .filter(|entry| {
+            entry.source_projection == StorageTraceVectorEntrySourceProjection::CanonicalSummary
+        })
+        .map(|entry| {
+            (
+                (entry.submission_id, entry.derived_id, entry.source_hash),
+                entry.vector_entry_id,
+            )
+        })
+        .collect())
 }
 
 async fn upsert_provenance_manifest_to_db(
@@ -10401,6 +10453,37 @@ mod tests {
         )
         .await
         .expect("submission dual-writes to DB mirror");
+        let mut pair_source = sample_envelope().await;
+        make_metadata_only_low_risk(&mut pair_source);
+        pair_source.consent.scopes = vec![ConsentScope::RankingTraining];
+        pair_source.value.submission_score = 0.1;
+        let pair_source_id = pair_source.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(pair_source),
+        )
+        .await
+        .expect("second ranker source dual-writes to DB mirror");
+        let Json(vector_response) = maintenance_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("manifest_listing_vector_index".to_string()),
+                dry_run: false,
+                backfill_db_mirror: false,
+                index_vectors: true,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("vector metadata indexing succeeds before derived exports");
+        assert_eq!(vector_response.vector_entries_indexed, 2);
         let Json(export) = dataset_replay_handler(
             State(state.clone()),
             auth_headers("review-token-a"),
@@ -10409,7 +10492,7 @@ mod tests {
                 purpose: Some("manifest_listing".to_string()),
                 status: Some(TraceCorpusStatus::Accepted),
                 privacy_risk: Some(ResidualPiiRisk::Low),
-                consent_scope: None,
+                consent_scope: Some("debugging-evaluation".to_string()),
             }),
         )
         .await
@@ -10421,7 +10504,7 @@ mod tests {
             Json(BenchmarkConversionRequest {
                 limit: Some(10),
                 purpose: Some("manifest_listing_benchmark".to_string()),
-                consent_scope: None,
+                consent_scope: Some("debugging-evaluation".to_string()),
                 status: Some(TraceCorpusStatus::Accepted),
                 privacy_risk: Some(ResidualPiiRisk::Low),
                 external_ref: None,
@@ -10437,42 +10520,87 @@ mod tests {
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
                 status: None,
-                consent_scope: None,
+                consent_scope: Some("ranking-training".to_string()),
                 privacy_risk: Some(ResidualPiiRisk::Low),
             }),
         )
         .await
         .expect("ranker export succeeds");
-        assert_eq!(ranker.item_count, 1);
+        assert_eq!(ranker.item_count, 2);
+
+        let Json(ranker_pairs) = ranker_training_pairs_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                status: None,
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect("ranker pair export succeeds");
+        assert_eq!(ranker_pairs.item_count, 1);
 
         assert_eq!(
             db.list_trace_export_manifests("tenant-a")
                 .await
                 .expect("all export manifest metadata reads")
                 .len(),
-            3,
-            "DB stores replay, benchmark, and ranker provenance manifests"
+            4,
+            "DB stores replay, benchmark, ranker candidate, and ranker pair provenance manifests"
         );
-        let derived_id = db
-            .list_trace_derived_records("tenant-a")
+        let vector_by_submission = db
+            .list_trace_vector_entries("tenant-a")
             .await
-            .expect("derived metadata reads")
+            .expect("vector metadata reads")
             .into_iter()
-            .find(|record| record.submission_id == submission_id)
-            .expect("derived metadata exists")
-            .derived_id;
+            .filter(|record| record.status == StorageTraceVectorEntryStatus::Active)
+            .map(|record| {
+                (
+                    record.submission_id,
+                    (record.derived_id, record.vector_entry_id),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let (derived_id, vector_entry_id) = *vector_by_submission
+            .get(&submission_id)
+            .expect("active vector metadata exists for derived summary");
+        let (pair_source_derived_id, pair_source_vector_entry_id) = *vector_by_submission
+            .get(&pair_source_id)
+            .expect("active vector metadata exists for ranker pair source");
         let benchmark_items = db
             .list_trace_export_manifest_items("tenant-a", benchmark.conversion_id)
             .await
             .expect("benchmark provenance items read");
         assert_eq!(benchmark_items.len(), 1);
         assert_eq!(benchmark_items[0].derived_id, Some(derived_id));
+        assert_eq!(benchmark_items[0].vector_entry_id, Some(vector_entry_id));
         let ranker_items = db
             .list_trace_export_manifest_items("tenant-a", ranker.export_id)
             .await
             .expect("ranker provenance items read");
-        assert_eq!(ranker_items.len(), 1);
-        assert_eq!(ranker_items[0].derived_id, Some(derived_id));
+        assert_eq!(ranker_items.len(), 2);
+        assert!(ranker_items.iter().any(|item| {
+            item.submission_id == submission_id
+                && item.derived_id == Some(derived_id)
+                && item.vector_entry_id == Some(vector_entry_id)
+        }));
+        assert!(ranker_items.iter().any(|item| {
+            item.submission_id == pair_source_id
+                && item.derived_id == Some(pair_source_derived_id)
+                && item.vector_entry_id == Some(pair_source_vector_entry_id)
+        }));
+        let ranker_pair_items = db
+            .list_trace_export_manifest_items("tenant-a", ranker_pairs.export_id)
+            .await
+            .expect("ranker pair provenance items read");
+        assert_eq!(ranker_pair_items.len(), 2);
+        assert!(
+            ranker_pair_items
+                .iter()
+                .all(|item| item.vector_entry_id.is_some())
+        );
 
         let Json(manifests) =
             replay_export_manifests_handler(State(state.clone()), auth_headers("review-token-a"))
