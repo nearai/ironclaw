@@ -483,6 +483,10 @@ fn app(state: Arc<AppState>) -> Router {
         )
         .route("/v1/benchmarks/convert", post(benchmark_convert_handler))
         .route(
+            "/v1/workers/benchmark-convert",
+            post(benchmark_worker_convert_handler),
+        )
+        .route(
             "/v1/ranker/training-candidates",
             get(ranker_training_candidates_handler),
         )
@@ -1666,9 +1670,27 @@ async fn benchmark_convert_handler(
 ) -> ApiResult<Json<TraceBenchmarkConversionArtifact>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_benchmarker(&tenant)?;
+    run_benchmark_conversion(state.as_ref(), &tenant, body).await
+}
+
+async fn benchmark_worker_convert_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<BenchmarkConversionRequest>,
+) -> ApiResult<Json<TraceBenchmarkConversionArtifact>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_benchmarker(&tenant)?;
+    run_benchmark_conversion(state.as_ref(), &tenant, body).await
+}
+
+async fn run_benchmark_conversion(
+    state: &AppState,
+    tenant: &TenantAuth,
+    body: BenchmarkConversionRequest,
+) -> ApiResult<Json<TraceBenchmarkConversionArtifact>> {
     let consent_scope = parse_consent_scope_filter(body.consent_scope.as_deref())?;
     enforce_dataset_export_guardrails(
-        state.as_ref(),
+        state,
         "benchmark conversion",
         body.purpose.as_deref(),
         body.status,
@@ -1679,10 +1701,9 @@ async fn benchmark_convert_handler(
         body.purpose.as_deref(),
         "trace_commons_benchmark_candidate_conversion",
     );
-    let TraceCommonsMetadataView { records, derived } =
-        read_reviewer_metadata_view(state.as_ref(), &tenant)
-            .await
-            .map_err(internal_error)?;
+    let TraceCommonsMetadataView { records, derived } = read_reviewer_metadata_view(state, tenant)
+        .await
+        .map_err(internal_error)?;
     let accepted_by_submission = records
         .into_iter()
         .filter(TraceCommonsSubmissionRecord::is_benchmark_eligible)
@@ -1718,7 +1739,7 @@ async fn benchmark_convert_handler(
     let source_submission_ids_hash =
         source_submission_ids_hash("benchmark_conversion", &source_submission_ids);
     let audit_event = TraceCommonsAuditEvent::benchmark_conversion(
-        &tenant,
+        tenant,
         conversion_id,
         candidates.len(),
         source_submission_ids_hash.clone(),
@@ -1758,7 +1779,7 @@ async fn benchmark_convert_handler(
         &provenance,
     )
     .map_err(internal_error)?;
-    if let Err(error) = mirror_benchmark_export_provenance_to_db(state.as_ref(), &artifact).await {
+    if let Err(error) = mirror_benchmark_export_provenance_to_db(state, &artifact).await {
         tracing::warn!(
             %error,
             export_id = %conversion_id,
@@ -1766,8 +1787,8 @@ async fn benchmark_convert_handler(
         );
     }
     append_audit_event_with_db_mirror(
-        state.as_ref(),
-        &tenant,
+        state,
+        tenant,
         audit_event,
         StorageTraceAuditAction::BenchmarkConvert,
         StorageTraceAuditSafeMetadata::Export {
@@ -1779,8 +1800,8 @@ async fn benchmark_convert_handler(
     .await
     .map_err(internal_error)?;
     append_automatic_utility_credit_events_once(
-        state.as_ref(),
-        &tenant,
+        state,
+        tenant,
         AutomaticUtilityCreditConfig {
             idempotency_label: "benchmark-conversion-credit",
             event_type: TraceCreditLedgerEventType::BenchmarkConversion,
@@ -8985,6 +9006,38 @@ mod tests {
         .await
         .expect("benchmark worker can convert benchmark artifacts");
         assert_eq!(benchmark.item_count, 1);
+
+        let export_benchmark_route_error = benchmark_worker_convert_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("export_worker_benchmark_route_denied".to_string()),
+                consent_scope: None,
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: Some("benchmark-job:export-worker-denied".to_string()),
+            }),
+        )
+        .await
+        .expect_err("export worker cannot use dedicated benchmark route");
+        assert_eq!(export_benchmark_route_error.0, StatusCode::FORBIDDEN);
+
+        let Json(dedicated_benchmark) = benchmark_worker_convert_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("benchmark_worker_dedicated_conversion".to_string()),
+                consent_scope: None,
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: Some("benchmark-job:worker-dedicated-scope".to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark worker can use dedicated benchmark route");
+        assert_eq!(dedicated_benchmark.item_count, 1);
 
         let benchmark_export_error = dataset_replay_handler(
             State(state.clone()),
