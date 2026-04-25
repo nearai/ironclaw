@@ -1404,6 +1404,18 @@ async fn review_decision_handler(
 ) -> ApiResult<Json<TraceSubmissionReceipt>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_reviewer(&tenant)?;
+    let reason = body
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                "review decisions require a non-empty reason",
+            )
+        })?
+        .to_string();
     let mut record = read_submission_record(&state.root, &tenant.tenant_id, submission_id)
         .map_err(internal_error)?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "trace submission not found"))?;
@@ -1477,7 +1489,7 @@ async fn review_decision_handler(
             &tenant,
             submission_id,
             record.status,
-            body.reason.as_deref(),
+            Some(reason.as_str()),
         ),
     )
     .map_err(internal_error)?;
@@ -10906,6 +10918,33 @@ mod tests {
                 .expect("review queue loads");
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].submission_id, submission_id);
+
+        let missing_reason_error = review_decision_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Approve,
+                reason: None,
+                credit_points_pending: Some(1.25),
+            }),
+        )
+        .await
+        .expect_err("review decisions require an explicit reason");
+        assert_eq!(missing_reason_error.0, StatusCode::BAD_REQUEST);
+        let blank_reason_error = review_decision_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Approve,
+                reason: Some(" ".to_string()),
+                credit_points_pending: Some(1.25),
+            }),
+        )
+        .await
+        .expect_err("review decisions reject blank reasons");
+        assert_eq!(blank_reason_error.0, StatusCode::BAD_REQUEST);
 
         let Json(receipt) = review_decision_handler(
             State(state.clone()),
