@@ -18,7 +18,7 @@ LocalFilesystem mounted at /system/extensions
 -> WasmRuntime executes a WASM capability
 -> ScriptRuntime executes a script capability
 -> InMemoryResourceGovernor reserves and reconciles both invocations
--> InMemoryEventSink records requested/selected/succeeded events
+-> JsonlEventSink records requested/selected/succeeded events under /engine/events
 -> JSON outputs are returned through one dispatch path
 ```
 
@@ -40,6 +40,7 @@ discovered_extensions=2
 dispatch=echo-wasm.say runtime=wasm output={"message":"hello wasm"} reservation_status=Reconciled
 dispatch=echo-script.say runtime=script script_backend=in_process_echo output={"message":"hello script"} reservation_status=Reconciled
 events=6
+durable_event_path=VirtualPath("/engine/events/reborn-demo.jsonl")
 event[0]=dispatch_requested capability=echo-wasm.say runtime=none error=none
 event[1]=runtime_selected capability=echo-wasm.say runtime=wasm error=none
 event[2]=dispatch_succeeded capability=echo-wasm.say runtime=wasm error=none
@@ -93,6 +94,7 @@ The integration test `crates/ironclaw_kernel/tests/vertical_slice_contract.rs` v
 - Script dispatch goes through `RuntimeDispatcher` and `ScriptRuntime`
 - both invocations reserve and reconcile resource usage
 - both lanes emit dispatch requested/runtime selected/dispatch succeeded events
+- event history is durably written through `RootFilesystem` at `/engine/events/reborn-demo.jsonl`
 - both lanes return JSON output through the same normalized kernel result type
 
 ---
