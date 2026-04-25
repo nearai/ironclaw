@@ -17,7 +17,7 @@ It keeps callers simple without making the runtime dispatcher own authorization:
 caller/channel/agent/conversation
   -> CapabilityHost::invoke_json(...)
       -> AuthorizationService / GrantAuthorizer
-      -> optional RunStateStore
+      -> optional RunStateStore / ApprovalRequestStore
       -> RuntimeDispatcher
           -> WASM / Script / MCP
 ```
@@ -36,7 +36,7 @@ This service is the middle communication layer between authorization and dispatc
 3. lookup CapabilityDescriptor in ExtensionRegistry
 4. call CapabilityDispatchAuthorizer
 5. if denied, mark `Failed` and return a typed invocation error before dispatch/resource reservation
-6. if approval is required, mark `BlockedApproval` and return a typed approval-required error
+6. if approval is required, save a pending approval request, mark `BlockedApproval`, and return a typed approval-required error
 7. if allowed, call RuntimeDispatcher with context.resource_scope
 8. mark `Completed` or `Failed` after dispatch
 9. return the normalized dispatch result
@@ -79,9 +79,10 @@ so callers cannot accidentally provide an authorization context for one scope an
 ```rust
 CapabilityHost::new(&registry, &dispatcher, &authorizer)
     .with_run_state(&run_state)
+    .with_approval_requests(&approval_requests)
 ```
 
-The run-state store is optional for low-level tests, but host-facing invocation should configure it so approvals and failures are visible outside the call stack.
+The stores are optional for low-level tests, but host-facing invocation should configure them so approvals and failures are visible outside the call stack and can survive process restarts. The durable implementations write through the `/engine` filesystem namespace, so production can provide a DB-backed filesystem implementation without coupling this crate to a specific database.
 
 ---
 
@@ -101,7 +102,7 @@ It has no dependency on `ironclaw_authorization`, no `ExecutionContext`, and no 
 
 This slice does not implement:
 
-- approval request persistence or resume
+- approval resolution or resume
 - grant storage, revocation, or expiration enforcement
 - invocation count tracking
 - obligation application beyond returning allowed/denied

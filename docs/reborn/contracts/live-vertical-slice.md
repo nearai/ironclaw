@@ -15,7 +15,7 @@ LocalFilesystem mounted at /system/extensions
 -> ExtensionDiscovery reads manifests
 -> ExtensionRegistry registers capabilities
 -> CapabilityHost invokes through GrantAuthorizer
--> InMemoryRunStateStore tracks running/completed/blocked states
+-> RunStateStore tracks running/completed/blocked states
 -> RuntimeDispatcher routes authorized dispatch by RuntimeKind
 -> WasmRuntime executes a WASM capability
 -> ScriptRuntime executes a script capability
@@ -56,7 +56,7 @@ event[7]=runtime_selected capability=echo-mcp.say runtime=mcp error=none
 event[8]=dispatch_succeeded capability=echo-mcp.say runtime=mcp error=none
 ```
 
-The default example uses an in-process echo script backend and in-process echo MCP client so the demo works without Docker or an external MCP server installed. It still exercises the real `CapabilityHost`, `GrantAuthorizer`, `InMemoryRunStateStore`, `ScriptRuntime`, `McpRuntime`, manifest-derived command metadata, `RuntimeDispatcher`, resource lifecycle, and event emission path.
+The default example uses an in-process echo script backend and in-process echo MCP client so the demo works without Docker or an external MCP server installed. It still exercises the real `CapabilityHost`, `GrantAuthorizer`, run-state store integration, `ScriptRuntime`, `McpRuntime`, manifest-derived command metadata, `RuntimeDispatcher`, resource lifecycle, and event emission path.
 
 ---
 
@@ -100,6 +100,7 @@ The integration test `crates/ironclaw_dispatcher/tests/vertical_slice_contract.r
 - caller-facing invocation goes through `CapabilityHost`
 - grant checks go through `GrantAuthorizer`, outside the dispatcher
 - host invocation can expose `Running`, `BlockedApproval`, `Completed`, and `Failed` run states
+- run-state and approval request stores can persist through the `/engine` filesystem namespace
 - WASM dispatch goes through `RuntimeDispatcher` and `WasmRuntime`
 - Script dispatch goes through `RuntimeDispatcher` and `ScriptRuntime`
 - MCP dispatch goes through `RuntimeDispatcher` and `McpRuntime`
@@ -116,7 +117,7 @@ This slice does not add:
 
 - full realtime event bus fanout/reconnect
 - durable transcript/job state
-- approval persistence or run-state blocking
+- approval resolution/resume
 - scoped script filesystem mounts
 - artifact export
 - secret injection
