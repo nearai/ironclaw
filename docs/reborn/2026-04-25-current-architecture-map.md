@@ -1,0 +1,313 @@
+# IronClaw Reborn — Current architecture map
+
+**Date:** 2026-04-25
+**Generated:** 2026-04-25T12:18:38Z
+**Status:** Current docs snapshot / implementation-alignment map
+**Scope:** Reborn host architecture, current implemented slices, and explicit gaps
+
+This document records the current Reborn shape after the recent architecture discussion. It is a map, not a replacement for the contract docs under `docs/reborn/contracts/`.
+
+Legend:
+
+```text
+[exists]   implemented or covered by current Reborn contract/demo slices
+[partial]  present as a narrow slice, not yet a product-complete service
+[not yet]  intentionally missing or deferred
+```
+
+---
+
+## 1. One host core, many ports/adapters
+
+Reborn has one host core with many adapters and runtime ports. It should not grow one host per vendor or per transport.
+
+```text
+                               users / external systems
+
+       +------------+   +------------+   +------------+   +------------+
+       | CLI driver |   | Web driver |   | Slack drv  |   | Telegram   |
+       | [adapter]  |   | [adapter]  |   | [adapter]  |   | [adapter]  |
+       +-----+------+   +-----+------+   +-----+------+   +-----+------+
+             |                |                |                |
+             +----------------+----------------+----------------+
+                              |
+                              v
+                  +---------------------------+
+                  | TransportAdapter port     |
+                  | normalize ingress/egress  |
+                  | [contract; real channel   |
+                  |  adapters mostly not yet] |
+                  +-------------+-------------+
+                                |
+                                v
+                  +---------------------------+
+                  | Turn service              |
+                  | one active run/thread,    |
+                  | checkpoints, resume edge  |
+                  | [not yet]                 |
+                  +-------------+-------------+
+                                |
+                                v
+                  +---------------------------+
+                  | First-party agent loop    |
+                  | hosted service/extension  |
+                  | emits Reply | Capability  |
+                  | Calls [not yet]           |
+                  +-------------+-------------+
+                                |
+                                v
++-------------------------------+---------------------------------------+
+|                         HOST CORE                                     |
+|                                                                       |
+|  +-------------------+       +-------------------+                    |
+|  | CapabilityHost    | ----> | Authorization /   |                    |
+|  | caller-facing     |       | grants / leases   |                    |
+|  | workflow gate     |       | [exists/partial]  |                    |
+|  | [exists]          |       +---------+---------+                    |
+|  +----+-------+------+                 |                              |
+|       |       |                        v                              |
+|       |       |              +-------------------+                    |
+|       |       |              | Run-state +       |                    |
+|       |       |              | approval stores   |                    |
+|       |       |              | [exists/partial]  |                    |
+|       |       |              +-------------------+                    |
+|       |       |                                                       |
+|       |       | spawn_json                                             |
+|       |       v                                                       |
+|       |  +-------------------+     background execution               |
+|       |  | ProcessManager / | ------------------------------------+   |
+|       |  | ProcessStore     |                                     |   |
+|       |  | [exists]         |                                     |   |
+|       |  +---------+--------+                                     |   |
+|       |            |                                              |   |
+|       |            v                                              |   |
+|       |  +---------------------------+                            |   |
+|       |  | BackgroundProcessManager  |                            |   |
+|       |  | + ProcessExecutor         |                            |   |
+|       |  | + DispatchProcessExecutor |                            |   |
+|       |  | [exists]                  |                            |   |
+|       |  +-------------+-------------+                            |   |
+|       |                | uses owned dispatcher handles             |   |
+|       |                v                                           |   |
+|       |  RuntimeDispatcher::from_arcs(...) [exists]                |   |
+|       |                                                            |   |
+|       v                                                            |   |
+|  +-------------------+                                             |   |
+|  | RuntimeDispatcher | <-------------------------------------------+   |
+|  | authorized lane   |                                                 |
+|  | router only       |                                                 |
+|  | [exists]          |                                                 |
+|  +----+--------+-----+                                                 |
+|       |        |                                                       |
++-------|--------|-------------------------------------------------------+
+        |        |
+        v        v
++--------------+ +---------------+ +---------------+ +------------------+
+| WASM runtime | | Script runner | | MCP adapter   | | FirstParty/System|
+| lane         | | lane          | | lane          | | runtime lanes    |
+| [exists]     | | [exists]      | | [exists]      | | [not yet exec]   |
++--------------+ +---------------+ +---------------+ +------------------+
+        ^                ^                 ^
+        |                |                 |
++-------+----------------+-----------------+---------------------------+
+| ExtensionDiscovery / ExtensionRegistry [exists]                      |
+| discovers manifests, packages, capabilities, runtime declarations;    |
+| knows what can run, never executes it.                                |
++-----------------------------------------------------------------------+
+
++-----------------------------------------------------------------------+
+| Shared host services and records                                      |
+| RootFilesystem/mounts [exists]  ResourceGovernor [exists]             |
+| Runtime events sink [partial]   Process persistence [exists]          |
+| Durable leases [not yet]        User-facing scoped event API [not yet] |
++-----------------------------------------------------------------------+
+```
+
+Key boundary decisions shown above:
+
+- There is **one Host core** with stable ports for transports, runtimes, filesystem, resources, approvals, and events.
+- Telegram, Slack, Web, and CLI are **channel adapters/drivers**, not separate hosts.
+- Vendor-specific behavior belongs in adapters or extension packages behind the host API, not in duplicated host cores.
+- The parent agent loop should be a **first-party hosted service/extension**, not kernel, dispatcher, or transport-driver logic.
+
+---
+
+## 2. Current caller path
+
+The current host-facing invocation path is:
+
+```text
+caller / first-party service / future turn service
+  -> CapabilityHost::invoke_json(...) | resume_json(...) | spawn_json(...)
+      -> validates ExecutionContext and ResourceScope consistency
+      -> looks up CapabilityDescriptor in ExtensionRegistry
+      -> asks authorizer / approval / lease services for a decision
+      -> records run-state when configured
+      -> dispatches only if authorized
+      -> either:
+           dispatch_json(...) through RuntimeDispatcher
+           or create a ProcessRecord through ProcessManager
+```
+
+`CapabilityHost` is the caller-facing authority and workflow gate. Callers should not manually evaluate grants and then call `RuntimeDispatcher` as if it were the public workflow API.
+
+`RuntimeDispatcher` is deliberately lower-level:
+
+```text
+already-authorized CapabilityDispatchRequest
+  -> runtime-kind selection
+  -> configured runtime backend
+  -> normalized CapabilityDispatchResult
+```
+
+The dispatcher does not own authorization, approval semantics, extension discovery, run-state, product workflows, prompt assembly, or transport behavior.
+
+---
+
+## 3. Background/process execution path
+
+Process/background execution exists as a capability-backed slice, not as an arbitrary host-process escape hatch.
+
+```text
+CapabilityHost::spawn_json(...)
+  -> authorize SpawnCapability + target effects
+  -> ProcessManager::spawn(ProcessStart)
+  -> ProcessStore persists ProcessRecord as Running
+  -> BackgroundProcessManager starts a ProcessExecutor task
+  -> DispatchProcessExecutor adapts the process request back into capability dispatch
+  -> RuntimeDispatcher::from_arcs(...) provides owned dispatcher composition for detached work
+  -> executor success/failure transitions process to Completed/Failed
+```
+
+Implemented/current pieces:
+
+- `ProcessRecord` carries `ProcessId`, parent process id, invocation id, tenant/user scope, extension id, capability id, runtime kind, grants, mounts, resource estimate, optional reservation id, and status.
+- `ProcessStatus` currently covers `Running`, `Completed`, `Failed`, and `Killed`.
+- `BackgroundProcessManager`, `ProcessExecutor`, and `DispatchProcessExecutor` establish the detachable execution seam.
+- `RuntimeDispatcher::from_arcs` exists so background execution can hold owned service handles without leaking borrowed request state into spawned tasks.
+- Process persistence exists through in-memory and filesystem-backed stores.
+
+Still missing for process/product completeness:
+
+- durable append-only process lifecycle events
+- explicit resource reservation ownership and cleanup semantics for long-running processes
+- cooperative cancellation/abort handles
+- process output streaming, await/subscribe APIs, and event fanout
+- richer process tree/query APIs beyond parent id storage
+
+---
+
+## 4. What exists now
+
+The current implemented or contract-backed Reborn stack includes these slices:
+
+| Area | Current status |
+| --- | --- |
+| Host API vocabulary | `[exists]` IDs, scopes, runtime kinds, trust classes, capabilities, grants, resources, approvals, events, paths, mount views |
+| Filesystem/mount surface | `[exists]` root/scoped filesystem contracts and filesystem-backed stores used by Reborn services |
+| Extension discovery/registry | `[exists]` manifests, package validation, capability descriptors, runtime declaration mapping |
+| Resource governor | `[exists]` reservation/reconcile/release model and V1 dimensions for hosted resource control |
+| Capability access | `[exists/partial]` grant matching, action-time authorization, lease-backed authorizer semantics |
+| CapabilityHost | `[exists]` caller-facing invocation, approval-blocking, resume, and spawn workflow gate |
+| Approvals/resume | `[exists/partial]` pending approval records, invocation fingerprints, approval resolver, in-memory exact-invocation leases, `resume_json` replay checks |
+| Run-state | `[exists]` `Running`, `BlockedApproval`, `BlockedAuth`, `Completed`, `Failed` current-state stores with tenant/user partitioning |
+| Dispatcher | `[exists]` routing of already-authorized requests to WASM, Script, and MCP lanes; `FirstParty`/`System` recognized but unsupported |
+| Runtime events | `[partial]` dispatcher-level event vocabulary/sinks for requested/selected/succeeded/failed |
+| WASM lane | `[exists]` configured `WasmRuntime` dispatch path in the live vertical slice |
+| Script lane | `[exists]` `ScriptExecutor` path, including in-process demo backend and optional Docker backend in the demo |
+| MCP lane | `[exists]` adapter/executor contract path in the live vertical slice; not a full MCP lifecycle product yet |
+| Process persistence | `[exists]` process store/manager records and background completion/failure transition protection |
+| Live vertical slice | `[exists]` runnable demo through discovery -> registry -> `CapabilityHost` -> authorization -> dispatcher -> WASM/Script/MCP -> resources/events |
+
+---
+
+## 5. What does not exist yet
+
+These are explicit gaps, not architecture contradictions:
+
+| Gap | Why it matters |
+| --- | --- |
+| Real Telegram/channel adapters | Telegram/Slack/Web/CLI should be transport drivers over the shared host request/event contracts; product-grade channel adapters still need to be built or ported into this shape. |
+| Turn service | The shared service that owns one-active-run-per-thread, turn lifecycle, checkpoint/resume edge, and handoff to the loop is not implemented yet. |
+| First-party agent loop runtime | The default parent agent loop should be hosted as a first-party service/extension that emits `Reply | CapabilityCalls`; it is not yet a Reborn runtime/service. |
+| Process lifecycle events/resource ownership | Process records exist, but durable lifecycle events, output streams, cancellation handles, resource cleanup ownership, and subscribe/await APIs are not complete. |
+| Durable leases | Approval leases currently have narrow/in-memory semantics; durable, revocable, auditable lease storage is not complete. |
+| User-facing scoped event API | Dispatcher events and JSONL/in-memory sinks exist, but scoped SSE/WebSocket/reconnect APIs and projection reducers are not productized. |
+| FirstParty/System runtime execution | `RuntimeKind::FirstParty` and `RuntimeKind::System` are recognized host API/runtime markers, but dispatch returns unsupported until trusted host service adapters land. |
+| Full MCP server lifecycle | MCP is a current adapter lane, not yet a complete product lifecycle for server install/start/auth/restart/monitoring. |
+| Auth-blocked resume product path | `BlockedAuth` is reserved in run-state; full OAuth/token prompt, secret lease, callback, and retry-after-auth workflow remains to be implemented. |
+
+---
+
+## 6. Adapter and host naming rules
+
+Use these naming rules in future docs and implementation plans:
+
+```text
+Correct:
+  Host core
+  Runtime port
+  TransportAdapter
+  Telegram channel adapter
+  Slack channel adapter
+  Web gateway adapter
+  CLI driver
+  first-party agent loop service/extension
+
+Avoid:
+  Telegram host
+  Slack host
+  Web host
+  per-vendor host
+  dispatcher-owned agent loop
+  kernel-owned product workflow
+```
+
+The host is the authority envelope. Adapters translate protocol-specific ingress/egress into host requests and events. Runtime lanes execute already-authorized capability work. Product behavior should live as first-party or third-party userland over those contracts.
+
+---
+
+## 7. Agent loop placement
+
+The current architecture decision is:
+
+```text
+agent loop = first-party hosted service/extension
+agent loop != kernel
+agent loop != RuntimeDispatcher
+agent loop != transport adapter
+```
+
+The loop boundary should stay:
+
+```text
+Reply | CapabilityCalls
+```
+
+Where:
+
+- `Reply` is user-visible output for the active thread.
+- `CapabilityCalls` are explicit capability requests against the visible capability surface.
+
+CodeAct, scripting, subagents, jobs, and other worker modes should be expressed as capabilities such as `spawn_subagent(...)`, `create_job(...)`, or `script.run(...)`, then pass through `CapabilityHost` and the authorized runtime dispatch path.
+
+---
+
+## 8. Source contracts
+
+Use these docs as the detailed contract sources behind this map:
+
+- `docs/reborn/contracts/host-api.md`
+- `docs/reborn/contracts/extensions.md`
+- `docs/reborn/contracts/capability-access.md`
+- `docs/reborn/contracts/capabilities.md`
+- `docs/reborn/contracts/approvals.md`
+- `docs/reborn/contracts/run-state.md`
+- `docs/reborn/contracts/dispatcher.md`
+- `docs/reborn/contracts/processes.md`
+- `docs/reborn/contracts/resources.md`
+- `docs/reborn/contracts/events.md`
+- `docs/reborn/contracts/events-projections.md`
+- `docs/reborn/contracts/agent-loop-protocol.md`
+- `docs/reborn/contracts/runtime-workflows.md`
+- `docs/reborn/contracts/live-vertical-slice.md`
