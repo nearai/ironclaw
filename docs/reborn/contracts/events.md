@@ -95,7 +95,7 @@ dispatch_requested
 dispatch_failed
 ```
 
-`MissingRuntimeBackend`, unknown capability, runtime mismatch, unsupported runtime, and runtime execution failures all emit a failed event without leaking internal paths or secret values.
+`AuthorizationDenied`, `MissingRuntimeBackend`, unknown capability, runtime mismatch, unsupported runtime, and runtime execution failures all emit a failed event without leaking internal paths or secret values.
 
 The live vertical slice currently emits nine events for its three successful lanes: WASM, Script, and MCP.
 

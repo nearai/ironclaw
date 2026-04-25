@@ -127,6 +127,7 @@ docs/reborn/contracts/resources.md
 docs/reborn/contracts/extensions.md
 docs/reborn/contracts/wasm.md
 docs/reborn/contracts/kernel-dispatch.md
+docs/reborn/contracts/capability-access.md
 docs/reborn/contracts/live-vertical-slice.md
 docs/reborn/contracts/mcp.md
 docs/reborn/contracts/scripts.md

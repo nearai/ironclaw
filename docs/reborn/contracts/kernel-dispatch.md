@@ -40,6 +40,7 @@ The dispatcher is constructed from references to service boundaries:
 
 ```rust
 RuntimeDispatcher::new(&registry, &root_filesystem, &resource_governor)
+    .with_capability_authorizer(&authorizer, &execution_context)
     .with_wasm_runtime(&wasm_runtime)
     .with_script_runtime(&script_runtime)
     .with_mcp_runtime(&mcp_runtime)
@@ -57,9 +58,10 @@ V1 `dispatch_json` performs only routing and consistency checks:
 1. lookup capability in ExtensionRegistry
 2. lookup provider package in ExtensionRegistry
 3. verify descriptor.runtime == package.manifest.runtime_kind()
-4. select runtime lane from RuntimeKind
-5. call the configured backend for that lane
-6. return normalized result or typed failure
+4. if configured, authorize dispatch against `ExecutionContext.grants`
+5. select runtime lane from RuntimeKind
+6. call the configured backend for that lane
+7. return normalized result or typed failure
 ```
 
 For `RuntimeKind::Wasm`, the dispatcher calls:
@@ -81,6 +83,8 @@ ironclaw_mcp::McpExecutor::execute_extension_json(...)
 ```
 
 Each runtime lane still owns its local reserve/prepare/invoke/reconcile/release lifecycle. The dispatcher does not duplicate the resource-governor protocol.
+
+When a capability authorizer is configured, authorization denial happens before runtime selection and before resource reservation. The dispatcher also verifies `request.scope == execution_context.resource_scope` so callers cannot smuggle a different billing/tenant scope into an authorized dispatch.
 
 ---
 
@@ -107,6 +111,8 @@ The dispatcher fails before execution when:
 - capability ID is not registered
 - provider package is not registered
 - capability descriptor runtime does not match package manifest runtime
+- configured authorization gate denies the dispatch
+- dispatch request scope does not match the authorization context resource scope
 - selected runtime backend is missing
 - selected runtime lane is recognized but not implemented yet
 
@@ -139,6 +145,7 @@ This PR does not add:
 
 - authorization/grant evaluation
 - approval prompts
+- grant persistence/revocation storage
 - full audit/event projection persistence
 - script filesystem mounts, artifact export, network access, or secret injection
 - MCP protocol handshake/lifecycle management beyond the adapter contract
@@ -156,6 +163,8 @@ Those belong in dedicated service crates or later narrow kernel composition slic
 
 The crate test suite covers:
 
+- optional authorization denial before runtime/resource reservation
+- optional authorization allow reaching runtime execution
 - WASM capability dispatch through the real WASM executor
 - unknown capability failure before resource reservation
 - descriptor/package runtime mismatch failure before execution
