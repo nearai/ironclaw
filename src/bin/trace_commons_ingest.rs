@@ -6072,12 +6072,50 @@ async fn reconcile_db_mirror(
         .iter()
         .filter(|entry| entry.status == StorageTraceVectorEntryStatus::Active)
         .count();
+    let active_canonical_vector_keys = db_vectors
+        .iter()
+        .filter(|entry| entry.status == StorageTraceVectorEntryStatus::Active)
+        .filter(|entry| {
+            entry.source_projection == StorageTraceVectorEntrySourceProjection::CanonicalSummary
+        })
+        .map(|entry| {
+            (
+                entry.submission_id,
+                entry.derived_id,
+                entry.source_hash.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let eligible_canonical_vector_keys = db_derived
+        .iter()
+        .filter(|record| record.status == StorageTraceDerivedStatus::Current)
+        .filter(|record| accepted_submission_ids.contains(&record.submission_id))
+        .filter_map(|record| {
+            record
+                .canonical_summary_hash
+                .as_ref()
+                .map(|hash| (record.submission_id, record.derived_id, hash.clone()))
+        })
+        .collect::<BTreeSet<_>>();
+    let accepted_current_derived_without_active_vector_entry = eligible_canonical_vector_keys
+        .difference(&active_canonical_vector_keys)
+        .map(|(submission_id, _, _)| *submission_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
     let invalid_active_vector_entries = db_vectors
         .iter()
         .filter(|entry| entry.status == StorageTraceVectorEntryStatus::Active)
         .filter(|entry| {
             !accepted_submission_ids.contains(&entry.submission_id)
                 || !current_derived_ids.contains(&(entry.submission_id, entry.derived_id))
+                || (entry.source_projection
+                    == StorageTraceVectorEntrySourceProjection::CanonicalSummary
+                    && !eligible_canonical_vector_keys.contains(&(
+                        entry.submission_id,
+                        entry.derived_id,
+                        entry.source_hash.clone(),
+                    )))
         })
         .count();
 
@@ -6218,6 +6256,7 @@ async fn reconcile_db_mirror(
         replay_export_manifest_reader_parity_ok,
         db_reader_parity_failures,
         active_vector_entries,
+        accepted_current_derived_without_active_vector_entry,
         invalid_active_vector_entries,
     }))
 }
@@ -7435,6 +7474,7 @@ struct TraceDbReconciliationReport {
     replay_export_manifest_reader_parity_ok: bool,
     db_reader_parity_failures: Vec<String>,
     active_vector_entries: usize,
+    accepted_current_derived_without_active_vector_entry: Vec<Uuid>,
     invalid_active_vector_entries: usize,
 }
 
@@ -12129,6 +12169,11 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(reconciliation.active_vector_entries, 1);
+        assert!(
+            reconciliation
+                .accepted_current_derived_without_active_vector_entry
+                .is_empty()
+        );
         assert_eq!(reconciliation.invalid_active_vector_entries, 0);
 
         let revoke_status = revoke_trace_handler(
@@ -12166,6 +12211,64 @@ mod tests {
         .await
         .expect("backfill can be rerun");
         assert_eq!(second_response.db_mirror_backfilled, 0);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn maintenance_reconciliation_reports_missing_eligible_vector_entries() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-reconcile-missing-vector.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(reconciliation_response) = maintenance_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_missing_vector_reconciliation".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: true,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("reviewer can reconcile DB mirror");
+        let reconciliation = reconciliation_response
+            .db_reconciliation
+            .expect("reconciliation report exists");
+        assert_eq!(reconciliation.active_vector_entries, 0);
+        assert_eq!(
+            reconciliation.accepted_current_derived_without_active_vector_entry,
+            vec![submission_id]
+        );
+        assert_eq!(reconciliation.invalid_active_vector_entries, 0);
     }
 
     #[cfg(feature = "libsql")]

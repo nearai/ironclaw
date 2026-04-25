@@ -2443,6 +2443,14 @@ fn maintenance_reconciliation_lines(value: &serde_json::Value) -> Vec<String> {
                 "accepted_without_active_envelope_object_ref",
                 "accepted_without_active_envelope",
             ),
+            (
+                "unreadable_active_envelope_object_refs",
+                "unreadable_active_envelope",
+            ),
+            (
+                "hash_mismatched_active_envelope_object_refs",
+                "hash_mismatched_active_envelope",
+            ),
         ],
     ) {
         lines.push(line);
@@ -2497,6 +2505,10 @@ fn maintenance_reconciliation_lines(value: &serde_json::Value) -> Vec<String> {
         "    vectors",
         &[
             ("active_vector_entries", "active"),
+            (
+                "accepted_current_derived_without_active_vector_entry",
+                "eligible_without_active",
+            ),
             ("invalid_active_vector_entries", "invalid_active"),
         ],
     ) {
@@ -3360,6 +3372,12 @@ mod tests {
                 "accepted_without_active_envelope_object_ref": [
                     "55555555-5555-5555-5555-555555555555"
                 ],
+                "unreadable_active_envelope_object_refs": [
+                    "66666666-6666-6666-6666-666666666666"
+                ],
+                "hash_mismatched_active_envelope_object_refs": [
+                    "77777777-7777-7777-7777-777777777777"
+                ],
                 "file_credit_event_count": 5,
                 "db_credit_event_count": 4,
                 "file_audit_event_count": 6,
@@ -3378,6 +3396,10 @@ mod tests {
                     "reviewer_metadata: file_submissions=3 db_submissions=2 file_derived=4 db_derived=3"
                 ],
                 "active_vector_entries": 7,
+                "accepted_current_derived_without_active_vector_entry": [
+                    "88888888-8888-8888-8888-888888888888",
+                    "99999999-9999-9999-9999-999999999999"
+                ],
                 "invalid_active_vector_entries": 1
             }
         });
@@ -3390,11 +3412,11 @@ mod tests {
                 "  db reconciliation:".to_string(),
                 "    submissions: files=3 db=2 missing_in_db=2 missing_in_files=0 status_mismatches=1".to_string(),
                 "    derived: files=4 db=3 missing_in_db=1".to_string(),
-                "    object refs: db=2 accepted_without_active_envelope=1".to_string(),
+                "    object refs: db=2 accepted_without_active_envelope=1 unreadable_active_envelope=1 hash_mismatched_active_envelope=1".to_string(),
                 "    ledger/audit: file_credit_events=5 db_credit_events=4 file_audit_events=6 db_audit_events=6".to_string(),
                 "    exports/tombstones: file_replay_manifests=1 db_export_manifests=2 db_export_items=3 file_revocation_tombstones=1 db_tombstones=1".to_string(),
                 "    reader parity: contributor_credit=true reviewer_metadata=false analytics=true audit=true replay_export_manifests=true failures=1".to_string(),
-                "    vectors: active=7 invalid_active=1".to_string(),
+                "    vectors: active=7 eligible_without_active=2 invalid_active=1".to_string(),
             ]
         );
         let rendered = lines.join("\n");
