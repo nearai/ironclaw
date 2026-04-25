@@ -314,9 +314,25 @@ pub enum TracesCommand {
         #[arg(long)]
         dry_run: bool,
 
+        /// Backfill file-backed Trace Commons metadata into the configured DB mirror
+        #[arg(long)]
+        backfill_db_mirror: bool,
+
+        /// Index accepted canonical summaries into DB vector metadata rows
+        #[arg(long)]
+        index_vectors: bool,
+
         /// RFC3339 cutoff; expired submissions at or before this time are purged
         #[arg(long)]
         purge_expired_before: Option<String>,
+
+        /// Maximum age in hours for export-cache pruning
+        #[arg(long)]
+        max_export_age_hours: Option<i64>,
+
+        /// Leave invalid export-cache files in place
+        #[arg(long)]
+        skip_export_cache_prune: bool,
 
         /// Include DB mirror reconciliation and reader parity diagnostics
         #[arg(long)]
@@ -848,21 +864,26 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
             endpoint,
             purpose,
             dry_run,
+            backfill_db_mirror,
+            index_vectors,
             purge_expired_before,
+            max_export_age_hours,
+            skip_export_cache_prune,
             reconcile_db_mirror,
             bearer_token_env,
             json,
         } => {
-            trace_commons_maintenance_run(
-                &endpoint,
-                &bearer_token_env,
+            let options = TraceCommonsMaintenanceOptions {
                 purpose,
                 dry_run,
-                purge_expired_before,
+                backfill_db_mirror,
+                index_vectors,
                 reconcile_db_mirror,
-                json,
-            )
-            .await
+                prune_export_cache: !skip_export_cache_prune,
+                max_export_age_hours,
+                purge_expired_before,
+            };
+            trace_commons_maintenance_run(&endpoint, &bearer_token_env, options, json).await
         }
         TracesCommand::BenchmarkConvert {
             endpoint,
@@ -1550,15 +1571,11 @@ async fn trace_commons_analytics_summary(
 async fn trace_commons_maintenance_run(
     endpoint: &str,
     bearer_token_env: &str,
-    purpose: String,
-    dry_run: bool,
-    purge_expired_before: Option<String>,
-    reconcile_db_mirror: bool,
+    options: TraceCommonsMaintenanceOptions,
     json: bool,
 ) -> anyhow::Result<()> {
-    require_non_empty_purpose(&purpose)?;
-    let body =
-        trace_commons_maintenance_body(purpose, dry_run, purge_expired_before, reconcile_db_mirror);
+    require_non_empty_purpose(&options.purpose)?;
+    let body = trace_commons_maintenance_body(&options);
     let response = trace_commons_api_request(
         Method::POST,
         endpoint,
@@ -1614,21 +1631,39 @@ async fn trace_commons_maintenance_run(
     Ok(())
 }
 
-fn trace_commons_maintenance_body(
+struct TraceCommonsMaintenanceOptions {
     purpose: String,
     dry_run: bool,
-    purge_expired_before: Option<String>,
+    backfill_db_mirror: bool,
+    index_vectors: bool,
     reconcile_db_mirror: bool,
-) -> serde_json::Value {
+    prune_export_cache: bool,
+    max_export_age_hours: Option<i64>,
+    purge_expired_before: Option<String>,
+}
+
+fn trace_commons_maintenance_body(options: &TraceCommonsMaintenanceOptions) -> serde_json::Value {
     let mut body = serde_json::json!({
-        "purpose": purpose,
-        "dry_run": dry_run,
+        "purpose": &options.purpose,
+        "dry_run": options.dry_run,
     });
-    if let Some(purge_expired_before) = purge_expired_before {
-        body["purge_expired_before"] = serde_json::Value::String(purge_expired_before);
+    if options.backfill_db_mirror {
+        body["backfill_db_mirror"] = serde_json::Value::Bool(true);
     }
-    if reconcile_db_mirror {
+    if options.index_vectors {
+        body["index_vectors"] = serde_json::Value::Bool(true);
+    }
+    if options.reconcile_db_mirror {
         body["reconcile_db_mirror"] = serde_json::Value::Bool(true);
+    }
+    if !options.prune_export_cache {
+        body["prune_export_cache"] = serde_json::Value::Bool(false);
+    }
+    if let Some(max_export_age_hours) = options.max_export_age_hours {
+        body["max_export_age_hours"] = serde_json::Value::Number(max_export_age_hours.into());
+    }
+    if let Some(purge_expired_before) = options.purge_expired_before.as_ref() {
+        body["purge_expired_before"] = serde_json::Value::String(purge_expired_before.clone());
     }
     body
 }
@@ -3214,16 +3249,25 @@ mod tests {
 
     #[test]
     fn maintenance_request_body_includes_reconcile_flag() {
-        let body = trace_commons_maintenance_body(
-            "db-read-cutover".to_string(),
-            true,
-            Some("2026-04-25T00:00:00Z".to_string()),
-            true,
-        );
+        let options = TraceCommonsMaintenanceOptions {
+            purpose: "db-read-cutover".to_string(),
+            dry_run: true,
+            backfill_db_mirror: true,
+            index_vectors: true,
+            reconcile_db_mirror: true,
+            prune_export_cache: false,
+            max_export_age_hours: Some(48),
+            purge_expired_before: Some("2026-04-25T00:00:00Z".to_string()),
+        };
+        let body = trace_commons_maintenance_body(&options);
 
         assert_eq!(body["purpose"], "db-read-cutover");
         assert_eq!(body["dry_run"], true);
-        assert_eq!(body["purge_expired_before"], "2026-04-25T00:00:00Z");
+        assert_eq!(body["backfill_db_mirror"], true);
+        assert_eq!(body["index_vectors"], true);
         assert_eq!(body["reconcile_db_mirror"], true);
+        assert_eq!(body["prune_export_cache"], false);
+        assert_eq!(body["max_export_age_hours"], 48);
+        assert_eq!(body["purge_expired_before"], "2026-04-25T00:00:00Z");
     }
 }
