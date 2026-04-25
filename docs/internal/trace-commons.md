@@ -59,6 +59,25 @@ TRACE_COMMONS_BIND='127.0.0.1:3907' \
 cargo run --bin trace_commons_ingest
 ```
 
+Internal deployments can also add a fail-closed tenant submission policy. When
+`TRACE_COMMONS_TENANT_POLICIES` contains an entry for the authenticated tenant,
+new submissions must use only the listed consent scopes and trace-card allowed
+uses before the server re-scrubs and stores them:
+
+```bash
+TRACE_COMMONS_TENANT_POLICIES='{
+  "tenant-a": {
+    "allowed_consent_scopes": ["debugging_evaluation", "benchmark_only"],
+    "allowed_uses": ["debugging", "evaluation", "benchmark_generation", "aggregate_analytics"]
+  }
+}' \
+cargo run --bin trace_commons_ingest
+```
+
+Tenants without an explicit entry keep the development default so existing local
+pilots continue to work. Production deployments should configure this policy for
+every tenant and treat envelope contributor fields as attribution only.
+
 Optional dark-launch storage can be enabled for internal pilots:
 
 ```bash
@@ -299,7 +318,7 @@ The web settings panel includes a Trace Commons tab for standing opt-in, autonom
 | Autonomous post-turn contribution | Implemented MVP | Runtime queues/flushed scoped envelopes after persisted or failed turns only when the scoped standing policy is enabled and has an ingestion endpoint. |
 | Web Trace Commons settings and preview endpoints | Implemented MVP | Authenticated gateway endpoints and UI controls exist; server-side tenant/user checks remain the trust boundary, and queue/manual-submit paths preflight scoped opt-in policy before enqueueing. |
 | Private ingestion service | Implemented MVP | Development/internal binary validates schema, reruns redaction, computes hashes/credit, stores accepted/quarantined records, and serves review/status/export routes, including reviewer trace-list filtering by export/provenance purpose. It can now dark-launch DB dual-write metadata and encrypted envelope artifacts. |
-| Tenant token roles | Partial | Static tenant tokens support contributor/reviewer/admin behavior. Production needs short-lived credentials, central policy, RBAC/ABAC, and row-level tenant enforcement. |
+| Tenant token roles | Partial | Static tenant tokens support contributor/reviewer/admin behavior, and optional tenant submission policies can restrict allowed consent scopes and trace-card uses at ingest. Production needs short-lived credentials, fuller central policy, RBAC/ABAC, and row-level tenant enforcement. |
 | Contributor credit ledger and delayed credit sync | Partial | Append-only local and central credit events exist, reviewer/admin delayed credit mutation requires a reason, downstream utility credit must carry an external artifact/job reference, DB audit rows include typed credit-mutation metadata with hashed reason/reference fields, and autonomous clients periodically notify opted-in users when submitted or later-revoked records receive ledger changes. Production needs anti-abuse review, stricter settlement policy, and audit reconciliation. |
 | Quarantine/review workflow | Partial | Reviewer/admin routes can list and decide on quarantined redacted traces. Production needs durable DB state, audit, assignment, escalation, and retention/revocation gates. |
 | Replay dataset export | Partial | Approved redacted slices can be exported by reviewer/admin tokens, DB metadata can drive replay export selection, submitted envelope bodies can resolve through active DB object refs for file or encrypted local artifact stores, manifests carry source-list hashes mirrored into audit `decision_inputs_hash`, replay exports mirror compact DB manifest rows and per-source item snapshots with source object refs plus invalidation timestamps, reviewer/admins can list replay manifest metadata, and each exported trace body read emits a tenant-scoped audit event. Production needs service-owned object storage, bulk export controls, and revocation propagation for already-published artifacts. |

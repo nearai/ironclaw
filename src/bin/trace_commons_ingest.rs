@@ -20,8 +20,8 @@ use ironclaw::trace_artifact_store::{
 };
 use ironclaw::trace_contribution::{
     ConsentScope, EmbeddingAnalysisMetadata, ResidualPiiRisk, TRACE_CONTRIBUTION_SCHEMA_VERSION,
-    TraceContributionEnvelope, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
-    TraceSubmissionStatusUpdate, apply_credit_estimate_to_envelope,
+    TraceAllowedUse, TraceContributionEnvelope, TraceSubmissionReceipt,
+    TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate, apply_credit_estimate_to_envelope,
     canonical_summary_for_embedding, rescrub_trace_envelope, retention_policy_for_trace,
 };
 use ironclaw::trace_corpus_storage::{
@@ -84,6 +84,7 @@ async fn main() -> anyhow::Result<()> {
 struct AppState {
     root: PathBuf,
     tokens: Arc<BTreeMap<String, TenantAuth>>,
+    tenant_policies: Arc<BTreeMap<String, TenantSubmissionPolicy>>,
     db_mirror: Option<Arc<dyn Database>>,
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
@@ -97,6 +98,14 @@ struct TenantAuth {
     tenant_id: String,
     role: TokenRole,
     principal_ref: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct TenantSubmissionPolicy {
+    #[serde(default)]
+    allowed_consent_scopes: BTreeSet<ConsentScope>,
+    #[serde(default)]
+    allowed_uses: BTreeSet<TraceAllowedUse>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +150,7 @@ impl AppState {
                 "TRACE_COMMONS_TENANT_TOKENS or TRACE_COMMONS_INGEST_TOKEN must be configured"
             );
         }
+        let tenant_policies = parse_tenant_submission_policies_from_env()?;
         let db_mirror = trace_corpus_db_mirror_from_env().await?;
         let db_contributor_reads = env_truthy("TRACE_COMMONS_DB_CONTRIBUTOR_READS");
         if db_contributor_reads && db_mirror.is_none() {
@@ -166,6 +176,7 @@ impl AppState {
         Ok(Self {
             root,
             tokens: Arc::new(tokens),
+            tenant_policies: Arc::new(tenant_policies),
             db_mirror,
             db_contributor_reads,
             db_reviewer_reads,
@@ -339,6 +350,27 @@ fn parse_tenant_tokens_from_env() -> anyhow::Result<BTreeMap<String, TenantAuth>
     Ok(tokens)
 }
 
+fn parse_tenant_submission_policies_from_env()
+-> anyhow::Result<BTreeMap<String, TenantSubmissionPolicy>> {
+    match std::env::var("TRACE_COMMONS_TENANT_POLICIES") {
+        Ok(configured) => parse_tenant_submission_policies(&configured),
+        Err(std::env::VarError::NotPresent) => Ok(BTreeMap::new()),
+        Err(error) => Err(error).context("failed to read TRACE_COMMONS_TENANT_POLICIES"),
+    }
+}
+
+fn parse_tenant_submission_policies(
+    configured: &str,
+) -> anyhow::Result<BTreeMap<String, TenantSubmissionPolicy>> {
+    let configured = configured.trim();
+    if configured.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    serde_json::from_str(configured)
+        .context("TRACE_COMMONS_TENANT_POLICIES must be a JSON object keyed by tenant id")
+}
+
 fn insert_token(
     tokens: &mut BTreeMap<String, TenantAuth>,
     tenant_id: &str,
@@ -400,6 +432,12 @@ async fn submit_trace_handler(
         .map_err(internal_error)?;
         return Ok(Json(receipt));
     }
+
+    enforce_tenant_submission_policy(
+        &tenant,
+        &envelope,
+        state.tenant_policies.get(&tenant.tenant_id),
+    )?;
 
     rescrub_trace_envelope(&mut envelope);
     let existing_derived =
@@ -1734,6 +1772,73 @@ fn validate_envelope(envelope: &TraceContributionEnvelope) -> ApiResult<()> {
             "trace contribution requires a pseudonymous contributor id",
         ));
     }
+    Ok(())
+}
+
+fn enforce_tenant_submission_policy(
+    tenant: &TenantAuth,
+    envelope: &TraceContributionEnvelope,
+    policy: Option<&TenantSubmissionPolicy>,
+) -> ApiResult<()> {
+    let Some(policy) = policy else {
+        return Ok(());
+    };
+
+    if !policy.allowed_consent_scopes.is_empty() {
+        let mut requested_scopes = envelope
+            .consent
+            .scopes
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        requested_scopes.insert(envelope.trace_card.consent_scope);
+        if requested_scopes.is_empty() {
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "tenant policy requires an allowed trace contribution consent scope",
+            ));
+        }
+        if let Some(scope) = requested_scopes
+            .iter()
+            .find(|scope| !policy.allowed_consent_scopes.contains(scope))
+        {
+            tracing::warn!(
+                tenant_id = %tenant.tenant_id,
+                ?scope,
+                "Trace Commons tenant policy rejected disallowed consent scope"
+            );
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "trace contribution consent scope is not allowed for this tenant",
+            ));
+        }
+    }
+
+    if !policy.allowed_uses.is_empty() {
+        if envelope.trace_card.allowed_uses.is_empty() {
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "tenant policy requires trace contribution allowed uses",
+            ));
+        }
+        if let Some(allowed_use) = envelope
+            .trace_card
+            .allowed_uses
+            .iter()
+            .find(|allowed_use| !policy.allowed_uses.contains(allowed_use))
+        {
+            tracing::warn!(
+                tenant_id = %tenant.tenant_id,
+                ?allowed_use,
+                "Trace Commons tenant policy rejected disallowed allowed use"
+            );
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "trace contribution allowed use is not allowed for this tenant",
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -6716,6 +6821,28 @@ mod tests {
         db_replay_export_reads: bool,
         db_audit_reads: bool,
     ) -> Arc<AppState> {
+        test_state_with_options_and_policies(
+            root,
+            db_mirror,
+            artifact_store,
+            db_contributor_reads,
+            db_reviewer_reads,
+            db_replay_export_reads,
+            db_audit_reads,
+            BTreeMap::new(),
+        )
+    }
+
+    fn test_state_with_options_and_policies(
+        root: PathBuf,
+        db_mirror: Option<Arc<dyn Database>>,
+        artifact_store: Option<Arc<LocalEncryptedTraceArtifactStore>>,
+        db_contributor_reads: bool,
+        db_reviewer_reads: bool,
+        db_replay_export_reads: bool,
+        db_audit_reads: bool,
+        tenant_policies: BTreeMap<String, TenantSubmissionPolicy>,
+    ) -> Arc<AppState> {
         let mut tokens = BTreeMap::new();
         insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Contributor);
         insert_token(&mut tokens, "tenant-a", "token-a-2", TokenRole::Contributor);
@@ -6735,6 +6862,7 @@ mod tests {
         Arc::new(AppState {
             root,
             tokens: Arc::new(tokens),
+            tenant_policies: Arc::new(tenant_policies),
             db_mirror,
             db_contributor_reads,
             db_reviewer_reads,
@@ -6824,6 +6952,116 @@ mod tests {
             .expect("stored envelope reads");
         assert!(stored.contains("server-rescrub-v1"));
         assert!(!stored.contains("/tmp/ironclaw/private/token.txt"));
+    }
+
+    #[test]
+    fn parses_tenant_submission_policies_from_json() {
+        let policies = parse_tenant_submission_policies(
+            r#"{
+                "tenant-a": {
+                    "allowed_consent_scopes": ["debugging_evaluation", "benchmark_only"],
+                    "allowed_uses": ["debugging", "evaluation", "aggregate_analytics"]
+                }
+            }"#,
+        )
+        .expect("policy parses");
+        let policy = policies.get("tenant-a").expect("tenant policy exists");
+        assert!(
+            policy
+                .allowed_consent_scopes
+                .contains(&ConsentScope::DebuggingEvaluation)
+        );
+        assert!(
+            policy
+                .allowed_consent_scopes
+                .contains(&ConsentScope::BenchmarkOnly)
+        );
+        assert!(policy.allowed_uses.contains(&TraceAllowedUse::Debugging));
+        assert!(
+            policy
+                .allowed_uses
+                .contains(&TraceAllowedUse::AggregateAnalytics)
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_rejects_scope_disallowed_by_tenant_policy() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut policies = BTreeMap::new();
+        policies.insert(
+            "tenant-a".to_string(),
+            TenantSubmissionPolicy {
+                allowed_consent_scopes: BTreeSet::from([ConsentScope::DebuggingEvaluation]),
+                allowed_uses: BTreeSet::new(),
+            },
+        );
+        let state = test_state_with_options_and_policies(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            false,
+            false,
+            false,
+            false,
+            policies,
+        );
+        let mut envelope = sample_envelope().await;
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+
+        let error = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope.clone()),
+        )
+        .await
+        .expect_err("tenant policy rejects disallowed consent scope");
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+
+        let Json(receipt) =
+            submit_trace_handler(State(state), auth_headers("token-b"), Json(envelope))
+                .await
+                .expect("tenant without explicit policy can submit");
+        assert_eq!(receipt.status, "quarantined");
+    }
+
+    #[tokio::test]
+    async fn submit_rejects_allowed_use_disallowed_by_tenant_policy() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut policies = BTreeMap::new();
+        policies.insert(
+            "tenant-a".to_string(),
+            TenantSubmissionPolicy {
+                allowed_consent_scopes: BTreeSet::from([ConsentScope::ModelTraining]),
+                allowed_uses: BTreeSet::from([
+                    TraceAllowedUse::Debugging,
+                    TraceAllowedUse::Evaluation,
+                    TraceAllowedUse::AggregateAnalytics,
+                ]),
+            },
+        );
+        let state = test_state_with_options_and_policies(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            false,
+            false,
+            false,
+            false,
+            policies,
+        );
+        let mut envelope = sample_envelope().await;
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope
+            .trace_card
+            .allowed_uses
+            .push(TraceAllowedUse::ModelTraining);
+
+        let error = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
+            .await
+            .expect_err("tenant policy rejects disallowed allowed use");
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

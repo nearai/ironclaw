@@ -117,7 +117,9 @@ Exit criteria:
 
 ### Phase 3: Tenant Policy, RBAC, ABAC, and Audit Hardening
 
-Status: partially represented by static token roles; production policy remains future work.
+Status: partially represented by static token roles plus optional ingest-time
+tenant submission policies for allowed consent scopes and trace-card uses;
+production policy remains future work.
 The PostgreSQL store now sets `ironclaw.trace_tenant_id` transaction-locally around
 tenant-scoped Trace Commons operations while retaining explicit `tenant_id`
 predicates. This is an incremental guardrail only: table owners, superusers, and
@@ -126,7 +128,7 @@ ownership and/or forced RLS are settled.
 
 Scope:
 
-- Replace static tenant-token assumptions with central tenant context, short-lived credentials or signed upload claims, role grants, allowed scopes, allowed uses, and expiry.
+- Replace static tenant-token assumptions and JSON pilot policies with central tenant context, short-lived credentials or signed upload claims, role grants, allowed scopes, allowed uses, and expiry.
 - Enforce PostgreSQL RLS or equivalent query guardrails for every tenant-scoped `trace_*` table.
 - Keep libSQL scoping explicit in repository methods and caller tests.
 - Require reasons and typed safe metadata for privileged actions: review override, delayed credit mutation, bulk export, retention override, purge, and tombstone changes.
