@@ -705,7 +705,16 @@ async fn review_quarantine_handler(
         .into_iter()
         .filter(|record| record.status == TraceCorpusStatus::Quarantined)
         .map(|record| TraceReviewQueueItem::from_record(record, &derived_by_submission))
-        .collect();
+        .collect::<Vec<_>>();
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::read(&tenant, "review_quarantine", queue.len()),
+        StorageTraceAuditAction::Read,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(queue))
 }
 
@@ -1446,6 +1455,15 @@ async fn active_learning_review_queue_handler(
             .then_with(|| left.received_at.cmp(&right.received_at))
     });
     items.truncate(limit);
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::read(&tenant, "active_learning_review_queue", items.len()),
+        StorageTraceAuditAction::Read,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(TraceActiveLearningReviewQueue {
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
@@ -9416,6 +9434,22 @@ mod tests {
         .await
         .expect("trace list read mirrors audit event");
         assert_eq!(list.len(), 1);
+        let Json(quarantine) =
+            review_quarantine_handler(State(audit_state.clone()), auth_headers("review-token-a"))
+                .await
+                .expect("quarantine read mirrors audit event");
+        assert!(quarantine.is_empty());
+        let Json(active_learning) = active_learning_review_queue_handler(
+            State(audit_state.clone()),
+            auth_headers("review-token-a"),
+            Query(ActiveLearningQueueQuery {
+                limit: Some(10),
+                privacy_risk: None,
+            }),
+        )
+        .await
+        .expect("active-learning read mirrors audit event");
+        assert_eq!(active_learning.item_count, 1);
 
         let Json(credit_event) = append_credit_event_handler(
             State(audit_state.clone()),
@@ -9493,6 +9527,15 @@ mod tests {
         assert!(events.iter().any(|event| {
             event.kind == "read"
                 && event.reason.as_deref() == Some("surface=trace_list;item_count=1")
+        }));
+        assert!(events.iter().any(|event| {
+            event.kind == "read"
+                && event.reason.as_deref() == Some("surface=review_quarantine;item_count=0")
+        }));
+        assert!(events.iter().any(|event| {
+            event.kind == "read"
+                && event.reason.as_deref()
+                    == Some("surface=active_learning_review_queue;item_count=1")
         }));
         assert!(events.iter().any(|event| {
             event.submission_id == submission_id && event.kind == "credit_mutate"
