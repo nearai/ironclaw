@@ -618,10 +618,8 @@ pub enum Action {
         capability: CapabilityId,
         estimated_resources: ResourceEstimate,
     },
-    Spawn {
-        extension_id: ExtensionId,
-        requested_capabilities: CapabilitySet,
-        requested_mounts: MountView,
+    SpawnCapability {
+        capability: CapabilityId,
         estimated_resources: ResourceEstimate,
     },
 

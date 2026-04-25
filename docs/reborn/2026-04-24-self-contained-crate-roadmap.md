@@ -643,6 +643,7 @@ crates/ironclaw_authorization
 crates/ironclaw_capabilities
 crates/ironclaw_run_state
 crates/ironclaw_approvals
+crates/ironclaw_processes
 wasm echo capability
 script echo capability
 ```
@@ -673,14 +674,16 @@ The architecture is real when:
 
 - `ironclaw_host_api` has no runtime/product logic
 - `ironclaw_dispatcher` has no authorization/product workflow logic; it only routes already-authorized dispatches
-- `ironclaw_capabilities` is the caller-facing invocation workflow between authorization, run-state, and dispatch
+- `ironclaw_capabilities` is the caller-facing invocation workflow between authorization, run-state, process start, and dispatch
 - `ironclaw_approvals` resolves pending approval records into scoped leases without touching dispatcher/runtime execution
 - `ironclaw_authorization` enforces scoped lease visibility, expiration, claim, consumption, and revocation before dispatch
 - fingerprinted approval leases are resume-only and cannot authorize plain `invoke_json` as ambient grants
 - `ironclaw_capabilities` binds approval-required dispatches to an invocation fingerprint before persistence/resume
 - `CapabilityHost::resume_json` resumes approved dispatches through the same authorization/dispatcher path, claims the matching lease before dispatch, and consumes it after success
 - run-state `start` rejects duplicate tenant/user/invocation records instead of overwriting lifecycle state
-- long-running `Action::Spawn` remains the next capability-host workflow after dispatch resume is stable
+- `Action::SpawnCapability` is capability-targeted, not extension-level or raw-process authority
+- `CapabilityHost::spawn_json` authorizes `SpawnProcess` plus target capability effects before creating a tracked process record
+- `ironclaw_processes` stores tenant/user-scoped `ProcessRecord` lifecycle state without owning authorization policy
 - `ironclaw_resources` is the only path for costed/quota-limited invocation accounting
 - `ironclaw_wasm` does not discover extensions
 - `ironclaw_mcp` tools are adapted into capabilities and still go through policy/audit

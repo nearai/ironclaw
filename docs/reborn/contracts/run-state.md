@@ -150,7 +150,11 @@ Decision::RequireApproval with incoherent store wiring -> Failed(error_kind = Ap
 Decision::Deny -> Failed(error_kind = AuthorizationDenied)
 dispatch success -> Completed
 dispatch failure -> Failed(error_kind = Dispatch)
+spawn process record created -> Completed
+spawn process creation failed -> Failed(error_kind = ProcessSpawn)
 ```
+
+For `spawn_json`, run state tracks the start request lifecycle only. Long-running/background process lifecycle belongs to `ironclaw_processes::ProcessStore` after the start workflow returns a `ProcessId`.
 
 `resume_json` continues a `BlockedApproval` run only after loading an approved request and matching lease under the same tenant/user/invocation scope:
 

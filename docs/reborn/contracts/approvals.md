@@ -218,7 +218,7 @@ This slice intentionally keeps approval resolution narrow:
 - no approval resolution audit event yet
 - no lease consumption/revocation persistence beyond the in-memory store
 - no approval support for non-dispatch actions yet
-- no `Action::Spawn`/long-running task approval workflow yet; that follows after dispatch resume mechanics
+- no `Action::SpawnCapability`/long-running task approval workflow yet; spawn start authorization exists, but approval/resume for spawn is a later slice
 - no reusable approval-scope expansion yet; V1 leases are exact-invocation only
 
 Before a durable/user-facing approval resume UI ships, the host should revisit atomic persistence for:
