@@ -3165,20 +3165,14 @@ fn trace_envelope_object_key(
     )
 }
 
-async fn mirror_submission_to_db(
+fn trace_object_ref_write_from_record(
     state: &AppState,
-    tenant: &TenantAuth,
+    audit_label: &str,
     record: &TraceCommonsSubmissionRecord,
-    derived_record: &TraceCommonsDerivedRecord,
     envelope: &TraceContributionEnvelope,
-) -> anyhow::Result<()> {
-    let Some(db) = state.db_mirror.as_ref() else {
-        return Ok(());
-    };
+) -> anyhow::Result<(StorageTraceObjectRefWrite, String)> {
     let envelope_json = serde_json::to_string_pretty(envelope)
         .context("failed to serialize trace envelope for DB mirror hashing")?;
-    let object_ref_id = deterministic_trace_uuid("submitted-envelope", record);
-    let derived_id = deterministic_trace_uuid("derived-precheck", record);
     let plaintext_sha256 = sha256_prefixed(&envelope_json);
     let (object_store, object_key, content_sha256) =
         if let Some(receipt) = record.artifact_receipt.as_ref() {
@@ -3198,6 +3192,38 @@ async fn mirror_submission_to_db(
                 plaintext_sha256,
             )
         };
+    Ok((
+        StorageTraceObjectRefWrite {
+            object_ref_id: deterministic_trace_uuid(audit_label, record),
+            tenant_id: record.tenant_id.clone(),
+            submission_id: record.submission_id,
+            artifact_kind: StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            object_store,
+            object_key,
+            content_sha256: content_sha256.clone(),
+            encryption_key_ref: format!("tenant:{}", tenant_storage_ref(&record.tenant_id)),
+            size_bytes: i64::try_from(envelope_json.len()).unwrap_or(i64::MAX),
+            compression: None,
+            created_by_job_id: None,
+        },
+        content_sha256,
+    ))
+}
+
+async fn mirror_submission_to_db(
+    state: &AppState,
+    tenant: &TenantAuth,
+    record: &TraceCommonsSubmissionRecord,
+    derived_record: &TraceCommonsDerivedRecord,
+    envelope: &TraceContributionEnvelope,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    let (object_ref, content_sha256) =
+        trace_object_ref_write_from_record(state, "submitted-envelope", record, envelope)?;
+    let object_ref_id = object_ref.object_ref_id;
+    let derived_id = deterministic_trace_uuid("derived-precheck", record);
     let privacy_risk = serde_storage_string(&record.privacy_risk)?;
     let credit_account_ref = envelope
         .contributor
@@ -3214,21 +3240,9 @@ async fn mirror_submission_to_db(
     .await
     .context("failed to mirror trace submission metadata")?;
 
-    db.append_trace_object_ref(StorageTraceObjectRefWrite {
-        object_ref_id,
-        tenant_id: record.tenant_id.clone(),
-        submission_id: record.submission_id,
-        artifact_kind: StorageTraceObjectArtifactKind::SubmittedEnvelope,
-        object_store,
-        object_key,
-        content_sha256: content_sha256.clone(),
-        encryption_key_ref: format!("tenant:{}", tenant_storage_ref(&record.tenant_id)),
-        size_bytes: i64::try_from(envelope_json.len()).unwrap_or(i64::MAX),
-        compression: None,
-        created_by_job_id: None,
-    })
-    .await
-    .context("failed to mirror trace object ref")?;
+    db.append_trace_object_ref(object_ref)
+        .await
+        .context("failed to mirror trace object ref")?;
 
     db.append_trace_derived_record(StorageTraceDerivedRecordWrite {
         derived_id,
@@ -3668,6 +3682,11 @@ async fn mirror_review_decision_to_db(
     )?)
     .await
     .context("failed to mirror reviewed trace submission metadata")?;
+    let (object_ref, _) =
+        trace_object_ref_write_from_record(state, "reviewed-envelope", record, envelope)?;
+    db.append_trace_object_ref(object_ref)
+        .await
+        .context("failed to mirror reviewed trace object ref")?;
     db.update_trace_submission_status(
         &record.tenant_id,
         record.submission_id,
@@ -8836,20 +8855,20 @@ mod tests {
             .expect("mirrored submission remains queryable");
         assert_eq!(revoked.status, StorageTraceCorpusStatus::Revoked);
         assert!(revoked.revoked_at.is_some());
+        let object_refs = db
+            .list_trace_object_refs("tenant-a", submission_id)
+            .await
+            .expect("object refs read after revoke");
+        assert!(
+            object_refs.len() >= 2,
+            "submit and review should both have mirrored object refs"
+        );
+        assert!(
+            object_refs
+                .iter()
+                .all(|record| record.invalidated_at.is_some())
+        );
         let conn = db.connect().await.expect("connect to mirror after revoke");
-        let mut rows = conn
-            .query(
-                "SELECT COUNT(*) FROM trace_object_refs WHERE tenant_id = ?1 AND submission_id = ?2 AND invalidated_at IS NOT NULL",
-                libsql::params!["tenant-a", submission_id.to_string()],
-            )
-            .await
-            .expect("object invalidation query succeeds");
-        let row = rows
-            .next()
-            .await
-            .expect("object invalidation row fetch succeeds")
-            .expect("object invalidation count row exists");
-        assert_eq!(row.get::<i64>(0).expect("object count reads"), 1);
         let mut rows = conn
             .query(
                 "SELECT COUNT(*) FROM trace_derived_records WHERE tenant_id = ?1 AND submission_id = ?2 AND status = ?3",
@@ -11881,7 +11900,7 @@ mod tests {
             false,
         );
         let Json(review_receipt) = review_decision_handler(
-            State(review_state),
+            State(review_state.clone()),
             auth_headers("review-token-a"),
             AxumPath(submission_id),
             Json(TraceReviewDecisionRequest {
@@ -11893,6 +11912,25 @@ mod tests {
         .await
         .expect("review decision reads body from DB object ref");
         assert_eq!(review_receipt.status, "accepted");
+
+        let reviewed_ref = db
+            .get_latest_active_trace_object_ref(
+                "tenant-a",
+                submission_id,
+                StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            )
+            .await
+            .expect("reviewed object ref reads")
+            .expect("reviewed submitted envelope object ref exists");
+        assert_ne!(reviewed_ref.object_ref_id, object_ref.object_ref_id);
+        assert_eq!(
+            reviewed_ref.object_store,
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+        );
+        let reviewed_envelope =
+            read_envelope_from_object_ref(review_state.as_ref(), "tenant-a", &reviewed_ref)
+                .expect("reviewed envelope reads through DB object ref");
+        assert_eq!(reviewed_envelope.value.credit_points_pending, 1.25);
 
         let db_audit_events = db
             .list_trace_audit_events("tenant-a")
