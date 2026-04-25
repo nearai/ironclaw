@@ -167,6 +167,131 @@ fn one_off_lease_does_not_authorize_different_invocation_in_same_tenant() {
 }
 
 #[test]
+fn consume_decrements_remaining_invocations_and_consumes_one_shot_lease() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let mut grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(context.extension_id.clone()),
+        vec![EffectKind::DispatchCapability],
+    );
+    grant.constraints.max_invocations = Some(2);
+    let lease = CapabilityLease::new(context.resource_scope.clone(), grant);
+    let lease_id = lease.grant.id;
+    leases.issue(lease);
+
+    let after_first = leases.consume(&context.resource_scope, lease_id).unwrap();
+
+    assert_eq!(after_first.status, CapabilityLeaseStatus::Active);
+    assert_eq!(after_first.grant.constraints.max_invocations, Some(1));
+
+    let after_second = leases.consume(&context.resource_scope, lease_id).unwrap();
+
+    assert_eq!(after_second.status, CapabilityLeaseStatus::Consumed);
+    assert_eq!(after_second.grant.constraints.max_invocations, Some(0));
+    assert!(matches!(
+        leases.consume(&context.resource_scope, lease_id).unwrap_err(),
+        CapabilityLeaseError::ExhaustedLease { lease_id: id } if id == lease_id
+    ));
+}
+
+#[test]
+fn consumed_lease_no_longer_authorizes_dispatch() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let mut grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(context.extension_id.clone()),
+        vec![EffectKind::DispatchCapability],
+    );
+    grant.constraints.max_invocations = Some(1);
+    let lease = CapabilityLease::new(context.resource_scope.clone(), grant);
+    let lease_id = lease.grant.id;
+    leases.issue(lease);
+    leases.consume(&context.resource_scope, lease_id).unwrap();
+
+    let authorizer = LeaseBackedAuthorizer::new(&leases);
+    let decision =
+        authorizer.authorize_dispatch(&context, &descriptor, &ResourceEstimate::default());
+
+    assert!(matches!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::MissingGrant
+        }
+    ));
+}
+
+#[test]
+fn expired_lease_no_longer_authorizes_or_consumes() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let mut grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(context.extension_id.clone()),
+        vec![EffectKind::DispatchCapability],
+    );
+    grant.constraints.expires_at = Some(timestamp("2000-01-01T00:00:00Z"));
+    let lease = CapabilityLease::new(context.resource_scope.clone(), grant);
+    let lease_id = lease.grant.id;
+    leases.issue(lease);
+
+    let authorizer = LeaseBackedAuthorizer::new(&leases);
+    let decision =
+        authorizer.authorize_dispatch(&context, &descriptor, &ResourceEstimate::default());
+
+    assert!(matches!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::MissingGrant
+        }
+    ));
+    assert!(matches!(
+        leases.consume(&context.resource_scope, lease_id).unwrap_err(),
+        CapabilityLeaseError::ExpiredLease { lease_id: id } if id == lease_id
+    ));
+}
+
+#[test]
+fn consume_is_scoped_to_exact_invocation() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let mut next_invocation_scope = execution_context(CapabilitySet::default()).resource_scope;
+    next_invocation_scope.tenant_id = context.resource_scope.tenant_id.clone();
+    next_invocation_scope.user_id = context.resource_scope.user_id.clone();
+    next_invocation_scope.project_id = context.resource_scope.project_id.clone();
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let mut grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(context.extension_id.clone()),
+        vec![EffectKind::DispatchCapability],
+    );
+    grant.constraints.max_invocations = Some(1);
+    let lease = CapabilityLease::new(context.resource_scope.clone(), grant);
+    let lease_id = lease.grant.id;
+    leases.issue(lease.clone());
+
+    let err = leases
+        .consume(&next_invocation_scope, lease_id)
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityLeaseError::UnknownLease { lease_id: id } if id == lease_id
+    ));
+    assert_eq!(
+        leases
+            .get(&context.resource_scope, lease_id)
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Active
+    );
+}
+
+#[test]
 fn revoked_lease_no_longer_authorizes_dispatch() {
     let leases = InMemoryCapabilityLeaseStore::new();
     let context = execution_context(CapabilitySet::default());
@@ -229,6 +354,10 @@ fn grant_for(
             max_invocations: None,
         },
     }
+}
+
+fn timestamp(value: &str) -> Timestamp {
+    serde_json::from_value(serde_json::Value::String(value.to_string())).unwrap()
 }
 
 fn execution_context(grants: CapabilitySet) -> ExecutionContext {

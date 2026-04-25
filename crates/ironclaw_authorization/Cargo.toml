@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+chrono = { version = "0.4", features = ["serde"] }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 thiserror = "2"
 

@@ -10,9 +10,10 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 
+use chrono::Utc;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, Decision, DenyReason, EffectKind,
-    ExecutionContext, Principal, ResourceEstimate, ResourceScope, TenantId, UserId,
+    ExecutionContext, InvocationId, Principal, ResourceEstimate, ResourceScope, TenantId, UserId,
 };
 use thiserror::Error;
 
@@ -68,6 +69,7 @@ impl CapabilityLease {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilityLeaseStatus {
     Active,
+    Consumed,
     Revoked,
 }
 
@@ -75,6 +77,15 @@ pub enum CapabilityLeaseStatus {
 pub enum CapabilityLeaseError {
     #[error("unknown capability lease {lease_id}")]
     UnknownLease { lease_id: CapabilityGrantId },
+    #[error("capability lease {lease_id} is expired")]
+    ExpiredLease { lease_id: CapabilityGrantId },
+    #[error("capability lease {lease_id} has no remaining invocations")]
+    ExhaustedLease { lease_id: CapabilityGrantId },
+    #[error("capability lease {lease_id} is not active: {status:?}")]
+    InactiveLease {
+        lease_id: CapabilityGrantId,
+        status: CapabilityLeaseStatus,
+    },
 }
 
 /// Store of active/revoked capability leases.
@@ -86,6 +97,11 @@ pub trait CapabilityLeaseStore: Send + Sync {
         lease_id: CapabilityGrantId,
     ) -> Result<CapabilityLease, CapabilityLeaseError>;
     fn get(&self, scope: &ResourceScope, lease_id: CapabilityGrantId) -> Option<CapabilityLease>;
+    fn consume(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError>;
     fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease>;
     fn active_grants_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityGrant>;
 }
@@ -136,6 +152,26 @@ impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
             .cloned()
     }
 
+    fn consume(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let mut leases = self.leases_guard();
+        let lease = leases
+            .get_mut(&CapabilityLeaseKey::new(scope, lease_id))
+            .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
+
+        ensure_consumable(lease)?;
+        if let Some(remaining) = lease.grant.constraints.max_invocations.as_mut() {
+            *remaining -= 1;
+            if *remaining == 0 {
+                lease.status = CapabilityLeaseStatus::Consumed;
+            }
+        }
+        Ok(lease.clone())
+    }
+
     fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease> {
         let mut leases = self
             .leases_guard()
@@ -150,10 +186,7 @@ impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
     fn active_grants_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityGrant> {
         self.leases_for_scope(&context.resource_scope)
             .into_iter()
-            .filter(|lease| {
-                lease.status == CapabilityLeaseStatus::Active
-                    && lease.scope.invocation_id == context.invocation_id
-            })
+            .filter(|lease| lease_is_authorizing(lease, context))
             .map(|lease| lease.grant)
             .collect()
     }
@@ -163,6 +196,7 @@ impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
 struct CapabilityLeaseKey {
     tenant_id: TenantId,
     user_id: UserId,
+    invocation_id: InvocationId,
     lease_id: CapabilityGrantId,
 }
 
@@ -171,6 +205,7 @@ impl CapabilityLeaseKey {
         Self {
             tenant_id: scope.tenant_id.clone(),
             user_id: scope.user_id.clone(),
+            invocation_id: scope.invocation_id,
             lease_id,
         }
     }
@@ -263,6 +298,47 @@ fn principal_matches_context(principal: &Principal, context: &ExecutionContext) 
 
 fn effects_are_covered(required: &[EffectKind], allowed: &[EffectKind]) -> bool {
     required.iter().all(|effect| allowed.contains(effect))
+}
+
+fn lease_is_authorizing(lease: &CapabilityLease, context: &ExecutionContext) -> bool {
+    lease.status == CapabilityLeaseStatus::Active
+        && lease.scope.invocation_id == context.invocation_id
+        && !lease_is_expired(lease)
+        && lease.grant.constraints.max_invocations != Some(0)
+}
+
+fn ensure_consumable(lease: &CapabilityLease) -> Result<(), CapabilityLeaseError> {
+    let lease_id = lease.grant.id;
+    match lease.status {
+        CapabilityLeaseStatus::Active => {}
+        CapabilityLeaseStatus::Consumed => {
+            return Err(CapabilityLeaseError::ExhaustedLease { lease_id });
+        }
+        CapabilityLeaseStatus::Revoked => {
+            return Err(CapabilityLeaseError::InactiveLease {
+                lease_id,
+                status: lease.status,
+            });
+        }
+    }
+
+    if lease_is_expired(lease) {
+        return Err(CapabilityLeaseError::ExpiredLease { lease_id });
+    }
+
+    if lease.grant.constraints.max_invocations == Some(0) {
+        return Err(CapabilityLeaseError::ExhaustedLease { lease_id });
+    }
+
+    Ok(())
+}
+
+fn lease_is_expired(lease: &CapabilityLease) -> bool {
+    lease
+        .grant
+        .constraints
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= Utc::now())
 }
 
 fn same_tenant_user(left: &ResourceScope, right: &ResourceScope) -> bool {
