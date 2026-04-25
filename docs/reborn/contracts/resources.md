@@ -103,7 +103,8 @@ Rules:
 
 1. Reservation uses estimated resource demand.
 2. Missing estimate dimensions count as zero for that dimension.
-3. Reservation succeeds only if all applicable account limits can absorb the estimate plus current active reservations plus reconciled usage.
+3. Resource limits, estimates, and actual usage must be non-negative. Negative amounts are invalid contract input and must fail before mutating ledgers.
+4. Reservation succeeds only if all applicable account limits can absorb the estimate plus current active reservations plus reconciled usage.
 4. Reservation returns a unique `ResourceReservationId`.
 5. Active reservations count against limits until reconciled or released.
 6. Reconcile replaces reserved estimate with actual usage and closes the reservation.
@@ -221,6 +222,7 @@ pub enum ResourceAccount {
 
 pub trait ResourceGovernor {
     fn set_limit(&self, account: ResourceAccount, limits: ResourceLimits);
+    fn try_set_limit(&self, account: ResourceAccount, limits: ResourceLimits) -> Result<(), ResourceError>;
     fn reserve(
         &self,
         scope: ResourceScope,
@@ -252,6 +254,7 @@ Local contract tests should prove:
 - reconcile records actual usage and releases active reservation
 - unknown reservation cannot be reconciled or released
 - double reconcile/release fails closed
+- negative USD limits, estimates, or actual usage fail without mutating ledgers
 - tenant/user/project hierarchy checks ancestors, not only leaf scope
 
 ---

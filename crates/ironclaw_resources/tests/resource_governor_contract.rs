@@ -652,6 +652,118 @@ fn closed_reservations_reject_cross_lifecycle_operations_with_status() {
 }
 
 #[test]
+fn negative_usd_estimate_is_rejected_without_mutating_ledgers() {
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope("tenant1", "user1", Some("project1"));
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor.set_limit(
+        account.clone(),
+        ResourceLimits {
+            max_usd: Some(dec!(1.00)),
+            ..ResourceLimits::default()
+        },
+    );
+
+    let err = governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                usd: Some(dec!(-0.25)),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ResourceError::InvalidResourceAmount {
+            dimension: ResourceDimension::Usd,
+            ..
+        }
+    ));
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(governor.usage_for(&account), ResourceTally::default());
+}
+
+#[test]
+fn negative_actual_usage_is_rejected_without_closing_reservation() {
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope("tenant1", "user1", Some("project1"));
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor.set_limit(
+        account.clone(),
+        ResourceLimits {
+            max_usd: Some(dec!(1.00)),
+            ..ResourceLimits::default()
+        },
+    );
+    let reservation = governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                usd: Some(dec!(0.25)),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+
+    let err = governor
+        .reconcile(
+            reservation.id,
+            ResourceUsage {
+                usd: dec!(-0.25),
+                ..ResourceUsage::default()
+            },
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ResourceError::InvalidResourceAmount {
+            dimension: ResourceDimension::Usd,
+            ..
+        }
+    ));
+    assert_eq!(governor.reserved_for(&account).usd, dec!(0.25));
+    assert_eq!(governor.usage_for(&account), ResourceTally::default());
+
+    governor.release(reservation.id).unwrap();
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+}
+
+#[test]
+fn negative_usd_limit_is_rejected_without_installing_limit() {
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope("tenant1", "user1", Some("project1"));
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+
+    let err = governor.try_set_limit(
+        account.clone(),
+        ResourceLimits {
+            max_usd: Some(dec!(-1.00)),
+            ..ResourceLimits::default()
+        },
+    );
+
+    assert!(matches!(
+        err,
+        Err(ResourceError::InvalidResourceAmount {
+            dimension: ResourceDimension::Usd,
+            ..
+        })
+    ));
+    governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                usd: Some(dec!(10.00)),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+}
+
+#[test]
 fn non_usd_dimensions_can_deny_reservations() {
     assert_denied_dimension(
         ResourceLimits {

@@ -177,6 +177,15 @@ pub enum ResourceValue {
     Integer(u64),
 }
 
+impl std::fmt::Display for ResourceValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Decimal(value) => write!(f, "{value}"),
+            Self::Integer(value) => write!(f, "{value}"),
+        }
+    }
+}
+
 /// Structured reservation denial.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceDenial {
@@ -193,6 +202,11 @@ pub struct ResourceDenial {
 pub enum ResourceError {
     #[error("resource limit exceeded for {dimension} at {account:?}", account = .0.account, dimension = .0.dimension)]
     LimitExceeded(Box<ResourceDenial>),
+    #[error("invalid negative resource amount for {dimension}: {amount}")]
+    InvalidResourceAmount {
+        dimension: ResourceDimension,
+        amount: ResourceValue,
+    },
     #[error("unknown resource reservation {id}")]
     UnknownReservation { id: ResourceReservationId },
     #[error("resource reservation {id} is already {status:?}")]
@@ -303,6 +317,12 @@ pub struct ResourceReceipt {
 pub trait ResourceGovernor: Send + Sync {
     fn set_limit(&self, account: ResourceAccount, limits: ResourceLimits);
 
+    fn try_set_limit(
+        &self,
+        account: ResourceAccount,
+        limits: ResourceLimits,
+    ) -> Result<(), ResourceError>;
+
     fn reserve(
         &self,
         scope: ResourceScope,
@@ -374,7 +394,18 @@ impl InMemoryResourceGovernor {
 
 impl ResourceGovernor for InMemoryResourceGovernor {
     fn set_limit(&self, account: ResourceAccount, limits: ResourceLimits) {
+        self.try_set_limit(account, limits)
+            .expect("resource limits must be non-negative");
+    }
+
+    fn try_set_limit(
+        &self,
+        account: ResourceAccount,
+        limits: ResourceLimits,
+    ) -> Result<(), ResourceError> {
+        validate_limits(&limits)?;
         self.lock_state().limits.insert(account, limits);
+        Ok(())
     }
 
     fn reserve(
@@ -382,6 +413,7 @@ impl ResourceGovernor for InMemoryResourceGovernor {
         scope: ResourceScope,
         estimate: ResourceEstimate,
     ) -> Result<ResourceReservation, ResourceError> {
+        validate_estimate(&estimate)?;
         let mut state = self.lock_state();
         let accounts = ResourceAccount::cascade(&scope);
         let requested = ResourceTally::from_estimate(&estimate);
@@ -437,6 +469,7 @@ impl ResourceGovernor for InMemoryResourceGovernor {
         reservation_id: ResourceReservationId,
         actual: ResourceUsage,
     ) -> Result<ResourceReceipt, ResourceError> {
+        validate_usage(&actual)?;
         let mut state = self.lock_state();
         let mut record = state
             .reservations
@@ -515,6 +548,38 @@ impl ResourceGovernor for InMemoryResourceGovernor {
         };
         state.reservations.insert(reservation_id, record);
         Ok(receipt)
+    }
+}
+
+fn validate_limits(limits: &ResourceLimits) -> Result<(), ResourceError> {
+    if let Some(max_usd) = limits.max_usd {
+        ensure_non_negative_decimal(ResourceDimension::Usd, max_usd)?;
+    }
+    Ok(())
+}
+
+fn validate_estimate(estimate: &ResourceEstimate) -> Result<(), ResourceError> {
+    if let Some(usd) = estimate.usd {
+        ensure_non_negative_decimal(ResourceDimension::Usd, usd)?;
+    }
+    Ok(())
+}
+
+fn validate_usage(usage: &ResourceUsage) -> Result<(), ResourceError> {
+    ensure_non_negative_decimal(ResourceDimension::Usd, usage.usd)
+}
+
+fn ensure_non_negative_decimal(
+    dimension: ResourceDimension,
+    amount: Decimal,
+) -> Result<(), ResourceError> {
+    if amount.is_sign_negative() {
+        Err(ResourceError::InvalidResourceAmount {
+            dimension,
+            amount: ResourceValue::Decimal(amount),
+        })
+    } else {
+        Ok(())
     }
 }
 
