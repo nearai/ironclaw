@@ -38,7 +38,7 @@ This service is the middle communication layer between authorization and dispatc
 5. lookup CapabilityDescriptor in ExtensionRegistry
 6. call CapabilityDispatchAuthorizer
 7. if denied, mark `Failed` and return a typed invocation error before dispatch/resource reservation
-8. if approval is required, attach/validate the invocation fingerprint, save a tenant/user-scoped pending approval request, mark `BlockedApproval`, and return a typed approval-required error
+8. if approval is required, require coherent run-state/approval-store wiring, attach/validate the invocation fingerprint, save a tenant/user-scoped pending approval request, mark `BlockedApproval`, and return a typed approval-required error
 9. if allowed, call CapabilityDispatcher with context.resource_scope
 10. mark `Completed` or `Failed` after dispatch
 11. return the normalized dispatch result
@@ -53,9 +53,10 @@ This service is the middle communication layer between authorization and dispatc
 4. load the approval record and require status Approved
 5. recompute InvocationFingerprint and compare it to the approved request fingerprint
 6. find an unexpired active lease for the same tenant/user/invocation, capability, and fingerprint
-7. call CapabilityDispatchAuthorizer, then CapabilityDispatcher
-8. consume the lease after successful dispatch
-9. mark Completed or Failed
+7. claim the matching lease before runtime dispatch so concurrent resumes cannot dispatch with the same one-shot lease
+8. call CapabilityDispatchAuthorizer with the claimed lease grant as request-local authority, then CapabilityDispatcher
+9. consume the claimed lease after successful dispatch
+10. mark Completed or Failed
 ```
 
 It does not implement grant matching itself; that belongs to `ironclaw_authorization`.
@@ -105,7 +106,9 @@ The capability host is responsible for preserving `ExecutionContext.resource_sco
 
 For approval-required dispatches, `CapabilityHost` also binds the approval to the exact invocation request by attaching an `InvocationFingerprint`. If an authorizer supplies a conflicting fingerprint, the host fails the run with `InvocationFingerprintMismatch` and persists no approval request.
 
-For approved resume, `CapabilityHost` compares the replayed request fingerprint to the approved fingerprint before dispatch and consumes the matching lease after successful dispatch. Denied/expired/non-approved approvals, missing leases, and fingerprint mismatches fail before runtime dispatch.
+If only one of `RunStateStore` or `ApprovalRequestStore` is configured and authorization requires approval, `CapabilityHost` fails closed instead of creating a non-resumable blocked run or orphan approval request. Host-facing approval paths should configure both stores.
+
+For approved resume, `CapabilityHost` compares the replayed request fingerprint to the approved fingerprint before dispatch, claims the matching lease before dispatch, and consumes it after successful dispatch. Denied/expired/non-approved approvals, missing leases, failed lease claims, and fingerprint mismatches fail before runtime dispatch.
 
 ---
 
