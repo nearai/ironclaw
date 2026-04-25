@@ -338,6 +338,10 @@ pub enum TracesCommand {
         #[arg(long)]
         reconcile_db_mirror: bool,
 
+        /// Include file-backed audit hash-chain verification diagnostics
+        #[arg(long)]
+        verify_audit_chain: bool,
+
         /// Environment variable containing an admin bearer token
         #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
         bearer_token_env: String,
@@ -885,6 +889,7 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
             max_export_age_hours,
             skip_export_cache_prune,
             reconcile_db_mirror,
+            verify_audit_chain,
             bearer_token_env,
             json,
         } => {
@@ -894,6 +899,7 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
                 backfill_db_mirror,
                 index_vectors,
                 reconcile_db_mirror,
+                verify_audit_chain,
                 prune_export_cache: !skip_export_cache_prune,
                 max_export_age_hours,
                 purge_expired_before,
@@ -1644,6 +1650,9 @@ async fn trace_commons_maintenance_run(
         );
         print_optional_json_field("  DB mirror backfilled", value, "db_mirror_backfilled");
         print_optional_json_field("  vectors indexed", value, "vector_entries_indexed");
+        for line in maintenance_audit_chain_lines(value) {
+            println!("{line}");
+        }
         for line in maintenance_reconciliation_lines(value) {
             println!("{line}");
         }
@@ -1657,6 +1666,7 @@ struct TraceCommonsMaintenanceOptions {
     backfill_db_mirror: bool,
     index_vectors: bool,
     reconcile_db_mirror: bool,
+    verify_audit_chain: bool,
     prune_export_cache: bool,
     max_export_age_hours: Option<i64>,
     purge_expired_before: Option<String>,
@@ -1675,6 +1685,9 @@ fn trace_commons_maintenance_body(options: &TraceCommonsMaintenanceOptions) -> s
     }
     if options.reconcile_db_mirror {
         body["reconcile_db_mirror"] = serde_json::Value::Bool(true);
+    }
+    if options.verify_audit_chain {
+        body["verify_audit_chain"] = serde_json::Value::Bool(true);
     }
     if !options.prune_export_cache {
         body["prune_export_cache"] = serde_json::Value::Bool(false);
@@ -2337,6 +2350,38 @@ fn print_json_map(label: &str, value: Option<&serde_json::Value>) {
         .collect::<Vec<_>>()
         .join(", ");
     println!("{label}: {items}");
+}
+
+fn maintenance_audit_chain_lines(value: &serde_json::Value) -> Vec<String> {
+    let Some(audit_chain) = value
+        .get("audit_chain")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Vec::new();
+    };
+
+    let mut lines = vec!["  audit chain:".to_string()];
+    if let Some(line) = compact_json_items(
+        audit_chain,
+        "    status",
+        &[
+            ("verified", "verified"),
+            ("event_count", "events"),
+            ("legacy_event_count", "legacy"),
+            ("mismatch_count", "mismatches"),
+        ],
+    ) {
+        lines.push(line);
+    }
+    if let Some(failures) = audit_chain
+        .get("failures")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        && failures > 0
+    {
+        lines.push(format!("    failures: {failures}"));
+    }
+    lines
 }
 
 fn maintenance_reconciliation_lines(value: &serde_json::Value) -> Vec<String> {
@@ -3346,6 +3391,7 @@ mod tests {
             backfill_db_mirror: true,
             index_vectors: true,
             reconcile_db_mirror: true,
+            verify_audit_chain: true,
             prune_export_cache: false,
             max_export_age_hours: Some(48),
             purge_expired_before: Some("2026-04-25T00:00:00Z".to_string()),
@@ -3357,8 +3403,39 @@ mod tests {
         assert_eq!(body["backfill_db_mirror"], true);
         assert_eq!(body["index_vectors"], true);
         assert_eq!(body["reconcile_db_mirror"], true);
+        assert_eq!(body["verify_audit_chain"], true);
         assert_eq!(body["prune_export_cache"], false);
         assert_eq!(body["max_export_age_hours"], 48);
         assert_eq!(body["purge_expired_before"], "2026-04-25T00:00:00Z");
+    }
+
+    #[test]
+    fn maintenance_audit_chain_lines_summarize_without_hashes() {
+        let value = serde_json::json!({
+            "audit_chain": {
+                "verified": false,
+                "event_count": 4,
+                "legacy_event_count": 1,
+                "mismatch_count": 2,
+                "last_event_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "failures": [
+                    "line 2: event_hash mismatch",
+                    "line 3: previous_event_hash mismatch"
+                ]
+            }
+        });
+
+        let lines = maintenance_audit_chain_lines(&value);
+        assert_eq!(
+            lines,
+            vec![
+                "  audit chain:".to_string(),
+                "    status: verified=false events=4 legacy=1 mismatches=2".to_string(),
+                "    failures: 2".to_string(),
+            ]
+        );
+        let rendered = lines.join("\n");
+        assert!(!rendered.contains("sha256:aaaaaaaa"));
+        assert!(!rendered.contains("line 2"));
     }
 }
