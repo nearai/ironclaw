@@ -306,7 +306,7 @@ fn summarize_latent_only_providers(
             name: latent.provider_extension.clone(),
             display_name: None,
             kind: CapabilitySummaryKind::Provider,
-            status: CapabilityStatus::AvailableNotInstalled,
+            status: CapabilityStatus::Latent,
             description: Some(latent.description.clone()),
             action_preview: Vec::new(),
             routing_hint: None,
@@ -443,10 +443,7 @@ mod tests {
         assert_eq!(by_name["slack"].status, CapabilityStatus::NeedsAuth);
         assert_eq!(by_name["github"].status, CapabilityStatus::NeedsSetup);
         assert_eq!(by_name["notion"].status, CapabilityStatus::Inactive);
-        assert_eq!(
-            by_name["gmail"].status,
-            CapabilityStatus::AvailableNotInstalled
-        );
+        assert_eq!(by_name["gmail"].status, CapabilityStatus::Latent);
         assert_eq!(
             by_name["gmail"].action_preview,
             vec!["gmail_send".to_string()]
