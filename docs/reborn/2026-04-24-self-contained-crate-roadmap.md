@@ -675,6 +675,7 @@ The architecture is real when:
 - `ironclaw_dispatcher` has no authorization/product workflow logic; it only routes already-authorized dispatches
 - `ironclaw_capabilities` is the caller-facing invocation workflow between authorization, run-state, and dispatch
 - `ironclaw_approvals` resolves pending approval records into scoped leases without touching dispatcher/runtime execution
+- `ironclaw_authorization` enforces scoped lease visibility, expiration, consumption, and revocation before dispatch
 - `ironclaw_resources` is the only path for costed/quota-limited invocation accounting
 - `ironclaw_wasm` does not discover extensions
 - `ironclaw_mcp` tools are adapted into capabilities and still go through policy/audit

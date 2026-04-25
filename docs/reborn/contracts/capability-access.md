@@ -82,9 +82,9 @@ pub struct CapabilityLease {
 }
 ```
 
-`LeaseBackedAuthorizer` combines request-local grants with active leases visible to the current `ExecutionContext.resource_scope` and then applies the same grant matching rules. Lease lookup is tenant/user scoped; a lease issued under one tenant/user must not authorize another tenant/user, even when UUIDs collide. V1 approval leases are also exact-invocation leases: they must not authorize a different invocation in the same tenant/user until reusable approval scopes are explicitly implemented.
+`LeaseBackedAuthorizer` combines request-local grants with active leases visible to the current `ExecutionContext.resource_scope` and then applies the same grant matching rules. Lease lookup is tenant/user/invocation scoped; a lease issued under one tenant/user/invocation must not authorize another tenant/user/invocation, even when UUIDs collide. V1 approval leases are exact-invocation leases until reusable approval scopes are explicitly implemented.
 
-V1 supports active and revoked lease state. Revocation is tenant/user scoped, and revoked leases are ignored by authorization.
+V1 supports active, consumed, and revoked lease state. Revocation and consumption are tenant/user/invocation scoped. Consumed, revoked, expired, and exhausted leases are ignored by authorization.
 
 See `docs/reborn/contracts/approvals.md` for how approval resolution issues leases.
 
@@ -112,8 +112,7 @@ This slice intentionally keeps authorization narrow:
 
 - no approval prompt UI/orchestration yet
 - no durable grant/lease persistence yet
-- no invocation count tracking for `max_invocations`
-- no expiration enforcement yet
+- no durable invocation-count/expiration persistence yet
 - no resource ceiling obligation enforcement yet
 - no network/secret/mount policy injection into runtimes yet
 

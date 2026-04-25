@@ -87,11 +87,23 @@ The lease adds host-managed lifecycle state:
 ```rust
 pub enum CapabilityLeaseStatus {
     Active,
+    Consumed,
     Revoked,
 }
 ```
 
-V1 includes an in-memory lease store with tenant/user scoped lookup and revocation. Lease lookup and revocation are not global by ID; the authorizer asks for active leases visible to the current `ExecutionContext.resource_scope`. This slice treats issued approval leases as one-off invocation leases: a lease only authorizes a context with the same invocation ID as the approved request. Broader reusable approval scopes are a later policy slice.
+V1 includes an in-memory lease store with exact tenant/user/invocation scoped lookup, consumption, and revocation. Lease lookup, consumption, and revocation are not global by ID; the authorizer asks for unexpired active leases visible to the current `ExecutionContext.resource_scope`. This slice treats issued approval leases as one-off invocation leases: a lease only authorizes a context with the same invocation ID as the approved request. Broader reusable approval scopes are a later policy slice.
+
+Lease consumption enforces `GrantConstraints.max_invocations`:
+
+```text
+Some(n > 1) -> decrement and remain Active
+Some(1)     -> decrement to Some(0) and mark Consumed
+Some(0)     -> reject as exhausted
+None        -> no invocation-count decrement
+```
+
+Expiration is enforced during authorization and consumption using `GrantConstraints.expires_at`.
 
 ---
 
@@ -164,11 +176,9 @@ This slice intentionally keeps approval resolution narrow:
 - no UI/user prompt implementation
 - no invocation resume API in `CapabilityHost` yet
 - no durable lease store yet
-- no lease expiration enforcement yet
-- no invocation-count decrementing for `max_invocations` yet
 - no atomic transaction across approval status update and lease issuance yet
 - no approval resolution audit event yet
-- no lease revocation persistence beyond the in-memory store
+- no lease consumption/revocation persistence beyond the in-memory store
 - no approval support for non-dispatch actions yet
 - no reusable approval-scope expansion yet; V1 leases are exact-invocation only
 
