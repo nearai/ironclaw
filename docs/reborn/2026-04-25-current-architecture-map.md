@@ -225,7 +225,7 @@ The current implemented or contract-backed Reborn stack includes these slices:
 | Script lane | `[exists]` `ScriptExecutor` path, including in-process demo backend and optional Docker backend in the demo |
 | MCP lane | `[exists]` adapter/executor contract path in the live vertical slice; not a full MCP lifecycle product yet |
 | Process persistence | `[exists]` process store/manager records, scoped process result records with inline JSON or filesystem output refs, `ProcessServices` wiring, host-facing `ProcessHost` status/kill/await/subscribe/result/output APIs, cooperative cancellation tokens, background completion/failure transition protection, lifecycle events, and resource reservation ownership/cleanup |
-| Live vertical slice | `[exists]` runnable demo through discovery -> registry -> `CapabilityHost` -> authorization -> dispatcher -> WASM/Script/MCP -> resources/events; host-runtime composition helper now covers the shared service wiring shape and has a non-Docker `ironclaw_host_runtime` live example |
+| Live vertical slice | `[exists]` runnable demo through discovery -> registry -> `CapabilityHost` -> authorization -> dispatcher -> WASM/Script/MCP -> resources/events; host-runtime composition helper now covers the shared service wiring shape and has non-Docker in-memory and filesystem-backed `ironclaw_host_runtime` live examples |
 
 ---
 
