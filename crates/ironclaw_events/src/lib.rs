@@ -236,6 +236,27 @@ where
     pub fn path(&self) -> &VirtualPath {
         &self.path
     }
+
+    pub async fn read_events(&self) -> Result<Vec<RuntimeEvent>, EventError> {
+        let bytes = match self.filesystem.read_file(&self.path).await {
+            Ok(bytes) => bytes,
+            Err(FilesystemError::Backend { .. }) | Err(FilesystemError::MountNotFound { .. }) => {
+                return Ok(Vec::new());
+            }
+            Err(error) => return Err(EventError::from(error)),
+        };
+        let text = String::from_utf8(bytes).map_err(|error| EventError::Serialize {
+            reason: error.to_string(),
+        })?;
+        text.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                serde_json::from_str::<RuntimeEvent>(line).map_err(|error| EventError::Serialize {
+                    reason: error.to_string(),
+                })
+            })
+            .collect()
+    }
 }
 
 #[async_trait]

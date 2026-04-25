@@ -1,6 +1,6 @@
-use std::error::Error;
+use std::{error::Error, sync::Arc};
 
-use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
+use ironclaw_events::{JsonlEventSink, RuntimeEventKind};
 use ironclaw_extensions::ExtensionDiscovery;
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{
@@ -29,16 +29,17 @@ async fn run_demo<B>(script_backend: B, script_backend_label: &str) -> Result<()
 where
     B: ScriptBackend + 'static,
 {
-    let fs = filesystem_with_echo_extensions()?;
+    let fs = Arc::new(filesystem_with_echo_extensions()?);
     let registry =
-        ExtensionDiscovery::discover(&fs, &VirtualPath::new("/system/extensions")?).await?;
+        ExtensionDiscovery::discover(fs.as_ref(), &VirtualPath::new("/system/extensions")?).await?;
     let discovered_extensions = registry.extensions().count();
 
     let governor = InMemoryResourceGovernor::new();
     let wasm_runtime = WasmRuntime::for_testing()?;
     let script_runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), script_backend);
-    let events = InMemoryEventSink::new();
-    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
+    let event_path = VirtualPath::new("/engine/events/reborn-demo.jsonl")?;
+    let events = JsonlEventSink::new(Arc::clone(&fs), event_path.clone());
+    let dispatcher = RuntimeDispatcher::new(&registry, fs.as_ref(), &governor)
         .with_wasm_runtime(&wasm_runtime)
         .with_script_runtime(&script_runtime)
         .with_event_sink(&events);
@@ -70,7 +71,7 @@ where
         })
         .await?;
 
-    let recorded_events = events.events();
+    let recorded_events = events.read_events().await?;
 
     println!("reborn_vertical_slice=ok");
     println!("discovered_extensions={discovered_extensions}");
@@ -89,6 +90,7 @@ where
         stable_json(&script.output),
         script.receipt.status
     );
+    println!("durable_event_path={event_path:?}");
     println!("events={}", recorded_events.len());
     for (index, event) in recorded_events.iter().enumerate() {
         println!(
@@ -118,19 +120,28 @@ impl ScriptBackend for EchoScriptBackend {
 
 fn filesystem_with_echo_extensions() -> Result<LocalFilesystem, Box<dyn Error>> {
     let storage = tempfile::tempdir()?.keep();
-    let wasm_root = storage.join("echo-wasm");
+    let extensions_root = storage.join("extensions");
+    let engine_root = storage.join("engine");
+    std::fs::create_dir_all(&extensions_root)?;
+    std::fs::create_dir_all(&engine_root)?;
+
+    let wasm_root = extensions_root.join("echo-wasm");
     std::fs::create_dir_all(wasm_root.join("wasm"))?;
     std::fs::write(wasm_root.join("manifest.toml"), WASM_MANIFEST)?;
     std::fs::write(wasm_root.join("wasm/echo.wasm"), json_echo_module()?)?;
 
-    let script_root = storage.join("echo-script");
+    let script_root = extensions_root.join("echo-script");
     std::fs::create_dir_all(&script_root)?;
     std::fs::write(script_root.join("manifest.toml"), SCRIPT_MANIFEST)?;
 
     let mut fs = LocalFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions")?,
-        HostPath::from_path_buf(storage),
+        HostPath::from_path_buf(extensions_root),
+    )?;
+    fs.mount_local(
+        VirtualPath::new("/engine")?,
+        HostPath::from_path_buf(engine_root),
     )?;
     Ok(fs)
 }

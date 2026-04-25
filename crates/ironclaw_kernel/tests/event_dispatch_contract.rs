@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use ironclaw_events::*;
 use ironclaw_extensions::*;
 use ironclaw_filesystem::*;
@@ -84,6 +86,50 @@ async fn dispatcher_emits_events_for_wasm_and_script_success() {
 }
 
 #[tokio::test]
+async fn dispatcher_can_persist_events_to_filesystem_jsonl_sink() {
+    let (fs, event_path) = filesystem_with_echo_extensions_and_engine();
+    let fs = Arc::new(fs);
+    let registry = ExtensionDiscovery::discover(
+        fs.as_ref(),
+        &VirtualPath::new("/system/extensions").unwrap(),
+    )
+    .await
+    .unwrap();
+    let governor = InMemoryResourceGovernor::new();
+    let wasm_runtime = WasmRuntime::for_testing().unwrap();
+    let events = JsonlEventSink::new(Arc::clone(&fs), event_path.clone());
+    let dispatcher = RuntimeDispatcher::new(&registry, fs.as_ref(), &governor)
+        .with_wasm_runtime(&wasm_runtime)
+        .with_event_sink(&events);
+
+    dispatcher
+        .dispatch_json(CapabilityDispatchRequest {
+            capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
+            scope: sample_scope(),
+            estimate: ResourceEstimate {
+                concurrency_slots: Some(1),
+                output_bytes: Some(10_000),
+                ..ResourceEstimate::default()
+            },
+            input: json!({"message": "durable wasm"}),
+        })
+        .await
+        .unwrap();
+
+    let recorded = events.read_events().await.unwrap();
+    assert_eq!(recorded.len(), 3);
+    assert_eq!(recorded[0].kind, RuntimeEventKind::DispatchRequested);
+    assert_eq!(recorded[1].kind, RuntimeEventKind::RuntimeSelected);
+    assert_eq!(recorded[2].kind, RuntimeEventKind::DispatchSucceeded);
+
+    let bytes = fs.read_file(&event_path).await.unwrap();
+    let text = String::from_utf8(bytes).unwrap();
+    assert_eq!(text.lines().count(), 3);
+    assert!(!text.contains("/var/"));
+    assert!(!text.contains("/tmp/"));
+}
+
+#[tokio::test]
 async fn dispatcher_emits_failed_event_for_missing_backend_without_reserving() {
     let fs = filesystem_with_echo_extensions();
     let registry =
@@ -144,16 +190,35 @@ impl ScriptBackend for EchoScriptBackend {
     }
 }
 
+fn filesystem_with_echo_extensions_and_engine() -> (LocalFilesystem, VirtualPath) {
+    let storage = tempfile::tempdir().unwrap().keep();
+    let extensions_root = storage.join("extensions");
+    let engine_root = storage.join("engine");
+    std::fs::create_dir_all(&extensions_root).unwrap();
+    std::fs::create_dir_all(&engine_root).unwrap();
+
+    write_echo_extensions(&extensions_root);
+
+    let mut fs = LocalFilesystem::new();
+    fs.mount_local(
+        VirtualPath::new("/system/extensions").unwrap(),
+        HostPath::from_path_buf(extensions_root),
+    )
+    .unwrap();
+    fs.mount_local(
+        VirtualPath::new("/engine").unwrap(),
+        HostPath::from_path_buf(engine_root),
+    )
+    .unwrap();
+    (
+        fs,
+        VirtualPath::new("/engine/events/reborn-test.jsonl").unwrap(),
+    )
+}
+
 fn filesystem_with_echo_extensions() -> LocalFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
-    let wasm_root = storage.join("echo-wasm");
-    std::fs::create_dir_all(wasm_root.join("wasm")).unwrap();
-    std::fs::write(wasm_root.join("manifest.toml"), WASM_MANIFEST).unwrap();
-    std::fs::write(wasm_root.join("wasm/echo.wasm"), json_echo_module()).unwrap();
-
-    let script_root = storage.join("echo-script");
-    std::fs::create_dir_all(&script_root).unwrap();
-    std::fs::write(script_root.join("manifest.toml"), SCRIPT_MANIFEST).unwrap();
+    write_echo_extensions(&storage);
 
     let mut fs = LocalFilesystem::new();
     fs.mount_local(
@@ -162,6 +227,17 @@ fn filesystem_with_echo_extensions() -> LocalFilesystem {
     )
     .unwrap();
     fs
+}
+
+fn write_echo_extensions(root: &std::path::Path) {
+    let wasm_root = root.join("echo-wasm");
+    std::fs::create_dir_all(wasm_root.join("wasm")).unwrap();
+    std::fs::write(wasm_root.join("manifest.toml"), WASM_MANIFEST).unwrap();
+    std::fs::write(wasm_root.join("wasm/echo.wasm"), json_echo_module()).unwrap();
+
+    let script_root = root.join("echo-script");
+    std::fs::create_dir_all(&script_root).unwrap();
+    std::fs::write(script_root.join("manifest.toml"), SCRIPT_MANIFEST).unwrap();
 }
 
 fn json_echo_module() -> Vec<u8> {
@@ -196,20 +272,20 @@ fn json_echo_module() -> Vec<u8> {
 
 fn sample_scope() -> ResourceScope {
     ResourceScope {
-        tenant_id: TenantId::new("tenant1").unwrap(),
-        user_id: UserId::new("user1").unwrap(),
-        project_id: Some(ProjectId::new("project1").unwrap()),
-        mission_id: None,
-        thread_id: None,
+        tenant_id: TenantId::new("tenant-a").unwrap(),
+        user_id: UserId::new("user-a").unwrap(),
+        project_id: Some(ProjectId::new("project-a").unwrap()),
+        mission_id: Some(MissionId::new("mission-a").unwrap()),
+        thread_id: Some(ThreadId::new("thread-a").unwrap()),
         invocation_id: InvocationId::new(),
     }
 }
 
 const WASM_MANIFEST: &str = r#"
 id = "echo-wasm"
-name = "WASM Echo"
+name = "Echo WASM"
 version = "0.1.0"
-description = "WASM echo demo extension"
+description = "Echo WASM demo extension"
 trust = "sandbox"
 
 [runtime]
@@ -218,17 +294,17 @@ module = "wasm/echo.wasm"
 
 [[capabilities]]
 id = "echo-wasm.say"
-description = "Echo text through WASM"
+description = "Echo WASM"
 effects = ["dispatch_capability"]
 default_permission = "allow"
-parameters_schema = { type = "object", required = ["message"], properties = { message = { type = "string" } } }
+parameters_schema = { type = "object" }
 "#;
 
 const SCRIPT_MANIFEST: &str = r#"
 id = "echo-script"
-name = "Script Echo"
+name = "Echo Script"
 version = "0.1.0"
-description = "Script echo demo extension"
+description = "Echo Script demo extension"
 trust = "sandbox"
 
 [runtime]
@@ -240,8 +316,8 @@ args = ["-c", "cat"]
 
 [[capabilities]]
 id = "echo-script.say"
-description = "Echo text through Script Runner"
+description = "Echo script"
 effects = ["dispatch_capability"]
 default_permission = "allow"
-parameters_schema = { type = "object", required = ["message"], properties = { message = { type = "string" } } }
+parameters_schema = { type = "object" }
 "#;

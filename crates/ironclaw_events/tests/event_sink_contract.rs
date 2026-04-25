@@ -64,6 +64,14 @@ async fn jsonl_event_sink_persists_redacted_runtime_events_without_host_paths() 
     assert!(text.contains("dispatch_failed"));
     assert!(text.contains("MissingRuntimeBackend"));
     assert!(!text.contains(storage.to_string_lossy().as_ref()));
+
+    let events = sink.read_events().await.unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, RuntimeEventKind::DispatchFailed);
+    assert_eq!(
+        events[0].error_kind.as_deref(),
+        Some("MissingRuntimeBackend")
+    );
 }
 
 fn sample_scope() -> ResourceScope {
