@@ -3,7 +3,7 @@
 //! Provides tools to migrate existing OpenClaw installations (memory, history,
 //! settings, and credentials) into IronClaw without data loss.
 
-#[cfg(feature = "import")]
+#[cfg(feature = "migrate")]
 pub mod openclaw;
 
 use std::path::PathBuf;

@@ -4,9 +4,9 @@
 //! verifying that data is correctly stored, idempotent, and that dry-run mode
 //! prevents modifications.
 
-#![cfg(feature = "import")]
+#![cfg(feature = "migrate")]
 
-#[cfg(feature = "import")]
+#[cfg(feature = "migrate")]
 mod import_integration_tests {
     use ironclaw::db::Database;
     use ironclaw::db::libsql::LibSqlBackend;

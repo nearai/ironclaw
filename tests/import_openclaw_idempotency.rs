@@ -5,9 +5,9 @@
 //! 2. Dry-run mode doesn't modify any state
 //! 3. Re-running import doesn't create duplicates
 
-#![cfg(feature = "import")]
+#![cfg(feature = "migrate")]
 
-#[cfg(feature = "import")]
+#[cfg(feature = "migrate")]
 mod idempotency_tests {
     use std::path::PathBuf;
     use tempfile::TempDir;

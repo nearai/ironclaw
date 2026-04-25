@@ -1,8 +1,8 @@
 //! Integration tests for OpenClaw import functionality.
 
-#![cfg(feature = "import")]
+#![cfg(feature = "migrate")]
 
-#[cfg(feature = "import")]
+#[cfg(feature = "migrate")]
 mod import_tests {
     use ironclaw::import::openclaw::reader::{OpenClawConfig, OpenClawMemoryChunk};
     use ironclaw::import::{ImportError, ImportStats};

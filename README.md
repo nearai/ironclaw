@@ -292,6 +292,13 @@ Engine v2 is opt-in right now. If you want to run the new engine instead of the 
 # First-time setup (configures database, auth, etc.)
 ironclaw onboard
 
+# Migrate from OpenClaw or Hermes into IronClaw
+# (source builds: compile with the opt-in `migrate` feature)
+cargo run --features migrate -- migrate openclaw
+cargo run --features migrate -- migrate hermes --all-profiles
+# Hermes migrations preserve raw auth.json as an encrypted backup secret.
+# After verifying the import, rotate migrated credentials and remove the backup if you no longer need it.
+
 # Start interactive REPL
 cargo run
 

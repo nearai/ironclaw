@@ -167,6 +167,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `agents` | ✅ | ❌ | P3 | Multi-agent management |
 | `sessions` | ✅ | ❌ | P3 | Session listing (shows subagent models) |
 | `memory` | ✅ | ✅ | - | Memory search CLI |
+| `migrate` | ✅ | ✅ | P1 | `ironclaw migrate openclaw` and `ironclaw migrate hermes` import settings, secrets, workspace docs, Engine V2 threads/conversations, and legacy web history |
 | `skills` | ✅ | ✅ | - | CLI subcommands (list, search, info) + agent tools + web API endpoints |
 | `pairing` | ✅ | ✅ | - | list/approve, account selector |
 | `nodes` | ✅ | ❌ | P3 | Device management, remove/clear flows |

@@ -21,6 +21,7 @@ mod user_facing_errors;
 mod workspace_reader;
 
 pub use cost_guard_gate::CostGuardBudgetGate;
+pub use store_adapter::HybridStore;
 pub use workspace_reader::WorkspaceReaderAdapter;
 
 pub use effect_adapter::EffectBridgeAdapter;
