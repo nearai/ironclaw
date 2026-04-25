@@ -48,6 +48,7 @@ use ironclaw::trace_corpus_storage::{
     TraceSubmissionRecord as StorageTraceSubmissionRecord,
     TraceSubmissionWrite as StorageTraceSubmissionWrite,
     TraceTenantPolicyRecord as StorageTraceTenantPolicyRecord,
+    TraceTenantPolicyWrite as StorageTraceTenantPolicyWrite,
     TraceTombstoneWrite as StorageTraceTombstoneWrite,
     TraceVectorEntrySourceProjection as StorageTraceVectorEntrySourceProjection,
     TraceVectorEntryStatus as StorageTraceVectorEntryStatus,
@@ -255,6 +256,10 @@ impl TokenRole {
         matches!(self, Self::Reviewer | Self::Admin)
     }
 
+    fn can_admin(self) -> bool {
+        matches!(self, Self::Admin)
+    }
+
     fn storage_name(self) -> &'static str {
         match self {
             Self::Contributor => "contributor",
@@ -456,6 +461,12 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/ranker/training-pairs",
             get(ranker_training_pairs_handler),
         )
+        .route(
+            "/v1/admin/tenant-policy",
+            get(get_tenant_policy_handler)
+                .post(put_tenant_policy_handler)
+                .put(put_tenant_policy_handler),
+        )
         .route("/v1/admin/maintenance", post(maintenance_handler))
         .route("/v1/audit/events", get(audit_events_handler))
         .with_state(state)
@@ -554,6 +565,109 @@ async fn health_handler() -> Json<HealthResponse> {
         status: "ok",
         schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION,
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceTenantPolicyRequest {
+    policy_version: String,
+    #[serde(default)]
+    allowed_consent_scopes: Vec<ConsentScope>,
+    #[serde(default)]
+    allowed_uses: Vec<TraceAllowedUse>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceTenantPolicyResponse {
+    tenant_id: String,
+    policy_version: String,
+    allowed_consent_scopes: Vec<String>,
+    allowed_uses: Vec<String>,
+    updated_by_principal_ref: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+async fn get_tenant_policy_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<TraceTenantPolicyResponse>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_admin(&tenant)?;
+    let db = trace_tenant_policy_db(state.as_ref())?;
+    let policy = db
+        .get_trace_tenant_policy(&tenant.tenant_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::NOT_FOUND,
+                "trace tenant contribution policy does not exist",
+            )
+        })?;
+    Ok(Json(trace_tenant_policy_response(policy)))
+}
+
+async fn put_tenant_policy_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceTenantPolicyRequest>,
+) -> ApiResult<Json<TraceTenantPolicyResponse>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_admin(&tenant)?;
+    let db = trace_tenant_policy_db(state.as_ref())?;
+    let policy_version = request.policy_version.trim();
+    if policy_version.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "trace tenant contribution policy requires a policy_version",
+        ));
+    }
+    let allowed_consent_scopes = request
+        .allowed_consent_scopes
+        .iter()
+        .map(serde_storage_string)
+        .collect::<anyhow::Result<Vec<_>>>()
+        .map_err(internal_error)?;
+    let allowed_uses = request
+        .allowed_uses
+        .iter()
+        .map(serde_storage_string)
+        .collect::<anyhow::Result<Vec<_>>>()
+        .map_err(internal_error)?;
+    let policy = db
+        .upsert_trace_tenant_policy(StorageTraceTenantPolicyWrite {
+            tenant_id: tenant.tenant_id.clone(),
+            policy_version: policy_version.to_string(),
+            allowed_consent_scopes,
+            allowed_uses,
+            updated_by_principal_ref: tenant.principal_ref.clone(),
+        })
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(trace_tenant_policy_response(policy)))
+}
+
+fn trace_tenant_policy_db(state: &AppState) -> ApiResult<Arc<dyn Database>> {
+    state.db_mirror.as_ref().cloned().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trace tenant policy DB is not configured",
+        )
+    })
+}
+
+fn trace_tenant_policy_response(
+    policy: StorageTraceTenantPolicyRecord,
+) -> TraceTenantPolicyResponse {
+    TraceTenantPolicyResponse {
+        tenant_id: policy.tenant_id,
+        policy_version: policy.policy_version,
+        allowed_consent_scopes: policy.allowed_consent_scopes,
+        allowed_uses: policy.allowed_uses,
+        updated_by_principal_ref: policy.updated_by_principal_ref,
+        created_at: policy.created_at,
+        updated_at: policy.updated_at,
+    }
 }
 
 async fn submit_trace_handler(
@@ -2207,6 +2321,14 @@ fn require_reviewer(auth: &TenantAuth) -> ApiResult<()> {
             StatusCode::FORBIDDEN,
             "reviewer or admin token required",
         ))
+    }
+}
+
+fn require_admin(auth: &TenantAuth) -> ApiResult<()> {
+    if auth.role.can_admin() {
+        Ok(())
+    } else {
+        Err(api_error(StatusCode::FORBIDDEN, "admin token required"))
     }
 }
 
@@ -7556,6 +7678,7 @@ mod tests {
             "review-token-a",
             TokenRole::Reviewer,
         );
+        insert_token(&mut tokens, "tenant-a", "admin-token-a", TokenRole::Admin);
         insert_token(&mut tokens, "tenant-b", "token-b", TokenRole::Contributor);
         insert_token(
             &mut tokens,
@@ -7563,6 +7686,7 @@ mod tests {
             "review-token-b",
             TokenRole::Reviewer,
         );
+        insert_token(&mut tokens, "tenant-b", "admin-token-b", TokenRole::Admin);
         Arc::new(AppState {
             root,
             tokens: Arc::new(tokens),
@@ -7919,6 +8043,87 @@ mod tests {
             .await
             .expect_err("DB-backed tenant policy rejects disallowed submission");
         assert_eq!(error.0, StatusCode::FORBIDDEN);
+
+        assert!(
+            db.get_trace_tenant_policy("tenant-b")
+                .await
+                .expect("other tenant policy reads")
+                .is_none()
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn admin_can_manage_db_backed_tenant_policy() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-tenant-policy-admin.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db_tenant_policy_reads(
+            temp.path().to_path_buf(),
+            db.clone() as Arc<dyn Database>,
+            true,
+        );
+
+        let contributor_error = put_tenant_policy_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(TraceTenantPolicyRequest {
+                policy_version: "tenant-policy-v1".to_string(),
+                allowed_consent_scopes: vec![ConsentScope::DebuggingEvaluation],
+                allowed_uses: vec![TraceAllowedUse::Debugging],
+            }),
+        )
+        .await
+        .expect_err("contributors cannot manage tenant policy");
+        assert_eq!(contributor_error.0, StatusCode::FORBIDDEN);
+
+        let Json(written) = put_tenant_policy_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceTenantPolicyRequest {
+                policy_version: "tenant-policy-v1".to_string(),
+                allowed_consent_scopes: vec![
+                    ConsentScope::DebuggingEvaluation,
+                    ConsentScope::BenchmarkOnly,
+                ],
+                allowed_uses: vec![TraceAllowedUse::Debugging, TraceAllowedUse::Evaluation],
+            }),
+        )
+        .await
+        .expect("admin can write tenant policy");
+        assert_eq!(written.tenant_id, "tenant-a");
+        assert_eq!(written.policy_version, "tenant-policy-v1");
+        assert_eq!(
+            written.allowed_consent_scopes,
+            vec!["debugging_evaluation", "benchmark_only"]
+        );
+        assert_eq!(written.allowed_uses, vec!["debugging", "evaluation"]);
+        assert_eq!(
+            written.updated_by_principal_ref,
+            principal_storage_ref("admin-token-a")
+        );
+
+        let Json(read) =
+            get_tenant_policy_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can read tenant policy");
+        assert_eq!(read.policy_version, written.policy_version);
+        assert_eq!(read.allowed_consent_scopes, written.allowed_consent_scopes);
+        assert_eq!(read.allowed_uses, written.allowed_uses);
+
+        let other_tenant_error =
+            get_tenant_policy_handler(State(state), auth_headers("admin-token-b"))
+                .await
+                .expect_err("admin only reads own tenant policy");
+        assert_eq!(other_tenant_error.0, StatusCode::NOT_FOUND);
 
         assert!(
             db.get_trace_tenant_policy("tenant-b")
