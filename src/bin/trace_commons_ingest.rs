@@ -5682,7 +5682,7 @@ async fn run_maintenance(
         .await?;
     }
     let audit_chain = if request.verify_audit_chain {
-        Some(verify_audit_chain(&state.root, &tenant.tenant_id)?)
+        Some(verify_audit_chain(state, &tenant.tenant_id).await?)
     } else {
         None
     };
@@ -5711,7 +5711,18 @@ async fn run_maintenance(
     })
 }
 
-fn verify_audit_chain(root: &Path, tenant_id: &str) -> anyhow::Result<TraceAuditChainReport> {
+async fn verify_audit_chain(
+    state: &AppState,
+    tenant_id: &str,
+) -> anyhow::Result<TraceAuditChainReport> {
+    let mut report = verify_file_audit_chain(&state.root, tenant_id)?;
+    if let Some(db) = state.db_mirror.as_ref() {
+        report.db_mirror = Some(verify_db_audit_chain(db.as_ref(), tenant_id).await?);
+    }
+    Ok(report)
+}
+
+fn verify_file_audit_chain(root: &Path, tenant_id: &str) -> anyhow::Result<TraceAuditChainReport> {
     let path = root
         .join("tenants")
         .join(tenant_storage_key(tenant_id))
@@ -5758,6 +5769,48 @@ fn verify_audit_chain(root: &Path, tenant_id: &str) -> anyhow::Result<TraceAudit
             report
                 .failures
                 .push(format!("line {line_number}: event_hash mismatch"));
+        }
+        expected_previous_hash = event_hash.to_string();
+        report.last_event_hash = Some(event_hash.to_string());
+    }
+    report.mismatch_count = report.failures.len();
+    report.verified = report.mismatch_count == 0;
+    Ok(report)
+}
+
+async fn verify_db_audit_chain(
+    db: &dyn Database,
+    tenant_id: &str,
+) -> anyhow::Result<TraceDbAuditChainReport> {
+    let events = db
+        .list_trace_audit_events(tenant_id)
+        .await
+        .context("failed to list DB audit events for hash-chain verification")?;
+    let mut report = TraceDbAuditChainReport::default();
+    let mut expected_previous_hash = TRACE_AUDIT_EVENT_GENESIS_HASH.to_string();
+    for (index, event) in events.into_iter().enumerate() {
+        let row_number = index + 1;
+        report.event_count += 1;
+        let Some(event_hash) = event.event_hash.as_deref() else {
+            report.legacy_event_count += 1;
+            expected_previous_hash = TRACE_AUDIT_EVENT_GENESIS_HASH.to_string();
+            continue;
+        };
+        if !event_hash.starts_with("sha256:") {
+            report.failures.push(format!(
+                "db row {row_number} event {}: event_hash has invalid format",
+                event.audit_event_id
+            ));
+        }
+        let previous_event_hash = event
+            .previous_event_hash
+            .as_deref()
+            .unwrap_or(TRACE_AUDIT_EVENT_GENESIS_HASH);
+        if previous_event_hash != expected_previous_hash {
+            report.failures.push(format!(
+                "db row {row_number} event {}: previous_event_hash mismatch",
+                event.audit_event_id
+            ));
         }
         expected_previous_hash = event_hash.to_string();
         report.last_event_hash = Some(event_hash.to_string());
@@ -7693,6 +7746,19 @@ struct TraceMaintenanceResponse {
 
 #[derive(Debug, Default, Serialize)]
 struct TraceAuditChainReport {
+    verified: bool,
+    event_count: usize,
+    legacy_event_count: usize,
+    mismatch_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_event_hash: Option<String>,
+    failures: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    db_mirror: Option<TraceDbAuditChainReport>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct TraceDbAuditChainReport {
     verified: bool,
     event_count: usize,
     legacy_event_count: usize,
@@ -15137,6 +15203,110 @@ mod tests {
                 .failures
                 .iter()
                 .any(|failure| failure.contains("event_hash mismatch"))
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn maintenance_can_verify_db_audit_chain() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-db-audit-chain.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(response) = maintenance_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("db_audit_chain_verify".to_string()),
+                dry_run: false,
+                backfill_db_mirror: true,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: true,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("maintenance verifies DB audit chain");
+        let report = response.audit_chain.expect("audit chain report exists");
+        assert!(report.verified);
+        let db_report = report.db_mirror.expect("DB audit chain report exists");
+        assert!(db_report.verified, "{db_report:?}");
+        assert!(db_report.event_count >= 3);
+        assert!(db_report.legacy_event_count >= 1);
+        assert_eq!(db_report.mismatch_count, 0);
+
+        let conn = db.connect().await.expect("connect to mirror");
+        conn.execute(
+            "UPDATE trace_audit_events
+             SET event_hash = 'sha256:tampered'
+             WHERE tenant_id = ?1
+               AND audit_event_id = (
+                   SELECT audit_event_id
+                   FROM trace_audit_events
+                   WHERE tenant_id = ?1
+                     AND event_hash IS NOT NULL
+                   ORDER BY occurred_at ASC
+                   LIMIT 1
+               )",
+            libsql::params!["tenant-a"],
+        )
+        .await
+        .expect("tamper DB audit event hash");
+
+        let Json(response) = maintenance_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("db_audit_chain_verify_after_tamper".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: true,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("maintenance reports DB audit chain tampering");
+        let db_report = response
+            .audit_chain
+            .expect("audit chain report exists")
+            .db_mirror
+            .expect("DB audit chain report exists");
+        assert!(!db_report.verified);
+        assert!(db_report.mismatch_count >= 1);
+        assert!(
+            db_report
+                .failures
+                .iter()
+                .any(|failure| failure.contains("previous_event_hash mismatch"))
         );
     }
 
