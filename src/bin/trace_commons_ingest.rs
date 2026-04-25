@@ -3516,6 +3516,7 @@ fn trace_envelope_object_key(
 fn trace_object_ref_write_from_record(
     state: &AppState,
     audit_label: &str,
+    artifact_kind: StorageTraceObjectArtifactKind,
     record: &TraceCommonsSubmissionRecord,
     envelope: &TraceContributionEnvelope,
 ) -> anyhow::Result<(StorageTraceObjectRefWrite, String)> {
@@ -3545,7 +3546,7 @@ fn trace_object_ref_write_from_record(
             object_ref_id: deterministic_trace_uuid(audit_label, record),
             tenant_id: record.tenant_id.clone(),
             submission_id: record.submission_id,
-            artifact_kind: StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            artifact_kind,
             object_store,
             object_key,
             content_sha256: content_sha256.clone(),
@@ -3568,8 +3569,13 @@ async fn mirror_submission_to_db(
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
     };
-    let (object_ref, content_sha256) =
-        trace_object_ref_write_from_record(state, "submitted-envelope", record, envelope)?;
+    let (object_ref, content_sha256) = trace_object_ref_write_from_record(
+        state,
+        "submitted-envelope",
+        StorageTraceObjectArtifactKind::SubmittedEnvelope,
+        record,
+        envelope,
+    )?;
     let object_ref_id = object_ref.object_ref_id;
     let derived_id = deterministic_trace_uuid("derived-precheck", record);
     let privacy_risk = serde_storage_string(&record.privacy_risk)?;
@@ -4044,8 +4050,13 @@ async fn mirror_review_decision_to_db(
     )?)
     .await
     .context("failed to mirror reviewed trace submission metadata")?;
-    let (object_ref, _) =
-        trace_object_ref_write_from_record(state, "reviewed-envelope", record, envelope)?;
+    let (object_ref, _) = trace_object_ref_write_from_record(
+        state,
+        "reviewed-envelope",
+        StorageTraceObjectArtifactKind::ReviewSnapshot,
+        record,
+        envelope,
+    )?;
     db.append_trace_object_ref(object_ref)
         .await
         .context("failed to mirror reviewed trace object ref")?;
@@ -4628,7 +4639,11 @@ fn read_envelope_from_object_ref(
         "trace object ref tenant mismatch"
     );
     anyhow::ensure!(
-        object_ref.artifact_kind == StorageTraceObjectArtifactKind::SubmittedEnvelope,
+        matches!(
+            object_ref.artifact_kind,
+            StorageTraceObjectArtifactKind::SubmittedEnvelope
+                | StorageTraceObjectArtifactKind::ReviewSnapshot
+        ),
         "trace object ref artifact kind mismatch"
     );
     anyhow::ensure!(
@@ -12741,15 +12756,29 @@ mod tests {
         .expect("review decision reads body from DB object ref");
         assert_eq!(review_receipt.status, "accepted");
 
-        let reviewed_ref = db
+        let submitted_ref_after_review = db
             .get_latest_active_trace_object_ref(
                 "tenant-a",
                 submission_id,
                 StorageTraceObjectArtifactKind::SubmittedEnvelope,
             )
             .await
-            .expect("reviewed object ref reads")
-            .expect("reviewed submitted envelope object ref exists");
+            .expect("submitted object ref reads after review")
+            .expect("submitted envelope object ref remains active after review");
+        assert_eq!(
+            submitted_ref_after_review.object_ref_id,
+            object_ref.object_ref_id
+        );
+
+        let reviewed_ref = db
+            .get_latest_active_trace_object_ref(
+                "tenant-a",
+                submission_id,
+                StorageTraceObjectArtifactKind::ReviewSnapshot,
+            )
+            .await
+            .expect("review snapshot object ref reads")
+            .expect("review snapshot object ref exists");
         assert_ne!(reviewed_ref.object_ref_id, object_ref.object_ref_id);
         assert_eq!(
             reviewed_ref.object_store,
