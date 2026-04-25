@@ -12,7 +12,7 @@ This branch now contains the first production-storage bridge:
 - `src/trace_corpus_storage.rs` and `TraceCorpusStore` implementations for PostgreSQL and libSQL.
 - Optional ingest-service DB dual-write behind `TRACE_COMMONS_DB_DUAL_WRITE=true`.
 - Optional DB-backed tenant policy reads behind `TRACE_COMMONS_DB_TENANT_POLICY_READS=true`.
-- Admin-token tenant policy management through `/v1/admin/tenant-policy`.
+- Admin-token tenant policy management through `/v1/admin/tenant-policy`, with hash-chained file audit events and safe DB audit metadata for policy version, allow-list counts, and the policy projection hash.
 - Optional encrypted local artifact storage behind `TRACE_COMMONS_ARTIFACT_KEY_HEX`, with `TRACE_COMMONS_OBJECT_STORE=local_service` selecting the service-owned local encrypted backend used for production-shaped object refs.
 - Caller-level tests for tenant-scoped writes, DB-backed tenant policy enforcement, review/revocation state, delayed credit events, encrypted artifact receipts, and DB object-ref replay reads through the service-owned local object-store backend.
 
@@ -902,7 +902,7 @@ Production may keep the vector payload in an external vector DB. Relational meta
 | `actor_role` | Role at time of action. |
 | `job_id` | Optional worker job. |
 | `submission_id`, `object_ref_id`, `export_manifest_id` | Optional targets. |
-| `action` | Submit, read, review, credit mutate, revoke, export, retain, purge, vector index, benchmark convert. |
+| `action` | Submit, read, review, credit mutate, revoke, export, retain, purge, vector index, benchmark convert, policy update. |
 | `reason` | Required for privileged actions. |
 | `request_id` | API request or worker trace id. |
 | `decision_inputs_hash` | Hash of reviewed policy/input projection. |

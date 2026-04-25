@@ -604,7 +604,17 @@ async fn get_tenant_policy_handler(
                 "trace tenant contribution policy does not exist",
             )
         })?;
-    Ok(Json(trace_tenant_policy_response(policy)))
+    let response = trace_tenant_policy_response(policy);
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::read(&tenant, "tenant_policy", 1),
+        StorageTraceAuditAction::Read,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(response))
 }
 
 async fn put_tenant_policy_handler(
@@ -634,6 +644,9 @@ async fn put_tenant_policy_handler(
         .map(serde_storage_string)
         .collect::<anyhow::Result<Vec<_>>>()
         .map_err(internal_error)?;
+    let policy_projection_hash =
+        trace_tenant_policy_projection_hash(policy_version, &allowed_consent_scopes, &allowed_uses)
+            .map_err(internal_error)?;
     let policy = db
         .upsert_trace_tenant_policy(StorageTraceTenantPolicyWrite {
             tenant_id: tenant.tenant_id.clone(),
@@ -644,7 +657,28 @@ async fn put_tenant_policy_handler(
         })
         .await
         .map_err(internal_error)?;
-    Ok(Json(trace_tenant_policy_response(policy)))
+    let response = trace_tenant_policy_response(policy);
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::tenant_policy_update(
+            &tenant,
+            &response.policy_version,
+            response.allowed_consent_scopes.len(),
+            response.allowed_uses.len(),
+            &policy_projection_hash,
+        ),
+        StorageTraceAuditAction::PolicyUpdate,
+        StorageTraceAuditSafeMetadata::TenantPolicy {
+            policy_version: response.policy_version.clone(),
+            allowed_consent_scope_count: response.allowed_consent_scopes.len() as u32,
+            allowed_use_count: response.allowed_uses.len() as u32,
+            policy_projection_hash,
+        },
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(response))
 }
 
 fn trace_tenant_policy_db(state: &AppState) -> ApiResult<Arc<dyn Database>> {
@@ -668,6 +702,28 @@ fn trace_tenant_policy_response(
         created_at: policy.created_at,
         updated_at: policy.updated_at,
     }
+}
+
+fn trace_tenant_policy_projection_hash(
+    policy_version: &str,
+    allowed_consent_scopes: &[String],
+    allowed_uses: &[String],
+) -> anyhow::Result<String> {
+    #[derive(Serialize)]
+    struct TenantPolicyAuditProjection<'a> {
+        policy_version: &'a str,
+        allowed_consent_scopes: &'a [String],
+        allowed_uses: &'a [String],
+    }
+
+    let projection = TenantPolicyAuditProjection {
+        policy_version,
+        allowed_consent_scopes,
+        allowed_uses,
+    };
+    let json = serde_json::to_string(&projection)
+        .context("failed to serialize trace tenant policy audit projection")?;
+    Ok(sha256_prefixed(&json))
 }
 
 async fn submit_trace_handler(
@@ -2715,6 +2771,12 @@ fn trace_commons_audit_event_from_storage(
             reason_hash: _,
             external_ref_hash: _,
         } => (None, event.reason.clone(), None),
+        StorageTraceAuditSafeMetadata::TenantPolicy {
+            policy_version: _,
+            allowed_consent_scope_count: _,
+            allowed_use_count: _,
+            policy_projection_hash: _,
+        } => (None, event.reason.clone(), None),
         StorageTraceAuditSafeMetadata::Empty => (None, event.reason.clone(), None),
     };
     Ok(TraceCommonsAuditEvent {
@@ -2766,6 +2828,7 @@ fn storage_audit_action_kind(action: StorageTraceAuditAction) -> &'static str {
         StorageTraceAuditAction::Purge => "purge",
         StorageTraceAuditAction::VectorIndex => "vector_index",
         StorageTraceAuditAction::BenchmarkConvert => "benchmark_conversion",
+        StorageTraceAuditAction::PolicyUpdate => "tenant_policy_update",
     }
 }
 
@@ -7182,6 +7245,33 @@ impl TraceCommonsAuditEvent {
         }
     }
 
+    fn tenant_policy_update(
+        auth: &TenantAuth,
+        policy_version: &str,
+        allowed_consent_scope_count: usize,
+        allowed_use_count: usize,
+        policy_projection_hash: &str,
+    ) -> Self {
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: "tenant_policy_update".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: Some(format!(
+                "policy_version={policy_version};allowed_consent_scope_count={allowed_consent_scope_count};allowed_use_count={allowed_use_count};policy_projection_hash={policy_projection_hash}"
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: Some(policy_projection_hash.to_string()),
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
     fn dataset_export(
         auth: &TenantAuth,
         export_id: Uuid,
@@ -8118,6 +8208,64 @@ mod tests {
         assert_eq!(read.policy_version, written.policy_version);
         assert_eq!(read.allowed_consent_scopes, written.allowed_consent_scopes);
         assert_eq!(read.allowed_uses, written.allowed_uses);
+
+        let file_audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("file audit events read");
+        let file_policy_update = file_audit_events
+            .iter()
+            .find(|event| event.kind == "tenant_policy_update")
+            .expect("tenant policy update writes file audit event");
+        assert_eq!(
+            file_policy_update.actor_principal_ref.as_deref(),
+            Some(principal_storage_ref("admin-token-a").as_str())
+        );
+        assert!(file_policy_update.reason.as_deref().is_some_and(|reason| {
+            reason.contains("policy_version=tenant-policy-v1")
+                && reason.contains("allowed_consent_scope_count=2")
+                && reason.contains("allowed_use_count=2")
+                && reason.contains("policy_projection_hash=sha256:")
+        }));
+        assert!(
+            file_policy_update
+                .event_hash
+                .as_deref()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+        assert!(file_audit_events.iter().any(|event| {
+            event.kind == "read"
+                && event.reason.as_deref() == Some("surface=tenant_policy;item_count=1")
+        }));
+
+        let db_audit_events = db
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("tenant policy audit events read");
+        let db_policy_update = db_audit_events
+            .iter()
+            .find(|event| event.action == StorageTraceAuditAction::PolicyUpdate)
+            .expect("tenant policy update mirrors DB audit event");
+        match &db_policy_update.metadata {
+            StorageTraceAuditSafeMetadata::TenantPolicy {
+                policy_version,
+                allowed_consent_scope_count,
+                allowed_use_count,
+                policy_projection_hash,
+            } => {
+                assert_eq!(policy_version, "tenant-policy-v1");
+                assert_eq!(*allowed_consent_scope_count, 2);
+                assert_eq!(*allowed_use_count, 2);
+                assert!(policy_projection_hash.starts_with("sha256:"));
+                assert_eq!(
+                    db_policy_update.decision_inputs_hash.as_ref(),
+                    Some(policy_projection_hash)
+                );
+            }
+            metadata => panic!("unexpected tenant policy audit metadata: {metadata:?}"),
+        }
+        assert!(db_audit_events.iter().any(|event| {
+            event.action == StorageTraceAuditAction::Read
+                && event.reason.as_deref() == Some("surface=tenant_policy;item_count=1")
+        }));
 
         let other_tenant_error =
             get_tenant_policy_handler(State(state), auth_headers("admin-token-b"))

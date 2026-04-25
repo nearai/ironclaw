@@ -85,6 +85,7 @@ pub enum TraceAuditAction {
     Purge,
     VectorIndex,
     BenchmarkConvert,
+    PolicyUpdate,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -457,6 +458,12 @@ pub enum TraceAuditSafeMetadata {
         credit_points_delta_micros: i64,
         reason_hash: String,
         external_ref_hash: Option<String>,
+    },
+    TenantPolicy {
+        policy_version: String,
+        allowed_consent_scope_count: u32,
+        allowed_use_count: u32,
+        policy_projection_hash: String,
     },
 }
 
