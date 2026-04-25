@@ -6585,8 +6585,10 @@ async fn reconcile_db_mirror(
         .await
         .context("failed to list trace tombstones for DB reconciliation")?;
     let mut db_export_manifest_item_count = 0usize;
+    let mut db_export_manifest_item_missing_object_ref_count = 0usize;
+    let mut db_export_manifest_ids_with_missing_object_refs = BTreeSet::new();
     for manifest in &db_export_manifests {
-        db_export_manifest_item_count += db
+        let items = db
             .list_trace_export_manifest_items(&tenant.tenant_id, manifest.export_manifest_id)
             .await
             .with_context(|| {
@@ -6594,8 +6596,16 @@ async fn reconcile_db_mirror(
                     "failed to list trace export manifest items for manifest {}",
                     manifest.export_manifest_id
                 )
-            })?
-            .len();
+            })?;
+        db_export_manifest_item_count += items.len();
+        let missing_object_ref_count = items
+            .iter()
+            .filter(|item| item.object_ref_id.is_none())
+            .count();
+        db_export_manifest_item_missing_object_ref_count += missing_object_ref_count;
+        if missing_object_ref_count > 0 {
+            db_export_manifest_ids_with_missing_object_refs.insert(manifest.export_manifest_id);
+        }
     }
     let db_replay_export_manifest_count = db_export_manifests
         .iter()
@@ -6984,6 +6994,11 @@ async fn reconcile_db_mirror(
         db_ranker_export_manifest_count,
         db_other_export_manifest_count,
         db_export_manifest_item_count,
+        db_export_manifest_item_missing_object_ref_count,
+        db_export_manifest_ids_with_missing_object_refs:
+            db_export_manifest_ids_with_missing_object_refs
+                .into_iter()
+                .collect(),
         file_revocation_tombstone_count: file_revocations.len(),
         db_tombstone_count: db_tombstones.len(),
         db_object_ref_count,
@@ -8241,6 +8256,8 @@ struct TraceDbReconciliationReport {
     db_ranker_export_manifest_count: usize,
     db_other_export_manifest_count: usize,
     db_export_manifest_item_count: usize,
+    db_export_manifest_item_missing_object_ref_count: usize,
+    db_export_manifest_ids_with_missing_object_refs: Vec<Uuid>,
     file_revocation_tombstone_count: usize,
     db_tombstone_count: usize,
     db_object_ref_count: usize,
@@ -13386,6 +13403,81 @@ mod tests {
             vec![audit_event_id]
         );
         assert!(reconciliation.missing_audit_event_ids_in_files.is_empty());
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn maintenance_reconciliation_reports_export_items_missing_object_refs() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp
+            .path()
+            .join("trace-reconcile-export-items-missing-object-refs.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let Json(export) = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("missing_object_ref_reconciliation".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("compatibility-mode replay export succeeds");
+
+        let Json(response) = maintenance_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_export_item_object_ref_reconciliation".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: true,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("reviewer can reconcile DB mirror");
+        let reconciliation = response
+            .db_reconciliation
+            .expect("reconciliation report exists");
+        assert_eq!(reconciliation.db_export_manifest_item_count, 1);
+        assert_eq!(
+            reconciliation.db_export_manifest_item_missing_object_ref_count,
+            1
+        );
+        assert_eq!(
+            reconciliation.db_export_manifest_ids_with_missing_object_refs,
+            vec![export.export_id]
+        );
     }
 
     #[cfg(feature = "libsql")]

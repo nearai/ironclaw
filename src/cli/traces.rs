@@ -2523,6 +2523,14 @@ fn maintenance_reconciliation_lines(value: &serde_json::Value) -> Vec<String> {
             ("db_other_export_manifest_count", "db_other_manifests"),
             ("db_export_manifest_item_count", "db_export_items"),
             (
+                "db_export_manifest_item_missing_object_ref_count",
+                "db_export_items_missing_object_refs",
+            ),
+            (
+                "db_export_manifest_ids_with_missing_object_refs",
+                "db_export_manifests_missing_object_refs",
+            ),
+            (
                 "file_revocation_tombstone_count",
                 "file_revocation_tombstones",
             ),
@@ -3528,6 +3536,41 @@ mod tests {
         assert!(!rendered.contains("dddddddd-dddd-dddd-dddd-dddddddddddd"));
         assert!(!rendered.contains("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"));
         assert!(!rendered.contains("12121212-1212-1212-1212-121212121212"));
+    }
+
+    #[test]
+    fn maintenance_reconciliation_lines_summarize_export_object_ref_gap_counts_without_ids() {
+        let value = serde_json::json!({
+            "db_reconciliation": {
+                "file_replay_export_manifest_count": 1,
+                "db_export_manifest_count": 2,
+                "db_replay_export_manifest_count": 1,
+                "db_benchmark_export_manifest_count": 0,
+                "db_ranker_export_manifest_count": 1,
+                "db_other_export_manifest_count": 0,
+                "db_export_manifest_item_count": 3,
+                "db_export_manifest_item_missing_object_ref_count": 2,
+                "db_export_manifest_ids_with_missing_object_refs": [
+                    "abababab-abab-abab-abab-abababababab",
+                    "cdcdcdcd-cdcd-cdcd-cdcd-cdcdcdcdcdcd"
+                ],
+                "file_revocation_tombstone_count": 1,
+                "db_tombstone_count": 1
+            }
+        });
+
+        let lines = maintenance_reconciliation_lines(&value);
+
+        assert_eq!(
+            lines,
+            vec![
+                "  db reconciliation:".to_string(),
+                "    exports/tombstones: file_replay_manifests=1 db_export_manifests=2 db_replay_manifests=1 db_benchmark_manifests=0 db_ranker_manifests=1 db_other_manifests=0 db_export_items=3 db_export_items_missing_object_refs=2 db_export_manifests_missing_object_refs=2 file_revocation_tombstones=1 db_tombstones=1".to_string(),
+            ]
+        );
+        let rendered = lines.join("\n");
+        assert!(!rendered.contains("abababab-abab-abab-abab-abababababab"));
+        assert!(!rendered.contains("cdcdcdcd-cdcd-cdcd-cdcd-cdcdcdcdcdcd"));
     }
 
     #[test]
