@@ -5,18 +5,22 @@
 //! understand grant evaluation and without making the dispatcher own auth.
 
 use async_trait::async_trait;
-use ironclaw_authorization::CapabilityDispatchAuthorizer;
+use ironclaw_authorization::{
+    CapabilityDispatchAuthorizer, CapabilityLease, CapabilityLeaseError, CapabilityLeaseStore,
+};
 use ironclaw_dispatcher::{
     CapabilityDispatchRequest, CapabilityDispatchResult, DispatchError, RuntimeDispatcher,
 };
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    CapabilityId, Decision, DenyReason, ExecutionContext, HostApiError, InvocationFingerprint,
-    ResourceEstimate,
+    ApprovalRequestId, CapabilityId, Decision, DenyReason, ExecutionContext, HostApiError,
+    InvocationFingerprint, InvocationId, ResourceEstimate, ResourceScope,
 };
 use ironclaw_resources::ResourceGovernor;
-use ironclaw_run_state::{ApprovalRequestStore, RunStart, RunStateError, RunStateStore};
+use ironclaw_run_state::{
+    ApprovalRequestStore, ApprovalStatus, RunStart, RunStateError, RunStateStore, RunStatus,
+};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -24,6 +28,16 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq)]
 pub struct CapabilityInvocationRequest {
     pub context: ExecutionContext,
+    pub capability_id: CapabilityId,
+    pub estimate: ResourceEstimate,
+    pub input: Value,
+}
+
+/// Caller-facing approved capability resume request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapabilityResumeRequest {
+    pub context: ExecutionContext,
+    pub approval_request_id: ApprovalRequestId,
     pub capability_id: CapabilityId,
     pub estimate: ResourceEstimate,
     pub input: Value,
@@ -75,6 +89,27 @@ pub enum CapabilityInvocationError {
         capability: CapabilityId,
         source: HostApiError,
     },
+    #[error("capability {capability} approval fingerprint mismatch")]
+    ApprovalFingerprintMismatch { capability: CapabilityId },
+    #[error("capability {capability} approval is not approved: {status:?}")]
+    ApprovalNotApproved {
+        capability: CapabilityId,
+        status: ApprovalStatus,
+    },
+    #[error("capability {capability} approval lease is missing")]
+    ApprovalLeaseMissing { capability: CapabilityId },
+    #[error("capability {capability} resume requires {store}")]
+    ResumeStoreMissing {
+        capability: CapabilityId,
+        store: &'static str,
+    },
+    #[error("capability {capability} cannot resume from run status {status:?}")]
+    ResumeNotBlocked {
+        capability: CapabilityId,
+        status: RunStatus,
+    },
+    #[error("lease update failed: {0}")]
+    Lease(Box<CapabilityLeaseError>),
     #[error("run-state update failed: {0}")]
     RunState(Box<RunStateError>),
     #[error("dispatch failed: {0}")]
@@ -103,6 +138,7 @@ where
     authorizer: &'a dyn CapabilityDispatchAuthorizer,
     run_state: Option<&'a dyn RunStateStore>,
     approval_requests: Option<&'a dyn ApprovalRequestStore>,
+    capability_leases: Option<&'a dyn CapabilityLeaseStore>,
 }
 
 impl<'a, D> CapabilityHost<'a, D>
@@ -120,6 +156,7 @@ where
             authorizer,
             run_state: None,
             approval_requests: None,
+            capability_leases: None,
         }
     }
 
@@ -133,6 +170,14 @@ where
         approval_requests: &'a dyn ApprovalRequestStore,
     ) -> Self {
         self.approval_requests = Some(approval_requests);
+        self
+    }
+
+    pub fn with_capability_leases(
+        mut self,
+        capability_leases: &'a dyn CapabilityLeaseStore,
+    ) -> Self {
+        self.capability_leases = Some(capability_leases);
         self
     }
 
@@ -266,5 +311,217 @@ where
         }
 
         Ok(CapabilityInvocationResult { dispatch })
+    }
+
+    pub async fn resume_json(
+        &self,
+        request: CapabilityResumeRequest,
+    ) -> Result<CapabilityInvocationResult, CapabilityInvocationError> {
+        let run_state =
+            self.run_state
+                .ok_or_else(|| CapabilityInvocationError::ResumeStoreMissing {
+                    capability: request.capability_id.clone(),
+                    store: "run_state",
+                })?;
+        let approval_requests = self.approval_requests.ok_or_else(|| {
+            CapabilityInvocationError::ResumeStoreMissing {
+                capability: request.capability_id.clone(),
+                store: "approval_requests",
+            }
+        })?;
+        let capability_leases = self.capability_leases.ok_or_else(|| {
+            CapabilityInvocationError::ResumeStoreMissing {
+                capability: request.capability_id.clone(),
+                store: "capability_leases",
+            }
+        })?;
+
+        let invocation_id = request.context.invocation_id;
+        let scope = request.context.resource_scope.clone();
+        if request.context.validate().is_err() {
+            return Err(CapabilityInvocationError::AuthorizationDenied {
+                capability: request.capability_id,
+                reason: DenyReason::InternalInvariantViolation,
+            });
+        }
+
+        let invocation_fingerprint = InvocationFingerprint::for_dispatch(
+            &scope,
+            &request.capability_id,
+            &request.estimate,
+            &request.input,
+        )
+        .map_err(|source| CapabilityInvocationError::InvocationFingerprint {
+            capability: request.capability_id.clone(),
+            source,
+        })?;
+
+        let run_record = run_state
+            .get(&scope, invocation_id)
+            .await?
+            .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
+        if run_record.status != RunStatus::BlockedApproval {
+            return Err(CapabilityInvocationError::ResumeNotBlocked {
+                capability: request.capability_id,
+                status: run_record.status,
+            });
+        }
+        if run_record.capability_id != request.capability_id
+            || run_record.approval_request_id != Some(request.approval_request_id)
+        {
+            fail_run(
+                run_state,
+                &scope,
+                invocation_id,
+                "ApprovalInvariantViolation",
+            )
+            .await?;
+            return Err(CapabilityInvocationError::AuthorizationDenied {
+                capability: request.capability_id,
+                reason: DenyReason::InternalInvariantViolation,
+            });
+        }
+
+        let approval = approval_requests
+            .get(&scope, request.approval_request_id)
+            .await?
+            .ok_or(RunStateError::UnknownApprovalRequest {
+                request_id: request.approval_request_id,
+            })?;
+        if approval.status != ApprovalStatus::Approved {
+            fail_run(
+                run_state,
+                &scope,
+                invocation_id,
+                approval_not_approved_error_kind(approval.status),
+            )
+            .await?;
+            return Err(CapabilityInvocationError::ApprovalNotApproved {
+                capability: request.capability_id,
+                status: approval.status,
+            });
+        }
+        if approval.request.invocation_fingerprint.as_ref() != Some(&invocation_fingerprint) {
+            fail_run(
+                run_state,
+                &scope,
+                invocation_id,
+                "InvocationFingerprintMismatch",
+            )
+            .await?;
+            return Err(CapabilityInvocationError::ApprovalFingerprintMismatch {
+                capability: request.capability_id,
+            });
+        }
+
+        let descriptor = match self.registry.get_capability(&request.capability_id) {
+            Some(descriptor) => descriptor,
+            None => {
+                fail_run(run_state, &scope, invocation_id, "UnknownCapability").await?;
+                return Err(CapabilityInvocationError::UnknownCapability {
+                    capability: request.capability_id,
+                });
+            }
+        };
+
+        let Some(lease) = matching_approval_lease(
+            capability_leases,
+            &request.context,
+            &request.capability_id,
+            &invocation_fingerprint,
+        ) else {
+            fail_run(run_state, &scope, invocation_id, "ApprovalLeaseMissing").await?;
+            return Err(CapabilityInvocationError::ApprovalLeaseMissing {
+                capability: request.capability_id,
+            });
+        };
+
+        match self
+            .authorizer
+            .authorize_dispatch(&request.context, descriptor, &request.estimate)
+        {
+            Decision::Allow { .. } => {}
+            Decision::Deny { reason } => {
+                fail_run(run_state, &scope, invocation_id, "AuthorizationDenied").await?;
+                return Err(CapabilityInvocationError::AuthorizationDenied {
+                    capability: request.capability_id,
+                    reason,
+                });
+            }
+            Decision::RequireApproval { .. } => {
+                fail_run(
+                    run_state,
+                    &scope,
+                    invocation_id,
+                    "AuthorizationRequiresApproval",
+                )
+                .await?;
+                return Err(CapabilityInvocationError::AuthorizationRequiresApproval {
+                    capability: request.capability_id,
+                });
+            }
+        }
+
+        let dispatch = match self
+            .dispatcher
+            .dispatch_json(CapabilityDispatchRequest {
+                capability_id: request.capability_id.clone(),
+                scope: scope.clone(),
+                estimate: request.estimate,
+                input: request.input,
+            })
+            .await
+        {
+            Ok(dispatch) => dispatch,
+            Err(error) => {
+                fail_run(run_state, &scope, invocation_id, "Dispatch").await?;
+                return Err(CapabilityInvocationError::from(error));
+            }
+        };
+
+        if let Err(error) = capability_leases.consume(&scope, lease.grant.id) {
+            fail_run(run_state, &scope, invocation_id, "LeaseConsumption").await?;
+            return Err(CapabilityInvocationError::Lease(Box::new(error)));
+        }
+        run_state.complete(&scope, invocation_id).await?;
+
+        Ok(CapabilityInvocationResult { dispatch })
+    }
+}
+
+fn matching_approval_lease(
+    capability_leases: &dyn CapabilityLeaseStore,
+    context: &ExecutionContext,
+    capability_id: &CapabilityId,
+    invocation_fingerprint: &InvocationFingerprint,
+) -> Option<CapabilityLease> {
+    capability_leases
+        .active_leases_for_context(context)
+        .into_iter()
+        .find(|lease| {
+            lease.scope == context.resource_scope
+                && lease.grant.capability == *capability_id
+                && lease.invocation_fingerprint.as_ref() == Some(invocation_fingerprint)
+        })
+}
+
+async fn fail_run(
+    run_state: &dyn RunStateStore,
+    scope: &ResourceScope,
+    invocation_id: InvocationId,
+    error_kind: &'static str,
+) -> Result<(), RunStateError> {
+    run_state
+        .fail(scope, invocation_id, error_kind.to_string())
+        .await?;
+    Ok(())
+}
+
+fn approval_not_approved_error_kind(status: ApprovalStatus) -> &'static str {
+    match status {
+        ApprovalStatus::Pending => "ApprovalPending",
+        ApprovalStatus::Approved => "ApprovalApproved",
+        ApprovalStatus::Denied => "ApprovalDenied",
+        ApprovalStatus::Expired => "ApprovalExpired",
     }
 }
