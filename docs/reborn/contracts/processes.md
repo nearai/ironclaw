@@ -24,6 +24,7 @@ ironclaw_processes
   -> optionally starts background execution through ProcessExecutor
   -> optionally owns resource reservations through ResourceManagedProcessStore
   -> optionally emits process lifecycle events through EventingProcessStore
+  -> exposes host-facing lifecycle APIs through ProcessHost
   -> exposes status transitions such as complete/fail/kill
 ```
 
@@ -88,6 +89,16 @@ async fn records_for_scope(scope) -> Result<Vec<ProcessRecord>>;
 ```
 
 `ProcessManager::spawn` is the lower-level lifecycle mechanic used by `CapabilityHost`. It receives the spawn input in `ProcessStart` so runtime-backed managers can start work, but `ProcessRecord` does not persist raw input. The in-memory and filesystem stores implement the manager by recording a new `Running` process.
+
+`ProcessHost` is the current host-facing lifecycle API layered over `ProcessStore`:
+
+```rust
+async fn status(scope, process_id) -> Result<Option<ProcessRecord>>;
+async fn kill(scope, process_id) -> Result<ProcessRecord>;
+async fn await_process(scope, process_id) -> Result<ProcessExit>;
+```
+
+`status` preserves tenant/user isolation by returning `None` for out-of-scope records. `kill` delegates to the scoped store transition. `await_process` polls the scoped current-state store until the record reaches `Completed`, `Failed`, or `Killed`, then returns a terminal `ProcessExit`. Missing or out-of-scope records fail closed with `UnknownProcess`.
 
 `BackgroundProcessManager` composes a `ProcessStore` and `ProcessExecutor`:
 
@@ -156,7 +167,7 @@ This slice does not implement:
 - direct WASM/Script/MCP process loops inside `ironclaw_processes`; runtime work is delegated through `ProcessExecutor`
 - dynamic executor-reported actual resource usage; completion reconciliation currently uses configured/default usage
 - cooperative cancellation/abort handles for running executor tasks
-- `await`, `subscribe`, or streaming output APIs
+- `subscribe` or streaming output APIs
 - durable process event projection/read APIs beyond the shared event sink
 - process tree queries beyond parent process ID storage
 - durable resource ledger beyond the configured `ResourceGovernor` implementation

@@ -21,7 +21,10 @@ use ironclaw_resources::{ResourceError, ResourceGovernor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::{
+    sync::Mutex as AsyncMutex,
+    time::{Duration, sleep},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -82,6 +85,33 @@ pub struct ProcessStart {
     pub estimated_resources: ResourceEstimate,
     pub resource_reservation: ProcessResourceReservation,
     pub input: Value,
+}
+
+/// Terminal process state returned by host-facing await operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessExit {
+    pub process_id: ProcessId,
+    pub scope: ResourceScope,
+    pub extension_id: ExtensionId,
+    pub capability_id: CapabilityId,
+    pub runtime: RuntimeKind,
+    pub status: ProcessStatus,
+    pub error_kind: Option<ErrorKind>,
+}
+
+impl ProcessExit {
+    fn from_terminal(record: ProcessRecord) -> Self {
+        debug_assert!(record.status != ProcessStatus::Running);
+        Self {
+            process_id: record.process_id,
+            scope: record.scope,
+            extension_id: record.extension_id,
+            capability_id: record.capability_id,
+            runtime: record.runtime,
+            status: record.status,
+            error_kind: record.error_kind,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -173,6 +203,60 @@ pub trait ProcessExecutor: Send + Sync {
 #[async_trait]
 pub trait ProcessManager: Send + Sync {
     async fn spawn(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError>;
+}
+
+/// Host-facing lifecycle API over process current state.
+pub struct ProcessHost<'a> {
+    store: &'a dyn ProcessStore,
+    poll_interval: Duration,
+}
+
+impl<'a> ProcessHost<'a> {
+    pub fn new(store: &'a dyn ProcessStore) -> Self {
+        Self {
+            store,
+            poll_interval: Duration::from_millis(10),
+        }
+    }
+
+    pub fn with_poll_interval(mut self, interval: Duration) -> Self {
+        self.poll_interval = interval;
+        self
+    }
+
+    pub async fn status(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<Option<ProcessRecord>, ProcessError> {
+        self.store.get(scope, process_id).await
+    }
+
+    pub async fn kill(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ProcessRecord, ProcessError> {
+        self.store.kill(scope, process_id).await
+    }
+
+    pub async fn await_process(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ProcessExit, ProcessError> {
+        loop {
+            let record = self
+                .store
+                .get(scope, process_id)
+                .await?
+                .ok_or(ProcessError::UnknownProcess { process_id })?;
+            if record.status != ProcessStatus::Running {
+                return Ok(ProcessExit::from_terminal(record));
+            }
+            sleep(self.poll_interval).await;
+        }
+    }
 }
 
 pub struct EventingProcessStore<S>
