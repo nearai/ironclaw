@@ -3093,9 +3093,7 @@ fn submission_status_from_record(
         .iter()
         .map(|event| event.credit_points_delta)
         .sum::<f32>();
-    let base_final = record
-        .credit_points_final
-        .unwrap_or(record.credit_points_pending);
+    let base_final = record.credit_points_final.unwrap_or(0.0);
     let credit_points_total = if delayed_events.is_empty() {
         None
     } else {
@@ -5055,11 +5053,7 @@ async fn run_maintenance(
             expired_submission_ids.insert(record.submission_id);
             if !request.dry_run {
                 record.status = TraceCorpusStatus::Expired;
-                record.credit_points_final = Some(
-                    record
-                        .credit_points_final
-                        .unwrap_or(record.credit_points_pending),
-                );
+                record.credit_points_final = Some(record.credit_points_final.unwrap_or(0.0));
                 write_submission_record(&state.root, record)?;
                 mirror_expiration_to_db(state, tenant, record.submission_id).await?;
             }
@@ -7610,9 +7604,7 @@ impl TraceCommonsTenantCreditResponse {
                 TraceCorpusStatus::Accepted => {
                     response.accepted += 1;
                     response.credit_points_pending += record.credit_points_pending;
-                    response.credit_points_final += record
-                        .credit_points_final
-                        .unwrap_or(record.credit_points_pending);
+                    response.credit_points_final += record.credit_points_final.unwrap_or(0.0);
                 }
                 TraceCorpusStatus::Quarantined => response.quarantined += 1,
                 TraceCorpusStatus::Revoked => response.revoked += 1,
@@ -9006,11 +8998,8 @@ mod tests {
             .expect("credit summary loads from DB");
         assert_eq!(credit.accepted, 1);
         assert_eq!(credit.credit_points_ledger, 2.5);
-        assert!(credit.credit_points_final > 0.0);
-        assert_eq!(
-            credit.credit_points_total,
-            credit.credit_points_final + credit.credit_points_ledger
-        );
+        assert_eq!(credit.credit_points_final, 0.0);
+        assert_eq!(credit.credit_points_total, 2.5);
 
         let Json(statuses) = submission_status_handler(
             State(state.clone()),
@@ -9024,7 +9013,9 @@ mod tests {
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].submission_id, submission_id);
         assert_eq!(statuses[0].status, "accepted");
+        assert_eq!(statuses[0].credit_points_final, None);
         assert_eq!(statuses[0].credit_points_ledger, 2.5);
+        assert_eq!(statuses[0].credit_points_total, Some(2.5));
         assert_eq!(statuses[0].delayed_credit_explanations.len(), 1);
 
         let Json(other_contributor_credit) =
@@ -13627,10 +13618,8 @@ mod tests {
             .await
             .expect("credit summary succeeds");
         assert_eq!(credit.credit_points_ledger, 1.75);
-        assert_eq!(
-            credit.credit_points_total,
-            credit.credit_points_final + 1.75
-        );
+        assert_eq!(credit.credit_points_final, 0.0);
+        assert_eq!(credit.credit_points_total, 1.75);
 
         let Json(statuses) = submission_status_handler(
             State(state),
@@ -13643,10 +13632,8 @@ mod tests {
         .expect("contributor can sync delayed credit status");
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].credit_points_ledger, 1.75);
-        assert_eq!(
-            statuses[0].credit_points_total,
-            Some(statuses[0].credit_points_pending + 1.75)
-        );
+        assert_eq!(statuses[0].credit_points_final, None);
+        assert_eq!(statuses[0].credit_points_total, Some(1.75));
         assert!(
             statuses[0]
                 .delayed_credit_explanations
@@ -13762,7 +13749,8 @@ mod tests {
             .await
             .expect("credit summary succeeds");
         assert_eq!(credit.credit_points_ledger, -4.0);
-        assert_eq!(credit.credit_points_total, credit.credit_points_final - 4.0);
+        assert_eq!(credit.credit_points_final, 0.0);
+        assert_eq!(credit.credit_points_total, -4.0);
     }
 
     #[tokio::test]

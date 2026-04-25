@@ -827,8 +827,8 @@ trace listing, audit reads, policy administration, review decisions, or credit m
 | `redaction_hash` | Hash over redacted content projection. |
 | `canonical_summary_hash` | Duplicate precheck key. |
 | `submission_score` | Current scoring result. |
-| `credit_points_pending` | Mutable pending credit snapshot. |
-| `credit_points_final` | Final credit snapshot when settled. |
+| `credit_points_pending` | Mutable pending credit estimate; do not count it as settled credit. |
+| `credit_points_final` | Explicit final credit snapshot when settled. Missing values are treated as `0` for aggregate settled totals. |
 | `received_at`, `reviewed_at`, `revoked_at`, `expires_at`, `purged_at` | Lifecycle timestamps. |
 
 Indexes: `(tenant_id, submission_id) unique`, `(tenant_id, status, received_at)`, `(tenant_id, canonical_summary_hash)`, `(tenant_id, expires_at)`, `(tenant_id, contributor_pseudonym)`.
