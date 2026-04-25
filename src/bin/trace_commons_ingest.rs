@@ -95,6 +95,7 @@ struct AppState {
     db_mirror: Option<Arc<dyn Database>>,
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
+    db_reviewer_require_object_refs: bool,
     db_replay_export_reads: bool,
     db_replay_export_require_object_refs: bool,
     db_audit_reads: bool,
@@ -314,6 +315,13 @@ impl AppState {
         if db_reviewer_reads && db_mirror.is_none() {
             anyhow::bail!("TRACE_COMMONS_DB_REVIEWER_READS requires TRACE_COMMONS_DB_DUAL_WRITE");
         }
+        let db_reviewer_require_object_refs =
+            env_truthy("TRACE_COMMONS_DB_REVIEWER_REQUIRE_OBJECT_REFS");
+        if db_reviewer_require_object_refs && !db_reviewer_reads {
+            anyhow::bail!(
+                "TRACE_COMMONS_DB_REVIEWER_REQUIRE_OBJECT_REFS requires TRACE_COMMONS_DB_REVIEWER_READS"
+            );
+        }
         let db_replay_export_reads = env_truthy("TRACE_COMMONS_DB_REPLAY_EXPORT_READS");
         if db_replay_export_reads && db_mirror.is_none() {
             anyhow::bail!(
@@ -347,6 +355,7 @@ impl AppState {
             db_mirror,
             db_contributor_reads,
             db_reviewer_reads,
+            db_reviewer_require_object_refs,
             db_replay_export_reads,
             db_replay_export_require_object_refs,
             db_audit_reads,
@@ -4193,6 +4202,10 @@ async fn read_envelope_body_for_review_decision(
     {
         return Ok(envelope);
     }
+    anyhow::ensure!(
+        !state.db_reviewer_require_object_refs,
+        "missing active submitted envelope object ref for review decision"
+    );
     Ok(TraceEnvelopeBodyRead {
         envelope: read_envelope_by_record(state, record)?,
         object_ref_id: None,
@@ -7737,6 +7750,36 @@ mod tests {
         test_state_with_options(root, db_mirror, None, false, true, false, false)
     }
 
+    fn test_state_with_db_reviewer_reads_require_object_refs(
+        root: PathBuf,
+        db_mirror: Option<Arc<dyn Database>>,
+    ) -> Arc<AppState> {
+        let mut tokens = BTreeMap::new();
+        insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Contributor);
+        insert_token(
+            &mut tokens,
+            "tenant-a",
+            "review-token-a",
+            TokenRole::Reviewer,
+        );
+        Arc::new(AppState {
+            root,
+            tokens: Arc::new(tokens),
+            tenant_policies: Arc::new(BTreeMap::new()),
+            require_tenant_submission_policy: false,
+            db_mirror,
+            db_contributor_reads: false,
+            db_reviewer_reads: true,
+            db_reviewer_require_object_refs: true,
+            db_replay_export_reads: false,
+            db_replay_export_require_object_refs: false,
+            db_audit_reads: false,
+            db_tenant_policy_reads: false,
+            require_export_guardrails: false,
+            artifact_store: None,
+        })
+    }
+
     fn test_state_with_db_replay_export_reads(
         root: PathBuf,
         db_mirror: Option<Arc<dyn Database>>,
@@ -7958,6 +8001,7 @@ mod tests {
             db_mirror,
             db_contributor_reads,
             db_reviewer_reads,
+            db_reviewer_require_object_refs: false,
             db_replay_export_reads,
             db_replay_export_require_object_refs,
             db_audit_reads,
@@ -11942,6 +11986,77 @@ mod tests {
                 && event.object_ref_id == Some(object_ref.object_ref_id)
                 && event.reason.as_deref() == Some("surface=review_decision")
         }));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn review_decision_can_require_active_db_object_ref_for_body_reads() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-review-require-object-ref.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let submit_state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let envelope = sample_envelope().await;
+        let submission_id = envelope.submission_id;
+
+        let Json(receipt) =
+            submit_trace_handler(State(submit_state), auth_headers("token-a"), Json(envelope))
+                .await
+                .expect("quarantined submission dual-writes object ref");
+        assert_eq!(receipt.status, "quarantined");
+
+        let invalidation_counts = db
+            .invalidate_trace_submission_artifacts(
+                "tenant-a",
+                submission_id,
+                StorageTraceDerivedStatus::Current,
+            )
+            .await
+            .expect("invalidate submitted envelope object ref");
+        assert_eq!(invalidation_counts.object_refs_invalidated, 1);
+
+        let fail_closed_state = test_state_with_db_reviewer_reads_require_object_refs(
+            temp.path().to_path_buf(),
+            Some(db.clone()),
+        );
+        let error = review_decision_handler(
+            State(fail_closed_state),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Approve,
+                reason: Some("require reviewer object ref".to_string()),
+                credit_points_pending: Some(0.5),
+            }),
+        )
+        .await
+        .expect_err("missing active DB object ref prevents review body read");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let fallback_state = test_state_with_db_reviewer_reads(temp.path().to_path_buf(), Some(db));
+        let Json(fallback_receipt) = review_decision_handler(
+            State(fallback_state),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Approve,
+                reason: Some("fallback reviewer read".to_string()),
+                credit_points_pending: Some(0.5),
+            }),
+        )
+        .await
+        .expect("compatibility mode can fall back to file-backed envelope body");
+        assert_eq!(fallback_receipt.status, "accepted");
     }
 
     #[cfg(feature = "libsql")]
