@@ -22,6 +22,7 @@ CapabilityHost::spawn_json(...)
 ironclaw_processes
   -> stores process identity and lifecycle
   -> optionally starts background execution through ProcessExecutor
+  -> optionally owns resource reservations through ResourceManagedProcessStore
   -> optionally emits process lifecycle events through EventingProcessStore
   -> exposes status transitions such as complete/fail/kill
 ```
@@ -97,9 +98,29 @@ start ProcessRecord as Running
   -> executor failure: fail(scope, process_id, error_kind)
 ```
 
-The executor receives a redaction-friendly `ProcessExecutionRequest` containing process identity, scope, target capability, estimate, and raw input. It returns `ProcessExecutionResult` for future output/event handling; this slice does not persist process output.
+The executor receives a redaction-friendly `ProcessExecutionRequest` containing process identity, scope, target capability, estimate, and raw input. When the process record already carries a process-owned reservation ID, `BackgroundProcessManager` sends a zero/default dispatch estimate so a runtime-backed process does not reserve the same process estimate twice. It returns `ProcessExecutionResult` for future output/event handling; this slice does not persist process output.
 
 `FilesystemProcessStore::from_arc(...)` provides an owned store handle for detached background managers. The filesystem store serializes start/status writes within a store instance; production DB/object-store implementations should use compare-and-swap or transactional updates for cross-process terminal-state protection.
+
+`ResourceManagedProcessStore` wraps any `ProcessStore` and owns process reservation cleanup:
+
+```text
+start
+  -> ResourceGovernor::reserve(scope, estimate)
+  -> attach resource_reservation_id to ProcessStart
+  -> inner.start(...)
+  -> on inner start failure: release reservation
+
+complete
+  -> inner.complete(...)
+  -> reconcile reservation with configured completion usage
+
+fail / kill
+  -> inner.fail(...) / inner.kill(...)
+  -> release reservation without recording usage
+```
+
+Resource denial fails before process record creation. The wrapper verifies that the inner store preserves the reservation ID it created and releases the reservation if start fails. The wrapper is deliberately below `CapabilityHost` and above concrete stores so resource ownership can compose with in-memory, filesystem, eventing, and future durable stores without making `ironclaw_dispatcher` process-aware.
 
 `EventingProcessStore` wraps any `ProcessStore` and emits best-effort lifecycle events after successful state transitions:
 
@@ -133,11 +154,12 @@ Cross-tenant and cross-user reads return `None`, empty lists, or `UnknownProcess
 This slice does not implement:
 
 - direct WASM/Script/MCP process loops inside `ironclaw_processes`; runtime work is delegated through `ProcessExecutor`
+- dynamic executor-reported actual resource usage; completion reconciliation currently uses configured/default usage
 - cooperative cancellation/abort handles for running executor tasks
 - `await`, `subscribe`, or streaming output APIs
 - durable process event projection/read APIs beyond the shared event sink
 - process tree queries beyond parent process ID storage
-- resource reservation ownership/cleanup beyond the optional reservation ID field
+- durable resource ledger beyond the configured `ResourceGovernor` implementation
 - approval resume for `Action::SpawnCapability`
 
 Those should be layered on this capability-backed process record and manager boundary.

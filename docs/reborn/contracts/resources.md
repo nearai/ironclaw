@@ -35,6 +35,7 @@ Applies to:
 - WASM capability invocations when quota-limited
 - Docker-backed script runner jobs
 - MCP calls
+- spawned/background capability processes
 - mission ticks
 - routines/heartbeats/background jobs
 - artifact/export work when limited by bytes/disk
@@ -181,7 +182,24 @@ This supports user messaging, approval requests, and audit/provenance without pa
 
 ---
 
-## 10. Audit and provenance
+## 10. Process resource lifecycle
+
+Spawned/background capability processes can own reservations through `ironclaw_processes::ResourceManagedProcessStore`:
+
+```text
+ProcessStart.estimated_resources
+  -> ResourceGovernor::reserve(scope, estimate)
+  -> ProcessRecord.resource_reservation_id = Some(id)
+  -> process runs
+  -> complete: reconcile(id, configured_completion_usage)
+  -> fail/kill: release(id)
+```
+
+The wrapper reserves before process records are created, releases the reservation if the underlying store rejects `start`, and verifies the resulting process record preserved the reservation ID. Resource denial therefore prevents process persistence. When a background process already owns a reservation, the process executor dispatch path uses a default runtime estimate to avoid double-reserving the same process estimate. Completion reconciliation currently uses configured/default usage because `ProcessExecutionResult` does not yet report measured usage.
+
+---
+
+## 11. Audit and provenance
 
 Every reservation lifecycle should be auditable:
 
@@ -206,7 +224,7 @@ Audit records should include:
 
 ---
 
-## 11. Initial Rust API sketch
+## 12. Initial Rust API sketch
 
 ```rust
 pub struct ResourceLimits { /* optional max per dimension */ }

@@ -686,6 +686,7 @@ The architecture is real when:
 - `ironclaw_processes` stores tenant/user-scoped `ProcessRecord` lifecycle state without owning authorization policy
 - `BackgroundProcessManager` can run spawned work through `ProcessExecutor` and update process state on executor success/failure without letting late completion overwrite killed processes
 - `EventingProcessStore` emits tenant/user-scoped process_started/process_completed/process_failed/process_killed events without making dispatcher process-aware
+- `ResourceManagedProcessStore` reserves resources before process start, records reservation IDs, reconciles on completion, and releases on failure/kill/start failure
 - `ironclaw_resources` is the only path for costed/quota-limited invocation accounting
 - `ironclaw_wasm` does not discover extensions
 - `ironclaw_mcp` tools are adapted into capabilities and still go through policy/audit
