@@ -142,6 +142,18 @@ impl LlmConfig {
             .any(|c| c.id == provider.provider_id);
         let is_ollama = matches!(provider.protocol, ProviderProtocol::Ollama);
 
+        // Honor the registry's `api_key_required` flag: providers that
+        // explicitly mark a key as optional (e.g. `openai_compatible` for
+        // self-hosted vLLM/LiteLLM, `ollama`) must not be flagged unusable
+        // when no key is present. Without this, every restart with a
+        // keyless self-hosted provider would silently demote `llm_backend`
+        // to `nearai` via the post-fallback DB sync — fixes
+        // nearai/ironclaw#2946.
+        let api_key_required = ProviderRegistry::load()
+            .find(&provider.provider_id)
+            .map(|def| def.api_key_required)
+            .unwrap_or(true);
+
         // Custom providers have no hardcoded base URL in the client layer —
         // an empty `base_url` here means requests will be sent to a bare
         // path with no host, which always fails.
@@ -150,8 +162,10 @@ impl LlmConfig {
         }
 
         // Ollama runs locally and has no API key concept. Every other
-        // provider needs at least one form of authentication.
+        // provider needs at least one form of authentication, unless the
+        // registry marks the key as optional.
         if !is_ollama
+            && api_key_required
             && provider.api_key.is_none()
             && provider.oauth_token.is_none()
             && provider.refresh_token.is_none()
@@ -2832,6 +2846,40 @@ mod tests {
             cfg.backend, "my-ollama",
             "custom ollama provider without api_key must NOT fall back"
         );
+    }
+
+    /// Regression for nearai/ironclaw#2946.
+    ///
+    /// The `openai_compatible` registry entry has `api_key_required: false`
+    /// (self-hosted vLLM/LiteLLM/etc. don't always need a key). Before the
+    /// fix, `unusable_reason` ignored this flag and flagged any keyless
+    /// resolve as `"missing API key"` — which triggered `fallback_fired` in
+    /// `resolve_llm_with_secrets_inner` and silently rewrote `llm_backend`
+    /// to `nearai` in the DB on every restart, overriding the user's
+    /// explicit `ironclaw models set-provider openai_compatible`.
+    #[test]
+    fn resolve_does_not_fall_back_for_openai_compatible_without_api_key() {
+        let _guard = lock_env();
+        clear_openai_compatible_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_API_KEY");
+            std::env::set_var("LLM_BASE_URL", "http://localhost:8000/v1");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("http://localhost:8000/v1".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve_with_fallback(&settings).expect("resolve should succeed");
+        assert_eq!(
+            cfg.backend, "openai_compatible",
+            "openai_compatible (api_key_required=false) without LLM_API_KEY must NOT fall back to nearai"
+        );
+
+        clear_openai_compatible_env();
     }
 
     #[test]
