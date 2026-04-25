@@ -665,6 +665,8 @@ pub struct CreditSummary {
     pub submissions_total: u32,
     pub submissions_submitted: u32,
     pub submissions_revoked: u32,
+    #[serde(default)]
+    pub submissions_expired: u32,
     pub pending_credit: f32,
     pub final_credit: f32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -3251,6 +3253,8 @@ pub struct LocalTraceSubmissionRecord {
 pub enum LocalTraceSubmissionStatus {
     Submitted,
     Revoked,
+    Expired,
+    Purged,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -3697,6 +3701,10 @@ pub fn apply_remote_trace_submission_statuses_for_scope(
         if update.status == "revoked" {
             record.status = LocalTraceSubmissionStatus::Revoked;
             record.revoked_at.get_or_insert(now);
+        } else if update.status == "expired" {
+            record.status = LocalTraceSubmissionStatus::Expired;
+        } else if update.status == "purged" {
+            record.status = LocalTraceSubmissionStatus::Purged;
         }
 
         if status_changed || credit_changed {
@@ -3762,6 +3770,15 @@ pub fn trace_credit_summary(records: &[LocalTraceSubmissionRecord]) -> CreditSum
         submissions_revoked: records
             .iter()
             .filter(|record| record.status == LocalTraceSubmissionStatus::Revoked)
+            .count() as u32,
+        submissions_expired: records
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record.status,
+                    LocalTraceSubmissionStatus::Expired | LocalTraceSubmissionStatus::Purged
+                )
+            })
             .count() as u32,
         pending_credit: records
             .iter()
@@ -4864,6 +4881,54 @@ mod tests {
                 .iter()
                 .any(|reason| reason.contains("Submission revoked"))
         );
+    }
+
+    #[test]
+    fn expired_status_sync_stops_resubmission_and_reports_expired_credit() {
+        let scope = format!("trace-credit-expired-test-{}", Uuid::new_v4());
+        let submission_id = Uuid::new_v4();
+        let trace_id = Uuid::new_v4();
+        write_local_trace_records_for_scope(
+            Some(&scope),
+            &[LocalTraceSubmissionRecord {
+                submission_id,
+                trace_id,
+                endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                status: LocalTraceSubmissionStatus::Submitted,
+                server_status: Some("accepted".to_string()),
+                submitted_at: Some(Utc::now()),
+                revoked_at: None,
+                privacy_risk: "low".to_string(),
+                redaction_counts: BTreeMap::new(),
+                credit_points_pending: 1.0,
+                credit_points_final: Some(1.0),
+                credit_explanation: vec!["Accepted locally.".to_string()],
+                credit_events: Vec::new(),
+                last_credit_notice_at: Some(Utc::now()),
+            }],
+        )
+        .expect("local record writes");
+
+        apply_remote_trace_submission_statuses_for_scope(
+            Some(&scope),
+            &[TraceSubmissionStatusUpdate {
+                submission_id,
+                trace_id,
+                status: "expired".to_string(),
+                credit_points_pending: 1.0,
+                credit_points_final: Some(1.0),
+                credit_points_ledger: 0.0,
+                credit_points_total: Some(1.0),
+                explanation: vec!["Expired under retention policy.".to_string()],
+                delayed_credit_explanations: Vec::new(),
+            }],
+        )
+        .expect("status sync applies");
+
+        let records = read_local_trace_records_for_scope(Some(&scope)).expect("records read");
+        assert_eq!(records[0].status, LocalTraceSubmissionStatus::Expired);
+        assert_eq!(trace_credit_summary(&records).submissions_expired, 1);
+        assert!(records[0].last_credit_notice_at.is_none());
     }
 
     #[tokio::test]

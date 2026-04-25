@@ -11,7 +11,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router, extract::Path as AxumPath, extract::State};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use ironclaw::config::{DatabaseBackend, DatabaseConfig};
 use ironclaw::db::Database;
 use ironclaw::secrets::SecretsCrypto;
@@ -22,7 +22,7 @@ use ironclaw::trace_contribution::{
     ConsentScope, EmbeddingAnalysisMetadata, ResidualPiiRisk, TRACE_CONTRIBUTION_SCHEMA_VERSION,
     TraceContributionEnvelope, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
     TraceSubmissionStatusUpdate, apply_credit_estimate_to_envelope,
-    canonical_summary_for_embedding, rescrub_trace_envelope,
+    canonical_summary_for_embedding, rescrub_trace_envelope, retention_policy_for_trace,
 };
 use ironclaw::trace_corpus_storage::{
     TraceAuditAction as StorageTraceAuditAction,
@@ -415,6 +415,11 @@ async fn submit_trace_handler(
         &envelope,
         derived_precheck,
     );
+    let retention_policy = retention_policy_for_trace(&envelope);
+    let received_at = Utc::now();
+    let expires_at = retention_policy
+        .max_age_days
+        .map(|days| received_at + Duration::days(i64::from(days)));
     let record = TraceCommonsSubmissionRecord {
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
@@ -430,7 +435,9 @@ async fn submit_trace_handler(
         credit_points_final: envelope.value.credit_points_final,
         consent_scopes: envelope.consent.scopes.clone(),
         redaction_counts: envelope.privacy.redaction_counts.clone(),
-        received_at: Utc::now(),
+        received_at,
+        retention_policy_id: retention_policy.name,
+        expires_at,
         object_key: stored_envelope.object_key,
         artifact_receipt: stored_envelope.artifact_receipt,
     };
@@ -740,10 +747,10 @@ async fn append_credit_event_handler(
     let submission = read_submission_record(&state.root, &tenant.tenant_id, submission_id)
         .map_err(internal_error)?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "trace submission not found"))?;
-    if submission.is_revoked() {
+    if submission.is_terminal() {
         return Err(api_error(
             StatusCode::CONFLICT,
-            "revoked trace submissions are not eligible for delayed credit",
+            "terminal trace submissions are not eligible for delayed credit",
         ));
     }
     let event = TraceCommonsCreditLedgerRecord {
@@ -793,10 +800,10 @@ async fn review_decision_handler(
     let mut record = read_submission_record(&state.root, &tenant.tenant_id, submission_id)
         .map_err(internal_error)?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "trace submission not found"))?;
-    if record.is_revoked() {
+    if record.is_terminal() {
         return Err(api_error(
             StatusCode::CONFLICT,
-            "revoked trace submissions are not eligible for review approval",
+            "terminal trace submissions are not eligible for review approval",
         ));
     }
     let mut envelope = read_envelope_by_record(state.as_ref(), &record).map_err(internal_error)?;
@@ -1784,6 +1791,8 @@ fn trace_commons_record_from_storage_submission(
                 .collect::<anyhow::Result<Vec<_>>>()?,
             redaction_counts: record.redaction_counts,
             received_at: record.received_at,
+            retention_policy_id: record.retention_policy_id,
+            expires_at: record.expires_at,
             object_key,
             artifact_receipt: None,
         })
@@ -1900,9 +1909,10 @@ fn trace_commons_derived_record_from_storage(
     let status = match record.status {
         StorageTraceDerivedStatus::Current => *submission_status,
         StorageTraceDerivedStatus::Revoked => TraceCorpusStatus::Revoked,
-        StorageTraceDerivedStatus::Invalidated
-        | StorageTraceDerivedStatus::Superseded
-        | StorageTraceDerivedStatus::Expired => return None,
+        StorageTraceDerivedStatus::Expired => TraceCorpusStatus::Expired,
+        StorageTraceDerivedStatus::Invalidated | StorageTraceDerivedStatus::Superseded => {
+            return None;
+        }
     };
     Some((|| {
         let privacy_risk = match record.privacy_risk.as_deref() {
@@ -1976,9 +1986,9 @@ fn trace_corpus_status_from_storage(status: StorageTraceCorpusStatus) -> Option<
         StorageTraceCorpusStatus::Quarantined => Some(TraceCorpusStatus::Quarantined),
         StorageTraceCorpusStatus::Rejected => Some(TraceCorpusStatus::Rejected),
         StorageTraceCorpusStatus::Revoked => Some(TraceCorpusStatus::Revoked),
-        StorageTraceCorpusStatus::Received
-        | StorageTraceCorpusStatus::Expired
-        | StorageTraceCorpusStatus::Purged => None,
+        StorageTraceCorpusStatus::Expired => Some(TraceCorpusStatus::Expired),
+        StorageTraceCorpusStatus::Purged => Some(TraceCorpusStatus::Purged),
+        StorageTraceCorpusStatus::Received => None,
     }
 }
 
@@ -2033,6 +2043,8 @@ fn receipt_from_record(record: &TraceCommonsSubmissionRecord) -> TraceSubmission
         ],
         TraceCorpusStatus::Revoked => vec!["Revoked and marked with a tombstone.".to_string()],
         TraceCorpusStatus::Rejected => vec!["Rejected by ingestion policy.".to_string()],
+        TraceCorpusStatus::Expired => vec!["Expired under the retention policy.".to_string()],
+        TraceCorpusStatus::Purged => vec!["Purged under the retention policy.".to_string()],
     };
 
     TraceSubmissionReceipt {
@@ -2372,6 +2384,44 @@ async fn mirror_revocation_to_db(
     Ok(())
 }
 
+async fn mirror_expiration_to_db(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_id: Uuid,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    if db
+        .get_trace_submission(&tenant.tenant_id, submission_id)
+        .await
+        .context("failed to check trace submission before expiration mirror")?
+        .is_none()
+    {
+        return Ok(());
+    }
+    db.update_trace_submission_status(
+        &tenant.tenant_id,
+        submission_id,
+        StorageTraceCorpusStatus::Expired,
+        &tenant.principal_ref,
+        Some("retention_expired"),
+    )
+    .await
+    .context("failed to mirror trace expiration status")?;
+    db.invalidate_trace_submission_artifacts(
+        &tenant.tenant_id,
+        submission_id,
+        StorageTraceDerivedStatus::Expired,
+    )
+    .await
+    .context("failed to mirror trace expiration artifact invalidation")?;
+    db.invalidate_trace_vector_entries_for_submission(&tenant.tenant_id, submission_id)
+        .await
+        .context("failed to mirror trace expiration vector invalidation")?;
+    Ok(())
+}
+
 async fn mirror_review_decision_to_db(
     state: &AppState,
     tenant: &TenantAuth,
@@ -2446,7 +2496,7 @@ fn storage_submission_write_from_record(
         consent_policy_version: envelope.consent.policy_version.clone(),
         consent_scopes: consent_scopes.clone(),
         allowed_uses: consent_scopes,
-        retention_policy_id: "private_corpus_revocable".to_string(),
+        retention_policy_id: record.retention_policy_id.clone(),
         status: storage_corpus_status(record.status),
         privacy_risk: serde_storage_string(&record.privacy_risk)?,
         redaction_pipeline_version: envelope.privacy.redaction_pipeline_version.clone(),
@@ -2456,7 +2506,7 @@ fn storage_submission_write_from_record(
         submission_score: Some(record.submission_score),
         credit_points_pending: Some(record.credit_points_pending),
         credit_points_final: record.credit_points_final,
-        expires_at: None,
+        expires_at: record.expires_at,
     })
 }
 
@@ -2474,12 +2524,17 @@ fn storage_corpus_status(status: TraceCorpusStatus) -> StorageTraceCorpusStatus 
         TraceCorpusStatus::Quarantined => StorageTraceCorpusStatus::Quarantined,
         TraceCorpusStatus::Rejected => StorageTraceCorpusStatus::Rejected,
         TraceCorpusStatus::Revoked => StorageTraceCorpusStatus::Revoked,
+        TraceCorpusStatus::Expired => StorageTraceCorpusStatus::Expired,
+        TraceCorpusStatus::Purged => StorageTraceCorpusStatus::Purged,
     }
 }
 
 fn storage_derived_status(status: TraceCorpusStatus) -> StorageTraceDerivedStatus {
     match status {
         TraceCorpusStatus::Revoked => StorageTraceDerivedStatus::Revoked,
+        TraceCorpusStatus::Expired | TraceCorpusStatus::Purged => {
+            StorageTraceDerivedStatus::Expired
+        }
         TraceCorpusStatus::Rejected => StorageTraceDerivedStatus::Invalidated,
         TraceCorpusStatus::Accepted | TraceCorpusStatus::Quarantined => {
             StorageTraceDerivedStatus::Current
@@ -3055,12 +3110,19 @@ async fn run_maintenance(
         .into_iter()
         .map(|revocation| revocation.submission_id)
         .collect::<BTreeSet<_>>();
+    let mut expired_submission_ids = BTreeSet::new();
 
     let mut records = read_all_submission_records(&state.root, &tenant.tenant_id)?;
     let mut records_marked_revoked = 0usize;
+    let mut records_marked_expired = 0usize;
+    let now = Utc::now();
     for record in &mut records {
         if record.is_revoked() {
             revoked_submission_ids.insert(record.submission_id);
+            continue;
+        }
+        if record.status == TraceCorpusStatus::Expired {
+            expired_submission_ids.insert(record.submission_id);
             continue;
         }
         if revoked_submission_ids.contains(&record.submission_id) {
@@ -3070,11 +3132,27 @@ async fn run_maintenance(
                 record.credit_points_final = Some(0.0);
                 write_submission_record(&state.root, record)?;
             }
+            continue;
+        }
+        if record.is_expired_at(now) {
+            records_marked_expired += 1;
+            expired_submission_ids.insert(record.submission_id);
+            if !request.dry_run {
+                record.status = TraceCorpusStatus::Expired;
+                record.credit_points_final = Some(
+                    record
+                        .credit_points_final
+                        .unwrap_or(record.credit_points_pending),
+                );
+                write_submission_record(&state.root, record)?;
+                mirror_expiration_to_db(state, tenant, record.submission_id).await?;
+            }
         }
     }
 
     let mut derived = read_all_derived_records(&state.root, &tenant.tenant_id)?;
     let mut derived_marked_revoked = 0usize;
+    let mut derived_marked_expired = 0usize;
     for record in &mut derived {
         if revoked_submission_ids.contains(&record.submission_id)
             && record.status != TraceCorpusStatus::Revoked
@@ -3082,6 +3160,17 @@ async fn run_maintenance(
             derived_marked_revoked += 1;
             if !request.dry_run {
                 record.status = TraceCorpusStatus::Revoked;
+                write_derived_record(&state.root, record)?;
+            }
+        } else if expired_submission_ids.contains(&record.submission_id)
+            && !matches!(
+                record.status,
+                TraceCorpusStatus::Revoked | TraceCorpusStatus::Expired
+            )
+        {
+            derived_marked_expired += 1;
+            if !request.dry_run {
+                record.status = TraceCorpusStatus::Expired;
                 write_derived_record(&state.root, record)?;
             }
         }
@@ -3121,7 +3210,9 @@ async fn run_maintenance(
 
     let maintenance_counts = TraceMaintenanceAuditCounts {
         records_marked_revoked,
+        records_marked_expired,
         derived_marked_revoked,
+        derived_marked_expired,
         export_cache_files_pruned,
         db_mirror_backfilled,
         vector_entries_indexed,
@@ -3168,8 +3259,11 @@ async fn run_maintenance(
         dry_run: request.dry_run,
         audit_event_id,
         revoked_submission_count: revoked_submission_ids.len(),
+        expired_submission_count: expired_submission_ids.len(),
         records_marked_revoked,
+        records_marked_expired,
         derived_marked_revoked,
+        derived_marked_expired,
         export_cache_files_pruned,
         db_mirror_backfilled,
         vector_entries_indexed,
@@ -3500,7 +3594,9 @@ fn deterministic_vector_entry_uuid(
 #[derive(Debug, Clone, Copy)]
 struct TraceMaintenanceAuditCounts {
     records_marked_revoked: usize,
+    records_marked_expired: usize,
     derived_marked_revoked: usize,
+    derived_marked_expired: usize,
     export_cache_files_pruned: usize,
     db_mirror_backfilled: usize,
     vector_entries_indexed: usize,
@@ -3514,8 +3610,16 @@ impl TraceMaintenanceAuditCounts {
             self.records_marked_revoked.min(u32::MAX as usize) as u32,
         );
         counts.insert(
+            "records_marked_expired".to_string(),
+            self.records_marked_expired.min(u32::MAX as usize) as u32,
+        );
+        counts.insert(
             "derived_marked_revoked".to_string(),
             self.derived_marked_revoked.min(u32::MAX as usize) as u32,
+        );
+        counts.insert(
+            "derived_marked_expired".to_string(),
+            self.derived_marked_expired.min(u32::MAX as usize) as u32,
         );
         counts.insert(
             "export_cache_files_pruned".to_string(),
@@ -3682,6 +3786,8 @@ enum TraceCorpusStatus {
     Quarantined,
     Rejected,
     Revoked,
+    Expired,
+    Purged,
 }
 
 impl TraceCorpusStatus {
@@ -3691,6 +3797,8 @@ impl TraceCorpusStatus {
             Self::Quarantined => "quarantined",
             Self::Rejected => "rejected",
             Self::Revoked => "revoked",
+            Self::Expired => "expired",
+            Self::Purged => "purged",
         }
     }
 }
@@ -3717,6 +3825,10 @@ struct TraceCommonsSubmissionRecord {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     redaction_counts: BTreeMap<String, u32>,
     received_at: DateTime<Utc>,
+    #[serde(default = "default_retention_policy_id")]
+    retention_policy_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expires_at: Option<DateTime<Utc>>,
     object_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     artifact_receipt: Option<EncryptedTraceArtifactReceipt>,
@@ -3727,6 +3839,21 @@ impl TraceCommonsSubmissionRecord {
         self.status == TraceCorpusStatus::Revoked
     }
 
+    fn is_terminal(&self) -> bool {
+        matches!(
+            self.status,
+            TraceCorpusStatus::Revoked | TraceCorpusStatus::Expired | TraceCorpusStatus::Purged
+        )
+    }
+
+    fn is_expired_at(&self, now: DateTime<Utc>) -> bool {
+        self.expires_at.is_some_and(|expires_at| expires_at <= now)
+            && !matches!(
+                self.status,
+                TraceCorpusStatus::Revoked | TraceCorpusStatus::Expired | TraceCorpusStatus::Purged
+            )
+    }
+
     fn is_export_eligible(&self) -> bool {
         self.status == TraceCorpusStatus::Accepted && !self.is_revoked()
     }
@@ -3734,6 +3861,10 @@ impl TraceCommonsSubmissionRecord {
     fn is_benchmark_eligible(&self) -> bool {
         self.is_export_eligible()
     }
+}
+
+fn default_retention_policy_id() -> String {
+    "private_corpus_revocable".to_string()
 }
 
 #[derive(Debug, Clone)]
@@ -4164,7 +4295,10 @@ impl TraceRankerTrainingLabel {
         match status {
             TraceCorpusStatus::Accepted => Self::Accepted,
             TraceCorpusStatus::Quarantined => Self::NeedsReview,
-            TraceCorpusStatus::Rejected | TraceCorpusStatus::Revoked => Self::NeedsReview,
+            TraceCorpusStatus::Rejected
+            | TraceCorpusStatus::Revoked
+            | TraceCorpusStatus::Expired
+            | TraceCorpusStatus::Purged => Self::NeedsReview,
         }
     }
 
@@ -4331,8 +4465,11 @@ struct TraceMaintenanceResponse {
     dry_run: bool,
     audit_event_id: Uuid,
     revoked_submission_count: usize,
+    expired_submission_count: usize,
     records_marked_revoked: usize,
+    records_marked_expired: usize,
     derived_marked_revoked: usize,
+    derived_marked_expired: usize,
     export_cache_files_pruned: usize,
     db_mirror_backfilled: usize,
     vector_entries_indexed: usize,
@@ -4616,9 +4753,11 @@ impl TraceCommonsAuditEvent {
             actor_role: Some(auth.role),
             actor_principal_ref: Some(auth.principal_ref.clone()),
             reason: Some(format!(
-                "purpose={purpose};dry_run={dry_run};records_marked_revoked={};derived_marked_revoked={};export_cache_files_pruned={};db_mirror_backfilled={};vector_entries_indexed={}",
+                "purpose={purpose};dry_run={dry_run};records_marked_revoked={};records_marked_expired={};derived_marked_revoked={};derived_marked_expired={};export_cache_files_pruned={};db_mirror_backfilled={};vector_entries_indexed={}",
                 counts.records_marked_revoked,
+                counts.records_marked_expired,
                 counts.derived_marked_revoked,
+                counts.derived_marked_expired,
                 counts.export_cache_files_pruned,
                 counts.db_mirror_backfilled,
                 counts.vector_entries_indexed
@@ -4638,6 +4777,7 @@ struct TraceCommonsTenantCreditResponse {
     quarantined: usize,
     revoked: usize,
     rejected: usize,
+    expired: usize,
     credit_points_pending: f32,
     credit_points_final: f32,
     credit_points_ledger: f32,
@@ -4657,6 +4797,7 @@ impl TraceCommonsTenantCreditResponse {
             quarantined: 0,
             revoked: 0,
             rejected: 0,
+            expired: 0,
             credit_points_pending: 0.0,
             credit_points_final: 0.0,
             credit_points_ledger: 0.0,
@@ -4675,6 +4816,7 @@ impl TraceCommonsTenantCreditResponse {
                 TraceCorpusStatus::Quarantined => response.quarantined += 1,
                 TraceCorpusStatus::Revoked => response.revoked += 1,
                 TraceCorpusStatus::Rejected => response.rejected += 1,
+                TraceCorpusStatus::Expired | TraceCorpusStatus::Purged => response.expired += 1,
             }
         }
 
@@ -5933,6 +6075,209 @@ mod tests {
             read_all_audit_events(temp.path(), "tenant-a").expect("audit events read");
         assert!(audit_events.iter().any(|event| {
             event.event_id == response.audit_event_id && event.kind == "maintenance"
+        }));
+    }
+
+    #[tokio::test]
+    async fn maintenance_marks_expired_traces_and_excludes_them_from_exports() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let metadata_path = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"))
+            .join("metadata")
+            .join(format!("{submission_id}.json"));
+        let mut metadata_json = serde_json::to_value(record).expect("record serializes");
+        metadata_json["expires_at"] =
+            serde_json::json!((Utc::now() - chrono::Duration::days(1)).to_rfc3339());
+        write_json_file(&metadata_path, &metadata_json, "expired trace metadata")
+            .expect("expired metadata writes");
+
+        let Json(response) = maintenance_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_expiration".to_string()),
+                dry_run: false,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                prune_export_cache: true,
+                max_export_age_hours: None,
+            }),
+        )
+        .await
+        .expect("maintenance expires traces");
+        assert_eq!(response.records_marked_expired, 1);
+        assert_eq!(response.derived_marked_expired, 1);
+
+        let expired_metadata: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&metadata_path).expect("expired metadata reads"),
+        )
+        .expect("expired metadata parses");
+        assert_eq!(expired_metadata["status"], "expired");
+
+        let Json(export) = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: None,
+                status: None,
+                privacy_risk: None,
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("expired trace export query succeeds");
+        assert_eq!(export.item_count, 0);
+
+        let Json(benchmark) = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: None,
+                consent_scope: None,
+                status: None,
+                privacy_risk: None,
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("expired trace benchmark query succeeds");
+        assert_eq!(benchmark.item_count, 0);
+
+        let review_error = review_decision_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Approve,
+                reason: Some("too late".to_string()),
+                credit_points_pending: None,
+            }),
+        )
+        .await
+        .expect_err("expired trace cannot be reviewed");
+        assert_eq!(review_error.0, StatusCode::CONFLICT);
+
+        let credit_error = append_credit_event_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::ReviewerBonus,
+                credit_points_delta: 1.0,
+                reason: Some("too late".to_string()),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect_err("expired trace cannot receive credit");
+        assert_eq!(credit_error.0, StatusCode::CONFLICT);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn maintenance_expiration_updates_db_mirror_and_invalidates_artifacts() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-expiration-mirror.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let metadata_path = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"))
+            .join("metadata")
+            .join(format!("{submission_id}.json"));
+        let mut metadata_json = serde_json::to_value(record).expect("record serializes");
+        metadata_json["expires_at"] =
+            serde_json::json!((Utc::now() - chrono::Duration::days(1)).to_rfc3339());
+        write_json_file(&metadata_path, &metadata_json, "expired trace metadata")
+            .expect("expired metadata writes");
+
+        let Json(response) = maintenance_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_db_expiration".to_string()),
+                dry_run: false,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+            }),
+        )
+        .await
+        .expect("maintenance expires traces");
+        assert_eq!(response.records_marked_expired, 1);
+        assert_eq!(response.derived_marked_expired, 1);
+
+        let mirrored = db
+            .get_trace_submission("tenant-a", submission_id)
+            .await
+            .expect("mirrored submission reads")
+            .expect("mirrored submission exists");
+        assert_eq!(mirrored.status, StorageTraceCorpusStatus::Expired);
+        let object_refs = db
+            .list_trace_object_refs("tenant-a", submission_id)
+            .await
+            .expect("object refs read");
+        assert!(!object_refs.is_empty());
+        assert!(
+            object_refs
+                .iter()
+                .all(|record| record.invalidated_at.is_some())
+        );
+        let derived = db
+            .list_trace_derived_records("tenant-a")
+            .await
+            .expect("derived records read");
+        assert!(derived.iter().any(|record| {
+            record.submission_id == submission_id
+                && record.status == StorageTraceDerivedStatus::Expired
         }));
     }
 

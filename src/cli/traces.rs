@@ -654,6 +654,8 @@ pub enum TraceCorpusStatusArg {
     Quarantined,
     Rejected,
     Revoked,
+    Expired,
+    Purged,
 }
 
 impl std::fmt::Display for TraceCorpusStatusArg {
@@ -663,6 +665,8 @@ impl std::fmt::Display for TraceCorpusStatusArg {
             Self::Quarantined => "quarantined",
             Self::Rejected => "rejected",
             Self::Revoked => "revoked",
+            Self::Expired => "expired",
+            Self::Purged => "purged",
         };
         write!(f, "{value}")
     }
@@ -1555,8 +1559,11 @@ async fn trace_commons_maintenance_run(
         print_optional_json_field("  purpose", value, "purpose");
         print_optional_json_field("  dry run", value, "dry_run");
         print_optional_json_field("  revoked submissions", value, "revoked_submission_count");
+        print_optional_json_field("  expired submissions", value, "expired_submission_count");
         print_optional_json_field("  records marked revoked", value, "records_marked_revoked");
+        print_optional_json_field("  records marked expired", value, "records_marked_expired");
         print_optional_json_field("  derived marked revoked", value, "derived_marked_revoked");
+        print_optional_json_field("  derived marked expired", value, "derived_marked_expired");
         print_optional_json_field(
             "  export cache files pruned",
             value,
@@ -2323,6 +2330,10 @@ fn apply_cli_submission_status_updates(
         if update.status == "revoked" {
             record.status = LocalSubmissionStatus::Revoked;
             record.revoked_at.get_or_insert(now);
+        } else if update.status == "expired" {
+            record.status = LocalSubmissionStatus::Expired;
+        } else if update.status == "purged" {
+            record.status = LocalSubmissionStatus::Purged;
         }
 
         if status_changed || credit_changed {
@@ -2502,10 +2513,13 @@ async fn list_submissions(json: bool) -> anyhow::Result<()> {
 
     println!("Trace contribution submissions:");
     for record in records {
-        let status = match record.status {
+        let local_status = match record.status {
             LocalSubmissionStatus::Submitted => "submitted",
             LocalSubmissionStatus::Revoked => "revoked",
+            LocalSubmissionStatus::Expired => "expired",
+            LocalSubmissionStatus::Purged => "purged",
         };
+        let status = record.server_status.as_deref().unwrap_or(local_status);
         let submitted = record
             .submitted_at
             .map(|t| t.to_rfc3339())
@@ -2541,6 +2555,7 @@ async fn show_credit(json: bool) -> anyhow::Result<()> {
     println!("  submissions: {}", summary.submissions_total);
     println!("  submitted: {}", summary.submissions_submitted);
     println!("  revoked: {}", summary.submissions_revoked);
+    println!("  expired: {}", summary.submissions_expired);
     println!("  pending credit: +{:.2}", summary.pending_credit);
     println!("  final credit: +{:.2}", summary.final_credit);
     if !summary.recent_explanations.is_empty() {
@@ -2562,6 +2577,15 @@ fn credit_summary(records: &[LocalSubmissionRecord]) -> CreditSummary {
         submissions_revoked: records
             .iter()
             .filter(|r| r.status == LocalSubmissionStatus::Revoked)
+            .count() as u32,
+        submissions_expired: records
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.status,
+                    LocalSubmissionStatus::Expired | LocalSubmissionStatus::Purged
+                )
+            })
             .count() as u32,
         pending_credit: records.iter().map(|r| r.credit_points_pending).sum(),
         final_credit: records.iter().filter_map(|r| r.credit_points_final).sum(),
@@ -2622,6 +2646,8 @@ struct LocalSubmissionRecord {
 enum LocalSubmissionStatus {
     Submitted,
     Revoked,
+    Expired,
+    Purged,
 }
 
 fn upsert_local_record(record: LocalSubmissionRecord) -> anyhow::Result<()> {

@@ -7241,12 +7241,14 @@ function traceQueueStateText(policy, queuedCount) {
 function traceMetricRows(summary, submissions) {
   var submitted = summary.submissions_submitted || 0;
   var revoked = summary.submissions_revoked || 0;
+  var expired = summary.submissions_expired || 0;
   var pending = Number(summary.pending_credit || 0).toFixed(2);
   var finalCredit = Number(summary.final_credit || 0).toFixed(2);
   var localStatuses = traceSubmissionStatusCounts(submissions);
   return ''
     + traceDisplayRow('Submitted', submitted)
     + traceDisplayRow('Revoked', revoked)
+    + traceDisplayRow('Expired', expired)
     + traceDisplayRow('Local status mix', localStatuses)
     + traceDisplayRow('Pending credit', '+' + pending)
     + traceDisplayRow('Final credit', '+' + finalCredit)
@@ -7412,6 +7414,7 @@ function traceSubmissionStatusCountsMap(submissions) {
 function traceSubmissionStatusClass(status) {
   var normalized = String(status || '').toLowerCase();
   if (normalized.indexOf('revoked') !== -1 || normalized.indexOf('reject') !== -1) return 'is-danger';
+  if (normalized.indexOf('expired') !== -1 || normalized.indexOf('purged') !== -1) return 'is-muted';
   if (normalized.indexOf('held') !== -1 || normalized.indexOf('quarantine') !== -1 || normalized.indexOf('pending') !== -1) return 'is-warning';
   if (normalized.indexOf('submitted') !== -1 || normalized.indexOf('accepted') !== -1 || normalized.indexOf('final') !== -1) return 'is-success';
   return '';
@@ -7452,7 +7455,7 @@ function traceOperatorDefaultBaseUrl(ingestionEndpoint) {
 
 function traceOperatorPanel(baseUrl) {
   var creditKinds = ['benchmark_conversion', 'regression_catch', 'training_utility', 'ranking_utility', 'reviewer_bonus', 'abuse_penalty'];
-  var statuses = ['accepted', 'quarantined', 'rejected', 'revoked'];
+  var statuses = ['accepted', 'quarantined', 'rejected', 'revoked', 'expired', 'purged'];
   var risks = ['low', 'medium', 'high'];
   return '<div class="settings-group trace-operator-section">'
     + '<div class="settings-group-title">Internal Reviewer / Operator</div>'
@@ -7687,8 +7690,11 @@ function traceOperatorHighlights(data) {
     revoked_count: 'revoked count',
     revoked: 'revoked count',
     revoked_submission_count: 'revoked submissions',
+    expired_submission_count: 'expired submissions',
     records_marked_revoked: 'records marked revoked',
+    records_marked_expired: 'records marked expired',
     derived_marked_revoked: 'derived marked revoked',
+    derived_marked_expired: 'derived marked expired',
     export_cache_files_pruned: 'export cache files pruned',
     item_count: 'export item count',
   };

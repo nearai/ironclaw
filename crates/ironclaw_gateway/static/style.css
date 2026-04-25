@@ -5812,6 +5812,12 @@ input[type="checkbox"]:focus-visible {
   background: var(--danger-subtle);
 }
 
+.trace-status-pill.is-muted {
+  color: var(--text-secondary);
+  border-color: var(--border);
+  background: var(--bg-secondary);
+}
+
 .trace-operator-section {
   border-color: var(--warning-border);
   background: linear-gradient(180deg, var(--bg-secondary), var(--bg));
