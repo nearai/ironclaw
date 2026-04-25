@@ -685,9 +685,9 @@ The architecture is real when:
 - `CapabilityHost::spawn_json` authorizes `SpawnProcess` plus target capability effects before creating a tracked process record
 - `ironclaw_processes` stores tenant/user-scoped `ProcessRecord` lifecycle state without owning authorization policy
 - `BackgroundProcessManager` can run spawned work through `ProcessExecutor` and update process state on executor success/failure without letting late completion overwrite killed processes
+- `ProcessHost` exposes host-facing `status`, `kill`, and `await_process` APIs over scoped process current state without moving process lifecycle back into `CapabilityHost`
 - `EventingProcessStore` emits tenant/user-scoped process_started/process_completed/process_failed/process_killed events without making dispatcher process-aware
-- `ResourceManagedProcessStore` reserves resources before process start, records reservation IDs through an internal process reservation handle, reconciles on completion, and releases on failure/kill/start failure
-- `CapabilityDispatcher` request/result/failure contracts live in `ironclaw_host_api`, so `ironclaw_capabilities` does not depend on concrete `ironclaw_dispatcher`
+- `ResourceManagedProcessStore` reserves resources before process start, records reservation IDs, reconciles on completion, and releases on failure/kill/start failure
 - `ironclaw_resources` is the only path for costed/quota-limited invocation accounting
 - `ironclaw_wasm` does not discover extensions
 - `ironclaw_mcp` tools are adapted into capabilities and still go through policy/audit
