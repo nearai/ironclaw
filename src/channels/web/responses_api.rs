@@ -1,9 +1,14 @@
-//! OpenAI Responses API (`POST /v1/responses`, `GET /v1/responses/{id}`).
+//! OpenAI Responses API (`POST /api/v1/responses`, `GET /api/v1/responses/{id}`).
 //!
 //! Unlike the Chat Completions proxy (`openai_compat.rs`) which is a raw LLM
 //! passthrough, this module routes requests through the full agent loop —
 //! giving callers access to tools, memory, safety, and server-side
 //! conversation state via a standard OpenAI-compatible interface.
+//!
+//! The canonical path is `/api/v1/responses` so the Responses API shares the
+//! `/api/...` prefix used by the rest of IronClaw's HTTP surface. The legacy
+//! `/v1/responses` path is still accepted as an alias for backward
+//! compatibility with clients configured against it (see ironclaw#2201).
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -26,7 +31,7 @@ use uuid::Uuid;
 use crate::channels::IncomingMessage;
 use crate::channels::web::types::AppEvent;
 
-use super::server::GatewayState;
+use super::platform::state::GatewayState;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -819,7 +824,7 @@ async fn handle_non_streaming(
     // Subscribe BEFORE sending so we don't miss events.
     let mut event_stream = state
         .sse
-        .subscribe_raw(Some(user_id.to_string()))
+        .subscribe_raw(Some(user_id.to_string()), false)
         .ok_or_else(|| {
             api_error(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -860,13 +865,16 @@ async fn handle_streaming(
     thread_id: String,
     user_id: String,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>> + Send>, ApiError> {
-    let event_stream = state.sse.subscribe_raw(Some(user_id)).ok_or_else(|| {
-        api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Too many concurrent connections",
-            "server_error",
-        )
-    })?;
+    let event_stream = state
+        .sse
+        .subscribe_raw(Some(user_id), false)
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Too many concurrent connections",
+                "server_error",
+            )
+        })?;
 
     send_to_agent(&state, msg).await?;
 
@@ -1210,7 +1218,8 @@ async fn streaming_worker(
 }
 
 // ---------------------------------------------------------------------------
-// GET /v1/responses/{id}
+// GET /api/v1/responses/{id}
+// (also served as GET /v1/responses/{id} for backward compat — ironclaw#2201)
 // ---------------------------------------------------------------------------
 
 pub async fn get_response_handler(
@@ -1524,13 +1533,13 @@ mod tests {
         assert!(!acc.process(AppEvent::ToolStarted {
             name: "memory_search".to_string(),
             detail: None,
-            call_id: None,
+            call_id: Some("call_memory_search".to_string()),
             thread_id: Some("t".to_string()),
         }));
         assert!(!acc.process(AppEvent::ToolResult {
             name: "memory_search".to_string(),
             preview: "found 3 results".to_string(),
-            call_id: None,
+            call_id: Some("call_memory_search".to_string()),
             thread_id: Some("t".to_string()),
         }));
         assert!(acc.process(AppEvent::Response {
@@ -1654,6 +1663,7 @@ mod tests {
             error: Some("boom".to_string()),
             parameters: Some("{\"query\":\"rust\"}".to_string()),
             call_id: Some("unexpected_call_id".to_string()),
+            duration_ms: None,
             thread_id: Some("t".to_string()),
         }));
         assert!(acc.process(AppEvent::Response {
@@ -1755,7 +1765,7 @@ mod tests {
             tool_name: "tool_install".to_string(),
             description: "Need auth".to_string(),
             parameters: "{\"name\":\"notion\"}".to_string(),
-            extension_name: Some("notion".to_string()),
+            extension_name: Some(ironclaw_common::ExtensionName::new("notion").unwrap()),
             resume_kind: serde_json::json!({
                 "Authentication": {
                     "credential_name": "notion_api_token",

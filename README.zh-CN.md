@@ -277,15 +277,26 @@ WASM ──► 白名单  ──► 泄露扫描 ──► 凭据  ──► 执
 
 ## 使用方式
 
+Engine v2 当前需要显式开启。如果你想运行新的引擎而不是旧的代理循环，请在启动 IronClaw 时设置 `ENGINE_V2=true`。
+
 ```bash
 # 首次设置（配置数据库、认证等）
 ironclaw onboard
 
-# 启动交互式 REPL
+# 启动已安装的二进制
+ironclaw
+
+# 使用 Engine v2 启动已安装的二进制
+ENGINE_V2=true ironclaw
+
+# 从源码启动交互式 REPL
 cargo run
 
-# 启用调试日志
-RUST_LOG=ironclaw=debug cargo run
+# 从源码启动 Engine v2 交互式 REPL
+ENGINE_V2=true cargo run
+
+# 使用 Engine v2 并启用调试日志
+ENGINE_V2=true RUST_LOG=ironclaw=debug cargo run
 ```
 
 ## 开发

@@ -16,9 +16,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::channels::wasm::{
-    LoadedChannel, RegisteredEndpoint, SharedWasmChannel, TELEGRAM_CHANNEL_NAME, WasmChannel,
-    WasmChannelLoader, WasmChannelRouter, WasmChannelRuntime, WasmChannelRuntimeConfig,
-    bot_username_setting_key, create_wasm_channel_router,
+    LoadedChannel, RUNTIME_CONFIG_KEY_BOT_USERNAME, RegisteredEndpoint, SecretConfigMappingSchema,
+    SharedWasmChannel, TELEGRAM_CHANNEL_NAME, WasmChannel, WasmChannelLoader, WasmChannelRouter,
+    WasmChannelRuntime, WasmChannelRuntimeConfig, bot_username_setting_key,
+    create_wasm_channel_router,
 };
 use crate::config::Config;
 use crate::db::Database;
@@ -65,7 +66,7 @@ pub async fn setup_wasm_channels(
     extension_manager: Option<&Arc<ExtensionManager>>,
     database: Option<&Arc<dyn Database>>,
     registered_channel_names: &[String],
-    startup_active_channel_names: &HashSet<String>,
+    startup_active_channel_names: Option<&HashSet<String>>,
     ownership_cache: Arc<crate::ownership::OwnershipCache>,
 ) -> Option<WasmChannelSetup> {
     let runtime = match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
@@ -94,33 +95,61 @@ pub async fn setup_wasm_channels(
         loader = loader.with_secrets_store(Arc::clone(secrets));
     }
 
-    let results = match loader
-        .load_from_dir(&config.channels.wasm_channels_dir)
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("Failed to scan WASM channels directory: {}", e);
-            return None;
-        }
+    let discovered_channels =
+        match crate::channels::wasm::discover_channels(&config.channels.wasm_channels_dir).await {
+            Ok(channels) => channels,
+            Err(e) => {
+                tracing::warn!("Failed to scan WASM channels directory: {}", e);
+                return None;
+            }
+        };
+
+    let startup_entries: Vec<(String, std::path::PathBuf, Option<std::path::PathBuf>)> =
+        discovered_channels
+            .into_iter()
+            .filter_map(|(name, discovered)| {
+                startup_active_channel_names
+                    .is_none_or(|active_names| active_names.contains(&name))
+                    .then_some((name, discovered.wasm_path, discovered.capabilities_path))
+            })
+            .collect();
+
+    let load_futures = startup_entries.iter().map(|(name, wasm_path, cap_path)| {
+        loader.load_from_files(name, wasm_path, cap_path.as_deref())
+    });
+    let load_results = futures::future::join_all(load_futures).await;
+
+    let mut loaded_channels = Vec::new();
+    let startup_load_error_message = if startup_active_channel_names.is_some() {
+        "Failed to load persisted-active WASM channel at startup"
+    } else {
+        "Failed to load WASM channel at startup"
     };
+    for ((name, wasm_path, _), result) in startup_entries.into_iter().zip(load_results) {
+        match result {
+            Ok(loaded) => loaded_channels.push(loaded),
+            Err(err) => {
+                tracing::warn!(
+                    channel = %name,
+                    path = %wasm_path.display(),
+                    error = %err,
+                    "{startup_load_error_message}"
+                );
+            }
+        }
+    }
 
     let wasm_router = Arc::new(WasmChannelRouter::new());
-    let (channels, channel_names) = register_startup_channels(
-        results.loaded,
+    let registration_context = StartupChannelRegistrationContext {
+        registered_channel_names,
         config,
         secrets_store,
-        settings_store.as_ref(),
-        registered_channel_names,
-        startup_active_channel_names,
-        &pairing_store,
-        &wasm_router,
-    )
-    .await;
-
-    for (path, err) in &results.errors {
-        tracing::warn!("Failed to load WASM channel {}: {}", path.display(), err);
-    }
+        settings_store: settings_store.as_ref(),
+        pairing_store: &pairing_store,
+        wasm_router: &wasm_router,
+    };
+    let (channels, channel_names) =
+        register_startup_loaded_channels(loaded_channels, &registration_context).await;
 
     // Always create webhook routes (even with no channels loaded) so that
     // channels hot-added at runtime can receive webhooks without a restart.
@@ -141,16 +170,18 @@ pub async fn setup_wasm_channels(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn register_startup_channels(
+struct StartupChannelRegistrationContext<'a> {
+    registered_channel_names: &'a [String],
+    config: &'a Config,
+    secrets_store: &'a Option<Arc<dyn SecretsStore + Send + Sync>>,
+    settings_store: Option<&'a Arc<dyn crate::db::SettingsStore>>,
+    pairing_store: &'a Arc<PairingStore>,
+    wasm_router: &'a Arc<WasmChannelRouter>,
+}
+
+async fn register_startup_loaded_channels(
     loaded_channels: Vec<LoadedChannel>,
-    config: &Config,
-    secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
-    settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
-    registered_channel_names: &[String],
-    startup_active_channel_names: &HashSet<String>,
-    pairing_store: &Arc<PairingStore>,
-    wasm_router: &Arc<WasmChannelRouter>,
+    context: &StartupChannelRegistrationContext<'_>,
 ) -> (
     Vec<(String, Box<dyn crate::channels::Channel>)>,
     Vec<String>,
@@ -167,19 +198,10 @@ async fn register_startup_channels(
     // - Trusted approval channels from session::TRUSTED_APPROVAL_CHANNELS
     // - The bootstrap sentinel (universal approval wildcard)
     for loaded in loaded_channels {
-        let channel_name = loaded.name().to_string();
-        if !startup_active_channel_names.contains(&channel_name) {
-            tracing::debug!(
-                channel = %channel_name,
-                "Skipping installed but inactive WASM channel during startup restore"
-            );
-            continue;
-        }
-
-        let name_lower = channel_name.to_ascii_lowercase();
+        let name_lower = loaded.name().to_ascii_lowercase();
         if is_reserved_wasm_channel_name(&name_lower) {
             tracing::warn!(
-                channel = %channel_name,
+                channel = %loaded.name(),
                 "Rejected WASM channel with reserved name"
             );
             continue;
@@ -187,12 +209,13 @@ async fn register_startup_channels(
         // Also reject any name that collides with an already-registered
         // channel to prevent a WASM module from shadowing a channel that
         // was registered earlier in the startup sequence.
-        if registered_channel_names
+        if context
+            .registered_channel_names
             .iter()
             .any(|n| n.to_ascii_lowercase() == name_lower)
         {
             tracing::warn!(
-                channel = %channel_name,
+                channel = %loaded.name(),
                 "Rejected WASM channel that collides with already-registered channel"
             );
             continue;
@@ -200,11 +223,11 @@ async fn register_startup_channels(
 
         let (name, channel) = register_channel(
             loaded,
-            config,
-            secrets_store,
-            settings_store,
-            pairing_store,
-            wasm_router,
+            context.config,
+            context.secrets_store,
+            context.settings_store,
+            context.pairing_store,
+            context.wasm_router,
         )
         .await;
         channel_names.push(name.clone());
@@ -232,6 +255,11 @@ async fn register_channel(
     let secret_name = loaded.webhook_secret_name();
     let sig_key_secret_name = loaded.signature_key_secret_name();
     let hmac_secret_name = loaded.hmac_secret_name();
+    let secret_config_mappings = loaded
+        .capabilities_file
+        .as_ref()
+        .map(|f| f.validated_secret_config_mappings())
+        .unwrap_or_default();
 
     // Channel-level secrets: owner_id is correct — channels are instance resources.
     let webhook_secret = if let Some(secrets) = secrets_store {
@@ -276,20 +304,26 @@ async fn register_channel(
                 .await
             && !username.trim().is_empty()
         {
-            config_updates.insert("bot_username".to_string(), serde_json::json!(username));
+            config_updates.insert(
+                RUNTIME_CONFIG_KEY_BOT_USERNAME.to_string(),
+                serde_json::json!(username),
+            );
         }
         // Inject channel-specific secrets into config for channels that need
         // credentials in API request bodies (e.g., Feishu token exchange).
         // The credential injection system only replaces placeholders in URLs
         // and headers, so channels like Feishu that exchange app_id + app_secret
         // for a tenant token need the raw values in their config.
-        inject_channel_secrets_into_config(
-            &channel_name,
-            &config.owner_id,
-            secrets_store,
-            &mut config_updates,
-        )
-        .await;
+        if let Some(secrets) = secrets_store {
+            inject_wasm_channel_secret_config_mappings(
+                &channel_name,
+                &config.owner_id,
+                secrets.as_ref(),
+                &secret_config_mappings,
+                &mut config_updates,
+            )
+            .await;
+        }
 
         if !config_updates.is_empty() {
             channel_arc.update_config(config_updates).await;
@@ -449,7 +483,10 @@ async fn resolve_owner_actor_id_for_channel(
     pairing_store
         .external_id_for_owner(
             channel_name,
-            &crate::ownership::OwnerId::from(config.owner_id.clone()),
+            &crate::ownership::UserId::from_trusted(
+                config.owner_id.clone(),
+                crate::ownership::UserRole::Owner,
+            ),
         )
         .await
         .ok()
@@ -558,60 +595,51 @@ pub async fn inject_channel_credentials(
     Ok(count)
 }
 
-/// Inject channel-specific secrets into the config JSON.
+/// Inject manifest-declared secrets into a WASM channel's runtime config.
 ///
 /// Some channels (e.g., Feishu) need raw credential values in their config
 /// because they perform token exchanges that require secrets in the HTTP
 /// request body. The standard credential injection system only replaces
 /// placeholders in URLs and headers, so this function fills config fields
-/// that map to secret names.
+/// declared via `setup.secret_config_mappings`.
 ///
-/// Mapping: for a channel named "feishu", secrets `feishu_app_id`,
-/// `feishu_app_secret`, and `feishu_verification_token` are injected as config
-/// keys `app_id`, `app_secret`, and `verification_token`.
-async fn inject_channel_secrets_into_config(
+/// Both startup (`register_channel`) and hot-activation/refresh paths in
+/// `ExtensionManager` must funnel through this single helper so the two
+/// call sites stay in behavioral lockstep — including the env-var
+/// fallback used when the secrets store has no entry.
+pub(crate) async fn inject_wasm_channel_secret_config_mappings(
     channel_name: &str,
     owner_id: &str,
-    secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
+    secrets: &(dyn SecretsStore + Send + Sync),
+    secret_config_mappings: &[SecretConfigMappingSchema],
     config_updates: &mut std::collections::HashMap<String, serde_json::Value>,
 ) {
-    // Map of (config_key, secret_name) pairs per channel.
-    let secret_config_mappings: &[(&str, &str)] = match channel_name {
-        "feishu" => &[
-            ("app_id", "feishu_app_id"),
-            ("app_secret", "feishu_app_secret"),
-            ("verification_token", "feishu_verification_token"),
-        ],
-        _ => return,
-    };
-
-    let Some(secrets) = secrets_store else {
-        return;
-    };
-
-    for &(config_key, secret_name) in secret_config_mappings {
-        match secrets.get_decrypted(owner_id, secret_name).await {
+    for mapping in secret_config_mappings {
+        match secrets.get_decrypted(owner_id, &mapping.secret_name).await {
             Ok(decrypted) => {
                 config_updates.insert(
-                    config_key.to_string(),
+                    mapping.config_key.clone(),
                     serde_json::Value::String(decrypted.expose().to_string()),
                 );
                 tracing::debug!(
                     channel = %channel_name,
-                    config_key = %config_key,
+                    config_key = %mapping.config_key,
                     "Injected secret into channel config"
                 );
             }
             Err(_) => {
-                // Also try environment variable fallback.
-                let env_name = secret_name.to_uppercase();
+                // Fall back to an uppercased env var so a channel can still
+                // boot from pure-env configuration (e.g. Feishu via
+                // FEISHU_APP_ID) without a populated secrets store.
+                let env_name = mapping.secret_name.to_uppercase();
                 if let Ok(val) = std::env::var(&env_name)
                     && !val.is_empty()
                 {
-                    config_updates.insert(config_key.to_string(), serde_json::Value::String(val));
+                    config_updates
+                        .insert(mapping.config_key.clone(), serde_json::Value::String(val));
                     tracing::debug!(
                         channel = %channel_name,
-                        config_key = %config_key,
+                        config_key = %mapping.config_key,
                         "Injected secret from env into channel config"
                     );
                 }
@@ -622,15 +650,15 @@ async fn inject_channel_secrets_into_config(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use super::reserved_wasm_channel_names;
     use crate::agent::session::{BOOTSTRAP_SOURCE_CHANNEL, TRUSTED_APPROVAL_CHANNELS};
     use crate::channels::wasm::capabilities::ChannelCapabilities;
     use crate::channels::wasm::{
-        ChannelCapabilitiesFile, LoadedChannel, PreparedChannelModule, WasmChannel,
-        WasmChannelRouter, WasmChannelRuntime, WasmChannelRuntimeConfig,
+        ChannelCapabilitiesFile, LoadedChannel, PreparedChannelModule, SecretConfigMappingSchema,
+        WasmChannel, WasmChannelRouter, WasmChannelRuntime, WasmChannelRuntimeConfig,
     };
     use crate::config::Config;
     use crate::pairing::PairingStore;
@@ -839,6 +867,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_startup_loaded_channels_registers_all_provided_channels() {
+        let (config, _temp_dir) = test_config();
+        let wasm_router = Arc::new(WasmChannelRouter::new());
+        let pairing_store = Arc::new(PairingStore::new_noop());
+        let context = super::StartupChannelRegistrationContext {
+            registered_channel_names: &[],
+            config: &config,
+            secrets_store: &None,
+            settings_store: None,
+            pairing_store: &pairing_store,
+            wasm_router: &wasm_router,
+        };
+
+        // Caller (setup_wasm_channels) is responsible for pre-filtering to
+        // persisted-active channels; register_startup_loaded_channels
+        // registers everything it receives.
+        let (channels, channel_names) = super::register_startup_loaded_channels(
+            vec![
+                test_loaded_channel("telegram", serde_json::json!({ "owner_id": 12345 })),
+                test_loaded_channel("slack", serde_json::json!({ "owner_id": 67890 })),
+            ],
+            &context,
+        )
+        .await;
+
+        assert_eq!(channels.len(), 2);
+        assert_eq!(
+            channel_names,
+            vec!["telegram".to_string(), "slack".to_string()]
+        );
+        assert!(
+            wasm_router
+                .get_channel_for_path("/webhook/telegram")
+                .await
+                .is_some(),
+            "telegram should be registered on the router"
+        );
+        assert!(
+            wasm_router
+                .get_channel_for_path("/webhook/slack")
+                .await
+                .is_some(),
+            "slack should be registered on the router"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_startup_loaded_channels_without_persistence_restores_all_channels() {
+        let (config, _temp_dir) = test_config();
+        let wasm_router = Arc::new(WasmChannelRouter::new());
+        let pairing_store = Arc::new(PairingStore::new_noop());
+        let context = super::StartupChannelRegistrationContext {
+            registered_channel_names: &[],
+            config: &config,
+            secrets_store: &None,
+            settings_store: None,
+            pairing_store: &pairing_store,
+            wasm_router: &wasm_router,
+        };
+
+        let (channels, channel_names) = super::register_startup_loaded_channels(
+            vec![
+                test_loaded_channel("telegram", serde_json::json!({ "owner_id": 12345 })),
+                test_loaded_channel("slack", serde_json::json!({ "owner_id": 67890 })),
+            ],
+            &context,
+        )
+        .await;
+
+        assert_eq!(channels.len(), 2);
+        assert_eq!(channel_names.len(), 2);
+        assert!(
+            wasm_router
+                .get_channel_for_path("/webhook/telegram")
+                .await
+                .is_some()
+        );
+        assert!(
+            wasm_router
+                .get_channel_for_path("/webhook/slack")
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
     async fn register_channel_routes_capabilities_owner_id_to_wasm_channel() {
         let (config, _temp_dir) = test_config();
         let loaded = test_loaded_channel("telegram", serde_json::json!({ "owner_id": 12345 }));
@@ -883,36 +997,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_channel_injects_settings_owner_id_as_number() {
-        let (mut config, _temp_dir) = test_config();
-        config
-            .channels
-            .wasm_channel_owner_ids
-            .insert("telegram".to_string(), 176326495);
-        let loaded = test_loaded_channel("telegram", serde_json::json!({ "owner_id": null }));
-        let wasm_router = Arc::new(WasmChannelRouter::new());
-        let pairing_store = Arc::new(PairingStore::new_noop());
-
-        let (_name, _channel) =
-            super::register_channel(loaded, &config, &None, None, &pairing_store, &wasm_router)
-                .await;
-
-        let registered = wasm_router
-            .get_channel_for_path("/webhook/telegram")
-            .await
-            .expect("telegram channel should be registered");
-        let runtime_config = registered.get_config().await;
-        let owner_id = runtime_config
-            .get("owner_id")
-            .expect("owner_id should be in config");
-        assert_eq!(
-            owner_id,
-            &serde_json::json!(176326495),
-            "owner_id recovered from settings must be a JSON number, not a string"
-        );
-    }
-
-    #[tokio::test]
     async fn register_channel_does_not_inject_null_owner_id_to_config() {
         let (config, _temp_dir) = test_config();
         let loaded = test_loaded_channel("telegram", serde_json::json!({ "owner_id": null }));
@@ -931,52 +1015,6 @@ mod tests {
             registered.owner_actor_id_for_test().await,
             None,
             "null owner_id from capabilities should not resolve"
-        );
-    }
-
-    #[tokio::test]
-    async fn register_startup_channels_only_restores_persisted_active_channels() {
-        let (config, _temp_dir) = test_config();
-        let wasm_router = Arc::new(WasmChannelRouter::new());
-        let pairing_store = Arc::new(PairingStore::new_noop());
-        let loaded_channels = vec![
-            test_loaded_channel("telegram", serde_json::json!({ "owner_id": 12345 })),
-            test_loaded_channel("discord", serde_json::json!({ "owner_id": 67890 })),
-        ];
-        let startup_active_channel_names =
-            HashSet::from([String::from("telegram"), String::from("missing_channel")]);
-
-        let (channels, channel_names) = super::register_startup_channels(
-            loaded_channels,
-            &config,
-            &None,
-            None,
-            &[],
-            &startup_active_channel_names,
-            &pairing_store,
-            &wasm_router,
-        )
-        .await;
-
-        assert_eq!(
-            channels.len(),
-            1,
-            "only the persisted active channel should restore"
-        );
-        assert_eq!(channel_names, vec!["telegram"]);
-        assert!(
-            wasm_router
-                .get_channel_for_path("/webhook/telegram")
-                .await
-                .is_some(),
-            "persisted active channel should be registered on the webhook router"
-        );
-        assert!(
-            wasm_router
-                .get_channel_for_path("/webhook/discord")
-                .await
-                .is_none(),
-            "installed but inactive channel should not be registered on the webhook router"
         );
     }
 
@@ -1024,10 +1062,25 @@ mod tests {
             .unwrap();
 
         let mut config_updates = HashMap::new();
-        super::inject_channel_secrets_into_config(
+        let secret_config_mappings = vec![
+            SecretConfigMappingSchema {
+                config_key: "app_id".to_string(),
+                secret_name: "feishu_app_id".to_string(),
+            },
+            SecretConfigMappingSchema {
+                config_key: "app_secret".to_string(),
+                secret_name: "feishu_app_secret".to_string(),
+            },
+            SecretConfigMappingSchema {
+                config_key: "verification_token".to_string(),
+                secret_name: "feishu_verification_token".to_string(),
+            },
+        ];
+        super::inject_wasm_channel_secret_config_mappings(
             "feishu",
             "owner-123",
-            &Some(Arc::clone(&secrets)),
+            secrets.as_ref(),
+            &secret_config_mappings,
             &mut config_updates,
         )
         .await;

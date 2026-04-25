@@ -319,7 +319,7 @@ impl ExecutionGate for RelayChannelGate {
 mod tests {
     use super::*;
     use ironclaw_engine::gate::ExecutionMode;
-    use ironclaw_engine::types::capability::{ActionDef, EffectType};
+    use ironclaw_engine::types::capability::{ActionDef, EffectType, ModelToolSurface};
     use ironclaw_engine::types::thread::ThreadId;
     use std::collections::HashSet;
 
@@ -330,6 +330,8 @@ mod tests {
             parameters_schema: serde_json::json!({}),
             effects: vec![EffectType::ReadLocal],
             requires_approval,
+            model_tool_surface: ModelToolSurface::FullSchema,
+            discovery: None,
         }
     }
 

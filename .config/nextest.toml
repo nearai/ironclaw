@@ -1,0 +1,36 @@
+# Cross-binary parallel test runner config for cargo-nextest.
+# See https://nexte.st/docs/configuration/ for the full schema.
+#
+# Profiles:
+# - default — `cargo nextest run` (local dev)
+# - ci      — `cargo nextest run --profile ci` (GitHub Actions)
+
+[profile.default]
+# Per-test slow warning: nextest prints "SLOW" for every `period`; after
+# `terminate-after` warnings it kills the process. 60s/3 catches obvious
+# hangs without surprising tests that happen to run ~45-55s on a loaded
+# laptop. Raise per-test via the `[[overrides]]` block below.
+slow-timeout = { period = "60s", terminate-after = 3 }
+# Leak detection fires if a test spawns threads/processes that outlive it;
+# the default 100ms grace is fine.
+leak-timeout = "100ms"
+
+[profile.ci]
+# One flake shouldn't mask other real failures.
+fail-fast = false
+# Inline failures, suppress passing noise, keep Actions logs scannable.
+failure-output = "immediate-final"
+success-output = "never"
+# Stricter CI timeout: a hung test should crash the job fast, not sit
+# against the workflow-level 25-minute cap.
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+# Per-test windows for the handful of scenarios that genuinely need more
+# than 60s (live-recorded fixtures + heavy integration).
+[[profile.default.overrides]]
+filter = "test(=live_tests::zizmor_scan) | test(=live_tests::zizmor_scan_v2) | test(=engine_v2_tests::snapshot_zizmor_scan_v2) | test(~e2e_thread_scheduling) | test(~heavy_integration)"
+slow-timeout = { period = "300s", terminate-after = 2 }
+
+[[profile.ci.overrides]]
+filter = "test(=live_tests::zizmor_scan) | test(=live_tests::zizmor_scan_v2) | test(=engine_v2_tests::snapshot_zizmor_scan_v2) | test(~e2e_thread_scheduling) | test(~heavy_integration)"
+slow-timeout = { period = "300s", terminate-after = 2 }

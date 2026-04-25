@@ -1,7 +1,12 @@
 //! Agent-callable tools for managing extensions (MCP servers and WASM tools).
 //!
-//! These six tools let the LLM search, install, authenticate, activate, list,
-//! and remove extensions entirely through conversation.
+//! These built-ins manage extension discovery and lifecycle from conversation.
+//! In engine v2, the normal model-facing enablement path is
+//! `tool_activate(name=...)`: blocked integrations surface in capability
+//! background, and `tool_activate` internally handles install/auth/activation
+//! as needed. `tool_search`, `tool_list`, and `tool_info` support discovery;
+//! `tool_install` / `tool_auth` remain available as narrower runtime/compat
+//! surfaces rather than the primary v2 prompt contract.
 
 use std::sync::Arc;
 
@@ -105,11 +110,10 @@ impl Tool for ToolSearchTool {
     fn description(&self) -> &str {
         "Search for available extensions to add new capabilities. Extensions include \
          channels (Telegram, Slack, Discord — connect messaging platforms so IronClaw can \
-         receive and reply there), tools, and MCP servers. Use `tool_install` to install and \
-         continue setup/activation when possible, and `tool_activate` only when an installed \
-         extension still needs an explicit activation step. Use the `message` tool for proactive \
-         outbound sends. Use discover:true to search online if the built-in registry has no \
-         results."
+         receive and reply there), tools, and MCP servers. When you want to make a discovered \
+         integration usable, call `tool_activate(name=\"...\")`. Use the `message` tool for \
+         proactive outbound sends. Use discover:true to search online if the built-in registry \
+         has no results."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -340,7 +344,8 @@ impl Tool for ToolActivateTool {
     }
 
     fn description(&self) -> &str {
-        "Activate an installed extension — starts channels, loads tools, or connects to MCP servers."
+        "Make an integration usable. This may install, authenticate, and activate it as needed \
+         before loading tools, starting channels, or connecting to MCP servers."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -911,10 +916,7 @@ mod tests {
         };
 
         let description = tool.description();
-        assert!(
-            description.contains("Use `tool_install` to install and continue setup/activation")
-        );
-        assert!(description.contains("`tool_activate` only when an installed extension still needs an explicit activation step"));
+        assert!(description.contains("call `tool_activate(name=\"...\")`"));
         assert!(description.contains("Use the `message` tool for proactive outbound sends"));
     }
 
@@ -961,6 +963,10 @@ mod tests {
             manager: test_manager_stub(),
         };
         assert_eq!(tool.name(), "tool_activate");
+        assert!(
+            tool.description()
+                .contains("install, authenticate, and activate")
+        );
         assert_eq!(
             tool.requires_approval(&serde_json::json!({})),
             ApprovalRequirement::Never

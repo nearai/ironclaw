@@ -1356,11 +1356,23 @@ mod tests {
 
     #[test]
     fn from_env_returns_none_when_unset() {
-        // SAFETY: This test is single-threaded and no other thread reads this var.
+        let _env_lock = crate::config::helpers::lock_env();
+        let prior = std::env::var_os("IRONCLAW_RECORD_TRACE");
+        // SAFETY: Tests serialize env access with lock_env().
         unsafe { std::env::remove_var("IRONCLAW_RECORD_TRACE") };
         let stub = Arc::new(StubLlm::new("response"));
         let result = RecordingLlm::from_env(stub);
         assert!(result.is_none());
+        match prior {
+            Some(value) => {
+                // SAFETY: Tests serialize env access with lock_env().
+                unsafe { std::env::set_var("IRONCLAW_RECORD_TRACE", value) };
+            }
+            None => {
+                // SAFETY: Tests serialize env access with lock_env().
+                unsafe { std::env::remove_var("IRONCLAW_RECORD_TRACE") };
+            }
+        }
     }
 
     /// Regression: credentials must never land in a recorded trace.

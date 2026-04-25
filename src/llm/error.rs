@@ -14,6 +14,20 @@ pub enum LlmError {
         retry_after: Option<Duration>,
     },
 
+    /// Upstream provider returned any HTTP 5xx (500–599). Covers both
+    /// proxy-layer failures (502/503/504) and upstream application errors
+    /// (500/501/505…). Response body is intentionally NOT carried on this
+    /// variant — upstream 5xx bodies frequently contain Python tracebacks or
+    /// other internal detail that must not cross the channel boundary (see
+    /// `.claude/rules/error-handling.md`). Operators find the body in
+    /// `debug!`-level logs at the source provider.
+    #[error("Provider {provider} temporarily unavailable (HTTP {status})")]
+    BadGateway {
+        provider: String,
+        status: u16,
+        retry_after: Option<Duration>,
+    },
+
     #[error("Invalid response from {provider}: {reason}")]
     InvalidResponse { provider: String, reason: String },
 

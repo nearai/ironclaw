@@ -1282,7 +1282,11 @@ async def test_onboarding_failed_sse_shows_error_toast_and_reloads_extensions(pa
     await go_to_extensions(page)
     count_before = len(reload_count)
 
-    await _show_auth_card(page, extension_name="gmail", auth_url="https://example.com/oauth", request_id="req-fail", thread_id="thread-fail")
+    # Use the real active thread id so showAuthCard's isCurrentThread gate
+    # lets the card render. A synthetic "thread-fail" id is rejected once
+    # the page has initialized currentThreadId.
+    thread_id = await _active_thread_id(page)
+    await _show_auth_card(page, extension_name="gmail", auth_url="https://example.com/oauth", request_id="req-fail", thread_id=thread_id)
     assert await page.locator(SEL["auth_card"] + '[data-extension-name="gmail"]').count() == 1
 
     # Inject a counter to confirm refreshCurrentSettingsTab is called
@@ -1634,3 +1638,28 @@ async def test_oauth_url_injection_blocked(page):
     await page.wait_for_timeout(600)
     opened = await page.evaluate("window._openedUrl")
     assert opened is None, f"window.open should NOT be called for non-HTTPS URLs, but got: {opened}"
+
+
+async def test_oauth_url_uppercase_https_opens_popup(page):
+    """Regression: valid HTTPS auth URLs should still open even if the scheme casing varies."""
+    await page.evaluate("window._openedUrl = null; window.open = (url) => { window._openedUrl = url; return null; }")
+    await mock_ext_apis(page, installed=[_MCP_INACTIVE])
+
+    async def handle_activate(route):
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"success": True, "auth_url": "HTTPS://example.com/oauth?state=abc"}),
+        )
+
+    await page.route("**/api/extensions/test-mcp-inactive/activate", handle_activate)
+    await go_to_mcp(page)
+
+    activate_btn = page.locator(SEL["ext_card_mcp"]).first.locator(SEL["ext_activate_btn"])
+    await activate_btn.wait_for(state="visible", timeout=5000)
+    await activate_btn.click()
+
+    await page.wait_for_timeout(600)
+    opened = await page.evaluate("window._openedUrl")
+    assert opened is not None, "window.open should be called for valid HTTPS URLs"
+    assert opened.lower().startswith("https://example.com/oauth"), opened

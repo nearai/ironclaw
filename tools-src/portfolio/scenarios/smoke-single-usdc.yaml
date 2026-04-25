@@ -1,0 +1,75 @@
+id: smoke-single-usdc
+description: |
+  The fixture address `0x1111…` has a single 5000 USDC supply position
+  in the synthetic test-lending protocol on Base, yielding 3.2% APY
+  (below the strategy's 4% floor). The full pipeline must:
+    1. scan → 1 ClassifiedPosition with category `stablecoin-idle`
+    2. propose → at least 1 `ready` proposal under
+       `stablecoin-yield-floor`
+    3. build_intent → a valid IntentBundle with `bounded_checks`
+       passing
+steps:
+  - name: scan
+    action: scan
+    params:
+      addresses: ["0x1111111111111111111111111111111111111111"]
+      source: fixture
+    expect:
+      positions_len: 1
+      first_position_category: stablecoin-idle
+      first_position_protocol_id: test-lending
+      source: fixture
+    capture:
+      positions_var: positions
+
+  - name: propose
+    action: propose
+    params:
+      # `positions` value is filled in from the previous step's
+      # captured `positions` variable by the test harness.
+      positions: $positions
+      strategies:
+        - |
+          ---
+          id: stablecoin-yield-floor
+          version: 1
+          applies_to:
+            category: stablecoin-idle
+            min_principal_usd: 100
+          constraints:
+            min_projected_delta_apy_bps: 50
+            max_risk_score: 3
+            gas_payback_days: 30
+          inputs:
+            floor_apy: 0.04
+          ---
+
+          # Stablecoin Yield Floor
+
+          M1 smoke body.
+      config:
+        floor_apy: 0.04
+        max_risk_score: 3
+        notify_threshold_usd: 100
+        auto_intent_ceiling_usd: 1000
+        max_slippage_bps: 50
+    expect:
+      ready_proposals_min: 1
+      first_strategy_id: stablecoin-yield-floor
+    capture:
+      first_ready_plan_var: plan
+
+  - name: build_intent
+    action: build_intent
+    params:
+      plan: $plan
+      config:
+        floor_apy: 0.04
+        max_risk_score: 3
+        notify_threshold_usd: 100
+        auto_intent_ceiling_usd: 1000
+        max_slippage_bps: 50
+      solver: fixture
+    expect:
+      bundle_legs_min: 1
+      bundle_schema_version: portfolio-intent/1

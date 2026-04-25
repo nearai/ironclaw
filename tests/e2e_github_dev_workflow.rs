@@ -162,7 +162,7 @@ mod github_dev_workflow_test {
         eprintln!("active skills: {:?}", harness.rig().active_skill_names());
         for event in harness.rig().captured_status_events() {
             match event {
-                StatusUpdate::SkillActivated { skill_names } => {
+                StatusUpdate::SkillActivated { skill_names, .. } => {
                     eprintln!("  ◆ skills activated: {}", skill_names.join(", "));
                 }
                 StatusUpdate::ToolStarted { name, detail, .. } => {

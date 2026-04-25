@@ -9,6 +9,7 @@ use crate::traits::effect::EffectExecutor;
 use crate::traits::store::Store;
 use crate::types::capability::GrantedActions;
 use crate::types::error::EngineError;
+use crate::types::step::StepId;
 use crate::types::thread::Thread;
 
 pub(crate) async fn reconcile_dynamic_tool_lease(
@@ -19,7 +20,9 @@ pub(crate) async fn reconcile_dynamic_tool_lease(
     lease_planner: &LeasePlanner,
 ) -> Result<(), EngineError> {
     let active_leases = leases.active_for_thread(thread.id).await;
-    let actions = effects.available_actions(&active_leases).await?;
+    let context =
+        crate::executor::thread_context::thread_execution_context(thread, StepId::new(), None);
+    let actions = effects.available_actions(&active_leases, &context).await?;
     if actions.is_empty() {
         return Ok(());
     }

@@ -243,6 +243,43 @@ impl TestRig {
         self.channel.send_incoming(msg).await;
     }
 
+    /// Resolve a pending auth gate by submitting a typed
+    /// `Submission::GateAuthResolution`.
+    ///
+    /// The `request_id` must be a `Uuid` matching the `request_id` field on
+    /// a previously-emitted `StatusUpdate::AuthRequired`. Use
+    /// `wait_for_auth_required` to observe it before calling this.
+    pub async fn send_gate_auth_resolution(
+        &self,
+        request_id: uuid::Uuid,
+        resolution: ironclaw::agent::submission::AuthGateResolution,
+    ) {
+        let submission = ironclaw::agent::submission::Submission::GateAuthResolution {
+            request_id,
+            resolution,
+        };
+        let msg = ironclaw::channels::IncomingMessage::new(
+            self.channel.channel_name(),
+            self.channel.user_id(),
+            "",
+        )
+        .with_structured_submission(submission);
+        self.channel.send_incoming(msg).await;
+    }
+
+    /// Resolve an OAuth-style gate by submitting a typed
+    /// `Submission::ExternalCallback`.
+    pub async fn send_external_callback(&self, request_id: uuid::Uuid) {
+        let submission = ironclaw::agent::submission::Submission::ExternalCallback { request_id };
+        let msg = ironclaw::channels::IncomingMessage::new(
+            self.channel.channel_name(),
+            self.channel.user_id(),
+            "",
+        )
+        .with_structured_submission(submission);
+        self.channel.send_incoming(msg).await;
+    }
+
     /// Return all message lists that were sent to the LLM provider.
     ///
     /// Only available when the rig was built with a `TraceLlm` (i.e., via `.with_trace()`).
@@ -406,7 +443,7 @@ impl TestRig {
         self.captured_status_events()
             .iter()
             .filter_map(|event| match event {
-                StatusUpdate::SkillActivated { skill_names } => Some(skill_names.clone()),
+                StatusUpdate::SkillActivated { skill_names, .. } => Some(skill_names.clone()),
                 _ => None,
             })
             .flatten()
@@ -670,6 +707,7 @@ pub struct TestRigBuilder {
     http_exchanges: Vec<HttpExchange>,
     http_interceptor_override: Option<Arc<dyn HttpInterceptor>>,
     extra_tools: Vec<Arc<dyn Tool>>,
+    test_tool_overrides: Vec<Arc<dyn Tool>>,
     wasm_tools: Vec<WasmToolSpec>,
     keep_bootstrap: bool,
     engine_v2: bool,
@@ -698,6 +736,7 @@ impl TestRigBuilder {
             http_exchanges: Vec::new(),
             http_interceptor_override: None,
             extra_tools: Vec::new(),
+            test_tool_overrides: Vec::new(),
             wasm_tools: Vec::new(),
             keep_bootstrap: false,
             engine_v2: false,
@@ -822,6 +861,18 @@ impl TestRigBuilder {
         self
     }
 
+    /// Replace a built-in or test tool by name after the normal registry
+    /// setup pass has completed.
+    ///
+    /// Unlike `with_extra_tools`, these overrides are applied at the end of
+    /// `build()` via `ToolRegistry::register_sync`, so a probe stub can
+    /// intentionally replace an earlier built-in registration (e.g.
+    /// `tool_activate`, `tool_auth`) for gate testing.
+    pub fn with_test_tool_override(mut self, tool: Arc<dyn Tool>) -> Self {
+        self.test_tool_overrides.push(tool);
+        self
+    }
+
     /// Enable prompt injection detection in the safety layer.
     ///
     /// When enabled, tool outputs are scanned for injection patterns
@@ -918,6 +969,7 @@ impl TestRigBuilder {
             http_exchanges: explicit_http_exchanges,
             http_interceptor_override,
             extra_tools,
+            test_tool_overrides,
             wasm_tools,
             keep_bootstrap,
             engine_v2,
@@ -1161,14 +1213,24 @@ impl TestRigBuilder {
                     .register_routine_tools(Arc::clone(db_arc), engine);
             }
 
-            // Skills tools: use the config-resolved skills dirs so that a
-            // custom `with_skills_dir()` path propagates all the way to
-            // the registry (instead of always pointing at an empty temp dir).
+            // Skills tools: rebuild the registry against the test's tempdir.
+            //
+            // `AppBuilder::init_database()` re-resolves `config` from
+            // DB/TOML/env, which clobbers `config.skills.local_dir` back
+            // to the default (`~/.ironclaw/skills/`). Any registry
+            // `build_all()` already constructed therefore points at the
+            // user's real skills dir, not the tempdir the test laid
+            // down. Rebuild here from the in-scope `skills_dir` /
+            // `installed_skills_dir`, actually run discovery, and write
+            // the paths back onto `components.config` so downstream
+            // consumers (AgentDeps::skills_config) see the same dirs.
             if enable_skills {
-                let registry = Arc::new(std::sync::RwLock::new(
-                    ironclaw_skills::SkillRegistry::new(components.config.skills.local_dir.clone())
-                        .with_installed_dir(components.config.skills.installed_dir.clone()),
-                ));
+                components.config.skills.local_dir = skills_dir.clone();
+                components.config.skills.installed_dir = installed_skills_dir.clone();
+                let mut registry = ironclaw_skills::SkillRegistry::new(skills_dir.clone())
+                    .with_installed_dir(installed_skills_dir.clone());
+                let _loaded = registry.discover_all().await;
+                let registry = Arc::new(std::sync::RwLock::new(registry));
                 let catalog = ironclaw_skills::catalog::shared_catalog();
                 components
                     .tools
@@ -1180,6 +1242,14 @@ impl TestRigBuilder {
             // Register any extra test-specific tools.
             for tool in extra_tools {
                 components.tools.register(tool).await;
+            }
+
+            // Apply test-only tool replacements. Runs after the normal
+            // registration pass (including AppBuilder's built-in
+            // registrations) so these stubs take precedence over any
+            // protected tool registered earlier.
+            for tool in test_tool_overrides {
+                components.tools.register_sync(tool);
             }
 
             // Register WASM tools with the shared HTTP interceptor.

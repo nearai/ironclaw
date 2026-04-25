@@ -1110,8 +1110,8 @@ impl ChannelPairingStore for PgBackend {
         &self,
         channel: &str,
         external_id: &str,
-    ) -> Result<Option<crate::ownership::Identity>, DatabaseError> {
-        use crate::ownership::{Identity, OwnerId, UserRole};
+    ) -> Result<Option<crate::ownership::UserId>, DatabaseError> {
+        use crate::ownership::{UserId, UserRole};
         let channel = crate::pairing::normalize_channel_name(channel);
         let client = self
             .pool()
@@ -1133,12 +1133,8 @@ impl ChannelPairingStore for PgBackend {
         Ok(row.map(|r| {
             let owner_id: String = r.get(0);
             let role_str: String = r.get(1);
-            let role = if role_str.eq_ignore_ascii_case("admin") {
-                UserRole::Admin
-            } else {
-                UserRole::Member
-            };
-            Identity::new(OwnerId::from(owner_id), role)
+            let role = UserRole::from_db_role(&role_str);
+            UserId::from_trusted(owner_id, role)
         }))
     }
 

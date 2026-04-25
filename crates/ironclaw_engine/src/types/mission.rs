@@ -50,7 +50,10 @@ pub enum MissionStatus {
     Paused,
     /// Mission has achieved its goal.
     Completed,
-    /// Mission has been abandoned or failed irrecoverably.
+    /// Mission stopped after a terminal thread failure.
+    ///
+    /// Automatic/manual firing is blocked until the owner explicitly resumes it
+    /// after fixing the underlying problem.
     Failed,
 }
 
@@ -269,6 +272,19 @@ impl Mission {
         matches!(
             self.status,
             MissionStatus::Completed | MissionStatus::Failed
+        )
+    }
+
+    /// Whether the mission is event-driven (fires in response to external
+    /// stimuli rather than on a fixed schedule). Event-driven missions may
+    /// legitimately re-fire after completion — each event is a fresh
+    /// investigation.
+    pub fn is_event_driven(&self) -> bool {
+        matches!(
+            self.cadence,
+            MissionCadence::OnSystemEvent { .. }
+                | MissionCadence::OnEvent { .. }
+                | MissionCadence::Webhook { .. }
         )
     }
 }

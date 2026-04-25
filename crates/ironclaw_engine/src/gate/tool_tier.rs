@@ -92,7 +92,7 @@ pub fn classify_tool_tier(action: &ActionDef) -> ToolTier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::capability::ActionDef;
+    use crate::types::capability::{ActionDef, ModelToolSurface};
 
     fn action(name: &str, effects: Vec<EffectType>, requires_approval: bool) -> ActionDef {
         ActionDef {
@@ -101,6 +101,8 @@ mod tests {
             parameters_schema: serde_json::json!({}),
             effects,
             requires_approval,
+            model_tool_surface: ModelToolSurface::FullSchema,
+            discovery: None,
         }
     }
 

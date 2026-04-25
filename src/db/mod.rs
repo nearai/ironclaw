@@ -1134,13 +1134,13 @@ pub struct PairingApprovalRecord {
 /// `PairingStore` struct in `src/pairing/store.rs`.
 #[async_trait]
 pub trait ChannelPairingStore: Send + Sync {
-    /// Returns the `Identity` for `(channel, external_id)` if the sender has been paired.
-    /// Joins `channel_identities` with `users` to get OwnerId + UserRole in one query.
+    /// Returns the [`crate::ownership::UserId`] for `(channel, external_id)` if the sender
+    /// has been paired. Joins `channel_identities` with `users` to get id + role in one query.
     async fn resolve_channel_identity(
         &self,
         channel: &str,
         external_id: &str,
-    ) -> Result<Option<crate::ownership::Identity>, DatabaseError>;
+    ) -> Result<Option<crate::ownership::UserId>, DatabaseError>;
 
     /// Read paired external IDs for a channel, for compatibility with legacy
     /// allow-list-based WASM channel admission.

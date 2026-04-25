@@ -57,10 +57,12 @@ pub use types::{
 
 pub use gating::{GatingResult, check_requirements, check_requirements_sync};
 pub use parser::{ParsedSkill, SkillParseError, parse_skill_md};
-pub use selector::{MAX_SKILL_CONTEXT_TOKENS, extract_skill_mentions, prefilter_skills};
+pub use selector::{
+    MAX_SKILL_CONTEXT_TOKENS, SelectionOutcome, extract_skill_mentions, prefilter_skills,
+};
 pub use validation::{
     escape_skill_content, escape_xml_attr, normalize_line_endings, validate_credential_name,
-    validate_credential_spec, validate_skill_name,
+    validate_credential_spec, validate_path_pattern, validate_skill_name,
 };
 
 #[cfg(feature = "catalog")]

@@ -10,6 +10,7 @@
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/theme.css">
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/debug-panel.css">
 
   <!-- i18n Modules -->
   <script src="/i18n/index.js"></script>
@@ -28,6 +29,7 @@
     crossorigin="anonymous"
   ></script>
   <script src="/theme-init.js"></script>
+  <script src="/debug-init.js"></script>
 </head>
 <body>
   <!-- Auth Screen -->
@@ -163,8 +165,6 @@
       <button data-tab="routines" data-v1-only data-tab-role="routines" data-i18n="tab.routines">Routines</button>
       <button data-tab="settings" data-i18n="tab.settings">Settings</button>
       <div class="spacer"></div>
-      <button class="status-logs-btn" data-tab="jobs" data-i18n="tab.jobs" title="Jobs">Jobs</button>
-
       <button class="status-logs-btn" data-tab="logs" data-i18n="tab.logs" title="Logs">Logs</button>
 
       <a class="status-logs-btn docs-link-btn" href="https://docs.ironclaw.com/" target="_blank" rel="noopener noreferrer" data-i18n="tab.docs" title="Docs">Docs</a>
@@ -226,15 +226,9 @@
         <span data-i18n="status.restart">Restart</span>
       </button>
     </div>
-    <div class="active-work-strip" id="active-work-strip" hidden></div>
-
     <!-- Chat Tab -->
     <div class="tab-panel active" id="tab-chat">
       <div class="thread-sidebar" id="thread-sidebar">
-        <div class="assistant-item" id="assistant-thread">
-          <span class="assistant-label" id="assistant-label" data-i18n="chat.assistant">Assistant</span>
-          <span class="assistant-meta" id="assistant-meta"></span>
-        </div>
         <div class="threads-section-header">
           <span data-i18n="chat.conversations">Conversations</span>
           <div class="spacer"></div>
@@ -259,9 +253,9 @@
             <textarea id="chat-input" data-i18n="chat.inputPlaceholder" data-i18n-attr="placeholder" placeholder="Message or / for commands..." rows="1"></textarea>
             <div id="ghost-text" class="ghost-text"></div>
           </div>
-          <input type="file" id="image-file-input" accept="image/*" multiple style="display:none">
-          <button id="attach-btn" class="attach-btn" data-i18n="chat.attachImages" data-i18n-attr="title" title="Attach images"
-            aria-label="Attach images">&#x1F4CE;</button>
+          <input type="file" id="image-file-input" accept="image/*,audio/*,.pdf,.txt,.md,.csv,.json,.xml,.rtf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.mp3,.ogg,.wav,.m4a,.mp4,.aac,.flac,.webm" multiple style="display:none">
+          <button id="attach-btn" class="attach-btn" data-i18n="chat.attachFiles" data-i18n-attr="title" title="Attach files"
+            aria-label="Attach files">&#x1F4CE;</button>
           <button id="send-btn" data-i18n="chat.send">Send</button>
         </div>
       </div>
@@ -372,20 +366,10 @@
     <div class="tab-panel" id="tab-missions">
       <div class="missions-container">
         <div class="missions-summary" id="missions-summary"></div>
-        <table class="missions-table" id="missions-table">
-          <thead>
-            <tr>
-              <th data-i18n="missions.name">Name</th>
-              <th data-i18n="missions.goal">Goal</th>
-              <th data-i18n="missions.cadence">Cadence</th>
-              <th data-i18n="missions.threads">Threads</th>
-              <th data-i18n="missions.status">Status</th>
-              <th data-i18n="missions.progress">Progress</th>
-              <th data-i18n="missions.actions">Actions</th>
-            </tr>
-          </thead>
-          <tbody id="missions-tbody"></tbody>
-        </table>
+        <div class="missions-body" id="missions-body">
+          <div class="missions-list-col" id="missions-list-col"></div>
+          <div class="missions-activity-col" id="missions-activity-col"></div>
+        </div>
         <div class="empty-state" id="missions-empty" style="display:none">
           <span data-i18n="missions.noConfigured">No missions found. Ask the assistant to create one.</span>
         </div>
@@ -452,10 +436,6 @@
                 <div class="config-section-header">
                   <h3 data-i18n="config.modelProviders">Model Providers</h3>
                   <button id="add-provider-btn" class="btn-add-provider" data-i18n="config.addProvider">+ Add Provider</button>
-                </div>
-                <div class="config-notice" id="config-restart-notice" style="display:none">
-                  <span>⚠</span>
-                  <span data-i18n="config.restartNotice">Changes take effect after restart.</span>
                 </div>
                 <div id="providers-list" class="providers-list">
                   <div class="empty-state" data-i18n="common.loading">Loading...</div>
@@ -597,5 +577,6 @@
   <div id="toasts"></div>
   <script src="/app.js"></script>
   <script src="/i18n-app.js"></script>
+  <script src="/debug-panel.js"></script>
 </body>
 </html>

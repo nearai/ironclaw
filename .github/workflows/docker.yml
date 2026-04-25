@@ -4,6 +4,11 @@ on:
   # Called by release.yml or other workflows
   workflow_call:
     inputs:
+      release:
+        description: "Set true when called from release.yml to publish version/latest tags"
+        required: false
+        type: boolean
+        default: false
       tag:
         description: "Image tag override (leave empty for auto-detect)"
         required: false
@@ -12,6 +17,11 @@ on:
   # On-demand builds
   workflow_dispatch:
     inputs:
+      release:
+        description: "Set true to force release-style tags (:version, :latest, :sha-xxx)"
+        required: false
+        type: boolean
+        default: false
       tag:
         description: "Image tag override (leave empty for auto-detect)"
         required: false
@@ -51,6 +61,10 @@ jobs:
         id: version
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Extracted version '${VERSION}' must match MAJOR.MINOR.PATCH[-prerelease] (Docker tags forbid '+')"
+            exit 1
+          fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Detected version: ${VERSION}"
 
@@ -59,13 +73,19 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
           EVENT_NAME: ${{ github.event_name }}
+          IS_RELEASE_BUILD: ${{ inputs.release && 'true' || 'false' }}
           INPUT_TAG: ${{ inputs.tag }}
           SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
         run: |
+          if [[ -n "${INPUT_TAG}" && ! "${INPUT_TAG}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "::error::Input tag '${INPUT_TAG}' does not match Docker tag grammar"
+            exit 1
+          fi
+
           SHA="sha-${SOURCE_SHA::7}"
           echo "sha_tag=${SHA}" >> "$GITHUB_OUTPUT"
 
-          if [[ "${EVENT_NAME}" == "workflow_call" ]]; then
+          if [[ "${IS_RELEASE_BUILD}" == "true" ]]; then
             # Release: :version + :latest + :sha-xxx
             TAGS="${IMAGE_NAME}:${VERSION}"
             TAGS="${TAGS},${IMAGE_NAME}:latest"
@@ -183,10 +203,11 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           EVENT_NAME: ${{ github.event_name }}
+          IS_RELEASE_BUILD: ${{ inputs.release && 'true' || 'false' }}
           INPUT_TAG: ${{ inputs.tag }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if [[ "${EVENT_NAME}" == "workflow_call" && -n "${VERSION}" ]]; then
+          if [[ "${IS_RELEASE_BUILD}" == "true" && -n "${VERSION}" ]]; then
             gh api repos/nearai/ironclaw-dind/dispatches \
               --method POST \
               -f event_type="ironclaw_image_published" \
@@ -199,30 +220,37 @@ jobs:
 
       - name: Summary
         if: steps.check.outputs.skip != 'true'
+        env:
+          TAGS: ${{ steps.tags.outputs.tags }}
+          WORKER_TAGS: ${{ steps.tags.outputs.worker_tags }}
+          VERSION: ${{ steps.version.outputs.version }}
+          SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
         run: |
           {
             echo "## Docker Images"
             echo ""
             echo "**ironclaw:**"
             echo '```'
-            echo "${{ steps.tags.outputs.tags }}" | tr ',' '\n'
+            echo "${TAGS}" | tr ',' '\n'
             echo '```'
             echo ""
             echo "**ironclaw-worker:**"
             echo '```'
-            echo "${{ steps.tags.outputs.worker_tags }}" | tr ',' '\n'
+            echo "${WORKER_TAGS}" | tr ',' '\n'
             echo '```'
             echo ""
-            echo "- version: \`${{ steps.version.outputs.version }}\`"
-            echo "- sha: \`${{ steps.source_sha.outputs.sha }}\`"
+            echo "- version: \`${VERSION}\`"
+            echo "- sha: \`${SOURCE_SHA}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Summary (skipped)
         if: steps.check.outputs.skip == 'true'
+        env:
+          SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
         run: |
           {
             echo "## Docker Images — skipped"
             echo ""
             echo "Current commit already built for \`${IMAGE_NAME}:staging\`."
-            echo "- sha: \`${{ steps.source_sha.outputs.sha }}\`"
+            echo "- sha: \`${SOURCE_SHA}\`"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,10 @@
+{
+  "id": "wallet",
+  "name": "Wallet Holdings",
+  "category": "wallet",
+  "match_protocol_ids": ["wallet"],
+  "base_risk_score": 0,
+  "liquidity_tier": "instant",
+  "withdrawal_delay_seconds": 0,
+  "yield_field": ""
+}

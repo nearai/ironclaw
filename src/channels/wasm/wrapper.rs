@@ -54,21 +54,21 @@ use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse,
 use crate::error::ChannelError;
 use crate::pairing::PairingStore;
 use crate::secrets::SecretsStore;
-use crate::tools::wasm::credential_injector::{
-    InjectedCredentials, host_matches_pattern, inject_credential,
-};
+use crate::secrets::host_matches_pattern;
+use crate::tools::wasm::credential_injector::{InjectedCredentials, inject_credential};
 use crate::tools::wasm::{
     LogLevel, WasmResourceLimiter, reject_private_ip, ssrf_safe_client_builder,
 };
+use ironclaw_common::CredentialName;
 use ironclaw_safety::LeakDetector;
 
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 const TEST_HTTP_REWRITE_MAP_ENV: &str = "IRONCLAW_TEST_HTTP_REWRITE_MAP";
 
 const WEBSOCKET_EVENT_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue";
 const WEBSOCKET_EVENT_PROCESSING_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue_processing";
 const WEBSOCKET_EVENT_QUEUE_MAX_ITEMS: usize = 100;
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 const TELEGRAM_TEST_API_BASE_ENV: &str = "IRONCLAW_TEST_TELEGRAM_API_BASE_URL";
 
 // Generate component model bindings from the WIT file
@@ -87,8 +87,15 @@ wasmtime::component::bindgen!({
 /// WASM channels never see the raw secret values.
 #[derive(Clone)]
 struct ResolvedHostCredential {
+    /// Name of the source secret. Non-sensitive metadata used only for
+    /// deterministic tie-breaks when two matching credentials share the
+    /// same path specificity; never rendered to logs or tool output.
+    secret_name: String,
     /// Host patterns this credential applies to (e.g., "api.slack.com").
     host_patterns: Vec<String>,
+    /// Literal path prefixes scoping this credential to specific endpoints.
+    /// Empty means the credential applies to every path on a matching host.
+    path_patterns: Vec<String>,
     /// Headers to add to matching requests (e.g., "Authorization: Bearer ...").
     headers: HashMap<String, String>,
     /// Query parameters to add to matching requests.
@@ -228,25 +235,50 @@ impl ChannelStoreData {
 
     /// Inject pre-resolved host credentials into the request.
     ///
-    /// Matches the URL host against each resolved credential's host_patterns.
-    /// Matching credentials have their headers merged and query params appended.
+    /// Matches the URL host against each resolved credential's host_patterns
+    /// and, when declared, path_patterns. Matching credentials are sorted by
+    /// ascending path specificity (longest matching prefix last), ties
+    /// broken alphabetically on `secret_name` for determinism. Last-write-
+    /// wins header merging then gives the most-specific mapping any
+    /// conflicting header key.
     fn inject_host_credentials(
         &self,
         url_host: &str,
         headers: &mut HashMap<String, String>,
         url: &mut String,
     ) {
-        for cred in &self.host_credentials {
-            let matches = cred
-                .host_patterns
-                .iter()
-                .any(|pattern| host_matches_pattern(url_host, pattern));
+        use crate::secrets::{
+            extract_url_path_for_matching, match_specificity, path_matches_prefix,
+        };
 
-            if !matches {
-                continue;
-            }
+        let url_path = extract_url_path_for_matching(url);
 
-            // Merge injected headers (host credentials take precedence)
+        let mut matches_for_request: Vec<&ResolvedHostCredential> = self
+            .host_credentials
+            .iter()
+            .filter(|cred| {
+                cred.host_patterns
+                    .iter()
+                    .any(|pattern| host_matches_pattern(url_host, pattern))
+                    && (cred.path_patterns.is_empty()
+                        || cred
+                            .path_patterns
+                            .iter()
+                            .any(|prefix| path_matches_prefix(&url_path, prefix)))
+            })
+            .collect();
+
+        matches_for_request.sort_by(|a, b| {
+            let spec_a = match_specificity(&a.path_patterns, &url_path);
+            let spec_b = match_specificity(&b.path_patterns, &url_path);
+            spec_a
+                .cmp(&spec_b)
+                .then_with(|| a.secret_name.cmp(&b.secret_name))
+        });
+
+        for cred in matches_for_request {
+            // Merge injected headers (most-specific match iterates last so
+            // it wins any conflict under insert-and-overwrite).
             for (key, value) in &cred.headers {
                 headers.insert(key.clone(), value.clone());
             }
@@ -339,11 +371,31 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             format!("Rate limit exceeded: {}", e)
         })?;
 
-        // Parse headers and inject credentials into header values
-        // This allows patterns like "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"
-        let raw_headers: std::collections::HashMap<String, String> =
-            serde_json::from_str(&headers_json).unwrap_or_default();
+        // Parse headers from WASM and scan for leaks before credential injection.
+        // Host-injected tokens (e.g., xoxb- Slack bot token) would otherwise
+        // trigger the leak detector. The URL has template substitution applied
+        // (`injected_url`) but not yet host credential injection.
+        let raw_headers: std::collections::HashMap<String, String> = serde_json::from_str(
+            &headers_json,
+        )
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Malformed headers JSON from WASM; scanning empty headers");
+            std::collections::HashMap::new()
+        });
 
+        let mut logical_url = injected_url;
+
+        let leak_detector = LeakDetector::new();
+        let raw_header_vec: Vec<(String, String)> = raw_headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        leak_detector
+            .scan_http_request(&logical_url, &raw_header_vec, body.as_deref())
+            .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
+
+        // Now inject credentials into header values
+        // This allows patterns like "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"
         let mut headers: std::collections::HashMap<String, String> = raw_headers
             .into_iter()
             .map(|(k, v)| {
@@ -363,22 +415,6 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             "Parsed and injected request headers"
         );
 
-        let mut logical_url = injected_url;
-
-        // Leak scan runs on WASM-provided values BEFORE host credential injection.
-        // This prevents false positives where the host-injected Bearer token
-        // (e.g., xoxb- Slack token) triggers the leak detector — WASM never saw
-        // the real value, so scanning the pre-injection state is correct.
-        let leak_detector = LeakDetector::new();
-        let header_vec: Vec<(String, String)> = headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        leak_detector
-            .scan_http_request(&logical_url, &header_vec, body.as_deref())
-            .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
-
         // Inject pre-resolved host credentials (Bearer tokens, API keys, etc.)
         // after the leak scan so host-injected secrets don't trigger false positives.
         if let Some(host) = extract_host_from_url(&logical_url) {
@@ -386,7 +422,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         }
 
         let (transport_url, allow_private_test_target) = {
-            #[cfg(test)]
+            #[cfg(any(test, debug_assertions))]
             {
                 let rewritten = rewrite_http_url_for_testing(&logical_url)
                     .or_else(|| rewrite_telegram_api_url_for_testing(&logical_url));
@@ -401,7 +437,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
                 }
                 (url, is_rewritten)
             }
-            #[cfg(not(test))]
+            #[cfg(not(any(test, debug_assertions)))]
             {
                 (logical_url.clone(), false)
             }
@@ -418,7 +454,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             .unwrap_or(10 * 1024 * 1024);
 
         // Resolve hostname and reject private/internal IPs to prevent DNS rebinding.
-        // Test-only URL rewrites intentionally point at local fake servers.
+        // Test/dev URL rewrites intentionally point at local fake servers.
         if !allow_private_test_target {
             reject_private_ip(&transport_url)?;
         }
@@ -610,6 +646,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
                     size_bytes: a.size_bytes,
                     source_url: a.source_url,
                     storage_key: a.storage_key,
+                    local_path: None,
                     extracted_text: a.extracted_text,
                     data,
                     duration_secs,
@@ -693,12 +730,12 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
             return Err("pairing host callback requires a multi-thread Tokio runtime".to_string());
         }
-        let result: Result<Option<crate::ownership::Identity>, crate::error::DatabaseError> =
+        let result: Result<Option<crate::ownership::UserId>, crate::error::DatabaseError> =
             tokio::task::block_in_place(move || {
                 handle.block_on(async move { store.resolve_identity(&channel, &external_id).await })
             });
         match result {
-            Ok(Some(identity)) => Ok(Some(identity.owner_id.to_string())),
+            Ok(Some(identity)) => Ok(Some(identity.as_str().to_string())),
             Ok(None) => Ok(None),
             Err(e) => Err(e.to_string()),
         }
@@ -787,6 +824,12 @@ pub struct WasmChannel {
     /// Ensures WASM channels can maintain state (e.g., polling offsets) between ticks.
     workspace_store: Arc<ChannelWorkspaceStore>,
 
+    /// Serializes callback execution for a single channel instance.
+    ///
+    /// Some channel state is read-modify-written through the shared workspace
+    /// store, so overlapping callbacks can otherwise lose updates.
+    callback_lock: Arc<tokio::sync::Mutex<()>>,
+
     /// Last-seen message metadata (contains chat_id for broadcast routing).
     /// Populated from incoming messages so `broadcast()` knows where to send.
     last_broadcast_metadata: Arc<tokio::sync::RwLock<Option<String>>>,
@@ -835,6 +878,117 @@ async fn do_update_broadcast_metadata(
     }
 }
 
+fn durable_workspace_settings_key(channel_name: &str) -> String {
+    format!("channels.wasm_workspace.{}", channel_name)
+}
+
+async fn do_persist_durable_workspace(
+    channel_name: &str,
+    owner_scope_id: &str,
+    workspace_store: &ChannelWorkspaceStore,
+    durable_paths: &[String],
+    settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
+) {
+    if durable_paths.is_empty() {
+        return;
+    }
+
+    let Some(store) = settings_store else {
+        return;
+    };
+
+    let snapshot = workspace_store.snapshot();
+    let durable_snapshot: HashMap<String, String> = durable_paths
+        .iter()
+        .filter_map(|path| {
+            snapshot
+                .get(path)
+                .cloned()
+                .map(|value| (path.clone(), value))
+        })
+        .collect();
+    let key = durable_workspace_settings_key(channel_name);
+
+    let result = if durable_snapshot.is_empty() {
+        store.delete_setting(owner_scope_id, &key).await.map(|_| ())
+    } else {
+        store
+            .set_setting(owner_scope_id, &key, &serde_json::json!(durable_snapshot))
+            .await
+    };
+
+    if let Err(e) = result {
+        tracing::warn!(
+            channel = %channel_name,
+            "Failed to persist durable workspace state: {}",
+            e
+        );
+    }
+}
+
+async fn do_load_durable_workspace(
+    channel_name: &str,
+    owner_scope_id: &str,
+    workspace_store: &ChannelWorkspaceStore,
+    durable_paths: &[String],
+    settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
+) {
+    if durable_paths.is_empty() {
+        return;
+    }
+
+    let Some(store) = settings_store else {
+        return;
+    };
+
+    let key = durable_workspace_settings_key(channel_name);
+    let load_value = match store.get_setting(owner_scope_id, &key).await {
+        Ok(value) => value,
+        Err(e) => {
+            tracing::warn!(
+                channel = %channel_name,
+                "Failed to load durable workspace state: {}",
+                e
+            );
+            None
+        }
+    };
+
+    let load_value = if load_value.is_none() && owner_scope_id != "default" {
+        match store.get_setting("default", &key).await {
+            Ok(value) => value,
+            Err(e) => {
+                tracing::warn!(
+                    channel = %channel_name,
+                    "Failed to load legacy durable workspace state: {}",
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        load_value
+    };
+
+    let Some(value) = load_value else {
+        return;
+    };
+
+    let Ok(snapshot) = serde_json::from_value::<HashMap<String, String>>(value) else {
+        tracing::warn!(
+            channel = %channel_name,
+            "Ignoring invalid durable workspace snapshot"
+        );
+        return;
+    };
+
+    let filtered: HashMap<String, String> = snapshot
+        .into_iter()
+        .filter(|(path, _)| durable_paths.iter().any(|durable| durable == path))
+        .collect();
+    workspace_store.restore_snapshot(&filtered);
+}
+
 fn resolve_message_scope(
     owner_scope_id: &str,
     owner_actor_id: Option<&str>,
@@ -862,7 +1016,7 @@ async fn resolve_message_scope_with_pairing(
         .resolve_identity(channel_name, sender_id)
         .await
     {
-        Ok(Some(identity)) => (identity.owner_id.to_string(), false),
+        Ok(Some(identity)) => (identity.as_str().to_string(), false),
         Ok(None) => (sender_id.to_string(), false),
         Err(error) => {
             tracing::warn!(
@@ -966,6 +1120,7 @@ impl WasmChannel {
             typing_task: RwLock::new(None),
             pairing_store,
             workspace_store: Arc::new(ChannelWorkspaceStore::new()),
+            callback_lock: Arc::new(tokio::sync::Mutex::new(())),
             last_broadcast_metadata: Arc::new(tokio::sync::RwLock::new(None)),
             settings_store,
             owner_scope_id: owner_scope_id.into(),
@@ -1135,6 +1290,43 @@ impl WasmChannel {
         format!("channel_broadcast_metadata_{}", self.name)
     }
 
+    fn durable_workspace_paths(&self) -> &[String] {
+        &self.capabilities.durable_workspace_paths
+    }
+
+    async fn load_durable_workspace_snapshot(&self) {
+        do_load_durable_workspace(
+            &self.name,
+            &self.owner_scope_id,
+            &self.workspace_store,
+            self.durable_workspace_paths(),
+            self.settings_store.as_ref(),
+        )
+        .await;
+    }
+
+    async fn persist_durable_workspace_snapshot_if_needed(&self, committed_paths: &[String]) {
+        if committed_paths.is_empty() {
+            return;
+        }
+
+        if !committed_paths
+            .iter()
+            .any(|path| self.capabilities.is_durable_workspace_path(path))
+        {
+            return;
+        }
+
+        do_persist_durable_workspace(
+            &self.name,
+            &self.owner_scope_id,
+            &self.workspace_store,
+            self.durable_workspace_paths(),
+            self.settings_store.as_ref(),
+        )
+        .await;
+    }
+
     /// Update broadcast metadata in memory and persist if changed (best-effort).
     ///
     /// Compares with the current value to avoid redundant DB writes on every
@@ -1253,6 +1445,7 @@ impl WasmChannel {
         let pairing_store = self.pairing_store.clone();
         let callback_timeout = self.runtime.config().callback_timeout;
         let workspace_store = self.workspace_store.clone();
+        let callback_lock = self.callback_lock.clone();
         let last_broadcast_metadata = self.last_broadcast_metadata.clone();
         let settings_store = self.settings_store.clone();
         let owner_scope_id = self.owner_scope_id.clone();
@@ -1277,6 +1470,20 @@ impl WasmChannel {
                 &owner_scope_id,
             )
             .await;
+            // Defense in depth: if an identify template or secret cannot be
+            // resolved here, do not enter the reconnect loop — peer will
+            // reject with an auth close code. `resolve_websocket_identify_message`
+            // returns `None` on several distinct failures (missing secret,
+            // decrypt error, missing identify template, store failure), so the
+            // message enumerates them rather than naming one.
+            if config.identify_secret_name.is_some() && identify_payload.is_none() {
+                tracing::warn!(
+                    channel = %channel_name,
+                    has_identify_template = config.identify.is_some(),
+                    "Websocket runtime exiting: failed to build identify payload (missing secret, decrypt error, or unresolved template)"
+                );
+                return;
+            }
             let mut session_state = WebsocketSessionState::new(identify_payload.as_deref());
 
             'reconnect: loop {
@@ -1395,6 +1602,7 @@ impl WasmChannel {
                                                             credentials: Arc::clone(&credentials),
                                                             pairing_store: pairing_store.clone(),
                                                             workspace_store: workspace_store.clone(),
+                                                            callback_lock: Arc::clone(&callback_lock),
                                                             message_tx: message_tx.clone(),
                                                             rate_limiter: Arc::clone(&rate_limiter),
                                                             last_broadcast_metadata: Arc::clone(&last_broadcast_metadata),
@@ -1425,6 +1633,23 @@ impl WasmChannel {
                                 }
                                 Some(Ok(other)) => {
                                     log_websocket_diagnostic(&channel_name, &other);
+                                    if let WebsocketMessage::Close(frame) = &other
+                                        && let Some(frame) = frame.as_ref()
+                                    {
+                                        let code = u16::from(frame.code);
+                                        if let WebsocketCloseDisposition::Terminal { reason } =
+                                            classify_websocket_close_code(code, &config.url)
+                                        {
+                                            tracing::warn!(
+                                                channel = %channel_name,
+                                                code,
+                                                disposition = reason,
+                                                reason_from_peer = %frame.reason,
+                                                "Websocket runtime received terminal close frame; stopping reconnect loop"
+                                            );
+                                            break 'reconnect;
+                                        }
+                                    }
                                 }
                                 Some(Err(error)) => {
                                     tracing::warn!(
@@ -1576,6 +1801,19 @@ impl WasmChannel {
         )
     }
 
+    fn commit_callback_workspace_writes(
+        host_state: &mut ChannelHostState,
+        workspace_store: &ChannelWorkspaceStore,
+    ) -> Vec<String> {
+        let pending_writes = host_state.take_pending_writes();
+        let committed_paths = pending_writes
+            .iter()
+            .map(|write| write.path.clone())
+            .collect();
+        workspace_store.commit_writes(&pending_writes);
+        committed_paths
+    }
+
     fn log_on_start_host_state(&self, host_state: &mut ChannelHostState) {
         for entry in host_state.take_logs() {
             match entry.level {
@@ -1595,6 +1833,9 @@ impl WasmChannel {
     async fn execute_on_start_with_state(
         &self,
     ) -> Result<(Result<ChannelConfig, WasmChannelError>, ChannelHostState), WasmChannelError> {
+        let _callback_guard = self.callback_lock.lock().await;
+        self.load_durable_workspace_snapshot().await;
+
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
         let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
@@ -1611,48 +1852,54 @@ impl WasmChannel {
         let pairing_store = self.pairing_store.clone();
         let workspace_store = self.workspace_store.clone();
 
-        tokio::time::timeout(timeout, async move {
-            tokio::task::spawn_blocking(move || {
-                let mut store = Self::create_store(
-                    &runtime,
-                    &prepared,
-                    &capabilities,
-                    credentials,
-                    host_credentials,
-                    pairing_store,
-                )?;
-                let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
+        let (config_result, host_state, committed_paths) =
+            tokio::time::timeout(timeout, async move {
+                tokio::task::spawn_blocking(move || {
+                    let mut store = Self::create_store(
+                        &runtime,
+                        &prepared,
+                        &capabilities,
+                        credentials,
+                        host_credentials,
+                        pairing_store,
+                    )?;
+                    let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
 
-                let channel_iface = instance.near_agent_channel();
-                let config_result = channel_iface
-                    .call_on_start(&mut store, &config_json)
-                    .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))
-                    .and_then(|wasm_result| match wasm_result {
-                        Ok(wit_config) => Ok(convert_channel_config(wit_config)),
-                        Err(err_msg) => Err(WasmChannelError::CallbackFailed {
-                            name: prepared.name.clone(),
-                            reason: err_msg,
-                        }),
-                    });
+                    let channel_iface = instance.near_agent_channel();
+                    let config_result = channel_iface
+                        .call_on_start(&mut store, &config_json)
+                        .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))
+                        .and_then(|wasm_result| match wasm_result {
+                            Ok(wit_config) => Ok(convert_channel_config(wit_config)),
+                            Err(err_msg) => Err(WasmChannelError::CallbackFailed {
+                                name: prepared.name.clone(),
+                                reason: err_msg,
+                            }),
+                        });
 
-                let mut host_state =
-                    Self::extract_host_state(&mut store, &prepared.name, &capabilities);
-                let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                    let mut host_state =
+                        Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+                    let committed_paths =
+                        Self::commit_callback_workspace_writes(&mut host_state, &workspace_store);
 
-                Ok::<_, WasmChannelError>((config_result, host_state))
+                    Ok::<_, WasmChannelError>((config_result, host_state, committed_paths))
+                })
+                .await
+                .map_err(|e| WasmChannelError::ExecutionPanicked {
+                    name: channel_name.clone(),
+                    reason: e.to_string(),
+                })?
             })
             .await
-            .map_err(|e| WasmChannelError::ExecutionPanicked {
-                name: channel_name.clone(),
-                reason: e.to_string(),
-            })?
-        })
-        .await
-        .map_err(|_| WasmChannelError::Timeout {
-            name: self.name.clone(),
-            callback: "on_start".to_string(),
-        })?
+            .map_err(|_| WasmChannelError::Timeout {
+                name: self.name.clone(),
+                callback: "on_start".to_string(),
+            })??;
+
+        self.persist_durable_workspace_snapshot_if_needed(&committed_paths)
+            .await;
+
+        Ok((config_result, host_state))
     }
 
     /// Execute the on_start callback.
@@ -1702,6 +1949,8 @@ impl WasmChannel {
         body: &[u8],
         secret_validated: bool,
     ) -> Result<HttpResponse, WasmChannelError> {
+        let _callback_guard = self.callback_lock.lock().await;
+
         tracing::info!(
             channel = %self.name,
             method = method,
@@ -1797,10 +2046,10 @@ impl WasmChannel {
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
 
                 // Commit pending workspace writes to the persistent store
-                let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                let committed_paths =
+                    Self::commit_callback_workspace_writes(&mut host_state, &workspace_store);
 
-                Ok((response, host_state))
+                Ok((response, host_state, committed_paths))
             })
             .await
             .map_err(|e| WasmChannelError::ExecutionPanicked {
@@ -1812,7 +2061,9 @@ impl WasmChannel {
 
         let channel_name = self.name.clone();
         match result {
-            Ok(Ok((response, mut host_state))) => {
+            Ok(Ok((response, mut host_state, committed_paths))) => {
+                self.persist_durable_workspace_snapshot_if_needed(&committed_paths)
+                    .await;
                 // Process emitted messages
                 let emitted = host_state.take_emitted_messages();
                 self.process_emitted_messages(emitted).await?;
@@ -1836,6 +2087,8 @@ impl WasmChannel {
     ///
     /// Called periodically if polling is configured.
     pub async fn call_on_poll(&self) -> Result<(), WasmChannelError> {
+        let _callback_guard = self.callback_lock.lock().await;
+
         // If no WASM bytes, do nothing (for testing)
         if self.prepared.component().is_none() {
             tracing::debug!(
@@ -1883,10 +2136,10 @@ impl WasmChannel {
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
 
                 // Commit pending workspace writes to the persistent store
-                let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                let committed_paths =
+                    Self::commit_callback_workspace_writes(&mut host_state, &workspace_store);
 
-                Ok(((), host_state))
+                Ok(((), host_state, committed_paths))
             })
             .await
             .map_err(|e| WasmChannelError::ExecutionPanicked {
@@ -1898,7 +2151,9 @@ impl WasmChannel {
 
         let channel_name = self.name.clone();
         match result {
-            Ok(Ok(((), mut host_state))) => {
+            Ok(Ok(((), mut host_state, committed_paths))) => {
+                self.persist_durable_workspace_snapshot_if_needed(&committed_paths)
+                    .await;
                 let _ = drain_guest_logs(&channel_name, "on_poll", &mut host_state);
 
                 // Process emitted messages
@@ -1930,6 +2185,8 @@ impl WasmChannel {
         metadata_json: &str,
         attachments: &[String],
     ) -> Result<(), WasmChannelError> {
+        let _callback_guard = self.callback_lock.lock().await;
+
         tracing::info!(
             channel = %self.name,
             message_id = %message_id,
@@ -2043,10 +2300,10 @@ impl WasmChannel {
 
                 let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
-                let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                let committed_paths =
+                    Self::commit_callback_workspace_writes(&mut host_state, &workspace_store);
                 tracing::info!("on_respond WASM execution completed successfully");
-                Ok(((), host_state))
+                Ok(((), host_state, committed_paths))
             })
             .await
             .map_err(|e| {
@@ -2061,7 +2318,9 @@ impl WasmChannel {
 
         let channel_name = self.name.clone();
         match result {
-            Ok(Ok(((), _host_state))) => {
+            Ok(Ok(((), _host_state, committed_paths))) => {
+                self.persist_durable_workspace_snapshot_if_needed(&committed_paths)
+                    .await;
                 tracing::debug!(
                     channel = %channel_name,
                     message_id = %message_id,
@@ -2087,6 +2346,8 @@ impl WasmChannel {
         thread_id: Option<&str>,
         attachments: &[String],
     ) -> Result<(), WasmChannelError> {
+        let _callback_guard = self.callback_lock.lock().await;
+
         tracing::info!(
             channel = %self.name,
             user_id = %user_id,
@@ -2171,10 +2432,10 @@ impl WasmChannel {
 
                 let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
-                let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                let committed_paths =
+                    Self::commit_callback_workspace_writes(&mut host_state, &workspace_store);
                 tracing::info!("on_broadcast WASM execution completed successfully");
-                Ok(((), host_state))
+                Ok(((), host_state, committed_paths))
             })
             .await
             .map_err(|e| WasmChannelError::ExecutionPanicked {
@@ -2186,7 +2447,9 @@ impl WasmChannel {
 
         let channel_name = self.name.clone();
         match result {
-            Ok(Ok(((), _host_state))) => {
+            Ok(Ok(((), _host_state, committed_paths))) => {
+                self.persist_durable_workspace_snapshot_if_needed(&committed_paths)
+                    .await;
                 tracing::debug!(
                     channel = %channel_name,
                     "WASM channel on_broadcast completed"
@@ -2209,6 +2472,8 @@ impl WasmChannel {
         status: &StatusUpdate,
         metadata: &serde_json::Value,
     ) -> Result<(), WasmChannelError> {
+        let _callback_guard = self.callback_lock.lock().await;
+
         // If no WASM bytes, do nothing (for testing)
         if self.prepared.component().is_none() {
             return Ok(());
@@ -2252,10 +2517,10 @@ impl WasmChannel {
 
                 let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
-                let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                let committed_paths =
+                    Self::commit_callback_workspace_writes(&mut host_state, &workspace_store);
 
-                Ok(())
+                Ok(committed_paths)
             })
             .await
             .map_err(|e| WasmChannelError::ExecutionPanicked {
@@ -2266,7 +2531,9 @@ impl WasmChannel {
         .await;
 
         match result {
-            Ok(Ok(())) => {
+            Ok(Ok(committed_paths)) => {
+                self.persist_durable_workspace_snapshot_if_needed(&committed_paths)
+                    .await;
                 tracing::debug!(
                     channel = %self.name,
                     "WASM channel on_status completed"
@@ -2288,26 +2555,34 @@ impl WasmChannel {
     #[allow(clippy::too_many_arguments)]
     async fn execute_status(
         channel_name: &str,
+        owner_scope_id: &str,
         runtime: &Arc<WasmChannelRuntime>,
         prepared: &Arc<PreparedChannelModule>,
         capabilities: &ChannelCapabilities,
         credentials: &RwLock<HashMap<String, String>>,
         host_credentials: Vec<ResolvedHostCredential>,
         pairing_store: Arc<PairingStore>,
-        timeout: Duration,
         workspace_store: &Arc<ChannelWorkspaceStore>,
+        callback_lock: &Arc<tokio::sync::Mutex<()>>,
+        settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
+        timeout: Duration,
         wit_update: wit_channel::StatusUpdate,
     ) -> Result<(), WasmChannelError> {
         if prepared.component().is_none() {
             return Ok(());
         }
 
+        let _callback_guard = callback_lock.lock().await;
+
         let runtime = Arc::clone(runtime);
         let prepared = Arc::clone(prepared);
         let capabilities = Self::inject_workspace_reader(capabilities, workspace_store);
+        let durable_workspace_paths = capabilities.durable_workspace_paths.clone();
         let credentials_snapshot = credentials.read().await.clone();
         let channel_name_owned = channel_name.to_string();
+        let owner_scope_id_owned = owner_scope_id.to_string();
         let workspace_store = Arc::clone(workspace_store);
+        let workspace_store_for_callback = Arc::clone(&workspace_store);
 
         let result = tokio::time::timeout(timeout, async move {
             tokio::task::spawn_blocking(move || {
@@ -2328,10 +2603,12 @@ impl WasmChannel {
 
                 let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
-                let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                let committed_paths = Self::commit_callback_workspace_writes(
+                    &mut host_state,
+                    &workspace_store_for_callback,
+                );
 
-                Ok(())
+                Ok(committed_paths)
             })
             .await
             .map_err(|e| WasmChannelError::ExecutionPanicked {
@@ -2342,7 +2619,23 @@ impl WasmChannel {
         .await;
 
         match result {
-            Ok(Ok(())) => Ok(()),
+            Ok(Ok(committed_paths)) => {
+                if committed_paths.iter().any(|path| {
+                    durable_workspace_paths
+                        .iter()
+                        .any(|durable| durable == path)
+                }) {
+                    do_persist_durable_workspace(
+                        channel_name,
+                        &owner_scope_id_owned,
+                        &workspace_store,
+                        &durable_workspace_paths,
+                        settings_store,
+                    )
+                    .await;
+                }
+                Ok(())
+            }
             Ok(Err(e)) => Err(e),
             Err(_) => Err(WasmChannelError::Timeout {
                 name: channel_name.to_string(),
@@ -2399,10 +2692,10 @@ impl WasmChannel {
 
                 // Spawn background repeater
                 let channel_name = self.name.clone();
+                let owner_scope_id = self.owner_scope_id.clone();
                 let runtime = Arc::clone(&self.runtime);
                 let prepared = Arc::clone(&self.prepared);
                 let capabilities = self.capabilities.clone();
-                let workspace_store = self.workspace_store.clone();
                 let credentials = self.credentials.clone();
                 // Pre-resolve host credentials once for the lifetime of the repeater.
                 // Channels tokens rarely change, so a snapshot per-repeater is correct.
@@ -2413,6 +2706,9 @@ impl WasmChannel {
                 )
                 .await;
                 let pairing_store = self.pairing_store.clone();
+                let workspace_store = self.workspace_store.clone();
+                let callback_lock = self.callback_lock.clone();
+                let settings_store = self.settings_store.clone();
                 let callback_timeout = self.runtime.config().callback_timeout;
                 let Some(wit_update) = status_to_wit(&status, metadata) else {
                     return Ok(());
@@ -2431,14 +2727,17 @@ impl WasmChannel {
 
                         if let Err(e) = Self::execute_status(
                             &channel_name,
+                            &owner_scope_id,
                             &runtime,
                             &prepared,
                             &capabilities,
                             &credentials,
                             hc,
                             pairing_store.clone(),
-                            callback_timeout,
                             &workspace_store,
+                            &callback_lock,
+                            settings_store.as_ref(),
+                            callback_timeout,
                             wit_update_clone,
                         )
                         .await
@@ -2603,6 +2902,7 @@ impl WasmChannel {
                         size_bytes: a.size_bytes,
                         source_url: a.source_url.clone(),
                         storage_key: a.storage_key.clone(),
+                        local_path: a.local_path.clone(),
                         extracted_text: a.extracted_text.clone(),
                         data: a.data.clone(),
                         duration_secs: a.duration_secs,
@@ -2705,6 +3005,7 @@ impl WasmChannel {
         let pairing_store = self.pairing_store.clone();
         let callback_timeout = self.runtime.config().callback_timeout;
         let workspace_store = self.workspace_store.clone();
+        let callback_lock = self.callback_lock.clone();
         let last_broadcast_metadata = self.last_broadcast_metadata.clone();
         let settings_store = self.settings_store.clone();
         let poll_secrets_store = self.secrets_store.clone();
@@ -2733,14 +3034,17 @@ impl WasmChannel {
                         // Execute on_poll with fresh WASM instance
                         let result = Self::execute_poll(
                             &channel_name,
+                            &owner_scope_id,
                             &runtime,
                             &prepared,
                             &capabilities,
                             &credentials,
                             host_credentials,
                             pairing_store.clone(),
-                            callback_timeout,
                             &workspace_store,
+                            &callback_lock,
+                            settings_store.as_ref(),
+                            callback_timeout,
                         ).await;
 
                         match result {
@@ -2813,14 +3117,17 @@ impl WasmChannel {
     #[allow(clippy::too_many_arguments)]
     async fn execute_poll(
         channel_name: &str,
+        owner_scope_id: &str,
         runtime: &Arc<WasmChannelRuntime>,
         prepared: &Arc<PreparedChannelModule>,
         capabilities: &ChannelCapabilities,
         credentials: &RwLock<HashMap<String, String>>,
         host_credentials: Vec<ResolvedHostCredential>,
         pairing_store: Arc<PairingStore>,
-        timeout: Duration,
         workspace_store: &Arc<ChannelWorkspaceStore>,
+        callback_lock: &Arc<tokio::sync::Mutex<()>>,
+        settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
+        timeout: Duration,
     ) -> Result<Vec<EmittedMessage>, WasmChannelError> {
         // Skip if no WASM bytes (testing mode)
         if prepared.component().is_none() {
@@ -2831,12 +3138,17 @@ impl WasmChannel {
             return Ok(Vec::new());
         }
 
+        let _callback_guard = callback_lock.lock().await;
+
         let runtime = Arc::clone(runtime);
         let prepared = Arc::clone(prepared);
         let capabilities = Self::inject_workspace_reader(capabilities, workspace_store);
+        let durable_workspace_paths = capabilities.durable_workspace_paths.clone();
         let credentials_snapshot = credentials.read().await.clone();
         let channel_name_owned = channel_name.to_string();
+        let owner_scope_id_owned = owner_scope_id.to_string();
         let workspace_store = Arc::clone(workspace_store);
+        let workspace_store_for_callback = Arc::clone(&workspace_store);
 
         // Execute in blocking task with timeout
         let result = tokio::time::timeout(timeout, async move {
@@ -2861,10 +3173,12 @@ impl WasmChannel {
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
 
                 // Commit pending workspace writes to the persistent store
-                let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                let committed_paths = Self::commit_callback_workspace_writes(
+                    &mut host_state,
+                    &workspace_store_for_callback,
+                );
 
-                Ok(host_state)
+                Ok((host_state, committed_paths))
             })
             .await
             .map_err(|e| WasmChannelError::ExecutionPanicked {
@@ -2875,7 +3189,21 @@ impl WasmChannel {
         .await;
 
         match result {
-            Ok(Ok(mut host_state)) => {
+            Ok(Ok((mut host_state, committed_paths))) => {
+                if committed_paths.iter().any(|path| {
+                    durable_workspace_paths
+                        .iter()
+                        .any(|durable| durable == path)
+                }) {
+                    do_persist_durable_workspace(
+                        channel_name,
+                        &owner_scope_id_owned,
+                        &workspace_store,
+                        &durable_workspace_paths,
+                        settings_store,
+                    )
+                    .await;
+                }
                 let _ = drain_guest_logs(channel_name, "on_poll", &mut host_state);
                 let emitted = host_state.take_emitted_messages();
                 tracing::debug!(
@@ -2971,6 +3299,7 @@ impl WasmChannel {
                         size_bytes: a.size_bytes,
                         source_url: a.source_url.clone(),
                         storage_key: a.storage_key.clone(),
+                        local_path: a.local_path.clone(),
                         extracted_text: a.extracted_text.clone(),
                         data: a.data.clone(),
                         duration_secs: a.duration_secs,
@@ -3119,17 +3448,41 @@ impl Channel for WasmChannel {
             *self.poll_task.write().await = Some(handle);
         }
 
-        if let Some(websocket_config) =
-            WebsocketRuntimeConfig::from_capabilities(&self.capabilities)
-            && websocket_config.connect_on_start
+        match websocket_start_decision(
+            &self.capabilities,
+            self.secrets_store.as_deref(),
+            &self.owner_scope_id,
+        )
+        .await
         {
-            let (websocket_shutdown_tx, websocket_shutdown_rx) = oneshot::channel();
-            *self.websocket_shutdown_tx.write().await = Some(websocket_shutdown_tx);
-            self.start_websocket_runtime(
-                websocket_config,
-                websocket_shutdown_rx,
-                Arc::clone(&self.owner_actor_id),
-            );
+            WebsocketStartDecision::NotConfigured => {}
+            WebsocketStartDecision::Spawn(websocket_config) => {
+                let (websocket_shutdown_tx, websocket_shutdown_rx) = oneshot::channel();
+                *self.websocket_shutdown_tx.write().await = Some(websocket_shutdown_tx);
+                self.start_websocket_runtime(
+                    websocket_config,
+                    websocket_shutdown_rx,
+                    Arc::clone(&self.owner_actor_id),
+                );
+            }
+            WebsocketStartDecision::MissingAuth { credential_name } => {
+                // Skip the spawn entirely: the runtime would connect, be
+                // rejected (e.g. Discord 4003), and retry forever (#2557).
+                // Recovery happens through the normal activation/restart
+                // path once the credential is written.
+                tracing::warn!(
+                    channel = %self.name,
+                    credential_name = %credential_name,
+                    "Skipping websocket runtime start: required credential is not present"
+                );
+            }
+            WebsocketStartDecision::MalformedConfig { reason } => {
+                tracing::warn!(
+                    channel = %self.name,
+                    reason = %reason,
+                    "Skipping websocket runtime start: malformed capability configuration"
+                );
+            }
         }
 
         tracing::info!(
@@ -3174,7 +3527,7 @@ impl Channel for WasmChannel {
         self.call_on_respond(
             msg.id,
             &response.content,
-            response.thread_id.as_deref(),
+            response.thread_id.as_ref().map(|t| t.as_str()),
             &metadata_json,
             &response.attachments,
         )
@@ -3212,7 +3565,7 @@ impl Channel for WasmChannel {
         self.call_on_broadcast(
             &resolved_target,
             &response.content,
-            response.thread_id.as_deref(),
+            response.thread_id.as_ref().map(|t| t.as_str()),
             &response.attachments,
         )
         .await
@@ -3338,6 +3691,208 @@ async fn resolve_websocket_identify_message(
         .await
         .ok()?;
     build_websocket_identify_message(&identify, secret.expose())
+}
+
+/// Result of the websocket auth preflight performed before spawning the runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WebsocketAuthPreflight {
+    /// No auth required, or the required credential is present.
+    Ready,
+    /// The capability declares a required credential that is not present
+    /// in the secrets store.
+    MissingCredential { credential_name: CredentialName },
+}
+
+/// Full decision for whether to spawn the websocket runtime at channel start.
+///
+/// Composes capability parsing, the `connect_on_start` flag, and the auth
+/// preflight into one testable outcome so the callsite in `Channel::start`
+/// is a plain `match` without any computed inputs that a refactor could
+/// silently drop.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum WebsocketStartDecision {
+    /// No websocket capability, or `connect_on_start` is false.
+    NotConfigured,
+    /// The capability is internally inconsistent and the runtime cannot build
+    /// a valid connection — e.g. `identify_secret_name` is declared but the
+    /// `identify` template is missing, or the declared credential name does
+    /// not validate as a [`CredentialName`].
+    MalformedConfig { reason: String },
+    /// Websocket is configured but the required credential is not present.
+    MissingAuth { credential_name: CredentialName },
+    /// All gates pass; the runtime should be spawned with this config.
+    Spawn(WebsocketRuntimeConfig),
+}
+
+/// Disposition for a websocket close frame: reconnect, or stop the loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WebsocketCloseDisposition {
+    Reconnect,
+    Terminal { reason: &'static str },
+}
+
+/// Check whether the websocket runtime can start.
+///
+/// If a credential is required, it must exist under `owner_scope_id` or the
+/// caller must skip the spawn — otherwise the runtime connects, is rejected
+/// (e.g. Discord close code 4003), and the reconnect loop retries forever
+/// (issue #2557).
+///
+/// `credential_name` is `Some` only when the capability declared one and it
+/// validated as a [`CredentialName`]; the caller performs that validation
+/// so this function handles only presence-in-store, not name syntax.
+///
+/// Transient errors from the secrets store (e.g. a dropped DB connection)
+/// are logged and treated as `Ready` so a store blip does not permanently
+/// block channel activation. If the credential is genuinely missing, the
+/// runtime-entry guard in `start_websocket_runtime` still catches it.
+async fn websocket_auth_preflight(
+    credential_name: Option<&CredentialName>,
+    store: Option<&(dyn SecretsStore + Send + Sync)>,
+    owner_scope_id: &str,
+) -> WebsocketAuthPreflight {
+    let Some(credential_name) = credential_name else {
+        return WebsocketAuthPreflight::Ready;
+    };
+    let Some(store) = store else {
+        return WebsocketAuthPreflight::MissingCredential {
+            credential_name: credential_name.clone(),
+        };
+    };
+    match store.exists(owner_scope_id, credential_name.as_str()).await {
+        Ok(true) => WebsocketAuthPreflight::Ready,
+        Ok(false) => WebsocketAuthPreflight::MissingCredential {
+            credential_name: credential_name.clone(),
+        },
+        Err(error) => {
+            tracing::warn!(
+                owner_scope_id = %owner_scope_id,
+                credential_name = %credential_name,
+                error = %error,
+                "Websocket auth preflight store lookup failed; proceeding to spawn and deferring to runtime-entry guard"
+            );
+            WebsocketAuthPreflight::Ready
+        }
+    }
+}
+
+/// Compose the websocket start decision from capabilities + auth state.
+///
+/// Validates `config.identify_secret_name` (a raw string on the capability
+/// wire contract) into a [`CredentialName`] at this boundary so that all
+/// internal flow below uses the typed identity. Validation failure surfaces
+/// as [`WebsocketStartDecision::MalformedConfig`].
+async fn websocket_start_decision(
+    capabilities: &ChannelCapabilities,
+    store: Option<&(dyn SecretsStore + Send + Sync)>,
+    owner_scope_id: &str,
+) -> WebsocketStartDecision {
+    let Some(config) = WebsocketRuntimeConfig::from_capabilities(capabilities) else {
+        return WebsocketStartDecision::NotConfigured;
+    };
+    if !config.connect_on_start {
+        return WebsocketStartDecision::NotConfigured;
+    }
+    // Validate the declared credential name once, at the boundary between the
+    // capability JSON (raw string) and internal flow (typed `CredentialName`).
+    let credential_name = match config.identify_secret_name.as_deref() {
+        None => None,
+        Some(raw) => match CredentialName::new(raw) {
+            Ok(name) => Some(name),
+            Err(err) => {
+                return WebsocketStartDecision::MalformedConfig {
+                    reason: format!("invalid identify_secret_name {raw:?}: {err}"),
+                };
+            }
+        },
+    };
+    // `identify` and `identify_secret_name` must be declared together: the
+    // runtime builds an identify payload by filling the template with the
+    // resolved secret, so either side on its own produces a connection that
+    // cannot send a valid Identify and will be kicked by the peer.
+    match (config.identify.as_ref(), credential_name.as_ref()) {
+        (None, Some(_)) => {
+            return WebsocketStartDecision::MalformedConfig {
+                reason: "identify_secret_name declared without identify template".to_string(),
+            };
+        }
+        (Some(_), None) => {
+            return WebsocketStartDecision::MalformedConfig {
+                reason: "identify template declared without identify_secret_name".to_string(),
+            };
+        }
+        _ => {}
+    }
+    // Normalize `config.identify_secret_name` to the canonicalized form
+    // (`CredentialName::new` trims whitespace and folds `-` → `_`) before
+    // returning `Spawn`. Preflight checks existence via the canonical form,
+    // but `resolve_websocket_identify_message` later reads the raw string
+    // from the config; without this write-back, a capability declaring
+    // `"github-token"` against a store holding `"github_token"` would pass
+    // preflight and then fail in the runtime.
+    let mut config = config;
+    if let Some(name) = credential_name.as_ref() {
+        config.identify_secret_name = Some(name.as_str().to_string());
+    }
+    match websocket_auth_preflight(credential_name.as_ref(), store, owner_scope_id).await {
+        WebsocketAuthPreflight::Ready => WebsocketStartDecision::Spawn(config),
+        WebsocketAuthPreflight::MissingCredential { credential_name } => {
+            WebsocketStartDecision::MissingAuth { credential_name }
+        }
+    }
+}
+
+/// True if `url` points at a Discord gateway host.
+///
+/// Websocket close codes 4000–4999 are application-defined (RFC 6455). Discord
+/// publishes specific semantics for 4003/4004/4010–4014; other providers may
+/// reuse the same numeric codes for different meanings, so the Discord-specific
+/// terminal-code table must be gated on the actual host.
+fn is_discord_gateway_host(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    match parsed.host_str().map(str::to_ascii_lowercase) {
+        Some(host) => host == "gateway.discord.gg" || host == "gateway.discord.com",
+        None => false,
+    }
+}
+
+/// Classify a websocket close code to decide whether to reconnect or stop.
+///
+/// Fatal Discord gateway codes (per the Discord opcodes/close-code
+/// documentation) always indicate a configuration problem the runtime cannot
+/// recover from on its own — more reconnects will produce the same rejection.
+/// The Discord-specific code table is only applied when `url` is a Discord
+/// gateway host; other providers fall through to `Reconnect`.
+fn classify_websocket_close_code(code: u16, url: &str) -> WebsocketCloseDisposition {
+    if !is_discord_gateway_host(url) {
+        return WebsocketCloseDisposition::Reconnect;
+    }
+    match code {
+        4003 => WebsocketCloseDisposition::Terminal {
+            reason: "not_authenticated",
+        },
+        4004 => WebsocketCloseDisposition::Terminal {
+            reason: "authentication_failed",
+        },
+        4010 => WebsocketCloseDisposition::Terminal {
+            reason: "invalid_shard",
+        },
+        4011 => WebsocketCloseDisposition::Terminal {
+            reason: "sharding_required",
+        },
+        4012 => WebsocketCloseDisposition::Terminal {
+            reason: "invalid_api_version",
+        },
+        4013 => WebsocketCloseDisposition::Terminal {
+            reason: "invalid_intents",
+        },
+        4014 => WebsocketCloseDisposition::Terminal {
+            reason: "disallowed_intents",
+        },
+        _ => WebsocketCloseDisposition::Reconnect,
+    }
 }
 
 fn build_websocket_identify_message(identify: &serde_json::Value, token: &str) -> Option<String> {
@@ -3536,6 +4091,7 @@ struct WebsocketPollContext {
     credentials: Arc<RwLock<HashMap<String, String>>>,
     pairing_store: Arc<PairingStore>,
     workspace_store: Arc<ChannelWorkspaceStore>,
+    callback_lock: Arc<tokio::sync::Mutex<()>>,
     message_tx: Arc<RwLock<Option<mpsc::Sender<IncomingMessage>>>>,
     rate_limiter: Arc<RwLock<ChannelEmitRateLimiter>>,
     last_broadcast_metadata: Arc<tokio::sync::RwLock<Option<String>>>,
@@ -3582,14 +4138,17 @@ fn spawn_websocket_poll(poll_guard: tokio::sync::OwnedMutexGuard<()>, ctx: Webso
 
             match WasmChannel::execute_poll(
                 &ctx.channel_name,
+                &ctx.owner_scope_id,
                 &ctx.runtime,
                 &ctx.prepared,
                 &ctx.capabilities,
                 &ctx.credentials,
                 host_credentials,
                 ctx.pairing_store.clone(),
-                ctx.callback_timeout,
                 &ctx.workspace_store,
+                &ctx.callback_lock,
+                ctx.settings_store.as_ref(),
+                ctx.callback_timeout,
             )
             .await
             {
@@ -4086,10 +4645,12 @@ fn status_to_wit(
             },
             metadata_json,
         },
-        // Suggestions and richer UI/runtime telemetry are handled by the web/TUI surfaces.
+        // Suggestions and richer UI/runtime telemetry are handled by the web/TUI surfaces; skip for WASM channels.
         StatusUpdate::Suggestions { .. }
         | StatusUpdate::TurnCost { .. }
         | StatusUpdate::SkillActivated { .. }
+        | StatusUpdate::ToolResultFull { .. }
+        | StatusUpdate::TurnMetrics { .. }
         | StatusUpdate::JobStatus { .. }
         | StatusUpdate::JobResult { .. }
         | StatusUpdate::RoutineUpdate { .. }
@@ -4205,7 +4766,9 @@ fn extract_host_from_url(url: &str) -> Option<String> {
 ///
 /// The replacement preserves the original path and query string so tests can
 /// point production hosts at local fakes without adding channel-specific code.
-#[cfg(test)]
+/// Replacement bases must be loopback URLs because credentials are injected
+/// before transport rewrite.
+#[cfg(any(test, debug_assertions))]
 fn rewrite_http_url_for_testing(url: &str) -> Option<String> {
     let parsed = url::Url::parse(url).ok()?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -4226,7 +4789,7 @@ fn rewrite_http_url_for_testing(url: &str) -> Option<String> {
     Some(rewritten)
 }
 
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 fn parse_test_http_rewrite_map(raw: &str) -> HashMap<String, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -4240,6 +4803,15 @@ fn parse_test_http_rewrite_map(raw: &str) -> HashMap<String, String> {
                 let host = host.trim().to_lowercase();
                 let base = base.trim().trim_end_matches('/').to_string();
                 if host.is_empty() || base.is_empty() {
+                    return None;
+                }
+                if !is_loopback_test_rewrite_base(&base) {
+                    tracing::warn!(
+                        env_var = TEST_HTTP_REWRITE_MAP_ENV,
+                        %host,
+                        %base,
+                        "Ignoring non-loopback test HTTP rewrite target"
+                    );
                     return None;
                 }
                 Some((host, base))
@@ -4256,11 +4828,40 @@ fn parse_test_http_rewrite_map(raw: &str) -> HashMap<String, String> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
+fn is_loopback_test_rewrite_base(base: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(base) else {
+        return false;
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+#[cfg(any(test, debug_assertions))]
 fn rewrite_telegram_api_url_for_testing(url: &str) -> Option<String> {
     let override_base = crate::config::helpers::env_or_override(TELEGRAM_TEST_API_BASE_ENV)
         .map(|value| value.trim().trim_end_matches('/').to_string())
-        .filter(|value| !value.is_empty())?;
+        .filter(|value| !value.is_empty())
+        .filter(|base| {
+            if is_loopback_test_rewrite_base(base) {
+                true
+            } else {
+                tracing::warn!(
+                    env_var = TELEGRAM_TEST_API_BASE_ENV,
+                    %base,
+                    "Ignoring non-loopback Telegram test API rewrite target"
+                );
+                false
+            }
+        })?;
 
     let parsed = url::Url::parse(url).ok()?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -4355,7 +4956,9 @@ async fn resolve_channel_host_credentials(
         }
 
         resolved.push(ResolvedHostCredential {
+            secret_name: mapping.secret_name.clone(),
             host_patterns: mapping.host_patterns.clone(),
+            path_patterns: mapping.path_patterns.clone(),
             headers: injected.headers,
             query_params: injected.query_params,
             secret_value: secret.expose().to_string(),
@@ -4451,6 +5054,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use ironclaw_common::CredentialName;
     use secrecy::SecretString;
 
     use crate::channels::Channel;
@@ -4462,13 +5066,14 @@ mod tests {
     };
     use crate::channels::wasm::wrapper::{
         EmitDispatchContext, HttpResponse, TELEGRAM_TEST_API_BASE_ENV, TEST_HTTP_REWRITE_MAP_ENV,
-        WasmChannel, WebsocketRuntimeConfig, build_discord_gateway_presence_update,
+        WasmChannel, WebsocketAuthPreflight, WebsocketCloseDisposition, WebsocketRuntimeConfig,
+        WebsocketStartDecision, build_discord_gateway_presence_update,
         build_websocket_identify_message, build_websocket_resume_message,
-        discord_gateway_presence_status, drain_guest_logs, parse_websocket_invalid_session,
-        parse_websocket_ready_session, resolve_websocket_identify_message,
-        rewrite_http_url_for_testing, should_warn_on_heartbeat_interval,
-        uses_owner_broadcast_target, websocket_heartbeat_sleep_duration,
-        websocket_reconnect_backoff,
+        classify_websocket_close_code, discord_gateway_presence_status, drain_guest_logs,
+        parse_websocket_invalid_session, parse_websocket_ready_session,
+        resolve_websocket_identify_message, rewrite_http_url_for_testing,
+        should_warn_on_heartbeat_interval, uses_owner_broadcast_target, websocket_auth_preflight,
+        websocket_heartbeat_sleep_duration, websocket_reconnect_backoff, websocket_start_decision,
     };
     use crate::pairing::PairingStore;
     use crate::secrets::{CreateSecretParams, InMemorySecretsStore, SecretsCrypto, SecretsStore};
@@ -4539,6 +5144,34 @@ mod tests {
             "{}".to_string(),
             Arc::new(PairingStore::new_noop()),
             settings_store,
+        )
+    }
+
+    #[cfg(feature = "libsql")]
+    fn create_test_slack_channel_with_settings_store(
+        settings_store: Arc<dyn crate::db::SettingsStore>,
+        owner_scope_id: &str,
+    ) -> WasmChannel {
+        let config = WasmChannelRuntimeConfig::for_testing();
+        let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
+        let prepared = Arc::new(PreparedChannelModule {
+            name: "slack".to_string(),
+            description: "Slack test channel".to_string(),
+            component: None,
+            limits: ResourceLimits::default(),
+        });
+        let capabilities = ChannelCapabilities::for_channel("slack")
+            .with_path("/webhook/slack")
+            .with_durable_workspace_paths(vec!["state/active_threads".to_string()]);
+
+        WasmChannel::new(
+            runtime,
+            prepared,
+            capabilities,
+            owner_scope_id,
+            "{}".to_string(),
+            Arc::new(PairingStore::new_noop()),
+            Some(settings_store),
         )
     }
 
@@ -4666,6 +5299,7 @@ mod tests {
                     prefix: Some("Bot ".to_string()),
                 },
                 host_patterns: vec!["discord.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -4839,6 +5473,344 @@ mod tests {
         check(5, 32);
         check(6, 64);
         check(10, 64); // capped at 2^6
+    }
+
+    /// Build a Discord-like channel capability set with `connect_on_start=true`
+    /// and an `identify_secret_name` — shared fixture for auth-gating tests.
+    fn discord_websocket_capabilities() -> ChannelCapabilities {
+        let tool_capabilities = ToolCapabilities {
+            http: Some(HttpCapability::new(vec![EndpointPattern::host(
+                "gateway.discord.gg",
+            )])),
+            websocket: Some(serde_json::json!({
+                "url": "wss://gateway.discord.gg/?v=10&encoding=json",
+                "connect_on_start": true,
+                "identify_secret_name": "discord_bot_token",
+                "identify": {
+                    "intents": 513,
+                    "properties": { "os": "linux", "browser": "ironclaw", "device": "ironclaw" }
+                }
+            })),
+            ..Default::default()
+        };
+        ChannelCapabilities::for_channel("discord").with_tool_capabilities(tool_capabilities)
+    }
+
+    fn empty_secrets_store() -> Arc<dyn SecretsStore + Send + Sync> {
+        let crypto =
+            Arc::new(SecretsCrypto::new(SecretString::from(TEST_CRYPTO_KEY.to_string())).unwrap());
+        Arc::new(InMemorySecretsStore::new(crypto))
+    }
+
+    fn discord_credential_name() -> CredentialName {
+        CredentialName::new("discord_bot_token").expect("valid credential name")
+    }
+
+    /// Regression test for #2557: websocket preflight must report
+    /// MissingCredential when a required credential is absent under the
+    /// owner scope.
+    #[tokio::test]
+    async fn test_websocket_auth_preflight_missing_when_secret_absent() {
+        let store = empty_secrets_store();
+        let credential = discord_credential_name();
+
+        let result =
+            websocket_auth_preflight(Some(&credential), Some(store.as_ref()), "owner_42").await;
+
+        assert_eq!(
+            result,
+            WebsocketAuthPreflight::MissingCredential {
+                credential_name: credential,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_websocket_auth_preflight_ready_when_secret_present() {
+        let store = empty_secrets_store();
+        store
+            .create(
+                "owner_42",
+                CreateSecretParams {
+                    name: "discord_bot_token".to_string(),
+                    value: SecretString::from("token".to_string()),
+                    provider: None,
+                    expires_at: None,
+                },
+            )
+            .await
+            .unwrap();
+        let credential = discord_credential_name();
+
+        let result =
+            websocket_auth_preflight(Some(&credential), Some(store.as_ref()), "owner_42").await;
+
+        assert_eq!(result, WebsocketAuthPreflight::Ready);
+    }
+
+    /// A websocket with no declared credential (unauthenticated gateway) must
+    /// still be allowed to start.
+    #[tokio::test]
+    async fn test_websocket_auth_preflight_ready_when_no_secret_required() {
+        let store = empty_secrets_store();
+
+        let result = websocket_auth_preflight(None, Some(store.as_ref()), "owner_42").await;
+
+        assert_eq!(result, WebsocketAuthPreflight::Ready);
+    }
+
+    /// Caller-level regression test for #2557: the decision function that
+    /// `Channel::start` delegates to must report MissingAuth (not Spawn) when
+    /// the declared identify credential is absent. A future refactor that
+    /// dropped the preflight call would flip this to `Spawn`, which this test
+    /// rejects.
+    #[tokio::test]
+    async fn test_websocket_start_decision_missing_auth_when_secret_absent() {
+        let store = empty_secrets_store();
+        let capabilities = discord_websocket_capabilities();
+
+        let decision =
+            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
+
+        assert_eq!(
+            decision,
+            WebsocketStartDecision::MissingAuth {
+                credential_name: discord_credential_name(),
+            }
+        );
+    }
+
+    /// If `identify_secret_name` on the capability JSON fails
+    /// [`CredentialName`] validation, the decision must surface that as
+    /// MalformedConfig rather than proceeding to preflight.
+    #[tokio::test]
+    async fn test_websocket_start_decision_malformed_config_with_invalid_credential_name() {
+        let store = empty_secrets_store();
+        let tool_capabilities = ToolCapabilities {
+            http: Some(HttpCapability::new(vec![EndpointPattern::host(
+                "gateway.discord.gg",
+            )])),
+            websocket: Some(serde_json::json!({
+                "url": "wss://gateway.discord.gg/?v=10&encoding=json",
+                "connect_on_start": true,
+                "identify_secret_name": "Bad Name With Spaces",
+                "identify": { "intents": 513 }
+            })),
+            ..Default::default()
+        };
+        let capabilities =
+            ChannelCapabilities::for_channel("discord").with_tool_capabilities(tool_capabilities);
+
+        let decision =
+            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
+
+        let WebsocketStartDecision::MalformedConfig { reason } = decision else {
+            panic!("expected MalformedConfig, got {decision:?}");
+        };
+        assert!(
+            reason.contains("invalid identify_secret_name"),
+            "reason should name the failing field, got: {reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_websocket_start_decision_spawn_when_secret_present() {
+        let store = empty_secrets_store();
+        store
+            .create(
+                "owner_42",
+                CreateSecretParams {
+                    name: "discord_bot_token".to_string(),
+                    value: SecretString::from("token".to_string()),
+                    provider: None,
+                    expires_at: None,
+                },
+            )
+            .await
+            .unwrap();
+        let capabilities = discord_websocket_capabilities();
+
+        let decision =
+            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
+
+        assert!(matches!(decision, WebsocketStartDecision::Spawn(_)));
+    }
+
+    /// The reverse of the existing "secret without identify template" case:
+    /// `identify` present but no `identify_secret_name` must also be flagged
+    /// as `MalformedConfig`. Without this branch, the runtime spawned but
+    /// could not build an Identify payload, so the peer would kick it — the
+    /// exact #2557 spin we are preventing.
+    #[tokio::test]
+    async fn test_websocket_start_decision_malformed_config_without_secret_name() {
+        let store = empty_secrets_store();
+        let tool_capabilities = ToolCapabilities {
+            http: Some(HttpCapability::new(vec![EndpointPattern::host(
+                "gateway.discord.gg",
+            )])),
+            websocket: Some(serde_json::json!({
+                "url": "wss://gateway.discord.gg/?v=10&encoding=json",
+                "connect_on_start": true,
+                "identify": { "intents": 513 }
+                // identify_secret_name intentionally omitted.
+            })),
+            ..Default::default()
+        };
+        let capabilities =
+            ChannelCapabilities::for_channel("discord").with_tool_capabilities(tool_capabilities);
+
+        let decision =
+            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
+
+        let WebsocketStartDecision::MalformedConfig { reason } = decision else {
+            panic!("expected MalformedConfig, got {decision:?}");
+        };
+        assert!(
+            reason.contains("identify template declared without identify_secret_name"),
+            "reason should name the missing field, got: {reason}"
+        );
+    }
+
+    /// `CredentialName::new` canonicalizes `-` to `_` and trims whitespace.
+    /// A capability declaring `"discord-bot-token"` against a store holding
+    /// `"discord_bot_token"` must pass preflight AND the returned Spawn
+    /// config must carry the canonicalized name — otherwise the runtime's
+    /// `resolve_websocket_identify_message` reads the raw dashed form and
+    /// fails the store lookup inside the spawn.
+    #[tokio::test]
+    async fn test_websocket_start_decision_spawn_canonicalizes_secret_name() {
+        let store = empty_secrets_store();
+        store
+            .create(
+                "owner_42",
+                CreateSecretParams {
+                    name: "discord_bot_token".to_string(), // canonical form
+                    value: SecretString::from("token".to_string()),
+                    provider: None,
+                    expires_at: None,
+                },
+            )
+            .await
+            .unwrap();
+        let tool_capabilities = ToolCapabilities {
+            http: Some(HttpCapability::new(vec![EndpointPattern::host(
+                "gateway.discord.gg",
+            )])),
+            websocket: Some(serde_json::json!({
+                "url": "wss://gateway.discord.gg/?v=10&encoding=json",
+                "connect_on_start": true,
+                "identify_secret_name": "discord-bot-token", // dashed, non-canonical
+                "identify": { "intents": 513 }
+            })),
+            ..Default::default()
+        };
+        let capabilities =
+            ChannelCapabilities::for_channel("discord").with_tool_capabilities(tool_capabilities);
+
+        let decision =
+            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
+
+        let WebsocketStartDecision::Spawn(config) = decision else {
+            panic!("expected Spawn, got {decision:?}");
+        };
+        assert_eq!(
+            config.identify_secret_name.as_deref(),
+            Some("discord_bot_token"),
+            "Spawn config must carry the canonicalized name so runtime lookups match preflight"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_websocket_start_decision_not_configured_without_websocket() {
+        let store = empty_secrets_store();
+        let capabilities = ChannelCapabilities::for_channel("plain").with_path("/webhook/plain");
+
+        let decision =
+            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
+
+        assert_eq!(decision, WebsocketStartDecision::NotConfigured);
+    }
+
+    /// A capability that declares `identify_secret_name` without an `identify`
+    /// template can never build a valid identify payload. Start decision must
+    /// surface that as `MalformedConfig`, not `MissingAuth`, so the operator
+    /// log line points at the real cause.
+    #[tokio::test]
+    async fn test_websocket_start_decision_malformed_config_without_identify_template() {
+        let store = empty_secrets_store();
+        let tool_capabilities = ToolCapabilities {
+            http: Some(HttpCapability::new(vec![EndpointPattern::host(
+                "gateway.discord.gg",
+            )])),
+            websocket: Some(serde_json::json!({
+                "url": "wss://gateway.discord.gg/?v=10&encoding=json",
+                "connect_on_start": true,
+                "identify_secret_name": "discord_bot_token"
+                // No `identify` template — malformed.
+            })),
+            ..Default::default()
+        };
+        let capabilities =
+            ChannelCapabilities::for_channel("discord").with_tool_capabilities(tool_capabilities);
+
+        let decision =
+            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
+
+        assert!(
+            matches!(decision, WebsocketStartDecision::MalformedConfig { .. }),
+            "expected MalformedConfig, got {decision:?}"
+        );
+    }
+
+    /// Regression test for #2557: fatal Discord gateway auth codes must be
+    /// terminal so the reconnect loop stops instead of spinning forever — but
+    /// only for Discord-gateway URLs, since 4000-series codes are
+    /// application-defined per RFC 6455.
+    #[test]
+    fn test_classify_websocket_close_code_terminal_for_discord_auth_failures() {
+        let discord_url = "wss://gateway.discord.gg/?v=10&encoding=json";
+        for code in [4003u16, 4004, 4010, 4011, 4012, 4013, 4014] {
+            assert!(
+                matches!(
+                    classify_websocket_close_code(code, discord_url),
+                    WebsocketCloseDisposition::Terminal { .. }
+                ),
+                "code {code} on Discord should be terminal"
+            );
+        }
+    }
+
+    #[test]
+    fn test_classify_websocket_close_code_reconnect_for_transient() {
+        let discord_url = "wss://gateway.discord.gg/?v=10&encoding=json";
+        for code in [1000u16, 1001, 1006, 4000, 4007, 4008, 4009] {
+            assert_eq!(
+                classify_websocket_close_code(code, discord_url),
+                WebsocketCloseDisposition::Reconnect,
+                "code {code} should be reconnectable"
+            );
+        }
+    }
+
+    /// The Discord-specific terminal codes must not apply to other providers:
+    /// 4000–4999 is application-defined (RFC 6455), so the same numeric code
+    /// on a non-Discord websocket could mean anything and must default to
+    /// Reconnect.
+    #[test]
+    fn test_classify_websocket_close_code_non_discord_host_never_terminal() {
+        for url in [
+            "wss://example.test/",
+            "wss://ws.slack.com/",
+            "wss://gateway.discord.gg.attacker.example/", // host-suffix spoof
+        ] {
+            for code in [4003u16, 4004, 4010, 4011, 4012, 4013, 4014] {
+                assert_eq!(
+                    classify_websocket_close_code(code, url),
+                    WebsocketCloseDisposition::Reconnect,
+                    "code {code} on {url} must default to Reconnect"
+                );
+            }
+        }
     }
 
     #[test]
@@ -5026,22 +5998,125 @@ mod tests {
         let timeout = std::time::Duration::from_secs(5);
 
         let workspace_store = Arc::new(crate::channels::wasm::host::ChannelWorkspaceStore::new());
+        let callback_lock = Arc::new(tokio::sync::Mutex::new(()));
 
         let result = WasmChannel::execute_poll(
             "poll-test",
+            "default",
             &runtime,
             &prepared,
             &capabilities,
             &credentials,
             Vec::new(), // no host credentials in test
             Arc::new(PairingStore::new_noop()),
-            timeout,
             &workspace_store,
+            &callback_lock,
+            None,
+            timeout,
         )
         .await;
 
         assert!(result.is_ok()); // safety: test-only assertion
         assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_on_respond_workspace_write_commit_survives_later_callback() {
+        use crate::channels::wasm::host::{ChannelHostState, ChannelWorkspaceStore};
+        use crate::tools::wasm::{WorkspaceCapability, WorkspaceReader};
+
+        let workspace_store = ChannelWorkspaceStore::new();
+        let mut respond_state =
+            ChannelHostState::new("slack", ChannelCapabilities::for_channel("slack"));
+        respond_state
+            .workspace_write(
+                "state/active_threads",
+                r#"[{"team_id":"T1","channel":"C1","thread_ts":"1710000000.000001"}]"#.to_string(),
+            )
+            .expect("on_respond write should be accepted");
+
+        WasmChannel::commit_callback_workspace_writes(&mut respond_state, &workspace_store);
+        assert_eq!(respond_state.pending_writes_count(), 0);
+
+        let workspace_store = Arc::new(workspace_store);
+        let mut later_caps = ChannelCapabilities::for_channel("slack");
+        later_caps.tool_capabilities.workspace_read = Some(WorkspaceCapability {
+            allowed_prefixes: vec![],
+            reader: Some(Arc::clone(&workspace_store) as Arc<dyn WorkspaceReader>),
+        });
+        let later_state = ChannelHostState::new("slack", later_caps);
+
+        assert_eq!(
+            later_state
+                .workspace_read("state/active_threads")
+                .expect("later callback read should not fail"),
+            Some(
+                r#"[{"team_id":"T1","channel":"C1","thread_ts":"1710000000.000001"}]"#.to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_inject_workspace_reader_supports_broadcast_callback_state_reads() {
+        use crate::channels::wasm::host::{
+            ChannelHostState, ChannelWorkspaceStore, PendingWorkspaceWrite,
+        };
+
+        let workspace_store = Arc::new(ChannelWorkspaceStore::new());
+        workspace_store.commit_writes(&[PendingWorkspaceWrite {
+            path: "channels/feishu/state/api_base".to_string(),
+            content: "https://open.feishu.cn".to_string(),
+        }]);
+
+        let callback_caps = WasmChannel::inject_workspace_reader(
+            &ChannelCapabilities::for_channel("feishu"),
+            &workspace_store,
+        );
+        let callback_state = ChannelHostState::new("feishu", callback_caps);
+
+        assert_eq!(
+            callback_state
+                .workspace_read("state/api_base")
+                .expect("callback read should not fail"),
+            Some("https://open.feishu.cn".to_string())
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_durable_workspace_paths_restore_across_channel_restart() {
+        use crate::channels::wasm::host::PendingWorkspaceWrite;
+        use crate::testing::test_db;
+
+        let (db, _temp_dir) = test_db().await;
+        let settings_store = Arc::clone(&db) as Arc<dyn crate::db::SettingsStore>;
+        let channel = create_test_slack_channel_with_settings_store(
+            Arc::clone(&settings_store),
+            "owner-scope",
+        );
+
+        channel.workspace_store.commit_writes(&[PendingWorkspaceWrite {
+            path: "channels/slack/state/active_threads".to_string(),
+            content: r#"[{"team_id":"T1","channel":"C1","thread_ts":"1710000000.000001","last_seen_ms":1710000000000}]"#.to_string(),
+        }]);
+        channel
+            .persist_durable_workspace_snapshot_if_needed(&[
+                "channels/slack/state/active_threads".to_string()
+            ])
+            .await;
+
+        let restored = create_test_slack_channel_with_settings_store(settings_store, "owner-scope");
+        restored.load_durable_workspace_snapshot().await;
+
+        assert_eq!(
+            crate::tools::wasm::WorkspaceReader::read(
+                &*restored.workspace_store,
+                "channels/slack/state/active_threads",
+            ),
+            Some(
+                r#"[{"team_id":"T1","channel":"C1","thread_ts":"1710000000.000001","last_seen_ms":1710000000000}]"#.to_string()
+            )
+        );
     }
 
     #[tokio::test]
@@ -5694,7 +6769,7 @@ mod tests {
         let metadata = serde_json::json!({"chat_id": 42});
         let wit = status_to_wit(
             &crate::channels::StatusUpdate::AuthRequired {
-                extension_name: "weather".to_string(),
+                extension_name: ironclaw_common::ExtensionName::new("weather").unwrap(),
                 instructions: Some("Paste your token".to_string()),
                 auth_url: Some("https://example.com/auth".to_string()),
                 setup_url: None,
@@ -5746,6 +6821,7 @@ mod tests {
                 error: None,
                 parameters: None,
                 call_id: None,
+                duration_ms: None,
             },
             &metadata,
         )
@@ -5770,6 +6846,7 @@ mod tests {
                 error: Some("connection refused".to_string()),
                 parameters: None,
                 call_id: None,
+                duration_ms: None,
             },
             &metadata,
         )
@@ -5857,7 +6934,7 @@ mod tests {
         let metadata = serde_json::json!(null);
         let wit = status_to_wit(
             &crate::channels::StatusUpdate::AuthCompleted {
-                extension_name: "weather".to_string(),
+                extension_name: ironclaw_common::ExtensionName::new("weather").unwrap(),
                 success: true,
                 message: "Token saved".to_string(),
             },
@@ -5880,7 +6957,7 @@ mod tests {
         let metadata = serde_json::json!(null);
         let wit = status_to_wit(
             &crate::channels::StatusUpdate::AuthCompleted {
-                extension_name: "weather".to_string(),
+                extension_name: ironclaw_common::ExtensionName::new("weather").unwrap(),
                 success: false,
                 message: "Invalid token".to_string(),
             },
@@ -6133,7 +7210,9 @@ mod tests {
         );
 
         let host_creds = vec![ResolvedHostCredential {
+            secret_name: "host_secret".to_string(),
             host_patterns: vec!["api.example.com".to_string()],
+            path_patterns: vec![],
             headers: std::collections::HashMap::new(),
             query_params: std::collections::HashMap::new(),
             secret_value: "host secret+value".to_string(),
@@ -6183,6 +7262,91 @@ mod tests {
 
         let input = "should not match anything";
         assert_eq!(store.redact_credentials(input), input);
+    }
+
+    #[test]
+    fn test_inject_host_credentials_path_scoped() {
+        use super::{ChannelStoreData, ResolvedHostCredential};
+        use std::collections::HashMap;
+
+        let host_creds = vec![ResolvedHostCredential {
+            secret_name: "scoped_token".to_string(),
+            host_patterns: vec!["api.example.com".to_string()],
+            path_patterns: vec!["/api/v1".to_string()],
+            headers: {
+                let mut h = HashMap::new();
+                h.insert(
+                    "Authorization".to_string(),
+                    "Bearer scoped-token".to_string(),
+                );
+                h
+            },
+            query_params: HashMap::new(),
+            secret_value: "scoped-token".to_string(),
+        }];
+
+        let store = ChannelStoreData::new(
+            1024 * 1024,
+            "test",
+            ChannelCapabilities::default(),
+            HashMap::new(),
+            host_creds,
+            Arc::new(PairingStore::new_noop()),
+        );
+
+        // Matching host + matching path → inject
+        let mut headers = HashMap::new();
+        let mut url = "https://api.example.com/api/v1/users".to_string();
+        store.inject_host_credentials("api.example.com", &mut headers, &mut url);
+        assert_eq!(
+            headers.get("Authorization"),
+            Some(&"Bearer scoped-token".to_string())
+        );
+
+        // Matching host, different path → no injection
+        let mut headers2 = HashMap::new();
+        let mut url2 = "https://api.example.com/other/endpoint".to_string();
+        store.inject_host_credentials("api.example.com", &mut headers2, &mut url2);
+        assert!(!headers2.contains_key("Authorization"));
+
+        // Prefix-boundary attack → no injection
+        let mut headers3 = HashMap::new();
+        let mut url3 = "https://api.example.com/api/v1-malicious".to_string();
+        store.inject_host_credentials("api.example.com", &mut headers3, &mut url3);
+        assert!(!headers3.contains_key("Authorization"));
+    }
+
+    #[test]
+    fn test_inject_host_credentials_empty_path_patterns_matches_all() {
+        use super::{ChannelStoreData, ResolvedHostCredential};
+        use std::collections::HashMap;
+
+        let host_creds = vec![ResolvedHostCredential {
+            secret_name: "api_key".to_string(),
+            host_patterns: vec!["api.example.com".to_string()],
+            path_patterns: vec![], // empty → all paths
+            headers: {
+                let mut h = HashMap::new();
+                h.insert("X-Api-Key".to_string(), "k".to_string());
+                h
+            },
+            query_params: HashMap::new(),
+            secret_value: "k".to_string(),
+        }];
+
+        let store = ChannelStoreData::new(
+            1024 * 1024,
+            "test",
+            ChannelCapabilities::default(),
+            HashMap::new(),
+            host_creds,
+            Arc::new(PairingStore::new_noop()),
+        );
+
+        let mut headers = HashMap::new();
+        let mut url = "https://api.example.com/literally/anything".to_string();
+        store.inject_host_credentials("api.example.com", &mut headers, &mut url);
+        assert_eq!(headers.get("X-Api-Key"), Some(&"k".to_string()));
     }
 
     #[test]
@@ -6304,6 +7468,15 @@ mod tests {
                 .expect("Telegram URL should rewrite");
         assert_eq!(rewritten, "http://127.0.0.1:19001/bot123/sendMessage");
 
+        // Non-loopback rewrite targets are ignored because credential injection
+        // happens before test transport rewrite.
+        unsafe {
+            std::env::set_var(TELEGRAM_TEST_API_BASE_ENV, "https://example.com");
+        }
+        let rewritten =
+            rewrite_telegram_api_url_for_testing("https://api.telegram.org/bot123/sendMessage");
+        assert!(rewritten.is_none());
+
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             if let Some(value) = original {
@@ -6385,6 +7558,7 @@ mod tests {
                 size_bytes: Some(50_000),
                 source_url: Some("https://api.telegram.org/file/photo123".to_string()),
                 storage_key: None,
+                local_path: None,
                 extracted_text: None,
                 data: Vec::new(),
                 duration_secs: None,
@@ -6396,6 +7570,7 @@ mod tests {
                 size_bytes: Some(120_000),
                 source_url: None,
                 storage_key: Some("store/doc456".to_string()),
+                local_path: None,
                 extracted_text: Some("Report contents...".to_string()),
                 data: Vec::new(),
                 duration_secs: None,
@@ -6574,7 +7749,7 @@ mod tests {
     #[tokio::test]
     async fn test_dispatch_emitted_messages_paired_sender_sets_owner_scope() {
         use crate::channels::wasm::host::EmittedMessage;
-        use crate::ownership::OwnerId;
+        use crate::ownership::{UserId, UserRole};
 
         let (pairing_store, _dir) = make_db_backed_pairing_store("owner-scope").await;
         let pairing_request = pairing_store
@@ -6589,7 +7764,7 @@ mod tests {
             .approve(
                 "telegram",
                 &pairing_request.code,
-                &OwnerId::from("owner-scope"),
+                &UserId::from_trusted("owner-scope".into(), UserRole::Regular),
             )
             .await
             .expect("pairing approval");
@@ -6804,18 +7979,87 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_http_url_for_testing_uses_host_map() {
-        use std::sync::{Mutex, OnceLock};
+    fn test_http_request_scans_headers_before_placeholder_substitution() {
+        use super::ChannelStoreData;
+        use std::collections::HashMap;
 
-        static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
-        let _lock = ENV_MUTEX
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("env mutex poisoned");
-
+        let _guard = crate::config::helpers::lock_env();
         let original = std::env::var(TEST_HTTP_REWRITE_MAP_ENV).ok();
 
-        // SAFETY: guarded by ENV_MUTEX — no concurrent env access.
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var(
+                TEST_HTTP_REWRITE_MAP_ENV,
+                r#"{"slack.com":"http://127.0.0.1:1"}"#,
+            );
+        }
+
+        let capabilities =
+            ChannelCapabilities::for_channel("test").with_tool_capabilities(ToolCapabilities {
+                http: Some(HttpCapability::new(vec![EndpointPattern::host(
+                    "slack.com",
+                )])),
+                ..Default::default()
+            });
+
+        // Placeholder whose substituted value matches the openai_api_key leak
+        // pattern (`sk-(?:proj-)?[a-zA-Z0-9]{20,}`). If the scan ran AFTER
+        // `inject_credentials` replaced `{FAKE_TOKEN}` in the Authorization
+        // header, the Bearer value would trip the detector.
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "FAKE_TOKEN".to_string(),
+            "sk-proj-TESTFAKEKEY01234567890abcdef".to_string(),
+        );
+
+        let mut store = ChannelStoreData::new(
+            1024 * 1024,
+            "test",
+            capabilities,
+            credentials,
+            Vec::new(),
+            Arc::new(PairingStore::new_noop()),
+        );
+
+        let result = super::near::agent::channel_host::Host::http_request(
+            &mut store,
+            "BREW".to_string(),
+            "https://slack.com/api/chat.postMessage".to_string(),
+            r#"{"Authorization":"Bearer {FAKE_TOKEN}"}"#.to_string(),
+            None,
+            Some(1_000),
+        );
+
+        // Reaching the unsupported-method branch proves the leak scan accepted
+        // the raw `Bearer {FAKE_TOKEN}` header value. A regression to
+        // post-injection scanning would surface as "Potential secret leak
+        // blocked" before method dispatch.
+        let error = result.expect_err("unsupported method should fail after leak scan");
+        assert!(
+            !error.contains("Potential secret leak blocked"),
+            "placeholder-substituted credential must not trigger request leak scan: {error}"
+        );
+        assert!(
+            error.contains("Unsupported HTTP method: BREW"),
+            "expected unsupported method after leak scan, got: {error}"
+        );
+
+        // SAFETY: Under ENV_MUTEX, restore original state.
+        unsafe {
+            if let Some(ref val) = original {
+                std::env::set_var(TEST_HTTP_REWRITE_MAP_ENV, val);
+            } else {
+                std::env::remove_var(TEST_HTTP_REWRITE_MAP_ENV);
+            }
+        }
+    }
+
+    #[test]
+    fn test_rewrite_http_url_for_testing_uses_host_map() {
+        let _guard = crate::config::helpers::lock_env();
+        let original = std::env::var(TEST_HTTP_REWRITE_MAP_ENV).ok();
+
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::set_var(
                 TEST_HTTP_REWRITE_MAP_ENV,
@@ -6839,6 +8083,17 @@ mod tests {
         );
         // Non-Slack URL should not be rewritten
         let result = rewrite_http_url_for_testing("https://api.telegram.org/bot123/getMe");
+        assert!(result.is_none());
+
+        // Non-loopback rewrite targets are ignored because credential injection
+        // happens before test transport rewrite.
+        unsafe {
+            std::env::set_var(
+                TEST_HTTP_REWRITE_MAP_ENV,
+                r#"{"slack.com":"https://example.com"}"#,
+            );
+        }
+        let result = rewrite_http_url_for_testing("https://slack.com/api/chat.postMessage");
         assert!(result.is_none());
 
         // SAFETY: guarded by ENV_MUTEX — restore original state.

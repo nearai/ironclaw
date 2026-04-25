@@ -461,7 +461,7 @@ async fn test_private_messages_use_chat_id_as_thread_scope() {
             .await
             .expect("message should arrive")
             .expect("stream should yield a message");
-        assert_eq!(msg.thread_id.as_deref(), Some("999"));
+        assert_eq!(msg.thread_id.as_ref().map(|t| t.as_str()), Some("999"));
         assert_eq!(msg.conversation_scope(), Some("999"));
     }
 
@@ -572,7 +572,7 @@ async fn test_private_dm_webhook_and_reply_use_fake_telegram_api() {
         .expect("message should arrive")
         .expect("stream should yield a message");
     assert_eq!(incoming.content, "hello from telegram dm");
-    assert_eq!(incoming.thread_id.as_deref(), Some("999"));
+    assert_eq!(incoming.thread_id.as_ref().map(|t| t.as_str()), Some("999"));
 
     channel
         .respond(
@@ -832,7 +832,10 @@ async fn test_group_message_with_bot_mention_emits_cleaned_content() {
         .expect("message should arrive")
         .expect("stream should yield a message");
     assert_eq!(msg.content, "status please");
-    assert_eq!(msg.thread_id.as_deref(), Some("-123456789"));
+    assert_eq!(
+        msg.thread_id.as_ref().map(|t| t.as_str()),
+        Some("-123456789")
+    );
 }
 
 #[tokio::test]
@@ -938,7 +941,7 @@ async fn test_edited_message_emits_like_regular_message() {
         .expect("message should arrive")
         .expect("stream should yield a message");
     assert_eq!(msg.content, "edited telegram message");
-    assert_eq!(msg.thread_id.as_deref(), Some("999"));
+    assert_eq!(msg.thread_id.as_ref().map(|t| t.as_str()), Some("999"));
 }
 
 #[tokio::test]
@@ -2032,7 +2035,7 @@ async fn test_polling_mode_get_updates_via_fake_telegram_api() {
         .expect("stream should yield the polled message");
 
     assert_eq!(msg.content, "hello from polling");
-    assert_eq!(msg.thread_id.as_deref(), Some("999"));
+    assert_eq!(msg.thread_id.as_ref().map(|t| t.as_str()), Some("999"));
 
     // Trigger a second poll (should return empty, no new messages)
     channel

@@ -5,13 +5,13 @@
 //! - [`context`] — context building for LLM calls
 //! - [`intent`] — tool intent nudge detection
 
-pub mod compaction;
 pub mod context;
 pub mod loop_engine;
 pub mod orchestrator;
 pub mod prompt;
 pub mod scripting;
 pub mod structured;
+pub(crate) mod thread_context;
 pub mod trace;
 
 pub use loop_engine::ExecutionLoop;
