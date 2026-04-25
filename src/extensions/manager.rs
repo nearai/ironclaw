@@ -3772,6 +3772,15 @@ impl ExtensionManager {
             return Ok(AuthResult::authenticated(name, ExtensionKind::McpServer));
         }
 
+        // Don't run OAuth endpoint discovery when the server doesn't need HTTP
+        // auth. For stdio/unix transports `server.url` is an empty placeholder
+        // and the `url` crate fails with "Invalid URL: relative URL without a
+        // base"; for non-OAuth HTTP (e.g. localhost dev servers) there's
+        // nothing to discover. Issue #2923.
+        if !server.requires_auth() {
+            return Ok(AuthResult::no_auth_required(name, ExtensionKind::McpServer));
+        }
+
         // In gateway mode, build an auth URL and return it for the frontend to
         // open in the same browser. The gateway's /oauth/callback handler will
         // complete the token exchange.
@@ -4305,6 +4314,16 @@ impl ExtensionManager {
     async fn mcp_supports_auth(&self, server: &McpServerConfig) -> bool {
         if server.oauth.is_some() || server.requires_auth() {
             return true;
+        }
+
+        // Non-HTTP transports have no URL to probe for OAuth metadata.
+        // Short-circuit before the cache lookup so list() doesn't emit a
+        // "Failed to determine MCP auth support" debug log per stdio server.
+        if !matches!(
+            server.effective_transport(),
+            crate::tools::mcp::config::EffectiveTransport::Http
+        ) {
+            return false;
         }
 
         // Cache hit: avoid the network probe on every list() call. Cache is
@@ -11264,6 +11283,46 @@ mod tests {
         );
         assert_eq!(oauth.token_url, "https://example.com/oauth/token");
         assert_eq!(oauth.scopes, vec!["search:read".to_string()]);
+    }
+
+    /// Regression test for #2923. Drives `auth()` (the public caller) per
+    /// `.claude/rules/testing.md` → "Test Through the Caller": `requires_auth()`
+    /// was always correct; the bug was `auth_mcp` ignoring it.
+    #[tokio::test]
+    async fn auth_mcp_skips_oauth_discovery_for_stdio_transport() {
+        use crate::extensions::AuthStatus;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        // Real store — `add_mcp_server` with `None` falls back to
+        // `default_config_path()` (~/.ironclaw/mcp_servers.json), which
+        // isn't writable in sandboxed test runs.
+        let (store, _db_dir) = make_test_store().await;
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            Some(Arc::clone(&store)),
+        );
+
+        let stdio_server = McpServerConfig::new_stdio(
+            "local-stdio",
+            "/bin/echo",
+            vec![],
+            std::collections::HashMap::new(),
+        );
+        mgr.add_mcp_server(stdio_server, "test")
+            .await
+            .expect("add stdio server");
+
+        let result = mgr
+            .auth("local-stdio", "test")
+            .await
+            .expect("auth must not attempt OAuth discovery for stdio transport");
+        assert!(
+            matches!(result.status, AuthStatus::NoAuthRequired),
+            "expected NoAuthRequired for stdio transport, got {:?}",
+            result.status
+        );
     }
 
     #[test]
