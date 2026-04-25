@@ -150,6 +150,16 @@ dispatch success -> Completed
 dispatch failure -> Failed(error_kind = Dispatch)
 ```
 
+`resume_json` continues a `BlockedApproval` run only after loading an approved request and matching lease under the same tenant/user/invocation scope:
+
+```text
+Approved + matching fingerprint + active lease -> dispatch -> consume lease -> Completed
+Denied/Expired/Pending approval -> Failed(error_kind = ApprovalDenied/ApprovalExpired/ApprovalPending)
+fingerprint mismatch -> Failed(error_kind = InvocationFingerprintMismatch)
+missing lease -> Failed(error_kind = ApprovalLeaseMissing)
+dispatch failure -> Failed(error_kind = Dispatch)
+```
+
 The dispatcher remains run-state-unaware. It still routes already-authorized dispatches only.
 
 ---
@@ -158,7 +168,6 @@ The dispatcher remains run-state-unaware. It still routes already-authorized dis
 
 This slice does not implement:
 
-- invocation resume after approval
 - durable grant/lease persistence
 - append-only transition history
 - atomic transactions across run-state and approval stores
