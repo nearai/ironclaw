@@ -96,9 +96,12 @@ async fn records_for_scope(scope) -> Result<Vec<ProcessRecord>>;
 async fn status(scope, process_id) -> Result<Option<ProcessRecord>>;
 async fn kill(scope, process_id) -> Result<ProcessRecord>;
 async fn await_process(scope, process_id) -> Result<ProcessExit>;
+async fn subscribe(scope, process_id) -> Result<ProcessSubscription>;
 ```
 
-`status` preserves tenant/user isolation by returning `None` for out-of-scope records. `kill` delegates to the scoped store transition. `await_process` polls the scoped current-state store until the record reaches `Completed`, `Failed`, or `Killed`, then returns a terminal `ProcessExit`. Missing or out-of-scope records fail closed with `UnknownProcess`.
+`status` preserves tenant/user isolation by returning `None` for out-of-scope records. `kill` delegates to the scoped store transition. `await_process` polls the scoped current-state store until the record reaches `Completed`, `Failed`, or `Killed`, then returns a terminal `ProcessExit`. `subscribe` returns a scoped current-state subscription whose first `next()` yields the current record, whose later `next()` calls yield status changes, and whose terminal record is emitted once before returning `None`. Missing or out-of-scope records fail closed with `UnknownProcess`.
+
+The V1 subscription is intentionally scoped and current-state based. It does not expose raw process input/output, host paths, or cross-tenant existence information, and it does not require `CapabilityHost` or `ironclaw_dispatcher` to own process lifecycle mechanics.
 
 `BackgroundProcessManager` composes a `ProcessStore` and `ProcessExecutor`:
 
@@ -167,8 +170,8 @@ This slice does not implement:
 - direct WASM/Script/MCP process loops inside `ironclaw_processes`; runtime work is delegated through `ProcessExecutor`
 - dynamic executor-reported actual resource usage; completion reconciliation currently uses configured/default usage
 - cooperative cancellation/abort handles for running executor tasks
-- `subscribe` or streaming output APIs
-- durable process event projection/read APIs beyond the shared event sink
+- streaming output APIs
+- durable subscription cursors or process event projection/read APIs beyond the shared event sink/current-state subscription
 - process tree queries beyond parent process ID storage
 - durable resource ledger beyond the configured `ResourceGovernor` implementation
 - approval resume for `Action::SpawnCapability`
