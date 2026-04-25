@@ -5,6 +5,8 @@
 //! itself, or execute product workflows. Those responsibilities stay in the
 //! owning service crates.
 
+use std::sync::Arc;
+
 use ironclaw_events::{EventError, EventSink, RuntimeEvent};
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::RootFilesystem;
@@ -99,19 +101,39 @@ impl From<WasmError> for DispatchError {
     }
 }
 
+enum ServiceHandle<'a, T>
+where
+    T: ?Sized,
+{
+    Borrowed(&'a T),
+    Shared(Arc<T>),
+}
+
+impl<T> ServiceHandle<'_, T>
+where
+    T: ?Sized,
+{
+    fn as_ref(&self) -> &T {
+        match self {
+            Self::Borrowed(value) => value,
+            Self::Shared(value) => value.as_ref(),
+        }
+    }
+}
+
 /// Narrow runtime dispatcher over already-discovered extensions and services.
 pub struct RuntimeDispatcher<'a, F, G>
 where
     F: RootFilesystem,
     G: ResourceGovernor,
 {
-    registry: &'a ExtensionRegistry,
-    filesystem: &'a F,
-    governor: &'a G,
-    wasm_runtime: Option<&'a WasmRuntime>,
-    script_runtime: Option<&'a dyn ScriptExecutor>,
-    mcp_runtime: Option<&'a dyn McpExecutor>,
-    event_sink: Option<&'a dyn EventSink>,
+    registry: ServiceHandle<'a, ExtensionRegistry>,
+    filesystem: ServiceHandle<'a, F>,
+    governor: ServiceHandle<'a, G>,
+    wasm_runtime: Option<ServiceHandle<'a, WasmRuntime>>,
+    script_runtime: Option<ServiceHandle<'a, dyn ScriptExecutor + 'a>>,
+    mcp_runtime: Option<ServiceHandle<'a, dyn McpExecutor + 'a>>,
+    event_sink: Option<ServiceHandle<'a, dyn EventSink + 'a>>,
 }
 
 impl<'a, F, G> RuntimeDispatcher<'a, F, G>
@@ -121,9 +143,29 @@ where
 {
     pub fn new(registry: &'a ExtensionRegistry, filesystem: &'a F, governor: &'a G) -> Self {
         Self {
-            registry,
-            filesystem,
-            governor,
+            registry: ServiceHandle::Borrowed(registry),
+            filesystem: ServiceHandle::Borrowed(filesystem),
+            governor: ServiceHandle::Borrowed(governor),
+            wasm_runtime: None,
+            script_runtime: None,
+            mcp_runtime: None,
+            event_sink: None,
+        }
+    }
+
+    pub fn from_arcs(
+        registry: Arc<ExtensionRegistry>,
+        filesystem: Arc<F>,
+        governor: Arc<G>,
+    ) -> RuntimeDispatcher<'static, F, G>
+    where
+        F: 'static,
+        G: 'static,
+    {
+        RuntimeDispatcher {
+            registry: ServiceHandle::Shared(registry),
+            filesystem: ServiceHandle::Shared(filesystem),
+            governor: ServiceHandle::Shared(governor),
             wasm_runtime: None,
             script_runtime: None,
             mcp_runtime: None,
@@ -132,22 +174,42 @@ where
     }
 
     pub fn with_wasm_runtime(mut self, runtime: &'a WasmRuntime) -> Self {
-        self.wasm_runtime = Some(runtime);
+        self.wasm_runtime = Some(ServiceHandle::Borrowed(runtime));
+        self
+    }
+
+    pub fn with_wasm_runtime_arc(mut self, runtime: Arc<WasmRuntime>) -> Self {
+        self.wasm_runtime = Some(ServiceHandle::Shared(runtime));
         self
     }
 
     pub fn with_script_runtime(mut self, runtime: &'a dyn ScriptExecutor) -> Self {
-        self.script_runtime = Some(runtime);
+        self.script_runtime = Some(ServiceHandle::Borrowed(runtime));
+        self
+    }
+
+    pub fn with_script_runtime_arc(mut self, runtime: Arc<dyn ScriptExecutor>) -> Self {
+        self.script_runtime = Some(ServiceHandle::Shared(runtime));
         self
     }
 
     pub fn with_mcp_runtime(mut self, runtime: &'a dyn McpExecutor) -> Self {
-        self.mcp_runtime = Some(runtime);
+        self.mcp_runtime = Some(ServiceHandle::Borrowed(runtime));
+        self
+    }
+
+    pub fn with_mcp_runtime_arc(mut self, runtime: Arc<dyn McpExecutor>) -> Self {
+        self.mcp_runtime = Some(ServiceHandle::Shared(runtime));
         self
     }
 
     pub fn with_event_sink(mut self, sink: &'a dyn EventSink) -> Self {
-        self.event_sink = Some(sink);
+        self.event_sink = Some(ServiceHandle::Borrowed(sink));
+        self
+    }
+
+    pub fn with_event_sink_arc(mut self, sink: Arc<dyn EventSink>) -> Self {
+        self.event_sink = Some(ServiceHandle::Shared(sink));
         self
     }
 
@@ -163,7 +225,11 @@ where
         ))
         .await;
 
-        let descriptor = match self.registry.get_capability(&request.capability_id) {
+        let descriptor = match self
+            .registry
+            .as_ref()
+            .get_capability(&request.capability_id)
+        {
             Some(descriptor) => descriptor,
             None => {
                 let error = DispatchError::UnknownCapability {
@@ -174,7 +240,7 @@ where
                 return Err(error);
             }
         };
-        let package = match self.registry.get_extension(&descriptor.provider) {
+        let package = match self.registry.as_ref().get_extension(&descriptor.provider) {
             Some(package) => package,
             None => {
                 let error = DispatchError::UnknownProvider {
@@ -212,7 +278,7 @@ where
 
         match descriptor.runtime {
             RuntimeKind::Wasm => {
-                let Some(wasm_runtime) = self.wasm_runtime else {
+                let Some(wasm_runtime) = self.wasm_runtime.as_ref() else {
                     let error = DispatchError::MissingRuntimeBackend {
                         runtime: RuntimeKind::Wasm,
                     };
@@ -235,9 +301,10 @@ where
                 .await;
 
                 let execution = match wasm_runtime
+                    .as_ref()
                     .execute_extension_json(
-                        self.filesystem,
-                        self.governor,
+                        self.filesystem.as_ref(),
+                        self.governor.as_ref(),
                         WasmExecutionRequest {
                             package,
                             capability_id: &request.capability_id,
@@ -284,7 +351,7 @@ where
                 })
             }
             RuntimeKind::Script => {
-                let Some(script_runtime) = self.script_runtime else {
+                let Some(script_runtime) = self.script_runtime.as_ref() else {
                     let error = DispatchError::MissingRuntimeBackend {
                         runtime: RuntimeKind::Script,
                     };
@@ -306,8 +373,8 @@ where
                 ))
                 .await;
 
-                let execution = match script_runtime.execute_extension_json(
-                    self.governor,
+                let execution = match script_runtime.as_ref().execute_extension_json(
+                    self.governor.as_ref(),
                     ScriptExecutionRequest {
                         package,
                         capability_id: &request.capability_id,
@@ -352,7 +419,7 @@ where
                 })
             }
             RuntimeKind::Mcp => {
-                let Some(mcp_runtime) = self.mcp_runtime else {
+                let Some(mcp_runtime) = self.mcp_runtime.as_ref() else {
                     let error = DispatchError::MissingRuntimeBackend {
                         runtime: RuntimeKind::Mcp,
                     };
@@ -375,8 +442,9 @@ where
                 .await;
 
                 let execution = match mcp_runtime
+                    .as_ref()
                     .execute_extension_json(
-                        self.governor,
+                        self.governor.as_ref(),
                         McpExecutionRequest {
                             package,
                             capability_id: &request.capability_id,
@@ -459,8 +527,8 @@ where
     }
 
     async fn emit_event(&self, event: RuntimeEvent) {
-        if let Some(sink) = self.event_sink {
-            let _ = sink.emit(event).await;
+        if let Some(sink) = self.event_sink.as_ref() {
+            let _ = sink.as_ref().emit(event).await;
         }
     }
 }

@@ -22,5 +22,5 @@ ironclaw_approvals = { path = "../ironclaw_approvals" }
 ironclaw_mcp = { path = "../ironclaw_mcp" }
 ironclaw_wasm = { path = "../ironclaw_wasm" }
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
 wat = "1"
