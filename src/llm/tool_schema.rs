@@ -156,22 +156,35 @@ fn merge_top_level_variant_properties(schema: &JsonValue) -> serde_json::Map<Str
     merged
 }
 
-pub(crate) fn serialize_json_capped(value: &JsonValue, max_bytes: usize) -> Result<String, ()> {
-    use std::io::Write;
+pub(crate) struct CappedJson {
+    pub(crate) text: String,
+    pub(crate) was_truncated: bool,
+}
+
+pub(crate) fn serialize_json_capped(value: &JsonValue, max_bytes: usize) -> Result<CappedJson, ()> {
+    use std::io::{Error, Write};
+
+    const CAP_REACHED: &str = "json cap reached";
 
     struct CappedWriter {
         buf: Vec<u8>,
         max: usize,
+        was_truncated: bool,
     }
 
     impl Write for CappedWriter {
         fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
             let remaining = self.max.saturating_sub(self.buf.len());
             if remaining == 0 {
-                return Ok(data.len());
+                self.was_truncated = true;
+                return Err(Error::other(CAP_REACHED));
             }
             let to_write = data.len().min(remaining);
             self.buf.extend_from_slice(&data[..to_write]);
+            if to_write < data.len() {
+                self.was_truncated = true;
+                return Err(Error::other(CAP_REACHED));
+            }
             Ok(data.len())
         }
 
@@ -183,19 +196,34 @@ pub(crate) fn serialize_json_capped(value: &JsonValue, max_bytes: usize) -> Resu
     let writer = CappedWriter {
         buf: Vec::with_capacity(max_bytes.min(8192)),
         max: max_bytes,
+        was_truncated: false,
     };
     let mut ser = serde_json::Serializer::new(writer);
-    serde::Serialize::serialize(value, &mut ser).map_err(|_| ())?;
-    let buf = ser.into_inner().buf;
-    match String::from_utf8(buf) {
-        Ok(s) => Ok(s),
+    let serialize_result = serde::Serialize::serialize(value, &mut ser);
+    let writer = ser.into_inner();
+    let was_truncated = writer.was_truncated;
+    let buf = writer.buf;
+
+    match serialize_result {
+        Ok(()) => {}
+        Err(e) if was_truncated && e.to_string().contains(CAP_REACHED) => {}
+        Err(_) => return Err(()),
+    }
+
+    let text = match String::from_utf8(buf) {
+        Ok(s) => s,
         Err(e) => {
             let valid_len = e.utf8_error().valid_up_to();
             let mut buf = e.into_bytes();
             buf.truncate(valid_len);
-            Ok(unsafe { String::from_utf8_unchecked(buf) })
+            String::from_utf8(buf).map_err(|_| ())?
         }
-    }
+    };
+
+    Ok(CappedJson {
+        text,
+        was_truncated,
+    })
 }
 
 fn flatten_top_level(parameters: &mut JsonValue, description: &mut String) {
@@ -204,13 +232,13 @@ fn flatten_top_level(parameters: &mut JsonValue, description: &mut String) {
     let detected = detect_forbidden_top_level(parameters);
     let merged_properties = merge_top_level_variant_properties(parameters);
 
-    if let Ok(capped_text) = serialize_json_capped(parameters, SCHEMA_HINT_MAX_BYTES)
-        && !capped_text.is_empty()
+    if let Ok(capped) = serialize_json_capped(parameters, SCHEMA_HINT_MAX_BYTES)
+        && !capped.text.is_empty()
     {
-        let hint = if capped_text.len() >= SCHEMA_HINT_MAX_BYTES {
-            format!("{capped_text} ... (truncated)")
+        let hint = if capped.was_truncated {
+            format!("{} ... (truncated)", capped.text)
         } else {
-            capped_text
+            capped.text
         };
         description.push_str(schema_flatten_hint_intro(detected));
         description.push_str(&hint);

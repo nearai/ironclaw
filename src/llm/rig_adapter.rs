@@ -1151,22 +1151,26 @@ mod tests {
         // Small schema under the cap: full output, no truncation.
         let small = serde_json::json!({"a": 1});
         let result = serialize_json_capped(&small, 1500).expect("should serialize");
-        assert_eq!(result, r#"{"a":1}"#);
+        assert_eq!(result.text, r#"{"a":1}"#);
+        assert!(!result.was_truncated);
 
         // Exactly at the cap: should produce exactly cap bytes (or fewer
         // if the serialized output happens to be shorter).
         let result = serialize_json_capped(&small, 7).expect("should serialize");
-        assert_eq!(result.len(), 7); // {"a":1} is exactly 7 bytes
+        assert_eq!(result.text.len(), 7); // {"a":1} is exactly 7 bytes
+        assert!(!result.was_truncated);
 
         // Over the cap: output is truncated. The JSON will be malformed
         // (cut mid-stream) but that's OK — the caller adds "... (truncated)".
         let result = serialize_json_capped(&small, 4).expect("should serialize");
-        assert_eq!(result.len(), 4);
-        assert_eq!(result, r#"{"a""#);
+        assert_eq!(result.text.len(), 4);
+        assert_eq!(result.text, r#"{"a""#);
+        assert!(result.was_truncated);
 
         // Cap of 0: empty output.
         let result = serialize_json_capped(&small, 0).expect("should serialize");
-        assert!(result.is_empty());
+        assert!(result.text.is_empty());
+        assert!(result.was_truncated);
     }
 
     /// Size-capped serializer with multi-MB string values: the cap must
@@ -1179,12 +1183,22 @@ mod tests {
         });
         let result = serialize_json_capped(&big, 1500).expect("should serialize");
         assert!(
-            result.len() <= 1500,
+            result.text.len() <= 1500,
             "capped serializer must bound output to max_bytes; got {} bytes",
-            result.len()
+            result.text.len()
         );
+        assert!(result.was_truncated);
         // The output should start with valid JSON structure.
-        assert!(result.starts_with(r#"{"description":""#));
+        assert!(result.text.starts_with(r#"{"description":""#));
+    }
+
+    #[test]
+    fn test_serialize_json_capped_reports_multibyte_truncation() {
+        let value = serde_json::json!({"description": "α"});
+        let result = serialize_json_capped(&value, 17).expect("should serialize");
+
+        assert_eq!(result.text, r#"{"description":""#);
+        assert!(result.was_truncated);
     }
 
     /// Caller-level regression test: drives `convert_tools` (the rig-based
