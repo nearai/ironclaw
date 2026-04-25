@@ -118,10 +118,14 @@ Private ingestion service routes used by the operator panel:
 | GET | `/v1/traces` | Reviewer/admin trace metadata list with status, risk, tool, coverage, and limit filters |
 | POST | `/v1/traces/{submission_id}/revoke` | Mark a central trace revoked when the ingest service supports propagation |
 | GET | `/v1/review/quarantine` | Reviewer/admin quarantine queue |
+| GET | `/v1/review/active-learning` | Reviewer/admin active-learning review queue |
 | POST | `/v1/review/{submission_id}/decision` | Approve/reject quarantined trace |
 | POST | `/v1/review/{submission_id}/credit-events` | Append delayed credit event |
 | GET | `/v1/datasets/replay` | Export approved replay dataset slice |
+| GET | `/v1/datasets/replay/manifests` | List replay export manifest metadata |
 | POST | `/v1/benchmarks/convert` | Convert approved replayable traces into benchmark candidates |
+| GET | `/v1/ranker/training-candidates` | Export approved ranker training candidates |
+| GET | `/v1/ranker/training-pairs` | Export approved ranker training pairs |
 | POST | `/v1/admin/maintenance` | Run tenant-scoped revocation propagation and export-cache maintenance |
 | GET | `/v1/audit/events` | List tenant audit events when available |
 

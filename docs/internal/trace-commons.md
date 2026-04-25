@@ -129,11 +129,14 @@ The service exposes:
 - `POST /v1/contributors/me/submission-status`
 - `GET /v1/analytics/summary`
 - `GET /v1/review/quarantine`
+- `GET /v1/review/active-learning`
 - `POST /v1/review/{submission_id}/decision`
 - `POST /v1/review/{submission_id}/credit-events`
 - `GET /v1/datasets/replay`
 - `GET /v1/datasets/replay/manifests`
 - `POST /v1/benchmarks/convert`
+- `GET /v1/ranker/training-candidates`
+- `GET /v1/ranker/training-pairs`
 - `POST /v1/admin/maintenance`
 - `GET /v1/audit/events`
 
