@@ -277,7 +277,7 @@ The runtime can call the same queue and flush behavior later after a task comple
 
 The agent runtime also schedules an autonomous post-turn contribution pass after a response is persisted or a turn fails. It reads the authenticated user's scoped policy, verifies the thread still belongs to that user, captures the most recent turns from durable conversation history, locally redacts the envelope, queues it, and flushes eligible queued envelopes. If the flush produces a due credit notice, the agent sends a status update back through the originating channel.
 
-During each queue flush and before web credit/submission responses, the client asks the ingestion API for status updates for locally known submitted ids. The status endpoint is tenant-bound by the bearer token and returns only records from that tenant's namespace, so delayed reviewer credit can be reflected locally without allowing broad corpus enumeration.
+During each queue flush and before web credit/submission responses, the client asks the ingestion API for status updates for locally known submitted ids. The status endpoint is tenant-bound by the bearer token and returns only records from that tenant's namespace, so delayed reviewer credit can be reflected locally without allowing broad corpus enumeration. The authenticated web settings response also surfaces persisted held-queue reasons and the richer local credit report for the current user scope only; held queue responses contain submission ids and sanitized hold reasons, not queued envelope bodies.
 
 In the authenticated web gateway, policy, queue, ledger, and revocation state are scoped under a hashed user/tenant directory rather than the global CLI policy. Envelopes carry a pseudonymous contributor id and a separate pseudonymous tenant scope reference, so the private ingestion service can attribute credit and enforce tenant boundaries without storing raw user ids in the trace body.
 
@@ -330,14 +330,14 @@ Protected web API endpoints:
 - `GET /api/traces/submissions`
 - `POST /api/traces/submissions/{submission_id}/revoke`
 
-The web settings panel includes a Trace Commons tab for standing opt-in, autonomous submission controls, queue flushing, recent submissions, revocation, and credit totals. The chat composer also has a Trace button that previews the current thread's redacted envelope and can queue it for the same autonomous submission path. Local preview remains available without opt-in, but enqueue/manual-submit/autonomous acceptance now preflights the scoped standing policy and requires both opt-in and an ingestion endpoint before capture/redaction work is queued.
+The web settings panel includes a Trace Commons tab for standing opt-in, autonomous submission controls, queue flushing, persisted held queue reasons, recent submissions, revocation, and richer credit/review totals. The chat composer also has a Trace button that previews the current thread's redacted envelope and can queue it for the same autonomous submission path. Local preview remains available without opt-in, but enqueue/manual-submit/autonomous acceptance now preflights the scoped standing policy and requires both opt-in and an ingestion endpoint before capture/redaction work is queued.
 
 ## Implementation Status Matrix
 
 | Area | Status | Maintainer notes |
 |------|--------|------------------|
 | Local opt-in policy and opt-out | Implemented MVP | CLI and scoped web/runtime policy files exist; submit token stays in environment. |
-| Local preview, queue, flush, and credit display | Implemented MVP | CLI and web paths use local redacted envelopes and local submission metadata. |
+| Local preview, queue, flush, and credit display | Implemented MVP | CLI and web paths use local redacted envelopes and local submission metadata; authenticated web activity now reloads persisted held queue reasons plus accepted/quarantined/rejected and delayed-credit report fields for the current user scope. |
 | Deterministic local redaction | Implemented MVP | Includes generic secret/path scrubbing, stable placeholders, tool-aware payload handling, and Privacy Filter safe projection. |
 | Privacy Filter sidecar integration | Implemented MVP | Local command/stdin/stdout path exists with safe output projection, non-fatal fallback, minimal child environment, stderr hashing, IO limits, and canary tests. Production container sandboxing and stricter output contracts remain. |
 | Autonomous post-turn contribution | Implemented MVP | Runtime queues/flushed scoped envelopes after persisted or failed turns only when the scoped standing policy is enabled and has an ingestion endpoint. |

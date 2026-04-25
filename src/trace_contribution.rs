@@ -3480,6 +3480,11 @@ pub struct TraceQueueHold {
     pub reason: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct TraceQueueHoldSidecar {
+    reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceQueueFlushReport {
     pub submitted: usize,
@@ -3616,6 +3621,50 @@ pub fn queued_trace_envelope_paths_for_scope(scope: Option<&str>) -> anyhow::Res
     }
     paths.sort();
     Ok(paths)
+}
+
+pub fn read_trace_queue_holds_for_scope(
+    scope: Option<&str>,
+) -> anyhow::Result<Vec<TraceQueueHold>> {
+    let dir = trace_queue_dir(scope);
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut holds = Vec::new();
+    for entry in std::fs::read_dir(&dir)
+        .map_err(|e| anyhow::anyhow!("failed to read queue {}: {}", dir.display(), e))?
+    {
+        let entry = entry.map_err(|e| anyhow::anyhow!("failed to read queue entry: {}", e))?;
+        let path = entry.path();
+        if !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".held.json"))
+        {
+            continue;
+        }
+
+        let Some(submission_id) = trace_queue_hold_submission_id(&path) else {
+            tracing::debug!(path = %path.display(), "Ignoring Trace Commons queue hold without a valid submission id");
+            continue;
+        };
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            tracing::debug!(path = %path.display(), "Ignoring unreadable Trace Commons queue hold");
+            continue;
+        };
+        let Ok(sidecar) = serde_json::from_str::<TraceQueueHoldSidecar>(&body) else {
+            tracing::debug!(path = %path.display(), "Ignoring malformed Trace Commons queue hold");
+            continue;
+        };
+
+        holds.push(TraceQueueHold {
+            submission_id,
+            reason: safe_trace_queue_hold_reason(sidecar.reason.as_deref().unwrap_or("held")),
+        });
+    }
+    holds.sort_by_key(|hold| hold.submission_id);
+    Ok(holds)
 }
 
 pub fn load_trace_envelope(path: &Path) -> anyhow::Result<TraceContributionEnvelope> {
@@ -4435,9 +4484,28 @@ fn write_trace_queue_hold_reason(path: &Path, reason: &str) -> anyhow::Result<()
     let body = serde_json::json!({
         "envelope": path.file_name().and_then(|name| name.to_str()).unwrap_or("unknown"),
         "held_at": Utc::now(),
-        "reason": reason,
+        "reason": safe_trace_queue_hold_reason(reason),
     });
     write_json_file(&hold_path, &body, "trace queue hold reason")
+}
+
+fn trace_queue_hold_submission_id(path: &Path) -> Option<Uuid> {
+    let file_name = path.file_name()?.to_str()?;
+    let raw = file_name.strip_suffix(".held.json")?;
+    Uuid::parse_str(raw).ok()
+}
+
+fn safe_trace_queue_hold_reason(reason: &str) -> String {
+    let normalized = reason
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string();
+    if normalized.is_empty() {
+        return "held".to_string();
+    }
+    normalized.chars().take(240).collect()
 }
 
 fn trace_policy_path(scope: Option<&str>) -> PathBuf {
@@ -5847,6 +5915,40 @@ mod tests {
         assert_eq!(notice.submissions_submitted, 1);
         assert_eq!(notice.pending_credit, 1.5);
         assert_eq!(notice.final_credit, 2.5);
+    }
+
+    #[test]
+    fn read_trace_queue_holds_for_scope_returns_sidecars_without_envelope_bodies() {
+        let scope = format!("trace-queue-holds-test-{}", Uuid::new_v4());
+        let dir = trace_queue_dir(Some(&scope));
+        std::fs::create_dir_all(&dir).expect("queue dir exists");
+        let submission_id = Uuid::new_v4();
+        let queue_path = dir.join(format!("{submission_id}.json"));
+        std::fs::write(&queue_path, "raw envelope body should not be exposed")
+            .expect("queued envelope fixture writes");
+        write_trace_queue_hold_reason(&queue_path, "requires manual review")
+            .expect("hold reason writes");
+
+        std::fs::write(
+            dir.join(format!("{}.held.json", Uuid::new_v4())),
+            "{not-json",
+        )
+        .expect("malformed hold fixture writes");
+        std::fs::write(
+            dir.join("not-a-submission.held.json"),
+            serde_json::json!({ "reason": "should be ignored" }).to_string(),
+        )
+        .expect("invalid id hold fixture writes");
+
+        let holds = read_trace_queue_holds_for_scope(Some(&scope)).expect("holds read");
+
+        assert_eq!(holds.len(), 1);
+        assert_eq!(holds[0].submission_id, submission_id);
+        assert_eq!(holds[0].reason, "requires manual review");
+        let serialized = serde_json::to_string(&holds).expect("holds serialize");
+        assert!(!serialized.contains("raw envelope body should not be exposed"));
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
     }
 
     #[tokio::test]

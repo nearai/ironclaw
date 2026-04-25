@@ -939,7 +939,8 @@ mod trace_contribution_isolation {
     };
     use crate::trace_contribution::{
         LocalTraceSubmissionStatus, StandingTraceContributionPolicy, TraceSubmissionReceipt,
-        record_submitted_trace_envelope_for_scope, write_trace_policy_for_scope,
+        queue_trace_envelope_for_scope, record_submitted_trace_envelope_for_scope,
+        write_trace_policy_for_scope,
     };
 
     fn trace_router(state: Arc<GatewayState>) -> Router {
@@ -1609,6 +1610,125 @@ mod trace_contribution_isolation {
         assert_eq!(
             alice_records[0].status,
             LocalTraceSubmissionStatus::Submitted
+        );
+
+        remove_trace_state(&alice_user_id);
+        remove_trace_state(&bob_user_id);
+    }
+
+    #[tokio::test]
+    async fn test_trace_activity_reports_holds_and_credit_report_by_tenant() {
+        let (db, _dir) = test_db().await;
+        let alice_user_id = format!("alice-{}", Uuid::new_v4());
+        let bob_user_id = format!("bob-{}", Uuid::new_v4());
+        remove_trace_state(&alice_user_id);
+        remove_trace_state(&bob_user_id);
+        enable_trace_policy(&alice_user_id);
+        enable_trace_policy(&bob_user_id);
+
+        let alice_thread = db
+            .create_conversation("gateway", &alice_user_id, None)
+            .await
+            .expect("create alice conversation");
+        db.add_conversation_message(alice_thread, "user", "Create a held trace")
+            .await
+            .expect("add alice user message");
+        db.add_conversation_message(alice_thread, "assistant", "Held trace created.")
+            .await
+            .expect("add alice assistant message");
+
+        let app = trace_router_with_auth(
+            build_state(Some(db), None),
+            trace_auth(alice_user_id.clone(), bob_user_id.clone()),
+        );
+        let preview_resp = json_request(
+            &app,
+            Method::POST,
+            "/api/traces/preview",
+            "tok-alice",
+            serde_json::json!({ "thread_id": alice_thread }),
+        )
+        .await;
+        assert_eq!(preview_resp.status(), StatusCode::OK);
+        let preview = response_json(preview_resp).await;
+        let envelope: crate::trace_contribution::TraceContributionEnvelope =
+            serde_json::from_value(preview["envelope"].clone()).expect("parse envelope");
+        queue_trace_envelope_for_scope(Some(&alice_user_id), &envelope)
+            .expect("queue alice envelope");
+
+        let hold_path =
+            crate::trace_contribution::trace_contribution_dir_for_scope(Some(&alice_user_id))
+                .join("queue")
+                .join(format!("{}.held.json", envelope.submission_id));
+        std::fs::write(
+            &hold_path,
+            serde_json::json!({
+                "envelope": format!("{}.json", envelope.submission_id),
+                "reason": "manual review required"
+            })
+            .to_string(),
+        )
+        .expect("write alice hold sidecar");
+
+        record_submitted_trace_envelope_for_scope(
+            Some(&alice_user_id),
+            &envelope,
+            "https://trace.example.test/v1/traces",
+            TraceSubmissionReceipt {
+                status: "accepted".to_string(),
+                credit_points_pending: Some(2.0),
+                credit_points_final: Some(3.25),
+                explanation: vec!["accepted plus delayed utility".to_string()],
+            },
+        )
+        .expect("record alice submitted trace");
+
+        let alice_policy =
+            response_json(authed_get(&app, "/api/traces/policy", "tok-alice").await).await;
+        assert_eq!(alice_policy["queued_envelopes"], 1);
+        assert_eq!(
+            alice_policy["held_queue"][0]["submission_id"],
+            envelope.submission_id.to_string()
+        );
+        assert_eq!(
+            alice_policy["held_queue"][0]["reason"],
+            "manual review required"
+        );
+        assert!(
+            !alice_policy.to_string().contains("Create a held trace"),
+            "held queue response must not expose envelope bodies"
+        );
+
+        let bob_policy =
+            response_json(authed_get(&app, "/api/traces/policy", "tok-bob").await).await;
+        assert_eq!(bob_policy["queued_envelopes"], 0);
+        assert!(
+            bob_policy["held_queue"]
+                .as_array()
+                .is_none_or(|holds| holds.is_empty())
+        );
+        assert!(
+            !bob_policy
+                .to_string()
+                .contains(&envelope.submission_id.to_string()),
+            "bob policy response must not include alice held queue ids"
+        );
+
+        let alice_credit =
+            response_json(authed_get(&app, "/api/traces/credit", "tok-alice").await).await;
+        assert_eq!(alice_credit["summary"]["submissions_total"], 1);
+        assert_eq!(alice_credit["report"]["submissions_accepted"], 1);
+        assert_eq!(alice_credit["report"]["final_credit"], 3.25);
+
+        let bob_credit =
+            response_json(authed_get(&app, "/api/traces/credit", "tok-bob").await).await;
+        assert_eq!(bob_credit["summary"]["submissions_total"], 0);
+        assert_eq!(bob_credit["report"]["submissions_accepted"], 0);
+        assert!(
+            !bob_credit
+                .to_string()
+                .contains(&envelope.submission_id.to_string()),
+            "bob credit response must not include alice review history"
         );
 
         remove_trace_state(&alice_user_id);

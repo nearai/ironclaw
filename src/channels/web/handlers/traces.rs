@@ -17,14 +17,14 @@ use crate::trace_contribution::{
     ConsentScope, CreditSummary, DeterministicTraceRedactor, LocalTraceSubmissionRecord,
     RawTraceContribution, RecordedTraceContributionOptions, StandingTraceContributionPolicy,
     TraceChannel, TraceContributionAcceptance, TraceContributionEnvelope,
-    TraceContributionPolicyRejection, TraceQueueFlushReport, TraceRedactor,
-    apply_credit_estimate_to_envelope, capture_turns_from_conversation_messages,
+    TraceContributionPolicyRejection, TraceCreditReport, TraceQueueFlushReport, TraceQueueHold,
+    TraceRedactor, apply_credit_estimate_to_envelope, capture_turns_from_conversation_messages,
     flush_trace_contribution_queue_for_scope, local_pseudonymous_contributor_id,
     local_pseudonymous_tenant_scope_ref, preflight_trace_contribution_policy,
     queue_trace_envelope_for_scope, read_local_trace_records_for_scope,
-    read_trace_policy_for_scope, revoke_trace_submission_for_scope,
-    sync_remote_trace_submission_records_for_scope, trace_credit_summary,
-    write_trace_policy_for_scope,
+    read_trace_policy_for_scope, read_trace_queue_holds_for_scope,
+    revoke_trace_submission_for_scope, sync_remote_trace_submission_records_for_scope,
+    trace_credit_report, trace_credit_summary, write_trace_policy_for_scope,
 };
 
 #[derive(Debug, Deserialize)]
@@ -47,6 +47,8 @@ pub struct TracePolicyRequest {
 pub struct TracePolicyResponse {
     pub policy: StandingTraceContributionPolicy,
     pub queued_envelopes: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held_queue: Vec<TraceQueueHold>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,6 +106,7 @@ pub struct TraceQueueFlushQuery {
 #[derive(Debug, Serialize)]
 pub struct TraceCreditResponse {
     pub summary: CreditSummary,
+    pub report: TraceCreditReport,
     pub records: Vec<LocalTraceSubmissionRecord>,
 }
 
@@ -130,9 +133,11 @@ pub async fn traces_policy_get_handler(
     let queued_envelopes = crate::trace_contribution::queued_trace_envelope_paths_for_scope(scope)
         .map_err(internal_error)?
         .len();
+    let held_queue = read_trace_queue_holds_for_scope(scope).map_err(internal_error)?;
     Ok(Json(TracePolicyResponse {
         policy,
         queued_envelopes,
+        held_queue,
     }))
 }
 
@@ -313,7 +318,12 @@ pub async fn traces_credit_handler(
     let records =
         read_local_trace_records_for_scope(Some(user.user_id.as_str())).map_err(internal_error)?;
     let summary = trace_credit_summary(&records);
-    Ok(Json(TraceCreditResponse { summary, records }))
+    let report = trace_credit_report(&records);
+    Ok(Json(TraceCreditResponse {
+        summary,
+        report,
+        records,
+    }))
 }
 
 pub async fn traces_submissions_handler(

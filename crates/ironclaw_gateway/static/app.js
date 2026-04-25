@@ -7116,6 +7116,8 @@ function loadTraceCommonsSettings() {
     var submissions = results[2] || [];
     var policy = policyResponse.policy || {};
     var summary = credit.summary || {};
+    var report = credit.report || {};
+    var persistedHolds = Array.isArray(policyResponse.held_queue) ? policyResponse.held_queue : [];
     var latestCredit = traceLastFlushReport && traceLastFlushReport.credit_notice
       ? traceLastFlushReport.credit_notice
       : summary;
@@ -7151,12 +7153,12 @@ function loadTraceCommonsSettings() {
       + '<div class="settings-group-title">Queue / Submit</div>'
       + traceDisplayRow('Queue state', traceQueueStateText(policy, queuedCount))
       + traceDisplayRow('Queued locally', queuedCount)
-      + traceHeldRows(traceLastFlushReport)
+      + traceHeldRows(traceLastFlushReport, persistedHolds)
       + traceActionsRow('<button id="trace-commons-flush-btn" class="btn-secondary">Submit / Flush Queue</button>')
       + '</div>'
       + '<div class="settings-group">'
       + '<div class="settings-group-title">Credit</div>'
-      + traceMetricRows(summary, submissions)
+      + traceMetricRows(summary, submissions, report)
       + traceCreditSummaryRows(latestCredit)
       + traceDelayedCreditRows(submissions)
       + '</div>'
@@ -7238,20 +7240,27 @@ function traceQueueStateText(policy, queuedCount) {
   return queuedCount > 0 ? 'ready to flush, ' + queuedCount + ' queued' : 'enabled, queue idle';
 }
 
-function traceMetricRows(summary, submissions) {
+function traceMetricRows(summary, submissions, report) {
+  report = report || {};
   var submitted = summary.submissions_submitted || 0;
   var revoked = summary.submissions_revoked || 0;
   var expired = summary.submissions_expired || 0;
   var pending = Number(summary.pending_credit || 0).toFixed(2);
   var finalCredit = Number(summary.final_credit || 0).toFixed(2);
+  var delayedDelta = Number(report.delayed_credit_delta || 0).toFixed(2);
   var localStatuses = traceSubmissionStatusCounts(submissions);
   return ''
     + traceDisplayRow('Submitted', submitted)
+    + traceDisplayRow('Accepted', report.submissions_accepted || 0)
+    + traceDisplayRow('Quarantined', report.submissions_quarantined || 0)
+    + traceDisplayRow('Rejected', report.submissions_rejected || 0)
     + traceDisplayRow('Revoked', revoked)
     + traceDisplayRow('Expired', expired)
     + traceDisplayRow('Local status mix', localStatuses)
     + traceDisplayRow('Pending credit', '+' + pending)
     + traceDisplayRow('Final credit', '+' + finalCredit)
+    + traceDisplayRow('Delayed credit delta', (Number(delayedDelta) >= 0 ? '+' : '') + delayedDelta)
+    + traceDisplayRow('Last credit sync', traceDateLabel(report.last_credit_sync_at))
     + traceDisplayRow('Known records', Array.isArray(submissions) ? submissions.length : 0);
 }
 
@@ -7279,16 +7288,27 @@ function traceDelayedCreditRows(submissions) {
   return traceDisplayRow('Delayed credit explanations', delayed.slice(-5).join(' | '));
 }
 
-function traceHeldRows(report) {
-  if (!report) return '';
+function traceHeldRows(report, persistedHolds) {
   var rows = '';
-  if (report.held !== undefined) rows += traceDisplayRow('Held last flush', report.held || 0);
-  if (Array.isArray(report.holds) && report.holds.length > 0) {
+  if (report && report.held !== undefined) rows += traceDisplayRow('Held last flush', report.held || 0);
+  if (Array.isArray(persistedHolds) && persistedHolds.length > 0) {
+    rows += traceDisplayRow('Held queue', persistedHolds.map(function(hold) {
+      return (hold.submission_id ? String(hold.submission_id).substring(0, 8) + ': ' : '') + (hold.reason || 'held');
+    }).join(' | '));
+  }
+  if (report && Array.isArray(report.holds) && report.holds.length > 0) {
     rows += traceDisplayRow('Held reasons', report.holds.map(function(hold) {
       return (hold.submission_id ? String(hold.submission_id).substring(0, 8) + ': ' : '') + (hold.reason || 'held');
     }).join(' | '));
   }
   return rows;
+}
+
+function traceDateLabel(value) {
+  if (!value) return 'not synced yet';
+  var date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString();
 }
 
 function traceDisplayRow(label, value) {
