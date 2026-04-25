@@ -480,9 +480,16 @@ impl WasmRuntime {
             Err(error) => return Err(release_after_failure(governor, reservation.id, error)),
         };
 
-        let receipt = governor
-            .reconcile(reservation.id, result.usage.clone())
-            .map_err(|error| WasmError::Resource(Box::new(error)))?;
+        let receipt = match governor.reconcile(reservation.id, result.usage.clone()) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                return Err(release_after_failure(
+                    governor,
+                    reservation.id,
+                    WasmError::Resource(Box::new(error)),
+                ));
+            }
+        };
         Ok(WasmExecutionResult { result, receipt })
     }
 

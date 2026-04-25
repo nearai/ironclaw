@@ -96,6 +96,7 @@ Failure cleanup rules:
 - if preparation fails after reservation, release the reservation
 - if invocation fails after reservation, release the reservation
 - if invocation succeeds, reconcile actual usage and return the resource receipt
+- if reconciliation fails after successful invocation, release the reservation before returning the resource error
 - cleanup failures are surfaced as resource-governor errors
 
 The executor is not the global dispatcher. It only coordinates the WASM lane's reservation lifecycle until `ironclaw_kernel`/dispatch owns cross-runtime routing.
@@ -378,7 +379,7 @@ Local contract tests should prove:
 - undeclared capabilities are rejected before module preparation
 - manifest-derived export mismatches are rejected before invocation
 - executor reserves before preparation/invocation and reconciles successful usage
-- executor releases reservations on preparation or invocation failure
+- executor releases reservations on preparation, invocation, or reconciliation failure
 - resource-denied executions fail before module preparation/invocation
 - invocation returns actual usage suitable for resource reconciliation
 - no privileged host imports are available unless explicitly registered

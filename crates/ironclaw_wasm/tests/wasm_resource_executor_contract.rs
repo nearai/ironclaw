@@ -177,6 +177,48 @@ async fn executor_releases_reservation_when_guest_traps() {
 }
 
 #[tokio::test]
+async fn executor_releases_reservation_when_reconcile_fails_after_successful_invocation() {
+    let (fs, package) = wasm_package_with_module(json_echo_module()).await;
+    let runtime = WasmRuntime::for_testing().unwrap();
+    let governor = ReconcileFailingGovernor::new();
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor.set_limit(
+        account.clone(),
+        ResourceLimits {
+            max_concurrency_slots: Some(1),
+            max_output_bytes: Some(10_000),
+            ..ResourceLimits::default()
+        },
+    );
+
+    let capability_id = CapabilityId::new("echo.say").unwrap();
+    let err = runtime
+        .execute_extension_json(
+            &fs,
+            &governor,
+            WasmExecutionRequest {
+                package: &package,
+                capability_id: &capability_id,
+                scope,
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    output_bytes: Some(10_000),
+                    ..ResourceEstimate::default()
+                },
+                invocation: CapabilityInvocation {
+                    input: json!({"message": "hello executor"}),
+                },
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, WasmError::Resource(_)));
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+}
+
+#[tokio::test]
 async fn executor_releases_reservation_when_output_limit_fails() {
     let (fs, package) = wasm_package_with_module(json_echo_module()).await;
     let runtime = WasmRuntime::new(WasmRuntimeConfig {
@@ -303,6 +345,66 @@ fn trapping_module() -> Vec<u8> {
               i32.const 0))"#,
     )
     .unwrap()
+}
+
+struct ReconcileFailingGovernor {
+    inner: InMemoryResourceGovernor,
+}
+
+impl ReconcileFailingGovernor {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryResourceGovernor::new(),
+        }
+    }
+
+    fn reserved_for(&self, account: &ResourceAccount) -> ResourceTally {
+        self.inner.reserved_for(account)
+    }
+}
+
+impl ResourceGovernor for ReconcileFailingGovernor {
+    fn set_limit(&self, account: ResourceAccount, limits: ResourceLimits) {
+        self.inner.set_limit(account, limits);
+    }
+
+    fn try_set_limit(
+        &self,
+        account: ResourceAccount,
+        limits: ResourceLimits,
+    ) -> Result<(), ResourceError> {
+        self.inner.try_set_limit(account, limits)
+    }
+
+    fn reserve(
+        &self,
+        scope: ResourceScope,
+        estimate: ResourceEstimate,
+    ) -> Result<ResourceReservation, ResourceError> {
+        self.inner.reserve(scope, estimate)
+    }
+
+    fn active_reservation(
+        &self,
+        reservation_id: ResourceReservationId,
+    ) -> Result<ActiveResourceReservation, ResourceError> {
+        self.inner.active_reservation(reservation_id)
+    }
+
+    fn reconcile(
+        &self,
+        reservation_id: ResourceReservationId,
+        _actual: ResourceUsage,
+    ) -> Result<ResourceReceipt, ResourceError> {
+        Err(ResourceError::UnknownReservation { id: reservation_id })
+    }
+
+    fn release(
+        &self,
+        reservation_id: ResourceReservationId,
+    ) -> Result<ResourceReceipt, ResourceError> {
+        self.inner.release(reservation_id)
+    }
 }
 
 fn sample_scope() -> ResourceScope {
