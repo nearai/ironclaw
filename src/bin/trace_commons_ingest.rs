@@ -438,6 +438,7 @@ async fn submit_trace_handler(
         received_at,
         retention_policy_id: retention_policy.name,
         expires_at,
+        purged_at: None,
         object_key: stored_envelope.object_key,
         artifact_receipt: stored_envelope.artifact_receipt,
     };
@@ -1350,6 +1351,8 @@ struct TraceMaintenanceRequest {
     prune_export_cache: bool,
     #[serde(default)]
     max_export_age_hours: Option<i64>,
+    #[serde(default)]
+    purge_expired_before: Option<DateTime<Utc>>,
 }
 
 fn default_true() -> bool {
@@ -1846,6 +1849,7 @@ fn trace_commons_record_from_storage_submission(
             received_at: record.received_at,
             retention_policy_id: record.retention_policy_id,
             expires_at: record.expires_at,
+            purged_at: record.purged_at,
             object_key,
             artifact_receipt: None,
         })
@@ -2484,6 +2488,44 @@ async fn mirror_expiration_to_db(
     Ok(())
 }
 
+async fn mirror_purge_to_db(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_id: Uuid,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    if db
+        .get_trace_submission(&tenant.tenant_id, submission_id)
+        .await
+        .context("failed to check trace submission before purge mirror")?
+        .is_none()
+    {
+        return Ok(());
+    }
+    db.update_trace_submission_status(
+        &tenant.tenant_id,
+        submission_id,
+        StorageTraceCorpusStatus::Purged,
+        &tenant.principal_ref,
+        Some("retention_purged"),
+    )
+    .await
+    .context("failed to mirror trace purge status")?;
+    db.invalidate_trace_submission_artifacts(
+        &tenant.tenant_id,
+        submission_id,
+        StorageTraceDerivedStatus::Expired,
+    )
+    .await
+    .context("failed to mirror trace purge artifact invalidation")?;
+    db.invalidate_trace_vector_entries_for_submission(&tenant.tenant_id, submission_id)
+        .await
+        .context("failed to mirror trace purge vector invalidation")?;
+    Ok(())
+}
+
 async fn mirror_review_decision_to_db(
     state: &AppState,
     tenant: &TenantAuth,
@@ -2682,6 +2724,33 @@ fn read_envelope_by_record(
         .with_context(|| format!("failed to read trace object {}", path.display()))?;
     serde_json::from_str(&body)
         .with_context(|| format!("failed to parse trace object {}", path.display()))
+}
+
+#[derive(Debug, Default)]
+struct TraceObjectDeletionCounts {
+    file_deleted: bool,
+    encrypted_artifact_deleted: bool,
+}
+
+fn delete_trace_objects_for_record(
+    state: &AppState,
+    record: &TraceCommonsSubmissionRecord,
+) -> anyhow::Result<TraceObjectDeletionCounts> {
+    let mut counts = TraceObjectDeletionCounts::default();
+    let path = state.root.join(&record.object_key);
+    if path.exists() {
+        std::fs::remove_file(&path)
+            .with_context(|| format!("failed to delete trace object {}", path.display()))?;
+        counts.file_deleted = true;
+    }
+    if let (Some(store), Some(receipt)) = (
+        state.artifact_store.as_ref(),
+        record.artifact_receipt.as_ref(),
+    ) {
+        counts.encrypted_artifact_deleted =
+            store.delete_artifact(&record.tenant_storage_ref, receipt)?;
+    }
+    Ok(counts)
 }
 
 fn read_all_submission_records(
@@ -3255,6 +3324,32 @@ async fn run_maintenance(
         }
     }
 
+    let mut records_marked_purged = 0usize;
+    let mut trace_object_files_deleted = 0usize;
+    let mut encrypted_artifacts_deleted = 0usize;
+    if let Some(purge_cutoff) = request.purge_expired_before {
+        for record in &mut records {
+            if record.status != TraceCorpusStatus::Expired
+                || record
+                    .expires_at
+                    .is_none_or(|expires_at| expires_at > purge_cutoff)
+            {
+                continue;
+            }
+            records_marked_purged += 1;
+            if request.dry_run {
+                continue;
+            }
+            let deletion_counts = delete_trace_objects_for_record(state, record)?;
+            trace_object_files_deleted += usize::from(deletion_counts.file_deleted);
+            encrypted_artifacts_deleted += usize::from(deletion_counts.encrypted_artifact_deleted);
+            record.status = TraceCorpusStatus::Purged;
+            record.purged_at = Some(now);
+            write_submission_record(&state.root, record)?;
+            mirror_purge_to_db(state, tenant, record.submission_id).await?;
+        }
+    }
+
     let export_cache_files_pruned = if request.prune_export_cache {
         prune_export_cache_files(
             &state.root,
@@ -3291,9 +3386,12 @@ async fn run_maintenance(
     let maintenance_counts = TraceMaintenanceAuditCounts {
         records_marked_revoked,
         records_marked_expired,
+        records_marked_purged,
         derived_marked_revoked,
         derived_marked_expired,
         export_cache_files_pruned,
+        trace_object_files_deleted,
+        encrypted_artifacts_deleted,
         db_mirror_backfilled,
         vector_entries_indexed,
     };
@@ -3342,9 +3440,12 @@ async fn run_maintenance(
         expired_submission_count: expired_submission_ids.len(),
         records_marked_revoked,
         records_marked_expired,
+        records_marked_purged,
         derived_marked_revoked,
         derived_marked_expired,
         export_cache_files_pruned,
+        trace_object_files_deleted,
+        encrypted_artifacts_deleted,
         db_mirror_backfilled,
         vector_entries_indexed,
         db_reconciliation,
@@ -3374,6 +3475,9 @@ async fn backfill_db_mirror_from_files(
         .collect::<BTreeMap<_, _>>();
     let mut backfilled = 0usize;
     for record in records {
+        if record.status == TraceCorpusStatus::Purged {
+            continue;
+        }
         let envelope = read_envelope_by_record(state, record)
             .with_context(|| format!("failed to validate envelope {}", record.submission_id))?;
         let derived_record = derived_by_submission
@@ -3675,9 +3779,12 @@ fn deterministic_vector_entry_uuid(
 struct TraceMaintenanceAuditCounts {
     records_marked_revoked: usize,
     records_marked_expired: usize,
+    records_marked_purged: usize,
     derived_marked_revoked: usize,
     derived_marked_expired: usize,
     export_cache_files_pruned: usize,
+    trace_object_files_deleted: usize,
+    encrypted_artifacts_deleted: usize,
     db_mirror_backfilled: usize,
     vector_entries_indexed: usize,
 }
@@ -3694,6 +3801,10 @@ impl TraceMaintenanceAuditCounts {
             self.records_marked_expired.min(u32::MAX as usize) as u32,
         );
         counts.insert(
+            "records_marked_purged".to_string(),
+            self.records_marked_purged.min(u32::MAX as usize) as u32,
+        );
+        counts.insert(
             "derived_marked_revoked".to_string(),
             self.derived_marked_revoked.min(u32::MAX as usize) as u32,
         );
@@ -3704,6 +3815,14 @@ impl TraceMaintenanceAuditCounts {
         counts.insert(
             "export_cache_files_pruned".to_string(),
             self.export_cache_files_pruned.min(u32::MAX as usize) as u32,
+        );
+        counts.insert(
+            "trace_object_files_deleted".to_string(),
+            self.trace_object_files_deleted.min(u32::MAX as usize) as u32,
+        );
+        counts.insert(
+            "encrypted_artifacts_deleted".to_string(),
+            self.encrypted_artifacts_deleted.min(u32::MAX as usize) as u32,
         );
         counts.insert(
             "db_mirror_backfilled".to_string(),
@@ -3916,6 +4035,8 @@ struct TraceCommonsSubmissionRecord {
     retention_policy_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     expires_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    purged_at: Option<DateTime<Utc>>,
     object_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     artifact_receipt: Option<EncryptedTraceArtifactReceipt>,
@@ -4555,9 +4676,12 @@ struct TraceMaintenanceResponse {
     expired_submission_count: usize,
     records_marked_revoked: usize,
     records_marked_expired: usize,
+    records_marked_purged: usize,
     derived_marked_revoked: usize,
     derived_marked_expired: usize,
     export_cache_files_pruned: usize,
+    trace_object_files_deleted: usize,
+    encrypted_artifacts_deleted: usize,
     db_mirror_backfilled: usize,
     vector_entries_indexed: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4867,12 +4991,15 @@ impl TraceCommonsAuditEvent {
             actor_role: Some(auth.role),
             actor_principal_ref: Some(auth.principal_ref.clone()),
             reason: Some(format!(
-                "purpose={purpose};dry_run={dry_run};records_marked_revoked={};records_marked_expired={};derived_marked_revoked={};derived_marked_expired={};export_cache_files_pruned={};db_mirror_backfilled={};vector_entries_indexed={}",
+                "purpose={purpose};dry_run={dry_run};records_marked_revoked={};records_marked_expired={};records_marked_purged={};derived_marked_revoked={};derived_marked_expired={};export_cache_files_pruned={};trace_object_files_deleted={};encrypted_artifacts_deleted={};db_mirror_backfilled={};vector_entries_indexed={}",
                 counts.records_marked_revoked,
                 counts.records_marked_expired,
+                counts.records_marked_purged,
                 counts.derived_marked_revoked,
                 counts.derived_marked_expired,
                 counts.export_cache_files_pruned,
+                counts.trace_object_files_deleted,
+                counts.encrypted_artifacts_deleted,
                 counts.db_mirror_backfilled,
                 counts.vector_entries_indexed
             )),
@@ -6148,6 +6275,7 @@ mod tests {
                 reconcile_db_mirror: false,
                 prune_export_cache: true,
                 max_export_age_hours: None,
+                purge_expired_before: None,
             }),
         )
         .await
@@ -6165,6 +6293,7 @@ mod tests {
                 reconcile_db_mirror: false,
                 prune_export_cache: true,
                 max_export_age_hours: None,
+                purge_expired_before: None,
             }),
         )
         .await
@@ -6265,6 +6394,7 @@ mod tests {
                 reconcile_db_mirror: false,
                 prune_export_cache: true,
                 max_export_age_hours: None,
+                purge_expired_before: None,
             }),
         )
         .await
@@ -6404,6 +6534,7 @@ mod tests {
                 reconcile_db_mirror: false,
                 prune_export_cache: false,
                 max_export_age_hours: None,
+                purge_expired_before: None,
             }),
         )
         .await
@@ -6435,6 +6566,110 @@ mod tests {
             record.submission_id == submission_id
                 && record.status == StorageTraceDerivedStatus::Expired
         }));
+    }
+
+    #[tokio::test]
+    async fn maintenance_purges_expired_trace_objects_only_with_explicit_cutoff() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+        let artifact_store = test_artifact_store(artifact_temp.path());
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            None,
+            Some(artifact_store.clone()),
+            false,
+            false,
+            false,
+            false,
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let object_path = temp.path().join(&record.object_key);
+        assert!(object_path.exists());
+        let receipt = record
+            .artifact_receipt
+            .clone()
+            .expect("encrypted receipt exists");
+        artifact_store
+            .read_artifact(&record.tenant_storage_ref, &receipt)
+            .expect("encrypted artifact exists");
+
+        let metadata_path = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"))
+            .join("metadata")
+            .join(format!("{submission_id}.json"));
+        let mut metadata_json = serde_json::to_value(record).expect("record serializes");
+        let expired_at = Utc::now() - chrono::Duration::days(2);
+        metadata_json["expires_at"] = serde_json::json!(expired_at.to_rfc3339());
+        write_json_file(&metadata_path, &metadata_json, "expired trace metadata")
+            .expect("expired metadata writes");
+
+        let Json(dry_run) = maintenance_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_retention_purge_dry_run".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: Some(Utc::now()),
+            }),
+        )
+        .await
+        .expect("dry-run purge succeeds");
+        assert_eq!(dry_run.records_marked_purged, 0);
+        assert_eq!(dry_run.trace_object_files_deleted, 0);
+        assert!(object_path.exists());
+        artifact_store
+            .read_artifact(&tenant_storage_ref("tenant-a"), &receipt)
+            .expect("dry-run keeps encrypted artifact");
+
+        let Json(response) = maintenance_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_retention_purge".to_string()),
+                dry_run: false,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: Some(Utc::now()),
+            }),
+        )
+        .await
+        .expect("purge succeeds");
+        assert_eq!(response.records_marked_expired, 1);
+        assert_eq!(response.records_marked_purged, 1);
+        assert_eq!(response.trace_object_files_deleted, 1);
+        assert_eq!(response.encrypted_artifacts_deleted, 1);
+        assert!(!object_path.exists());
+        let purged_record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("purged record reads")
+            .expect("purged record exists");
+        assert_eq!(purged_record.status, TraceCorpusStatus::Purged);
+        assert!(purged_record.purged_at.is_some());
+        artifact_store
+            .read_artifact(&tenant_storage_ref("tenant-a"), &receipt)
+            .expect_err("encrypted artifact was deleted");
     }
 
     #[cfg(feature = "libsql")]
@@ -6478,6 +6713,7 @@ mod tests {
                 reconcile_db_mirror: false,
                 prune_export_cache: false,
                 max_export_age_hours: None,
+                purge_expired_before: None,
             }),
         )
         .await
@@ -6516,6 +6752,7 @@ mod tests {
                 reconcile_db_mirror: false,
                 prune_export_cache: false,
                 max_export_age_hours: None,
+                purge_expired_before: None,
             }),
         )
         .await
@@ -6547,6 +6784,7 @@ mod tests {
                 reconcile_db_mirror: false,
                 prune_export_cache: false,
                 max_export_age_hours: None,
+                purge_expired_before: None,
             }),
         )
         .await
@@ -6564,6 +6802,7 @@ mod tests {
                 reconcile_db_mirror: true,
                 prune_export_cache: false,
                 max_export_age_hours: None,
+                purge_expired_before: None,
             }),
         )
         .await
@@ -6612,6 +6851,7 @@ mod tests {
                 reconcile_db_mirror: false,
                 prune_export_cache: false,
                 max_export_age_hours: None,
+                purge_expired_before: None,
             }),
         )
         .await

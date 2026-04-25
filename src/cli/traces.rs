@@ -310,6 +310,10 @@ pub enum TracesCommand {
         #[arg(long)]
         dry_run: bool,
 
+        /// RFC3339 cutoff; expired submissions at or before this time are purged
+        #[arg(long)]
+        purge_expired_before: Option<String>,
+
         /// Environment variable containing an admin bearer token
         #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
         bearer_token_env: String,
@@ -836,11 +840,19 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
             endpoint,
             purpose,
             dry_run,
+            purge_expired_before,
             bearer_token_env,
             json,
         } => {
-            trace_commons_maintenance_run(&endpoint, &bearer_token_env, purpose, dry_run, json)
-                .await
+            trace_commons_maintenance_run(
+                &endpoint,
+                &bearer_token_env,
+                purpose,
+                dry_run,
+                purge_expired_before,
+                json,
+            )
+            .await
         }
         TracesCommand::BenchmarkConvert {
             endpoint,
@@ -1530,13 +1542,17 @@ async fn trace_commons_maintenance_run(
     bearer_token_env: &str,
     purpose: String,
     dry_run: bool,
+    purge_expired_before: Option<String>,
     json: bool,
 ) -> anyhow::Result<()> {
     require_non_empty_purpose(&purpose)?;
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "purpose": purpose,
         "dry_run": dry_run,
     });
+    if let Some(purge_expired_before) = purge_expired_before {
+        body["purge_expired_before"] = serde_json::Value::String(purge_expired_before);
+    }
     let response = trace_commons_api_request(
         Method::POST,
         endpoint,
@@ -1560,12 +1576,23 @@ async fn trace_commons_maintenance_run(
         print_optional_json_field("  expired submissions", value, "expired_submission_count");
         print_optional_json_field("  records marked revoked", value, "records_marked_revoked");
         print_optional_json_field("  records marked expired", value, "records_marked_expired");
+        print_optional_json_field("  records marked purged", value, "records_marked_purged");
         print_optional_json_field("  derived marked revoked", value, "derived_marked_revoked");
         print_optional_json_field("  derived marked expired", value, "derived_marked_expired");
         print_optional_json_field(
             "  export cache files pruned",
             value,
             "export_cache_files_pruned",
+        );
+        print_optional_json_field(
+            "  trace object files deleted",
+            value,
+            "trace_object_files_deleted",
+        );
+        print_optional_json_field(
+            "  encrypted artifacts deleted",
+            value,
+            "encrypted_artifacts_deleted",
         );
     }
     Ok(())

@@ -163,6 +163,24 @@ impl LocalEncryptedTraceArtifactStore {
         Ok(artifact)
     }
 
+    pub fn delete_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            receipt.tenant_storage_ref == expected_tenant_storage_ref,
+            "trace artifact receipt tenant mismatch"
+        );
+        let path = self.artifact_path(expected_tenant_storage_ref, &receipt.object_key)?;
+        if !path.exists() {
+            return Ok(false);
+        }
+        std::fs::remove_file(&path)
+            .with_context(|| format!("failed to delete trace artifact {}", path.display()))?;
+        Ok(true)
+    }
+
     fn artifact_path(&self, tenant_storage_ref: &str, object_key: &str) -> anyhow::Result<PathBuf> {
         validate_object_key(object_key)?;
         let artifact_dir = self.tenant_artifact_dir(tenant_storage_ref)?;
@@ -334,5 +352,35 @@ mod tests {
             .read_artifact("tenant:sha256:abc123", &receipt)
             .expect_err("path-shaped object keys must fail");
         assert!(error.to_string().contains("64-character hex digest"));
+    }
+
+    #[test]
+    fn encrypted_artifact_delete_removes_ciphertext_file() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = test_store(&temp);
+        let payload = json!({"safe": true});
+        let receipt = store
+            .put_json(
+                "tenant:sha256:abc123",
+                TraceArtifactKind::ContributionEnvelope,
+                "delete-me",
+                &payload,
+            )
+            .expect("artifact writes");
+
+        assert!(
+            store
+                .delete_artifact("tenant:sha256:abc123", &receipt)
+                .expect("artifact deletes")
+        );
+        assert!(
+            !store
+                .delete_artifact("tenant:sha256:abc123", &receipt)
+                .expect("missing artifact delete is idempotent")
+        );
+        let error = store
+            .read_artifact("tenant:sha256:abc123", &receipt)
+            .expect_err("deleted artifact should not read");
+        assert!(error.to_string().contains("failed to read trace artifact"));
     }
 }
