@@ -14,7 +14,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, ProcessId, ResourceScope, RuntimeKind, Timestamp, VirtualPath,
+    CapabilityId, ErrorKind, ExtensionId, ProcessId, ResourceScope, RuntimeKind, Timestamp,
+    VirtualPath,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -67,7 +68,7 @@ pub struct RuntimeEvent {
     pub runtime: Option<RuntimeKind>,
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
-    pub error_kind: Option<String>,
+    pub error_kind: Option<ErrorKind>,
 }
 
 impl RuntimeEvent {
@@ -126,7 +127,7 @@ impl RuntimeEvent {
         capability_id: CapabilityId,
         provider: Option<ExtensionId>,
         runtime: Option<RuntimeKind>,
-        error_kind: impl Into<String>,
+        error_kind: impl Into<ErrorKind>,
     ) -> Self {
         Self::new(RuntimeEventPayload {
             kind: RuntimeEventKind::DispatchFailed,
@@ -136,7 +137,7 @@ impl RuntimeEvent {
             runtime,
             process_id: None,
             output_bytes: None,
-            error_kind: Some(sanitize_error_kind(error_kind)),
+            error_kind: Some(error_kind.into()),
         })
     }
 
@@ -184,7 +185,7 @@ impl RuntimeEvent {
         provider: ExtensionId,
         runtime: RuntimeKind,
         process_id: ProcessId,
-        error_kind: impl Into<String>,
+        error_kind: impl Into<ErrorKind>,
     ) -> Self {
         Self::new(RuntimeEventPayload {
             kind: RuntimeEventKind::ProcessFailed,
@@ -194,7 +195,7 @@ impl RuntimeEvent {
             runtime: Some(runtime),
             process_id: Some(process_id),
             output_bytes: None,
-            error_kind: Some(sanitize_error_kind(error_kind)),
+            error_kind: Some(error_kind.into()),
         })
     }
 
@@ -233,20 +234,6 @@ impl RuntimeEvent {
     }
 }
 
-fn sanitize_error_kind(error_kind: impl Into<String>) -> String {
-    let error_kind = error_kind.into();
-    let is_safe = !error_kind.is_empty()
-        && error_kind.len() <= 128
-        && error_kind
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'));
-    if is_safe {
-        error_kind
-    } else {
-        "Unclassified".to_string()
-    }
-}
-
 struct RuntimeEventPayload {
     kind: RuntimeEventKind,
     scope: ResourceScope,
@@ -255,7 +242,7 @@ struct RuntimeEventPayload {
     runtime: Option<RuntimeKind>,
     process_id: Option<ProcessId>,
     output_bytes: Option<u64>,
-    error_kind: Option<String>,
+    error_kind: Option<ErrorKind>,
 }
 
 /// Event sink failures.

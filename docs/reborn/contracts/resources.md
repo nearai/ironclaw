@@ -197,7 +197,7 @@ ProcessStart.estimated_resources
   -> fail/kill: release(id)
 ```
 
-The wrapper reserves before process records are created, releases the reservation if the underlying store rejects `start`, and verifies the resulting process record preserved the reservation ID. Resource denial therefore prevents process persistence. When a background process already owns a reservation, the process executor dispatch path uses a default runtime estimate to avoid double-reserving the same process estimate. Completion reconciliation currently uses configured/default usage because `ProcessExecutionResult` does not yet report measured usage.
+The wrapper reserves before process records are created, releases the reservation if the underlying store rejects `start`, and verifies the resulting process record preserved the reservation ID. Public `ProcessStart` values carry `ProcessResourceReservation::none()`; only the resource-managed wrapper can attach the internal reserved handle. Resource denial therefore prevents process persistence. When a background process already owns a reservation, the process-dispatch adapter suppresses a duplicate runtime reservation for the same process estimate while preserving the original estimate in `ProcessExecutionRequest`. Completion reconciliation currently uses configured/default usage because `ProcessExecutionResult` does not yet report measured usage.
 
 ---
 

@@ -216,6 +216,7 @@ async fn dispatch_process_executor_routes_process_request_to_capability_dispatch
             capability_id: CapabilityId::new("echo.say").unwrap(),
             runtime: RuntimeKind::Wasm,
             estimate: ResourceEstimate::default(),
+            resource_reservation_id: None,
             input: json!({"message": "background dispatch"}),
         })
         .await
@@ -279,6 +280,30 @@ async fn capability_host_spawn_can_run_background_dispatch_process() {
     );
     assert_eq!(request.scope, scope);
     assert_eq!(request.input, json!({"message": "background dispatch"}));
+}
+
+#[tokio::test]
+async fn dispatch_process_executor_rejects_provider_or_runtime_mismatch() {
+    let executor = DispatchProcessExecutor::new(Arc::new(MismatchedDispatcher));
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id);
+
+    let err = executor
+        .execute(ProcessExecutionRequest {
+            process_id: ProcessId::new(),
+            invocation_id,
+            scope,
+            extension_id: ExtensionId::new("echo").unwrap(),
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            runtime: RuntimeKind::Wasm,
+            estimate: ResourceEstimate::default(),
+            resource_reservation_id: None,
+            input: json!({"message": "background dispatch"}),
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.kind.as_str(), "ProcessDispatchInvariantViolation");
 }
 
 #[tokio::test]
@@ -508,6 +533,31 @@ impl CapabilityDispatcher for RecordingSpawnDispatcher {
     }
 }
 
+struct MismatchedDispatcher;
+
+#[async_trait]
+impl CapabilityDispatcher for MismatchedDispatcher {
+    async fn dispatch_json(
+        &self,
+        request: CapabilityDispatchRequest,
+    ) -> Result<CapabilityDispatchResult, DispatchError> {
+        Ok(CapabilityDispatchResult {
+            capability_id: request.capability_id,
+            provider: ExtensionId::new("other-provider").unwrap(),
+            runtime: RuntimeKind::Script,
+            output: request.input,
+            usage: ResourceUsage::default(),
+            receipt: ResourceReceipt {
+                id: ResourceReservationId::new(),
+                scope: request.scope,
+                status: ReservationStatus::Reconciled,
+                estimate: request.estimate,
+                actual: Some(ResourceUsage::default()),
+            },
+        })
+    }
+}
+
 struct InputAssertingProcessManager {
     expected_input: serde_json::Value,
 }
@@ -528,7 +578,7 @@ impl ProcessManager for InputAssertingProcessManager {
             grants: start.grants,
             mounts: start.mounts,
             estimated_resources: start.estimated_resources,
-            resource_reservation_id: start.resource_reservation_id,
+            resource_reservation_id: start.resource_reservation.id(),
             error_kind: None,
         })
     }

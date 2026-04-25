@@ -25,7 +25,7 @@ The dispatcher does not discover extensions, parse manifests, implement policy, 
 
 ## 2. Inputs
 
-The dispatcher receives an already-authorized `CapabilityDispatchRequest`:
+The dispatcher receives an already-authorized `CapabilityDispatchRequest` from the neutral `ironclaw_host_api` dispatch port:
 
 ```rust
 pub struct CapabilityDispatchRequest {
@@ -52,7 +52,7 @@ RuntimeDispatcher::from_arcs(registry, root_filesystem, resource_governor)
     .with_wasm_runtime_arc(wasm_runtime)
 ```
 
-The owned form keeps dispatcher composition-only while allowing `DispatchProcessExecutor` to run capability-backed processes without leaking borrowed app state into a spawned task.
+The owned form keeps dispatcher composition-only while allowing the process-dispatch adapter to run capability-backed processes without leaking borrowed app state into a spawned task. `RuntimeDispatcher` implements the host API `CapabilityDispatcher` trait, but `ironclaw_capabilities` no longer depends on this concrete crate.
 
 `ExtensionRegistry` remains the authority for what can run. Runtime crates remain the authority for how a lane runs.
 
@@ -68,7 +68,7 @@ V1 `dispatch_json` performs only routing and consistency checks:
 3. verify descriptor.runtime == package.manifest.runtime_kind()
 4. select runtime lane from RuntimeKind
 5. call the configured backend for that lane
-6. return normalized result or typed failure
+6. return a normalized host API dispatch result or host-safe failure kind
 ```
 
 For `RuntimeKind::Wasm`, the dispatcher calls:
@@ -119,7 +119,7 @@ The dispatcher fails before execution when:
 - selected runtime backend is missing
 - selected runtime lane is recognized but not implemented yet
 
-These failures must not reserve resources or perform external effects.
+These failures must not reserve resources or perform external effects. Event sink failures are best-effort observability failures and must not turn a preflight or post-execution dispatch outcome into a different workflow result.
 
 ---
 

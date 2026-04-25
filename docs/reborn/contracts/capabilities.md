@@ -18,7 +18,7 @@ caller/channel/agent/conversation
   -> CapabilityHost::invoke_json(...) / resume_json(...) / spawn_json(...)
       -> AuthorizationService / GrantAuthorizer / LeaseBackedAuthorizer
       -> optional RunStateStore / ApprovalRequestStore / CapabilityLeaseStore / ProcessManager
-      -> RuntimeDispatcher or ProcessManager
+      -> CapabilityDispatcher port or ProcessManager
           -> WASM / Script / MCP or tracked/background ProcessRecord
 ```
 
@@ -75,7 +75,7 @@ This service is the middle communication layer between authorization, dispatch, 
 Spawn is capability-targeted. It does not start raw host processes or extension-level workers without a declared capability identity.
 
 It does not implement grant matching itself; that belongs to `ironclaw_authorization`.
-It does not select WASM/Script/MCP for dispatch; that belongs to `ironclaw_dispatcher` behind the narrow `CapabilityDispatcher` interface. The `DispatchProcessExecutor` adapter can run spawned process input through that same dispatch interface from a background process manager.
+It does not select WASM/Script/MCP for dispatch; that belongs to a concrete implementation such as `ironclaw_dispatcher` behind the neutral `ironclaw_host_api::CapabilityDispatcher` port. The `DispatchProcessExecutor` adapter can run spawned process input through that same dispatch interface from a background process manager and verifies the returned provider/runtime still match the process record.
 It does not own process lifecycle mechanics after start; that belongs to `ironclaw_processes` behind `ProcessManager`/`ProcessStore`.
 
 ---
@@ -140,13 +140,13 @@ If only one of `RunStateStore` or `ApprovalRequestStore` is configured and autho
 
 For approved resume, `CapabilityHost` compares the replayed request fingerprint to the approved fingerprint before dispatch, claims the matching lease before dispatch, and consumes it after successful dispatch. Denied/expired/non-approved approvals, missing leases, failed lease claims, and fingerprint mismatches fail before runtime dispatch.
 
-For spawn, `CapabilityHost` preserves `ExecutionContext.resource_scope` and creates a process record through `ProcessManager`. It does not call `dispatch_json` directly. If a `ResourceManagedProcessStore` is configured behind that manager, process resource reservations are owned and cleaned up by `ironclaw_processes`, not by the capability host or dispatcher. If a runtime-backed process manager is configured, the lower-level `DispatchProcessExecutor` adapter can route the background work through `CapabilityDispatcher` after the authorized process record is created. If an `EventingProcessStore` is used behind that manager, process lifecycle events are emitted by `ironclaw_processes`, not by the capability host or dispatcher. The process record carries the target capability identity and runtime so later lifecycle operations remain capability-backed.
+For spawn, `CapabilityHost` preserves `ExecutionContext.resource_scope` and creates a process record through `ProcessManager`. It does not call `dispatch_json` directly. If a `ResourceManagedProcessStore` is configured behind that manager, process resource reservations are owned and cleaned up by `ironclaw_processes`, not by the capability host or dispatcher. If a runtime-backed process manager is configured, the lower-level `DispatchProcessExecutor` adapter can route the background work through `CapabilityDispatcher` after the authorized process record is created. When a process already owns a reservation, that adapter suppresses a duplicate runtime reservation for the same process estimate and validates the dispatch result provider/runtime against the process record. If an `EventingProcessStore` is used behind that manager, process lifecycle events are emitted by `ironclaw_processes`, not by the capability host or dispatcher. The process record carries the target capability identity and runtime so later lifecycle operations remain capability-backed.
 
 ---
 
 ## 5. Relationship to dispatcher
 
-`CapabilityHost` depends on the narrow `CapabilityDispatcher` trait. `RuntimeDispatcher` implements that trait and remains deliberately lower level:
+`CapabilityHost` depends on the narrow `ironclaw_host_api::CapabilityDispatcher` trait. `RuntimeDispatcher` implements that trait and remains deliberately lower level:
 
 ```text
 already-authorized dispatch request -> runtime lane -> normalized result

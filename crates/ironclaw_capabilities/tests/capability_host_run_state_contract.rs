@@ -162,7 +162,10 @@ async fn capability_host_records_blocked_auth_for_authorization_denial() {
     ));
     let record = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(record.status, RunStatus::BlockedAuth);
-    assert_eq!(record.error_kind.as_deref(), Some("AuthorizationDenied"));
+    assert_eq!(
+        record.error_kind.as_ref().map(|kind| kind.as_str()),
+        Some("AuthorizationDenied")
+    );
 }
 
 #[tokio::test]
@@ -246,7 +249,7 @@ async fn capability_host_rejects_mismatched_approval_fingerprint_without_persist
     let record = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(record.status, RunStatus::Failed);
     assert_eq!(
-        record.error_kind.as_deref(),
+        record.error_kind.as_ref().map(|kind| kind.as_str()),
         Some("InvocationFingerprintMismatch")
     );
 }
@@ -410,7 +413,7 @@ async fn capability_host_rejects_resume_when_input_fingerprint_differs() {
     let record = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(record.status, RunStatus::Failed);
     assert_eq!(
-        record.error_kind.as_deref(),
+        record.error_kind.as_ref().map(|kind| kind.as_str()),
         Some("InvocationFingerprintMismatch")
     );
 }
@@ -479,7 +482,10 @@ async fn capability_host_rejects_resume_when_approval_was_denied() {
     ));
     let record = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(record.status, RunStatus::Failed);
-    assert_eq!(record.error_kind.as_deref(), Some("ApprovalDenied"));
+    assert_eq!(
+        record.error_kind.as_ref().map(|kind| kind.as_str()),
+        Some("ApprovalDenied")
+    );
 }
 
 #[tokio::test]
@@ -543,7 +549,10 @@ async fn capability_host_rejects_resume_when_no_matching_lease_exists() {
     ));
     let record = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(record.status, RunStatus::Failed);
-    assert_eq!(record.error_kind.as_deref(), Some("ApprovalLeaseMissing"));
+    assert_eq!(
+        record.error_kind.as_ref().map(|kind| kind.as_str()),
+        Some("ApprovalLeaseMissing")
+    );
 }
 
 #[tokio::test]
@@ -651,7 +660,10 @@ async fn capability_host_fails_approval_required_invocation_when_approval_store_
     ));
     let record = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(record.status, RunStatus::Failed);
-    assert_eq!(record.error_kind.as_deref(), Some("ApprovalStoreMissing"));
+    assert_eq!(
+        record.error_kind.as_ref().map(|kind| kind.as_str()),
+        Some("ApprovalStoreMissing")
+    );
     assert_eq!(record.approval_request_id, None);
 }
 
@@ -827,7 +839,10 @@ async fn capability_host_records_failed_run_after_dispatch_error() {
     assert!(matches!(err, CapabilityInvocationError::Dispatch(_)));
     let record = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(record.status, RunStatus::Failed);
-    assert_eq!(record.error_kind.as_deref(), Some("Dispatch"));
+    assert_eq!(
+        record.error_kind.as_ref().map(|kind| kind.as_str()),
+        Some("Dispatch")
+    );
 }
 
 struct ClaimStatusAssertingDispatcher<'a> {

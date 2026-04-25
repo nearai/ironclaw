@@ -193,7 +193,7 @@ async fn dispatcher_fails_unknown_capability_without_reserving_resources() {
         .await
         .unwrap_err();
 
-    assert!(matches!(err, DispatchError::UnknownCapability { .. }));
+    assert_eq!(err.kind, CapabilityDispatchFailureKind::UnknownCapability);
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert_eq!(governor.usage_for(&account), ResourceTally::default());
 }
@@ -223,14 +223,8 @@ async fn dispatcher_fails_closed_when_descriptor_runtime_does_not_match_package_
         .await
         .unwrap_err();
 
-    assert!(matches!(
-        err,
-        DispatchError::RuntimeMismatch {
-            descriptor_runtime: RuntimeKind::Script,
-            package_runtime: RuntimeKind::Wasm,
-            ..
-        }
-    ));
+    assert_eq!(err.kind, CapabilityDispatchFailureKind::RuntimeMismatch);
+    assert_eq!(err.runtime, Some(RuntimeKind::Script));
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert_eq!(governor.usage_for(&account), ResourceTally::default());
 }
@@ -264,10 +258,8 @@ async fn dispatcher_recognizes_host_lanes_but_does_not_execute_without_backends(
             .await
             .unwrap_err();
 
-        assert!(matches!(
-            err,
-            DispatchError::UnsupportedRuntime { runtime: actual, .. } if actual == runtime
-        ));
+        assert_eq!(err.kind, CapabilityDispatchFailureKind::UnsupportedRuntime);
+        assert_eq!(err.runtime, Some(runtime));
         assert_eq!(governor.reserved_for(&account), ResourceTally::default());
         assert_eq!(governor.usage_for(&account), ResourceTally::default());
     }
@@ -299,12 +291,11 @@ async fn dispatcher_requires_mcp_backend_before_reserving_resources() {
         .await
         .unwrap_err();
 
-    assert!(matches!(
-        err,
-        DispatchError::MissingRuntimeBackend {
-            runtime: RuntimeKind::Mcp
-        }
-    ));
+    assert_eq!(
+        err.kind,
+        CapabilityDispatchFailureKind::MissingRuntimeBackend
+    );
+    assert_eq!(err.runtime, Some(RuntimeKind::Mcp));
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert_eq!(governor.usage_for(&account), ResourceTally::default());
 }
@@ -335,12 +326,11 @@ async fn dispatcher_requires_script_backend_before_reserving_resources() {
         .await
         .unwrap_err();
 
-    assert!(matches!(
-        err,
-        DispatchError::MissingRuntimeBackend {
-            runtime: RuntimeKind::Script
-        }
-    ));
+    assert_eq!(
+        err.kind,
+        CapabilityDispatchFailureKind::MissingRuntimeBackend
+    );
+    assert_eq!(err.runtime, Some(RuntimeKind::Script));
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert_eq!(governor.usage_for(&account), ResourceTally::default());
 }
@@ -368,12 +358,11 @@ async fn dispatcher_requires_wasm_backend_before_reserving_resources() {
         .await
         .unwrap_err();
 
-    assert!(matches!(
-        err,
-        DispatchError::MissingRuntimeBackend {
-            runtime: RuntimeKind::Wasm
-        }
-    ));
+    assert_eq!(
+        err.kind,
+        CapabilityDispatchFailureKind::MissingRuntimeBackend
+    );
+    assert_eq!(err.runtime, Some(RuntimeKind::Wasm));
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert_eq!(governor.usage_for(&account), ResourceTally::default());
 }

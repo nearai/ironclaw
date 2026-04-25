@@ -405,3 +405,28 @@ fn sample_context() -> ExecutionContext {
         },
     }
 }
+
+#[test]
+fn error_kind_sanitizes_detail_like_values() {
+    assert_eq!(ErrorKind::new("Dispatch").as_str(), "Dispatch");
+    assert_eq!(
+        ErrorKind::new("failed at /tmp/secret-token.txt").as_str(),
+        "Unclassified"
+    );
+}
+
+#[test]
+fn capability_dispatch_error_uses_host_safe_failure_kind() {
+    let error = CapabilityDispatchError::new(
+        CapabilityDispatchFailureKind::MissingRuntimeBackend,
+        CapabilityId::new("echo.say").unwrap(),
+        Some(ExtensionId::new("echo").unwrap()),
+        Some(RuntimeKind::Wasm),
+    );
+
+    assert_eq!(
+        error.kind,
+        CapabilityDispatchFailureKind::MissingRuntimeBackend
+    );
+    assert_eq!(error.error_kind().as_str(), "MissingRuntimeBackend");
+}

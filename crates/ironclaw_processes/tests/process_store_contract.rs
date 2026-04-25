@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -160,7 +160,8 @@ async fn background_process_manager_marks_process_failed_after_executor_error() 
             .unwrap()
             .unwrap()
             .error_kind
-            .as_deref(),
+            .as_ref()
+            .map(|kind| kind.as_str()),
         Some("RuntimeDispatch")
     );
 }
@@ -329,7 +330,10 @@ async fn background_process_manager_emits_completed_and_failed_events() {
         Some(failure_process_id)
     );
     assert_eq!(
-        failure_events.events()[1].error_kind.as_deref(),
+        failure_events.events()[1]
+            .error_kind
+            .as_ref()
+            .map(|kind| kind.as_str()),
         Some("RuntimeDispatch")
     );
 }
@@ -677,6 +681,60 @@ async fn background_process_manager_releases_process_reservation_after_kill_befo
 }
 
 #[tokio::test]
+async fn process_failures_store_sanitized_error_kinds() {
+    let store = InMemoryProcessStore::new();
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    store
+        .start(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+
+    let record = store
+        .fail(
+            &scope,
+            process_id,
+            "failed at /tmp/secret-token.txt".to_string(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        record.error_kind.as_ref().map(|kind| kind.as_str()),
+        Some("Unclassified")
+    );
+}
+
+#[tokio::test]
+async fn background_process_manager_preserves_reserved_process_estimate_for_executor() {
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let store = Arc::new(ResourceManagedProcessStore::new(
+        InMemoryProcessStore::new(),
+        governor,
+    ));
+    let executor = Arc::new(EstimateRecordingExecutor::default());
+    let manager = BackgroundProcessManager::new(store.clone(), executor.clone());
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let estimate = process_estimate();
+
+    manager
+        .spawn(process_start_with_estimate(
+            process_id,
+            invocation_id,
+            scope.clone(),
+            estimate.clone(),
+        ))
+        .await
+        .unwrap();
+    wait_for_status(store.as_ref(), &scope, process_id, ProcessStatus::Completed).await;
+
+    assert_eq!(executor.last_estimate(), Some(estimate));
+}
+
+#[tokio::test]
 async fn filesystem_process_store_persists_under_tenant_user_engine_processes() {
     let fs = engine_filesystem();
     let store = FilesystemProcessStore::new(&fs);
@@ -704,6 +762,30 @@ async fn filesystem_process_store_persists_under_tenant_user_engine_processes() 
             .len(),
         1
     );
+}
+
+#[derive(Default)]
+struct EstimateRecordingExecutor {
+    last_estimate: Mutex<Option<ResourceEstimate>>,
+}
+
+impl EstimateRecordingExecutor {
+    fn last_estimate(&self) -> Option<ResourceEstimate> {
+        self.last_estimate.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ProcessExecutor for EstimateRecordingExecutor {
+    async fn execute(
+        &self,
+        request: ProcessExecutionRequest,
+    ) -> Result<ProcessExecutionResult, ProcessExecutionError> {
+        *self.last_estimate.lock().unwrap() = Some(request.estimate);
+        Ok(ProcessExecutionResult {
+            output: serde_json::json!({"ok": true}),
+        })
+    }
 }
 
 struct ReservationDroppingStore;
@@ -912,7 +994,7 @@ fn process_start_with_estimate(
         },
         mounts: MountView::default(),
         estimated_resources,
-        resource_reservation_id: None,
+        resource_reservation: ProcessResourceReservation::none(),
         input: serde_json::json!({"message": "runtime payload"}),
     }
 }

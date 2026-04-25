@@ -66,7 +66,10 @@ async fn process_lifecycle_events_carry_process_identity_and_scope() {
     assert_eq!(started.runtime, Some(RuntimeKind::Wasm));
     assert_eq!(failed.kind, RuntimeEventKind::ProcessFailed);
     assert_eq!(failed.process_id, Some(process_id));
-    assert_eq!(failed.error_kind.as_deref(), Some("RuntimeDispatch"));
+    assert_eq!(
+        failed.error_kind.as_ref().map(|kind| kind.as_str()),
+        Some("RuntimeDispatch")
+    );
 
     let unsafe_error = RuntimeEvent::process_failed(
         scope,
@@ -76,7 +79,10 @@ async fn process_lifecycle_events_carry_process_identity_and_scope() {
         process_id,
         "failed at /tmp/secret-token.txt",
     );
-    assert_eq!(unsafe_error.error_kind.as_deref(), Some("Unclassified"));
+    assert_eq!(
+        unsafe_error.error_kind.as_ref().map(|kind| kind.as_str()),
+        Some("Unclassified")
+    );
 }
 
 #[tokio::test]
@@ -111,7 +117,7 @@ async fn jsonl_event_sink_persists_redacted_runtime_events_without_host_paths() 
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].kind, RuntimeEventKind::DispatchFailed);
     assert_eq!(
-        events[0].error_kind.as_deref(),
+        events[0].error_kind.as_ref().map(|kind| kind.as_str()),
         Some("MissingRuntimeBackend")
     );
 }

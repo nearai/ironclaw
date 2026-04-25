@@ -12,8 +12,8 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    ApprovalRequest, ApprovalRequestId, CapabilityId, HostApiError, InvocationId, ResourceScope,
-    TenantId, UserId, VirtualPath,
+    ApprovalRequest, ApprovalRequestId, CapabilityId, ErrorKind, HostApiError, InvocationId,
+    ResourceScope, TenantId, UserId, VirtualPath,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -37,7 +37,7 @@ pub struct RunRecord {
     pub scope: ResourceScope,
     pub status: RunStatus,
     pub approval_request_id: Option<ApprovalRequestId>,
-    pub error_kind: Option<String>,
+    pub error_kind: Option<ErrorKind>,
 }
 
 /// Start metadata for a capability invocation.
@@ -274,7 +274,7 @@ impl RunStateStore for InMemoryRunStateStore {
     ) -> Result<RunRecord, RunStateError> {
         self.update(scope, invocation_id, |record| {
             record.status = RunStatus::BlockedAuth;
-            record.error_kind = Some(error_kind);
+            record.error_kind = Some(ErrorKind::new(error_kind));
         })
     }
 
@@ -297,7 +297,7 @@ impl RunStateStore for InMemoryRunStateStore {
     ) -> Result<RunRecord, RunStateError> {
         self.update(scope, invocation_id, |record| {
             record.status = RunStatus::Failed;
-            record.error_kind = Some(error_kind);
+            record.error_kind = Some(ErrorKind::new(error_kind));
         })
     }
 
@@ -495,7 +495,7 @@ where
             .await?
             .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
         record.status = RunStatus::BlockedAuth;
-        record.error_kind = Some(error_kind);
+        record.error_kind = Some(ErrorKind::new(error_kind));
         self.write_record(&record).await?;
         Ok(record)
     }
@@ -526,7 +526,7 @@ where
             .await?
             .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
         record.status = RunStatus::Failed;
-        record.error_kind = Some(error_kind);
+        record.error_kind = Some(ErrorKind::new(error_kind));
         self.write_record(&record).await?;
         Ok(record)
     }

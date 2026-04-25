@@ -68,7 +68,7 @@ pub struct ApprovalRecord {
 
 The run-state API is current-state oriented and async so durable implementations can use the host filesystem abstraction.
 
-Every read, list, and mutation after `start` requires a `ResourceScope`. `start` creates a new invocation record and must fail if the same tenant/user/invocation already exists; callers must use explicit resume/transition APIs rather than overwriting current state.
+Every read, list, and mutation after `start` requires a `ResourceScope`. `start` creates a new invocation record and must fail if the same tenant/user/invocation already exists; callers must use explicit resume/transition APIs rather than overwriting current state. Stored `error_kind` values use the shared sanitized `ErrorKind` contract so current-state APIs do not expose detail-like runtime strings.
 
 
 ```rust

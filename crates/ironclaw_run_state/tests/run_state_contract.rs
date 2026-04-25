@@ -3,6 +3,35 @@ use ironclaw_host_api::*;
 use ironclaw_run_state::*;
 
 #[tokio::test]
+async fn run_state_stores_sanitized_error_kinds() {
+    let store = InMemoryRunStateStore::new();
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    store
+        .start(RunStart {
+            invocation_id,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            scope: scope.clone(),
+        })
+        .await
+        .unwrap();
+
+    let record = store
+        .fail(
+            &scope,
+            invocation_id,
+            "failed at /tmp/secret-token.txt".to_string(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        record.error_kind.as_ref().map(|kind| kind.as_str()),
+        Some("Unclassified")
+    );
+}
+
+#[tokio::test]
 async fn in_memory_run_state_tracks_running_to_completed() {
     let store = InMemoryRunStateStore::new();
     let invocation_id = InvocationId::new();
@@ -79,7 +108,10 @@ async fn in_memory_run_state_tracks_failed_with_error_kind() {
         .unwrap();
 
     assert_eq!(failed.status, RunStatus::Failed);
-    assert_eq!(failed.error_kind.as_deref(), Some("AuthorizationDenied"));
+    assert_eq!(
+        failed.error_kind.as_ref().map(|kind| kind.as_str()),
+        Some("AuthorizationDenied")
+    );
 }
 
 #[tokio::test]

@@ -133,6 +133,40 @@ async fn dispatcher_emits_events_for_mcp_success() {
 }
 
 #[tokio::test]
+async fn dispatcher_event_sink_failures_do_not_fail_dispatch() {
+    let fs = filesystem_with_echo_extensions();
+    let registry =
+        ExtensionDiscovery::discover(&fs, &VirtualPath::new("/system/extensions").unwrap())
+            .await
+            .unwrap();
+    let governor = InMemoryResourceGovernor::new();
+    let wasm_runtime = WasmRuntime::for_testing().unwrap();
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
+        .with_wasm_runtime(&wasm_runtime)
+        .with_event_sink(&FailingEventSink);
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+
+    let result = dispatcher
+        .dispatch_json(CapabilityDispatchRequest {
+            capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
+            scope,
+            estimate: ResourceEstimate {
+                concurrency_slots: Some(1),
+                output_bytes: Some(10_000),
+                ..ResourceEstimate::default()
+            },
+            input: json!({"message": "event sink is down"}),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.output, json!({"message": "event sink is down"}));
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert!(governor.usage_for(&account).output_bytes > 0);
+}
+
+#[tokio::test]
 async fn dispatcher_can_persist_events_to_filesystem_jsonl_sink() {
     let (fs, event_path) = filesystem_with_echo_extensions_and_engine();
     let fs = Arc::new(fs);
@@ -203,12 +237,11 @@ async fn dispatcher_emits_failed_event_for_missing_backend_without_reserving() {
         .await
         .unwrap_err();
 
-    assert!(matches!(
-        err,
-        DispatchError::MissingRuntimeBackend {
-            runtime: RuntimeKind::Script
-        }
-    ));
+    assert_eq!(
+        err.kind,
+        CapabilityDispatchFailureKind::MissingRuntimeBackend
+    );
+    assert_eq!(err.runtime, Some(RuntimeKind::Script));
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert_eq!(governor.usage_for(&account), ResourceTally::default());
 
@@ -218,7 +251,7 @@ async fn dispatcher_emits_failed_event_for_missing_backend_without_reserving() {
     assert_eq!(recorded[1].kind, RuntimeEventKind::DispatchFailed);
     assert_eq!(recorded[1].runtime, Some(RuntimeKind::Script));
     assert_eq!(
-        recorded[1].error_kind.as_deref(),
+        recorded[1].error_kind.as_ref().map(|kind| kind.as_str()),
         Some("MissingRuntimeBackend")
     );
 }
@@ -257,7 +290,7 @@ async fn event_sink_failure_does_not_change_dispatch_result() {
 
 struct FailingEventSink;
 
-#[async_trait::async_trait]
+#[async_trait]
 impl EventSink for FailingEventSink {
     async fn emit(&self, _event: RuntimeEvent) -> Result<(), EventError> {
         Err(EventError::Sink {

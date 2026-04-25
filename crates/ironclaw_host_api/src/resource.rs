@@ -9,7 +9,9 @@
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::{InvocationId, MissionId, ProjectId, TenantId, ThreadId, UserId};
+use crate::{
+    InvocationId, MissionId, ProjectId, ResourceReservationId, TenantId, ThreadId, UserId,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceScope {
@@ -42,6 +44,33 @@ pub struct ResourceUsage {
     pub output_bytes: u64,
     pub network_egress_bytes: u64,
     pub process_count: u32,
+}
+
+/// Active reservation returned by a resource governor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceReservation {
+    pub id: ResourceReservationId,
+    pub scope: ResourceScope,
+    pub estimate: ResourceEstimate,
+}
+
+/// Reservation lifecycle status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReservationStatus {
+    Active,
+    Reconciled,
+    Released,
+}
+
+/// Receipt returned when a resource reservation is reconciled or released.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceReceipt {
+    pub id: ResourceReservationId,
+    pub scope: ResourceScope,
+    pub status: ReservationStatus,
+    pub estimate: ResourceEstimate,
+    pub actual: Option<ResourceUsage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

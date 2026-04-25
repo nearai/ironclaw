@@ -12,6 +12,8 @@ use ironclaw_host_api::{
     MissionId, ProjectId, ResourceEstimate, ResourceReservationId, ResourceScope, ResourceUsage,
     TenantId, ThreadId, UserId,
 };
+
+pub use ironclaw_host_api::{ReservationStatus, ResourceReceipt, ResourceReservation};
 use rust_decimal::Decimal;
 use thiserror::Error;
 
@@ -287,14 +289,6 @@ impl ResourceTally {
     }
 }
 
-/// Active reservation returned by [`ResourceGovernor::reserve`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResourceReservation {
-    pub id: ResourceReservationId,
-    pub scope: ResourceScope,
-    pub estimate: ResourceEstimate,
-}
-
 /// Governor-issued proof that a reservation is currently active.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveResourceReservation {
@@ -317,24 +311,6 @@ impl ActiveResourceReservation {
     pub fn reservation(&self) -> &ResourceReservation {
         &self.reservation
     }
-}
-
-/// Reservation lifecycle status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReservationStatus {
-    Active,
-    Reconciled,
-    Released,
-}
-
-/// Receipt returned when a reservation is reconciled or released.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResourceReceipt {
-    pub id: ResourceReservationId,
-    pub scope: ResourceScope,
-    pub status: ReservationStatus,
-    pub estimate: ResourceEstimate,
-    pub actual: Option<ResourceUsage>,
 }
 
 /// Synchronous resource governor contract.

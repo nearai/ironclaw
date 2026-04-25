@@ -4013,6 +4013,7 @@ dependencies = [
  "ironclaw_processes",
  "ironclaw_resources",
  "ironclaw_run_state",
+ "ironclaw_scripts",
  "ironclaw_wasm",
  "serde_json",
  "tempfile",
@@ -4037,8 +4038,6 @@ name = "ironclaw_dispatcher"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "ironclaw_authorization",
- "ironclaw_capabilities",
  "ironclaw_events",
  "ironclaw_extensions",
  "ironclaw_filesystem",
@@ -4131,6 +4130,7 @@ dependencies = [
 name = "ironclaw_host_api"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "rust_decimal",
  "rust_decimal_macros",

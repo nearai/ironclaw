@@ -13,9 +13,9 @@ use async_trait::async_trait;
 use ironclaw_events::{EventSink, RuntimeEvent};
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilityId, CapabilitySet, ExtensionId, HostApiError, InvocationId, MountView, ProcessId,
-    ResourceEstimate, ResourceReservationId, ResourceScope, ResourceUsage, RuntimeKind, TenantId,
-    UserId, VirtualPath,
+    CapabilityId, CapabilitySet, ErrorKind, ExtensionId, HostApiError, InvocationId, MountView,
+    ProcessId, ResourceEstimate, ResourceReservationId, ResourceScope, ResourceUsage, RuntimeKind,
+    TenantId, UserId, VirtualPath,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor};
 use serde::{Deserialize, Serialize};
@@ -46,7 +46,26 @@ pub struct ProcessRecord {
     pub mounts: MountView,
     pub estimated_resources: ResourceEstimate,
     pub resource_reservation_id: Option<ResourceReservationId>,
-    pub error_kind: Option<String>,
+    pub error_kind: Option<ErrorKind>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProcessResourceReservation {
+    id: Option<ResourceReservationId>,
+}
+
+impl ProcessResourceReservation {
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    pub fn id(&self) -> Option<ResourceReservationId> {
+        self.id
+    }
+
+    fn reserved(id: ResourceReservationId) -> Self {
+        Self { id: Some(id) }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,7 +80,7 @@ pub struct ProcessStart {
     pub grants: CapabilitySet,
     pub mounts: MountView,
     pub estimated_resources: ResourceEstimate,
-    pub resource_reservation_id: Option<ResourceReservationId>,
+    pub resource_reservation: ProcessResourceReservation,
     pub input: Value,
 }
 
@@ -122,6 +141,7 @@ pub struct ProcessExecutionRequest {
     pub capability_id: CapabilityId,
     pub runtime: RuntimeKind,
     pub estimate: ResourceEstimate,
+    pub resource_reservation_id: Option<ResourceReservationId>,
     pub input: Value,
 }
 
@@ -133,11 +153,11 @@ pub struct ProcessExecutionResult {
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 #[error("process execution failed: {kind}")]
 pub struct ProcessExecutionError {
-    pub kind: String,
+    pub kind: ErrorKind,
 }
 
 impl ProcessExecutionError {
-    pub fn new(kind: impl Into<String>) -> Self {
+    pub fn new(kind: impl Into<ErrorKind>) -> Self {
         Self { kind: kind.into() }
     }
 }
@@ -227,7 +247,7 @@ where
             record
                 .error_kind
                 .clone()
-                .unwrap_or_else(|| "Unknown".to_string()),
+                .unwrap_or_else(|| ErrorKind::new("Unknown")),
         ))
         .await;
         Ok(record)
@@ -323,14 +343,14 @@ where
     G: ResourceGovernor + ?Sized,
 {
     async fn start(&self, mut start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
-        if start.resource_reservation_id.is_some() {
+        if start.resource_reservation.id().is_some() {
             return self.inner.start(start).await;
         }
 
         let reservation = self
             .governor
             .reserve(start.scope.clone(), start.estimated_resources.clone())?;
-        start.resource_reservation_id = Some(reservation.id);
+        start.resource_reservation = ProcessResourceReservation::reserved(reservation.id);
         match self.inner.start(start).await {
             Ok(record) if record.resource_reservation_id == Some(reservation.id) => Ok(record),
             Ok(record) => {
@@ -419,11 +439,7 @@ impl ProcessManager for BackgroundProcessManager {
         let executor = Arc::clone(&self.executor);
         let scope = record.scope.clone();
         let process_id = record.process_id;
-        let dispatch_estimate = if record.resource_reservation_id.is_some() {
-            ResourceEstimate::default()
-        } else {
-            record.estimated_resources.clone()
-        };
+        let dispatch_estimate = record.estimated_resources.clone();
         let request = ProcessExecutionRequest {
             process_id: record.process_id,
             invocation_id: record.invocation_id,
@@ -432,6 +448,7 @@ impl ProcessManager for BackgroundProcessManager {
             capability_id: record.capability_id.clone(),
             runtime: record.runtime,
             estimate: dispatch_estimate,
+            resource_reservation_id: record.resource_reservation_id,
             input,
         };
         tokio::spawn(async move {
@@ -440,7 +457,7 @@ impl ProcessManager for BackgroundProcessManager {
                     let _ = store.complete(&scope, process_id).await;
                 }
                 Err(error) => {
-                    let _ = store.fail(&scope, process_id, error.kind).await;
+                    let _ = store.fail(&scope, process_id, error.kind.to_string()).await;
                 }
             }
         });
@@ -535,7 +552,7 @@ impl InMemoryProcessStore {
             .ok_or(ProcessError::UnknownProcess { process_id })?;
         ensure_status_transition(process_id, record.status, to)?;
         record.status = to;
-        record.error_kind = error_kind;
+        record.error_kind = error_kind.map(ErrorKind::new);
         Ok(record.clone())
     }
 }
@@ -555,7 +572,7 @@ impl ProcessStore for InMemoryProcessStore {
             grants: start.grants,
             mounts: start.mounts,
             estimated_resources: start.estimated_resources,
-            resource_reservation_id: start.resource_reservation_id,
+            resource_reservation_id: start.resource_reservation.id(),
             error_kind: None,
         };
         let key = ProcessKey::new(&record.scope, record.process_id);
@@ -687,7 +704,7 @@ where
             .ok_or(ProcessError::UnknownProcess { process_id })?;
         ensure_status_transition(process_id, record.status, to)?;
         record.status = to;
-        record.error_kind = error_kind;
+        record.error_kind = error_kind.map(ErrorKind::new);
         self.write_record(&record).await?;
         Ok(record)
     }
@@ -723,7 +740,7 @@ where
             grants: start.grants,
             mounts: start.mounts,
             estimated_resources: start.estimated_resources,
-            resource_reservation_id: start.resource_reservation_id,
+            resource_reservation_id: start.resource_reservation.id(),
             error_kind: None,
         };
         self.write_record(&record).await?;

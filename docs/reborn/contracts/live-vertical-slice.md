@@ -31,7 +31,7 @@ It is intentionally not a product agent loop, gateway, TUI, secret flow, or full
 ## 2. Run it
 
 ```bash
-cargo run -p ironclaw_dispatcher --example reborn_echo
+cargo run -p ironclaw_capabilities --example reborn_echo
 ```
 
 Expected output shape:
@@ -64,7 +64,7 @@ The default example uses an in-process echo script backend and in-process echo M
 To exercise the V1 Docker script backend:
 
 ```bash
-IRONCLAW_REBORN_DEMO_DOCKER=1 cargo run -p ironclaw_dispatcher --example reborn_echo
+IRONCLAW_REBORN_DEMO_DOCKER=1 cargo run -p ironclaw_capabilities --example reborn_echo
 ```
 
 The script manifest declares:
@@ -92,7 +92,7 @@ Docker availability, image presence, and local Docker permissions are intentiona
 
 ## 4. What this validates
 
-The integration test `crates/ironclaw_dispatcher/tests/vertical_slice_contract.rs` validates:
+The integration test `crates/ironclaw_capabilities/tests/runtime_dispatcher_vertical_slice_contract.rs` validates:
 
 - extension manifests are read from `LocalFilesystem` via `/system/extensions`
 - extension discovery returns WASM, Script, and MCP packages

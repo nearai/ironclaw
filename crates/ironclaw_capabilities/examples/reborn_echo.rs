@@ -133,7 +133,11 @@ where
             event_kind_label(event.kind),
             event.capability_id,
             event.runtime.map(runtime_label).unwrap_or("none"),
-            event.error_kind.as_deref().unwrap_or("none")
+            event
+                .error_kind
+                .as_ref()
+                .map(|kind| kind.as_str())
+                .unwrap_or("none")
         );
     }
     Ok(())

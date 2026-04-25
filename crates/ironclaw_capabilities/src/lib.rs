@@ -10,20 +10,17 @@ use async_trait::async_trait;
 use ironclaw_authorization::{
     CapabilityDispatchAuthorizer, CapabilityLease, CapabilityLeaseError, CapabilityLeaseStore,
 };
-use ironclaw_dispatcher::{
-    CapabilityDispatchRequest, CapabilityDispatchResult, DispatchError, RuntimeDispatcher,
-};
 use ironclaw_extensions::ExtensionRegistry;
-use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, Decision, DenyReason, ExecutionContext, HostApiError,
-    InvocationFingerprint, InvocationId, ProcessId, ResourceEstimate, ResourceScope,
+    ApprovalRequestId, CapabilityDispatchError, CapabilityDispatchRequest,
+    CapabilityDispatchResult, CapabilityDispatcher, CapabilityId, Decision, DenyReason, ErrorKind,
+    ExecutionContext, HostApiError, InvocationFingerprint, InvocationId, ProcessId,
+    ResourceEstimate, ResourceScope,
 };
 use ironclaw_processes::{
     ProcessError, ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult,
-    ProcessExecutor, ProcessManager, ProcessRecord, ProcessStart,
+    ProcessExecutor, ProcessManager, ProcessRecord, ProcessResourceReservation, ProcessStart,
 };
-use ironclaw_resources::ResourceGovernor;
 use ironclaw_run_state::{
     ApprovalRequestStore, ApprovalStatus, RunStart, RunStateError, RunStateStore, RunStatus,
 };
@@ -68,29 +65,6 @@ pub struct CapabilityInvocationResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilitySpawnResult {
     pub process: ProcessRecord,
-}
-
-/// Interface for already-authorized runtime dispatch.
-#[async_trait]
-pub trait CapabilityDispatcher: Send + Sync {
-    async fn dispatch_json(
-        &self,
-        request: CapabilityDispatchRequest,
-    ) -> Result<CapabilityDispatchResult, DispatchError>;
-}
-
-#[async_trait]
-impl<F, G> CapabilityDispatcher for RuntimeDispatcher<'_, F, G>
-where
-    F: RootFilesystem,
-    G: ResourceGovernor,
-{
-    async fn dispatch_json(
-        &self,
-        request: CapabilityDispatchRequest,
-    ) -> Result<CapabilityDispatchResult, DispatchError> {
-        RuntimeDispatcher::dispatch_json(self, request).await
-    }
 }
 
 /// Capability invocation failures before or during dispatch.
@@ -143,7 +117,7 @@ pub enum CapabilityInvocationError {
     #[error("process update failed: {0}")]
     Process(Box<ProcessError>),
     #[error("dispatch failed: {0}")]
-    Dispatch(Box<DispatchError>),
+    Dispatch(Box<CapabilityDispatchError>),
 }
 
 impl From<RunStateError> for CapabilityInvocationError {
@@ -158,8 +132,8 @@ impl From<ProcessError> for CapabilityInvocationError {
     }
 }
 
-impl From<DispatchError> for CapabilityInvocationError {
-    fn from(error: DispatchError) -> Self {
+impl From<CapabilityDispatchError> for CapabilityInvocationError {
+    fn from(error: CapabilityDispatchError) -> Self {
         Self::Dispatch(Box::new(error))
     }
 }
@@ -190,16 +164,28 @@ where
         &self,
         request: ProcessExecutionRequest,
     ) -> Result<ProcessExecutionResult, ProcessExecutionError> {
+        let expected_provider = request.extension_id.clone();
+        let expected_runtime = request.runtime;
+        let dispatch_estimate = if request.resource_reservation_id.is_some() {
+            ResourceEstimate::default()
+        } else {
+            request.estimate
+        };
         let dispatch = self
             .dispatcher
             .dispatch_json(CapabilityDispatchRequest {
                 capability_id: request.capability_id,
                 scope: request.scope,
-                estimate: request.estimate,
+                estimate: dispatch_estimate,
                 input: request.input,
             })
             .await
-            .map_err(|error| ProcessExecutionError::new(dispatch_error_kind(&error)))?;
+            .map_err(|error| ProcessExecutionError::new(error.error_kind()))?;
+        if dispatch.provider != expected_provider || dispatch.runtime != expected_runtime {
+            return Err(ProcessExecutionError::new(ErrorKind::new(
+                "ProcessDispatchInvariantViolation",
+            )));
+        }
         Ok(ProcessExecutionResult {
             output: dispatch.output,
         })
@@ -508,7 +494,7 @@ where
                 grants: request.context.grants,
                 mounts: request.context.mounts,
                 estimated_resources: request.estimate,
-                resource_reservation_id: None,
+                resource_reservation: ProcessResourceReservation::none(),
                 input: request.input,
             })
             .await
@@ -717,20 +703,6 @@ where
         run_state.complete(&scope, invocation_id).await?;
 
         Ok(CapabilityInvocationResult { dispatch })
-    }
-}
-
-fn dispatch_error_kind(error: &DispatchError) -> &'static str {
-    match error {
-        DispatchError::UnknownCapability { .. } => "UnknownCapability",
-        DispatchError::UnknownProvider { .. } => "UnknownProvider",
-        DispatchError::RuntimeMismatch { .. } => "RuntimeMismatch",
-        DispatchError::MissingRuntimeBackend { .. } => "MissingRuntimeBackend",
-        DispatchError::UnsupportedRuntime { .. } => "UnsupportedRuntime",
-        DispatchError::Event(_) => "Event",
-        DispatchError::Mcp(_) => "Mcp",
-        DispatchError::Script(_) => "Script",
-        DispatchError::Wasm(_) => "Wasm",
     }
 }
 
