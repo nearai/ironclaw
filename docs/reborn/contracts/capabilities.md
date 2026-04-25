@@ -33,14 +33,15 @@ This service is the middle communication layer between authorization and dispatc
 ```text
 1. receive ExecutionContext + capability id + input + estimate
 2. validate ExecutionContext/resource_scope consistency before persistence or dispatch
-3. if configured, mark invocation `Running` in `RunStateStore` under `context.resource_scope`
-4. lookup CapabilityDescriptor in ExtensionRegistry
-5. call CapabilityDispatchAuthorizer
-6. if denied, mark `Failed` and return a typed invocation error before dispatch/resource reservation
-7. if approval is required, save a tenant/user-scoped pending approval request, mark `BlockedApproval`, and return a typed approval-required error
-8. if allowed, call CapabilityDispatcher with context.resource_scope
-9. mark `Completed` or `Failed` after dispatch
-10. return the normalized dispatch result
+3. compute an `InvocationFingerprint` over scope + capability + estimate + JSON input without storing raw input in the approval record
+4. if configured, mark invocation `Running` in `RunStateStore` under `context.resource_scope`
+5. lookup CapabilityDescriptor in ExtensionRegistry
+6. call CapabilityDispatchAuthorizer
+7. if denied, mark `Failed` and return a typed invocation error before dispatch/resource reservation
+8. if approval is required, attach/validate the invocation fingerprint, save a tenant/user-scoped pending approval request, mark `BlockedApproval`, and return a typed approval-required error
+9. if allowed, call CapabilityDispatcher with context.resource_scope
+10. mark `Completed` or `Failed` after dispatch
+11. return the normalized dispatch result
 ```
 
 It does not implement grant matching itself; that belongs to `ironclaw_authorization`.
@@ -87,6 +88,8 @@ The stores are optional for low-level tests, but host-facing invocation should c
 
 The capability host is responsible for preserving `ExecutionContext.resource_scope` across run-state, approval persistence, and dispatch. A caller cannot authorize under one tenant/user and persist or bill under another.
 
+For approval-required dispatches, `CapabilityHost` also binds the approval to the exact invocation request by attaching an `InvocationFingerprint`. If an authorizer supplies a conflicting fingerprint, the host fails the run with `InvocationFingerprintMismatch` and persists no approval request.
+
 ---
 
 ## 5. Relationship to dispatcher
@@ -107,7 +110,7 @@ This slice does not implement:
 
 - invocation resume after approval resolution
 - durable grant/lease storage, revocation, or expiration enforcement
-- invocation count tracking
+- automatic lease consumption during dispatch resume
 - obligation application beyond returning allowed/denied
 - transcript/job history
 
