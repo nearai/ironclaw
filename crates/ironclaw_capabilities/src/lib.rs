@@ -11,7 +11,10 @@ use ironclaw_dispatcher::{
 };
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::{CapabilityId, Decision, DenyReason, ExecutionContext, ResourceEstimate};
+use ironclaw_host_api::{
+    CapabilityId, Decision, DenyReason, ExecutionContext, HostApiError, InvocationFingerprint,
+    ResourceEstimate,
+};
 use ironclaw_resources::ResourceGovernor;
 use ironclaw_run_state::{ApprovalRequestStore, RunStart, RunStateError, RunStateStore};
 use serde_json::Value;
@@ -67,6 +70,11 @@ pub enum CapabilityInvocationError {
     },
     #[error("capability {capability} invocation requires approval")]
     AuthorizationRequiresApproval { capability: CapabilityId },
+    #[error("capability {capability} invocation fingerprint failed: {source}")]
+    InvocationFingerprint {
+        capability: CapabilityId,
+        source: HostApiError,
+    },
     #[error("run-state update failed: {0}")]
     RunState(Box<RunStateError>),
     #[error("dispatch failed: {0}")]
@@ -149,6 +157,17 @@ where
             });
         }
 
+        let invocation_fingerprint = InvocationFingerprint::for_dispatch(
+            &scope,
+            &request.capability_id,
+            &request.estimate,
+            &request.input,
+        )
+        .map_err(|source| CapabilityInvocationError::InvocationFingerprint {
+            capability: request.capability_id.clone(),
+            source,
+        })?;
+
         if let Some(run_state) = self.run_state {
             run_state
                 .start(RunStart {
@@ -189,7 +208,29 @@ where
                     reason,
                 });
             }
-            Decision::RequireApproval { request: approval } => {
+            Decision::RequireApproval {
+                request: mut approval,
+            } => {
+                if let Some(existing) = &approval.invocation_fingerprint {
+                    if existing != &invocation_fingerprint {
+                        if let Some(run_state) = self.run_state {
+                            run_state
+                                .fail(
+                                    &scope,
+                                    invocation_id,
+                                    "InvocationFingerprintMismatch".to_string(),
+                                )
+                                .await?;
+                        }
+                        return Err(CapabilityInvocationError::AuthorizationDenied {
+                            capability: request.capability_id,
+                            reason: DenyReason::InternalInvariantViolation,
+                        });
+                    }
+                } else {
+                    approval.invocation_fingerprint = Some(invocation_fingerprint.clone());
+                }
+
                 if let Some(approval_requests) = self.approval_requests {
                     approval_requests
                         .save_pending(scope.clone(), approval.clone())

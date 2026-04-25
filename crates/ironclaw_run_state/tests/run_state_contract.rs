@@ -365,6 +365,7 @@ fn approval_request(invocation_id: InvocationId) -> ApprovalRequest {
             capability: CapabilityId::new("echo.say").unwrap(),
             estimated_resources: ResourceEstimate::default(),
         }),
+        invocation_fingerprint: None,
         reason: format!("approval for {invocation_id}"),
         reusable_scope: None,
     }

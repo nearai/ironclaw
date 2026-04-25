@@ -108,6 +108,21 @@ async fn capability_host_blocks_for_approval_without_dispatch_or_reservation() {
     assert_eq!(approval.scope, scope);
     assert_eq!(approval.status, ApprovalStatus::Pending);
     assert_eq!(approval.request.id, approval_request_id);
+    assert_eq!(
+        approval.request.invocation_fingerprint,
+        Some(
+            InvocationFingerprint::for_dispatch(
+                &scope,
+                &CapabilityId::new("echo.say").unwrap(),
+                &ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    ..ResourceEstimate::default()
+                },
+                &json!({"message": "needs approval"}),
+            )
+            .unwrap()
+        )
+    );
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert_eq!(governor.usage_for(&account), ResourceTally::default());
 }
@@ -179,12 +194,56 @@ async fn capability_host_rejects_invalid_context_before_recording_run_state() {
             ..
         }
     ));
-    assert!(
-        run_state
-            .records_for_scope(&original_scope)
-            .await
-            .unwrap()
-            .is_empty()
+    assert!(run_state
+        .records_for_scope(&original_scope)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn capability_host_rejects_mismatched_approval_fingerprint_without_persisting_approval() {
+    let (fs, package) = wasm_package_with_module(json_echo_module());
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    let governor = InMemoryResourceGovernor::new();
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
+    let authorizer = MismatchedFingerprintAuthorizer;
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+
+    let err = host
+        .invoke_json(CapabilityInvocationRequest {
+            context,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: ResourceEstimate::default(),
+            input: json!({"message": "real input"}),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::AuthorizationDenied {
+            reason: DenyReason::InternalInvariantViolation,
+            ..
+        }
+    ));
+    assert_eq!(
+        approval_requests.records_for_scope(&scope).await.unwrap(),
+        Vec::new()
+    );
+    let record = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(record.status, RunStatus::Failed);
+    assert_eq!(
+        record.error_kind.as_deref(),
+        Some("InvocationFingerprintMismatch")
     );
 }
 
@@ -294,7 +353,44 @@ impl CapabilityDispatchAuthorizer for ApprovalAuthorizer {
                     capability: descriptor.id.clone(),
                     estimated_resources: estimate.clone(),
                 }),
+                invocation_fingerprint: None,
                 reason: "test approval".to_string(),
+                reusable_scope: None,
+            },
+        }
+    }
+}
+
+struct MismatchedFingerprintAuthorizer;
+
+impl CapabilityDispatchAuthorizer for MismatchedFingerprintAuthorizer {
+    fn authorize_dispatch(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+    ) -> Decision {
+        let mut other_scope = context.resource_scope.clone();
+        other_scope.invocation_id = InvocationId::new();
+        Decision::RequireApproval {
+            request: ApprovalRequest {
+                id: ApprovalRequestId::new(),
+                correlation_id: context.correlation_id,
+                requested_by: Principal::Extension(context.extension_id.clone()),
+                action: Box::new(Action::Dispatch {
+                    capability: descriptor.id.clone(),
+                    estimated_resources: estimate.clone(),
+                }),
+                invocation_fingerprint: Some(
+                    InvocationFingerprint::for_dispatch(
+                        &other_scope,
+                        &descriptor.id,
+                        estimate,
+                        &json!({"message": "different input"}),
+                    )
+                    .unwrap(),
+                ),
+                reason: "mismatched fingerprint".to_string(),
                 reusable_scope: None,
             },
         }
