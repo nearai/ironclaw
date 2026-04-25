@@ -57,9 +57,10 @@ Start with these deeper docs as needed:
 
 ## Security and Runtime Invariants
 
-- Review any change touching listeners, routes, auth, secrets, sandboxing, approvals, or outbound HTTP with a security mindset.
+- Review any change touching listeners, routes, auth, secrets, sandboxing, approvals, persistence, or outbound HTTP with a security mindset.
 - Do not weaken bearer-token auth, webhook auth, CORS/origin checks, body limits, rate limits, allowlists, or secret-handling guarantees.
 - Treat Docker containers and external services as untrusted.
+- Multi-tenancy is a default requirement, not an optional follow-up. New systems and refactors must carry tenant/user scope through authorization, persistence, resource accounting, events, and runtime boundaries; avoid global stores/lookups unless explicitly admin-scoped, and add tenant-isolation tests for persistence or authority changes.
 - Session/thread/turn state matters. Submission parsing happens before normal chat handling.
 - Skills are selected deterministically. Tool approval and auth flows are special paths and must not be mixed into normal chat history carelessly.
 - Persistent memory is the workspace system, not just transcript storage; preserve file-like semantics, chunking/search behavior, and identity/system-prompt loading.
