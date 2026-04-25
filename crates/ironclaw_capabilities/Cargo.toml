@@ -19,6 +19,7 @@ thiserror = "2"
 
 [dev-dependencies]
 ironclaw_approvals = { path = "../ironclaw_approvals" }
+ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_mcp = { path = "../ironclaw_mcp" }
 ironclaw_wasm = { path = "../ironclaw_wasm" }
 tempfile = "3"

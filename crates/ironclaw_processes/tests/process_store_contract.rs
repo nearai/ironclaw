@@ -7,6 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::*;
 use ironclaw_processes::*;
@@ -231,6 +232,140 @@ async fn filesystem_process_store_rejects_terminal_status_overwrite() {
 }
 
 #[tokio::test]
+async fn eventing_process_store_emits_started_and_killed_events() {
+    let events = Arc::new(InMemoryEventSink::new());
+    let store = EventingProcessStore::new(InMemoryProcessStore::new(), events.clone());
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+
+    store
+        .start(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+    store.kill(&scope, process_id).await.unwrap();
+
+    let emitted = events.events();
+    assert_eq!(emitted.len(), 2);
+    assert_eq!(emitted[0].kind, RuntimeEventKind::ProcessStarted);
+    assert_eq!(emitted[0].process_id, Some(process_id));
+    assert_eq!(emitted[0].scope, scope);
+    assert_eq!(emitted[0].provider, Some(ExtensionId::new("echo").unwrap()));
+    assert_eq!(emitted[0].runtime, Some(RuntimeKind::Wasm));
+    assert_eq!(emitted[1].kind, RuntimeEventKind::ProcessKilled);
+    assert_eq!(emitted[1].process_id, Some(process_id));
+}
+
+#[tokio::test]
+async fn background_process_manager_emits_completed_and_failed_events() {
+    let success_events = Arc::new(InMemoryEventSink::new());
+    let success_store = Arc::new(EventingProcessStore::new(
+        InMemoryProcessStore::new(),
+        success_events.clone(),
+    ));
+    let success_manager =
+        BackgroundProcessManager::new(success_store.clone(), Arc::new(CountingExecutor::success()));
+    let success_invocation_id = InvocationId::new();
+    let success_process_id = ProcessId::new();
+    let success_scope = sample_scope(success_invocation_id, "tenant1", "user1");
+
+    success_manager
+        .spawn(process_start(
+            success_process_id,
+            success_invocation_id,
+            success_scope,
+        ))
+        .await
+        .unwrap();
+    wait_for_event_count(success_events.as_ref(), 2).await;
+    assert_eq!(
+        success_events.events()[0].kind,
+        RuntimeEventKind::ProcessStarted
+    );
+    assert_eq!(
+        success_events.events()[1].kind,
+        RuntimeEventKind::ProcessCompleted
+    );
+    assert_eq!(
+        success_events.events()[1].process_id,
+        Some(success_process_id)
+    );
+
+    let failure_events = Arc::new(InMemoryEventSink::new());
+    let failure_store = Arc::new(EventingProcessStore::new(
+        InMemoryProcessStore::new(),
+        failure_events.clone(),
+    ));
+    let failure_manager = BackgroundProcessManager::new(
+        failure_store,
+        Arc::new(CountingExecutor::failure("RuntimeDispatch")),
+    );
+    let failure_invocation_id = InvocationId::new();
+    let failure_process_id = ProcessId::new();
+    let failure_scope = sample_scope(failure_invocation_id, "tenant1", "user1");
+
+    failure_manager
+        .spawn(process_start(
+            failure_process_id,
+            failure_invocation_id,
+            failure_scope,
+        ))
+        .await
+        .unwrap();
+    wait_for_event_count(failure_events.as_ref(), 2).await;
+    assert_eq!(
+        failure_events.events()[0].kind,
+        RuntimeEventKind::ProcessStarted
+    );
+    assert_eq!(
+        failure_events.events()[1].kind,
+        RuntimeEventKind::ProcessFailed
+    );
+    assert_eq!(
+        failure_events.events()[1].process_id,
+        Some(failure_process_id)
+    );
+    assert_eq!(
+        failure_events.events()[1].error_kind.as_deref(),
+        Some("RuntimeDispatch")
+    );
+}
+
+#[tokio::test]
+async fn background_process_manager_does_not_emit_completed_after_kill() {
+    let events = Arc::new(InMemoryEventSink::new());
+    let store = Arc::new(EventingProcessStore::new(
+        InMemoryProcessStore::new(),
+        events.clone(),
+    ));
+    let executor = Arc::new(CountingExecutor::delayed_success(Duration::from_millis(25)));
+    let manager = BackgroundProcessManager::new(store.clone(), executor);
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+
+    manager
+        .spawn(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+    store.kill(&scope, process_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    let kinds = events
+        .events()
+        .into_iter()
+        .map(|event| event.kind)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        vec![
+            RuntimeEventKind::ProcessStarted,
+            RuntimeEventKind::ProcessKilled
+        ]
+    );
+}
+
+#[tokio::test]
 async fn filesystem_process_store_persists_under_tenant_user_engine_processes() {
     let fs = engine_filesystem();
     let store = FilesystemProcessStore::new(&fs);
@@ -316,6 +451,21 @@ impl ProcessExecutor for CountingExecutor {
             }),
             Err(kind) => Err(ProcessExecutionError::new(kind)),
         }
+    }
+}
+
+async fn wait_for_event_count(events: &InMemoryEventSink, expected: usize) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let count = events.events().len();
+        if count >= expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "event sink did not reach {expected} events; last count was {count}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
 

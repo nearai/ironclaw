@@ -38,6 +38,48 @@ async fn in_memory_event_sink_records_runtime_events_in_order() {
 }
 
 #[tokio::test]
+async fn process_lifecycle_events_carry_process_identity_and_scope() {
+    let scope = sample_scope();
+    let process_id = ProcessId::new();
+
+    let started = RuntimeEvent::process_started(
+        scope.clone(),
+        CapabilityId::new("echo.say").unwrap(),
+        ExtensionId::new("echo").unwrap(),
+        RuntimeKind::Wasm,
+        process_id,
+    );
+    let failed = RuntimeEvent::process_failed(
+        scope.clone(),
+        CapabilityId::new("echo.say").unwrap(),
+        ExtensionId::new("echo").unwrap(),
+        RuntimeKind::Wasm,
+        process_id,
+        "RuntimeDispatch",
+    );
+
+    assert_eq!(started.kind, RuntimeEventKind::ProcessStarted);
+    assert_eq!(started.process_id, Some(process_id));
+    assert_eq!(started.scope.tenant_id, scope.tenant_id);
+    assert_eq!(started.scope.user_id, scope.user_id);
+    assert_eq!(started.provider, Some(ExtensionId::new("echo").unwrap()));
+    assert_eq!(started.runtime, Some(RuntimeKind::Wasm));
+    assert_eq!(failed.kind, RuntimeEventKind::ProcessFailed);
+    assert_eq!(failed.process_id, Some(process_id));
+    assert_eq!(failed.error_kind.as_deref(), Some("RuntimeDispatch"));
+
+    let unsafe_error = RuntimeEvent::process_failed(
+        scope,
+        CapabilityId::new("echo.say").unwrap(),
+        ExtensionId::new("echo").unwrap(),
+        RuntimeKind::Wasm,
+        process_id,
+        "failed at /tmp/secret-token.txt",
+    );
+    assert_eq!(unsafe_error.error_kind.as_deref(), Some("Unclassified"));
+}
+
+#[tokio::test]
 async fn jsonl_event_sink_persists_redacted_runtime_events_without_host_paths() {
     let storage = tempfile::tempdir().unwrap().keep();
     let mut fs = LocalFilesystem::new();
