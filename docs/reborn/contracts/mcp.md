@@ -3,7 +3,7 @@
 **Date:** 2026-04-25
 **Status:** V1 contract slice
 **Crate:** `crates/ironclaw_mcp`
-**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/extensions.md`, `docs/reborn/contracts/resources.md`, `docs/reborn/contracts/kernel-dispatch.md`
+**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/extensions.md`, `docs/reborn/contracts/resources.md`, `docs/reborn/contracts/dispatcher.md`
 
 ---
 
@@ -55,7 +55,7 @@ pub struct McpExecutionResult {
 }
 ```
 
-The kernel then maps this into `CapabilityDispatchResult` with `runtime = RuntimeKind::Mcp`.
+The dispatcher then maps this into `CapabilityDispatchResult` with `runtime = RuntimeKind::Mcp`.
 
 ---
 
@@ -90,7 +90,7 @@ Important boundaries:
 - command, args, URL, and transport come from the validated manifest, not model text
 - raw host paths are not included
 - raw secrets are not included
-- MCP server network/process behavior remains host-adapter policy, not kernel policy
+- MCP server network/process behavior remains host-adapter policy, not dispatcher policy
 - stdio MCP usage is accounted as at least one process in V1
 
 ---
@@ -121,7 +121,7 @@ The runtime computes serialized JSON output bytes and reconciles at least that a
 
 ---
 
-## 5. Kernel dispatch
+## 5. Dispatcher
 
 `RuntimeDispatcher` now supports:
 
@@ -144,7 +144,7 @@ If no MCP runtime is configured, dispatch returns `MissingRuntimeBackend { runti
 
 ## 6. V1 supported transport posture
 
-The runtime recognizes manifest-declared `stdio`, `http`, and `sse` transport strings and passes them to the host-selected adapter. It does not implement raw protocol clients in the kernel.
+The runtime recognizes manifest-declared `stdio`, `http`, and `sse` transport strings and passes them to the host-selected adapter. It does not implement raw protocol clients in the dispatcher.
 
 Transport-specific policy is a host adapter responsibility:
 

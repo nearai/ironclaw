@@ -1,14 +1,14 @@
-# IronClaw Reborn kernel dispatch contract
+# IronClaw Reborn dispatcher contract
 
 Date: 2026-04-24
 Status: V1 contract slice
-Crate: `crates/ironclaw_kernel`
+Crate: `crates/ironclaw_dispatcher`
 
 ---
 
 ## 1. Purpose
 
-`ironclaw_kernel` is the first composition-only dispatch layer for Reborn.
+`ironclaw_dispatcher` is the composition-only runtime dispatch layer for Reborn.
 
 It connects already-validated extension capabilities to runtime lanes:
 
@@ -19,13 +19,13 @@ ExtensionRegistry + RootFilesystem + ResourceGovernor + runtime backends
   -> normalized CapabilityDispatchResult
 ```
 
-The kernel does not discover extensions, parse manifests, implement policy, open files directly, resolve secrets, or execute product workflows. It wires service crates together and fails closed when a required lane or declaration is missing.
+The dispatcher does not discover extensions, parse manifests, implement policy, open files directly, resolve secrets, or execute product workflows. It wires service crates together and fails closed when a required lane or declaration is missing.
 
 ---
 
 ## 2. Inputs
 
-The dispatcher receives a `CapabilityDispatchRequest`:
+The dispatcher receives an already-authorized `CapabilityDispatchRequest`:
 
 ```rust
 pub struct CapabilityDispatchRequest {
@@ -148,7 +148,7 @@ This PR does not add:
 - background `spawn` / process lifecycle
 - agent-loop behavior
 
-Those belong in dedicated service crates or later narrow kernel composition slices.
+Those belong in dedicated service crates or later narrow dispatcher composition slices.
 
 ---
 

@@ -3,7 +3,7 @@
 **Date:** 2026-04-25
 **Status:** V1 contract slice
 **Crate:** `crates/ironclaw_scripts`
-**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/extensions.md`, `docs/reborn/contracts/resources.md`, `docs/reborn/contracts/kernel-dispatch.md`
+**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/extensions.md`, `docs/reborn/contracts/resources.md`, `docs/reborn/contracts/dispatcher.md`
 
 ---
 
@@ -40,7 +40,7 @@ pub struct ScriptBackendOutput;
 pub enum ScriptError;
 ```
 
-The kernel composes a script runtime with:
+The dispatcher composes a script runtime with:
 
 ```rust
 RuntimeDispatcher::new(&registry, &fs, &governor)
@@ -143,15 +143,15 @@ Future PRs may add scoped filesystem mounts, artifact export, network policy, an
 
 ---
 
-## 6. Kernel dispatch relationship
+## 6. Dispatcher relationship
 
-`ironclaw_kernel` selects the script lane when a declared capability has:
+`ironclaw_dispatcher` selects the script lane when a declared capability has:
 
 ```text
 RuntimeKind::Script
 ```
 
-The kernel does not execute Docker itself. It calls the configured `ScriptExecutor`.
+The dispatcher does not execute Docker itself. It calls the configured `ScriptExecutor`.
 
 Fail-closed behavior:
 
@@ -190,5 +190,5 @@ Current contract tests cover:
 - non-script packages are rejected before reserving
 - undeclared capabilities are rejected before reserving
 - command metadata comes from the manifest, not invocation input
-- kernel dispatch routes script capabilities through a configured `ScriptExecutor`
-- kernel dispatch fails before reservation when script backend is missing
+- dispatcher routes script capabilities through a configured `ScriptExecutor`
+- dispatcher fails before reservation when script backend is missing

@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-25
 **Status:** Runnable V1 demo
-**Crates:** `ironclaw_filesystem`, `ironclaw_extensions`, `ironclaw_resources`, `ironclaw_wasm`, `ironclaw_scripts`, `ironclaw_events`, `ironclaw_mcp`, `ironclaw_kernel`
+**Crates:** `ironclaw_filesystem`, `ironclaw_extensions`, `ironclaw_resources`, `ironclaw_wasm`, `ironclaw_scripts`, `ironclaw_events`, `ironclaw_mcp`, `ironclaw_authorization`, `ironclaw_capabilities`, `ironclaw_dispatcher`
 
 ---
 
@@ -14,7 +14,8 @@ This slice proves the first Reborn host path is runnable:
 LocalFilesystem mounted at /system/extensions
 -> ExtensionDiscovery reads manifests
 -> ExtensionRegistry registers capabilities
--> RuntimeDispatcher routes by RuntimeKind
+-> CapabilityHost invokes through GrantAuthorizer
+-> RuntimeDispatcher routes authorized dispatch by RuntimeKind
 -> WasmRuntime executes a WASM capability
 -> ScriptRuntime executes a script capability
 -> McpRuntime executes an MCP adapter capability
@@ -30,7 +31,7 @@ It is intentionally not a product agent loop, gateway, TUI, secret flow, or full
 ## 2. Run it
 
 ```bash
-cargo run -p ironclaw_kernel --example reborn_echo
+cargo run -p ironclaw_dispatcher --example reborn_echo
 ```
 
 Expected output shape:
@@ -54,7 +55,7 @@ event[7]=runtime_selected capability=echo-mcp.say runtime=mcp error=none
 event[8]=dispatch_succeeded capability=echo-mcp.say runtime=mcp error=none
 ```
 
-The default example uses an in-process echo script backend and in-process echo MCP client so the demo works without Docker or an external MCP server installed. It still exercises the real `ScriptRuntime`, `McpRuntime`, manifest-derived command metadata, `RuntimeDispatcher`, resource lifecycle, and event emission path.
+The default example uses an in-process echo script backend and in-process echo MCP client so the demo works without Docker or an external MCP server installed. It still exercises the real `CapabilityHost`, `GrantAuthorizer`, `ScriptRuntime`, `McpRuntime`, manifest-derived command metadata, `RuntimeDispatcher`, resource lifecycle, and event emission path.
 
 ---
 
@@ -63,7 +64,7 @@ The default example uses an in-process echo script backend and in-process echo M
 To exercise the V1 Docker script backend:
 
 ```bash
-IRONCLAW_REBORN_DEMO_DOCKER=1 cargo run -p ironclaw_kernel --example reborn_echo
+IRONCLAW_REBORN_DEMO_DOCKER=1 cargo run -p ironclaw_dispatcher --example reborn_echo
 ```
 
 The script manifest declares:
@@ -91,17 +92,19 @@ Docker availability, image presence, and local Docker permissions are intentiona
 
 ## 4. What this validates
 
-The integration test `crates/ironclaw_kernel/tests/vertical_slice_contract.rs` validates:
+The integration test `crates/ironclaw_dispatcher/tests/vertical_slice_contract.rs` validates:
 
 - extension manifests are read from `LocalFilesystem` via `/system/extensions`
 - extension discovery returns WASM, Script, and MCP packages
+- caller-facing invocation goes through `CapabilityHost`
+- grant checks go through `GrantAuthorizer`, outside the dispatcher
 - WASM dispatch goes through `RuntimeDispatcher` and `WasmRuntime`
 - Script dispatch goes through `RuntimeDispatcher` and `ScriptRuntime`
 - MCP dispatch goes through `RuntimeDispatcher` and `McpRuntime`
 - all invocations reserve and reconcile resource usage
 - all lanes emit dispatch requested/runtime selected/dispatch succeeded events
 - event history is durably written through `RootFilesystem` at `/engine/events/reborn-demo.jsonl`
-- both lanes return JSON output through the same normalized kernel result type
+- both lanes return JSON output through the same normalized dispatch result type
 
 ---
 
@@ -111,7 +114,7 @@ This slice does not add:
 
 - full realtime event bus fanout/reconnect
 - durable transcript/job state
-- approval/auth gates
+- approval persistence or run-state blocking
 - scoped script filesystem mounts
 - artifact export
 - secret injection
