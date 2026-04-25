@@ -797,6 +797,11 @@ The names below are intentionally close to the MVP concepts, but are not propose
 | `created_by`, `revoked_by`, `reason` | Audit-friendly provenance. |
 
 Access grants authorize service operations. Envelope contributor fields remain attribution only.
+In the current ingest service, `export_worker` is limited to replay/ranker export surfaces,
+`benchmark_worker` is limited to benchmark conversion, `retention_worker` is limited to
+retention/cache cleanup maintenance, and `vector_worker` is limited to vector-index
+maintenance. These worker roles are intentionally not treated as reviewers for generic
+trace listing, audit reads, policy administration, review decisions, or credit mutation.
 
 ### Submissions
 

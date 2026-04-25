@@ -240,6 +240,10 @@ enum TokenRole {
     Contributor,
     Reviewer,
     Admin,
+    ExportWorker,
+    RetentionWorker,
+    VectorWorker,
+    BenchmarkWorker,
 }
 
 impl TokenRole {
@@ -248,12 +252,24 @@ impl TokenRole {
             "contributor" => Ok(Self::Contributor),
             "reviewer" => Ok(Self::Reviewer),
             "admin" => Ok(Self::Admin),
+            "export_worker" | "export-worker" => Ok(Self::ExportWorker),
+            "retention_worker" | "retention-worker" => Ok(Self::RetentionWorker),
+            "vector_worker" | "vector-worker" => Ok(Self::VectorWorker),
+            "benchmark_worker" | "benchmark-worker" => Ok(Self::BenchmarkWorker),
             other => anyhow::bail!("unknown Trace Commons token role: {other}"),
         }
     }
 
     fn can_review(self) -> bool {
         matches!(self, Self::Reviewer | Self::Admin)
+    }
+
+    fn can_export(self) -> bool {
+        matches!(self, Self::Reviewer | Self::Admin | Self::ExportWorker)
+    }
+
+    fn can_benchmark(self) -> bool {
+        matches!(self, Self::Reviewer | Self::Admin | Self::BenchmarkWorker)
     }
 
     fn can_admin(self) -> bool {
@@ -265,6 +281,10 @@ impl TokenRole {
             Self::Contributor => "contributor",
             Self::Reviewer => "reviewer",
             Self::Admin => "admin",
+            Self::ExportWorker => "export_worker",
+            Self::RetentionWorker => "retention_worker",
+            Self::VectorWorker => "vector_worker",
+            Self::BenchmarkWorker => "benchmark_worker",
         }
     }
 }
@@ -1355,7 +1375,7 @@ async fn dataset_replay_handler(
     Query(query): Query<DatasetExportQuery>,
 ) -> ApiResult<Json<TraceReplayDatasetExport>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
-    require_reviewer(&tenant)?;
+    require_exporter(&tenant)?;
     let consent_scope = parse_consent_scope_filter(query.consent_scope.as_deref())?;
     enforce_dataset_export_guardrails(
         state.as_ref(),
@@ -1479,7 +1499,7 @@ async fn replay_export_manifests_handler(
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<TraceExportManifestSummary>>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
-    require_reviewer(&tenant)?;
+    require_exporter(&tenant)?;
     let manifests = read_replay_export_manifest_summaries(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
@@ -1516,7 +1536,7 @@ async fn benchmark_convert_handler(
     Json(body): Json<BenchmarkConversionRequest>,
 ) -> ApiResult<Json<TraceBenchmarkConversionArtifact>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
-    require_reviewer(&tenant)?;
+    require_benchmarker(&tenant)?;
     let consent_scope = parse_consent_scope_filter(body.consent_scope.as_deref())?;
     enforce_dataset_export_guardrails(
         state.as_ref(),
@@ -1649,7 +1669,7 @@ async fn ranker_training_candidates_handler(
     Query(query): Query<RankerTrainingExportQuery>,
 ) -> ApiResult<Json<TraceRankerTrainingCandidateExport>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
-    require_reviewer(&tenant)?;
+    require_exporter(&tenant)?;
     let consent_scope = parse_ranker_consent_scope_filter(query.consent_scope.as_deref())?;
     enforce_ranker_export_guardrails(
         state.as_ref(),
@@ -1737,7 +1757,7 @@ async fn ranker_training_pairs_handler(
     Query(query): Query<RankerTrainingExportQuery>,
 ) -> ApiResult<Json<TraceRankerTrainingPairExport>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
-    require_reviewer(&tenant)?;
+    require_exporter(&tenant)?;
     let consent_scope = parse_ranker_consent_scope_filter(query.consent_scope.as_deref())?;
     enforce_ranker_export_guardrails(
         state.as_ref(),
@@ -1904,6 +1924,25 @@ struct TraceMaintenanceRequest {
     purge_expired_before: Option<DateTime<Utc>>,
 }
 
+impl TraceMaintenanceRequest {
+    fn is_retention_worker_request(&self) -> bool {
+        !self.backfill_db_mirror
+            && !self.index_vectors
+            && !self.reconcile_db_mirror
+            && !self.verify_audit_chain
+    }
+
+    fn is_vector_worker_request(&self) -> bool {
+        self.index_vectors
+            && !self.backfill_db_mirror
+            && !self.reconcile_db_mirror
+            && !self.verify_audit_chain
+            && !self.prune_export_cache
+            && self.max_export_age_hours.is_none()
+            && self.purge_expired_before.is_none()
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -1914,7 +1953,7 @@ async fn maintenance_handler(
     Json(body): Json<TraceMaintenanceRequest>,
 ) -> ApiResult<Json<TraceMaintenanceResponse>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
-    require_reviewer(&tenant)?;
+    require_maintenance_operator(&tenant, &body)?;
     let response = run_maintenance(state.as_ref(), &tenant, body)
         .await
         .map_err(internal_error)?;
@@ -2378,6 +2417,47 @@ fn require_reviewer(auth: &TenantAuth) -> ApiResult<()> {
             "reviewer or admin token required",
         ))
     }
+}
+
+fn require_exporter(auth: &TenantAuth) -> ApiResult<()> {
+    if auth.role.can_export() {
+        Ok(())
+    } else {
+        Err(api_error(
+            StatusCode::FORBIDDEN,
+            "reviewer, admin, or export worker token required",
+        ))
+    }
+}
+
+fn require_benchmarker(auth: &TenantAuth) -> ApiResult<()> {
+    if auth.role.can_benchmark() {
+        Ok(())
+    } else {
+        Err(api_error(
+            StatusCode::FORBIDDEN,
+            "reviewer, admin, or benchmark worker token required",
+        ))
+    }
+}
+
+fn require_maintenance_operator(
+    auth: &TenantAuth,
+    request: &TraceMaintenanceRequest,
+) -> ApiResult<()> {
+    if auth.role.can_review() {
+        return Ok(());
+    }
+    if auth.role == TokenRole::RetentionWorker && request.is_retention_worker_request() {
+        return Ok(());
+    }
+    if auth.role == TokenRole::VectorWorker && request.is_vector_worker_request() {
+        return Ok(());
+    }
+    Err(api_error(
+        StatusCode::FORBIDDEN,
+        "reviewer/admin token or matching maintenance worker token required",
+    ))
 }
 
 fn require_admin(auth: &TenantAuth) -> ApiResult<()> {
@@ -4029,8 +4109,8 @@ async fn read_envelope_for_replay_export(
     purpose: Option<&str>,
 ) -> anyhow::Result<TraceEnvelopeBodyRead> {
     anyhow::ensure!(
-        tenant.role.can_review(),
-        "trace body read requires reviewer or admin role"
+        tenant.role.can_export(),
+        "trace body read requires reviewer, admin, or export worker role"
     );
     anyhow::ensure!(
         record.tenant_id == tenant.tenant_id,
@@ -7769,6 +7849,30 @@ mod tests {
             TokenRole::Reviewer,
         );
         insert_token(&mut tokens, "tenant-a", "admin-token-a", TokenRole::Admin);
+        insert_token(
+            &mut tokens,
+            "tenant-a",
+            "export-worker-token-a",
+            TokenRole::ExportWorker,
+        );
+        insert_token(
+            &mut tokens,
+            "tenant-a",
+            "retention-worker-token-a",
+            TokenRole::RetentionWorker,
+        );
+        insert_token(
+            &mut tokens,
+            "tenant-a",
+            "vector-worker-token-a",
+            TokenRole::VectorWorker,
+        );
+        insert_token(
+            &mut tokens,
+            "tenant-a",
+            "benchmark-worker-token-a",
+            TokenRole::BenchmarkWorker,
+        );
         insert_token(&mut tokens, "tenant-b", "token-b", TokenRole::Contributor);
         insert_token(
             &mut tokens,
@@ -7837,6 +7941,40 @@ mod tests {
             .filter(|line| !line.is_empty())
             .map(|line| serde_json::from_str(line).context("failed to parse raw audit event"))
             .collect()
+    }
+
+    #[test]
+    fn token_role_parses_worker_roles() {
+        let cases = [
+            ("contributor", TokenRole::Contributor, "contributor"),
+            ("reviewer", TokenRole::Reviewer, "reviewer"),
+            ("admin", TokenRole::Admin, "admin"),
+            ("export_worker", TokenRole::ExportWorker, "export_worker"),
+            ("export-worker", TokenRole::ExportWorker, "export_worker"),
+            (
+                "retention_worker",
+                TokenRole::RetentionWorker,
+                "retention_worker",
+            ),
+            (
+                "retention-worker",
+                TokenRole::RetentionWorker,
+                "retention_worker",
+            ),
+            ("vector_worker", TokenRole::VectorWorker, "vector_worker"),
+            (
+                "benchmark_worker",
+                TokenRole::BenchmarkWorker,
+                "benchmark_worker",
+            ),
+        ];
+
+        for (raw, expected, storage_name) in cases {
+            let parsed = TokenRole::parse(raw).expect("role parses");
+            assert_eq!(parsed, expected);
+            assert_eq!(parsed.storage_name(), storage_name);
+        }
+        assert!(TokenRole::parse("trainer").is_err());
     }
 
     async fn sample_envelope() -> TraceContributionEnvelope {
@@ -8279,6 +8417,219 @@ mod tests {
                 .expect("other tenant policy reads")
                 .is_none()
         );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn worker_roles_are_scoped_to_trace_job_surfaces() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-worker-role-scope.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+        envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("training-consented submission succeeds");
+
+        let Json(replay_export) = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("worker_replay".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("export worker can build replay dataset");
+        assert_eq!(replay_export.item_count, 1);
+
+        let Json(manifests) = replay_export_manifests_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+        )
+        .await
+        .expect("export worker can list replay manifests");
+        assert_eq!(manifests.len(), 1);
+
+        let Json(ranker_candidates) = ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking_training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect("export worker can build ranker candidates");
+        assert_eq!(ranker_candidates.item_count, 1);
+
+        let export_review_error = review_decision_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Reject,
+                reason: Some("export workers cannot review".to_string()),
+                credit_points_pending: None,
+            }),
+        )
+        .await
+        .expect_err("export worker cannot make review decisions");
+        assert_eq!(export_review_error.0, StatusCode::FORBIDDEN);
+
+        let export_audit_error = audit_events_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            Query(AuditEventsQuery { limit: Some(10) }),
+        )
+        .await
+        .expect_err("export worker cannot read audit events");
+        assert_eq!(export_audit_error.0, StatusCode::FORBIDDEN);
+
+        let export_policy_error = put_tenant_policy_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            Json(TraceTenantPolicyRequest {
+                policy_version: "worker-policy-v1".to_string(),
+                allowed_consent_scopes: vec![ConsentScope::RankingTraining],
+                allowed_uses: vec![TraceAllowedUse::RankingModelTraining],
+            }),
+        )
+        .await
+        .expect_err("export worker cannot manage tenant policies");
+        assert_eq!(export_policy_error.0, StatusCode::FORBIDDEN);
+
+        let Json(benchmark) = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("benchmark_worker_conversion".to_string()),
+                consent_scope: None,
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: Some("benchmark-job:worker-scope".to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark worker can convert benchmark artifacts");
+        assert_eq!(benchmark.item_count, 1);
+
+        let benchmark_export_error = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("benchmark_worker_replay_denied".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect_err("benchmark worker cannot build replay exports");
+        assert_eq!(benchmark_export_error.0, StatusCode::FORBIDDEN);
+
+        let Json(retention_dry_run) = maintenance_handler(
+            State(state.clone()),
+            auth_headers("retention-worker-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("retention_worker_dry_run".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("retention worker can run retention-scoped maintenance");
+        assert_eq!(retention_dry_run.vector_entries_indexed, 0);
+
+        let retention_vector_error = maintenance_handler(
+            State(state.clone()),
+            auth_headers("retention-worker-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("retention_worker_vector_denied".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: true,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect_err("retention worker cannot index vectors");
+        assert_eq!(retention_vector_error.0, StatusCode::FORBIDDEN);
+
+        let Json(vector_index) = maintenance_handler(
+            State(state.clone()),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("vector_worker_index".to_string()),
+                dry_run: false,
+                backfill_db_mirror: false,
+                index_vectors: true,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("vector worker can run vector-scoped maintenance");
+        assert_eq!(vector_index.vector_entries_indexed, 1);
+
+        let vector_retention_error = maintenance_handler(
+            State(state),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("vector_worker_retention_denied".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: true,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: true,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect_err("vector worker cannot run retention cleanup");
+        assert_eq!(vector_retention_error.0, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

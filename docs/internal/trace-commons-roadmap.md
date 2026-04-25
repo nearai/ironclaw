@@ -119,9 +119,11 @@ Exit criteria:
 
 Status: partially represented by static token roles plus optional ingest-time
 tenant submission policies for allowed consent scopes and trace-card uses.
-Production-like deployments can require explicit tenant policy entries, and
-ingest can now read those policies from the TraceCorpusStore behind
-`TRACE_COMMONS_DB_TENANT_POLICY_READS`; fuller RBAC/ABAC remains future work.
+Production-like deployments can require explicit tenant policy entries, ingest
+can now read those policies from the TraceCorpusStore behind
+`TRACE_COMMONS_DB_TENANT_POLICY_READS`, and worker tokens now have scoped
+export, retention, vector, and benchmark route gates; fuller RBAC/ABAC remains
+future work.
 The PostgreSQL store now sets `ironclaw.trace_tenant_id` transaction-locally around
 tenant-scoped Trace Commons operations while retaining explicit `tenant_id`
 predicates. This is an incremental guardrail only: table owners, superusers, and
