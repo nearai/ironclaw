@@ -1,11 +1,11 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use ironclaw_dispatcher::*;
 use ironclaw_events::*;
 use ironclaw_extensions::*;
 use ironclaw_filesystem::*;
 use ironclaw_host_api::*;
-use ironclaw_kernel::*;
 use ironclaw_mcp::*;
 use ironclaw_resources::*;
 use ironclaw_scripts::*;

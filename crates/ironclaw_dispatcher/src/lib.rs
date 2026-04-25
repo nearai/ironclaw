@@ -1,6 +1,6 @@
 //! Composition-only runtime dispatch contracts for IronClaw Reborn.
 //!
-//! `ironclaw_kernel` wires validated extension descriptors to runtime lanes. It
+//! `ironclaw_dispatcher` wires validated extension descriptors to runtime lanes. It
 //! does not parse extension manifests, implement sandbox policy, reserve budget
 //! itself, or execute product workflows. Those responsibilities stay in the
 //! owning service crates.
