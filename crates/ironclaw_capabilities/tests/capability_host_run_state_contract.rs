@@ -23,7 +23,8 @@ async fn capability_host_blocks_for_approval_without_dispatch_or_reservation() {
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
-    let account = ResourceAccount::tenant(context.resource_scope.tenant_id.clone());
+    let scope = context.resource_scope.clone();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
     let invocation_id = context.invocation_id;
 
     let err = host
@@ -43,14 +44,15 @@ async fn capability_host_blocks_for_approval_without_dispatch_or_reservation() {
         err,
         CapabilityInvocationError::AuthorizationRequiresApproval { .. }
     ));
-    let record = run_state.get(invocation_id).await.unwrap().unwrap();
+    let record = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(record.status, RunStatus::BlockedApproval);
     let approval_request_id = record.approval_request_id.unwrap();
     let approval = approval_requests
-        .get(approval_request_id)
+        .get(&scope, approval_request_id)
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(approval.scope, scope);
     assert_eq!(approval.status, ApprovalStatus::Pending);
     assert_eq!(approval.request.id, approval_request_id);
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
@@ -76,6 +78,7 @@ async fn capability_host_records_completed_run_after_authorized_dispatch() {
             vec![EffectKind::DispatchCapability],
         )],
     });
+    let scope = context.resource_scope.clone();
     let invocation_id = context.invocation_id;
 
     let result = host
@@ -94,7 +97,12 @@ async fn capability_host_records_completed_run_after_authorized_dispatch() {
 
     assert_eq!(result.dispatch.output, json!({"message": "ok"}));
     assert_eq!(
-        run_state.get(invocation_id).await.unwrap().unwrap().status,
+        run_state
+            .get(&scope, invocation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
         RunStatus::Completed
     );
 }
@@ -116,6 +124,7 @@ async fn capability_host_records_failed_run_after_dispatch_error() {
             vec![EffectKind::DispatchCapability],
         )],
     });
+    let scope = context.resource_scope.clone();
     let invocation_id = context.invocation_id;
 
     let err = host
@@ -133,7 +142,7 @@ async fn capability_host_records_failed_run_after_dispatch_error() {
         .unwrap_err();
 
     assert!(matches!(err, CapabilityInvocationError::Dispatch(_)));
-    let record = run_state.get(invocation_id).await.unwrap().unwrap();
+    let record = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(record.status, RunStatus::Failed);
     assert_eq!(record.error_kind.as_deref(), Some("Dispatch"));
 }
