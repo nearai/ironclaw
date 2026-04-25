@@ -3630,12 +3630,30 @@ pub async fn flush_trace_contribution_queue_for_scope(
 
         match trace_autonomous_eligibility(&envelope, &policy) {
             TraceQueueEligibility::Submit => {
-                let receipt = submit_trace_envelope_to_endpoint(
+                let receipt = match submit_trace_envelope_to_endpoint(
                     &envelope,
                     endpoint,
                     &policy.bearer_token_env,
                 )
-                .await?;
+                .await
+                {
+                    Ok(receipt) => receipt,
+                    Err(error) => {
+                        let reason = sanitized_trace_submission_failure_reason(&error);
+                        if let Err(hold_error) = write_trace_queue_hold_reason(&path, &reason) {
+                            tracing::debug!(
+                                error = %hold_error,
+                                submission_id = %envelope.submission_id,
+                                "Failed to write retry hold reason for trace submission"
+                            );
+                        }
+                        holds.push(TraceQueueHold {
+                            submission_id: envelope.submission_id,
+                            reason,
+                        });
+                        continue;
+                    }
+                };
                 record_submitted_trace_envelope_for_scope(scope, &envelope, endpoint, receipt)?;
                 std::fs::remove_file(&path).map_err(|e| {
                     anyhow::anyhow!("failed to remove queued envelope {}: {}", path.display(), e)
@@ -4089,6 +4107,16 @@ fn mark_trace_credit_noticed_if_due(
     }
     write_local_trace_records_for_scope(scope, &records)?;
     Ok(Some(summary))
+}
+
+fn sanitized_trace_submission_failure_reason(error: &anyhow::Error) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(error.to_string().as_bytes());
+    let digest = hasher.finalize();
+    format!(
+        "submission failed; retained for retry (error_hash=sha256:{})",
+        hex::encode(&digest[..8])
+    )
 }
 
 fn trace_record_noticeable(record: &LocalTraceSubmissionRecord) -> bool {
@@ -5193,6 +5221,78 @@ mod tests {
         assert_eq!(records[0].status, LocalTraceSubmissionStatus::Expired);
         assert_eq!(trace_credit_summary(&records).submissions_expired, 1);
         assert!(records[0].last_credit_notice_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn queue_flush_holds_failed_submission_and_still_returns_due_credit_notice() {
+        let scope = format!("trace-flush-submit-failure-test-{}", Uuid::new_v4());
+        let _token_guard = EnvVarRestore::set("TRACE_COMMONS_TEST_TOKEN", "super-secret-token");
+        let mut policy = StandingTraceContributionPolicy::default();
+        policy.enabled = true;
+        policy.ingestion_endpoint = Some("http://127.0.0.1:9/v1/traces".to_string());
+        policy.bearer_token_env = "TRACE_COMMONS_TEST_TOKEN".to_string();
+        policy.auto_submit_high_value_traces = true;
+        policy.min_submission_score = 0.0;
+        policy.credit_notice_interval_hours = 168;
+        write_trace_policy_for_scope(Some(&scope), &policy).expect("policy writes");
+
+        let raw = RawTraceContribution::from_recorded_trace(
+            &sample_trace(),
+            RecordedTraceContributionOptions::default(),
+        );
+        let mut envelope = DeterministicTraceRedactor::default()
+            .redact_trace(raw)
+            .await
+            .expect("redaction should succeed");
+        apply_credit_estimate_to_envelope(&mut envelope);
+        let queue_path = queue_trace_envelope_for_scope(Some(&scope), &envelope)
+            .expect("queued envelope writes");
+
+        write_local_trace_records_for_scope(
+            Some(&scope),
+            &[LocalTraceSubmissionRecord {
+                submission_id: Uuid::new_v4(),
+                trace_id: Uuid::new_v4(),
+                endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                status: LocalTraceSubmissionStatus::Submitted,
+                server_status: Some("accepted".to_string()),
+                submitted_at: Some(Utc::now()),
+                revoked_at: None,
+                privacy_risk: "low".to_string(),
+                redaction_counts: BTreeMap::new(),
+                credit_points_pending: 1.5,
+                credit_points_final: Some(2.5),
+                credit_explanation: vec!["Delayed utility credit posted.".to_string()],
+                credit_events: Vec::new(),
+                last_credit_notice_at: None,
+            }],
+        )
+        .expect("local record writes");
+
+        let report = flush_trace_contribution_queue_for_scope(Some(&scope), 10)
+            .await
+            .expect("flush should not abort on one failed submission");
+
+        assert_eq!(report.submitted, 0);
+        assert_eq!(report.held, 1);
+        assert_eq!(report.holds[0].submission_id, envelope.submission_id);
+        assert!(queue_path.exists(), "failed envelope should stay queued");
+        assert!(report.holds[0].reason.contains("retained for retry"));
+        assert!(!report.holds[0].reason.contains("127.0.0.1"));
+        assert!(!report.holds[0].reason.contains("super-secret-token"));
+
+        let hold_path = queue_path.with_extension("held.json");
+        let hold_body = std::fs::read_to_string(&hold_path).expect("hold reason writes");
+        assert!(hold_body.contains("retained for retry"));
+        assert!(!hold_body.contains("127.0.0.1"));
+        assert!(!hold_body.contains("super-secret-token"));
+
+        let notice = report
+            .credit_notice
+            .expect("due credit notice should still be evaluated");
+        assert_eq!(notice.submissions_submitted, 1);
+        assert_eq!(notice.pending_credit, 1.5);
+        assert_eq!(notice.final_credit, 2.5);
     }
 
     #[tokio::test]

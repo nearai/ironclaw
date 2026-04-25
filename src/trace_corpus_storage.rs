@@ -227,6 +227,44 @@ pub struct TraceExportManifestRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceExportManifestItemInvalidationReason {
+    Revoked,
+    Expired,
+    Purged,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceExportManifestItemWrite {
+    pub tenant_id: String,
+    pub export_manifest_id: Uuid,
+    pub submission_id: Uuid,
+    pub trace_id: Uuid,
+    pub derived_id: Option<Uuid>,
+    pub object_ref_id: Option<Uuid>,
+    pub vector_entry_id: Option<Uuid>,
+    pub source_status_at_export: TraceCorpusStatus,
+    pub source_hash_at_export: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceExportManifestItemRecord {
+    pub tenant_id: String,
+    pub export_manifest_id: Uuid,
+    pub submission_id: Uuid,
+    pub trace_id: Uuid,
+    pub derived_id: Option<Uuid>,
+    pub object_ref_id: Option<Uuid>,
+    pub vector_entry_id: Option<Uuid>,
+    pub source_status_at_export: TraceCorpusStatus,
+    pub source_hash_at_export: String,
+    pub source_invalidated_at: Option<DateTime<Utc>>,
+    pub source_invalidation_reason: Option<TraceExportManifestItemInvalidationReason>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TenantScopedTraceObjectRef {
     pub tenant_id: String,
@@ -525,10 +563,28 @@ pub trait TraceCorpusStore: Send + Sync {
         tenant_id: &str,
     ) -> Result<Vec<TraceExportManifestRecord>, DatabaseError>;
 
+    async fn upsert_trace_export_manifest_item(
+        &self,
+        item: TraceExportManifestItemWrite,
+    ) -> Result<TraceExportManifestItemRecord, DatabaseError>;
+
+    async fn list_trace_export_manifest_items(
+        &self,
+        tenant_id: &str,
+        export_manifest_id: Uuid,
+    ) -> Result<Vec<TraceExportManifestItemRecord>, DatabaseError>;
+
     async fn invalidate_trace_export_manifests_for_submission(
         &self,
         tenant_id: &str,
         submission_id: Uuid,
+    ) -> Result<u64, DatabaseError>;
+
+    async fn invalidate_trace_export_manifest_items_for_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        reason: TraceExportManifestItemInvalidationReason,
     ) -> Result<u64, DatabaseError>;
 
     async fn invalidate_trace_vector_entries_for_submission(

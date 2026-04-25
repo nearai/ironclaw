@@ -452,3 +452,95 @@ fn internal_error(error: impl std::fmt::Display) -> (StatusCode, String) {
         "Trace contribution operation failed".to_string(),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::channels::web::auth::UserIdentity;
+    use crate::trace_contribution::{
+        LocalTraceSubmissionStatus, TraceCreditEvent, TraceCreditEventKind,
+        trace_contribution_dir_for_scope, write_trace_policy_for_scope,
+    };
+    use chrono::Utc;
+
+    fn write_trace_records(scope: &str, records: &[LocalTraceSubmissionRecord]) {
+        let path = trace_contribution_dir_for_scope(Some(scope)).join("submissions.json");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("trace record dir creates");
+        }
+        let body = serde_json::to_string_pretty(records).expect("trace records serialize");
+        std::fs::write(path, body).expect("trace records write");
+    }
+
+    fn submitted_record(points: f32) -> LocalTraceSubmissionRecord {
+        let submission_id = Uuid::new_v4();
+        LocalTraceSubmissionRecord {
+            submission_id,
+            trace_id: Uuid::new_v4(),
+            endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+            status: LocalTraceSubmissionStatus::Submitted,
+            server_status: Some("accepted".to_string()),
+            submitted_at: Some(Utc::now()),
+            revoked_at: None,
+            privacy_risk: "low".to_string(),
+            redaction_counts: BTreeMap::new(),
+            credit_points_pending: points,
+            credit_points_final: Some(points + 1.0),
+            credit_explanation: vec![format!("Scoped credit {points:.1}")],
+            credit_events: vec![TraceCreditEvent {
+                event_id: Uuid::new_v4(),
+                submission_id,
+                contributor_pseudonym: "test".to_string(),
+                kind: TraceCreditEventKind::CreditSynced,
+                points_delta: points,
+                reason: "Delayed credit synced.".to_string(),
+                created_at: Utc::now(),
+            }],
+            last_credit_notice_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn traces_flush_handler_returns_authenticated_user_scoped_credit_notice() {
+        let user_id = format!("trace-web-flush-user-{}", Uuid::new_v4());
+        let other_user_id = format!("trace-web-flush-other-{}", Uuid::new_v4());
+        let mut policy = StandingTraceContributionPolicy::default();
+        policy.enabled = true;
+        policy.ingestion_endpoint = Some("https://trace.example.com/v1/traces".to_string());
+        policy.credit_notice_interval_hours = 168;
+        write_trace_policy_for_scope(Some(&user_id), &policy).expect("user policy writes");
+        write_trace_policy_for_scope(Some(&other_user_id), &policy).expect("other policy writes");
+        write_trace_records(&user_id, &[submitted_record(2.0)]);
+        write_trace_records(&other_user_id, &[submitted_record(99.0)]);
+
+        let Json(report) = traces_flush_handler(
+            AuthenticatedUser(UserIdentity {
+                user_id: user_id.clone(),
+                role: "member".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Query(TraceQueueFlushQuery { limit: Some(25) }),
+        )
+        .await
+        .expect("flush handler succeeds");
+
+        let notice = report
+            .credit_notice
+            .expect("scoped due credit notice is returned");
+        assert_eq!(notice.submissions_submitted, 1);
+        assert_eq!(notice.pending_credit, 2.0);
+        assert_eq!(notice.final_credit, 3.0);
+        assert!(
+            notice
+                .recent_explanations
+                .iter()
+                .any(|reason| reason.contains("Scoped credit 2.0"))
+        );
+        assert!(
+            notice
+                .recent_explanations
+                .iter()
+                .all(|reason| !reason.contains("99.0"))
+        );
+    }
+}

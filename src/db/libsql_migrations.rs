@@ -1142,6 +1142,37 @@ CREATE INDEX IF NOT EXISTS idx_trace_export_manifests_generated
 CREATE INDEX IF NOT EXISTS idx_trace_export_manifests_hash
     ON trace_export_manifests (tenant_id, source_submission_ids_hash);
 
+CREATE TABLE IF NOT EXISTS trace_export_manifest_items (
+    tenant_id TEXT NOT NULL,
+    export_manifest_id TEXT NOT NULL,
+    submission_id TEXT NOT NULL,
+    trace_id TEXT NOT NULL,
+    derived_id TEXT,
+    object_ref_id TEXT,
+    vector_entry_id TEXT,
+    source_status_at_export TEXT NOT NULL,
+    source_hash_at_export TEXT NOT NULL,
+    source_invalidated_at TEXT,
+    source_invalidation_reason TEXT CHECK (
+        source_invalidation_reason IS NULL
+        OR source_invalidation_reason IN ('revoked', 'expired', 'purged')
+    ),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (tenant_id, export_manifest_id, submission_id),
+    FOREIGN KEY (tenant_id, export_manifest_id)
+        REFERENCES trace_export_manifests (tenant_id, export_manifest_id)
+        ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, submission_id)
+        REFERENCES trace_submissions (tenant_id, submission_id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_trace_export_manifest_items_source
+    ON trace_export_manifest_items (tenant_id, submission_id, source_invalidated_at);
+CREATE INDEX IF NOT EXISTS idx_trace_export_manifest_items_manifest
+    ON trace_export_manifest_items (tenant_id, export_manifest_id, created_at ASC);
+
 CREATE TABLE IF NOT EXISTS trace_credit_ledger (
     tenant_id TEXT NOT NULL,
     credit_event_id TEXT NOT NULL,
@@ -1279,6 +1310,42 @@ CREATE INDEX IF NOT EXISTS idx_trace_export_manifests_generated
     ON trace_export_manifests (tenant_id, generated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_trace_export_manifests_hash
     ON trace_export_manifests (tenant_id, source_submission_ids_hash);
+"#,
+    ),
+    (
+        30,
+        "trace_export_manifest_items",
+        r#"
+CREATE TABLE IF NOT EXISTS trace_export_manifest_items (
+    tenant_id TEXT NOT NULL,
+    export_manifest_id TEXT NOT NULL,
+    submission_id TEXT NOT NULL,
+    trace_id TEXT NOT NULL,
+    derived_id TEXT,
+    object_ref_id TEXT,
+    vector_entry_id TEXT,
+    source_status_at_export TEXT NOT NULL,
+    source_hash_at_export TEXT NOT NULL,
+    source_invalidated_at TEXT,
+    source_invalidation_reason TEXT CHECK (
+        source_invalidation_reason IS NULL
+        OR source_invalidation_reason IN ('revoked', 'expired', 'purged')
+    ),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (tenant_id, export_manifest_id, submission_id),
+    FOREIGN KEY (tenant_id, export_manifest_id)
+        REFERENCES trace_export_manifests (tenant_id, export_manifest_id)
+        ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, submission_id)
+        REFERENCES trace_submissions (tenant_id, submission_id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_trace_export_manifest_items_source
+    ON trace_export_manifest_items (tenant_id, submission_id, source_invalidated_at);
+CREATE INDEX IF NOT EXISTS idx_trace_export_manifest_items_manifest
+    ON trace_export_manifest_items (tenant_id, export_manifest_id, created_at ASC);
 "#,
     ),
 ];

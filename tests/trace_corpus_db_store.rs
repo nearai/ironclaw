@@ -9,6 +9,7 @@ mod libsql_trace_corpus_store {
         TenantScopedTraceObjectRef, TraceAuditAction, TraceAuditEventWrite, TraceAuditSafeMetadata,
         TraceCorpusStatus, TraceCorpusStore, TraceCreditEventType, TraceCreditEventWrite,
         TraceCreditSettlementState, TraceDerivedRecordWrite, TraceDerivedStatus,
+        TraceExportManifestItemInvalidationReason, TraceExportManifestItemWrite,
         TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefWrite,
         TraceSubmissionWrite, TraceTombstoneWrite, TraceVectorEntrySourceProjection,
         TraceVectorEntryStatus, TraceVectorEntryWrite, TraceWorkerKind,
@@ -704,5 +705,146 @@ mod libsql_trace_corpus_store {
         assert_eq!(beta_manifests.len(), 1);
         assert_eq!(beta_manifests[0].export_manifest_id, beta_export_id);
         assert!(beta_manifests[0].invalidated_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn libsql_store_preserves_export_manifest_item_scope_and_invalidation() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let db_path = temp_dir.path().join("trace-export-manifest-items.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("create libsql backend");
+        backend.run_migrations().await.expect("run migrations");
+
+        let submission_id = Uuid::new_v4();
+        let trace_id = Uuid::new_v4();
+        let mut alpha_submission = sample_submission("tenant-alpha", submission_id);
+        alpha_submission.trace_id = trace_id;
+        backend
+            .upsert_trace_submission(alpha_submission)
+            .await
+            .expect("insert alpha submission");
+        let mut beta_submission = sample_submission("tenant-beta", submission_id);
+        beta_submission.trace_id = trace_id;
+        backend
+            .upsert_trace_submission(beta_submission)
+            .await
+            .expect("insert beta submission");
+
+        let alpha_export_id = Uuid::new_v4();
+        let beta_export_id = Uuid::new_v4();
+        backend
+            .upsert_trace_export_manifest(TraceExportManifestWrite {
+                tenant_id: "tenant-alpha".to_string(),
+                export_manifest_id: alpha_export_id,
+                artifact_kind: TraceObjectArtifactKind::ExportArtifact,
+                purpose_code: Some("replay_dataset".to_string()),
+                audit_event_id: Some(Uuid::new_v4()),
+                source_submission_ids: vec![submission_id],
+                source_submission_ids_hash: "sha256:alpha-sources".to_string(),
+                item_count: 1,
+                generated_at: Utc::now(),
+            })
+            .await
+            .expect("insert alpha manifest");
+        backend
+            .upsert_trace_export_manifest(TraceExportManifestWrite {
+                tenant_id: "tenant-beta".to_string(),
+                export_manifest_id: beta_export_id,
+                artifact_kind: TraceObjectArtifactKind::ExportArtifact,
+                purpose_code: Some("replay_dataset".to_string()),
+                audit_event_id: Some(Uuid::new_v4()),
+                source_submission_ids: vec![submission_id],
+                source_submission_ids_hash: "sha256:beta-sources".to_string(),
+                item_count: 1,
+                generated_at: Utc::now(),
+            })
+            .await
+            .expect("insert beta manifest");
+
+        backend
+            .upsert_trace_export_manifest_item(TraceExportManifestItemWrite {
+                tenant_id: "tenant-alpha".to_string(),
+                export_manifest_id: alpha_export_id,
+                submission_id,
+                trace_id,
+                derived_id: Some(Uuid::new_v4()),
+                object_ref_id: Some(Uuid::new_v4()),
+                vector_entry_id: Some(Uuid::new_v4()),
+                source_status_at_export: TraceCorpusStatus::Accepted,
+                source_hash_at_export: "sha256:alpha-source".to_string(),
+            })
+            .await
+            .expect("insert alpha manifest item");
+        backend
+            .upsert_trace_export_manifest_item(TraceExportManifestItemWrite {
+                tenant_id: "tenant-beta".to_string(),
+                export_manifest_id: beta_export_id,
+                submission_id,
+                trace_id,
+                derived_id: None,
+                object_ref_id: None,
+                vector_entry_id: None,
+                source_status_at_export: TraceCorpusStatus::Accepted,
+                source_hash_at_export: "sha256:beta-source".to_string(),
+            })
+            .await
+            .expect("insert beta manifest item");
+
+        let alpha_items = backend
+            .list_trace_export_manifest_items("tenant-alpha", alpha_export_id)
+            .await
+            .expect("list alpha manifest items");
+        assert_eq!(alpha_items.len(), 1);
+        assert_eq!(alpha_items[0].tenant_id, "tenant-alpha");
+        assert_eq!(alpha_items[0].export_manifest_id, alpha_export_id);
+        assert_eq!(alpha_items[0].submission_id, submission_id);
+        assert_eq!(alpha_items[0].trace_id, trace_id);
+        assert_eq!(
+            alpha_items[0].source_status_at_export,
+            TraceCorpusStatus::Accepted
+        );
+        assert_eq!(alpha_items[0].source_hash_at_export, "sha256:alpha-source");
+        assert!(alpha_items[0].derived_id.is_some());
+        assert!(alpha_items[0].object_ref_id.is_some());
+        assert!(alpha_items[0].vector_entry_id.is_some());
+        assert!(alpha_items[0].source_invalidated_at.is_none());
+        assert!(alpha_items[0].source_invalidation_reason.is_none());
+
+        let invalidated = backend
+            .invalidate_trace_export_manifest_items_for_submission(
+                "tenant-alpha",
+                submission_id,
+                TraceExportManifestItemInvalidationReason::Revoked,
+            )
+            .await
+            .expect("invalidate alpha manifest item");
+        assert_eq!(invalidated, 1);
+        let idempotent = backend
+            .invalidate_trace_export_manifest_items_for_submission(
+                "tenant-alpha",
+                submission_id,
+                TraceExportManifestItemInvalidationReason::Revoked,
+            )
+            .await
+            .expect("repeat alpha manifest item invalidation");
+        assert_eq!(idempotent, 0);
+
+        let alpha_items = backend
+            .list_trace_export_manifest_items("tenant-alpha", alpha_export_id)
+            .await
+            .expect("list invalidated alpha manifest items");
+        assert!(alpha_items[0].source_invalidated_at.is_some());
+        assert_eq!(
+            alpha_items[0].source_invalidation_reason,
+            Some(TraceExportManifestItemInvalidationReason::Revoked)
+        );
+
+        let beta_items = backend
+            .list_trace_export_manifest_items("tenant-beta", beta_export_id)
+            .await
+            .expect("list beta manifest items");
+        assert_eq!(beta_items.len(), 1);
+        assert!(beta_items[0].source_invalidated_at.is_none());
     }
 }

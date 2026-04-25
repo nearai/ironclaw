@@ -11,7 +11,8 @@ use crate::trace_corpus_storage::{
     TenantScopedTraceObjectRef, TraceArtifactInvalidationCounts, TraceAuditEventRecord,
     TraceAuditEventWrite, TraceAuditSafeMetadata, TraceCorpusStatus, TraceCorpusStore,
     TraceCreditEventRecord, TraceCreditEventWrite, TraceCreditSettlementState, TraceDerivedRecord,
-    TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportManifestRecord,
+    TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportManifestItemInvalidationReason,
+    TraceExportManifestItemRecord, TraceExportManifestItemWrite, TraceExportManifestRecord,
     TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefRecord, TraceObjectRefWrite,
     TraceSubmissionRecord, TraceSubmissionWrite, TraceTombstoneWrite, TraceVectorEntryRecord,
     TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
@@ -27,6 +28,11 @@ const TRACE_EXPORT_MANIFEST_COLUMNS: &str = "\
     tenant_id, export_manifest_id, artifact_kind, purpose_code, audit_event_id, \
     source_submission_ids, source_submission_ids_hash, item_count, generated_at, \
     invalidated_at, deleted_at, created_at, updated_at";
+
+const TRACE_EXPORT_MANIFEST_ITEM_COLUMNS: &str = "\
+    tenant_id, export_manifest_id, submission_id, trace_id, derived_id, object_ref_id, \
+    vector_entry_id, source_status_at_export, source_hash_at_export, source_invalidated_at, \
+    source_invalidation_reason, created_at, updated_at";
 
 fn json_array_strings(
     value: serde_json::Value,
@@ -235,6 +241,37 @@ fn row_to_export_manifest(row: &Row) -> Result<TraceExportManifestRecord, Databa
         generated_at: row.get("generated_at"),
         invalidated_at: row.get("invalidated_at"),
         deleted_at: row.get("deleted_at"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    })
+}
+
+fn row_to_export_manifest_item(row: &Row) -> Result<TraceExportManifestItemRecord, DatabaseError> {
+    let source_status_at_export: String = row.get("source_status_at_export");
+    let source_invalidation_reason: Option<String> = row.get("source_invalidation_reason");
+    Ok(TraceExportManifestItemRecord {
+        tenant_id: row.get("tenant_id"),
+        export_manifest_id: row.get("export_manifest_id"),
+        submission_id: row.get("submission_id"),
+        trace_id: row.get("trace_id"),
+        derived_id: row.get("derived_id"),
+        object_ref_id: row.get("object_ref_id"),
+        vector_entry_id: row.get("vector_entry_id"),
+        source_status_at_export: enum_from_storage::<TraceCorpusStatus>(
+            &source_status_at_export,
+            "TraceCorpusStatus",
+        )?,
+        source_hash_at_export: row.get("source_hash_at_export"),
+        source_invalidated_at: row.get("source_invalidated_at"),
+        source_invalidation_reason: source_invalidation_reason
+            .as_deref()
+            .map(|reason| {
+                enum_from_storage::<TraceExportManifestItemInvalidationReason>(
+                    reason,
+                    "TraceExportManifestItemInvalidationReason",
+                )
+            })
+            .transpose()?,
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
@@ -854,6 +891,71 @@ impl TraceCorpusStore for PgBackend {
         rows.iter().map(row_to_export_manifest).collect()
     }
 
+    async fn upsert_trace_export_manifest_item(
+        &self,
+        item: TraceExportManifestItemWrite,
+    ) -> Result<TraceExportManifestItemRecord, DatabaseError> {
+        self.ensure_trace_tenant(&item.tenant_id).await?;
+        let client = self.pool().get().await?;
+        let source_status_at_export = enum_to_storage(item.source_status_at_export)?;
+        let row = client
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_export_manifest_items (
+                        tenant_id, export_manifest_id, submission_id, trace_id, derived_id,
+                        object_ref_id, vector_entry_id, source_status_at_export,
+                        source_hash_at_export
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                     ON CONFLICT (tenant_id, export_manifest_id, submission_id) DO UPDATE SET
+                        trace_id = excluded.trace_id,
+                        derived_id = excluded.derived_id,
+                        object_ref_id = excluded.object_ref_id,
+                        vector_entry_id = excluded.vector_entry_id,
+                        source_status_at_export = excluded.source_status_at_export,
+                        source_hash_at_export = excluded.source_hash_at_export,
+                        source_invalidated_at = NULL,
+                        source_invalidation_reason = NULL,
+                        updated_at = NOW()
+                     RETURNING {TRACE_EXPORT_MANIFEST_ITEM_COLUMNS}"
+                ),
+                &[
+                    &item.tenant_id,
+                    &item.export_manifest_id,
+                    &item.submission_id,
+                    &item.trace_id,
+                    &item.derived_id,
+                    &item.object_ref_id,
+                    &item.vector_entry_id,
+                    &source_status_at_export,
+                    &item.source_hash_at_export,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        row_to_export_manifest_item(&row)
+    }
+
+    async fn list_trace_export_manifest_items(
+        &self,
+        tenant_id: &str,
+        export_manifest_id: Uuid,
+    ) -> Result<Vec<TraceExportManifestItemRecord>, DatabaseError> {
+        let client = self.pool().get().await?;
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT {TRACE_EXPORT_MANIFEST_ITEM_COLUMNS}
+                     FROM trace_export_manifest_items
+                     WHERE tenant_id = $1 AND export_manifest_id = $2
+                     ORDER BY created_at ASC"
+                ),
+                &[&tenant_id, &export_manifest_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        rows.iter().map(row_to_export_manifest_item).collect()
+    }
+
     async fn invalidate_trace_export_manifests_for_submission(
         &self,
         tenant_id: &str,
@@ -870,6 +972,29 @@ impl TraceCorpusStore for PgBackend {
                    AND invalidated_at IS NULL
                    AND deleted_at IS NULL",
                 &[&tenant_id, &submission_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)
+    }
+
+    async fn invalidate_trace_export_manifest_items_for_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        reason: TraceExportManifestItemInvalidationReason,
+    ) -> Result<u64, DatabaseError> {
+        let client = self.pool().get().await?;
+        let reason = enum_to_storage(reason)?;
+        client
+            .execute(
+                "UPDATE trace_export_manifest_items
+                 SET source_invalidated_at = COALESCE(source_invalidated_at, NOW()),
+                     source_invalidation_reason = $3,
+                     updated_at = NOW()
+                 WHERE tenant_id = $1
+                   AND submission_id = $2
+                   AND source_invalidated_at IS NULL",
+                &[&tenant_id, &submission_id, &reason],
             )
             .await
             .map_err(DatabaseError::Postgres)

@@ -12,7 +12,8 @@ use crate::trace_corpus_storage::{
     TenantScopedTraceObjectRef, TraceArtifactInvalidationCounts, TraceAuditEventRecord,
     TraceAuditEventWrite, TraceAuditSafeMetadata, TraceCorpusStatus, TraceCorpusStore,
     TraceCreditEventRecord, TraceCreditEventWrite, TraceCreditSettlementState, TraceDerivedRecord,
-    TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportManifestRecord,
+    TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportManifestItemInvalidationReason,
+    TraceExportManifestItemRecord, TraceExportManifestItemWrite, TraceExportManifestRecord,
     TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefRecord, TraceObjectRefWrite,
     TraceSubmissionRecord, TraceSubmissionWrite, TraceTombstoneWrite, TraceVectorEntryRecord,
     TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
@@ -37,6 +38,11 @@ const TRACE_EXPORT_MANIFEST_COLUMNS: &str = "\
     tenant_id, export_manifest_id, artifact_kind, purpose_code, audit_event_id, \
     source_submission_ids, source_submission_ids_hash, item_count, generated_at, \
     invalidated_at, deleted_at, created_at, updated_at";
+
+const TRACE_EXPORT_MANIFEST_ITEM_COLUMNS: &str = "\
+    tenant_id, export_manifest_id, submission_id, trace_id, derived_id, object_ref_id, \
+    vector_entry_id, source_status_at_export, source_hash_at_export, source_invalidated_at, \
+    source_invalidation_reason, created_at, updated_at";
 
 fn opt_f32(value: Option<f32>) -> libsql::Value {
     match value {
@@ -315,6 +321,48 @@ fn row_to_export_manifest(row: &libsql::Row) -> Result<TraceExportManifestRecord
         generated_at: get_ts(row, 8),
         invalidated_at: get_opt_ts(row, 9),
         deleted_at: get_opt_ts(row, 10),
+        created_at: get_ts(row, 11),
+        updated_at: get_ts(row, 12),
+    })
+}
+
+fn row_to_export_manifest_item(
+    row: &libsql::Row,
+) -> Result<TraceExportManifestItemRecord, DatabaseError> {
+    Ok(TraceExportManifestItemRecord {
+        tenant_id: get_text(row, 0),
+        export_manifest_id: parse_uuid(
+            &get_text(row, 1),
+            "trace_export_manifest_items.export_manifest_id",
+        )?,
+        submission_id: parse_uuid(
+            &get_text(row, 2),
+            "trace_export_manifest_items.submission_id",
+        )?,
+        trace_id: parse_uuid(&get_text(row, 3), "trace_export_manifest_items.trace_id")?,
+        derived_id: get_opt_text(row, 4)
+            .map(|id| parse_uuid(&id, "trace_export_manifest_items.derived_id"))
+            .transpose()?,
+        object_ref_id: get_opt_text(row, 5)
+            .map(|id| parse_uuid(&id, "trace_export_manifest_items.object_ref_id"))
+            .transpose()?,
+        vector_entry_id: get_opt_text(row, 6)
+            .map(|id| parse_uuid(&id, "trace_export_manifest_items.vector_entry_id"))
+            .transpose()?,
+        source_status_at_export: enum_from_storage::<TraceCorpusStatus>(
+            &get_text(row, 7),
+            "TraceCorpusStatus",
+        )?,
+        source_hash_at_export: get_text(row, 8),
+        source_invalidated_at: get_opt_ts(row, 9),
+        source_invalidation_reason: get_opt_text(row, 10)
+            .map(|reason| {
+                enum_from_storage::<TraceExportManifestItemInvalidationReason>(
+                    &reason,
+                    "TraceExportManifestItemInvalidationReason",
+                )
+            })
+            .transpose()?,
         created_at: get_ts(row, 11),
         updated_at: get_ts(row, 12),
     })
@@ -1019,6 +1067,99 @@ impl TraceCorpusStore for LibSqlBackend {
         Ok(manifests)
     }
 
+    async fn upsert_trace_export_manifest_item(
+        &self,
+        item: TraceExportManifestItemWrite,
+    ) -> Result<TraceExportManifestItemRecord, DatabaseError> {
+        self.ensure_trace_tenant(&item.tenant_id).await?;
+        let conn = self.connect().await?;
+        conn.execute(
+            "INSERT INTO trace_export_manifest_items (
+                tenant_id, export_manifest_id, submission_id, trace_id, derived_id,
+                object_ref_id, vector_entry_id, source_status_at_export, source_hash_at_export
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT (tenant_id, export_manifest_id, submission_id) DO UPDATE SET
+                trace_id = excluded.trace_id,
+                derived_id = excluded.derived_id,
+                object_ref_id = excluded.object_ref_id,
+                vector_entry_id = excluded.vector_entry_id,
+                source_status_at_export = excluded.source_status_at_export,
+                source_hash_at_export = excluded.source_hash_at_export,
+                source_invalidated_at = NULL,
+                source_invalidation_reason = NULL,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+            libsql::params![
+                item.tenant_id.as_str(),
+                item.export_manifest_id.to_string(),
+                item.submission_id.to_string(),
+                item.trace_id.to_string(),
+                opt_uuid(item.derived_id),
+                opt_uuid(item.object_ref_id),
+                opt_uuid(item.vector_entry_id),
+                enum_to_storage(item.source_status_at_export)?,
+                item.source_hash_at_export.as_str(),
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {TRACE_EXPORT_MANIFEST_ITEM_COLUMNS}
+                     FROM trace_export_manifest_items
+                     WHERE tenant_id = ?1 AND export_manifest_id = ?2 AND submission_id = ?3"
+                ),
+                libsql::params![
+                    item.tenant_id.as_str(),
+                    item.export_manifest_id.to_string(),
+                    item.submission_id.to_string(),
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        match rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            Some(row) => row_to_export_manifest_item(&row),
+            None => Err(DatabaseError::NotFound {
+                entity: "trace_export_manifest_item".to_string(),
+                id: format!("{}:{}", item.export_manifest_id, item.submission_id),
+            }),
+        }
+    }
+
+    async fn list_trace_export_manifest_items(
+        &self,
+        tenant_id: &str,
+        export_manifest_id: Uuid,
+    ) -> Result<Vec<TraceExportManifestItemRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {TRACE_EXPORT_MANIFEST_ITEM_COLUMNS}
+                     FROM trace_export_manifest_items
+                     WHERE tenant_id = ?1 AND export_manifest_id = ?2
+                     ORDER BY created_at ASC"
+                ),
+                libsql::params![tenant_id, export_manifest_id.to_string()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut items = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            items.push(row_to_export_manifest_item(&row)?);
+        }
+        Ok(items)
+    }
+
     async fn invalidate_trace_export_manifests_for_submission(
         &self,
         tenant_id: &str,
@@ -1038,6 +1179,27 @@ impl TraceCorpusStore for LibSqlBackend {
                    WHERE value = ?2
                )",
             libsql::params![tenant_id, submission_id.to_string()],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))
+    }
+
+    async fn invalidate_trace_export_manifest_items_for_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        reason: TraceExportManifestItemInvalidationReason,
+    ) -> Result<u64, DatabaseError> {
+        let conn = self.connect().await?;
+        conn.execute(
+            "UPDATE trace_export_manifest_items
+             SET source_invalidated_at = COALESCE(source_invalidated_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                 source_invalidation_reason = ?3,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE tenant_id = ?1
+               AND submission_id = ?2
+               AND source_invalidated_at IS NULL",
+            libsql::params![tenant_id, submission_id.to_string(), enum_to_storage(reason)?],
         )
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))

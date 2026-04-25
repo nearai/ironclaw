@@ -3255,6 +3255,122 @@ mod tests {
     }
 
     #[cfg(feature = "libsql")]
+    async fn make_trace_capture_agent_with_statuses(
+        llm: Arc<dyn crate::llm::LlmProvider>,
+    ) -> (
+        Agent,
+        Arc<dyn crate::db::Database>,
+        tempfile::TempDir,
+        Arc<TokioMutex<Vec<StatusUpdate>>>,
+    ) {
+        let (db, temp_dir) = crate::testing::test_db().await;
+        let statuses = Arc::new(TokioMutex::new(Vec::new()));
+        let channels = Arc::new(ChannelManager::new());
+        channels
+            .add(Box::new(RecordingStatusChannel {
+                statuses: Arc::clone(&statuses),
+            }))
+            .await;
+        let deps = AgentDeps {
+            owner_id: "default".to_string(),
+            store: Some(Arc::clone(&db)),
+            llm,
+            cheap_llm: None,
+            safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: false,
+            })),
+            tools: Arc::new(ToolRegistry::new()),
+            workspace: None,
+            extension_manager: None,
+            skill_registry: None,
+            skill_catalog: None,
+            skills_config: SkillsConfig::default(),
+            hooks: Arc::new(HookRegistry::new()),
+            auth_manager: None,
+            cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+            sse_tx: None,
+            http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
+            sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            builder: None,
+            llm_backend: "nearai".to_string(),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+        };
+        let agent = Agent::new(
+            AgentConfig {
+                name: "trace-capture-status-test-agent".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: Duration::from_secs(60),
+                stuck_threshold: Duration::from_secs(60),
+                repair_check_interval: Duration::from_secs(30),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: Duration::from_secs(300),
+                allow_local_tools: false,
+                max_cost_per_day_cents: None,
+                max_actions_per_hour: None,
+                max_cost_per_user_per_day_cents: None,
+                max_tool_iterations: 50,
+                auto_approve_tools: false,
+                default_timezone: "UTC".to_string(),
+                max_jobs_per_user: None,
+                max_tokens_per_job: 0,
+                multi_tenant: false,
+                max_llm_concurrent_per_user: None,
+                max_jobs_concurrent_per_user: None,
+                engine_v2: false,
+            },
+            deps,
+            channels,
+            None,
+            None,
+            None,
+            Some(Arc::new(ContextManager::new(1))),
+            None,
+        );
+
+        (agent, db, temp_dir, statuses)
+    }
+
+    #[cfg(feature = "libsql")]
+    fn write_trace_notice_record_for_user(user_id: &str, pending: f32, final_credit: f32) {
+        let submission_id = Uuid::new_v4();
+        let record = crate::trace_contribution::LocalTraceSubmissionRecord {
+            submission_id,
+            trace_id: Uuid::new_v4(),
+            endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+            status: crate::trace_contribution::LocalTraceSubmissionStatus::Submitted,
+            server_status: Some("accepted".to_string()),
+            submitted_at: Some(chrono::Utc::now()),
+            revoked_at: None,
+            privacy_risk: "low".to_string(),
+            redaction_counts: std::collections::BTreeMap::new(),
+            credit_points_pending: pending,
+            credit_points_final: Some(final_credit),
+            credit_explanation: vec!["Delayed runtime credit posted.".to_string()],
+            credit_events: vec![crate::trace_contribution::TraceCreditEvent {
+                event_id: Uuid::new_v4(),
+                submission_id,
+                contributor_pseudonym: "test".to_string(),
+                kind: crate::trace_contribution::TraceCreditEventKind::CreditSynced,
+                points_delta: final_credit - pending,
+                reason: "Delayed runtime credit posted.".to_string(),
+                created_at: chrono::Utc::now(),
+            }],
+            last_credit_notice_at: None,
+        };
+        let path = crate::trace_contribution::trace_contribution_dir_for_scope(Some(user_id))
+            .join("submissions.json");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("trace submissions dir creates");
+        }
+        let body = serde_json::to_string_pretty(&vec![record]).expect("trace record serializes");
+        std::fs::write(path, body).expect("trace record writes");
+    }
+
+    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn test_process_user_input_persists_success_outcome_metadata() {
         let (agent, db, _temp_dir) = make_trace_capture_agent(Arc::new(StubLlm::new("done"))).await;
@@ -3337,6 +3453,68 @@ mod tests {
             outcome
                 .error_taxonomy
                 .contains(&"runtime_error".to_string())
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_process_user_input_emits_autonomous_trace_credit_notice() {
+        let (agent, _db, _temp_dir, statuses) =
+            make_trace_capture_agent_with_statuses(Arc::new(StubLlm::new("done"))).await;
+        let user_id = format!("trace-runtime-credit-user-{}", Uuid::new_v4());
+        let mut policy = crate::trace_contribution::StandingTraceContributionPolicy::default();
+        policy.enabled = true;
+        policy.ingestion_endpoint = Some("http://127.0.0.1:9/v1/traces".to_string());
+        policy.auto_submit_high_value_traces = true;
+        policy.min_submission_score = 0.0;
+        policy.credit_notice_interval_hours = 168;
+        crate::trace_contribution::write_trace_policy_for_scope(Some(&user_id), &policy)
+            .expect("trace policy writes");
+        write_trace_notice_record_for_user(&user_id, 4.0, 6.0);
+
+        let session = agent.session_manager.get_or_create_session(&user_id).await;
+        let thread_id = {
+            let mut sess = session.lock().await;
+            sess.create_thread(Some("test")).id
+        };
+        let message = IncomingMessage::new("test", &user_id, "finish it");
+
+        let result = agent
+            .process_user_input(
+                &message,
+                agent.tenant_ctx(&user_id).await,
+                Arc::clone(&session),
+                thread_id,
+                "finish it",
+            )
+            .await
+            .expect("process user input");
+        assert!(matches!(result, SubmissionResult::Response { .. }));
+
+        let notice_seen = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let statuses = statuses.lock().await;
+                if statuses.iter().any(|status| {
+                    matches!(
+                        status,
+                        StatusUpdate::Status(message)
+                            if message.contains("Trace contribution credit update")
+                                && message.contains("pending +4.00")
+                                && message.contains("final confirmed +6.00")
+                    )
+                }) {
+                    break true;
+                }
+                drop(statuses);
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap_or(false);
+
+        assert!(
+            notice_seen,
+            "autonomous trace credit status was not emitted"
         );
     }
 
