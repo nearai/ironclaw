@@ -129,6 +129,7 @@ docs/reborn/contracts/wasm.md
 docs/reborn/contracts/dispatcher.md
 docs/reborn/contracts/capability-access.md
 docs/reborn/contracts/capabilities.md
+docs/reborn/contracts/run-state.md
 docs/reborn/contracts/live-vertical-slice.md
 docs/reborn/contracts/mcp.md
 docs/reborn/contracts/scripts.md
@@ -639,6 +640,7 @@ crates/ironclaw_scripts
 crates/ironclaw_dispatcher
 crates/ironclaw_authorization
 crates/ironclaw_capabilities
+crates/ironclaw_run_state
 wasm echo capability
 script echo capability
 ```
@@ -669,7 +671,7 @@ The architecture is real when:
 
 - `ironclaw_host_api` has no runtime/product logic
 - `ironclaw_dispatcher` has no authorization/product workflow logic; it only routes already-authorized dispatches
-- `ironclaw_capabilities` is the caller-facing invocation workflow between authorization and dispatch
+- `ironclaw_capabilities` is the caller-facing invocation workflow between authorization, run-state, and dispatch
 - `ironclaw_resources` is the only path for costed/quota-limited invocation accounting
 - `ironclaw_wasm` does not discover extensions
 - `ironclaw_mcp` tools are adapted into capabilities and still go through policy/audit
