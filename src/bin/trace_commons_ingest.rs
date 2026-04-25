@@ -1831,6 +1831,7 @@ async fn read_replay_export_manifest_summaries(
             .context("failed to read Trace Commons export manifests from DB mirror")?
             .into_iter()
             .map(TraceExportManifestSummary::from_storage_record)
+            .filter(TraceExportManifestSummary::is_replay_dataset_manifest)
             .collect());
     }
 
@@ -4383,6 +4384,7 @@ async fn reconcile_db_mirror(
             .iter()
             .cloned()
             .map(TraceExportManifestSummary::from_storage_record)
+            .filter(TraceExportManifestSummary::is_replay_dataset_manifest)
             .collect(),
     );
 
@@ -5116,6 +5118,14 @@ impl TraceExportManifestSummary {
             invalidated_at: None,
             deleted_at: None,
         }
+    }
+
+    fn is_replay_dataset_manifest(&self) -> bool {
+        self.artifact_kind == StorageTraceObjectArtifactKind::ExportArtifact
+            && !matches!(
+                self.purpose_code.as_deref(),
+                Some("ranker_training_candidates_export" | "ranker_training_pairs_export")
+            )
     }
 }
 
@@ -9039,6 +9049,10 @@ mod tests {
         );
         let mut envelope = sample_envelope().await;
         make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![
+            ConsentScope::DebuggingEvaluation,
+            ConsentScope::RankingTraining,
+        ];
         let submission_id = envelope.submission_id;
 
         let _ = submit_trace_handler(
@@ -9061,6 +9075,44 @@ mod tests {
         )
         .await
         .expect("dataset export succeeds");
+
+        let Json(benchmark) = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("manifest_listing_benchmark".to_string()),
+                consent_scope: None,
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("benchmark conversion succeeds");
+        assert_eq!(benchmark.item_count, 1);
+
+        let Json(ranker) = ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                consent_scope: None,
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect("ranker export succeeds");
+        assert_eq!(ranker.item_count, 1);
+
+        assert_eq!(
+            db.list_trace_export_manifests("tenant-a")
+                .await
+                .expect("all export manifest metadata reads")
+                .len(),
+            3,
+            "DB stores replay, benchmark, and ranker provenance manifests"
+        );
 
         let Json(manifests) =
             replay_export_manifests_handler(State(state.clone()), auth_headers("review-token-a"))
