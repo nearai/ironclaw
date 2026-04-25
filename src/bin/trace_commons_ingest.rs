@@ -2138,6 +2138,7 @@ fn trace_commons_derived_record_from_storage(
         Ok(TraceCommonsDerivedRecord {
             tenant_storage_ref: tenant_storage_ref(tenant_id),
             tenant_id: tenant_id.clone(),
+            derived_id: Some(record.derived_id),
             submission_id: record.submission_id,
             trace_id: record.trace_id,
             status,
@@ -2846,7 +2847,7 @@ async fn mirror_benchmark_export_provenance_to_db(
             export_manifest_id: artifact.conversion_id,
             submission_id: candidate.submission_id,
             trace_id: candidate.trace_id,
-            derived_id: None,
+            derived_id: Some(candidate.derived_id),
             object_ref_id: None,
             vector_entry_id: None,
             source_status_at_export: StorageTraceCorpusStatus::Accepted,
@@ -2884,7 +2885,7 @@ async fn mirror_ranker_candidate_export_provenance_to_db(
             export_manifest_id: provenance.export_id,
             submission_id: candidate.submission_id,
             trace_id: candidate.trace_id,
-            derived_id: None,
+            derived_id: Some(candidate.derived_id),
             object_ref_id: None,
             vector_entry_id: None,
             source_status_at_export: storage_corpus_status(candidate.status),
@@ -2923,7 +2924,7 @@ async fn mirror_ranker_pair_export_provenance_to_db(
                 export_manifest_id: provenance.export_id,
                 submission_id: candidate.submission_id,
                 trace_id: candidate.trace_id,
-                derived_id: None,
+                derived_id: Some(candidate.derived_id),
                 object_ref_id: None,
                 vector_entry_id: None,
                 source_status_at_export: storage_corpus_status(candidate.status),
@@ -2995,9 +2996,13 @@ fn storage_submission_write_from_record(
 }
 
 fn deterministic_trace_uuid(label: &str, record: &TraceCommonsSubmissionRecord) -> Uuid {
+    deterministic_trace_uuid_for(label, &record.tenant_id, record.submission_id)
+}
+
+fn deterministic_trace_uuid_for(label: &str, tenant_id: &str, submission_id: Uuid) -> Uuid {
     let input = format!(
         "ironclaw.trace_commons.{label}:{}:{}",
-        record.tenant_id, record.submission_id
+        tenant_id, submission_id
     );
     Uuid::new_v5(&Uuid::NAMESPACE_URL, input.as_bytes())
 }
@@ -3387,6 +3392,11 @@ fn build_derived_record(
     TraceCommonsDerivedRecord {
         tenant_id: tenant_id.to_string(),
         tenant_storage_ref: tenant_storage_ref(tenant_id),
+        derived_id: Some(deterministic_trace_uuid_for(
+            "derived-precheck",
+            tenant_id,
+            envelope.submission_id,
+        )),
         submission_id: envelope.submission_id,
         trace_id: envelope.trace_id,
         status,
@@ -4979,6 +4989,8 @@ struct TraceCommonsDerivedPrecheck {
 struct TraceCommonsDerivedRecord {
     tenant_id: String,
     tenant_storage_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    derived_id: Option<Uuid>,
     submission_id: Uuid,
     trace_id: Uuid,
     status: TraceCorpusStatus,
@@ -5397,6 +5409,7 @@ struct TraceBenchmarkConversionFilters {
 struct TraceBenchmarkCandidate {
     submission_id: Uuid,
     trace_id: Uuid,
+    derived_id: Uuid,
     canonical_summary_hash: String,
     canonical_summary: String,
     summary_model: String,
@@ -5419,6 +5432,9 @@ impl TraceBenchmarkCandidate {
         Self {
             submission_id: submission.submission_id,
             trace_id: submission.trace_id,
+            derived_id: derived
+                .derived_id
+                .unwrap_or_else(|| deterministic_trace_uuid("derived-precheck", submission)),
             canonical_summary_hash: derived.canonical_summary_hash.clone(),
             canonical_summary: derived.canonical_summary.clone(),
             summary_model: derived.summary_model.clone(),
@@ -5463,6 +5479,7 @@ struct TraceRankerTrainingPairExport {
 struct TraceRankerTrainingCandidate {
     submission_id: Uuid,
     trace_id: Uuid,
+    derived_id: Uuid,
     status: TraceCorpusStatus,
     privacy_risk: ResidualPiiRisk,
     label: TraceRankerTrainingLabel,
@@ -5493,6 +5510,9 @@ impl TraceRankerTrainingCandidate {
         Self {
             submission_id: submission.submission_id,
             trace_id: submission.trace_id,
+            derived_id: derived
+                .derived_id
+                .unwrap_or_else(|| deterministic_trace_uuid("derived-precheck", submission)),
             status: submission.status,
             privacy_risk: submission.privacy_risk,
             label,
@@ -9188,6 +9208,26 @@ mod tests {
             3,
             "DB stores replay, benchmark, and ranker provenance manifests"
         );
+        let derived_id = db
+            .list_trace_derived_records("tenant-a")
+            .await
+            .expect("derived metadata reads")
+            .into_iter()
+            .find(|record| record.submission_id == submission_id)
+            .expect("derived metadata exists")
+            .derived_id;
+        let benchmark_items = db
+            .list_trace_export_manifest_items("tenant-a", benchmark.conversion_id)
+            .await
+            .expect("benchmark provenance items read");
+        assert_eq!(benchmark_items.len(), 1);
+        assert_eq!(benchmark_items[0].derived_id, Some(derived_id));
+        let ranker_items = db
+            .list_trace_export_manifest_items("tenant-a", ranker.export_id)
+            .await
+            .expect("ranker provenance items read");
+        assert_eq!(ranker_items.len(), 1);
+        assert_eq!(ranker_items[0].derived_id, Some(derived_id));
 
         let Json(manifests) =
             replay_export_manifests_handler(State(state.clone()), auth_headers("review-token-a"))
