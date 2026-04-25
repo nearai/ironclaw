@@ -76,7 +76,7 @@ Spawn is capability-targeted. It does not start raw host processes or extension-
 
 It does not implement grant matching itself; that belongs to `ironclaw_authorization`.
 It does not select WASM/Script/MCP for dispatch; that belongs to `ironclaw_dispatcher` behind the narrow `CapabilityDispatcher` interface. The `DispatchProcessExecutor` adapter can run spawned process input through that same dispatch interface from a background process manager.
-It does not own process lifecycle or process-result mechanics after start; those belong to `ironclaw_processes` behind `ProcessManager`/`ProcessStore`/`ProcessResultStore`.
+It does not own process lifecycle or process-result mechanics after start; those belong to `ironclaw_processes` behind `ProcessManager`/`ProcessStore`/`ProcessResultStore`. Applications can use `ProcessServices` to compose those process pieces consistently before handing a `ProcessManager` to `CapabilityHost`.
 
 ---
 

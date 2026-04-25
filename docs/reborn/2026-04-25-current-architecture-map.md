@@ -187,6 +187,7 @@ Implemented/current pieces:
 - `RuntimeDispatcher::from_arcs` exists so background execution can hold owned service handles without leaking borrowed request state into spawned tasks.
 - Process persistence exists through in-memory and filesystem-backed stores.
 - `ProcessHost` exists as the current host-facing `status`, `kill`, `await_process`, `subscribe`, `result`, `output`, and `await_result` API over scoped process current state/results; when wired to `ProcessCancellationRegistry`, scoped kill also signals cooperative executor cancellation.
+- `ProcessServices` exists as convenience composition so `ProcessHost` and `BackgroundProcessManager` share the same process store, result store, and cancellation registry.
 - Process lifecycle events exist through `EventingProcessStore` and shared `EventSink` implementations.
 - Process resource reservation ownership exists through `ResourceManagedProcessStore`; public process starts cannot forge reserved handles, and runtime-backed process dispatch suppresses duplicate reservation through the process-dispatch adapter.
 
@@ -220,7 +221,7 @@ The current implemented or contract-backed Reborn stack includes these slices:
 | WASM lane | `[exists]` configured `WasmRuntime` dispatch path in the live vertical slice |
 | Script lane | `[exists]` `ScriptExecutor` path, including in-process demo backend and optional Docker backend in the demo |
 | MCP lane | `[exists]` adapter/executor contract path in the live vertical slice; not a full MCP lifecycle product yet |
-| Process persistence | `[exists]` process store/manager records, scoped process result records with inline JSON or filesystem output refs, host-facing `ProcessHost` status/kill/await/subscribe/result/output APIs, cooperative cancellation tokens, background completion/failure transition protection, lifecycle events, and resource reservation ownership/cleanup |
+| Process persistence | `[exists]` process store/manager records, scoped process result records with inline JSON or filesystem output refs, `ProcessServices` wiring, host-facing `ProcessHost` status/kill/await/subscribe/result/output APIs, cooperative cancellation tokens, background completion/failure transition protection, lifecycle events, and resource reservation ownership/cleanup |
 | Live vertical slice | `[exists]` runnable demo through discovery -> registry -> `CapabilityHost` -> authorization -> dispatcher -> WASM/Script/MCP -> resources/events |
 
 ---
