@@ -27,7 +27,7 @@ It is not a runtime, policy engine, filesystem, budget ledger, or extension mana
 - resource estimates/usages
 - audit/event envelopes
 
-The first implementation PR should create this crate before implementing `ironclaw_filesystem`, `ironclaw_resources`, `ironclaw_extensions`, `ironclaw_wasm`, or `ironclaw_kernel`.
+The first implementation PR should create this crate before implementing `ironclaw_filesystem`, `ironclaw_resources`, `ironclaw_extensions`, `ironclaw_wasm`, or `ironclaw_dispatcher`.
 
 ---
 
@@ -45,7 +45,7 @@ The first implementation PR should create this crate before implementing `ironcl
 
 ### Must not depend on
 
-- `ironclaw_kernel`
+- `ironclaw_dispatcher`
 - `ironclaw_filesystem`
 - `ironclaw_resources`
 - `ironclaw_extensions`
@@ -989,7 +989,7 @@ Do not implement in `ironclaw_host_api`:
 - script runner
 - auth/OAuth flows
 - network client
-- kernel builder
+- dispatcher builder
 - agent loop
 - gateway/TUI behavior
 

@@ -106,10 +106,10 @@ This design should not be presented as a canonical 3-box architecture. The 3-box
                               | dispatch/spawn, events, fs/resources/auth/network
                               |
 +-----------------------------|--------------------------------+
-|                      ironclaw_kernel                         |
+|            ironclaw_capabilities / host composition          |
 |--------------------------------------------------------------|
-| host composition | boot | scope wiring | event bus wiring     |
-| composes extensions/resources/filesystem/runtimes/auth/etc.  |
+| invocation workflow | boot | scope wiring | event bus wiring  |
+| coordinates auth/resources/filesystem/dispatcher/runtimes    |
 +-----------------------------↑--------------------------------+
                               |
                               | composes system-service crates
@@ -141,7 +141,8 @@ This design should not be presented as a canonical 3-box architecture. The 3-box
 The important architectural unit is not “box 1/2/3”. The important unit is the service boundary:
 
 - **extensions/** = executable userland and product behavior
-- **ironclaw_kernel** = composition, boot, scope wiring, and event bus wiring
+- **ironclaw_capabilities** = caller-facing invocation workflow that coordinates auth and dispatch
+- **ironclaw_dispatcher** = narrow runtime lane router for already-authorized dispatches
 - **ironclaw_filesystem** = durable path/mount API
 - **ironclaw_resources** = resource budgets, quotas, reservations, and budget/audit events
 - **ironclaw_wasm / ironclaw_mcp / ironclaw_scripts / ironclaw_processes** = approved execution lanes and execution substrates
@@ -149,7 +150,7 @@ The important architectural unit is not “box 1/2/3”. The important unit is t
 - **ironclaw_network** = mediated outbound network
 - **mounted state / external world** = storage and external effects behind service boundaries
 
-This is closer to an OS design than an application-layer control-plane design. The kernel host should act like a small OS compositor around explicit services, not like a smart runtime that owns product behavior.
+This is closer to an OS design than an application-layer control-plane design. The host should act like a small OS compositor around explicit services, not like a smart runtime that owns product behavior.
 
 ---
 
@@ -246,7 +247,7 @@ crates/
   ironclaw_resources
   ironclaw_auth
   ironclaw_network
-  ironclaw_kernel
+  ironclaw_dispatcher
 ```
 
 `ironclaw_host_api` owns shared authority-bearing contracts and invariants. The V1 execution model is `Host | WASM | Script Runner`: trusted first-party host services, portable WASM capabilities, and native CLI/script execution. `ironclaw_mcp` remains a required V1 adapter path that maps MCP tools into IronClaw capabilities and invokes local stdio servers through the same process/sandbox substrate. Generic arbitrary process extensions are not a public V1 lane; process execution remains an internal substrate for script runner, MCP stdio servers, and trusted system work.
@@ -502,17 +503,23 @@ This crate is the multi-tenant resource and budget governor.
 
 Every V1 runtime lane must call resource reservation before costed work and reconcile after the work completes. No LLM, WASM, MCP, script runner, mission, heartbeat, or job path should bypass this service in hosted/multi-tenant mode.
 
-### 6.11 `crates/ironclaw_kernel`
+### 6.11 `crates/ironclaw_capabilities` and `crates/ironclaw_dispatcher`
 
-This crate composes the system.
+These crates split caller-facing invocation workflow from low-level runtime routing.
 
-#### Owns
+#### `ironclaw_capabilities` owns
 
-- wiring between extension manager, filesystem, WASM, MCP, scripts, resources, processes, auth, and network
-- stable system contracts shared across services
-- user/tenant/project scope wiring
-- high-level host startup
-- event bus composition
+- the public capability invocation workflow
+- coordination between authorization and dispatch
+- mapping `ExecutionContext` into authorized dispatch scope
+- future approval/run-state integration points
+
+#### `ironclaw_dispatcher` owns
+
+- routing already-authorized dispatches by `RuntimeKind`
+- consistency checks between descriptors and packages
+- calling configured WASM, Script, and MCP runtime executors
+- normalized dispatch results
 
 #### Must not become
 
@@ -521,7 +528,7 @@ This crate composes the system.
 - a second agent runtime full of business logic
 - a policy dumping ground
 
-The kernel should be composition-heavy and logic-light.
+The capability host should coordinate services; the dispatcher should remain runtime-routing-only.
 
 ---
 
@@ -532,7 +539,8 @@ The intended dependency direction is:
 ```text
 extensions -> host interface/contracts
 ironclaw_host_api -> no system-service crates
-ironclaw_kernel -> host_api + extensions + filesystem + processes + wasm + mcp + scripts + resources + auth + network
+ironclaw_capabilities -> host_api + authorization + extensions + dispatcher
+ironclaw_dispatcher -> host_api + extensions + filesystem + wasm + mcp + scripts + resources + events
 ironclaw_extensions -> host_api + filesystem contracts and manifest/capability types
 ironclaw_wasm -> host ABI/contracts + filesystem/resources/auth/network/events interfaces
 ironclaw_mcp -> resources + processes for stdio servers + network/auth interfaces for remote servers
@@ -549,9 +557,10 @@ Hard rules:
 - `ironclaw_host_api` must not depend on runtime/system-service crates.
 - `ironclaw_filesystem` must not depend on product extensions.
 - `ironclaw_processes` must not depend on extension discovery internals.
-- `ironclaw_kernel` must not parse extension manifests directly.
+- `ironclaw_capabilities` must not implement grant matching itself; it calls authorization.
+- `ironclaw_dispatcher` must not parse extension manifests directly or evaluate authorization.
 - Runtime lanes must not bypass `ironclaw_resources` for costed or quota-limited work.
-- Extensions must not import kernel internals directly.
+- Extensions must not import dispatcher internals directly.
 - First-party extensions must use the same host API shape as third-party extensions, with explicit privilege levels.
 
 ---
@@ -673,7 +682,7 @@ Define event classes early:
 ### 10.3 Ownership
 
 - `ironclaw_processes` is a major producer of runtime events.
-- `ironclaw_kernel` composes the shared realtime event bus and event contracts.
+- `ironclaw_dispatcher` composes the shared realtime event bus and event contracts.
 - durable audit/history is stored through `ironclaw_filesystem` under a scoped namespace.
 
 ---
@@ -981,7 +990,7 @@ Mitigations:
 - no thread persistence semantics
 - narrow dispatch/spawn/process lifecycle API
 
-### 19.2 `ironclaw_kernel` becoming misc glue
+### 19.2 `ironclaw_dispatcher` becoming misc glue
 
 Risk: “puts it all together” becomes “everything complicated goes here.”
 
@@ -1220,7 +1229,7 @@ The goal of V1 is to prove the OS-like shape, not recreate all current IronClaw 
    - project-local Python/bash/JS helpers and existing native CLIs
    - limits, cleanup, scoped mounts, bounded output, and artifact export
 
-7. **`ironclaw_kernel` composition**
+7. **`ironclaw_dispatcher` composition**
    - wire host API + filesystem + resources + extension manager + WASM runtime + script runner
    - wire auth/network service handles
    - wire event bus

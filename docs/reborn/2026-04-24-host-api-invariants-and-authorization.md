@@ -648,7 +648,7 @@ ironclaw_extensions -> manifest/grant/capability declarations
 ironclaw_auth       -> secret handle authority
 ironclaw_network    -> egress authority
 runtime lanes       -> no-bypass execution boundaries
-ironclaw_kernel     -> composition only
+ironclaw_dispatcher     -> composition only
 ```
 
 The goal is not one monolithic policy engine. The goal is one coherent authorization law enforced by narrow services.

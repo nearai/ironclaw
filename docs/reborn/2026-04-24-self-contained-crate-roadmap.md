@@ -88,7 +88,7 @@ Build the portable installed capability lane and prove one tiny WASM capability 
 
 Add `script.run` / declared CLI capability execution for native CLIs and project-local Python/bash/JS helpers. V1 uses Docker/container as the first backend.
 
-### PR 8 — `crates/ironclaw_kernel`
+### PR 8 — `crates/ironclaw_dispatcher`
 
 Wire host API + filesystem + resources + extensions + WASM runtime + script runner into a composition-only host.
 
@@ -126,7 +126,9 @@ docs/reborn/contracts/filesystem.md
 docs/reborn/contracts/resources.md
 docs/reborn/contracts/extensions.md
 docs/reborn/contracts/wasm.md
-docs/reborn/contracts/kernel-dispatch.md
+docs/reborn/contracts/dispatcher.md
+docs/reborn/contracts/capability-access.md
+docs/reborn/contracts/capabilities.md
 docs/reborn/contracts/live-vertical-slice.md
 docs/reborn/contracts/mcp.md
 docs/reborn/contracts/scripts.md
@@ -476,7 +478,7 @@ Do not add:
 
 ---
 
-## 11. Milestone 7 — `ironclaw_kernel`
+## 11. Milestone 7 — `ironclaw_dispatcher`
 
 ### Purpose
 
@@ -485,7 +487,7 @@ Compose the system.
 ### Crate
 
 ```text
-crates/ironclaw_kernel/
+crates/ironclaw_dispatcher/
 ```
 
 ### Build
@@ -634,7 +636,9 @@ crates/ironclaw_resources
 crates/ironclaw_extensions
 crates/ironclaw_wasm
 crates/ironclaw_scripts
-crates/ironclaw_kernel
+crates/ironclaw_dispatcher
+crates/ironclaw_authorization
+crates/ironclaw_capabilities
 wasm echo capability
 script echo capability
 ```
@@ -664,7 +668,8 @@ This proves the architecture without product complexity.
 The architecture is real when:
 
 - `ironclaw_host_api` has no runtime/product logic
-- `ironclaw_kernel` has almost no product logic
+- `ironclaw_dispatcher` has no authorization/product workflow logic; it only routes already-authorized dispatches
+- `ironclaw_capabilities` is the caller-facing invocation workflow between authorization and dispatch
 - `ironclaw_resources` is the only path for costed/quota-limited invocation accounting
 - `ironclaw_wasm` does not discover extensions
 - `ironclaw_mcp` tools are adapted into capabilities and still go through policy/audit

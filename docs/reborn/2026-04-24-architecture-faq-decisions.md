@@ -28,7 +28,7 @@ The shape is:
 
 ```text
 extensions/ userland
-  -> ironclaw_kernel host composition
+  -> ironclaw_dispatcher host composition
   -> system-service crates
   -> mounted durable filesystem state + mediated external world
 ```
@@ -46,7 +46,7 @@ crates/ironclaw_scripts
 crates/ironclaw_processes
 crates/ironclaw_auth
 crates/ironclaw_network
-crates/ironclaw_kernel
+crates/ironclaw_dispatcher
 ```
 
 First-party products such as agent loop, gateway, and TUI should live under `extensions/` rather than inside the kernel.
@@ -80,7 +80,7 @@ This reduces the risk of a giant undefined “middle layer” becoming the new m
 
 ## 4. What does the kernel own?
 
-`ironclaw_kernel` owns composition and wiring.
+`ironclaw_dispatcher` owns composition and wiring.
 
 It wires together:
 
@@ -104,7 +104,7 @@ It should not own:
 - repair/self-learning logic
 - extension business logic
 
-**Decision:** Kernel is composition-heavy and logic-light. If product behavior starts accumulating in `ironclaw_kernel`, the architecture is failing.
+**Decision:** Kernel is composition-heavy and logic-light. If product behavior starts accumulating in `ironclaw_dispatcher`, the architecture is failing.
 
 ---
 
@@ -130,7 +130,7 @@ It does not own:
 - routing decisions
 - thread persistence
 
-`ironclaw_kernel` composes this crate; it should not parse manifests or own extension discovery directly.
+`ironclaw_dispatcher` composes this crate; it should not parse manifests or own extension discovery directly.
 
 **Decision:** Keep `ExtensionManager` explicit and narrow in `crates/ironclaw_extensions`. It knows what can run; it does not know what is currently running.
 
@@ -408,7 +408,7 @@ Every LLM call, WASM capability invocation, MCP call, script run, mission tick, 
 
 ## 16. Where does the event bus live?
 
-The event bus is composed by `ironclaw_kernel` and produced by multiple system services.
+The event bus is composed by `ironclaw_dispatcher` and produced by multiple system services.
 
 `ironclaw_processes` is a major event producer, but it should not own the whole event system.
 

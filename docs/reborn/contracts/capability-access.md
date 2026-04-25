@@ -3,7 +3,7 @@
 **Date:** 2026-04-25
 **Status:** V1 contract slice
 **Crate:** `crates/ironclaw_authorization`
-**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/kernel-dispatch.md`
+**Depends on:** `docs/reborn/contracts/host-api.md`
 
 ---
 
@@ -70,31 +70,19 @@ The V1 `GrantAuthorizer` can match grants issued to:
 
 ---
 
-## 4. Kernel integration
+## 4. Capability host integration
 
-`RuntimeDispatcher` can be configured with a capability access gate:
-
-```rust
-RuntimeDispatcher::new(&registry, &filesystem, &governor)
-    .with_capability_authorizer(&authorizer, &execution_context)
-```
-
-When configured, dispatch performs authorization after descriptor/package consistency checks and before runtime selection:
+`ironclaw_authorization` is consumed by the caller-facing capability invocation service, not by the dispatcher.
 
 ```text
-dispatch_requested event
-lookup capability descriptor
-lookup provider package
-verify descriptor runtime matches package runtime
-verify request.scope == execution_context.resource_scope
-authorize dispatch
-runtime_selected event
-runtime executor call
+CapabilityHost::invoke_json(...)
+  -> GrantAuthorizer::authorize_dispatch(...)
+  -> RuntimeDispatcher::dispatch_json(...)
 ```
 
-Authorization denial happens before resource reservation and before runtime execution.
+Authorization denial happens before runtime dispatch and before resource reservation.
 
-Denied authorization emits `dispatch_failed` with `error_kind = "AuthorizationDenied"`.
+The dispatcher remains auth-unaware: it receives already-authorized `CapabilityDispatchRequest` values from `CapabilityHost` or another trusted host service.
 
 ---
 

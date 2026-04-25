@@ -3,7 +3,7 @@
 **Date:** 2026-04-25
 **Status:** V1 contract slice
 **Crate:** `crates/ironclaw_events`
-**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/kernel-dispatch.md`, `docs/reborn/contracts/live-vertical-slice.md`
+**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/dispatcher.md`, `docs/reborn/contracts/live-vertical-slice.md`
 
 ---
 
@@ -76,7 +76,7 @@ The path is a `VirtualPath`; runtime code and guests still do not receive raw ho
 
 ---
 
-## 5. Kernel dispatch events
+## 5. Dispatcher events
 
 `RuntimeDispatcher::dispatch_json` emits:
 

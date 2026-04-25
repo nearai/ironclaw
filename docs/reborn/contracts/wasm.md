@@ -99,7 +99,7 @@ Failure cleanup rules:
 - if reconciliation fails after successful invocation, release the reservation before returning the resource error
 - cleanup failures are surfaced as resource-governor errors
 
-The executor is not the global dispatcher. It only coordinates the WASM lane's reservation lifecycle; cross-runtime routing is owned by the composition layer documented in `docs/reborn/contracts/kernel-dispatch.md`.
+The executor is not the global dispatcher. It only coordinates the WASM lane's reservation lifecycle; cross-runtime routing is owned by the composition layer documented in `docs/reborn/contracts/dispatcher.md`.
 
 ---
 
@@ -511,6 +511,6 @@ Do not add in this first crate:
 - owning manifest parsing or registry validation
 - Docker/script execution
 - MCP client handling
-- kernel dispatch
+- dispatcher
 - marketplace behavior
 - agent loop behavior
