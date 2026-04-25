@@ -114,7 +114,7 @@ Stores partition durable data by tenant and user from `ResourceScope`:
 
 The full `ResourceScope` remains inside each record for project/mission/thread/invocation metadata. The first hard isolation boundary is tenant/user; later projection/index layers can add project/thread views without weakening tenant/user partitioning.
 
-Store APIs hide cross-tenant and cross-user records by returning `None`, an empty list, or `UnknownInvocation`. They must not expose whether another tenant/user has a matching UUID.
+Store APIs hide cross-tenant and cross-user records by returning `None`, an empty list, or `UnknownInvocation`. They must not expose whether another tenant/user has a matching UUID. This applies to in-memory stores too: test/dev backends use tenant/user/UUID composite keys rather than UUID-only maps.
 
 ---
 

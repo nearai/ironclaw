@@ -32,18 +32,19 @@ This service is the middle communication layer between authorization and dispatc
 
 ```text
 1. receive ExecutionContext + capability id + input + estimate
-2. if configured, mark invocation `Running` in `RunStateStore` under `context.resource_scope`
-3. lookup CapabilityDescriptor in ExtensionRegistry
-4. call CapabilityDispatchAuthorizer
-5. if denied, mark `Failed` and return a typed invocation error before dispatch/resource reservation
-6. if approval is required, save a tenant/user-scoped pending approval request, mark `BlockedApproval`, and return a typed approval-required error
-7. if allowed, call RuntimeDispatcher with context.resource_scope
-8. mark `Completed` or `Failed` after dispatch
-9. return the normalized dispatch result
+2. validate ExecutionContext/resource_scope consistency before persistence or dispatch
+3. if configured, mark invocation `Running` in `RunStateStore` under `context.resource_scope`
+4. lookup CapabilityDescriptor in ExtensionRegistry
+5. call CapabilityDispatchAuthorizer
+6. if denied, mark `Failed` and return a typed invocation error before dispatch/resource reservation
+7. if approval is required, save a tenant/user-scoped pending approval request, mark `BlockedApproval`, and return a typed approval-required error
+8. if allowed, call CapabilityDispatcher with context.resource_scope
+9. mark `Completed` or `Failed` after dispatch
+10. return the normalized dispatch result
 ```
 
 It does not implement grant matching itself; that belongs to `ironclaw_authorization`.
-It does not select WASM/Script/MCP; that belongs to `ironclaw_dispatcher`.
+It does not select WASM/Script/MCP; that belongs to `ironclaw_dispatcher` behind the narrow `CapabilityDispatcher` interface.
 
 ---
 
@@ -90,7 +91,7 @@ The capability host is responsible for preserving `ExecutionContext.resource_sco
 
 ## 5. Relationship to dispatcher
 
-`RuntimeDispatcher` is now deliberately lower level:
+`CapabilityHost` depends on the narrow `CapabilityDispatcher` trait. `RuntimeDispatcher` implements that trait and remains deliberately lower level:
 
 ```text
 already-authorized dispatch request -> runtime lane -> normalized result
