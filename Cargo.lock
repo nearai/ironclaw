@@ -4142,6 +4142,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_host_runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_authorization",
+ "ironclaw_capabilities",
+ "ironclaw_dispatcher",
+ "ironclaw_events",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_mcp",
+ "ironclaw_processes",
+ "ironclaw_resources",
+ "ironclaw_run_state",
+ "ironclaw_scripts",
+ "ironclaw_wasm",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "ironclaw_mcp"
 version = "0.1.0"
 dependencies = [

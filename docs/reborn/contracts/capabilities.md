@@ -95,7 +95,7 @@ let result = capability_host
 
 The caller provides the `ExecutionContext`; it does not manually evaluate grants or call the dispatcher.
 
-For spawn, callers use the same host-facing pattern. Applications can either provide an explicit `ProcessManager` or let the host derive one from `ProcessServices` and a background executor:
+For spawn, callers use the same host-facing pattern. Applications can either provide an explicit `ProcessManager`, let the host derive one from `ProcessServices` and a background executor, or use `HostRuntimeServices` from `ironclaw_host_runtime` to build the dispatcher/capability-host/process-host handles together:
 
 ```rust
 let services = ProcessServices::in_memory();
