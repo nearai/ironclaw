@@ -1569,6 +1569,8 @@ struct TraceMaintenanceRequest {
     index_vectors: bool,
     #[serde(default)]
     reconcile_db_mirror: bool,
+    #[serde(default)]
+    verify_audit_chain: bool,
     #[serde(default = "default_true")]
     prune_export_cache: bool,
     #[serde(default)]
@@ -4565,6 +4567,11 @@ async fn run_maintenance(
         )
         .await?;
     }
+    let audit_chain = if request.verify_audit_chain {
+        Some(verify_audit_chain(&state.root, &tenant.tenant_id)?)
+    } else {
+        None
+    };
 
     Ok(TraceMaintenanceResponse {
         tenant_id: tenant.tenant_id.clone(),
@@ -4585,8 +4592,65 @@ async fn run_maintenance(
         encrypted_artifacts_deleted,
         db_mirror_backfilled,
         vector_entries_indexed,
+        audit_chain,
         db_reconciliation,
     })
+}
+
+fn verify_audit_chain(root: &Path, tenant_id: &str) -> anyhow::Result<TraceAuditChainReport> {
+    let path = root
+        .join("tenants")
+        .join(tenant_storage_key(tenant_id))
+        .join("audit")
+        .join("events.jsonl");
+    if !path.exists() {
+        return Ok(TraceAuditChainReport::default());
+    }
+
+    let body = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read audit log {}", path.display()))?;
+    let mut report = TraceAuditChainReport::default();
+    let mut expected_previous_hash = TRACE_AUDIT_EVENT_GENESIS_HASH.to_string();
+    for (index, line) in body.lines().enumerate() {
+        let line_number = index + 1;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        report.event_count += 1;
+        let event: TraceCommonsAuditEvent = serde_json::from_str(line).with_context(|| {
+            format!(
+                "failed to parse audit event {} line {}",
+                path.display(),
+                line_number
+            )
+        })?;
+        let Some(event_hash) = event.event_hash.as_deref() else {
+            report.legacy_event_count += 1;
+            expected_previous_hash = TRACE_AUDIT_EVENT_GENESIS_HASH.to_string();
+            continue;
+        };
+        let previous_event_hash = event
+            .previous_event_hash
+            .as_deref()
+            .unwrap_or(TRACE_AUDIT_EVENT_GENESIS_HASH);
+        if previous_event_hash != expected_previous_hash {
+            report
+                .failures
+                .push(format!("line {line_number}: previous_event_hash mismatch"));
+        }
+        let recomputed = compute_audit_event_hash(previous_event_hash, &event)?;
+        if recomputed != event_hash {
+            report
+                .failures
+                .push(format!("line {line_number}: event_hash mismatch"));
+        }
+        expected_previous_hash = event_hash.to_string();
+        report.last_event_hash = Some(event_hash.to_string());
+    }
+    report.mismatch_count = report.failures.len();
+    report.verified = report.mismatch_count == 0;
+    Ok(report)
 }
 
 async fn backfill_db_mirror_from_files(
@@ -6217,7 +6281,20 @@ struct TraceMaintenanceResponse {
     db_mirror_backfilled: usize,
     vector_entries_indexed: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
+    audit_chain: Option<TraceAuditChainReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     db_reconciliation: Option<TraceDbReconciliationReport>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct TraceAuditChainReport {
+    verified: bool,
+    event_count: usize,
+    legacy_event_count: usize,
+    mismatch_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_event_hash: Option<String>,
+    failures: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -8500,6 +8577,7 @@ mod tests {
                 purge_expired_before: None,
                 index_vectors: false,
                 reconcile_db_mirror: false,
+                verify_audit_chain: false,
             }),
         )
         .await
@@ -8730,6 +8808,7 @@ mod tests {
                 backfill_db_mirror: false,
                 index_vectors: false,
                 reconcile_db_mirror: false,
+                verify_audit_chain: false,
                 prune_export_cache: true,
                 max_export_age_hours: None,
                 purge_expired_before: None,
@@ -8748,6 +8827,7 @@ mod tests {
                 backfill_db_mirror: false,
                 index_vectors: false,
                 reconcile_db_mirror: false,
+                verify_audit_chain: false,
                 prune_export_cache: true,
                 max_export_age_hours: None,
                 purge_expired_before: None,
@@ -8849,6 +8929,7 @@ mod tests {
                 backfill_db_mirror: false,
                 index_vectors: false,
                 reconcile_db_mirror: false,
+                verify_audit_chain: false,
                 prune_export_cache: true,
                 max_export_age_hours: None,
                 purge_expired_before: None,
@@ -8989,6 +9070,7 @@ mod tests {
                 backfill_db_mirror: false,
                 index_vectors: false,
                 reconcile_db_mirror: false,
+                verify_audit_chain: false,
                 prune_export_cache: false,
                 max_export_age_hours: None,
                 purge_expired_before: None,
@@ -9120,6 +9202,7 @@ mod tests {
                 backfill_db_mirror: false,
                 index_vectors: false,
                 reconcile_db_mirror: false,
+                verify_audit_chain: false,
                 prune_export_cache: false,
                 max_export_age_hours: None,
                 purge_expired_before: Some(Utc::now()),
@@ -9245,6 +9328,7 @@ mod tests {
                 backfill_db_mirror: false,
                 index_vectors: false,
                 reconcile_db_mirror: false,
+                verify_audit_chain: false,
                 prune_export_cache: false,
                 max_export_age_hours: None,
                 purge_expired_before: Some(Utc::now()),
@@ -9268,6 +9352,7 @@ mod tests {
                 backfill_db_mirror: false,
                 index_vectors: false,
                 reconcile_db_mirror: false,
+                verify_audit_chain: false,
                 prune_export_cache: false,
                 max_export_age_hours: None,
                 purge_expired_before: Some(Utc::now()),
@@ -9329,6 +9414,7 @@ mod tests {
                 backfill_db_mirror: true,
                 index_vectors: false,
                 reconcile_db_mirror: false,
+                verify_audit_chain: false,
                 prune_export_cache: false,
                 max_export_age_hours: None,
                 purge_expired_before: None,
@@ -9368,6 +9454,7 @@ mod tests {
                 backfill_db_mirror: false,
                 index_vectors: true,
                 reconcile_db_mirror: false,
+                verify_audit_chain: false,
                 prune_export_cache: false,
                 max_export_age_hours: None,
                 purge_expired_before: None,
@@ -9400,6 +9487,7 @@ mod tests {
                 backfill_db_mirror: false,
                 index_vectors: true,
                 reconcile_db_mirror: false,
+                verify_audit_chain: false,
                 prune_export_cache: false,
                 max_export_age_hours: None,
                 purge_expired_before: None,
@@ -9433,6 +9521,7 @@ mod tests {
                 backfill_db_mirror: false,
                 index_vectors: false,
                 reconcile_db_mirror: true,
+                verify_audit_chain: false,
                 prune_export_cache: false,
                 max_export_age_hours: None,
                 purge_expired_before: None,
@@ -9517,6 +9606,7 @@ mod tests {
                 backfill_db_mirror: true,
                 index_vectors: false,
                 reconcile_db_mirror: false,
+                verify_audit_chain: false,
                 prune_export_cache: false,
                 max_export_age_hours: None,
                 purge_expired_before: None,
@@ -10925,6 +11015,77 @@ mod tests {
             Some(TRACE_AUDIT_EVENT_GENESIS_HASH)
         );
         assert!(raw_events[1].event_hash.is_some());
+    }
+
+    #[tokio::test]
+    async fn maintenance_can_verify_file_audit_chain() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let envelope = sample_envelope().await;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(response) = maintenance_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("audit_chain_verify".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: true,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("maintenance verifies audit chain");
+        let report = response.audit_chain.expect("audit chain report exists");
+        assert!(report.verified);
+        assert_eq!(report.event_count, 2);
+        assert_eq!(report.mismatch_count, 0);
+
+        let path = audit_log_path(temp.path(), "tenant-a");
+        let body = std::fs::read_to_string(&path).expect("audit log reads");
+        std::fs::write(
+            &path,
+            body.replacen("\"submitted\"", "\"submitted_tampered\"", 1),
+        )
+        .expect("tamper audit log");
+
+        let Json(response) = maintenance_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("audit_chain_verify_after_tamper".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: true,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("maintenance reports audit chain tampering");
+        let report = response.audit_chain.expect("audit chain report exists");
+        assert!(!report.verified);
+        assert!(report.mismatch_count >= 1);
+        assert!(
+            report
+                .failures
+                .iter()
+                .any(|failure| failure.contains("event_hash mismatch"))
+        );
     }
 
     #[tokio::test]
