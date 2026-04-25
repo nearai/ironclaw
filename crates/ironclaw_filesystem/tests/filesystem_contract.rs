@@ -497,6 +497,29 @@ async fn local_backend_denies_write_through_symlinked_parent_escape() {
     assert!(!outside.path().join("new.txt").exists());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn local_backend_denies_write_through_symlinked_parent_before_creating_dirs() {
+    use std::os::unix::fs::symlink;
+
+    let storage = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("project1")).unwrap();
+    symlink(outside.path(), storage.path().join("project1/outside-dir")).unwrap();
+
+    let scoped = scoped_project_fs(storage.path(), MountPermissions::read_write());
+    let err = scoped
+        .write_file(
+            &ScopedPath::new("/workspace/outside-dir/new-dir/new.txt").unwrap(),
+            b"escaped",
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, FilesystemError::SymlinkEscape { .. }));
+    assert!(!outside.path().join("new-dir").exists());
+}
+
 fn local_root_with_projects_mount(path: &std::path::Path) -> LocalFilesystem {
     let mut root = LocalFilesystem::new();
     root.mount_local(

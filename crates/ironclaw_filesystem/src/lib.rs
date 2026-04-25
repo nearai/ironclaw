@@ -278,6 +278,7 @@ impl LocalFilesystem {
         let parent = joined
             .parent()
             .ok_or_else(|| FilesystemError::PathOutsideMount { path: path.clone() })?;
+        ensure_existing_parent_chain_contained(path, mount, parent)?;
         std::fs::create_dir_all(parent).map_err(|error| FilesystemError::Backend {
             path: path.clone(),
             operation: FilesystemOperation::CreateDirAll,
@@ -391,6 +392,27 @@ impl RootFilesystem for LocalFilesystem {
 
 fn virtual_prefix_matches(prefix: &str, path: &str) -> bool {
     path == prefix || path.starts_with(&format!("{prefix}/"))
+}
+
+fn ensure_existing_parent_chain_contained(
+    virtual_path: &VirtualPath,
+    mount: &LocalMount,
+    parent: &Path,
+) -> Result<(), FilesystemError> {
+    let mut current = parent;
+    while !current.exists() {
+        current = current
+            .parent()
+            .ok_or_else(|| FilesystemError::PathOutsideMount {
+                path: virtual_path.clone(),
+            })?;
+    }
+    let canonical = std::fs::canonicalize(current).map_err(|error| FilesystemError::Backend {
+        path: virtual_path.clone(),
+        operation: FilesystemOperation::CreateDirAll,
+        reason: io_reason(error),
+    })?;
+    ensure_contained(virtual_path, mount, &canonical, true)
 }
 
 fn ensure_contained(
