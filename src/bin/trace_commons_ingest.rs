@@ -729,6 +729,20 @@ enum TraceCreditLedgerEventType {
     AbusePenalty,
 }
 
+const MAX_DELAYED_CREDIT_POINTS_DELTA: f32 = 100.0;
+
+impl TraceCreditLedgerEventType {
+    fn requires_external_ref(self) -> bool {
+        matches!(
+            self,
+            Self::BenchmarkConversion
+                | Self::RegressionCatch
+                | Self::TrainingUtility
+                | Self::RankingUtility
+        )
+    }
+}
+
 async fn append_credit_event_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -753,6 +767,36 @@ async fn append_credit_event_handler(
             "terminal trace submissions are not eligible for delayed credit",
         ));
     }
+    if body.credit_points_delta.abs() > MAX_DELAYED_CREDIT_POINTS_DELTA {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "credit_points_delta exceeds the delayed credit policy limit",
+        ));
+    }
+    let reason = body
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                "delayed credit events require a non-empty reason",
+            )
+        })?
+        .to_string();
+    let external_ref = body
+        .external_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|external_ref| !external_ref.is_empty())
+        .map(ToOwned::to_owned);
+    if body.event_type.requires_external_ref() && external_ref.is_none() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "benchmark, regression, training, and ranking utility credit require external_ref",
+        ));
+    }
     let event = TraceCommonsCreditLedgerRecord {
         event_id: Uuid::new_v4(),
         tenant_id: tenant.tenant_id.clone(),
@@ -762,8 +806,8 @@ async fn append_credit_event_handler(
         auth_principal_ref: submission.auth_principal_ref,
         event_type: body.event_type,
         credit_points_delta: body.credit_points_delta,
-        reason: body.reason,
-        external_ref: body.external_ref,
+        reason: Some(reason),
+        external_ref,
         actor_role: tenant.role,
         actor_principal_ref: tenant.principal_ref.clone(),
         created_at: Utc::now(),
@@ -7373,6 +7417,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delayed_credit_requires_reason_artifact_ref_and_bounded_delta() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let envelope = sample_envelope().await;
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let missing_reason = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::ReviewerBonus,
+                credit_points_delta: 1.0,
+                reason: Some(" ".to_string()),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect_err("delayed credit requires a reason");
+        assert_eq!(missing_reason.0, StatusCode::BAD_REQUEST);
+
+        let missing_artifact_ref = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.0,
+                reason: Some("training job improved ranker".to_string()),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect_err("utility credit requires artifact reference");
+        assert_eq!(missing_artifact_ref.0, StatusCode::BAD_REQUEST);
+
+        let excessive_delta = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::ReviewerBonus,
+                credit_points_delta: 101.0,
+                reason: Some("too much at once".to_string()),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect_err("delayed credit delta is bounded");
+        assert_eq!(excessive_delta.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn contributor_sees_own_delayed_credit_events_in_summary() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
@@ -7394,8 +7499,8 @@ mod tests {
             Json(TraceCreditLedgerAppendRequest {
                 event_type: TraceCreditLedgerEventType::TrainingUtility,
                 credit_points_delta: 1.75,
-                reason: None,
-                external_ref: None,
+                reason: Some("training utility job selected this trace".to_string()),
+                external_ref: Some("training-job:summary-ranker-smoke".to_string()),
             }),
         )
         .await
@@ -7461,8 +7566,8 @@ mod tests {
             Json(TraceCreditLedgerAppendRequest {
                 event_type: TraceCreditLedgerEventType::RegressionCatch,
                 credit_points_delta: 3.0,
-                reason: None,
-                external_ref: None,
+                reason: Some("caught regression in replay suite".to_string()),
+                external_ref: Some("regression:trace-replay-smoke".to_string()),
             }),
         )
         .await

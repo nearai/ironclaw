@@ -264,9 +264,9 @@ pub enum TracesCommand {
         #[arg(long)]
         credit_points_delta: f32,
 
-        /// Optional explanation for the contributor/reviewer ledger
+        /// Explanation for the contributor/reviewer ledger
         #[arg(long)]
-        reason: Option<String>,
+        reason: String,
 
         /// Optional benchmark/job/external reference
         #[arg(long)]
@@ -1447,7 +1447,7 @@ struct TraceCommonsAppendCreditEventOptions<'a> {
     submission_id: Uuid,
     event_type: TraceCreditEventTypeArg,
     credit_points_delta: f32,
-    reason: Option<String>,
+    reason: String,
     external_ref: Option<String>,
     json: bool,
 }
@@ -1458,10 +1458,8 @@ async fn trace_commons_append_credit_event(
     let mut body = serde_json::json!({
         "event_type": options.event_type.to_string(),
         "credit_points_delta": options.credit_points_delta,
+        "reason": options.reason,
     });
-    if let Some(reason) = options.reason {
-        body["reason"] = serde_json::Value::String(reason);
-    }
     if let Some(external_ref) = options.external_ref {
         body["external_ref"] = serde_json::Value::String(external_ref);
     }
