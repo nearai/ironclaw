@@ -13,7 +13,8 @@ use std::{
 use chrono::Utc;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, Decision, DenyReason, EffectKind,
-    ExecutionContext, InvocationId, Principal, ResourceEstimate, ResourceScope, TenantId, UserId,
+    ExecutionContext, InvocationFingerprint, InvocationId, Principal, ResourceEstimate,
+    ResourceScope, TenantId, UserId,
 };
 use thiserror::Error;
 
@@ -53,6 +54,7 @@ impl CapabilityDispatchAuthorizer for GrantAuthorizer {
 pub struct CapabilityLease {
     pub scope: ResourceScope,
     pub grant: CapabilityGrant,
+    pub invocation_fingerprint: Option<InvocationFingerprint>,
     pub status: CapabilityLeaseStatus,
 }
 
@@ -61,6 +63,7 @@ impl CapabilityLease {
         Self {
             scope,
             grant,
+            invocation_fingerprint: None,
             status: CapabilityLeaseStatus::Active,
         }
     }

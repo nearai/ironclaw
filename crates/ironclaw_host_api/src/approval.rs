@@ -8,10 +8,11 @@
 //! one-off approval.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{
-    Action, ApprovalRequestId, CapabilityId, CorrelationId, NetworkTargetPattern, Principal,
-    ScopedPath, Timestamp,
+    Action, ApprovalRequestId, CapabilityId, CorrelationId, HostApiError, NetworkTargetPattern,
+    Principal, ResourceEstimate, ResourceScope, ScopedPath, Timestamp,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -20,8 +21,78 @@ pub struct ApprovalRequest {
     pub correlation_id: CorrelationId,
     pub requested_by: Principal,
     pub action: Box<Action>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_fingerprint: Option<InvocationFingerprint>,
     pub reason: String,
     pub reusable_scope: Option<ApprovalScope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct InvocationFingerprint(String);
+
+impl InvocationFingerprint {
+    pub fn for_dispatch(
+        scope: &ResourceScope,
+        capability: &CapabilityId,
+        estimate: &ResourceEstimate,
+        input: &serde_json::Value,
+    ) -> Result<Self, HostApiError> {
+        #[derive(Serialize)]
+        struct Payload<'a> {
+            version: u8,
+            kind: &'static str,
+            scope: &'a ResourceScope,
+            capability: &'a CapabilityId,
+            estimate: &'a ResourceEstimate,
+            input: &'a serde_json::Value,
+        }
+
+        let canonical_input = canonical_json(input);
+        let payload = Payload {
+            version: 1,
+            kind: "dispatch",
+            scope,
+            capability,
+            estimate,
+            input: &canonical_input,
+        };
+        let bytes = serde_json::to_vec(&payload)
+            .map_err(|error| HostApiError::invariant(error.to_string()))?;
+        let digest = Sha256::digest(bytes);
+        Ok(Self(format!("sha256:{}", to_lower_hex(&digest))))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(canonical_json).collect())
+        }
+        serde_json::Value::Object(map) => {
+            let mut entries = map.iter().collect::<Vec<_>>();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            let mut canonical = serde_json::Map::new();
+            for (key, value) in entries {
+                canonical.insert(key.clone(), canonical_json(value));
+            }
+            serde_json::Value::Object(canonical)
+        }
+        _ => value.clone(),
+    }
+}
+
+fn to_lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

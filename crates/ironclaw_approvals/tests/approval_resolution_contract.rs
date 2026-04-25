@@ -37,6 +37,10 @@ async fn approving_pending_dispatch_request_issues_scoped_capability_lease() {
         CapabilityId::new("echo.say").unwrap()
     );
     assert_eq!(lease.grant.grantee, approval.requested_by);
+    assert_eq!(
+        lease.invocation_fingerprint,
+        approval.invocation_fingerprint
+    );
     assert_eq!(lease.grant.constraints.max_invocations, Some(1));
     assert_eq!(
         approvals
@@ -178,11 +182,20 @@ fn approval_request(invocation_id: InvocationId, capability: CapabilityId) -> Ap
         correlation_id: CorrelationId::new(),
         requested_by: Principal::Extension(ExtensionId::new("caller").unwrap()),
         action: Box::new(Action::Dispatch {
-            capability,
+            capability: capability.clone(),
             estimated_resources: ResourceEstimate::default(),
         }),
         reason: format!("approval for {invocation_id}"),
         reusable_scope: None,
+        invocation_fingerprint: Some(
+            InvocationFingerprint::for_dispatch(
+                &sample_scope(invocation_id, "tenant1", "user1"),
+                &capability,
+                &ResourceEstimate::default(),
+                &serde_json::json!({"message": "approved"}),
+            )
+            .unwrap(),
+        ),
     }
 }
 

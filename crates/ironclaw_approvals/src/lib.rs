@@ -66,10 +66,10 @@ where
                 max_invocations: approval.max_invocations,
             },
         };
+        let mut lease = CapabilityLease::new(record.scope.clone(), grant);
+        lease.invocation_fingerprint = record.request.invocation_fingerprint.clone();
         self.approvals.approve(scope, request_id).await?;
-        Ok(self
-            .leases
-            .issue(CapabilityLease::new(record.scope.clone(), grant)))
+        Ok(self.leases.issue(lease))
     }
 
     pub async fn deny(

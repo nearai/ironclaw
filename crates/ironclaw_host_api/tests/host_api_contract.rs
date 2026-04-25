@@ -167,6 +167,93 @@ fn execution_context_validation_rejects_mismatched_resource_scope() {
 }
 
 #[test]
+fn invocation_fingerprint_is_stable_and_input_redacted() {
+    let ctx = sample_context();
+    let capability = CapabilityId::new("echo.say").unwrap();
+    let estimate = ResourceEstimate {
+        concurrency_slots: Some(1),
+        output_bytes: Some(10_000),
+        ..ResourceEstimate::default()
+    };
+    let input = json!({"message": "secret payload"});
+    let mut reordered = serde_json::Map::new();
+    reordered.insert("z".to_string(), json!(1));
+    reordered.insert("a".to_string(), json!({"b": 2, "a": 1}));
+
+    let first =
+        InvocationFingerprint::for_dispatch(&ctx.resource_scope, &capability, &estimate, &input)
+            .unwrap();
+    let second = InvocationFingerprint::for_dispatch(
+        &ctx.resource_scope,
+        &capability,
+        &estimate,
+        &json!({"message": "secret payload"}),
+    )
+    .unwrap();
+    let canonical_first = InvocationFingerprint::for_dispatch(
+        &ctx.resource_scope,
+        &capability,
+        &estimate,
+        &serde_json::Value::Object(reordered),
+    )
+    .unwrap();
+    let canonical_second = InvocationFingerprint::for_dispatch(
+        &ctx.resource_scope,
+        &capability,
+        &estimate,
+        &json!({"a": {"a": 1, "b": 2}, "z": 1}),
+    )
+    .unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(canonical_first, canonical_second);
+    assert!(first.as_str().starts_with("sha256:"));
+    assert!(!first.as_str().contains("secret payload"));
+}
+
+#[test]
+fn invocation_fingerprint_changes_when_authorized_invocation_changes() {
+    let ctx = sample_context();
+    let capability = CapabilityId::new("echo.say").unwrap();
+    let estimate = ResourceEstimate::default();
+    let baseline = InvocationFingerprint::for_dispatch(
+        &ctx.resource_scope,
+        &capability,
+        &estimate,
+        &json!({"message": "one"}),
+    )
+    .unwrap();
+
+    let changed_input = InvocationFingerprint::for_dispatch(
+        &ctx.resource_scope,
+        &capability,
+        &estimate,
+        &json!({"message": "two"}),
+    )
+    .unwrap();
+    let changed_capability = InvocationFingerprint::for_dispatch(
+        &ctx.resource_scope,
+        &CapabilityId::new("echo.other").unwrap(),
+        &estimate,
+        &json!({"message": "one"}),
+    )
+    .unwrap();
+    let mut other_scope = ctx.resource_scope.clone();
+    other_scope.invocation_id = InvocationId::new();
+    let changed_scope = InvocationFingerprint::for_dispatch(
+        &other_scope,
+        &capability,
+        &estimate,
+        &json!({"message": "one"}),
+    )
+    .unwrap();
+
+    assert_ne!(baseline, changed_input);
+    assert_ne!(baseline, changed_capability);
+    assert_ne!(baseline, changed_scope);
+}
+
+#[test]
 fn actions_and_decisions_serialize_with_stable_snake_case_tags() {
     let action = Action::Dispatch {
         capability: CapabilityId::new("github.search_issues").unwrap(),
