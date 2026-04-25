@@ -76,7 +76,7 @@ Spawn is capability-targeted. It does not start raw host processes or extension-
 
 It does not implement grant matching itself; that belongs to `ironclaw_authorization`.
 It does not select WASM/Script/MCP for dispatch; that belongs to `ironclaw_dispatcher` behind the narrow `CapabilityDispatcher` interface. The `DispatchProcessExecutor` adapter can run spawned process input through that same dispatch interface from a background process manager.
-It does not own process lifecycle mechanics after start; that belongs to `ironclaw_processes` behind `ProcessManager`/`ProcessStore`.
+It does not own process lifecycle or process-result mechanics after start; those belong to `ironclaw_processes` behind `ProcessManager`/`ProcessStore`/`ProcessResultStore`.
 
 ---
 
@@ -162,7 +162,8 @@ This slice does not implement:
 
 - durable grant/lease storage, revocation, or expiration persistence
 - approval/resume of `Action::SpawnCapability`
-- process lifecycle/cancellation APIs inside `CapabilityHost`; `status`/`kill`/`await_process`/`subscribe` and cooperative cancellation live in `ProcessHost`/`BackgroundProcessManager`
+- process lifecycle/cancellation/result APIs inside `CapabilityHost`; `status`/`kill`/`await_process`/`subscribe`/`result`/`await_result` and cooperative cancellation live in `ironclaw_processes`
+- filesystem/artifact-backed process output references; V1 process results store inline JSON only
 - streaming output APIs
 - obligation application beyond returning allowed/denied
 - transcript/job history
