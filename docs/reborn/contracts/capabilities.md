@@ -3,7 +3,7 @@
 **Date:** 2026-04-25
 **Status:** V1 contract slice
 **Crate:** `crates/ironclaw_capabilities`
-**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/capability-access.md`, `docs/reborn/contracts/approvals.md`, `docs/reborn/contracts/run-state.md`, `docs/reborn/contracts/dispatcher.md`
+**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/capability-access.md`, `docs/reborn/contracts/approvals.md`, `docs/reborn/contracts/run-state.md`, `docs/reborn/contracts/processes.md`, `docs/reborn/contracts/dispatcher.md`
 
 ---
 
@@ -15,14 +15,14 @@ It keeps callers simple without making the runtime dispatcher own authorization:
 
 ```text
 caller/channel/agent/conversation
-  -> CapabilityHost::invoke_json(...) or CapabilityHost::resume_json(...)
+  -> CapabilityHost::invoke_json(...) / resume_json(...) / spawn_json(...)
       -> AuthorizationService / GrantAuthorizer / LeaseBackedAuthorizer
-      -> optional RunStateStore / ApprovalRequestStore / CapabilityLeaseStore
-      -> RuntimeDispatcher
-          -> WASM / Script / MCP
+      -> optional RunStateStore / ApprovalRequestStore / CapabilityLeaseStore / ProcessManager
+      -> RuntimeDispatcher or ProcessManager
+          -> WASM / Script / MCP or tracked ProcessRecord
 ```
 
-This service is the middle communication layer between authorization and dispatch.
+This service is the middle communication layer between authorization, dispatch, and process lifecycle start workflows.
 
 ---
 
@@ -59,8 +59,24 @@ This service is the middle communication layer between authorization and dispatc
 10. mark Completed or Failed
 ```
 
+`CapabilityHost::spawn_json` owns the capability-backed process start workflow:
+
+```text
+1. receive ExecutionContext + capability id + input + estimate
+2. validate ExecutionContext/resource_scope consistency
+3. if configured, mark invocation `Running` in `RunStateStore`
+4. lookup CapabilityDescriptor in ExtensionRegistry
+5. call CapabilityDispatchAuthorizer::authorize_spawn, requiring `SpawnProcess` plus descriptor effects
+6. if allowed, ask ProcessManager to create a tenant/user-scoped ProcessRecord
+7. mark the start invocation Completed or Failed
+8. return the ProcessRecord with ProcessId, scope, extension_id, capability_id, runtime, grants, mounts, and status
+```
+
+Spawn is capability-targeted. It does not start raw host processes or extension-level workers without a declared capability identity.
+
 It does not implement grant matching itself; that belongs to `ironclaw_authorization`.
 It does not select WASM/Script/MCP; that belongs to `ironclaw_dispatcher` behind the narrow `CapabilityDispatcher` interface.
+It does not own process lifecycle mechanics after start; that belongs to `ironclaw_processes` behind `ProcessManager`/`ProcessStore`.
 
 ---
 
@@ -78,6 +94,19 @@ let result = capability_host
 ```
 
 The caller provides the `ExecutionContext`; it does not manually evaluate grants or call the dispatcher.
+
+For spawn, callers use the same host-facing pattern:
+
+```rust
+let result = capability_host
+    .spawn_json(CapabilitySpawnRequest {
+        context,
+        capability_id,
+        estimate,
+        input,
+    })
+    .await?;
+```
 
 The host service builds the lower-level dispatch request using:
 
@@ -98,6 +127,7 @@ CapabilityHost::new(&registry, &dispatcher, &authorizer)
     .with_run_state(&run_state)
     .with_approval_requests(&approval_requests)
     .with_capability_leases(&leases)
+    .with_process_manager(&processes)
 ```
 
 The stores are optional for low-level tests, but host-facing invocation should configure them so approvals and failures are visible outside the call stack and can survive process restarts. The durable implementations write through tenant/user partitions under the `/engine` filesystem namespace, so production can provide a DB-backed filesystem implementation without coupling this crate to a specific database.
@@ -109,6 +139,8 @@ For approval-required dispatches, `CapabilityHost` also binds the approval to th
 If only one of `RunStateStore` or `ApprovalRequestStore` is configured and authorization requires approval, `CapabilityHost` fails closed instead of creating a non-resumable blocked run or orphan approval request. Host-facing approval paths should configure both stores.
 
 For approved resume, `CapabilityHost` compares the replayed request fingerprint to the approved fingerprint before dispatch, claims the matching lease before dispatch, and consumes it after successful dispatch. Denied/expired/non-approved approvals, missing leases, failed lease claims, and fingerprint mismatches fail before runtime dispatch.
+
+For spawn, `CapabilityHost` preserves `ExecutionContext.resource_scope` and creates a process record through `ProcessManager`; the dispatcher is not involved. The process record carries the target capability identity and runtime so later lifecycle operations remain capability-backed.
 
 ---
 
@@ -129,7 +161,9 @@ It has no dependency on `ironclaw_authorization`, no `ExecutionContext`, and no 
 This slice does not implement:
 
 - durable grant/lease storage, revocation, or expiration persistence
-- resume of non-dispatch actions such as `Action::Spawn`
+- approval/resume of `Action::SpawnCapability`
+- runtime-backed background execution loops after process creation
+- `await`, `subscribe`, or streaming output APIs
 - obligation application beyond returning allowed/denied
 - transcript/job history
 

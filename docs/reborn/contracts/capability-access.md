@@ -11,11 +11,11 @@
 
 `ironclaw_authorization` evaluates authority-bearing host API contracts before runtime execution.
 
-The first slices add grant- and lease-backed capability dispatch gates:
+The first slices add grant- and lease-backed capability dispatch/spawn gates:
 
 ```text
 ExecutionContext + CapabilityDescriptor + ResourceEstimate
-  -> CapabilityDispatchAuthorizer::authorize_dispatch(...)
+  -> CapabilityDispatchAuthorizer::authorize_dispatch(...) / authorize_spawn(...)
   -> Decision::Allow | Decision::Deny | Decision::RequireApproval
 ```
 
@@ -52,6 +52,8 @@ If the `ExecutionContext` is internally inconsistent, authorization returns:
 ```rust
 Decision::Deny { reason: DenyReason::InternalInvariantViolation }
 ```
+
+V1 spawn authorization targets the same declared capability but requires `EffectKind::SpawnProcess` in addition to the capability descriptor's declared effects. A dispatch-only grant must not authorize background or long-lived process creation.
 
 ---
 
@@ -101,9 +103,13 @@ See `docs/reborn/contracts/approvals.md` for how approval resolution issues leas
 CapabilityHost::invoke_json(...)
   -> GrantAuthorizer::authorize_dispatch(...)
   -> RuntimeDispatcher::dispatch_json(...)
+
+CapabilityHost::spawn_json(...)
+  -> GrantAuthorizer::authorize_spawn(...)
+  -> ProcessManager::spawn(...)
 ```
 
-Authorization denial happens before runtime dispatch and before resource reservation.
+Authorization denial happens before runtime dispatch, process creation, and resource reservation.
 
 The dispatcher remains auth-unaware: it receives already-authorized `CapabilityDispatchRequest` values from `CapabilityHost` or another trusted host service.
 

@@ -234,10 +234,8 @@ pub enum Action {
         capability: CapabilityId,
         estimated_resources: ResourceEstimate,
     },
-    Spawn {
-        extension_id: ExtensionId,
-        requested_capabilities: CapabilitySet,
-        requested_mounts: MountView,
+    SpawnCapability {
+        capability: CapabilityId,
         estimated_resources: ResourceEstimate,
     },
 
@@ -269,8 +267,8 @@ Notes:
 
 - `UseSecret` uses a `SecretHandle`, not a raw name/string value.
 - `NetworkTarget` should be parsed and validated, not a free-form domain string.
-- `Spawn` must request its desired capabilities and mounts up front.
-- `Dispatch` and `Spawn` carry resource estimates so budgeting cannot be bolted on later.
+- `SpawnCapability` targets a declared capability, not an extension-level/raw process escape.
+- `Dispatch` and `SpawnCapability` carry resource estimates so budgeting cannot be bolted on later.
 
 ---
 
