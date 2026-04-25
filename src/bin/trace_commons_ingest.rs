@@ -1164,6 +1164,8 @@ enum TraceCreditLedgerEventType {
 }
 
 const MAX_DELAYED_CREDIT_POINTS_DELTA: f32 = 100.0;
+const BENCHMARK_CONVERSION_CREDIT_POINTS_DELTA: f32 = 2.0;
+const RANKER_TRAINING_CANDIDATE_CREDIT_POINTS_DELTA: f32 = 0.5;
 
 impl TraceCreditLedgerEventType {
     fn requires_external_ref(self) -> bool {
@@ -1270,6 +1272,101 @@ async fn append_credit_event_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(event))
+}
+
+struct AutomaticUtilityCreditSource {
+    submission_id: Uuid,
+    trace_id: Uuid,
+    auth_principal_ref: String,
+}
+
+impl AutomaticUtilityCreditSource {
+    fn from_benchmark_candidate(candidate: &TraceBenchmarkCandidate) -> Self {
+        Self {
+            submission_id: candidate.submission_id,
+            trace_id: candidate.trace_id,
+            auth_principal_ref: candidate.auth_principal_ref.clone(),
+        }
+    }
+
+    fn from_ranker_candidate(candidate: &TraceRankerTrainingCandidate) -> Self {
+        Self {
+            submission_id: candidate.submission_id,
+            trace_id: candidate.trace_id,
+            auth_principal_ref: candidate.auth_principal_ref.clone(),
+        }
+    }
+}
+
+struct AutomaticUtilityCreditConfig {
+    idempotency_label: &'static str,
+    event_type: TraceCreditLedgerEventType,
+    credit_points_delta: f32,
+    reason: String,
+    external_ref: String,
+}
+
+async fn append_automatic_utility_credit_events_once(
+    state: &AppState,
+    tenant: &TenantAuth,
+    config: AutomaticUtilityCreditConfig,
+    sources: impl IntoIterator<Item = AutomaticUtilityCreditSource>,
+) -> anyhow::Result<usize> {
+    let mut existing_event_ids = read_all_credit_events(&state.root, &tenant.tenant_id)?
+        .into_iter()
+        .map(|event| event.event_id)
+        .collect::<BTreeSet<_>>();
+    let mut appended = 0usize;
+    for source in sources {
+        let event_id = deterministic_trace_uuid_for(
+            config.idempotency_label,
+            &tenant.tenant_id,
+            source.submission_id,
+        );
+        if existing_event_ids.contains(&event_id) {
+            continue;
+        }
+        let event = TraceCommonsCreditLedgerRecord {
+            event_id,
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            submission_id: source.submission_id,
+            trace_id: source.trace_id,
+            auth_principal_ref: source.auth_principal_ref,
+            event_type: config.event_type,
+            credit_points_delta: config.credit_points_delta,
+            reason: Some(config.reason.clone()),
+            external_ref: Some(config.external_ref.clone()),
+            actor_role: tenant.role,
+            actor_principal_ref: tenant.principal_ref.clone(),
+            created_at: Utc::now(),
+        };
+        append_credit_event(&state.root, &tenant.tenant_id, &event)?;
+        if let Err(error) = mirror_credit_event_to_db(state, &event).await {
+            tracing::warn!(%error, submission_id = %event.submission_id, "Trace Commons DB dual-write automatic credit mirror failed");
+        }
+        append_audit_event_with_db_mirror(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::credit_mutation(
+                tenant,
+                event.submission_id,
+                config.credit_points_delta,
+                event.reason.as_deref(),
+            ),
+            StorageTraceAuditAction::CreditMutate,
+            StorageTraceAuditSafeMetadata::CreditMutation {
+                event_type: storage_credit_event_type(config.event_type),
+                credit_points_delta_micros: credit_delta_micros(config.credit_points_delta),
+                reason_hash: sha256_prefixed(event.reason.as_deref().unwrap_or_default()),
+                external_ref_hash: event.external_ref.as_deref().map(sha256_prefixed),
+            },
+        )
+        .await?;
+        existing_event_ids.insert(event_id);
+        appended += 1;
+    }
+    Ok(appended)
 }
 
 async fn review_decision_handler(
@@ -1661,6 +1758,30 @@ async fn benchmark_convert_handler(
     )
     .await
     .map_err(internal_error)?;
+    append_automatic_utility_credit_events_once(
+        state.as_ref(),
+        &tenant,
+        AutomaticUtilityCreditConfig {
+            idempotency_label: "benchmark-conversion-credit",
+            event_type: TraceCreditLedgerEventType::BenchmarkConversion,
+            credit_points_delta: BENCHMARK_CONVERSION_CREDIT_POINTS_DELTA,
+            reason: format!(
+                "Converted into benchmark artifact {}.",
+                artifact.conversion_id
+            ),
+            external_ref: artifact
+                .filters
+                .external_ref
+                .clone()
+                .unwrap_or_else(|| format!("benchmark_conversion:{}", artifact.conversion_id)),
+        },
+        artifact
+            .candidates
+            .iter()
+            .map(AutomaticUtilityCreditSource::from_benchmark_candidate),
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(artifact))
 }
 
@@ -1748,6 +1869,22 @@ async fn ranker_training_candidates_handler(
             purpose_code: Some("ranker_training_candidates_export".to_string()),
             item_count: candidates.len().min(u32::MAX as usize) as u32,
         },
+    )
+    .await
+    .map_err(internal_error)?;
+    append_automatic_utility_credit_events_once(
+        state.as_ref(),
+        &tenant,
+        AutomaticUtilityCreditConfig {
+            idempotency_label: "ranker-training-candidate-credit",
+            event_type: TraceCreditLedgerEventType::TrainingUtility,
+            credit_points_delta: RANKER_TRAINING_CANDIDATE_CREDIT_POINTS_DELTA,
+            reason: format!("Exported as ranker training candidate {}.", export_id),
+            external_ref: format!("ranker_training_candidates_export:{export_id}"),
+        },
+        candidates
+            .iter()
+            .map(AutomaticUtilityCreditSource::from_ranker_candidate),
     )
     .await
     .map_err(internal_error)?;
@@ -6596,6 +6733,8 @@ struct TraceBenchmarkConversionFilters {
 struct TraceBenchmarkCandidate {
     submission_id: Uuid,
     trace_id: Uuid,
+    #[serde(skip)]
+    auth_principal_ref: String,
     derived_id: Uuid,
     canonical_summary_hash: String,
     canonical_summary: String,
@@ -6619,6 +6758,7 @@ impl TraceBenchmarkCandidate {
         Self {
             submission_id: submission.submission_id,
             trace_id: submission.trace_id,
+            auth_principal_ref: submission.auth_principal_ref.clone(),
             derived_id: derived
                 .derived_id
                 .unwrap_or_else(|| deterministic_trace_uuid("derived-precheck", submission)),
@@ -6666,6 +6806,8 @@ struct TraceRankerTrainingPairExport {
 struct TraceRankerTrainingCandidate {
     submission_id: Uuid,
     trace_id: Uuid,
+    #[serde(skip)]
+    auth_principal_ref: String,
     derived_id: Uuid,
     status: TraceCorpusStatus,
     privacy_risk: ResidualPiiRisk,
@@ -6697,6 +6839,7 @@ impl TraceRankerTrainingCandidate {
         Self {
             submission_id: submission.submission_id,
             trace_id: submission.trace_id,
+            auth_principal_ref: submission.auth_principal_ref.clone(),
             derived_id: derived
                 .derived_id
                 .unwrap_or_else(|| deterministic_trace_uuid("derived-precheck", submission)),
@@ -9447,6 +9590,40 @@ mod tests {
         assert_eq!(benchmark.candidates[0].submission_id, kept_id);
         assert!(!benchmark.source_submission_ids.contains(&revoked_id));
         assert!(benchmark_artifact_path(temp.path(), "tenant-a", benchmark.conversion_id).exists());
+        let credit_events =
+            read_all_credit_events(temp.path(), "tenant-a").expect("credit events read");
+        let benchmark_credit_events = credit_events
+            .iter()
+            .filter(|event| event.event_type == TraceCreditLedgerEventType::BenchmarkConversion)
+            .collect::<Vec<_>>();
+        assert_eq!(benchmark_credit_events.len(), 1);
+        assert_eq!(benchmark_credit_events[0].submission_id, kept_id);
+        assert_ne!(benchmark_credit_events[0].submission_id, revoked_id);
+
+        let _ = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: None,
+                consent_scope: None,
+                status: None,
+                privacy_risk: None,
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("benchmark conversion rerun succeeds");
+        let rerun_credit_events =
+            read_all_credit_events(temp.path(), "tenant-a").expect("rerun credit events read");
+        assert_eq!(
+            rerun_credit_events
+                .iter()
+                .filter(|event| event.event_type == TraceCreditLedgerEventType::BenchmarkConversion)
+                .count(),
+            1,
+            "benchmark conversion utility credit must be idempotent"
+        );
 
         let audit_events =
             read_all_audit_events(temp.path(), "tenant-a").expect("audit events read");
@@ -9662,6 +9839,53 @@ mod tests {
                 .all(|candidate| candidate.submission_id != tenant_b_id)
         );
         assert!(candidates.source_item_list_hash.starts_with("sha256:"));
+        let credit_events =
+            read_all_credit_events(temp.path(), "tenant-a").expect("credit events read");
+        let training_credit_events = credit_events
+            .iter()
+            .filter(|event| event.event_type == TraceCreditLedgerEventType::TrainingUtility)
+            .collect::<Vec<_>>();
+        assert_eq!(training_credit_events.len(), 2);
+        assert!(
+            training_credit_events
+                .iter()
+                .any(|event| event.submission_id == tenant_a_best_id)
+        );
+        assert!(
+            training_credit_events
+                .iter()
+                .any(|event| event.submission_id == tenant_a_lower_id)
+        );
+        assert!(
+            training_credit_events
+                .iter()
+                .all(|event| event.submission_id != tenant_a_quarantined_id
+                    && event.submission_id != tenant_a_revoked_id
+                    && event.submission_id != tenant_b_id)
+        );
+
+        let _ = ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                status: None,
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: None,
+            }),
+        )
+        .await
+        .expect("ranker candidates export rerun succeeds");
+        let rerun_credit_events =
+            read_all_credit_events(temp.path(), "tenant-a").expect("rerun credit events read");
+        assert_eq!(
+            rerun_credit_events
+                .iter()
+                .filter(|event| event.event_type == TraceCreditLedgerEventType::TrainingUtility)
+                .count(),
+            2,
+            "ranker candidate utility credit must be idempotent"
+        );
 
         let Json(pairs) = ranker_training_pairs_handler(
             State(state.clone()),
@@ -11514,7 +11738,7 @@ mod tests {
         assert_eq!(purpose_list[0].submission_id, accepted_id);
 
         let Json(candidates) = ranker_training_candidates_handler(
-            State(state),
+            State(state.clone()),
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
@@ -11528,6 +11752,24 @@ mod tests {
         assert_eq!(candidates.item_count, 1);
         assert_eq!(candidates.candidates[0].submission_id, accepted_id);
         assert_eq!(candidates.candidates[0].tool_sequence, vec!["shell"]);
+
+        let credit_events = read_all_credit_events(temp.path(), "tenant-a")
+            .expect("DB-backed utility credits read");
+        assert!(credit_events.iter().any(|event| {
+            event.submission_id == accepted_id
+                && event.auth_principal_ref == principal_storage_ref("token-a")
+                && event.event_type == TraceCreditLedgerEventType::BenchmarkConversion
+        }));
+        assert!(credit_events.iter().any(|event| {
+            event.submission_id == accepted_id
+                && event.auth_principal_ref == principal_storage_ref("token-a")
+                && event.event_type == TraceCreditLedgerEventType::TrainingUtility
+        }));
+        assert!(
+            credit_events
+                .iter()
+                .all(|event| event.submission_id != quarantined_id)
+        );
     }
 
     #[cfg(feature = "libsql")]
