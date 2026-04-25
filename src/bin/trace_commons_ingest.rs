@@ -4952,6 +4952,9 @@ async fn run_maintenance(
     for record in &mut records {
         if record.is_revoked() {
             revoked_submission_ids.insert(record.submission_id);
+            if !request.dry_run {
+                mirror_revocation_to_db(state, tenant, record.submission_id, Some(record)).await?;
+            }
             continue;
         }
         if record.status == TraceCorpusStatus::Expired {
@@ -10121,6 +10124,156 @@ mod tests {
         .await
         .expect("maintenance mirrors discovered revocation");
         assert_eq!(response.records_marked_revoked, 1);
+        assert_eq!(response.derived_marked_revoked, 1);
+
+        let db_submission = db
+            .get_trace_submission("tenant-a", submission_id)
+            .await
+            .expect("DB submission status reads")
+            .expect("DB submission exists");
+        assert_eq!(db_submission.status, StorageTraceCorpusStatus::Revoked);
+        assert!(
+            db.list_trace_object_refs("tenant-a", submission_id)
+                .await
+                .expect("DB object refs read")
+                .iter()
+                .all(|record| record.invalidated_at.is_some())
+        );
+        assert!(
+            db.list_trace_derived_records("tenant-a")
+                .await
+                .expect("DB derived records read")
+                .iter()
+                .any(|record| {
+                    record.submission_id == submission_id
+                        && record.status == StorageTraceDerivedStatus::Revoked
+                })
+        );
+        assert!(
+            db.list_trace_vector_entries("tenant-a")
+                .await
+                .expect("DB vector entries read")
+                .iter()
+                .any(|record| {
+                    record.submission_id == submission_id
+                        && record.status == StorageTraceVectorEntryStatus::Invalidated
+                })
+        );
+        let db_manifests = db
+            .list_trace_export_manifests("tenant-a")
+            .await
+            .expect("DB export manifests read");
+        assert!(db_manifests.iter().any(|manifest| {
+            manifest.export_manifest_id == export.export_id && manifest.invalidated_at.is_some()
+        }));
+        let db_items = db
+            .list_trace_export_manifest_items("tenant-a", export.export_id)
+            .await
+            .expect("DB export manifest items read");
+        assert_eq!(db_items.len(), 1);
+        assert!(db_items[0].source_invalidated_at.is_some());
+        assert_eq!(
+            db_items[0].source_invalidation_reason,
+            Some(StorageTraceExportManifestItemInvalidationReason::Revoked)
+        );
+        assert_eq!(
+            db.list_trace_tombstones("tenant-a")
+                .await
+                .expect("DB tombstones read")
+                .len(),
+            1
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn maintenance_repairs_db_revocation_for_already_revoked_file_records() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp
+            .path()
+            .join("trace-maintenance-existing-revocation.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission dual-writes to DB mirror");
+        let Json(vector_response) = maintenance_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("existing_revocation_vector_index".to_string()),
+                dry_run: false,
+                backfill_db_mirror: false,
+                index_vectors: true,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("vector metadata indexing succeeds");
+        assert_eq!(vector_response.vector_entries_indexed, 1);
+        let Json(export) = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("existing_revocation_replay".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("replay export mirrors manifest metadata");
+        assert_eq!(export.item_count, 1);
+
+        let mut record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("file record reads")
+            .expect("file record exists");
+        record.status = TraceCorpusStatus::Revoked;
+        record.credit_points_final = Some(0.0);
+        write_submission_record(temp.path(), &record).expect("file record marks revoked");
+
+        let Json(response) = maintenance_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("repair_existing_revocation_db_mirror".to_string()),
+                dry_run: false,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("maintenance repairs existing file revocation in DB");
+        assert_eq!(response.records_marked_revoked, 0);
         assert_eq!(response.derived_marked_revoked, 1);
 
         let db_submission = db
