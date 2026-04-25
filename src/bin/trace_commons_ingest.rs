@@ -76,6 +76,7 @@ struct AppState {
     db_mirror: Option<Arc<dyn Database>>,
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
+    db_replay_export_reads: bool,
     artifact_store: Option<Arc<LocalEncryptedTraceArtifactStore>>,
 }
 
@@ -131,6 +132,12 @@ impl AppState {
         if db_reviewer_reads && db_mirror.is_none() {
             anyhow::bail!("TRACE_COMMONS_DB_REVIEWER_READS requires TRACE_COMMONS_DB_DUAL_WRITE");
         }
+        let db_replay_export_reads = env_truthy("TRACE_COMMONS_DB_REPLAY_EXPORT_READS");
+        if db_replay_export_reads && db_mirror.is_none() {
+            anyhow::bail!(
+                "TRACE_COMMONS_DB_REPLAY_EXPORT_READS requires TRACE_COMMONS_DB_DUAL_WRITE"
+            );
+        }
         let artifact_store = trace_artifact_store_from_env(&root)?;
         Ok(Self {
             root,
@@ -138,6 +145,7 @@ impl AppState {
             db_mirror,
             db_contributor_reads,
             db_reviewer_reads,
+            db_replay_export_reads,
             artifact_store,
         })
     }
@@ -845,10 +853,10 @@ async fn dataset_replay_handler(
 ) -> ApiResult<Json<TraceReplayDatasetExport>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_reviewer(&tenant)?;
-    let records =
-        read_all_submission_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
-    let derived =
-        read_all_derived_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let TraceCommonsMetadataView { records, derived } =
+        read_replay_export_metadata_view(state.as_ref(), &tenant)
+            .await
+            .map_err(internal_error)?;
     let derived_by_submission = derived
         .into_iter()
         .map(|record| (record.submission_id, record))
@@ -1449,6 +1457,20 @@ async fn read_reviewer_metadata_view(
     tenant: &TenantAuth,
 ) -> anyhow::Result<TraceCommonsMetadataView> {
     if state.db_reviewer_reads {
+        return read_reviewer_metadata_view_from_db(state, tenant).await;
+    }
+
+    Ok(TraceCommonsMetadataView {
+        records: read_all_submission_records(&state.root, &tenant.tenant_id)?,
+        derived: read_all_derived_records(&state.root, &tenant.tenant_id)?,
+    })
+}
+
+async fn read_replay_export_metadata_view(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<TraceCommonsMetadataView> {
+    if state.db_replay_export_reads {
         return read_reviewer_metadata_view_from_db(state, tenant).await;
     }
 
@@ -3960,25 +3982,32 @@ mod tests {
     use ironclaw::trace_corpus_storage::TraceCorpusStore;
 
     fn test_state(root: PathBuf) -> Arc<AppState> {
-        test_state_with_options(root, None, None, false, false)
+        test_state_with_options(root, None, None, false, false, false)
     }
 
     fn test_state_with_db(root: PathBuf, db_mirror: Option<Arc<dyn Database>>) -> Arc<AppState> {
-        test_state_with_options(root, db_mirror, None, false, false)
+        test_state_with_options(root, db_mirror, None, false, false, false)
     }
 
     fn test_state_with_db_contributor_reads(
         root: PathBuf,
         db_mirror: Option<Arc<dyn Database>>,
     ) -> Arc<AppState> {
-        test_state_with_options(root, db_mirror, None, true, false)
+        test_state_with_options(root, db_mirror, None, true, false, false)
     }
 
     fn test_state_with_db_reviewer_reads(
         root: PathBuf,
         db_mirror: Option<Arc<dyn Database>>,
     ) -> Arc<AppState> {
-        test_state_with_options(root, db_mirror, None, false, true)
+        test_state_with_options(root, db_mirror, None, false, true, false)
+    }
+
+    fn test_state_with_db_replay_export_reads(
+        root: PathBuf,
+        db_mirror: Option<Arc<dyn Database>>,
+    ) -> Arc<AppState> {
+        test_state_with_options(root, db_mirror, None, false, false, true)
     }
 
     fn test_state_with_options(
@@ -3987,6 +4016,7 @@ mod tests {
         artifact_store: Option<Arc<LocalEncryptedTraceArtifactStore>>,
         db_contributor_reads: bool,
         db_reviewer_reads: bool,
+        db_replay_export_reads: bool,
     ) -> Arc<AppState> {
         let mut tokens = BTreeMap::new();
         insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Contributor);
@@ -4010,6 +4040,7 @@ mod tests {
             db_mirror,
             db_contributor_reads,
             db_reviewer_reads,
+            db_replay_export_reads,
             artifact_store,
         })
     }
@@ -4105,6 +4136,7 @@ mod tests {
             temp.path().to_path_buf(),
             None,
             Some(artifact_store.clone()),
+            false,
             false,
             false,
         );
@@ -5348,6 +5380,64 @@ mod tests {
         assert_eq!(candidates.item_count, 1);
         assert_eq!(candidates.candidates[0].submission_id, accepted_id);
         assert_eq!(candidates.candidates[0].tool_sequence, vec!["shell"]);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn replay_export_can_select_from_db_mirror_without_file_metadata() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-mirror-replay-export.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let submit_state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.replay.replayable = true;
+        envelope.replay.required_tools.push("shell".to_string());
+        let submission_id = envelope.submission_id;
+
+        let Json(receipt) =
+            submit_trace_handler(State(submit_state), auth_headers("token-a"), Json(envelope))
+                .await
+                .expect("submission dual-writes to DB mirror");
+        assert_eq!(receipt.status, "accepted");
+
+        let tenant_dir = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"));
+        std::fs::remove_dir_all(tenant_dir.join("metadata")).expect("remove file metadata");
+        std::fs::remove_dir_all(tenant_dir.join("derived")).expect("remove derived metadata");
+
+        let replay_state =
+            test_state_with_db_replay_export_reads(temp.path().to_path_buf(), Some(db));
+        let Json(export) = dataset_replay_handler(
+            State(replay_state),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("db_replay_export".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("replay export can select DB metadata and read envelope object");
+        assert_eq!(export.item_count, 1);
+        assert_eq!(export.items[0].submission_id, submission_id);
+        assert_eq!(export.items[0].required_tools, vec!["shell"]);
+        assert!(export.items[0].canonical_summary_hash.is_some());
     }
 
     #[tokio::test]
