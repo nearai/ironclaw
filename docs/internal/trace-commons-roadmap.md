@@ -119,6 +119,7 @@ Exit criteria:
 
 Status: partially represented by static token roles plus optional ingest-time
 tenant submission policies for allowed consent scopes and trace-card uses;
+production-like deployments can require explicit tenant policy entries, but
 production policy remains future work.
 The PostgreSQL store now sets `ironclaw.trace_tenant_id` transaction-locally around
 tenant-scoped Trace Commons operations while retaining explicit `tenant_id`

@@ -85,6 +85,7 @@ struct AppState {
     root: PathBuf,
     tokens: Arc<BTreeMap<String, TenantAuth>>,
     tenant_policies: Arc<BTreeMap<String, TenantSubmissionPolicy>>,
+    require_tenant_submission_policy: bool,
     db_mirror: Option<Arc<dyn Database>>,
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
@@ -153,6 +154,8 @@ impl AppState {
             );
         }
         let tenant_policies = parse_tenant_submission_policies_from_env()?;
+        let require_tenant_submission_policy =
+            env_truthy("TRACE_COMMONS_REQUIRE_TENANT_SUBMISSION_POLICY");
         let db_mirror = trace_corpus_db_mirror_from_env().await?;
         let db_contributor_reads = env_truthy("TRACE_COMMONS_DB_CONTRIBUTOR_READS");
         if db_contributor_reads && db_mirror.is_none() {
@@ -187,6 +190,7 @@ impl AppState {
             root,
             tokens: Arc::new(tokens),
             tenant_policies: Arc::new(tenant_policies),
+            require_tenant_submission_policy,
             db_mirror,
             db_contributor_reads,
             db_reviewer_reads,
@@ -449,6 +453,7 @@ async fn submit_trace_handler(
         &tenant,
         &envelope,
         state.tenant_policies.get(&tenant.tenant_id),
+        state.require_tenant_submission_policy,
     )?;
 
     rescrub_trace_envelope(&mut envelope);
@@ -1881,8 +1886,19 @@ fn enforce_tenant_submission_policy(
     tenant: &TenantAuth,
     envelope: &TraceContributionEnvelope,
     policy: Option<&TenantSubmissionPolicy>,
+    require_policy: bool,
 ) -> ApiResult<()> {
     let Some(policy) = policy else {
+        if require_policy {
+            tracing::warn!(
+                tenant_id = %tenant.tenant_id,
+                "Trace Commons tenant policy rejected submission without tenant policy"
+            );
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "trace contribution tenant does not have a submission policy",
+            ));
+        }
         return Ok(());
     };
 
@@ -7009,6 +7025,7 @@ mod tests {
             false,
             BTreeMap::new(),
             false,
+            false,
         )
     }
 
@@ -7054,6 +7071,26 @@ mod tests {
             db_audit_reads,
             tenant_policies,
             false,
+            false,
+        )
+    }
+
+    fn test_state_with_required_tenant_policies(
+        root: PathBuf,
+        tenant_policies: BTreeMap<String, TenantSubmissionPolicy>,
+    ) -> Arc<AppState> {
+        test_state_with_options_policies_and_export_guardrails(
+            root,
+            None,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            tenant_policies,
+            true,
+            false,
         )
     }
 
@@ -7068,6 +7105,7 @@ mod tests {
             false,
             false,
             BTreeMap::new(),
+            false,
             true,
         )
     }
@@ -7082,6 +7120,7 @@ mod tests {
         db_replay_export_require_object_refs: bool,
         db_audit_reads: bool,
         tenant_policies: BTreeMap<String, TenantSubmissionPolicy>,
+        require_tenant_submission_policy: bool,
         require_export_guardrails: bool,
     ) -> Arc<AppState> {
         let mut tokens = BTreeMap::new();
@@ -7104,6 +7143,7 @@ mod tests {
             root,
             tokens: Arc::new(tokens),
             tenant_policies: Arc::new(tenant_policies),
+            require_tenant_submission_policy,
             db_mirror,
             db_contributor_reads,
             db_reviewer_reads,
@@ -7334,6 +7374,40 @@ mod tests {
             .await
             .expect_err("tenant policy rejects disallowed allowed use");
         assert_eq!(error.0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn submit_requires_explicit_tenant_policy_when_configured() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut policies = BTreeMap::new();
+        policies.insert(
+            "tenant-a".to_string(),
+            TenantSubmissionPolicy {
+                allowed_consent_scopes: BTreeSet::from([ConsentScope::DebuggingEvaluation]),
+                allowed_uses: BTreeSet::from([
+                    TraceAllowedUse::Debugging,
+                    TraceAllowedUse::Evaluation,
+                    TraceAllowedUse::AggregateAnalytics,
+                ]),
+            },
+        );
+        let state = test_state_with_required_tenant_policies(temp.path().to_path_buf(), policies);
+        let envelope = sample_envelope().await;
+
+        let error = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(envelope.clone()),
+        )
+        .await
+        .expect_err("tenant without policy cannot submit when required");
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+
+        let Json(receipt) =
+            submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
+                .await
+                .expect("tenant with policy can submit");
+        assert_eq!(receipt.status, "quarantined");
     }
 
     #[tokio::test]
