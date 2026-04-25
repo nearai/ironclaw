@@ -47,6 +47,7 @@ use ironclaw::trace_corpus_storage::{
     TraceObjectRefWrite as StorageTraceObjectRefWrite,
     TraceSubmissionRecord as StorageTraceSubmissionRecord,
     TraceSubmissionWrite as StorageTraceSubmissionWrite,
+    TraceTenantPolicyRecord as StorageTraceTenantPolicyRecord,
     TraceTombstoneWrite as StorageTraceTombstoneWrite,
     TraceVectorEntrySourceProjection as StorageTraceVectorEntrySourceProjection,
     TraceVectorEntryStatus as StorageTraceVectorEntryStatus,
@@ -96,6 +97,7 @@ struct AppState {
     db_replay_export_reads: bool,
     db_replay_export_require_object_refs: bool,
     db_audit_reads: bool,
+    db_tenant_policy_reads: bool,
     require_export_guardrails: bool,
     artifact_store: Option<ConfiguredTraceArtifactStore>,
 }
@@ -304,6 +306,12 @@ impl AppState {
         if db_audit_reads && db_mirror.is_none() {
             anyhow::bail!("TRACE_COMMONS_DB_AUDIT_READS requires TRACE_COMMONS_DB_DUAL_WRITE");
         }
+        let db_tenant_policy_reads = env_truthy("TRACE_COMMONS_DB_TENANT_POLICY_READS");
+        if db_tenant_policy_reads && db_mirror.is_none() {
+            anyhow::bail!(
+                "TRACE_COMMONS_DB_TENANT_POLICY_READS requires TRACE_COMMONS_DB_DUAL_WRITE"
+            );
+        }
         let require_export_guardrails = env_truthy("TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS");
         let artifact_store = trace_artifact_store_from_env(&root)?;
         Ok(Self {
@@ -317,6 +325,7 @@ impl AppState {
             db_replay_export_reads,
             db_replay_export_require_object_refs,
             db_audit_reads,
+            db_tenant_policy_reads,
             require_export_guardrails,
             artifact_store,
         })
@@ -575,10 +584,11 @@ async fn submit_trace_handler(
         return Ok(Json(receipt));
     }
 
+    let tenant_policy = tenant_submission_policy_for_request(state.as_ref(), &tenant).await?;
     enforce_tenant_submission_policy(
         &tenant,
         &envelope,
-        state.tenant_policies.get(&tenant.tenant_id),
+        tenant_policy.as_ref(),
         state.require_tenant_submission_policy,
     )?;
 
@@ -2045,6 +2055,53 @@ fn validate_envelope(envelope: &TraceContributionEnvelope) -> ApiResult<()> {
         ));
     }
     Ok(())
+}
+
+async fn tenant_submission_policy_for_request(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> ApiResult<Option<TenantSubmissionPolicy>> {
+    if state.db_tenant_policy_reads {
+        let db = state
+            .db_mirror
+            .as_ref()
+            .ok_or_else(|| internal_error("DB tenant policy reads require DB mirror"))?;
+        let policy = db
+            .get_trace_tenant_policy(&tenant.tenant_id)
+            .await
+            .map_err(internal_error)?;
+        return policy
+            .map(tenant_submission_policy_from_storage)
+            .transpose()
+            .map_err(internal_error);
+    }
+
+    Ok(state.tenant_policies.get(&tenant.tenant_id).cloned())
+}
+
+fn tenant_submission_policy_from_storage(
+    policy: StorageTraceTenantPolicyRecord,
+) -> anyhow::Result<TenantSubmissionPolicy> {
+    Ok(TenantSubmissionPolicy {
+        allowed_consent_scopes: parse_storage_policy_values(
+            &policy.allowed_consent_scopes,
+            "allowed_consent_scopes",
+        )?,
+        allowed_uses: parse_storage_policy_values(&policy.allowed_uses, "allowed_uses")?,
+    })
+}
+
+fn parse_storage_policy_values<T>(values: &[String], label: &str) -> anyhow::Result<BTreeSet<T>>
+where
+    T: for<'de> Deserialize<'de> + Ord,
+{
+    values
+        .iter()
+        .map(|value| {
+            serde_json::from_value::<T>(serde_json::Value::String(value.clone()))
+                .with_context(|| format!("failed to parse trace tenant policy {label} value"))
+        })
+        .collect()
 }
 
 fn enforce_tenant_submission_policy(
@@ -7448,9 +7505,31 @@ mod tests {
             db_replay_export_reads,
             db_replay_export_require_object_refs,
             db_audit_reads,
+            false,
             tenant_policies,
             require_tenant_submission_policy,
             require_export_guardrails,
+        )
+    }
+
+    fn test_state_with_db_tenant_policy_reads(
+        root: PathBuf,
+        db_mirror: Arc<dyn Database>,
+        require_tenant_submission_policy: bool,
+    ) -> Arc<AppState> {
+        test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            root,
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            BTreeMap::new(),
+            require_tenant_submission_policy,
+            false,
         )
     }
 
@@ -7463,6 +7542,7 @@ mod tests {
         db_replay_export_reads: bool,
         db_replay_export_require_object_refs: bool,
         db_audit_reads: bool,
+        db_tenant_policy_reads: bool,
         tenant_policies: BTreeMap<String, TenantSubmissionPolicy>,
         require_tenant_submission_policy: bool,
         require_export_guardrails: bool,
@@ -7494,6 +7574,7 @@ mod tests {
             db_replay_export_reads,
             db_replay_export_require_object_refs,
             db_audit_reads,
+            db_tenant_policy_reads,
             require_export_guardrails,
             artifact_store,
         })
@@ -7786,6 +7867,65 @@ mod tests {
                 .await
                 .expect("tenant with policy can submit");
         assert_eq!(receipt.status, "quarantined");
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn submit_enforces_db_backed_tenant_policy_when_enabled() {
+        use ironclaw::db::libsql::LibSqlBackend;
+        use ironclaw::trace_corpus_storage::TraceTenantPolicyWrite;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-tenant-policy.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        db.upsert_trace_tenant_policy(TraceTenantPolicyWrite {
+            tenant_id: "tenant-a".to_string(),
+            policy_version: "tenant-policy-v1".to_string(),
+            allowed_consent_scopes: vec!["debugging_evaluation".to_string()],
+            allowed_uses: vec!["debugging".to_string()],
+            updated_by_principal_ref: "admin:test".to_string(),
+        })
+        .await
+        .expect("tenant policy writes");
+        let state = test_state_with_db_tenant_policy_reads(
+            temp.path().to_path_buf(),
+            db.clone() as Arc<dyn Database>,
+            true,
+        );
+
+        let mut allowed = sample_envelope().await;
+        make_metadata_only_low_risk(&mut allowed);
+        allowed.consent.scopes = vec![ConsentScope::DebuggingEvaluation];
+        allowed.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
+        allowed.trace_card.allowed_uses = vec![TraceAllowedUse::Debugging];
+        let Json(receipt) =
+            submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(allowed))
+                .await
+                .expect("DB-backed tenant policy allows matching submission");
+        assert_eq!(receipt.status, "accepted");
+
+        let mut disallowed = sample_envelope().await;
+        make_metadata_only_low_risk(&mut disallowed);
+        disallowed.consent.scopes = vec![ConsentScope::ModelTraining];
+        disallowed.trace_card.consent_scope = ConsentScope::ModelTraining;
+        disallowed.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let error = submit_trace_handler(State(state), auth_headers("token-a"), Json(disallowed))
+            .await
+            .expect_err("DB-backed tenant policy rejects disallowed submission");
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+
+        assert!(
+            db.get_trace_tenant_policy("tenant-b")
+                .await
+                .expect("other tenant policy reads")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -9770,6 +9910,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             BTreeMap::new(),
             false,
             false,
@@ -10686,6 +10827,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             BTreeMap::new(),
             false,
             false,
@@ -10732,6 +10874,7 @@ mod tests {
             false,
             true,
             true,
+            false,
             false,
             BTreeMap::new(),
             false,

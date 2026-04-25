@@ -164,6 +164,26 @@ pub struct TraceSubmissionRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceTenantPolicyWrite {
+    pub tenant_id: String,
+    pub policy_version: String,
+    pub allowed_consent_scopes: Vec<String>,
+    pub allowed_uses: Vec<String>,
+    pub updated_by_principal_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceTenantPolicyRecord {
+    pub tenant_id: String,
+    pub policy_version: String,
+    pub allowed_consent_scopes: Vec<String>,
+    pub allowed_uses: Vec<String>,
+    pub updated_by_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TraceObjectRefWrite {
     pub object_ref_id: Uuid,
     pub tenant_id: String,
@@ -525,6 +545,16 @@ pub trait TraceCorpusStore: Send + Sync {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError>;
+
+    async fn upsert_trace_tenant_policy(
+        &self,
+        policy: TraceTenantPolicyWrite,
+    ) -> Result<TraceTenantPolicyRecord, DatabaseError>;
+
+    async fn get_trace_tenant_policy(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<TraceTenantPolicyRecord>, DatabaseError>;
 
     async fn list_trace_credit_events(
         &self,

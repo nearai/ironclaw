@@ -11,8 +11,9 @@ mod libsql_trace_corpus_store {
         TraceCreditSettlementState, TraceDerivedRecordWrite, TraceDerivedStatus,
         TraceExportManifestItemInvalidationReason, TraceExportManifestItemWrite,
         TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefWrite,
-        TraceSubmissionWrite, TraceTombstoneWrite, TraceVectorEntrySourceProjection,
-        TraceVectorEntryStatus, TraceVectorEntryWrite, TraceWorkerKind,
+        TraceSubmissionWrite, TraceTenantPolicyWrite, TraceTombstoneWrite,
+        TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
+        TraceWorkerKind,
     };
     use uuid::Uuid;
 
@@ -102,6 +103,57 @@ mod libsql_trace_corpus_store {
             .await
             .expect("list submissions for other tenant");
         assert!(other_tenant_list.is_empty());
+
+        let policy = backend
+            .upsert_trace_tenant_policy(TraceTenantPolicyWrite {
+                tenant_id: tenant_id.to_string(),
+                policy_version: "tenant-policy-v1".to_string(),
+                allowed_consent_scopes: vec!["debugging_evaluation".to_string()],
+                allowed_uses: vec!["debugging".to_string(), "evaluation".to_string()],
+                updated_by_principal_ref: "admin:test".to_string(),
+            })
+            .await
+            .expect("upsert tenant policy");
+        assert_eq!(policy.tenant_id, tenant_id);
+        assert_eq!(policy.policy_version, "tenant-policy-v1");
+        assert_eq!(policy.allowed_consent_scopes, vec!["debugging_evaluation"]);
+        assert_eq!(policy.allowed_uses, vec!["debugging", "evaluation"]);
+        assert_eq!(policy.updated_by_principal_ref, "admin:test");
+
+        let read_policy = backend
+            .get_trace_tenant_policy(tenant_id)
+            .await
+            .expect("read tenant policy")
+            .expect("tenant policy exists");
+        assert_eq!(read_policy, policy);
+        assert!(
+            backend
+                .get_trace_tenant_policy("tenant-beta")
+                .await
+                .expect("read other tenant policy")
+                .is_none()
+        );
+
+        let updated_policy = backend
+            .upsert_trace_tenant_policy(TraceTenantPolicyWrite {
+                tenant_id: tenant_id.to_string(),
+                policy_version: "tenant-policy-v2".to_string(),
+                allowed_consent_scopes: vec![
+                    "debugging_evaluation".to_string(),
+                    "benchmark_only".to_string(),
+                ],
+                allowed_uses: vec!["debugging".to_string()],
+                updated_by_principal_ref: "admin:second".to_string(),
+            })
+            .await
+            .expect("update tenant policy");
+        assert_eq!(updated_policy.policy_version, "tenant-policy-v2");
+        assert_eq!(
+            updated_policy.allowed_consent_scopes,
+            vec!["debugging_evaluation", "benchmark_only"]
+        );
+        assert_eq!(updated_policy.allowed_uses, vec!["debugging"]);
+        assert_eq!(updated_policy.updated_by_principal_ref, "admin:second");
 
         let object_ref_id = Uuid::new_v4();
         backend

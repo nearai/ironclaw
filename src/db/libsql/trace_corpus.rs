@@ -15,9 +15,10 @@ use crate::trace_corpus_storage::{
     TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportManifestItemInvalidationReason,
     TraceExportManifestItemRecord, TraceExportManifestItemWrite, TraceExportManifestRecord,
     TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefRecord, TraceObjectRefWrite,
-    TraceSubmissionRecord, TraceSubmissionWrite, TraceTombstoneRecord, TraceTombstoneWrite,
-    TraceVectorEntryRecord, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
-    TraceVectorEntryWrite, TraceWorkerKind,
+    TraceSubmissionRecord, TraceSubmissionWrite, TraceTenantPolicyRecord, TraceTenantPolicyWrite,
+    TraceTombstoneRecord, TraceTombstoneWrite, TraceVectorEntryRecord,
+    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
+    TraceWorkerKind,
 };
 
 const TRACE_SUBMISSION_COLUMNS: &str = "\
@@ -28,6 +29,10 @@ const TRACE_SUBMISSION_COLUMNS: &str = "\
     redaction_counts, canonical_summary_hash, submission_score, \
     credit_points_pending, credit_points_final, received_at, updated_at, \
     reviewed_at, revoked_at, expires_at, purged_at";
+
+const TRACE_TENANT_POLICY_COLUMNS: &str = "\
+    tenant_id, policy_version, allowed_consent_scopes, allowed_uses, \
+    updated_by_principal_ref, created_at, updated_at";
 
 const TRACE_OBJECT_REF_COLUMNS: &str = "\
     tenant_id, submission_id, object_ref_id, artifact_kind, object_store, object_key, \
@@ -173,6 +178,18 @@ fn row_to_submission(row: &libsql::Row) -> Result<TraceSubmissionRecord, Databas
         revoked_at: get_opt_ts(row, 23),
         expires_at: get_opt_ts(row, 24),
         purged_at: get_opt_ts(row, 25),
+    })
+}
+
+fn row_to_tenant_policy(row: &libsql::Row) -> Result<TraceTenantPolicyRecord, DatabaseError> {
+    Ok(TraceTenantPolicyRecord {
+        tenant_id: get_text(row, 0),
+        policy_version: get_text(row, 1),
+        allowed_consent_scopes: json_array_strings(&get_text(row, 2), "allowed_consent_scopes")?,
+        allowed_uses: json_array_strings(&get_text(row, 3), "allowed_uses")?,
+        updated_by_principal_ref: get_text(row, 4),
+        created_at: get_ts(row, 5),
+        updated_at: get_ts(row, 6),
     })
 }
 
@@ -569,6 +586,70 @@ impl TraceCorpusStore for LibSqlBackend {
             submissions.push(row_to_submission(&row)?);
         }
         Ok(submissions)
+    }
+
+    async fn upsert_trace_tenant_policy(
+        &self,
+        policy: TraceTenantPolicyWrite,
+    ) -> Result<TraceTenantPolicyRecord, DatabaseError> {
+        self.ensure_trace_tenant(&policy.tenant_id).await?;
+        let conn = self.connect().await?;
+        let allowed_consent_scopes = json_string(&policy.allowed_consent_scopes)?;
+        let allowed_uses = json_string(&policy.allowed_uses)?;
+        conn.execute(
+            "INSERT INTO trace_tenant_policies (
+                tenant_id, policy_version, allowed_consent_scopes, allowed_uses,
+                updated_by_principal_ref
+             ) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (tenant_id) DO UPDATE SET
+                policy_version = excluded.policy_version,
+                allowed_consent_scopes = excluded.allowed_consent_scopes,
+                allowed_uses = excluded.allowed_uses,
+                updated_by_principal_ref = excluded.updated_by_principal_ref,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+            libsql::params![
+                policy.tenant_id.as_str(),
+                policy.policy_version.as_str(),
+                allowed_consent_scopes,
+                allowed_uses,
+                policy.updated_by_principal_ref.as_str(),
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        self.get_trace_tenant_policy(&policy.tenant_id)
+            .await?
+            .ok_or_else(|| DatabaseError::NotFound {
+                entity: "trace_tenant_policy".to_string(),
+                id: policy.tenant_id,
+            })
+    }
+
+    async fn get_trace_tenant_policy(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<TraceTenantPolicyRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {TRACE_TENANT_POLICY_COLUMNS}
+                     FROM trace_tenant_policies
+                     WHERE tenant_id = ?1"
+                ),
+                libsql::params![tenant_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        match rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            Some(row) => Ok(Some(row_to_tenant_policy(&row)?)),
+            None => Ok(None),
+        }
     }
 
     async fn list_trace_credit_events(

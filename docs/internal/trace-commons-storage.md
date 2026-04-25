@@ -8,15 +8,16 @@ The MVP ingestion service still serves tenant-scoped JSON files under `TRACE_COM
 
 This branch now contains the first production-storage bridge:
 
-- `migrations/V25__trace_corpus_storage.sql`, `migrations/V26__trace_object_ref_lifecycle.sql`, `migrations/V27__trace_corpus_rich_metadata.sql`, `migrations/V28__trace_vector_entries.sql`, `migrations/V29__trace_export_manifests.sql`, `migrations/V30__trace_export_manifest_items.sql`, and matching libSQL incremental migrations.
+- `migrations/V25__trace_corpus_storage.sql`, `migrations/V26__trace_object_ref_lifecycle.sql`, `migrations/V27__trace_corpus_rich_metadata.sql`, `migrations/V28__trace_vector_entries.sql`, `migrations/V29__trace_export_manifests.sql`, `migrations/V30__trace_export_manifest_items.sql`, `migrations/V32__trace_audit_hash_chain.sql`, `migrations/V33__trace_tenant_policies.sql`, and matching libSQL incremental migrations.
 - `src/trace_corpus_storage.rs` and `TraceCorpusStore` implementations for PostgreSQL and libSQL.
 - Optional ingest-service DB dual-write behind `TRACE_COMMONS_DB_DUAL_WRITE=true`.
+- Optional DB-backed tenant policy reads behind `TRACE_COMMONS_DB_TENANT_POLICY_READS=true`.
 - Optional encrypted local artifact storage behind `TRACE_COMMONS_ARTIFACT_KEY_HEX`, with `TRACE_COMMONS_OBJECT_STORE=local_service` selecting the service-owned local encrypted backend used for production-shaped object refs.
-- Caller-level tests for tenant-scoped writes, review/revocation state, delayed credit events, encrypted artifact receipts, and DB object-ref replay reads through the service-owned local object-store backend.
+- Caller-level tests for tenant-scoped writes, DB-backed tenant policy enforcement, review/revocation state, delayed credit events, encrypted artifact receipts, and DB object-ref replay reads through the service-owned local object-store backend.
 
 Production still needs stronger guarantees before broad tenant rollout:
 
-- Relational metadata for tenant policy, workflow state, credit, audit, retention, and export manifests.
+- Relational metadata for broader workflow state, credit, audit, retention, and export manifests.
 - Encrypted object storage for redacted envelope bodies and large derived artifacts. The current service-owned local backend is a migration step toward remote object stores: it records a stable object-store provider alias in `trace_object_refs`, stores ciphertext under tenant-hashed paths, verifies ciphertext hashes on read, and lets replay exports fail closed when active object refs are required.
 - A vector store for approved redacted summaries and allowed redacted trace fields.
 - Tenant isolation derived from authenticated request identity, never from envelope fields.
@@ -81,6 +82,16 @@ CREATE TABLE trace_tenants (
     status TEXT NOT NULL CHECK (status IN ('active', 'suspended', 'retention_only', 'deleted')),
     data_residency_region TEXT,
     default_retention_policy_id TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE trace_tenant_policies (
+    tenant_id TEXT PRIMARY KEY REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
+    policy_version TEXT NOT NULL,
+    allowed_consent_scopes JSONB NOT NULL DEFAULT '[]'::JSONB,
+    allowed_uses JSONB NOT NULL DEFAULT '[]'::JSONB,
+    updated_by_principal_ref TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -398,6 +409,16 @@ CREATE TABLE IF NOT EXISTS trace_tenants (
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
+CREATE TABLE IF NOT EXISTS trace_tenant_policies (
+    tenant_id TEXT PRIMARY KEY REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
+    policy_version TEXT NOT NULL,
+    allowed_consent_scopes TEXT NOT NULL DEFAULT '[]',
+    allowed_uses TEXT NOT NULL DEFAULT '[]',
+    updated_by_principal_ref TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
 CREATE TABLE IF NOT EXISTS trace_access_grants (
     grant_id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
@@ -707,6 +728,16 @@ pub trait TraceCorpusStore: Send + Sync {
         submission_id: Uuid,
     ) -> Result<Option<TraceSubmissionRecord>, DatabaseError>;
 
+    async fn upsert_trace_tenant_policy(
+        &self,
+        policy: TraceTenantPolicyWrite,
+    ) -> Result<TraceTenantPolicyRecord, DatabaseError>;
+
+    async fn get_trace_tenant_policy(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<TraceTenantPolicyRecord>, DatabaseError>;
+
     async fn update_trace_submission_status(
         &self,
         tenant_id: &str,
@@ -739,6 +770,16 @@ The names below are intentionally close to the MVP concepts, but are not propose
 | `status` | `active`, `suspended`, `retention_only`, `deleted`. |
 | `data_residency_region` | Region pin for DB/object/vector placement. |
 | `default_retention_policy_id` | Fallback central retention policy. |
+
+`trace_tenant_policies`
+
+| Column | Purpose |
+|--------|---------|
+| `tenant_id` | Tenant boundary and primary key. |
+| `policy_version` | Operator-defined policy version applied during ingest. |
+| `allowed_consent_scopes` | Consent scopes accepted for new submissions. |
+| `allowed_uses` | Trace-card uses accepted for new submissions. |
+| `updated_by_principal_ref` | Admin or job principal that last changed policy. |
 
 `trace_access_grants`
 

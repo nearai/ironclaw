@@ -1002,6 +1002,16 @@ CREATE TABLE IF NOT EXISTS trace_tenants (
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
+CREATE TABLE IF NOT EXISTS trace_tenant_policies (
+    tenant_id TEXT PRIMARY KEY REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
+    policy_version TEXT NOT NULL,
+    allowed_consent_scopes TEXT NOT NULL DEFAULT '[]',
+    allowed_uses TEXT NOT NULL DEFAULT '[]',
+    updated_by_principal_ref TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
 CREATE TABLE IF NOT EXISTS trace_submissions (
     tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
     submission_id TEXT NOT NULL,
@@ -1356,6 +1366,21 @@ CREATE INDEX IF NOT EXISTS idx_trace_export_manifest_items_manifest
         r#"
 ALTER TABLE trace_audit_events ADD COLUMN previous_event_hash TEXT;
 ALTER TABLE trace_audit_events ADD COLUMN event_hash TEXT;
+"#,
+    ),
+    (
+        32,
+        "trace_tenant_policies",
+        r#"
+CREATE TABLE IF NOT EXISTS trace_tenant_policies (
+    tenant_id TEXT PRIMARY KEY REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
+    policy_version TEXT NOT NULL,
+    allowed_consent_scopes TEXT NOT NULL DEFAULT '[]',
+    allowed_uses TEXT NOT NULL DEFAULT '[]',
+    updated_by_principal_ref TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
 "#,
     ),
 ];

@@ -118,9 +118,10 @@ Exit criteria:
 ### Phase 3: Tenant Policy, RBAC, ABAC, and Audit Hardening
 
 Status: partially represented by static token roles plus optional ingest-time
-tenant submission policies for allowed consent scopes and trace-card uses;
-production-like deployments can require explicit tenant policy entries, but
-production policy remains future work.
+tenant submission policies for allowed consent scopes and trace-card uses.
+Production-like deployments can require explicit tenant policy entries, and
+ingest can now read those policies from the TraceCorpusStore behind
+`TRACE_COMMONS_DB_TENANT_POLICY_READS`; fuller RBAC/ABAC remains future work.
 The PostgreSQL store now sets `ironclaw.trace_tenant_id` transaction-locally around
 tenant-scoped Trace Commons operations while retaining explicit `tenant_id`
 predicates. This is an incremental guardrail only: table owners, superusers, and

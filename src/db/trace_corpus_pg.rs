@@ -14,9 +14,10 @@ use crate::trace_corpus_storage::{
     TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportManifestItemInvalidationReason,
     TraceExportManifestItemRecord, TraceExportManifestItemWrite, TraceExportManifestRecord,
     TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefRecord, TraceObjectRefWrite,
-    TraceSubmissionRecord, TraceSubmissionWrite, TraceTombstoneRecord, TraceTombstoneWrite,
-    TraceVectorEntryRecord, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
-    TraceVectorEntryWrite, TraceWorkerKind,
+    TraceSubmissionRecord, TraceSubmissionWrite, TraceTenantPolicyRecord, TraceTenantPolicyWrite,
+    TraceTombstoneRecord, TraceTombstoneWrite, TraceVectorEntryRecord,
+    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
+    TraceWorkerKind,
 };
 
 const TRACE_OBJECT_REF_COLUMNS: &str = "\
@@ -98,6 +99,23 @@ fn row_to_submission(row: &Row) -> Result<TraceSubmissionRecord, DatabaseError> 
         revoked_at: row.get("revoked_at"),
         expires_at: row.get("expires_at"),
         purged_at: row.get("purged_at"),
+    })
+}
+
+fn row_to_tenant_policy(row: &Row) -> Result<TraceTenantPolicyRecord, DatabaseError> {
+    let allowed_consent_scopes: serde_json::Value = row.get("allowed_consent_scopes");
+    let allowed_uses: serde_json::Value = row.get("allowed_uses");
+    Ok(TraceTenantPolicyRecord {
+        tenant_id: row.get("tenant_id"),
+        policy_version: row.get("policy_version"),
+        allowed_consent_scopes: json_array_strings(
+            allowed_consent_scopes,
+            "allowed_consent_scopes",
+        )?,
+        allowed_uses: json_array_strings(allowed_uses, "allowed_uses")?,
+        updated_by_principal_ref: row.get("updated_by_principal_ref"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
     })
 }
 
@@ -500,6 +518,76 @@ impl TraceCorpusStore for PgBackend {
         let records = rows.iter().map(row_to_submission).collect();
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         records
+    }
+
+    async fn upsert_trace_tenant_policy(
+        &self,
+        policy: TraceTenantPolicyWrite,
+    ) -> Result<TraceTenantPolicyRecord, DatabaseError> {
+        self.ensure_trace_tenant(&policy.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &policy.tenant_id).await?;
+        let allowed_consent_scopes =
+            serde_json::to_value(&policy.allowed_consent_scopes).map_err(|e| {
+                DatabaseError::Serialization(format!(
+                    "trace tenant policy consent scopes encode failed: {e}"
+                ))
+            })?;
+        let allowed_uses = serde_json::to_value(&policy.allowed_uses).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace tenant policy allowed uses encode failed: {e}"
+            ))
+        })?;
+        let row = tx
+            .query_one(
+                "INSERT INTO trace_tenant_policies (
+                    tenant_id, policy_version, allowed_consent_scopes, allowed_uses,
+                    updated_by_principal_ref
+                 ) VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (tenant_id) DO UPDATE SET
+                    policy_version = excluded.policy_version,
+                    allowed_consent_scopes = excluded.allowed_consent_scopes,
+                    allowed_uses = excluded.allowed_uses,
+                    updated_by_principal_ref = excluded.updated_by_principal_ref,
+                    updated_at = NOW()
+                 RETURNING
+                    tenant_id, policy_version, allowed_consent_scopes, allowed_uses,
+                    updated_by_principal_ref, created_at, updated_at",
+                &[
+                    &policy.tenant_id,
+                    &policy.policy_version,
+                    &allowed_consent_scopes,
+                    &allowed_uses,
+                    &policy.updated_by_principal_ref,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_tenant_policy(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn get_trace_tenant_policy(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<TraceTenantPolicyRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT
+                    tenant_id, policy_version, allowed_consent_scopes, allowed_uses,
+                    updated_by_principal_ref, created_at, updated_at
+                 FROM trace_tenant_policies
+                 WHERE tenant_id = $1",
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row.as_ref().map(row_to_tenant_policy).transpose()?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
     }
 
     async fn list_trace_credit_events(

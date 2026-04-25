@@ -183,6 +183,7 @@ async fn assert_raw_sql_rls_filters_by_tenant_context(
 async fn assert_trace_rls_policies_installed(backend: &PgBackend) {
     let expected_tables = vec![
         "trace_tenants".to_string(),
+        "trace_tenant_policies".to_string(),
         "trace_submissions".to_string(),
         "trace_object_refs".to_string(),
         "trace_derived_records".to_string(),
