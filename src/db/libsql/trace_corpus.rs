@@ -12,10 +12,11 @@ use crate::trace_corpus_storage::{
     TenantScopedTraceObjectRef, TraceArtifactInvalidationCounts, TraceAuditEventRecord,
     TraceAuditEventWrite, TraceAuditSafeMetadata, TraceCorpusStatus, TraceCorpusStore,
     TraceCreditEventRecord, TraceCreditEventWrite, TraceCreditSettlementState, TraceDerivedRecord,
-    TraceDerivedRecordWrite, TraceDerivedStatus, TraceObjectArtifactKind, TraceObjectRefRecord,
-    TraceObjectRefWrite, TraceSubmissionRecord, TraceSubmissionWrite, TraceTombstoneWrite,
-    TraceVectorEntryRecord, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
-    TraceVectorEntryWrite, TraceWorkerKind,
+    TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportManifestRecord,
+    TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefRecord, TraceObjectRefWrite,
+    TraceSubmissionRecord, TraceSubmissionWrite, TraceTombstoneWrite, TraceVectorEntryRecord,
+    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
+    TraceWorkerKind,
 };
 
 const TRACE_SUBMISSION_COLUMNS: &str = "\
@@ -31,6 +32,11 @@ const TRACE_OBJECT_REF_COLUMNS: &str = "\
     tenant_id, submission_id, object_ref_id, artifact_kind, object_store, object_key, \
     content_sha256, encryption_key_ref, size_bytes, compression, created_by_job_id, \
     invalidated_at, deleted_at, updated_at, created_at";
+
+const TRACE_EXPORT_MANIFEST_COLUMNS: &str = "\
+    tenant_id, export_manifest_id, artifact_kind, purpose_code, audit_event_id, \
+    source_submission_ids, source_submission_ids_hash, item_count, generated_at, \
+    invalidated_at, deleted_at, created_at, updated_at";
 
 fn opt_f32(value: Option<f32>) -> libsql::Value {
     match value {
@@ -82,6 +88,15 @@ fn get_i32(row: &libsql::Row, idx: i32, column: &str) -> Result<i32, DatabaseErr
     })
 }
 
+fn get_u32(row: &libsql::Row, idx: i32, column: &str) -> Result<u32, DatabaseError> {
+    let value = row.get::<i64>(idx).map_err(|e| {
+        DatabaseError::Serialization(format!("trace {column} column read failed: {e}"))
+    })?;
+    u32::try_from(value).map_err(|e| {
+        DatabaseError::Serialization(format!("invalid trace {column} column value: {e}"))
+    })
+}
+
 fn json_string<T: serde::Serialize>(value: &T) -> Result<String, DatabaseError> {
     serde_json::to_string(value)
         .map_err(|e| DatabaseError::Serialization(format!("trace corpus JSON encode failed: {e}")))
@@ -103,6 +118,13 @@ fn json_array_strings(raw: &str, column: &str) -> Result<Vec<String>, DatabaseEr
                 ))
             })
         })
+        .collect()
+}
+
+fn json_array_uuids(raw: &str, column: &str) -> Result<Vec<Uuid>, DatabaseError> {
+    json_array_strings(raw, column)?
+        .into_iter()
+        .map(|id| parse_uuid(&id, column))
         .collect()
 }
 
@@ -265,6 +287,36 @@ fn row_to_vector_entry(row: &libsql::Row) -> Result<TraceVectorEntryRecord, Data
         deleted_at: get_opt_ts(row, 17),
         created_at: get_ts(row, 18),
         updated_at: get_ts(row, 19),
+    })
+}
+
+fn row_to_export_manifest(row: &libsql::Row) -> Result<TraceExportManifestRecord, DatabaseError> {
+    let audit_event_id = get_opt_text(row, 4)
+        .map(|id| parse_uuid(&id, "trace_export_manifests.audit_event_id"))
+        .transpose()?;
+    Ok(TraceExportManifestRecord {
+        tenant_id: get_text(row, 0),
+        export_manifest_id: parse_uuid(
+            &get_text(row, 1),
+            "trace_export_manifests.export_manifest_id",
+        )?,
+        artifact_kind: enum_from_storage::<TraceObjectArtifactKind>(
+            &get_text(row, 2),
+            "TraceObjectArtifactKind",
+        )?,
+        purpose_code: get_opt_text(row, 3),
+        audit_event_id,
+        source_submission_ids: json_array_uuids(
+            &get_text(row, 5),
+            "trace_export_manifests.source_submission_ids",
+        )?,
+        source_submission_ids_hash: get_text(row, 6),
+        item_count: get_u32(row, 7, "trace_export_manifests.item_count")?,
+        generated_at: get_ts(row, 8),
+        invalidated_at: get_opt_ts(row, 9),
+        deleted_at: get_opt_ts(row, 10),
+        created_at: get_ts(row, 11),
+        updated_at: get_ts(row, 12),
     })
 }
 
@@ -867,6 +919,128 @@ impl TraceCorpusStore for LibSqlBackend {
             entries.push(row_to_vector_entry(&row)?);
         }
         Ok(entries)
+    }
+
+    async fn upsert_trace_export_manifest(
+        &self,
+        manifest: TraceExportManifestWrite,
+    ) -> Result<TraceExportManifestRecord, DatabaseError> {
+        self.ensure_trace_tenant(&manifest.tenant_id).await?;
+        let conn = self.connect().await?;
+        let source_submission_ids = manifest
+            .source_submission_ids
+            .iter()
+            .map(Uuid::to_string)
+            .collect::<Vec<_>>();
+        let source_submission_ids = json_string(&source_submission_ids)?;
+        conn.execute(
+            "INSERT INTO trace_export_manifests (
+                tenant_id, export_manifest_id, artifact_kind, purpose_code, audit_event_id,
+                source_submission_ids, source_submission_ids_hash, item_count, generated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT (tenant_id, export_manifest_id) DO UPDATE SET
+                artifact_kind = excluded.artifact_kind,
+                purpose_code = excluded.purpose_code,
+                audit_event_id = excluded.audit_event_id,
+                source_submission_ids = excluded.source_submission_ids,
+                source_submission_ids_hash = excluded.source_submission_ids_hash,
+                item_count = excluded.item_count,
+                generated_at = excluded.generated_at,
+                invalidated_at = NULL,
+                deleted_at = NULL,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+            libsql::params![
+                manifest.tenant_id.as_str(),
+                manifest.export_manifest_id.to_string(),
+                enum_to_storage(manifest.artifact_kind)?,
+                opt_string(manifest.purpose_code.clone()),
+                opt_uuid(manifest.audit_event_id),
+                source_submission_ids,
+                manifest.source_submission_ids_hash.as_str(),
+                i64::from(manifest.item_count),
+                fmt_ts(&manifest.generated_at),
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {TRACE_EXPORT_MANIFEST_COLUMNS}
+                     FROM trace_export_manifests
+                     WHERE tenant_id = ?1 AND export_manifest_id = ?2"
+                ),
+                libsql::params![
+                    manifest.tenant_id.as_str(),
+                    manifest.export_manifest_id.to_string(),
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        match rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            Some(row) => row_to_export_manifest(&row),
+            None => Err(DatabaseError::NotFound {
+                entity: "trace_export_manifest".to_string(),
+                id: manifest.export_manifest_id.to_string(),
+            }),
+        }
+    }
+
+    async fn list_trace_export_manifests(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceExportManifestRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {TRACE_EXPORT_MANIFEST_COLUMNS}
+                     FROM trace_export_manifests
+                     WHERE tenant_id = ?1
+                     ORDER BY generated_at ASC"
+                ),
+                libsql::params![tenant_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut manifests = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            manifests.push(row_to_export_manifest(&row)?);
+        }
+        Ok(manifests)
+    }
+
+    async fn invalidate_trace_export_manifests_for_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        let conn = self.connect().await?;
+        conn.execute(
+            "UPDATE trace_export_manifests
+             SET invalidated_at = COALESCE(invalidated_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE tenant_id = ?1
+               AND invalidated_at IS NULL
+               AND deleted_at IS NULL
+               AND EXISTS (
+                   SELECT 1
+                   FROM json_each(source_submission_ids)
+                   WHERE value = ?2
+               )",
+            libsql::params![tenant_id, submission_id.to_string()],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))
     }
 
     async fn invalidate_trace_vector_entries_for_submission(

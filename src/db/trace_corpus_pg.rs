@@ -11,16 +11,22 @@ use crate::trace_corpus_storage::{
     TenantScopedTraceObjectRef, TraceArtifactInvalidationCounts, TraceAuditEventRecord,
     TraceAuditEventWrite, TraceAuditSafeMetadata, TraceCorpusStatus, TraceCorpusStore,
     TraceCreditEventRecord, TraceCreditEventWrite, TraceCreditSettlementState, TraceDerivedRecord,
-    TraceDerivedRecordWrite, TraceDerivedStatus, TraceObjectArtifactKind, TraceObjectRefRecord,
-    TraceObjectRefWrite, TraceSubmissionRecord, TraceSubmissionWrite, TraceTombstoneWrite,
-    TraceVectorEntryRecord, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
-    TraceVectorEntryWrite, TraceWorkerKind,
+    TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportManifestRecord,
+    TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefRecord, TraceObjectRefWrite,
+    TraceSubmissionRecord, TraceSubmissionWrite, TraceTombstoneWrite, TraceVectorEntryRecord,
+    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
+    TraceWorkerKind,
 };
 
 const TRACE_OBJECT_REF_COLUMNS: &str = "\
     tenant_id, submission_id, object_ref_id, artifact_kind, object_store, object_key, \
     content_sha256, encryption_key_ref, size_bytes, compression, created_by_job_id, \
     invalidated_at, deleted_at, updated_at, created_at";
+
+const TRACE_EXPORT_MANIFEST_COLUMNS: &str = "\
+    tenant_id, export_manifest_id, artifact_kind, purpose_code, audit_event_id, \
+    source_submission_ids, source_submission_ids_hash, item_count, generated_at, \
+    invalidated_at, deleted_at, created_at, updated_at";
 
 fn json_array_strings(
     value: serde_json::Value,
@@ -201,6 +207,32 @@ fn row_to_vector_entry(row: &Row) -> Result<TraceVectorEntryRecord, DatabaseErro
         duplicate_score: row.get("duplicate_score"),
         novelty_score: row.get("novelty_score"),
         indexed_at: row.get("indexed_at"),
+        invalidated_at: row.get("invalidated_at"),
+        deleted_at: row.get("deleted_at"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    })
+}
+
+fn row_to_export_manifest(row: &Row) -> Result<TraceExportManifestRecord, DatabaseError> {
+    let artifact_kind: String = row.get("artifact_kind");
+    Ok(TraceExportManifestRecord {
+        tenant_id: row.get("tenant_id"),
+        export_manifest_id: row.get("export_manifest_id"),
+        artifact_kind: enum_from_storage::<TraceObjectArtifactKind>(
+            &artifact_kind,
+            "TraceObjectArtifactKind",
+        )?,
+        purpose_code: row.get("purpose_code"),
+        audit_event_id: row.get("audit_event_id"),
+        source_submission_ids: row.get("source_submission_ids"),
+        source_submission_ids_hash: row.get("source_submission_ids_hash"),
+        item_count: row.get::<_, i32>("item_count").try_into().map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "invalid trace_export_manifests.item_count column value: {e}"
+            ))
+        })?,
+        generated_at: row.get("generated_at"),
         invalidated_at: row.get("invalidated_at"),
         deleted_at: row.get("deleted_at"),
         created_at: row.get("created_at"),
@@ -750,6 +782,97 @@ impl TraceCorpusStore for PgBackend {
             .await
             .map_err(DatabaseError::Postgres)?;
         rows.iter().map(row_to_vector_entry).collect()
+    }
+
+    async fn upsert_trace_export_manifest(
+        &self,
+        manifest: TraceExportManifestWrite,
+    ) -> Result<TraceExportManifestRecord, DatabaseError> {
+        self.ensure_trace_tenant(&manifest.tenant_id).await?;
+        let client = self.pool().get().await?;
+        let artifact_kind = enum_to_storage(manifest.artifact_kind)?;
+        let item_count = i32::try_from(manifest.item_count).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace export manifest item_count exceeds PostgreSQL integer range: {e}"
+            ))
+        })?;
+        let row = client
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_export_manifests (
+                        tenant_id, export_manifest_id, artifact_kind, purpose_code,
+                        audit_event_id, source_submission_ids, source_submission_ids_hash,
+                        item_count, generated_at
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                     ON CONFLICT (tenant_id, export_manifest_id) DO UPDATE SET
+                        artifact_kind = excluded.artifact_kind,
+                        purpose_code = excluded.purpose_code,
+                        audit_event_id = excluded.audit_event_id,
+                        source_submission_ids = excluded.source_submission_ids,
+                        source_submission_ids_hash = excluded.source_submission_ids_hash,
+                        item_count = excluded.item_count,
+                        generated_at = excluded.generated_at,
+                        invalidated_at = NULL,
+                        deleted_at = NULL,
+                        updated_at = NOW()
+                     RETURNING {TRACE_EXPORT_MANIFEST_COLUMNS}"
+                ),
+                &[
+                    &manifest.tenant_id,
+                    &manifest.export_manifest_id,
+                    &artifact_kind,
+                    &manifest.purpose_code,
+                    &manifest.audit_event_id,
+                    &manifest.source_submission_ids,
+                    &manifest.source_submission_ids_hash,
+                    &item_count,
+                    &manifest.generated_at,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        row_to_export_manifest(&row)
+    }
+
+    async fn list_trace_export_manifests(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceExportManifestRecord>, DatabaseError> {
+        let client = self.pool().get().await?;
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT {TRACE_EXPORT_MANIFEST_COLUMNS}
+                     FROM trace_export_manifests
+                     WHERE tenant_id = $1
+                     ORDER BY generated_at ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        rows.iter().map(row_to_export_manifest).collect()
+    }
+
+    async fn invalidate_trace_export_manifests_for_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        let client = self.pool().get().await?;
+        client
+            .execute(
+                "UPDATE trace_export_manifests
+                 SET invalidated_at = COALESCE(invalidated_at, NOW()),
+                     updated_at = NOW()
+                 WHERE tenant_id = $1
+                   AND $2 = ANY(source_submission_ids)
+                   AND invalidated_at IS NULL
+                   AND deleted_at IS NULL",
+                &[&tenant_id, &submission_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)
     }
 
     async fn invalidate_trace_vector_entries_for_submission(

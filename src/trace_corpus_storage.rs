@@ -198,6 +198,36 @@ pub struct TraceObjectRefRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceExportManifestWrite {
+    pub tenant_id: String,
+    pub export_manifest_id: Uuid,
+    pub artifact_kind: TraceObjectArtifactKind,
+    pub purpose_code: Option<String>,
+    pub audit_event_id: Option<Uuid>,
+    pub source_submission_ids: Vec<Uuid>,
+    pub source_submission_ids_hash: String,
+    pub item_count: u32,
+    pub generated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceExportManifestRecord {
+    pub tenant_id: String,
+    pub export_manifest_id: Uuid,
+    pub artifact_kind: TraceObjectArtifactKind,
+    pub purpose_code: Option<String>,
+    pub audit_event_id: Option<Uuid>,
+    pub source_submission_ids: Vec<Uuid>,
+    pub source_submission_ids_hash: String,
+    pub item_count: u32,
+    pub generated_at: DateTime<Utc>,
+    pub invalidated_at: Option<DateTime<Utc>>,
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TenantScopedTraceObjectRef {
     pub tenant_id: String,
     pub submission_id: Uuid,
@@ -484,6 +514,22 @@ pub trait TraceCorpusStore: Send + Sync {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceVectorEntryRecord>, DatabaseError>;
+
+    async fn upsert_trace_export_manifest(
+        &self,
+        manifest: TraceExportManifestWrite,
+    ) -> Result<TraceExportManifestRecord, DatabaseError>;
+
+    async fn list_trace_export_manifests(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceExportManifestRecord>, DatabaseError>;
+
+    async fn invalidate_trace_export_manifests_for_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<u64, DatabaseError>;
 
     async fn invalidate_trace_vector_entries_for_submission(
         &self,

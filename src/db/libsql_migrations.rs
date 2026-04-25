@@ -1120,6 +1120,28 @@ CREATE INDEX IF NOT EXISTS idx_trace_audit_events_submission
 CREATE INDEX IF NOT EXISTS idx_trace_audit_events_action
     ON trace_audit_events (tenant_id, action, occurred_at DESC);
 
+CREATE TABLE IF NOT EXISTS trace_export_manifests (
+    tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
+    export_manifest_id TEXT NOT NULL,
+    artifact_kind TEXT NOT NULL,
+    purpose_code TEXT,
+    audit_event_id TEXT,
+    source_submission_ids TEXT NOT NULL DEFAULT '[]',
+    source_submission_ids_hash TEXT NOT NULL,
+    item_count INTEGER NOT NULL CHECK (item_count >= 0),
+    generated_at TEXT NOT NULL,
+    invalidated_at TEXT,
+    deleted_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (tenant_id, export_manifest_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trace_export_manifests_generated
+    ON trace_export_manifests (tenant_id, generated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trace_export_manifests_hash
+    ON trace_export_manifests (tenant_id, source_submission_ids_hash);
+
 CREATE TABLE IF NOT EXISTS trace_credit_ledger (
     tenant_id TEXT NOT NULL,
     credit_event_id TEXT NOT NULL,
@@ -1230,6 +1252,33 @@ CREATE INDEX IF NOT EXISTS idx_trace_vector_entries_source
 CREATE INDEX IF NOT EXISTS idx_trace_vector_entries_cluster
     ON trace_vector_entries (tenant_id, cluster_id, status)
     WHERE cluster_id IS NOT NULL;
+"#,
+    ),
+    (
+        29,
+        "trace_export_manifests",
+        r#"
+CREATE TABLE IF NOT EXISTS trace_export_manifests (
+    tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
+    export_manifest_id TEXT NOT NULL,
+    artifact_kind TEXT NOT NULL,
+    purpose_code TEXT,
+    audit_event_id TEXT,
+    source_submission_ids TEXT NOT NULL DEFAULT '[]',
+    source_submission_ids_hash TEXT NOT NULL,
+    item_count INTEGER NOT NULL CHECK (item_count >= 0),
+    generated_at TEXT NOT NULL,
+    invalidated_at TEXT,
+    deleted_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (tenant_id, export_manifest_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trace_export_manifests_generated
+    ON trace_export_manifests (tenant_id, generated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trace_export_manifests_hash
+    ON trace_export_manifests (tenant_id, source_submission_ids_hash);
 "#,
     ),
 ];

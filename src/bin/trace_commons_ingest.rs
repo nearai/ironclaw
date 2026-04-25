@@ -37,6 +37,7 @@ use ironclaw::trace_corpus_storage::{
     TraceDerivedRecord as StorageTraceDerivedRecord,
     TraceDerivedRecordWrite as StorageTraceDerivedRecordWrite,
     TraceDerivedStatus as StorageTraceDerivedStatus,
+    TraceExportManifestWrite as StorageTraceExportManifestWrite,
     TraceObjectArtifactKind as StorageTraceObjectArtifactKind,
     TraceObjectRefWrite as StorageTraceObjectRefWrite,
     TraceSubmissionRecord as StorageTraceSubmissionRecord,
@@ -1023,6 +1024,19 @@ async fn dataset_replay_handler(
         source_submission_ids_hash,
     );
     write_export_manifest(&state.root, &tenant.tenant_id, &manifest).map_err(internal_error)?;
+    if let Err(error) = mirror_export_manifest_to_db(
+        state.as_ref(),
+        StorageTraceObjectArtifactKind::ExportArtifact,
+        &manifest,
+    )
+    .await
+    {
+        tracing::warn!(
+            %error,
+            export_id = %manifest.export_id,
+            "Trace Commons DB dual-write export manifest mirror failed"
+        );
+    }
     append_audit_event_with_db_mirror(
         state.as_ref(),
         &tenant,
@@ -2403,11 +2417,16 @@ async fn mirror_revocation_to_db(
         .invalidate_trace_vector_entries_for_submission(&tenant.tenant_id, submission_id)
         .await
         .context("failed to mirror trace vector invalidation")?;
+    let export_manifests_invalidated = db
+        .invalidate_trace_export_manifests_for_submission(&tenant.tenant_id, submission_id)
+        .await
+        .context("failed to mirror trace export manifest invalidation")?;
 
     if let Some(record) = record
         && (invalidation_counts.object_refs_invalidated > 0
             || invalidation_counts.derived_records_invalidated > 0
-            || vector_entries_invalidated > 0)
+            || vector_entries_invalidated > 0
+            || export_manifests_invalidated > 0)
     {
         let mut action_counts = BTreeMap::new();
         action_counts.insert(
@@ -2425,6 +2444,10 @@ async fn mirror_revocation_to_db(
         action_counts.insert(
             "vector_entries_invalidated".to_string(),
             vector_entries_invalidated.min(u64::from(u32::MAX)) as u32,
+        );
+        action_counts.insert(
+            "export_manifests_invalidated".to_string(),
+            export_manifests_invalidated.min(u64::from(u32::MAX)) as u32,
         );
         db.append_trace_audit_event(StorageTraceAuditEventWrite {
             audit_event_id: deterministic_trace_uuid("revocation-artifact-invalidation", record),
@@ -2485,6 +2508,9 @@ async fn mirror_expiration_to_db(
     db.invalidate_trace_vector_entries_for_submission(&tenant.tenant_id, submission_id)
         .await
         .context("failed to mirror trace expiration vector invalidation")?;
+    db.invalidate_trace_export_manifests_for_submission(&tenant.tenant_id, submission_id)
+        .await
+        .context("failed to mirror trace expiration export manifest invalidation")?;
     Ok(())
 }
 
@@ -2523,6 +2549,9 @@ async fn mirror_purge_to_db(
     db.invalidate_trace_vector_entries_for_submission(&tenant.tenant_id, submission_id)
         .await
         .context("failed to mirror trace purge vector invalidation")?;
+    db.invalidate_trace_export_manifests_for_submission(&tenant.tenant_id, submission_id)
+        .await
+        .context("failed to mirror trace purge export manifest invalidation")?;
     Ok(())
 }
 
@@ -2581,6 +2610,30 @@ async fn mirror_credit_event_to_db(
     })
     .await
     .context("failed to mirror trace credit ledger event")
+}
+
+async fn mirror_export_manifest_to_db(
+    state: &AppState,
+    artifact_kind: StorageTraceObjectArtifactKind,
+    manifest: &TraceReplayExportManifest,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    db.upsert_trace_export_manifest(StorageTraceExportManifestWrite {
+        tenant_id: manifest.tenant_id.clone(),
+        export_manifest_id: manifest.export_id,
+        artifact_kind,
+        purpose_code: Some(manifest.purpose.clone()),
+        audit_event_id: Some(manifest.audit_event_id),
+        source_submission_ids: manifest.source_submission_ids.clone(),
+        source_submission_ids_hash: manifest.source_submission_ids_hash.clone(),
+        item_count: manifest.source_submission_ids.len().min(u32::MAX as usize) as u32,
+        generated_at: manifest.generated_at,
+    })
+    .await
+    .context("failed to mirror trace export manifest metadata")?;
+    Ok(())
 }
 
 fn storage_submission_write_from_record(
@@ -7211,6 +7264,145 @@ mod tests {
         assert_eq!(export.items[0].submission_id, submission_id);
         assert_eq!(export.items[0].required_tools, vec!["shell"]);
         assert!(export.items[0].canonical_summary_hash.is_some());
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn replay_export_mirrors_manifest_metadata_to_db() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-export-manifests.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let Json(receipt) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission dual-writes to DB mirror");
+        assert_eq!(receipt.status, "accepted");
+
+        let Json(export) = dataset_replay_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("db_export_manifest".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("dataset export succeeds");
+        assert_eq!(export.item_count, 1);
+        assert_eq!(export.items[0].submission_id, submission_id);
+
+        let manifests = db
+            .list_trace_export_manifests("tenant-a")
+            .await
+            .expect("list export manifest metadata");
+        assert_eq!(manifests.len(), 1);
+        let manifest = &manifests[0];
+        assert_eq!(manifest.tenant_id, "tenant-a");
+        assert_eq!(manifest.export_manifest_id, export.export_id);
+        assert_eq!(
+            manifest.artifact_kind,
+            StorageTraceObjectArtifactKind::ExportArtifact
+        );
+        assert_eq!(manifest.purpose_code.as_deref(), Some("db_export_manifest"));
+        assert_eq!(manifest.audit_event_id, Some(export.audit_event_id));
+        assert_eq!(manifest.source_submission_ids, vec![submission_id]);
+        assert_eq!(
+            manifest.source_submission_ids_hash,
+            export.manifest.source_submission_ids_hash
+        );
+        assert_eq!(manifest.item_count, 1);
+        assert!(manifest.invalidated_at.is_none());
+        assert!(manifest.deleted_at.is_none());
+
+        let other_tenant_manifests = db
+            .list_trace_export_manifests("tenant-b")
+            .await
+            .expect("list other tenant export manifest metadata");
+        assert!(other_tenant_manifests.is_empty());
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn revocation_invalidates_db_export_manifest_metadata() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-export-manifest-revocation.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission dual-writes to DB mirror");
+        let Json(export) = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("revocation_manifest".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("dataset export succeeds");
+        assert_eq!(export.item_count, 1);
+
+        revoke_trace_handler(
+            State(state),
+            auth_headers("token-a"),
+            AxumPath(submission_id),
+        )
+        .await
+        .expect("contributor can revoke own trace");
+
+        let manifests = db
+            .list_trace_export_manifests("tenant-a")
+            .await
+            .expect("list export manifest metadata");
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].export_manifest_id, export.export_id);
+        assert!(manifests[0].invalidated_at.is_some());
+        assert!(manifests[0].deleted_at.is_none());
     }
 
     #[cfg(feature = "libsql")]
