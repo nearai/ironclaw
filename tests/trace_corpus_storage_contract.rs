@@ -1,6 +1,6 @@
 use ironclaw::trace_corpus_storage::{
-    TenantScopedTraceObjectRef, TraceAuditSafeMetadata, TraceCorpusStatus, TraceObjectArtifactKind,
-    TraceSubmissionWrite,
+    TenantScopedTraceObjectRef, TraceAuditSafeMetadata, TraceCorpusStatus, TraceCreditEventType,
+    TraceObjectArtifactKind, TraceSubmissionWrite,
 };
 use uuid::Uuid;
 
@@ -71,4 +71,22 @@ fn audit_metadata_contract_is_typed_not_arbitrary_json() {
     assert_eq!(json["artifact_kind"], "export_artifact");
     assert!(json.get("request_body").is_none());
     assert!(json.get("tool_payload").is_none());
+}
+
+#[test]
+fn credit_mutation_audit_metadata_hashes_sensitive_refs() {
+    let metadata = TraceAuditSafeMetadata::CreditMutation {
+        event_type: TraceCreditEventType::TrainingUtility,
+        credit_points_delta_micros: 1_250_000,
+        reason_hash: "sha256:reason".to_string(),
+        external_ref_hash: Some("sha256:artifact-ref".to_string()),
+    };
+    let json = serde_json::to_value(metadata).unwrap();
+
+    assert_eq!(json["kind"], "credit_mutation");
+    assert_eq!(json["event_type"], "training_utility");
+    assert_eq!(json["credit_points_delta_micros"], 1_250_000);
+    assert_eq!(json["external_ref_hash"], "sha256:artifact-ref");
+    assert!(json.get("reason").is_none());
+    assert!(json.get("external_ref").is_none());
 }

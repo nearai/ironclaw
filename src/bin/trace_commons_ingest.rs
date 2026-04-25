@@ -852,7 +852,12 @@ async fn append_credit_event_handler(
             event.reason.as_deref(),
         ),
         StorageTraceAuditAction::CreditMutate,
-        StorageTraceAuditSafeMetadata::Empty,
+        StorageTraceAuditSafeMetadata::CreditMutation {
+            event_type: storage_credit_event_type(body.event_type),
+            credit_points_delta_micros: credit_delta_micros(body.credit_points_delta),
+            reason_hash: sha256_prefixed(event.reason.as_deref().unwrap_or_default()),
+            external_ref_hash: event.external_ref.as_deref().map(sha256_prefixed),
+        },
     )
     .await
     .map_err(internal_error)?;
@@ -2082,6 +2087,12 @@ fn trace_commons_audit_event_from_storage(
                     .sum(),
             ),
         ),
+        StorageTraceAuditSafeMetadata::CreditMutation {
+            event_type: _,
+            credit_points_delta_micros: _,
+            reason_hash: _,
+            external_ref_hash: _,
+        } => (None, event.reason.clone(), None),
         StorageTraceAuditSafeMetadata::Empty => (None, event.reason.clone(), None),
     };
     Ok(TraceCommonsAuditEvent {
@@ -3064,6 +3075,10 @@ fn storage_credit_event_type(
         TraceCreditLedgerEventType::ReviewerBonus => StorageTraceCreditEventType::ReviewerBonus,
         TraceCreditLedgerEventType::AbusePenalty => StorageTraceCreditEventType::AbusePenalty,
     }
+}
+
+fn credit_delta_micros(delta: f32) -> i64 {
+    (delta * 1_000_000.0).round() as i64
 }
 
 fn consent_scope_storage_strings(scopes: &[ConsentScope]) -> anyhow::Result<Vec<String>> {
@@ -9535,6 +9550,27 @@ mod tests {
             }),
             "DB content-read audit events should name the object ref that passed the read gate"
         );
+        let credit_audit_event = db_audit_events
+            .iter()
+            .find(|event| {
+                event.action == StorageTraceAuditAction::CreditMutate
+                    && event.submission_id == Some(submission_id)
+            })
+            .expect("credit mutation audit event is mirrored");
+        match &credit_audit_event.metadata {
+            StorageTraceAuditSafeMetadata::CreditMutation {
+                event_type,
+                credit_points_delta_micros,
+                reason_hash,
+                external_ref_hash,
+            } => {
+                assert_eq!(*event_type, StorageTraceCreditEventType::ReviewerBonus);
+                assert_eq!(*credit_points_delta_micros, 250_000);
+                assert!(reason_hash.starts_with("sha256:"));
+                assert!(external_ref_hash.is_none());
+            }
+            metadata => panic!("unexpected credit audit metadata: {metadata:?}"),
+        }
 
         let Json(events) = audit_events_handler(
             State(audit_state),

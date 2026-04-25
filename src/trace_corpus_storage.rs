@@ -428,6 +428,12 @@ pub enum TraceAuditSafeMetadata {
         dry_run: bool,
         action_counts: BTreeMap<String, u32>,
     },
+    CreditMutation {
+        event_type: TraceCreditEventType,
+        credit_points_delta_micros: i64,
+        reason_hash: String,
+        external_ref_hash: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
