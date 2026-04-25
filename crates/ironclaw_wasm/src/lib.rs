@@ -168,6 +168,8 @@ pub struct WasmInvocationResult<T> {
 pub enum WasmError {
     #[error("failed to create WASM engine: {reason}")]
     Engine { reason: String },
+    #[error("invalid WASM runtime configuration: {reason}")]
+    InvalidConfig { reason: String },
     #[error("WASM runtime cache error: {reason}")]
     Cache { reason: String },
     #[error("invalid WASM module: {reason}")]
@@ -212,6 +214,7 @@ pub struct WasmRuntime {
 
 impl WasmRuntime {
     pub fn new(config: WasmRuntimeConfig) -> Result<Self, WasmError> {
+        validate_runtime_config(&config)?;
         let mut wasmtime_config = Config::new();
         wasmtime_config.consume_fuel(true);
         wasmtime_config.epoch_interruption(true);
@@ -546,7 +549,10 @@ impl WasmRuntime {
             };
         }
         let message = error.to_string();
-        if message.contains("ironclaw memory limit exceeded") {
+        if message.contains("ironclaw memory limit exceeded")
+            || message.contains("memory")
+            || message.contains("Memory")
+        {
             return WasmError::MemoryExceeded {
                 used: parse_marker_u64(&message, "desired=")
                     .unwrap_or(self.config.max_memory_bytes.saturating_add(1)),
@@ -635,22 +641,46 @@ impl ResourceLimiter for WasmRuntimeLimiter {
     }
 }
 
+fn validate_runtime_config(config: &WasmRuntimeConfig) -> Result<(), WasmError> {
+    if config.fuel == 0 {
+        return Err(WasmError::InvalidConfig {
+            reason: "fuel must be greater than zero".to_string(),
+        });
+    }
+    if config.max_memory_bytes == 0 {
+        return Err(WasmError::InvalidConfig {
+            reason: "max_memory_bytes must be greater than zero".to_string(),
+        });
+    }
+    if config.timeout.is_zero() {
+        return Err(WasmError::InvalidConfig {
+            reason: "timeout must be greater than zero".to_string(),
+        });
+    }
+    if config.epoch_tick_interval.is_zero() {
+        return Err(WasmError::InvalidConfig {
+            reason: "epoch_tick_interval must be greater than zero".to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn enable_compilation_cache(config: &mut Config, cache_dir: &Path) -> Result<(), WasmError> {
-    std::fs::create_dir_all(cache_dir).map_err(|error| WasmError::Cache {
-        reason: error.to_string(),
+    std::fs::create_dir_all(cache_dir).map_err(|_| WasmError::Cache {
+        reason: "failed to create compilation cache directory".to_string(),
     })?;
     let toml_path = cache_dir.join("wasmtime-cache.toml");
     let escaped = cache_dir
         .to_string_lossy()
         .replace('\\', "\\\\")
         .replace('"', "\\\"");
-    std::fs::write(&toml_path, format!("[cache]\ndirectory = \"{escaped}\"\n")).map_err(
-        |error| WasmError::Cache {
-            reason: error.to_string(),
-        },
-    )?;
-    let cache = Cache::from_file(Some(&toml_path)).map_err(|error| WasmError::Cache {
-        reason: error.to_string(),
+    std::fs::write(&toml_path, format!("[cache]\ndirectory = \"{escaped}\"\n")).map_err(|_| {
+        WasmError::Cache {
+            reason: "failed to write compilation cache configuration".to_string(),
+        }
+    })?;
+    let cache = Cache::from_file(Some(&toml_path)).map_err(|_| WasmError::Cache {
+        reason: "failed to load compilation cache configuration".to_string(),
     })?;
     config.cache(Some(cache));
     Ok(())

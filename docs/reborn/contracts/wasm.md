@@ -104,10 +104,10 @@ The existing IronClaw codebase already uses Wasmtime with fuel, epoch interrupti
 `ironclaw_wasm` owns the Wasmtime engine mechanics that make the WASM lane safe enough to host untrusted portable code:
 
 - **Fuel:** every store receives configured fuel before guest execution.
-- **Epoch timeout:** the engine runs an epoch ticker; each invocation sets an epoch deadline derived from the configured timeout.
+- **Epoch timeout:** the engine runs an epoch ticker; each invocation sets an epoch deadline derived from the configured timeout. Non-zero timeout and epoch tick interval are required.
 - **Memory limiter:** stores attach a `ResourceLimiter`; memory growth beyond `max_memory_bytes` fails closed as `WasmError::MemoryExceeded`.
 - **Compile cache:** `prepare_cached` caches compiled modules by provider, capability, export name, ABI version, and module content hash.
-- **Persistent compilation cache:** an optional `cache_dir` may enable Wasmtime's on-disk compilation cache without changing capability authority.
+- **Persistent compilation cache:** an optional `cache_dir` may enable Wasmtime's on-disk compilation cache without changing capability authority. Cache setup errors are sanitized and must not leak raw host paths.
 - **Fresh instance guarantee:** cached modules only reuse compiled code. Every invocation still creates a fresh store and instance, so mutable guest globals and memories do not carry across invocations.
 
 The cache key must include the module content hash so modified bytes never reuse stale compiled code. Extension/manifest reload will later decide when to clear cache entries at package boundaries.
@@ -233,6 +233,7 @@ impl WasmRuntime {
 Minimum errors:
 
 ```rust
+WasmError::InvalidConfig
 WasmError::Cache
 WasmError::InvalidModule
 WasmError::UnsupportedImport
@@ -274,7 +275,9 @@ Local contract tests should prove:
 - memory limit is enforced
 - fuel limit stops a runaway module
 - memory growth beyond the configured limit fails closed
+- invalid timeout/epoch configurations fail closed
 - epoch timeout interrupts runaway modules even when fuel is large
+- cache setup errors do not leak raw host paths
 - cached prepared modules reuse identical bytes and split changed content
 - cached modules still instantiate fresh per invocation
 - invocation returns actual usage suitable for resource reconciliation

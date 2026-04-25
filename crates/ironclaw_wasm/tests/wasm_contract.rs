@@ -171,6 +171,7 @@ fn memory_limit_is_enforced() {
         fuel: 10_000,
         max_output_bytes: 1_024,
         max_memory_bytes: 64 * 1024,
+        ..WasmRuntimeConfig::for_testing()
     })
     .unwrap();
     let module = runtime

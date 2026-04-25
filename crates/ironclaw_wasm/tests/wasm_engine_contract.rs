@@ -6,6 +6,41 @@ use ironclaw_resources::*;
 use ironclaw_wasm::*;
 
 #[test]
+fn invalid_timeout_configuration_fails_closed() {
+    let err = WasmRuntime::new(WasmRuntimeConfig {
+        timeout: Duration::from_secs(1),
+        epoch_tick_interval: Duration::ZERO,
+        ..WasmRuntimeConfig::for_testing()
+    })
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        WasmError::InvalidConfig { reason } if reason.contains("epoch_tick_interval")
+    ));
+}
+
+#[test]
+fn cache_errors_do_not_leak_raw_host_paths() {
+    let temp =
+        std::env::temp_dir().join(format!("ironclaw-wasm-cache-test-{}", std::process::id()));
+    std::fs::create_dir_all(&temp).unwrap();
+    let file_path = temp.join("not-a-directory");
+    std::fs::write(&file_path, b"not a directory").unwrap();
+
+    let err = WasmRuntime::new(WasmRuntimeConfig {
+        cache_compiled_modules: true,
+        cache_dir: Some(file_path.clone()),
+        ..WasmRuntimeConfig::for_testing()
+    })
+    .unwrap_err();
+
+    let message = err.to_string();
+    assert!(matches!(err, WasmError::Cache { .. }));
+    assert!(!message.contains(file_path.to_string_lossy().as_ref()));
+}
+
+#[test]
 fn memory_growth_beyond_configured_limit_fails_closed() {
     let runtime = WasmRuntime::new(WasmRuntimeConfig {
         fuel: 100_000,
