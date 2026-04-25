@@ -9,16 +9,20 @@
 
 ## 1. Purpose
 
-`ironclaw_events` defines the first runtime event vocabulary and sink interfaces for Reborn. The V1 slice focuses on dispatcher-level observability:
+`ironclaw_events` defines the first runtime/process event vocabulary and sink interfaces for Reborn. The V1 slices cover dispatcher-level observability and process lifecycle observability:
 
 ```text
 dispatch requested
 runtime selected
 dispatch succeeded
 dispatch failed
+process started
+process completed
+process failed
+process killed
 ```
 
-Events carry typed scope/capability/runtime metadata. They must not contain raw host paths, raw secrets, or unredacted request payloads.
+Events carry typed scope/capability/runtime/process metadata. They must not contain raw host paths, raw secrets, or unredacted request payloads. Event `error_kind` fields are constrained to short classification strings; unsafe detail-like values are collapsed to `Unclassified`.
 
 ---
 
@@ -33,6 +37,7 @@ pub struct RuntimeEvent {
     pub capability_id: CapabilityId,
     pub provider: Option<ExtensionId>,
     pub runtime: Option<RuntimeKind>,
+    pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
 }
@@ -46,6 +51,10 @@ pub enum RuntimeEventKind {
     RuntimeSelected,
     DispatchSucceeded,
     DispatchFailed,
+    ProcessStarted,
+    ProcessCompleted,
+    ProcessFailed,
+    ProcessKilled,
 }
 ```
 
@@ -101,7 +110,33 @@ The live vertical slice currently emits nine events for its three successful lan
 
 ---
 
-## 6. Non-goals
+## 6. Process lifecycle events
+
+`ironclaw_processes::EventingProcessStore` can emit lifecycle events around successful process state transitions:
+
+```text
+start    -> process_started
+complete -> process_completed
+fail     -> process_failed
+kill     -> process_killed
+```
+
+Each process event carries:
+
+```text
+ResourceScope
+CapabilityId
+provider ExtensionId
+RuntimeKind
+ProcessId
+optional sanitized error_kind for process_failed
+```
+
+Process event emission is observability for this slice. It is deliberately outside `ironclaw_dispatcher`, so dispatcher remains process-blind and continues to route only already-authorized runtime dispatch requests.
+
+---
+
+## 7. Non-goals
 
 This contract does not implement:
 
@@ -112,5 +147,6 @@ This contract does not implement:
 - cryptographic audit integrity
 - event subscription authorization
 - transcript/job persistence
+- durable process event projections beyond the shared JSONL sink
 
 Those belong to later event/projection/audit slices.
