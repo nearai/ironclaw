@@ -12,6 +12,7 @@ use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{CapabilityId, Decision, DenyReason, ExecutionContext, ResourceEstimate};
 use ironclaw_resources::ResourceGovernor;
+use ironclaw_run_state::{RunStart, RunStateError, RunStateStore};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -42,8 +43,16 @@ pub enum CapabilityInvocationError {
     },
     #[error("capability {capability} invocation requires approval")]
     AuthorizationRequiresApproval { capability: CapabilityId },
+    #[error("run-state update failed: {0}")]
+    RunState(Box<RunStateError>),
     #[error("dispatch failed: {0}")]
     Dispatch(Box<DispatchError>),
+}
+
+impl From<RunStateError> for CapabilityInvocationError {
+    fn from(error: RunStateError) -> Self {
+        Self::RunState(Box::new(error))
+    }
 }
 
 impl From<DispatchError> for CapabilityInvocationError {
@@ -61,6 +70,7 @@ where
     registry: &'a ExtensionRegistry,
     dispatcher: &'a RuntimeDispatcher<'a, F, G>,
     authorizer: &'a dyn CapabilityDispatchAuthorizer,
+    run_state: Option<&'a dyn RunStateStore>,
 }
 
 impl<'a, F, G> CapabilityHost<'a, F, G>
@@ -77,18 +87,39 @@ where
             registry,
             dispatcher,
             authorizer,
+            run_state: None,
         }
+    }
+
+    pub fn with_run_state(mut self, run_state: &'a dyn RunStateStore) -> Self {
+        self.run_state = Some(run_state);
+        self
     }
 
     pub async fn invoke_json(
         &self,
         request: CapabilityInvocationRequest,
     ) -> Result<CapabilityInvocationResult, CapabilityInvocationError> {
+        let invocation_id = request.context.invocation_id;
+        let capability_id = request.capability_id.clone();
+        if let Some(run_state) = self.run_state {
+            run_state.start(RunStart {
+                invocation_id,
+                capability_id,
+                scope: request.context.resource_scope.clone(),
+            });
+        }
+
         let descriptor = self
             .registry
             .get_capability(&request.capability_id)
-            .ok_or_else(|| CapabilityInvocationError::UnknownCapability {
-                capability: request.capability_id.clone(),
+            .ok_or_else(|| {
+                if let Some(run_state) = self.run_state {
+                    let _ = run_state.fail(invocation_id, "UnknownCapability".to_string());
+                }
+                CapabilityInvocationError::UnknownCapability {
+                    capability: request.capability_id.clone(),
+                }
             })?;
 
         match self
@@ -97,19 +128,25 @@ where
         {
             Decision::Allow { .. } => {}
             Decision::Deny { reason } => {
+                if let Some(run_state) = self.run_state {
+                    run_state.fail(invocation_id, "AuthorizationDenied".to_string())?;
+                }
                 return Err(CapabilityInvocationError::AuthorizationDenied {
                     capability: request.capability_id,
                     reason,
                 });
             }
-            Decision::RequireApproval { .. } => {
+            Decision::RequireApproval { request: approval } => {
+                if let Some(run_state) = self.run_state {
+                    run_state.block_approval(invocation_id, approval)?;
+                }
                 return Err(CapabilityInvocationError::AuthorizationRequiresApproval {
                     capability: request.capability_id,
                 });
             }
         }
 
-        let dispatch = self
+        let dispatch = match self
             .dispatcher
             .dispatch_json(CapabilityDispatchRequest {
                 capability_id: request.capability_id,
@@ -117,7 +154,20 @@ where
                 estimate: request.estimate,
                 input: request.input,
             })
-            .await?;
+            .await
+        {
+            Ok(dispatch) => dispatch,
+            Err(error) => {
+                if let Some(run_state) = self.run_state {
+                    run_state.fail(invocation_id, "Dispatch".to_string())?;
+                }
+                return Err(CapabilityInvocationError::from(error));
+            }
+        };
+
+        if let Some(run_state) = self.run_state {
+            run_state.complete(invocation_id)?;
+        }
 
         Ok(CapabilityInvocationResult { dispatch })
     }
