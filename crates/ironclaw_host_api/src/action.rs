@@ -2,7 +2,7 @@
 //!
 //! An [`Action`] is the normalized description of something an execution wants
 //! to do before any service performs it: read/write a scoped path, dispatch a
-//! capability, spawn another extension, use a secret, contact the network, or
+//! capability, spawn a capability-backed process, use a secret, contact the network, or
 //! reserve resources. Runtime crates should convert their concrete operations
 //! into these variants so policy, approvals, resources, and audit all reason
 //! about the same shape. Actions intentionally contain scoped/virtual contract
@@ -11,8 +11,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ApprovalRequest, CapabilityId, CapabilitySet, EffectKind, ExtensionId, MountView,
-    ResourceEstimate, ScopedPath, SecretHandle,
+    ApprovalRequest, CapabilityId, EffectKind, ExtensionId, ResourceEstimate, ScopedPath,
+    SecretHandle,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,10 +92,8 @@ pub enum Action {
         capability: CapabilityId,
         estimated_resources: ResourceEstimate,
     },
-    Spawn {
-        extension_id: ExtensionId,
-        requested_capabilities: CapabilitySet,
-        requested_mounts: MountView,
+    SpawnCapability {
+        capability: CapabilityId,
         estimated_resources: ResourceEstimate,
     },
     UseSecret {
