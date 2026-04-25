@@ -124,7 +124,8 @@ let rows = state.store.list_agent_jobs().await?; // dispatch-exempt: read-only a
 ```
 
 The pre-commit hook (`scripts/pre-commit-safety.sh`) flags any newly
-added line in `src/channels/web/handlers/*.rs` or `src/cli/*.rs` that
+added line in `src/channels/web/handlers/*.rs`,
+`src/channels/web/features/**/*.rs`, or `src/cli/*.rs` that
 touches `state.{store,workspace,workspace_pool,extension_manager,
 skill_registry,session_manager}.*` without a trailing
 `// dispatch-exempt: <reason>` comment on the same line. The check only

@@ -2953,13 +2953,12 @@ impl ExtensionManager {
             .list_prompts()
             .await
             .map_err(|e| ExtensionError::ActivationFailed(map_mcp_error_to_user(&e)))?;
-        let prompt_def = prompts
-            .iter()
-            .find(|p| p.name == name)
-            .ok_or_else(|| ExtensionError::PromptNotFound {
+        let prompt_def = prompts.iter().find(|p| p.name == name).ok_or_else(|| {
+            ExtensionError::PromptNotFound {
                 server: server.to_string(),
                 prompt: name.to_string(),
-            })?;
+            }
+        })?;
         let missing: Vec<String> = prompt_def
             .arguments
             .as_deref()

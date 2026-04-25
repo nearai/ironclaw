@@ -116,11 +116,11 @@ pub fn extract_prompt_mentions(message: &str) -> Vec<PromptMention> {
     out
 }
 
-fn is_server_ident_byte(b: u8) -> bool {
+pub(crate) fn is_server_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
 }
 
-fn is_prompt_ident_byte(b: u8) -> bool {
+pub(crate) fn is_prompt_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.'
 }
 

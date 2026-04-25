@@ -1173,6 +1173,7 @@ impl Agent {
         &self,
         user_id: &str,
     ) -> Result<SubmissionResult, Error> {
+        // dispatch-exempt: read-only aggregation across MCP servers, no side effects
         let Some(ext_mgr) = self.deps.extension_manager.as_ref() else {
             return Ok(SubmissionResult::error("Extensions not enabled."));
         };
@@ -1180,10 +1181,10 @@ impl Agent {
         let entries = match ext_mgr.list_prompts_for_user(user_id).await {
             Ok(e) => e,
             Err(e) => {
-                return Ok(SubmissionResult::error(format!(
-                    "Failed to list MCP prompts: {}",
-                    e
-                )));
+                // Scrub transport/config internals at the channel boundary —
+                // see `.claude/rules/error-handling.md`.
+                tracing::warn!(user_id = %user_id, error = %e, "list_prompts_for_user failed");
+                return Ok(SubmissionResult::error("Failed to list MCP prompts."));
             }
         };
 

@@ -774,11 +774,16 @@ impl McpClient {
 
         let init = self.initialize().await?;
         if init.capabilities.prompts.is_none() {
-            // Server doesn't support prompts. Cache the empty list so we
-            // don't re-hit initialize on every call.
-            let empty = Vec::new();
-            *self.prompts_cache.write().await = Some(empty.clone());
-            return Ok(empty);
+            // Server doesn't support prompts. Do NOT cache the empty
+            // result: if the server later advertises `prompts` across a
+            // re-handshake (same `Arc<McpClient>`, cleared
+            // `initialized` OnceCell, or a future
+            // `notifications/prompts/list_changed` hook), a persisted
+            // empty cache would mask the upgrade until the client was
+            // rebuilt. `initialize()` itself is OnceCell-memoized, so
+            // skipping the cache costs only the branch check — no wire
+            // traffic.
+            return Ok(Vec::new());
         }
 
         let request = McpRequest::list_prompts(self.next_request_id());
@@ -2644,5 +2649,33 @@ mod tests {
 
         // init + notif + 2× prompts/list
         assert_eq!(transport.recorded_headers().len(), 4);
+    }
+
+    /// Regression: the no-capability branch must not persist an empty
+    /// cache — otherwise a post-handshake capability upgrade is shadowed.
+    #[tokio::test]
+    async fn list_prompts_does_not_persist_empty_cache_when_no_capability() {
+        let transport = Arc::new(MockTransport::new(
+            false,
+            vec![
+                init_response_with_capabilities(1, serde_json::json!({})),
+                notification_ack(),
+            ],
+        ));
+        let client = McpClient::new_with_transport(
+            "test-no-cap-cache",
+            transport.clone(),
+            None,
+            None,
+            "default",
+            None,
+        );
+
+        let prompts = client.list_prompts().await.expect("list_prompts ok");
+        assert!(prompts.is_empty());
+        assert!(
+            client.prompts_cache.read().await.is_none(),
+            "no-capability branch must NOT persist an empty cache"
+        );
     }
 }

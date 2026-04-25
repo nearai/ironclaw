@@ -420,12 +420,7 @@ mod tests {
         activate_for_user(&manager, &secrets, &cfg, USER_A, "token-a").await;
 
         let err = manager
-            .get_prompt_for_user(
-                USER_A,
-                SERVER_NAME,
-                "does-not-exist",
-                serde_json::json!({}),
-            )
+            .get_prompt_for_user(USER_A, SERVER_NAME, "does-not-exist", serde_json::json!({}))
             .await
             .expect_err("unknown prompt name must fail");
         match &err {

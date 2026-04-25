@@ -30,7 +30,8 @@ pub(crate) async fn prompts_list_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<PromptsListResponse>, (StatusCode, String)> {
-    let ext_mgr = state.extension_manager.as_ref().ok_or((
+    let ext_mgr_opt = state.extension_manager.as_ref(); // dispatch-exempt: read-only MCP prompts aggregation
+    let ext_mgr = ext_mgr_opt.ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "extensions not enabled".to_string(),
     ))?;
@@ -67,7 +68,8 @@ pub(crate) async fn prompts_get_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Json(body): Json<PromptsGetRequest>,
 ) -> Result<Json<PromptsGetResponse>, (StatusCode, String)> {
-    let ext_mgr = state.extension_manager.as_ref().ok_or((
+    let ext_mgr_opt = state.extension_manager.as_ref(); // dispatch-exempt: read-only MCP prompts/get fetch
+    let ext_mgr = ext_mgr_opt.ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "extensions not enabled".to_string(),
     ))?;

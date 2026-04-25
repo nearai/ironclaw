@@ -184,12 +184,7 @@ impl McpTransport for HttpMcpTransport {
         if content_type.contains("text/event-stream") {
             self.parse_sse_response(response, request.id).await
         } else {
-            response.json().await.map_err(|e| {
-                ToolError::ExternalService(format!(
-                    "[{}] Failed to parse MCP response: {}",
-                    self.server_name, e
-                ))
-            })
+            self.parse_json_response(response).await
         }
     }
 
@@ -203,7 +198,53 @@ impl McpTransport for HttpMcpTransport {
     }
 }
 
+/// Upper bound on MCP response body size (JSON or SSE). Matches the
+/// existing SSE cap and sits below the 14 MiB gateway body limit; guards
+/// against an adversarial server forcing unbounded allocation before
+/// the safety layer sees a byte.
+const MAX_MCP_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+
 impl HttpMcpTransport {
+    /// Streamed JSON read, hard-capped at [`MAX_MCP_RESPONSE_BYTES`].
+    async fn parse_json_response(
+        &self,
+        response: reqwest::Response,
+    ) -> Result<McpResponse, ToolError> {
+        use futures::StreamExt;
+
+        // Pre-reserve against the advertised Content-Length (clamped to
+        // the cap) so the common small-response path avoids repeated
+        // reallocations. A missing or lying header is harmless — the
+        // per-chunk guard below is the security boundary.
+        let hint = response
+            .content_length()
+            .map(|n| n.min(MAX_MCP_RESPONSE_BYTES as u64) as usize)
+            .unwrap_or(0);
+        let mut stream = response.bytes_stream();
+        let mut buf: Vec<u8> = Vec::with_capacity(hint);
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| {
+                ToolError::ExternalService(format!(
+                    "[{}] Failed to read MCP response body: {}",
+                    self.server_name, e
+                ))
+            })?;
+            if buf.len().saturating_add(chunk.len()) > MAX_MCP_RESPONSE_BYTES {
+                return Err(ToolError::ExternalService(format!(
+                    "[{}] MCP response exceeded {} byte limit",
+                    self.server_name, MAX_MCP_RESPONSE_BYTES
+                )));
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&buf).map_err(|e| {
+            ToolError::ExternalService(format!(
+                "[{}] Failed to parse MCP response: {}",
+                self.server_name, e
+            ))
+        })
+    }
+
     /// Parse a Server-Sent Events response, returning the JSON-RPC response
     /// whose `id` matches `request_id`. Non-matching events (e.g. server
     /// notifications or progress updates) are skipped so that the caller
@@ -215,7 +256,7 @@ impl HttpMcpTransport {
     ) -> Result<McpResponse, ToolError> {
         use futures::StreamExt;
 
-        const MAX_SSE_BUFFER: usize = 10 * 1024 * 1024; // 10 MB
+        const MAX_SSE_BUFFER: usize = MAX_MCP_RESPONSE_BYTES;
 
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
@@ -655,5 +696,68 @@ mod tests {
         assert_eq!(response.id, request.id);
         assert!(response.result.is_none());
         assert!(response.error.is_none());
+    }
+
+    /// Regression: responses over [`MAX_MCP_RESPONSE_BYTES`] must be
+    /// rejected before `serde_json::from_slice` sees them.
+    #[tokio::test]
+    async fn test_json_response_over_size_cap_rejected() {
+        use axum::{Router, response::IntoResponse, routing::post};
+        use tokio::net::TcpListener;
+
+        async fn oversized() -> impl IntoResponse {
+            let filler = "a".repeat(11 * 1024 * 1024);
+            let body = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"result":{{"filler":"{}"}}}}"#,
+                filler
+            );
+            (
+                axum::http::StatusCode::OK,
+                [("content-type", "application/json")],
+                body,
+            )
+        }
+
+        let app = Router::new().route("/", post(oversized));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://127.0.0.1:{}", addr.port());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let transport = HttpMcpTransport::new(&url, "oversize");
+        let request = McpRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(1),
+            method: "prompts/list".to_string(),
+            params: None,
+        };
+        let err = transport
+            .send(&request, &HashMap::new())
+            .await
+            .expect_err("over-cap response must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("byte limit"),
+            "expected size-cap rejection, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_json_response_under_size_cap_accepted() {
+        let (url, _handle) = spawn_echo_server().await;
+        let transport = HttpMcpTransport::new(&url, "echo-sized");
+        let request = McpRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(1),
+            method: "initialize".to_string(),
+            params: Some(serde_json::json!({})),
+        };
+        let response = transport
+            .send(&request, &HashMap::new())
+            .await
+            .expect("small response must parse");
+        assert!(response.result.is_some());
     }
 }
