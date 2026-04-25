@@ -10,6 +10,59 @@ use ironclaw_wasm::*;
 use serde_json::json;
 
 #[tokio::test]
+async fn capability_host_rejects_invalid_context_before_persisting_run_state() {
+    let (fs, package) = wasm_package_with_module(json_echo_module());
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    let governor = InMemoryResourceGovernor::new();
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
+    let authorizer = GrantAuthorizer::new();
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let mut context = execution_context(CapabilitySet {
+        grants: vec![grant_for(
+            CapabilityId::new("echo.say").unwrap(),
+            Principal::Extension(ExtensionId::new("caller").unwrap()),
+            vec![EffectKind::DispatchCapability],
+        )],
+    });
+    let original_scope = context.resource_scope.clone();
+    context.tenant_id = TenantId::new("tenant2").unwrap();
+
+    let err = host
+        .invoke_json(CapabilityInvocationRequest {
+            context,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: ResourceEstimate::default(),
+            input: json!({"message": "invalid context"}),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::AuthorizationDenied {
+            reason: DenyReason::InternalInvariantViolation,
+            ..
+        }
+    ));
+    assert_eq!(
+        run_state.records_for_scope(&original_scope).await.unwrap(),
+        Vec::new()
+    );
+    assert_eq!(
+        approval_requests
+            .records_for_scope(&original_scope)
+            .await
+            .unwrap(),
+        Vec::new()
+    );
+}
+
+#[tokio::test]
 async fn capability_host_blocks_for_approval_without_dispatch_or_reservation() {
     let (fs, package) = wasm_package_with_module(json_echo_module());
     let mut registry = ExtensionRegistry::new();
