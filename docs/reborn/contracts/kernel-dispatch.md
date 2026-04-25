@@ -41,6 +41,7 @@ The dispatcher is constructed from references to service boundaries:
 ```rust
 RuntimeDispatcher::new(&registry, &root_filesystem, &resource_governor)
     .with_wasm_runtime(&wasm_runtime)
+    .with_script_runtime(&script_runtime)
 ```
 
 `ExtensionRegistry` remains the authority for what can run. Runtime crates remain the authority for how a lane runs.
@@ -66,7 +67,13 @@ For `RuntimeKind::Wasm`, the dispatcher calls:
 ironclaw_wasm::WasmRuntime::execute_extension_json(...)
 ```
 
-The WASM lane still owns its local reserve/prepare/invoke/reconcile/release lifecycle. The dispatcher does not duplicate the resource-governor protocol.
+For `RuntimeKind::Script`, the dispatcher calls:
+
+```text
+ironclaw_scripts::ScriptExecutor::execute_extension_json(...)
+```
+
+Each runtime lane still owns its local reserve/prepare/invoke/reconcile/release lifecycle. The dispatcher does not duplicate the resource-governor protocol.
 
 ---
 
@@ -77,12 +84,12 @@ V1 routes these runtime kinds explicitly:
 | Runtime kind | Dispatch behavior |
 | --- | --- |
 | `Wasm` | Executes through configured `WasmRuntime` |
-| `Script` | Recognized, returns `UnsupportedRuntime` until script runner crate lands |
+| `Script` | Executes through configured `ScriptExecutor` |
 | `Mcp` | Recognized, returns `UnsupportedRuntime` until MCP adapter crate lands |
 | `FirstParty` | Recognized, returns `UnsupportedRuntime` until host service adapters land |
 | `System` | Recognized, returns `UnsupportedRuntime` until system service adapters land |
 
-If the WASM runtime is not configured, WASM dispatch returns `MissingRuntimeBackend` before reserving resources.
+If the selected WASM or Script runtime is not configured, dispatch returns `MissingRuntimeBackend` before reserving resources.
 
 ---
 
@@ -126,7 +133,7 @@ This PR does not add:
 - authorization/grant evaluation
 - approval prompts
 - audit/event persistence
-- script execution
+- script filesystem mounts, artifact export, network access, or secret injection
 - MCP client execution
 - host service dispatch for first-party/system capabilities
 - filesystem mount selection
@@ -145,7 +152,8 @@ The crate test suite covers:
 - WASM capability dispatch through the real WASM executor
 - unknown capability failure before resource reservation
 - descriptor/package runtime mismatch failure before execution
-- script, MCP, first-party, and system lanes recognized but not executed
-- missing WASM backend failure before resource reservation
+- Script capability dispatch through a configured script executor
+- MCP, first-party, and system lanes recognized but not executed
+- missing WASM or Script backend failure before resource reservation
 
 These tests are intentionally caller-level: they drive `RuntimeDispatcher::dispatch_json`, not only helper functions.
