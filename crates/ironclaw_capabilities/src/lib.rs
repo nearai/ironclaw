@@ -12,7 +12,7 @@ use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{CapabilityId, Decision, DenyReason, ExecutionContext, ResourceEstimate};
 use ironclaw_resources::ResourceGovernor;
-use ironclaw_run_state::{RunStart, RunStateError, RunStateStore};
+use ironclaw_run_state::{ApprovalRequestStore, RunStart, RunStateError, RunStateStore};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -71,6 +71,7 @@ where
     dispatcher: &'a RuntimeDispatcher<'a, F, G>,
     authorizer: &'a dyn CapabilityDispatchAuthorizer,
     run_state: Option<&'a dyn RunStateStore>,
+    approval_requests: Option<&'a dyn ApprovalRequestStore>,
 }
 
 impl<'a, F, G> CapabilityHost<'a, F, G>
@@ -88,11 +89,20 @@ where
             dispatcher,
             authorizer,
             run_state: None,
+            approval_requests: None,
         }
     }
 
     pub fn with_run_state(mut self, run_state: &'a dyn RunStateStore) -> Self {
         self.run_state = Some(run_state);
+        self
+    }
+
+    pub fn with_approval_requests(
+        mut self,
+        approval_requests: &'a dyn ApprovalRequestStore,
+    ) -> Self {
+        self.approval_requests = Some(approval_requests);
         self
     }
 
@@ -103,24 +113,28 @@ where
         let invocation_id = request.context.invocation_id;
         let capability_id = request.capability_id.clone();
         if let Some(run_state) = self.run_state {
-            run_state.start(RunStart {
-                invocation_id,
-                capability_id,
-                scope: request.context.resource_scope.clone(),
-            });
+            run_state
+                .start(RunStart {
+                    invocation_id,
+                    capability_id,
+                    scope: request.context.resource_scope.clone(),
+                })
+                .await?;
         }
 
-        let descriptor = self
-            .registry
-            .get_capability(&request.capability_id)
-            .ok_or_else(|| {
+        let descriptor = match self.registry.get_capability(&request.capability_id) {
+            Some(descriptor) => descriptor,
+            None => {
                 if let Some(run_state) = self.run_state {
-                    let _ = run_state.fail(invocation_id, "UnknownCapability".to_string());
+                    run_state
+                        .fail(invocation_id, "UnknownCapability".to_string())
+                        .await?;
                 }
-                CapabilityInvocationError::UnknownCapability {
-                    capability: request.capability_id.clone(),
-                }
-            })?;
+                return Err(CapabilityInvocationError::UnknownCapability {
+                    capability: request.capability_id,
+                });
+            }
+        };
 
         match self
             .authorizer
@@ -129,7 +143,9 @@ where
             Decision::Allow { .. } => {}
             Decision::Deny { reason } => {
                 if let Some(run_state) = self.run_state {
-                    run_state.fail(invocation_id, "AuthorizationDenied".to_string())?;
+                    run_state
+                        .fail(invocation_id, "AuthorizationDenied".to_string())
+                        .await?;
                 }
                 return Err(CapabilityInvocationError::AuthorizationDenied {
                     capability: request.capability_id,
@@ -137,8 +153,11 @@ where
                 });
             }
             Decision::RequireApproval { request: approval } => {
+                if let Some(approval_requests) = self.approval_requests {
+                    approval_requests.save_pending(approval.clone()).await?;
+                }
                 if let Some(run_state) = self.run_state {
-                    run_state.block_approval(invocation_id, approval)?;
+                    run_state.block_approval(invocation_id, approval).await?;
                 }
                 return Err(CapabilityInvocationError::AuthorizationRequiresApproval {
                     capability: request.capability_id,
@@ -159,14 +178,16 @@ where
             Ok(dispatch) => dispatch,
             Err(error) => {
                 if let Some(run_state) = self.run_state {
-                    run_state.fail(invocation_id, "Dispatch".to_string())?;
+                    run_state
+                        .fail(invocation_id, "Dispatch".to_string())
+                        .await?;
                 }
                 return Err(CapabilityInvocationError::from(error));
             }
         };
 
         if let Some(run_state) = self.run_state {
-            run_state.complete(invocation_id)?;
+            run_state.complete(invocation_id).await?;
         }
 
         Ok(CapabilityInvocationResult { dispatch })
