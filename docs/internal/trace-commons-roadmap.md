@@ -11,7 +11,7 @@ As of the `gecko-pass` branch, Trace Commons has moved beyond the local-only MVP
 - PostgreSQL and libSQL schema slices exist through the current Trace Commons storage work: core corpus rows, object refs, derived records, vector metadata, audit events, credit ledger rows, tombstones, retention/export metadata, compact replay export manifests, and replay export item snapshots.
 - `TraceCorpusStore` exists behind the shared database abstraction with backend implementations and libSQL-focused parity coverage.
 - Optional DB-backed read flags now cover contributor credit/status, reviewer metadata, replay export selection, and audit event reads.
-- The encrypted local artifact sidecar stores submitted redacted envelopes, and DB-backed replay export can resolve bodies through active DB object refs for file-backed objects or those encrypted artifacts.
+- The encrypted local artifact sidecar stores submitted redacted envelopes, and DB-backed replay export resolves bodies through a shared policy/audit helper that verifies active DB object refs, tenant scope, artifact kind, and content hash for file-backed objects or encrypted artifacts.
 - Local credit visibility now has a reusable report shape that separates local lifecycle state from central accepted/quarantined/rejected status, credit totals, delayed ledger deltas, and last submission/status-sync times.
 - Maintenance can backfill file-backed pilot records into the DB mirror, mark/purge expired records, prune invalid export caches, index deterministic vector metadata for canonical summaries, and run file-vs-DB reconciliation with reader-projection parity diagnostics.
 - Export audit paths now carry deterministic source-list hashes, and replay export manifest metadata can be listed by reviewer/admin tokens.

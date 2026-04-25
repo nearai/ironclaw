@@ -993,13 +993,10 @@ async fn dataset_replay_handler(
         .filter(TraceCommonsSubmissionRecord::is_export_eligible)
         .take(limit)
     {
-        let envelope = read_envelope_for_replay_export(state.as_ref(), &tenant, &record)
-            .await
-            .map_err(internal_error)?;
-        append_trace_content_read_audit(
+        let envelope = read_envelope_for_replay_export(
             state.as_ref(),
             &tenant,
-            record.submission_id,
+            &record,
             "replay_dataset_export",
             Some(&purpose),
         )
@@ -3108,11 +3105,48 @@ fn read_envelope_by_record(
         .with_context(|| format!("failed to parse trace object {}", path.display()))
 }
 
+struct TraceEnvelopeBodyRead {
+    envelope: TraceContributionEnvelope,
+    object_ref_id: Option<Uuid>,
+}
+
 async fn read_envelope_for_replay_export(
     state: &AppState,
     tenant: &TenantAuth,
     record: &TraceCommonsSubmissionRecord,
+    surface: &str,
+    purpose: Option<&str>,
 ) -> anyhow::Result<TraceContributionEnvelope> {
+    anyhow::ensure!(
+        tenant.role.can_review(),
+        "trace body read requires reviewer or admin role"
+    );
+    anyhow::ensure!(
+        record.tenant_id == tenant.tenant_id,
+        "trace body read tenant mismatch"
+    );
+    anyhow::ensure!(
+        record.is_export_eligible(),
+        "trace body read source is not export eligible"
+    );
+    let body_read = read_envelope_body_for_replay_export(state, tenant, record).await?;
+    append_trace_content_read_audit(
+        state,
+        tenant,
+        record.submission_id,
+        body_read.object_ref_id,
+        surface,
+        purpose,
+    )
+    .await?;
+    Ok(body_read.envelope)
+}
+
+async fn read_envelope_body_for_replay_export(
+    state: &AppState,
+    tenant: &TenantAuth,
+    record: &TraceCommonsSubmissionRecord,
+) -> anyhow::Result<TraceEnvelopeBodyRead> {
     if state.db_replay_export_reads
         && let Some(envelope) =
             read_envelope_from_active_db_object_ref(state, &tenant.tenant_id, record.submission_id)
@@ -3120,14 +3154,17 @@ async fn read_envelope_for_replay_export(
     {
         return Ok(envelope);
     }
-    read_envelope_by_record(state, record)
+    Ok(TraceEnvelopeBodyRead {
+        envelope: read_envelope_by_record(state, record)?,
+        object_ref_id: None,
+    })
 }
 
 async fn read_envelope_from_active_db_object_ref(
     state: &AppState,
     tenant_id: &str,
     submission_id: Uuid,
-) -> anyhow::Result<Option<TraceContributionEnvelope>> {
+) -> anyhow::Result<Option<TraceEnvelopeBodyRead>> {
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(None);
     };
@@ -3146,7 +3183,11 @@ async fn read_envelope_from_active_db_object_ref(
     else {
         return Ok(None);
     };
-    read_envelope_from_object_ref(state, tenant_id, &object_ref).map(Some)
+    let envelope = read_envelope_from_object_ref(state, tenant_id, &object_ref)?;
+    Ok(Some(TraceEnvelopeBodyRead {
+        envelope,
+        object_ref_id: Some(object_ref.object_ref_id),
+    }))
 }
 
 fn read_envelope_from_object_ref(
@@ -3568,17 +3609,29 @@ async fn append_trace_content_read_audit(
     state: &AppState,
     tenant: &TenantAuth,
     submission_id: Uuid,
+    object_ref_id: Option<Uuid>,
     surface: &str,
     purpose: Option<&str>,
 ) -> anyhow::Result<()> {
-    append_audit_event_with_db_mirror(
+    let event = TraceCommonsAuditEvent::trace_content_read(tenant, submission_id, surface, purpose);
+    append_audit_event(&state.root, &tenant.tenant_id, event.clone())?;
+    if let Err(error) = mirror_audit_event_to_db_with_object_ref(
         state,
         tenant,
-        TraceCommonsAuditEvent::trace_content_read(tenant, submission_id, surface, purpose),
+        &event,
         StorageTraceAuditAction::Read,
         StorageTraceAuditSafeMetadata::Empty,
+        object_ref_id,
     )
     .await
+    {
+        tracing::warn!(
+            %error,
+            event_id = %event.event_id,
+            "Trace Commons DB dual-write audit mirror failed"
+        );
+    }
+    Ok(())
 }
 
 async fn mirror_audit_event_to_db(
@@ -3587,6 +3640,17 @@ async fn mirror_audit_event_to_db(
     event: &TraceCommonsAuditEvent,
     action: StorageTraceAuditAction,
     metadata: StorageTraceAuditSafeMetadata,
+) -> anyhow::Result<()> {
+    mirror_audit_event_to_db_with_object_ref(state, tenant, event, action, metadata, None).await
+}
+
+async fn mirror_audit_event_to_db_with_object_ref(
+    state: &AppState,
+    tenant: &TenantAuth,
+    event: &TraceCommonsAuditEvent,
+    action: StorageTraceAuditAction,
+    metadata: StorageTraceAuditSafeMetadata,
+    object_ref_id: Option<Uuid>,
 ) -> anyhow::Result<()> {
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
@@ -3607,7 +3671,7 @@ async fn mirror_audit_event_to_db(
         reason: event.reason.clone(),
         request_id: None,
         submission_id: (event.submission_id != Uuid::nil()).then_some(event.submission_id),
-        object_ref_id: None,
+        object_ref_id,
         export_manifest_id: event.export_id,
         decision_inputs_hash: event.decision_inputs_hash.clone(),
         metadata,
@@ -6405,13 +6469,6 @@ mod tests {
         db_mirror: Option<Arc<dyn Database>>,
     ) -> Arc<AppState> {
         test_state_with_options(root, db_mirror, None, false, false, true, false)
-    }
-
-    fn test_state_with_db_audit_reads(
-        root: PathBuf,
-        db_mirror: Option<Arc<dyn Database>>,
-    ) -> Arc<AppState> {
-        test_state_with_options(root, db_mirror, None, false, false, false, true)
     }
 
     fn test_state_with_options(
@@ -9277,7 +9334,15 @@ mod tests {
             .join(tenant_storage_key("tenant-a"));
         std::fs::remove_dir_all(tenant_dir.join("audit")).expect("remove file audit events");
 
-        let audit_state = test_state_with_db_audit_reads(temp.path().to_path_buf(), Some(db));
+        let audit_state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+            None,
+            false,
+            false,
+            true,
+            true,
+        );
         let Json(list) = list_traces_handler(
             State(audit_state.clone()),
             auth_headers("review-token-a"),
@@ -9328,6 +9393,31 @@ mod tests {
                 .manifest
                 .source_submission_ids_hash
                 .starts_with("sha256:")
+        );
+        let active_object_ref = db
+            .get_latest_active_trace_object_ref(
+                "tenant-a",
+                submission_id,
+                StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            )
+            .await
+            .expect("active object ref reads")
+            .expect("active submitted envelope object ref exists");
+        let db_audit_events = db
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("audit events read from db");
+        assert!(
+            db_audit_events.iter().any(|event| {
+                event.action == StorageTraceAuditAction::Read
+                    && event.submission_id == Some(submission_id)
+                    && event.object_ref_id == Some(active_object_ref.object_ref_id)
+                    && event.reason.as_deref().is_some_and(|reason| {
+                        reason.contains("surface=replay_dataset_export")
+                            && reason.contains("purpose=db_audit_export")
+                    })
+            }),
+            "DB content-read audit events should name the object ref that passed the read gate"
         );
 
         let Json(events) = audit_events_handler(
