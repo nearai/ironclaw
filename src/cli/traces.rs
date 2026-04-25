@@ -2479,6 +2479,13 @@ fn maintenance_reconciliation_lines(value: &serde_json::Value) -> Vec<String> {
         &[
             ("file_replay_export_manifest_count", "file_replay_manifests"),
             ("db_export_manifest_count", "db_export_manifests"),
+            ("db_replay_export_manifest_count", "db_replay_manifests"),
+            (
+                "db_benchmark_export_manifest_count",
+                "db_benchmark_manifests",
+            ),
+            ("db_ranker_export_manifest_count", "db_ranker_manifests"),
+            ("db_other_export_manifest_count", "db_other_manifests"),
             ("db_export_manifest_item_count", "db_export_items"),
             (
                 "file_revocation_tombstone_count",
@@ -3407,6 +3414,10 @@ mod tests {
                 "db_audit_event_count": 6,
                 "file_replay_export_manifest_count": 1,
                 "db_export_manifest_count": 2,
+                "db_replay_export_manifest_count": 1,
+                "db_benchmark_export_manifest_count": 0,
+                "db_ranker_export_manifest_count": 1,
+                "db_other_export_manifest_count": 0,
                 "db_export_manifest_item_count": 3,
                 "file_revocation_tombstone_count": 1,
                 "db_tombstone_count": 1,
@@ -3437,7 +3448,7 @@ mod tests {
                 "    derived: files=4 db=3 missing_in_db=1 missing_in_files=1 status_mismatches=1 hash_mismatches=1".to_string(),
                 "    object refs: db=2 accepted_without_active_envelope=1 unreadable_active_envelope=1 hash_mismatched_active_envelope=1".to_string(),
                 "    ledger/audit: file_credit_events=5 db_credit_events=4 file_audit_events=6 db_audit_events=6".to_string(),
-                "    exports/tombstones: file_replay_manifests=1 db_export_manifests=2 db_export_items=3 file_revocation_tombstones=1 db_tombstones=1".to_string(),
+                "    exports/tombstones: file_replay_manifests=1 db_export_manifests=2 db_replay_manifests=1 db_benchmark_manifests=0 db_ranker_manifests=1 db_other_manifests=0 db_export_items=3 file_revocation_tombstones=1 db_tombstones=1".to_string(),
                 "    reader parity: contributor_credit=true reviewer_metadata=false analytics=true audit=true replay_export_manifests=true failures=1".to_string(),
                 "    vectors: active=7 eligible_without_active=2 invalid_active=1".to_string(),
             ]

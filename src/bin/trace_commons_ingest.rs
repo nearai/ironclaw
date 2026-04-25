@@ -5957,6 +5957,25 @@ async fn reconcile_db_mirror(
             })?
             .len();
     }
+    let db_replay_export_manifest_count = db_export_manifests
+        .iter()
+        .filter(|manifest| is_replay_dataset_storage_manifest(manifest))
+        .count();
+    let db_benchmark_export_manifest_count = db_export_manifests
+        .iter()
+        .filter(|manifest| {
+            manifest.artifact_kind == StorageTraceObjectArtifactKind::BenchmarkArtifact
+        })
+        .count();
+    let db_ranker_export_manifest_count = db_export_manifests
+        .iter()
+        .filter(|manifest| is_ranker_training_storage_manifest(manifest))
+        .count();
+    let db_other_export_manifest_count = db_export_manifests.len().saturating_sub(
+        db_replay_export_manifest_count
+            + db_benchmark_export_manifest_count
+            + db_ranker_export_manifest_count,
+    );
     let file_credit_events = read_all_credit_events(&state.root, &tenant.tenant_id)?;
     let file_audit_events = read_all_audit_events(&state.root, &tenant.tenant_id)?;
     let file_replay_export_manifests = read_all_export_manifests(&state.root, &tenant.tenant_id)?;
@@ -6274,6 +6293,10 @@ async fn reconcile_db_mirror(
         db_audit_event_count: db_audit_events.len(),
         file_replay_export_manifest_count: file_replay_export_manifests.len(),
         db_export_manifest_count: db_export_manifests.len(),
+        db_replay_export_manifest_count,
+        db_benchmark_export_manifest_count,
+        db_ranker_export_manifest_count,
+        db_other_export_manifest_count,
         db_export_manifest_item_count,
         file_revocation_tombstone_count: file_revocations.len(),
         db_tombstone_count: db_tombstones.len(),
@@ -6291,6 +6314,19 @@ async fn reconcile_db_mirror(
         accepted_current_derived_without_active_vector_entry,
         invalid_active_vector_entries,
     }))
+}
+
+fn is_ranker_training_storage_manifest(record: &StorageTraceExportManifestRecord) -> bool {
+    record.artifact_kind == StorageTraceObjectArtifactKind::ExportArtifact
+        && matches!(
+            record.purpose_code.as_deref(),
+            Some("ranker_training_candidates_export" | "ranker_training_pairs_export")
+        )
+}
+
+fn is_replay_dataset_storage_manifest(record: &StorageTraceExportManifestRecord) -> bool {
+    record.artifact_kind == StorageTraceObjectArtifactKind::ExportArtifact
+        && !is_ranker_training_storage_manifest(record)
 }
 
 fn deterministic_vector_entry_uuid(
@@ -7495,6 +7531,10 @@ struct TraceDbReconciliationReport {
     db_audit_event_count: usize,
     file_replay_export_manifest_count: usize,
     db_export_manifest_count: usize,
+    db_replay_export_manifest_count: usize,
+    db_benchmark_export_manifest_count: usize,
+    db_ranker_export_manifest_count: usize,
+    db_other_export_manifest_count: usize,
     db_export_manifest_item_count: usize,
     file_revocation_tombstone_count: usize,
     db_tombstone_count: usize,
@@ -12180,6 +12220,10 @@ mod tests {
         assert!(reconciliation.db_audit_event_count >= 1);
         assert_eq!(reconciliation.file_replay_export_manifest_count, 0);
         assert_eq!(reconciliation.db_export_manifest_count, 0);
+        assert_eq!(reconciliation.db_replay_export_manifest_count, 0);
+        assert_eq!(reconciliation.db_benchmark_export_manifest_count, 0);
+        assert_eq!(reconciliation.db_ranker_export_manifest_count, 0);
+        assert_eq!(reconciliation.db_other_export_manifest_count, 0);
         assert_eq!(reconciliation.db_export_manifest_item_count, 0);
         assert_eq!(reconciliation.file_revocation_tombstone_count, 0);
         assert_eq!(reconciliation.db_tombstone_count, 0);
@@ -12267,6 +12311,87 @@ mod tests {
         .await
         .expect("backfill can be rerun");
         assert_eq!(second_response.db_mirror_backfilled, 0);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn maintenance_reconciliation_splits_db_export_manifest_counts_by_kind() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-reconcile-export-kinds.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let source_submission_id = Uuid::new_v4();
+        for (artifact_kind, purpose_code) in [
+            (
+                StorageTraceObjectArtifactKind::ExportArtifact,
+                Some("debug_replay".to_string()),
+            ),
+            (
+                StorageTraceObjectArtifactKind::BenchmarkArtifact,
+                Some("benchmark_conversion".to_string()),
+            ),
+            (
+                StorageTraceObjectArtifactKind::ExportArtifact,
+                Some("ranker_training_candidates_export".to_string()),
+            ),
+            (
+                StorageTraceObjectArtifactKind::WorkerIntermediate,
+                Some("operator_probe".to_string()),
+            ),
+        ] {
+            db.upsert_trace_export_manifest(StorageTraceExportManifestWrite {
+                tenant_id: "tenant-a".to_string(),
+                export_manifest_id: Uuid::new_v4(),
+                artifact_kind,
+                purpose_code,
+                audit_event_id: None,
+                source_submission_ids: vec![source_submission_id],
+                source_submission_ids_hash: "sha256:source-list".to_string(),
+                item_count: 0,
+                generated_at: Utc::now(),
+            })
+            .await
+            .expect("export manifest can be seeded");
+        }
+
+        let Json(reconciliation_response) = maintenance_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_export_kind_reconciliation".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: true,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("reviewer can reconcile DB mirror");
+        let reconciliation = reconciliation_response
+            .db_reconciliation
+            .expect("reconciliation report exists");
+        assert_eq!(reconciliation.db_export_manifest_count, 4);
+        assert_eq!(reconciliation.db_replay_export_manifest_count, 1);
+        assert_eq!(reconciliation.db_benchmark_export_manifest_count, 1);
+        assert_eq!(reconciliation.db_ranker_export_manifest_count, 1);
+        assert_eq!(reconciliation.db_other_export_manifest_count, 1);
+        assert_eq!(reconciliation.file_replay_export_manifest_count, 0);
+        assert!(!reconciliation.replay_export_manifest_reader_parity_ok);
     }
 
     #[cfg(feature = "libsql")]
