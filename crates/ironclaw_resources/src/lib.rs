@@ -295,6 +295,30 @@ pub struct ResourceReservation {
     pub estimate: ResourceEstimate,
 }
 
+/// Governor-issued proof that a reservation is currently active.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveResourceReservation {
+    reservation: ResourceReservation,
+    _private: (),
+}
+
+impl ActiveResourceReservation {
+    fn new(reservation: ResourceReservation) -> Self {
+        Self {
+            reservation,
+            _private: (),
+        }
+    }
+
+    pub fn id(&self) -> ResourceReservationId {
+        self.reservation.id
+    }
+
+    pub fn reservation(&self) -> &ResourceReservation {
+        &self.reservation
+    }
+}
+
 /// Reservation lifecycle status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReservationStatus {
@@ -328,6 +352,11 @@ pub trait ResourceGovernor: Send + Sync {
         scope: ResourceScope,
         estimate: ResourceEstimate,
     ) -> Result<ResourceReservation, ResourceError>;
+
+    fn active_reservation(
+        &self,
+        reservation_id: ResourceReservationId,
+    ) -> Result<ActiveResourceReservation, ResourceError>;
 
     fn reconcile(
         &self,
@@ -462,6 +491,24 @@ impl ResourceGovernor for InMemoryResourceGovernor {
         );
 
         Ok(reservation)
+    }
+
+    fn active_reservation(
+        &self,
+        reservation_id: ResourceReservationId,
+    ) -> Result<ActiveResourceReservation, ResourceError> {
+        let state = self.lock_state();
+        let record = state
+            .reservations
+            .get(&reservation_id)
+            .ok_or(ResourceError::UnknownReservation { id: reservation_id })?;
+        if record.status != ReservationStatus::Active {
+            return Err(ResourceError::ReservationClosed {
+                id: reservation_id,
+                status: record.status,
+            });
+        }
+        Ok(ActiveResourceReservation::new(record.reservation.clone()))
     }
 
     fn reconcile(

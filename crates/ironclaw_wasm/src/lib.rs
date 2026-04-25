@@ -9,16 +9,17 @@ use std::time::Instant;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, ExtensionId, ResourceUsage, RuntimeKind,
 };
-use ironclaw_resources::ResourceReservation;
+use ironclaw_resources::ActiveResourceReservation;
 use rust_decimal::Decimal;
 use thiserror::Error;
-use wasmtime::{Config, Engine, Instance, Module, Store};
+use wasmtime::{Config, Engine, Instance, Module, Store, StoreLimits, StoreLimitsBuilder};
 
 /// WASM runtime configuration for the narrow V1 vertical slice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmRuntimeConfig {
     pub fuel: u64,
     pub max_output_bytes: u64,
+    pub max_memory_bytes: usize,
 }
 
 impl Default for WasmRuntimeConfig {
@@ -26,6 +27,7 @@ impl Default for WasmRuntimeConfig {
         Self {
             fuel: 500_000,
             max_output_bytes: 1024 * 1024,
+            max_memory_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -35,6 +37,7 @@ impl WasmRuntimeConfig {
         Self {
             fuel: 100_000,
             max_output_bytes: 1024,
+            max_memory_bytes: 1024 * 1024,
         }
     }
 }
@@ -110,6 +113,8 @@ pub enum WasmError {
     FuelExhausted { limit: u64 },
     #[error("WASM output limit exceeded: limit {limit}, actual {actual}")]
     OutputLimitExceeded { limit: u64, actual: u64 },
+    #[error("WASM memory limit exceeded: limit {limit} bytes")]
+    MemoryLimitExceeded { limit: usize },
     #[error("WASM trap: {reason}")]
     Trap { reason: String },
 }
@@ -173,31 +178,41 @@ impl WasmRuntime {
         &self,
         module: &PreparedWasmModule,
         descriptor: &CapabilityDescriptor,
-        reservation: Option<&ResourceReservation>,
+        reservation: Option<&ActiveResourceReservation>,
         input: i32,
     ) -> Result<WasmInvocationResult<i32>, WasmError> {
         let reservation = reservation.ok_or(WasmError::MissingReservation)?;
         self.validate_descriptor(module, descriptor)?;
 
         let start = Instant::now();
-        let mut store = Store::new(&self.engine, ());
+        let mut store = Store::new(
+            &self.engine,
+            WasmStoreState {
+                limits: StoreLimitsBuilder::new()
+                    .memory_size(self.config.max_memory_bytes)
+                    .trap_on_grow_failure(true)
+                    .build(),
+            },
+        );
+        store.limiter(|state| &mut state.limits);
         store
             .set_fuel(self.config.fuel)
             .map_err(|error| WasmError::Trap {
                 reason: error.to_string(),
             })?;
 
-        let instance = Instance::new(&mut store, &module.module, &[])
-            .map_err(|error| classify_wasmtime_error(error, self.config.fuel))?;
+        let instance = Instance::new(&mut store, &module.module, &[]).map_err(|error| {
+            classify_wasmtime_error(error, self.config.fuel, self.config.max_memory_bytes)
+        })?;
         let func = instance
             .get_typed_func::<i32, i32>(&mut store, module.export())
             .map_err(|_| WasmError::MissingExport {
                 export: module.export().to_string(),
             })?;
 
-        let value = func
-            .call(&mut store, input)
-            .map_err(|error| classify_wasmtime_error(error, self.config.fuel))?;
+        let value = func.call(&mut store, input).map_err(|error| {
+            classify_wasmtime_error(error, self.config.fuel, self.config.max_memory_bytes)
+        })?;
 
         let output_bytes = value.to_string().len() as u64;
         if output_bytes > self.config.max_output_bytes {
@@ -213,7 +228,7 @@ impl WasmRuntime {
 
         Ok(WasmInvocationResult {
             value,
-            reservation_id: reservation.id,
+            reservation_id: reservation.id(),
             usage: ResourceUsage {
                 usd: Decimal::ZERO,
                 input_tokens: 0,
@@ -258,7 +273,15 @@ impl WasmRuntime {
     }
 }
 
-fn classify_wasmtime_error(error: wasmtime::Error, fuel_limit: u64) -> WasmError {
+struct WasmStoreState {
+    limits: StoreLimits,
+}
+
+fn classify_wasmtime_error(
+    error: wasmtime::Error,
+    fuel_limit: u64,
+    memory_limit: usize,
+) -> WasmError {
     if matches!(
         error.downcast_ref::<wasmtime::Trap>(),
         Some(wasmtime::Trap::OutOfFuel)
@@ -268,6 +291,10 @@ fn classify_wasmtime_error(error: wasmtime::Error, fuel_limit: u64) -> WasmError
     let message = error.to_string();
     if message.contains("all fuel consumed") || message.contains("out of fuel") {
         WasmError::FuelExhausted { limit: fuel_limit }
+    } else if message.contains("memory") || message.contains("Memory") {
+        WasmError::MemoryLimitExceeded {
+            limit: memory_limit,
+        }
     } else {
         WasmError::Trap { reason: message }
     }

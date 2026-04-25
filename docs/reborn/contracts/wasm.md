@@ -44,7 +44,7 @@ A module cannot read files, open sockets, invoke tools, or resolve secrets unles
 - descriptor runtime is `Wasm`
 - descriptor provider matches the prepared module provider
 - descriptor capability ID matches the prepared module capability/export binding
-- invocation carries an active resource reservation
+- invocation carries a governor-issued active reservation guard, not a caller-forgeable reservation record
 
 The runtime must not accept arbitrary capability IDs or extension IDs that bypass extension registry validation.
 
@@ -61,7 +61,8 @@ ironclaw_resources.reserve(scope, estimate)
 Then:
 
 ```text
-ironclaw_wasm.invoke(..., reservation, ...)
+ironclaw_resources.active_reservation(reservation_id) -> active_guard
+ironclaw_wasm.invoke(..., active_guard, ...)
 ```
 
 After invocation:
@@ -128,6 +129,12 @@ Rules:
 ```rust
 pub struct WasmRuntime;
 
+pub struct WasmRuntimeConfig {
+    pub fuel: u64,
+    pub max_output_bytes: u64,
+    pub max_memory_bytes: usize,
+}
+
 pub struct WasmModuleSpec {
     pub provider: ExtensionId,
     pub capability: CapabilityId,
@@ -141,7 +148,7 @@ impl WasmRuntime {
         &self,
         module: &PreparedWasmModule,
         descriptor: &CapabilityDescriptor,
-        reservation: &ResourceReservation,
+        reservation: &ActiveResourceReservation,
         input: i32,
     ) -> Result<WasmInvocationResult<i32>, WasmError>;
 }
@@ -177,9 +184,10 @@ Local contract tests should prove:
 - invalid module fails
 - descriptor must use `RuntimeKind::Wasm`
 - descriptor provider/capability must match the prepared module
-- invocation requires a reservation
+- invocation requires a governor-issued active reservation guard
 - exported function is invoked successfully
 - output byte limit is enforced
+- memory limit is enforced
 - fuel limit stops a runaway module
 - invocation returns actual usage suitable for resource reconciliation
 - no privileged host imports are available unless explicitly registered

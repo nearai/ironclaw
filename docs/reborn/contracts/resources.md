@@ -105,8 +105,9 @@ Rules:
 2. Missing estimate dimensions count as zero for that dimension.
 3. Resource limits, estimates, and actual usage must be non-negative. Negative amounts are invalid contract input and must fail before mutating ledgers.
 4. Reservation succeeds only if all applicable account limits can absorb the estimate plus current active reservations plus reconciled usage.
-4. Reservation returns a unique `ResourceReservationId`.
-5. Active reservations count against limits until reconciled or released.
+5. Reservation returns a unique `ResourceReservationId`.
+6. Runtime invocations should use a governor-issued active reservation guard instead of treating public reservation records as authority.
+7. Active reservations count against limits until reconciled or released.
 6. Reconcile replaces reserved estimate with actual usage and closes the reservation.
 7. Release removes the reservation without recording spend.
 8. Unknown reservations fail closed.
@@ -228,6 +229,7 @@ pub trait ResourceGovernor {
         scope: ResourceScope,
         estimate: ResourceEstimate,
     ) -> Result<ResourceReservation, ResourceError>;
+    fn active_reservation(&self, reservation_id: ResourceReservationId) -> Result<ActiveResourceReservation, ResourceError>;
     fn reconcile(
         &self,
         reservation_id: ResourceReservationId,

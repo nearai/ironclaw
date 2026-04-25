@@ -30,7 +30,7 @@ fn valid_module_prepares_and_invalid_module_fails() {
 fn invocation_requires_wasm_descriptor_matching_module_and_reservation() {
     let runtime = WasmRuntime::for_testing().unwrap();
     let module = runtime.prepare(echo_spec()).unwrap();
-    let reservation = sample_reservation();
+    let reservation = sample_active_reservation();
 
     let mut descriptor = make_descriptor("echo", "echo.add_one", RuntimeKind::Script);
     let err = runtime
@@ -93,9 +93,10 @@ fn exported_function_is_invoked_and_usage_can_be_reconciled() {
             },
         )
         .unwrap();
+    let active = governor.active_reservation(reservation.id).unwrap();
 
     let result = runtime
-        .invoke_i32(&module, &descriptor, Some(&reservation), 41)
+        .invoke_i32(&module, &descriptor, Some(&active), 41)
         .unwrap();
 
     assert_eq!(result.value, 42);
@@ -115,11 +116,12 @@ fn output_byte_limit_is_enforced() {
     let runtime = WasmRuntime::new(WasmRuntimeConfig {
         fuel: 10_000,
         max_output_bytes: 1,
+        max_memory_bytes: 1024 * 1024,
     })
     .unwrap();
     let module = runtime.prepare(echo_spec()).unwrap();
     let descriptor = make_descriptor("echo", "echo.add_one", RuntimeKind::Wasm);
-    let reservation = sample_reservation();
+    let reservation = sample_active_reservation();
 
     let err = runtime
         .invoke_i32(&module, &descriptor, Some(&reservation), 41)
@@ -136,6 +138,7 @@ fn fuel_limit_stops_runaway_module() {
     let runtime = WasmRuntime::new(WasmRuntimeConfig {
         fuel: 1_000,
         max_output_bytes: 1_024,
+        max_memory_bytes: 1024 * 1024,
     })
     .unwrap();
     let module = runtime
@@ -153,13 +156,59 @@ fn fuel_limit_stops_runaway_module() {
         })
         .unwrap();
     let descriptor = make_descriptor("loop", "loop.spin", RuntimeKind::Wasm);
-    let reservation = sample_reservation();
+    let reservation = sample_active_reservation();
 
     let err = runtime
         .invoke_i32(&module, &descriptor, Some(&reservation), 0)
         .unwrap_err();
 
     assert!(matches!(err, WasmError::FuelExhausted { .. }));
+}
+
+#[test]
+fn memory_limit_is_enforced() {
+    let runtime = WasmRuntime::new(WasmRuntimeConfig {
+        fuel: 10_000,
+        max_output_bytes: 1_024,
+        max_memory_bytes: 64 * 1024,
+    })
+    .unwrap();
+    let module = runtime
+        .prepare(WasmModuleSpec {
+            provider: ExtensionId::new("memory-hog").unwrap(),
+            capability: CapabilityId::new("memory-hog.allocate").unwrap(),
+            export: "allocate".to_string(),
+            bytes: wat::parse_str(
+                r#"(module
+                    (memory 2)
+                    (func (export "allocate") (param i32) (result i32)
+                      local.get 0))"#,
+            )
+            .unwrap(),
+        })
+        .unwrap();
+    let descriptor = make_descriptor("memory-hog", "memory-hog.allocate", RuntimeKind::Wasm);
+    let reservation = sample_active_reservation();
+
+    let err = runtime
+        .invoke_i32(&module, &descriptor, Some(&reservation), 0)
+        .unwrap_err();
+
+    assert!(matches!(err, WasmError::MemoryLimitExceeded { .. }));
+}
+
+#[test]
+fn closed_reservation_cannot_be_claimed_for_invocation() {
+    let governor = InMemoryResourceGovernor::new();
+    let reservation = governor
+        .reserve(sample_scope(), ResourceEstimate::default())
+        .unwrap();
+    governor.release(reservation.id).unwrap();
+
+    assert!(matches!(
+        governor.active_reservation(reservation.id),
+        Err(ResourceError::ReservationClosed { .. })
+    ));
 }
 
 #[test]
@@ -225,10 +274,10 @@ fn sample_scope() -> ResourceScope {
     }
 }
 
-fn sample_reservation() -> ResourceReservation {
-    ResourceReservation {
-        id: ResourceReservationId::new(),
-        scope: sample_scope(),
-        estimate: ResourceEstimate::default(),
-    }
+fn sample_active_reservation() -> ActiveResourceReservation {
+    let governor = InMemoryResourceGovernor::new();
+    let reservation = governor
+        .reserve(sample_scope(), ResourceEstimate::default())
+        .unwrap();
+    governor.active_reservation(reservation.id).unwrap()
 }
