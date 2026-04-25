@@ -170,6 +170,52 @@ impl ConfiguredTraceArtifactStore {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TraceEncryptedObjectStoreKind {
+    LegacyArtifactSidecar,
+    ServiceLocal,
+}
+
+impl TraceEncryptedObjectStoreKind {
+    fn from_config(
+        raw_mode: Option<&str>,
+        encrypted_artifacts_requested: bool,
+    ) -> anyhow::Result<Option<Self>> {
+        let Some(raw_mode) = raw_mode else {
+            return Ok(encrypted_artifacts_requested.then_some(Self::LegacyArtifactSidecar));
+        };
+        let normalized = raw_mode.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "" => Ok(encrypted_artifacts_requested.then_some(Self::LegacyArtifactSidecar)),
+            "file" | "none" => Ok(None),
+            "local_encrypted" | "encrypted_artifact" => Ok(Some(Self::LegacyArtifactSidecar)),
+            "local_service" | "local_service_encrypted" | "service_local_encrypted" => {
+                Ok(Some(Self::ServiceLocal))
+            }
+            other => anyhow::bail!("unsupported TRACE_COMMONS_OBJECT_STORE value: {other}"),
+        }
+    }
+
+    fn object_store_name(self) -> &'static str {
+        match self {
+            Self::LegacyArtifactSidecar => TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE,
+            Self::ServiceLocal => TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+        }
+    }
+
+    fn root_from_env(self, default_root: &Path) -> PathBuf {
+        match self {
+            Self::LegacyArtifactSidecar => std::env::var("TRACE_COMMONS_ARTIFACT_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| default_root.join("encrypted_artifacts")),
+            Self::ServiceLocal => std::env::var("TRACE_COMMONS_SERVICE_OBJECT_STORE_DIR")
+                .or_else(|_| std::env::var("TRACE_COMMONS_ARTIFACT_DIR"))
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| default_root.join("service_object_store")),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct TenantAuth {
     tenant_id: String,
@@ -280,48 +326,20 @@ impl AppState {
 fn trace_artifact_store_from_env(
     default_root: &Path,
 ) -> anyhow::Result<Option<ConfiguredTraceArtifactStore>> {
-    let object_store_mode = std::env::var("TRACE_COMMONS_OBJECT_STORE")
-        .ok()
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty());
-    if matches!(object_store_mode.as_deref(), Some("file" | "none")) {
-        return Ok(None);
-    }
-    let service_local_mode = matches!(
-        object_store_mode.as_deref(),
-        Some("local_service" | "local_service_encrypted" | "service_local_encrypted")
-    );
-    if let Some(mode) = object_store_mode.as_deref() {
-        anyhow::ensure!(
-            service_local_mode || matches!(mode, "local_encrypted" | "encrypted_artifact"),
-            "unsupported TRACE_COMMONS_OBJECT_STORE value: {mode}"
-        );
-    }
+    let object_store_mode = std::env::var("TRACE_COMMONS_OBJECT_STORE").ok();
     let key = std::env::var("TRACE_COMMONS_ARTIFACT_KEY_HEX").ok();
-    if key.is_none()
-        && !env_truthy("TRACE_COMMONS_ENCRYPTED_ARTIFACTS")
-        && object_store_mode.is_none()
-    {
+    let encrypted_store_kind = TraceEncryptedObjectStoreKind::from_config(
+        object_store_mode.as_deref(),
+        key.is_some() || env_truthy("TRACE_COMMONS_ENCRYPTED_ARTIFACTS"),
+    )?;
+    let Some(encrypted_store_kind) = encrypted_store_kind else {
         return Ok(None);
-    }
+    };
     let key = key.context(
         "encrypted Trace Commons object storage requires TRACE_COMMONS_ARTIFACT_KEY_HEX",
     )?;
-    let root = if service_local_mode {
-        std::env::var("TRACE_COMMONS_SERVICE_OBJECT_STORE_DIR")
-            .or_else(|_| std::env::var("TRACE_COMMONS_ARTIFACT_DIR"))
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| default_root.join("service_object_store"))
-    } else {
-        std::env::var("TRACE_COMMONS_ARTIFACT_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| default_root.join("encrypted_artifacts"))
-    };
-    let object_store_name = if service_local_mode {
-        TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
-    } else {
-        TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE
-    };
+    let root = encrypted_store_kind.root_from_env(default_root);
+    let object_store_name = encrypted_store_kind.object_store_name();
     let crypto = SecretsCrypto::new(SecretString::from(key))
         .context("failed to initialize Trace Commons artifact encryption")?;
     Ok(Some(ConfiguredTraceArtifactStore::new(
@@ -7622,6 +7640,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn trace_object_store_kind_parses_operator_modes() {
+        assert_eq!(
+            TraceEncryptedObjectStoreKind::from_config(None, false).expect("mode parses"),
+            None
+        );
+        assert_eq!(
+            TraceEncryptedObjectStoreKind::from_config(None, true).expect("mode parses"),
+            Some(TraceEncryptedObjectStoreKind::LegacyArtifactSidecar)
+        );
+        assert_eq!(
+            TraceEncryptedObjectStoreKind::from_config(Some("file"), true).expect("mode parses"),
+            None
+        );
+        assert_eq!(
+            TraceEncryptedObjectStoreKind::from_config(Some("local_encrypted"), false)
+                .expect("mode parses"),
+            Some(TraceEncryptedObjectStoreKind::LegacyArtifactSidecar)
+        );
+        assert_eq!(
+            TraceEncryptedObjectStoreKind::from_config(Some("local_service"), false)
+                .expect("mode parses"),
+            Some(TraceEncryptedObjectStoreKind::ServiceLocal)
+        );
+
+        let error = TraceEncryptedObjectStoreKind::from_config(Some("mystery_store"), false)
+            .expect_err("unknown object store mode must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported TRACE_COMMONS_OBJECT_STORE")
+        );
+    }
+
     #[tokio::test]
     async fn submit_rejects_scope_disallowed_by_tenant_policy() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -9687,6 +9739,122 @@ mod tests {
             }
             metadata => panic!("unexpected purge audit metadata: {metadata:?}"),
         }
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn maintenance_purge_deletes_service_local_object_store_and_invalidates_refs() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_root = temp.path().join("service-object-store");
+        let artifact_store = test_artifact_store(&artifact_root);
+        let configured_store = ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            artifact_store.clone(),
+        );
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-service-object-store-purge.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+            Some(configured_store),
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let object_ref = db
+            .get_latest_active_trace_object_ref(
+                "tenant-a",
+                submission_id,
+                StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            )
+            .await
+            .expect("object ref reads")
+            .expect("submitted envelope object ref exists");
+        assert_eq!(
+            object_ref.object_store,
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+        );
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let receipt = record
+            .artifact_receipt
+            .clone()
+            .expect("service object receipt exists");
+        artifact_store
+            .read_artifact(&record.tenant_storage_ref, &receipt)
+            .expect("service-local encrypted object exists");
+
+        let metadata_path = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"))
+            .join("metadata")
+            .join(format!("{submission_id}.json"));
+        let mut metadata_json = serde_json::to_value(record).expect("record serializes");
+        metadata_json["expires_at"] =
+            serde_json::json!((Utc::now() - chrono::Duration::days(1)).to_rfc3339());
+        write_json_file(&metadata_path, &metadata_json, "expired trace metadata")
+            .expect("expired metadata writes");
+
+        let Json(response) = maintenance_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_service_object_store_purge".to_string()),
+                dry_run: false,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: Some(Utc::now()),
+            }),
+        )
+        .await
+        .expect("maintenance purges service-local object");
+        assert_eq!(response.records_marked_expired, 1);
+        assert_eq!(response.records_marked_purged, 1);
+        assert_eq!(response.encrypted_artifacts_deleted, 1);
+        artifact_store
+            .read_artifact(&tenant_storage_ref("tenant-a"), &receipt)
+            .expect_err("service-local encrypted object was deleted");
+
+        let object_refs = db
+            .list_trace_object_refs("tenant-a", submission_id)
+            .await
+            .expect("object refs read");
+        assert_eq!(object_refs.len(), 1);
+        assert_eq!(
+            object_refs[0].object_store,
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+        );
+        assert!(object_refs[0].invalidated_at.is_some());
     }
 
     #[tokio::test]
