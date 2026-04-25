@@ -6056,6 +6056,35 @@ async fn reconcile_db_mirror(
         .filter(|submission_id| !db_derived_by_submission.contains_key(submission_id))
         .copied()
         .collect::<Vec<_>>();
+    let missing_derived_submission_ids_in_files = db_derived_by_submission
+        .keys()
+        .filter(|submission_id| !file_derived_by_submission.contains_key(submission_id))
+        .copied()
+        .collect::<Vec<_>>();
+    let mut derived_status_mismatches = Vec::new();
+    let mut derived_hash_mismatches = Vec::new();
+    for (submission_id, db_record) in &db_derived_by_submission {
+        let Some(file_record) = file_derived_by_submission.get(submission_id) else {
+            continue;
+        };
+        let file_status = storage_derived_status(file_record.status);
+        if db_record.status != file_status {
+            derived_status_mismatches.push(TraceDbDerivedStatusMismatch {
+                submission_id: *submission_id,
+                file_status,
+                db_status: db_record.status,
+            });
+        }
+        if db_record.canonical_summary_hash.as_deref()
+            != Some(file_record.canonical_summary_hash.as_str())
+        {
+            derived_hash_mismatches.push(TraceDbDerivedHashMismatch {
+                submission_id: *submission_id,
+                file_canonical_summary_hash: file_record.canonical_summary_hash.clone(),
+                db_canonical_summary_hash: db_record.canonical_summary_hash.clone(),
+            });
+        }
+    }
 
     let accepted_submission_ids = db_records
         .iter()
@@ -6236,6 +6265,9 @@ async fn reconcile_db_mirror(
         file_derived_count: file_derived.len(),
         db_derived_count: db_derived.len(),
         missing_derived_submission_ids_in_db,
+        missing_derived_submission_ids_in_files,
+        derived_status_mismatches,
+        derived_hash_mismatches,
         file_credit_event_count: file_credit_events.len(),
         db_credit_event_count: db_credit_events.len(),
         file_audit_event_count: file_audit_events.len(),
@@ -7454,6 +7486,9 @@ struct TraceDbReconciliationReport {
     file_derived_count: usize,
     db_derived_count: usize,
     missing_derived_submission_ids_in_db: Vec<Uuid>,
+    missing_derived_submission_ids_in_files: Vec<Uuid>,
+    derived_status_mismatches: Vec<TraceDbDerivedStatusMismatch>,
+    derived_hash_mismatches: Vec<TraceDbDerivedHashMismatch>,
     file_credit_event_count: usize,
     db_credit_event_count: usize,
     file_audit_event_count: usize,
@@ -7483,6 +7518,20 @@ struct TraceDbStatusMismatch {
     submission_id: Uuid,
     file_status: StorageTraceCorpusStatus,
     db_status: StorageTraceCorpusStatus,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceDbDerivedStatusMismatch {
+    submission_id: Uuid,
+    file_status: StorageTraceDerivedStatus,
+    db_status: StorageTraceDerivedStatus,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceDbDerivedHashMismatch {
+    submission_id: Uuid,
+    file_canonical_summary_hash: String,
+    db_canonical_summary_hash: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -12117,6 +12166,13 @@ mod tests {
         assert_eq!(reconciliation.db_submission_count, 1);
         assert!(reconciliation.missing_submission_ids_in_db.is_empty());
         assert!(reconciliation.status_mismatches.is_empty());
+        assert!(
+            reconciliation
+                .missing_derived_submission_ids_in_files
+                .is_empty()
+        );
+        assert!(reconciliation.derived_status_mismatches.is_empty());
+        assert!(reconciliation.derived_hash_mismatches.is_empty());
         assert_eq!(reconciliation.db_object_ref_count, 1);
         assert!(reconciliation.file_credit_event_count >= 1);
         assert!(reconciliation.db_credit_event_count >= 1);
@@ -12211,6 +12267,167 @@ mod tests {
         .await
         .expect("backfill can be rerun");
         assert_eq!(second_response.db_mirror_backfilled, 0);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn maintenance_reconciliation_reports_db_derived_records_missing_in_files() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-reconcile-derived-missing.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let derived_path = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"))
+            .join("derived")
+            .join(format!("{submission_id}.json"));
+        std::fs::remove_file(derived_path).expect("remove file-backed derived record");
+
+        let Json(reconciliation_response) = maintenance_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_missing_derived_file_reconciliation".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: true,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("reviewer can reconcile DB mirror");
+        let reconciliation = reconciliation_response
+            .db_reconciliation
+            .expect("reconciliation report exists");
+        assert!(
+            reconciliation
+                .missing_derived_submission_ids_in_db
+                .is_empty()
+        );
+        assert_eq!(
+            reconciliation.missing_derived_submission_ids_in_files,
+            vec![submission_id]
+        );
+        assert!(reconciliation.derived_status_mismatches.is_empty());
+        assert!(reconciliation.derived_hash_mismatches.is_empty());
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn maintenance_reconciliation_reports_derived_status_and_hash_mismatches() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-reconcile-derived-mismatch.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let mut derived = read_derived_record(temp.path(), "tenant-a", submission_id)
+            .expect("derived record reads")
+            .expect("derived record exists");
+        derived.status = TraceCorpusStatus::Revoked;
+        derived.canonical_summary_hash = "sha256:file-side-derived-mismatch".to_string();
+        write_derived_record(temp.path(), &derived).expect("derived record can be tampered");
+
+        let Json(reconciliation_response) = maintenance_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_derived_mismatch_reconciliation".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: true,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("reviewer can reconcile DB mirror");
+        let reconciliation = reconciliation_response
+            .db_reconciliation
+            .expect("reconciliation report exists");
+        assert!(
+            reconciliation
+                .missing_derived_submission_ids_in_files
+                .is_empty()
+        );
+        assert_eq!(reconciliation.derived_status_mismatches.len(), 1);
+        assert_eq!(
+            reconciliation.derived_status_mismatches[0].submission_id,
+            submission_id
+        );
+        assert_eq!(
+            reconciliation.derived_status_mismatches[0].file_status,
+            StorageTraceDerivedStatus::Revoked
+        );
+        assert_eq!(
+            reconciliation.derived_status_mismatches[0].db_status,
+            StorageTraceDerivedStatus::Current
+        );
+        assert_eq!(reconciliation.derived_hash_mismatches.len(), 1);
+        assert_eq!(
+            reconciliation.derived_hash_mismatches[0].submission_id,
+            submission_id
+        );
+        assert_eq!(
+            reconciliation.derived_hash_mismatches[0].file_canonical_summary_hash,
+            "sha256:file-side-derived-mismatch"
+        );
+        assert!(
+            reconciliation.derived_hash_mismatches[0]
+                .db_canonical_summary_hash
+                .as_deref()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
     }
 
     #[cfg(feature = "libsql")]

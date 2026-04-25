@@ -2430,6 +2430,12 @@ fn maintenance_reconciliation_lines(value: &serde_json::Value) -> Vec<String> {
             ("file_derived_count", "files"),
             ("db_derived_count", "db"),
             ("missing_derived_submission_ids_in_db", "missing_in_db"),
+            (
+                "missing_derived_submission_ids_in_files",
+                "missing_in_files",
+            ),
+            ("derived_status_mismatches", "status_mismatches"),
+            ("derived_hash_mismatches", "hash_mismatches"),
         ],
     ) {
         lines.push(line);
@@ -3368,6 +3374,23 @@ mod tests {
                 "missing_derived_submission_ids_in_db": [
                     "44444444-4444-4444-4444-444444444444"
                 ],
+                "missing_derived_submission_ids_in_files": [
+                    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+                ],
+                "derived_status_mismatches": [
+                    {
+                        "submission_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                        "file_status": "revoked",
+                        "db_status": "current"
+                    }
+                ],
+                "derived_hash_mismatches": [
+                    {
+                        "submission_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                        "file_canonical_summary_hash": "sha256:file",
+                        "db_canonical_summary_hash": "sha256:db"
+                    }
+                ],
                 "db_object_ref_count": 2,
                 "accepted_without_active_envelope_object_ref": [
                     "55555555-5555-5555-5555-555555555555"
@@ -3411,7 +3434,7 @@ mod tests {
             vec![
                 "  db reconciliation:".to_string(),
                 "    submissions: files=3 db=2 missing_in_db=2 missing_in_files=0 status_mismatches=1".to_string(),
-                "    derived: files=4 db=3 missing_in_db=1".to_string(),
+                "    derived: files=4 db=3 missing_in_db=1 missing_in_files=1 status_mismatches=1 hash_mismatches=1".to_string(),
                 "    object refs: db=2 accepted_without_active_envelope=1 unreadable_active_envelope=1 hash_mismatched_active_envelope=1".to_string(),
                 "    ledger/audit: file_credit_events=5 db_credit_events=4 file_audit_events=6 db_audit_events=6".to_string(),
                 "    exports/tombstones: file_replay_manifests=1 db_export_manifests=2 db_export_items=3 file_revocation_tombstones=1 db_tombstones=1".to_string(),
