@@ -90,6 +90,7 @@ struct AppState {
     db_reviewer_reads: bool,
     db_replay_export_reads: bool,
     db_audit_reads: bool,
+    require_export_guardrails: bool,
     artifact_store: Option<Arc<LocalEncryptedTraceArtifactStore>>,
 }
 
@@ -172,6 +173,7 @@ impl AppState {
         if db_audit_reads && db_mirror.is_none() {
             anyhow::bail!("TRACE_COMMONS_DB_AUDIT_READS requires TRACE_COMMONS_DB_DUAL_WRITE");
         }
+        let require_export_guardrails = env_truthy("TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS");
         let artifact_store = trace_artifact_store_from_env(&root)?;
         Ok(Self {
             root,
@@ -182,6 +184,7 @@ impl AppState {
             db_reviewer_reads,
             db_replay_export_reads,
             db_audit_reads,
+            require_export_guardrails,
             artifact_store,
         })
     }
@@ -1026,6 +1029,17 @@ async fn dataset_replay_handler(
 ) -> ApiResult<Json<TraceReplayDatasetExport>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_reviewer(&tenant)?;
+    let consent_scope = parse_consent_scope_filter(query.consent_scope.as_deref())?;
+    enforce_dataset_export_guardrails(
+        state.as_ref(),
+        "replay dataset",
+        query.purpose.as_deref(),
+        query.status,
+        query.privacy_risk,
+        consent_scope,
+    )?;
+    let purpose =
+        normalized_export_purpose(query.purpose.as_deref(), "trace_commons_replay_dataset");
     let TraceCommonsMetadataView { records, derived } =
         read_replay_export_metadata_view(state.as_ref(), &tenant)
             .await
@@ -1035,14 +1049,6 @@ async fn dataset_replay_handler(
         .map(|record| (record.submission_id, record))
         .collect::<BTreeMap<_, _>>();
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
-    let purpose = query
-        .purpose
-        .as_deref()
-        .map(str::trim)
-        .filter(|purpose| !purpose.is_empty())
-        .unwrap_or("trace_commons_replay_dataset")
-        .to_string();
-    let consent_scope = parse_consent_scope_filter(query.consent_scope.as_deref())?;
     let mut items = Vec::new();
     for record in records
         .into_iter()
@@ -1184,11 +1190,23 @@ async fn benchmark_convert_handler(
 ) -> ApiResult<Json<TraceBenchmarkConversionArtifact>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_reviewer(&tenant)?;
+    let consent_scope = parse_consent_scope_filter(body.consent_scope.as_deref())?;
+    enforce_dataset_export_guardrails(
+        state.as_ref(),
+        "benchmark conversion",
+        body.purpose.as_deref(),
+        body.status,
+        body.privacy_risk,
+        consent_scope,
+    )?;
+    let purpose = normalized_export_purpose(
+        body.purpose.as_deref(),
+        "trace_commons_benchmark_candidate_conversion",
+    );
     let TraceCommonsMetadataView { records, derived } =
         read_reviewer_metadata_view(state.as_ref(), &tenant)
             .await
             .map_err(internal_error)?;
-    let consent_scope = parse_consent_scope_filter(body.consent_scope.as_deref())?;
     let accepted_by_submission = records
         .into_iter()
         .filter(TraceCommonsSubmissionRecord::is_benchmark_eligible)
@@ -1201,10 +1219,6 @@ async fn benchmark_convert_handler(
         .map(|record| (record.submission_id, record))
         .collect::<BTreeMap<_, _>>();
     let limit = body.limit.unwrap_or(100).clamp(1, 500);
-    let purpose = body
-        .purpose
-        .filter(|purpose| !purpose.trim().is_empty())
-        .unwrap_or_else(|| "trace_commons_benchmark_candidate_conversion".to_string());
 
     let mut candidates = Vec::new();
     for derived in derived
@@ -1308,6 +1322,7 @@ async fn ranker_training_candidates_handler(
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_reviewer(&tenant)?;
     let consent_scope = parse_ranker_consent_scope_filter(query.consent_scope.as_deref())?;
+    enforce_ranker_export_guardrails(state.as_ref(), query.privacy_risk, consent_scope)?;
     let mut candidate_query = query;
     candidate_query.limit = Some(candidate_query.limit.unwrap_or(100).clamp(1, 500));
     let candidates = collect_ranker_training_candidates(
@@ -1390,6 +1405,7 @@ async fn ranker_training_pairs_handler(
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_reviewer(&tenant)?;
     let consent_scope = parse_ranker_consent_scope_filter(query.consent_scope.as_deref())?;
+    enforce_ranker_export_guardrails(state.as_ref(), query.privacy_risk, consent_scope)?;
     let mut pair_query = query;
     let pair_limit = pair_query.limit.unwrap_or(100).clamp(1, 500);
     pair_query.limit = Some(pair_limit.saturating_add(1));
@@ -1725,6 +1741,83 @@ fn ranker_pair_source_submission_ids(pairs: &[TraceRankerTrainingPair]) -> Vec<U
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+fn normalized_export_purpose(value: Option<&str>, default: &str) -> String {
+    value
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or(default)
+        .to_string()
+}
+
+fn enforce_dataset_export_guardrails(
+    state: &AppState,
+    export_kind: &str,
+    purpose: Option<&str>,
+    status: Option<TraceCorpusStatus>,
+    privacy_risk: Option<ResidualPiiRisk>,
+    consent_scope: Option<ConsentScope>,
+) -> ApiResult<()> {
+    if !state.require_export_guardrails {
+        return Ok(());
+    }
+
+    if purpose
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .is_none()
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("{export_kind} export requires an explicit purpose"),
+        ));
+    }
+    if status != Some(TraceCorpusStatus::Accepted) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("{export_kind} export requires status=accepted"),
+        ));
+    }
+    if privacy_risk != Some(ResidualPiiRisk::Low) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("{export_kind} export requires privacy_risk=low"),
+        ));
+    }
+    if consent_scope.is_none() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("{export_kind} export requires an explicit consent_scope"),
+        ));
+    }
+
+    Ok(())
+}
+
+fn enforce_ranker_export_guardrails(
+    state: &AppState,
+    privacy_risk: Option<ResidualPiiRisk>,
+    consent_scope: Option<ConsentScope>,
+) -> ApiResult<()> {
+    if !state.require_export_guardrails {
+        return Ok(());
+    }
+
+    if privacy_risk != Some(ResidualPiiRisk::Low) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ranker training export requires privacy_risk=low",
+        ));
+    }
+    if consent_scope.is_none() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ranker training export requires explicit ranking-training or model-training consent_scope",
+        ));
+    }
+
+    Ok(())
 }
 
 fn parse_consent_scope_filter(value: Option<&str>) -> ApiResult<Option<ConsentScope>> {
@@ -6843,6 +6936,44 @@ mod tests {
         db_audit_reads: bool,
         tenant_policies: BTreeMap<String, TenantSubmissionPolicy>,
     ) -> Arc<AppState> {
+        test_state_with_options_policies_and_export_guardrails(
+            root,
+            db_mirror,
+            artifact_store,
+            db_contributor_reads,
+            db_reviewer_reads,
+            db_replay_export_reads,
+            db_audit_reads,
+            tenant_policies,
+            false,
+        )
+    }
+
+    fn test_state_with_export_guardrails(root: PathBuf) -> Arc<AppState> {
+        test_state_with_options_policies_and_export_guardrails(
+            root,
+            None,
+            None,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            true,
+        )
+    }
+
+    fn test_state_with_options_policies_and_export_guardrails(
+        root: PathBuf,
+        db_mirror: Option<Arc<dyn Database>>,
+        artifact_store: Option<Arc<LocalEncryptedTraceArtifactStore>>,
+        db_contributor_reads: bool,
+        db_reviewer_reads: bool,
+        db_replay_export_reads: bool,
+        db_audit_reads: bool,
+        tenant_policies: BTreeMap<String, TenantSubmissionPolicy>,
+        require_export_guardrails: bool,
+    ) -> Arc<AppState> {
         let mut tokens = BTreeMap::new();
         insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Contributor);
         insert_token(&mut tokens, "tenant-a", "token-a-2", TokenRole::Contributor);
@@ -6868,6 +6999,7 @@ mod tests {
             db_reviewer_reads,
             db_replay_export_reads,
             db_audit_reads,
+            require_export_guardrails,
             artifact_store,
         })
     }
@@ -7577,6 +7709,115 @@ mod tests {
         .await
         .expect_err("contributor cannot export datasets");
         assert_eq!(contributor_export_error.0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn export_guardrails_require_explicit_filters_when_enabled() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state_with_export_guardrails(temp.path().to_path_buf());
+
+        let replay_error = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: None,
+                status: None,
+                privacy_risk: None,
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect_err("guarded replay export requires explicit filters");
+        assert_eq!(replay_error.0, StatusCode::BAD_REQUEST);
+
+        let Json(replay_export) = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("guarded_replay".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: Some("debugging_evaluation".to_string()),
+            }),
+        )
+        .await
+        .expect("fully filtered replay export is allowed");
+        assert_eq!(replay_export.item_count, 0);
+        assert_eq!(replay_export.manifest.purpose, "guarded_replay");
+
+        let benchmark_error = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: None,
+                consent_scope: None,
+                status: None,
+                privacy_risk: None,
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect_err("guarded benchmark conversion requires explicit filters");
+        assert_eq!(benchmark_error.0, StatusCode::BAD_REQUEST);
+
+        let Json(benchmark) = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("guarded_benchmark".to_string()),
+                consent_scope: Some("benchmark_only".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("fully filtered benchmark conversion is allowed");
+        assert_eq!(benchmark.item_count, 0);
+        assert_eq!(benchmark.purpose, "guarded_benchmark");
+
+        let ranker_error = ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                consent_scope: None,
+                privacy_risk: None,
+            }),
+        )
+        .await
+        .expect_err("guarded ranker export requires explicit filters");
+        assert_eq!(ranker_error.0, StatusCode::BAD_REQUEST);
+
+        let Json(candidates) = ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                consent_scope: Some("ranking_training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect("fully filtered ranker candidates export is allowed");
+        assert_eq!(candidates.item_count, 0);
+
+        let Json(pairs) = ranker_training_pairs_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                consent_scope: Some("model_training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect("fully filtered ranker pairs export is allowed");
+        assert_eq!(pairs.item_count, 0);
     }
 
     #[tokio::test]
