@@ -1076,6 +1076,15 @@ async fn replay_export_manifests_handler(
     let manifests = read_replay_export_manifest_summaries(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::read(&tenant, "replay_export_manifests", manifests.len()),
+        StorageTraceAuditAction::Read,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(manifests))
 }
 
@@ -7585,6 +7594,13 @@ mod tests {
         );
         assert_eq!(manifests[0].item_count, 1);
         assert!(manifests[0].invalidated_at.is_none());
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("audit events read");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "read"
+                && event.reason.as_deref()
+                    == Some("surface=replay_export_manifests;item_count=1")
+        }));
 
         let contributor_error =
             replay_export_manifests_handler(State(state.clone()), auth_headers("token-a"))
