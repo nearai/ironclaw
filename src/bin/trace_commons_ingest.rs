@@ -1190,6 +1190,7 @@ enum TraceCreditLedgerEventType {
 const MAX_DELAYED_CREDIT_POINTS_DELTA: f32 = 100.0;
 const BENCHMARK_CONVERSION_CREDIT_POINTS_DELTA: f32 = 2.0;
 const RANKER_TRAINING_CANDIDATE_CREDIT_POINTS_DELTA: f32 = 0.5;
+const RANKER_TRAINING_PAIR_CREDIT_POINTS_DELTA: f32 = 0.75;
 
 impl TraceCreditLedgerEventType {
     fn requires_external_ref(self) -> bool {
@@ -2007,6 +2008,29 @@ async fn ranker_training_pairs_handler(
             purpose_code: Some("ranker_training_pairs_export".to_string()),
             item_count: pairs.len().min(u32::MAX as usize) as u32,
         },
+    )
+    .await
+    .map_err(internal_error)?;
+    let pair_credit_sources = pairs
+        .iter()
+        .flat_map(|pair| {
+            [
+                AutomaticUtilityCreditSource::from_ranker_candidate(&pair.preferred),
+                AutomaticUtilityCreditSource::from_ranker_candidate(&pair.rejected),
+            ]
+        })
+        .collect::<Vec<_>>();
+    append_automatic_utility_credit_events_once(
+        state.as_ref(),
+        &tenant,
+        AutomaticUtilityCreditConfig {
+            idempotency_label: "ranker-training-pair-credit",
+            event_type: TraceCreditLedgerEventType::RankingUtility,
+            credit_points_delta: RANKER_TRAINING_PAIR_CREDIT_POINTS_DELTA,
+            reason: format!("Exported as ranker training pair {}.", export_id),
+            external_ref: format!("ranker_training_pairs_export:{export_id}"),
+        },
+        pair_credit_sources,
     )
     .await
     .map_err(internal_error)?;
@@ -10316,6 +10340,46 @@ mod tests {
                     && pair.rejected_submission_id != tenant_a_quarantined_id
                     && pair.preferred_submission_id != tenant_b_id
                     && pair.rejected_submission_id != tenant_b_id)
+        );
+        let pair_credit_events =
+            read_all_credit_events(temp.path(), "tenant-a").expect("pair credit events read");
+        let ranking_utility_events = pair_credit_events
+            .iter()
+            .filter(|event| event.event_type == TraceCreditLedgerEventType::RankingUtility)
+            .collect::<Vec<_>>();
+        assert_eq!(ranking_utility_events.len(), 2);
+        assert!(
+            ranking_utility_events
+                .iter()
+                .any(|event| event.submission_id == tenant_a_best_id)
+        );
+        assert!(
+            ranking_utility_events
+                .iter()
+                .any(|event| event.submission_id == tenant_a_lower_id)
+        );
+
+        let _ = ranker_training_pairs_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                status: None,
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: None,
+            }),
+        )
+        .await
+        .expect("ranker pairs export rerun succeeds");
+        let rerun_pair_credit_events =
+            read_all_credit_events(temp.path(), "tenant-a").expect("rerun pair credit events read");
+        assert_eq!(
+            rerun_pair_credit_events
+                .iter()
+                .filter(|event| event.event_type == TraceCreditLedgerEventType::RankingUtility)
+                .count(),
+            2,
+            "ranker pair utility credit must be idempotent"
         );
 
         let Json(limited_pairs) = ranker_training_pairs_handler(
