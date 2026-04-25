@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use ironclaw_host_api::*;
 use ironclaw_processes::*;
 use serde_json::json;
+use tokio::time::timeout;
 
 #[tokio::test]
 async fn process_host_status_reads_scoped_process_record() {
@@ -117,6 +118,102 @@ async fn process_host_await_process_fails_closed_for_unknown_or_other_scope_proc
         .await_process(&other_scope, process_id)
         .await
         .unwrap_err();
+    assert!(matches!(hidden, ProcessError::UnknownProcess { process_id: id } if id == process_id));
+}
+
+#[tokio::test]
+async fn process_host_subscribe_emits_initial_and_terminal_records() {
+    let store = InMemoryProcessStore::new();
+    let host = ProcessHost::new(&store).with_poll_interval(Duration::from_millis(5));
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+
+    store
+        .start(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+
+    let mut subscription = host.subscribe(&scope, process_id).await.unwrap();
+    let initial = subscription.next().await.unwrap().unwrap();
+    assert_eq!(initial.status, ProcessStatus::Running);
+
+    store.complete(&scope, process_id).await.unwrap();
+
+    let terminal = subscription.next().await.unwrap().unwrap();
+    assert_eq!(terminal.status, ProcessStatus::Completed);
+    assert_eq!(subscription.next().await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn process_host_subscribe_tracks_background_completion() {
+    let store = Arc::new(InMemoryProcessStore::new());
+    let manager = BackgroundProcessManager::new(store.clone(), Arc::new(DelayedSuccessExecutor));
+    let host = ProcessHost::new(store.as_ref()).with_poll_interval(Duration::from_millis(5));
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+
+    manager
+        .spawn(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+
+    let mut subscription = host.subscribe(&scope, process_id).await.unwrap();
+    assert_eq!(
+        subscription.next().await.unwrap().unwrap().status,
+        ProcessStatus::Running
+    );
+
+    let terminal = timeout(Duration::from_millis(200), subscription.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(terminal.status, ProcessStatus::Completed);
+}
+
+#[tokio::test]
+async fn process_host_subscribe_closes_after_initial_terminal_record() {
+    let store = InMemoryProcessStore::new();
+    let host = ProcessHost::new(&store).with_poll_interval(Duration::from_millis(5));
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+
+    store
+        .start(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+    store.kill(&scope, process_id).await.unwrap();
+
+    let mut subscription = host.subscribe(&scope, process_id).await.unwrap();
+
+    assert_eq!(
+        subscription.next().await.unwrap().unwrap().status,
+        ProcessStatus::Killed
+    );
+    assert_eq!(subscription.next().await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn process_host_subscribe_fails_closed_for_unknown_or_other_scope_process() {
+    let store = InMemoryProcessStore::new();
+    let host = ProcessHost::new(&store);
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let other_scope = sample_scope(invocation_id, "tenant2", "user1");
+
+    let missing = host.subscribe(&scope, process_id).await.unwrap_err();
+    assert!(matches!(missing, ProcessError::UnknownProcess { process_id: id } if id == process_id));
+
+    store
+        .start(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+
+    let hidden = host.subscribe(&other_scope, process_id).await.unwrap_err();
     assert!(matches!(hidden, ProcessError::UnknownProcess { process_id: id } if id == process_id));
 }
 

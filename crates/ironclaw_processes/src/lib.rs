@@ -6,6 +6,7 @@
 
 use std::{
     collections::HashMap,
+    fmt,
     sync::{Arc, Mutex, MutexGuard},
 };
 
@@ -33,6 +34,12 @@ pub enum ProcessStatus {
     Completed,
     Failed,
     Killed,
+}
+
+impl ProcessStatus {
+    pub fn is_terminal(self) -> bool {
+        self != Self::Running
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,7 +108,7 @@ pub struct ProcessExit {
 
 impl ProcessExit {
     fn from_terminal(record: ProcessRecord) -> Self {
-        debug_assert!(record.status != ProcessStatus::Running);
+        debug_assert!(record.status.is_terminal());
         Self {
             process_id: record.process_id,
             scope: record.scope,
@@ -251,8 +258,87 @@ impl<'a> ProcessHost<'a> {
                 .get(scope, process_id)
                 .await?
                 .ok_or(ProcessError::UnknownProcess { process_id })?;
-            if record.status != ProcessStatus::Running {
+            if record.status.is_terminal() {
                 return Ok(ProcessExit::from_terminal(record));
+            }
+            sleep(self.poll_interval).await;
+        }
+    }
+
+    pub async fn subscribe(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ProcessSubscription<'a>, ProcessError> {
+        let initial_record = self
+            .store
+            .get(scope, process_id)
+            .await?
+            .ok_or(ProcessError::UnknownProcess { process_id })?;
+        Ok(ProcessSubscription {
+            store: self.store,
+            scope: scope.clone(),
+            process_id,
+            poll_interval: self.poll_interval,
+            last_status: Some(initial_record.status),
+            pending_initial: Some(initial_record),
+            finished: false,
+        })
+    }
+}
+
+/// Scoped subscription over process lifecycle status changes.
+pub struct ProcessSubscription<'a> {
+    store: &'a dyn ProcessStore,
+    scope: ResourceScope,
+    process_id: ProcessId,
+    poll_interval: Duration,
+    last_status: Option<ProcessStatus>,
+    pending_initial: Option<ProcessRecord>,
+    finished: bool,
+}
+
+impl fmt::Debug for ProcessSubscription<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProcessSubscription")
+            .field("scope", &self.scope)
+            .field("process_id", &self.process_id)
+            .field("last_status", &self.last_status)
+            .field(
+                "pending_initial_status",
+                &self.pending_initial.as_ref().map(|record| record.status),
+            )
+            .field("finished", &self.finished)
+            .finish()
+    }
+}
+
+impl ProcessSubscription<'_> {
+    pub async fn next(&mut self) -> Result<Option<ProcessRecord>, ProcessError> {
+        if let Some(record) = self.pending_initial.take() {
+            if record.status.is_terminal() {
+                self.finished = true;
+            }
+            return Ok(Some(record));
+        }
+
+        if self.finished {
+            return Ok(None);
+        }
+
+        loop {
+            let record = self.store.get(&self.scope, self.process_id).await?.ok_or(
+                ProcessError::UnknownProcess {
+                    process_id: self.process_id,
+                },
+            )?;
+            if Some(record.status) != self.last_status {
+                self.last_status = Some(record.status);
+                if record.status.is_terminal() {
+                    self.finished = true;
+                }
+                return Ok(Some(record));
             }
             sleep(self.poll_interval).await;
         }
