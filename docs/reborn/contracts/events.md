@@ -60,11 +60,23 @@ V1 provides two sinks:
 | `InMemoryEventSink` | Tests, demos, and live progress capture |
 | `JsonlEventSink<F: RootFilesystem>` | Durable JSONL runtime history under a `VirtualPath` |
 
-`JsonlEventSink` writes through `RootFilesystem`, not raw host paths. It is a minimal durable history sink, not the final audit store, replay service, or stream fanout implementation.
+`JsonlEventSink` writes through `RootFilesystem`, not raw host paths. It also supports `read_events()` for deterministic demo/test readback from JSONL. It is a minimal durable history sink, not the final audit store, replay service, or stream fanout implementation.
 
 ---
 
-## 4. Kernel dispatch events
+## 4. Durable event path in the live slice
+
+The live vertical slice mounts an explicit `/engine` root and persists demo dispatch events at:
+
+```text
+/engine/events/reborn-demo.jsonl
+```
+
+The path is a `VirtualPath`; runtime code and guests still do not receive raw host paths.
+
+---
+
+## 5. Kernel dispatch events
 
 `RuntimeDispatcher::dispatch_json` emits:
 
@@ -87,7 +99,7 @@ dispatch_failed
 
 ---
 
-## 5. Non-goals
+## 6. Non-goals
 
 This contract does not implement:
 
