@@ -89,6 +89,7 @@ struct AppState {
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
     db_replay_export_reads: bool,
+    db_replay_export_require_object_refs: bool,
     db_audit_reads: bool,
     require_export_guardrails: bool,
     artifact_store: Option<Arc<LocalEncryptedTraceArtifactStore>>,
@@ -169,6 +170,13 @@ impl AppState {
                 "TRACE_COMMONS_DB_REPLAY_EXPORT_READS requires TRACE_COMMONS_DB_DUAL_WRITE"
             );
         }
+        let db_replay_export_require_object_refs =
+            env_truthy("TRACE_COMMONS_DB_REPLAY_EXPORT_REQUIRE_OBJECT_REFS");
+        if db_replay_export_require_object_refs && !db_replay_export_reads {
+            anyhow::bail!(
+                "TRACE_COMMONS_DB_REPLAY_EXPORT_REQUIRE_OBJECT_REFS requires TRACE_COMMONS_DB_REPLAY_EXPORT_READS"
+            );
+        }
         let db_audit_reads = env_truthy("TRACE_COMMONS_DB_AUDIT_READS");
         if db_audit_reads && db_mirror.is_none() {
             anyhow::bail!("TRACE_COMMONS_DB_AUDIT_READS requires TRACE_COMMONS_DB_DUAL_WRITE");
@@ -183,6 +191,7 @@ impl AppState {
             db_contributor_reads,
             db_reviewer_reads,
             db_replay_export_reads,
+            db_replay_export_require_object_refs,
             db_audit_reads,
             require_export_guardrails,
             artifact_store,
@@ -3562,12 +3571,17 @@ async fn read_envelope_body_for_replay_export(
     tenant: &TenantAuth,
     record: &TraceCommonsSubmissionRecord,
 ) -> anyhow::Result<TraceEnvelopeBodyRead> {
-    if state.db_replay_export_reads
-        && let Some(envelope) =
+    if state.db_replay_export_reads {
+        if let Some(envelope) =
             read_envelope_from_active_db_object_ref(state, &tenant.tenant_id, record.submission_id)
                 .await?
-    {
-        return Ok(envelope);
+        {
+            return Ok(envelope);
+        }
+        anyhow::ensure!(
+            !state.db_replay_export_require_object_refs,
+            "missing active submitted envelope object ref for replay export"
+        );
     }
     Ok(TraceEnvelopeBodyRead {
         envelope: read_envelope_by_record(state, record)?,
@@ -6905,6 +6919,24 @@ mod tests {
         test_state_with_options(root, db_mirror, None, false, false, true, false)
     }
 
+    fn test_state_with_db_replay_export_reads_require_object_refs(
+        root: PathBuf,
+        db_mirror: Option<Arc<dyn Database>>,
+    ) -> Arc<AppState> {
+        test_state_with_options_policies_and_export_guardrails(
+            root,
+            db_mirror,
+            None,
+            false,
+            false,
+            true,
+            true,
+            false,
+            BTreeMap::new(),
+            false,
+        )
+    }
+
     fn test_state_with_options(
         root: PathBuf,
         db_mirror: Option<Arc<dyn Database>>,
@@ -6943,6 +6975,7 @@ mod tests {
             db_contributor_reads,
             db_reviewer_reads,
             db_replay_export_reads,
+            false,
             db_audit_reads,
             tenant_policies,
             false,
@@ -6954,6 +6987,7 @@ mod tests {
             root,
             None,
             None,
+            false,
             false,
             false,
             false,
@@ -6970,6 +7004,7 @@ mod tests {
         db_contributor_reads: bool,
         db_reviewer_reads: bool,
         db_replay_export_reads: bool,
+        db_replay_export_require_object_refs: bool,
         db_audit_reads: bool,
         tenant_policies: BTreeMap<String, TenantSubmissionPolicy>,
         require_export_guardrails: bool,
@@ -6998,6 +7033,7 @@ mod tests {
             db_contributor_reads,
             db_reviewer_reads,
             db_replay_export_reads,
+            db_replay_export_require_object_refs,
             db_audit_reads,
             require_export_guardrails,
             artifact_store,
@@ -9594,6 +9630,85 @@ mod tests {
         assert_eq!(export.items[0].submission_id, submission_id);
         assert_eq!(export.items[0].required_tools, vec!["shell"]);
         assert!(export.items[0].canonical_summary_hash.is_some());
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn replay_export_can_require_active_db_object_ref_for_body_reads() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-mirror-require-object-ref.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let submit_state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.replay.replayable = true;
+        envelope.replay.required_tools.push("shell".to_string());
+        let submission_id = envelope.submission_id;
+
+        let Json(receipt) =
+            submit_trace_handler(State(submit_state), auth_headers("token-a"), Json(envelope))
+                .await
+                .expect("submission dual-writes to DB mirror");
+        assert_eq!(receipt.status, "accepted");
+
+        let invalidation_counts = db
+            .invalidate_trace_submission_artifacts(
+                "tenant-a",
+                submission_id,
+                StorageTraceDerivedStatus::Current,
+            )
+            .await
+            .expect("invalidate submitted envelope object ref");
+        assert_eq!(invalidation_counts.object_refs_invalidated, 1);
+
+        let fallback_state =
+            test_state_with_db_replay_export_reads(temp.path().to_path_buf(), Some(db.clone()));
+        let Json(fallback_export) = dataset_replay_handler(
+            State(fallback_state),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("fallback_without_object_ref".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("compatibility mode can fall back to file-backed envelope body");
+        assert_eq!(fallback_export.item_count, 1);
+        assert_eq!(fallback_export.items[0].submission_id, submission_id);
+        assert_eq!(fallback_export.items[0].object_ref_id, None);
+
+        let fail_closed_state = test_state_with_db_replay_export_reads_require_object_refs(
+            temp.path().to_path_buf(),
+            Some(db),
+        );
+        let error = dataset_replay_handler(
+            State(fail_closed_state),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("require_object_ref".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect_err("missing active DB object ref prevents replay body read");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[cfg(feature = "libsql")]
