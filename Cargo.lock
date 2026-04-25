@@ -4064,6 +4064,7 @@ dependencies = [
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_resources",
+ "ironclaw_scripts",
  "ironclaw_wasm",
  "serde_json",
  "tempfile",
@@ -4093,6 +4094,18 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "ironclaw_scripts"
+version = "0.1.0"
+dependencies = [
+ "ironclaw_extensions",
+ "ironclaw_host_api",
+ "ironclaw_resources",
+ "rust_decimal_macros",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
