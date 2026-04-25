@@ -124,7 +124,34 @@ Tenant/user scope still comes from `ExecutionContext.resource_scope`, and all pe
 
 ---
 
-## 5. Current non-goals
+## 5. Live example
+
+A non-Docker live example is available at:
+
+```text
+crates/ironclaw_host_runtime/examples/reborn_host_runtime.rs
+```
+
+Run it with:
+
+```bash
+cargo run -p ironclaw_host_runtime --example reborn_host_runtime
+```
+
+The example uses an in-process `ScriptBackend` with a manifest-declared script capability so it can demonstrate the full composition path without requiring Docker:
+
+```text
+HostRuntimeServices
+  -> RuntimeDispatcher
+  -> CapabilityHost::spawn_json(...)
+  -> ProcessServices background manager
+  -> ScriptRuntime + in-process backend
+  -> ProcessHost::await_result/output(...)
+```
+
+---
+
+## 6. Current non-goals
 
 This slice does not implement:
 
