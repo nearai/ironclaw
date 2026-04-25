@@ -1,0 +1,160 @@
+name: Pilot Linux Artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Branch, tag, or commit SHA to build
+        required: true
+        type: string
+      release_tag:
+        description: GitHub release tag to create or update
+        required: true
+        type: string
+      cargo_features:
+        description: Comma-separated Cargo features to enable
+        required: true
+        default: postgres,html-to-markdown,matrix-e2ee
+        type: string
+      target:
+        description: Rust target triple
+        required: true
+        default: x86_64-unknown-linux-gnu
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pilot-linux-artifact-${{ inputs.release_tag }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build pilot artifact
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out requested source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ inputs.target }}
+
+      - name: Cache Rust build outputs
+        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: pilot-${{ inputs.target }}-${{ inputs.cargo_features }}
+
+      - name: Build IronClaw
+        run: |
+          cargo build \
+            --locked \
+            --release \
+            --no-default-features \
+            --target "${{ inputs.target }}" \
+            --features "${{ inputs.cargo_features }}"
+
+      - name: Package release artifact
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SHORT_SHA="$(git rev-parse --short=12 HEAD)"
+          ARCHIVE_NAME="ironclaw-${SHORT_SHA}-${{ inputs.target }}.tar.gz"
+          DIST_DIR="$RUNNER_TEMP/pilot-dist"
+          STAGE_DIR="$DIST_DIR/stage"
+          mkdir -p "$STAGE_DIR"
+
+          cp "target/${{ inputs.target }}/release/ironclaw" "$STAGE_DIR/ironclaw"
+          chmod 0755 "$STAGE_DIR/ironclaw"
+
+          cat > "$STAGE_DIR/BUILD-INFO.txt" <<EOF
+          source_ref=${{ inputs.source_ref }}
+          source_sha=$(git rev-parse HEAD)
+          release_tag=${{ inputs.release_tag }}
+          cargo_features=${{ inputs.cargo_features }}
+          target=${{ inputs.target }}
+          built_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          EOF
+
+          tar czf "$DIST_DIR/$ARCHIVE_NAME" -C "$STAGE_DIR" ironclaw BUILD-INFO.txt
+          sha256sum "$DIST_DIR/$ARCHIVE_NAME" > "$DIST_DIR/$ARCHIVE_NAME.sha256"
+
+          echo "archive_name=$ARCHIVE_NAME" >> "$GITHUB_OUTPUT"
+          echo "archive_path=$DIST_DIR/$ARCHIVE_NAME" >> "$GITHUB_OUTPUT"
+          echo "checksum_path=$DIST_DIR/$ARCHIVE_NAME.sha256" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "download_url=https://github.com/${{ github.repository }}/releases/download/${{ inputs.release_tag }}/$ARCHIVE_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pilot-linux-artifact-${{ steps.package.outputs.archive_name }}
+          path: |
+            ${{ steps.package.outputs.archive_path }}
+            ${{ steps.package.outputs.checksum_path }}
+          retention-days: 30
+
+      - name: Create or update prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_SHA: ${{ steps.package.outputs.source_sha }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          CARGO_FEATURES: ${{ inputs.cargo_features }}
+          TARGET: ${{ inputs.target }}
+          ARCHIVE_PATH: ${{ steps.package.outputs.archive_path }}
+          CHECKSUM_PATH: ${{ steps.package.outputs.checksum_path }}
+          ARCHIVE_NAME: ${{ steps.package.outputs.archive_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          NOTES_FILE="$RUNNER_TEMP/pilot-release-notes.md"
+          {
+            echo "Pilot Linux build artifact for branch/ref deployment."
+            echo
+            echo "- source ref: \`$SOURCE_REF\`"
+            echo "- source sha: \`$SOURCE_SHA\`"
+            echo "- target: \`$TARGET\`"
+            echo "- cargo features: \`$CARGO_FEATURES\`"
+          } > "$NOTES_FILE"
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --target "$SOURCE_SHA" \
+              --title "Pilot artifact $RELEASE_TAG" \
+              --notes-file "$NOTES_FILE" \
+              --prerelease
+            gh release upload "$RELEASE_TAG" "$ARCHIVE_PATH" "$CHECKSUM_PATH" --clobber
+          else
+            gh release create "$RELEASE_TAG" \
+              --target "$SOURCE_SHA" \
+              --title "Pilot artifact $RELEASE_TAG" \
+              --notes-file "$NOTES_FILE" \
+              --prerelease \
+              "$ARCHIVE_PATH" \
+              "$CHECKSUM_PATH"
+          fi
+
+      - name: Summary
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          SOURCE_SHA: ${{ steps.package.outputs.source_sha }}
+          DOWNLOAD_URL: ${{ steps.package.outputs.download_url }}
+        run: |
+          {
+            echo "## Pilot Linux Artifact"
+            echo
+            echo "- source ref: \`${SOURCE_REF}\`"
+            echo "- source sha: \`${SOURCE_SHA}\`"
+            echo "- release tag: \`${RELEASE_TAG}\`"
+            echo "- download URL: \`${DOWNLOAD_URL}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
