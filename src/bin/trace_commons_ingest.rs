@@ -41,7 +41,11 @@ use ironclaw::trace_corpus_storage::{
     TraceObjectRefWrite as StorageTraceObjectRefWrite,
     TraceSubmissionRecord as StorageTraceSubmissionRecord,
     TraceSubmissionWrite as StorageTraceSubmissionWrite,
-    TraceTombstoneWrite as StorageTraceTombstoneWrite, TraceWorkerKind as StorageTraceWorkerKind,
+    TraceTombstoneWrite as StorageTraceTombstoneWrite,
+    TraceVectorEntrySourceProjection as StorageTraceVectorEntrySourceProjection,
+    TraceVectorEntryStatus as StorageTraceVectorEntryStatus,
+    TraceVectorEntryWrite as StorageTraceVectorEntryWrite,
+    TraceWorkerKind as StorageTraceWorkerKind,
 };
 use secrecy::SecretString;
 use serde::de::DeserializeOwned;
@@ -1247,6 +1251,8 @@ struct TraceMaintenanceRequest {
     dry_run: bool,
     #[serde(default)]
     backfill_db_mirror: bool,
+    #[serde(default)]
+    index_vectors: bool,
     #[serde(default = "default_true")]
     prune_export_cache: bool,
     #[serde(default)]
@@ -2261,10 +2267,15 @@ async fn mirror_revocation_to_db(
         )
         .await
         .context("failed to mirror trace artifact invalidation")?;
+    let vector_entries_invalidated = db
+        .invalidate_trace_vector_entries_for_submission(&tenant.tenant_id, submission_id)
+        .await
+        .context("failed to mirror trace vector invalidation")?;
 
     if let Some(record) = record
         && (invalidation_counts.object_refs_invalidated > 0
-            || invalidation_counts.derived_records_invalidated > 0)
+            || invalidation_counts.derived_records_invalidated > 0
+            || vector_entries_invalidated > 0)
     {
         let mut action_counts = BTreeMap::new();
         action_counts.insert(
@@ -2278,6 +2289,10 @@ async fn mirror_revocation_to_db(
             invalidation_counts
                 .derived_records_invalidated
                 .min(u64::from(u32::MAX)) as u32,
+        );
+        action_counts.insert(
+            "vector_entries_invalidated".to_string(),
+            vector_entries_invalidated.min(u64::from(u32::MAX)) as u32,
         );
         db.append_trace_audit_event(StorageTraceAuditEventWrite {
             audit_event_id: deterministic_trace_uuid("revocation-artifact-invalidation", record),
@@ -3038,18 +3053,51 @@ async fn run_maintenance(
         request.dry_run,
     )
     .await?;
+    let vector_entries_indexed =
+        index_vector_metadata_from_db(state, tenant, request.index_vectors, request.dry_run)
+            .await?;
 
-    let audit_event = TraceCommonsAuditEvent::maintenance(
-        tenant,
-        &purpose,
-        request.dry_run,
+    let maintenance_counts = TraceMaintenanceAuditCounts {
         records_marked_revoked,
         derived_marked_revoked,
         export_cache_files_pruned,
         db_mirror_backfilled,
-    );
+        vector_entries_indexed,
+    };
+    let audit_event =
+        TraceCommonsAuditEvent::maintenance(tenant, &purpose, request.dry_run, maintenance_counts);
     let audit_event_id = audit_event.event_id;
-    append_audit_event(&state.root, &tenant.tenant_id, audit_event)?;
+    append_audit_event_with_db_mirror(
+        state,
+        tenant,
+        audit_event,
+        StorageTraceAuditAction::Retain,
+        StorageTraceAuditSafeMetadata::Maintenance {
+            dry_run: request.dry_run,
+            action_counts: maintenance_counts.action_counts(),
+        },
+    )
+    .await?;
+    if request.index_vectors {
+        append_audit_event_with_db_mirror(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::vector_index(tenant, vector_entries_indexed, request.dry_run),
+            StorageTraceAuditAction::VectorIndex,
+            StorageTraceAuditSafeMetadata::Maintenance {
+                dry_run: request.dry_run,
+                action_counts: {
+                    let mut counts = BTreeMap::new();
+                    counts.insert(
+                        "vector_entries_indexed".to_string(),
+                        vector_entries_indexed.min(u32::MAX as usize) as u32,
+                    );
+                    counts
+                },
+            },
+        )
+        .await?;
+    }
 
     Ok(TraceMaintenanceResponse {
         tenant_id: tenant.tenant_id.clone(),
@@ -3062,6 +3110,7 @@ async fn run_maintenance(
         derived_marked_revoked,
         export_cache_files_pruned,
         db_mirror_backfilled,
+        vector_entries_indexed,
     })
 }
 
@@ -3118,6 +3167,161 @@ async fn backfill_db_mirror_from_files(
         backfilled += 1;
     }
     Ok(backfilled)
+}
+
+async fn index_vector_metadata_from_db(
+    state: &AppState,
+    tenant: &TenantAuth,
+    enabled: bool,
+    dry_run: bool,
+) -> anyhow::Result<usize> {
+    if !enabled {
+        return Ok(0);
+    }
+    let db = state
+        .db_mirror
+        .as_ref()
+        .context("Trace Commons vector indexing requires TRACE_COMMONS_DB_DUAL_WRITE")?;
+    let submissions = db
+        .list_trace_submissions(&tenant.tenant_id)
+        .await
+        .context("failed to list trace submissions for vector indexing")?;
+    let accepted_submission_ids = submissions
+        .into_iter()
+        .filter(|record| record.status == StorageTraceCorpusStatus::Accepted)
+        .filter(|record| record.revoked_at.is_none() && record.purged_at.is_none())
+        .map(|record| record.submission_id)
+        .collect::<BTreeSet<_>>();
+    let derived_records = db
+        .list_trace_derived_records(&tenant.tenant_id)
+        .await
+        .context("failed to list trace derived records for vector indexing")?;
+    let active_vector_ids = db
+        .list_trace_vector_entries(&tenant.tenant_id)
+        .await
+        .context("failed to list trace vector entries for vector indexing")?
+        .into_iter()
+        .filter(|entry| entry.status == StorageTraceVectorEntryStatus::Active)
+        .map(|entry| entry.vector_entry_id)
+        .collect::<BTreeSet<_>>();
+
+    let eligible = derived_records
+        .iter()
+        .filter(|record| record.status == StorageTraceDerivedStatus::Current)
+        .filter(|record| accepted_submission_ids.contains(&record.submission_id))
+        .filter(|record| record.canonical_summary_hash.is_some())
+        .collect::<Vec<_>>();
+
+    let mut indexed = 0usize;
+    for record in &eligible {
+        let Some(source_hash) = record.canonical_summary_hash.clone() else {
+            continue;
+        };
+        let vector_entry_id = deterministic_vector_entry_uuid(
+            &tenant.tenant_id,
+            record.submission_id,
+            record.derived_id,
+            &source_hash,
+        );
+        if active_vector_ids.contains(&vector_entry_id) {
+            continue;
+        }
+        indexed += 1;
+        if dry_run {
+            continue;
+        }
+        let nearest_trace_ids = eligible
+            .iter()
+            .filter(|candidate| candidate.submission_id != record.submission_id)
+            .filter(|candidate| candidate.canonical_summary_hash.as_ref() == Some(&source_hash))
+            .map(|candidate| candidate.trace_id.to_string())
+            .take(5)
+            .collect::<Vec<_>>();
+        let duplicate_score = if nearest_trace_ids.is_empty() {
+            record.duplicate_score.unwrap_or_default()
+        } else {
+            1.0
+        };
+        let novelty_score = if nearest_trace_ids.is_empty() {
+            record.novelty_score.unwrap_or(0.5)
+        } else {
+            0.1
+        };
+        db.upsert_trace_vector_entry(StorageTraceVectorEntryWrite {
+            tenant_id: tenant.tenant_id.clone(),
+            submission_id: record.submission_id,
+            derived_id: record.derived_id,
+            vector_entry_id,
+            vector_store: "trace_commons_metadata_precheck".to_string(),
+            embedding_model: "canonical-summary-hash-v1".to_string(),
+            embedding_dimension: 1,
+            embedding_version: "trace_commons_vector_metadata_v1".to_string(),
+            source_projection: StorageTraceVectorEntrySourceProjection::CanonicalSummary,
+            source_hash: source_hash.clone(),
+            status: StorageTraceVectorEntryStatus::Active,
+            nearest_trace_ids,
+            cluster_id: record
+                .cluster_id
+                .clone()
+                .or_else(|| Some(format!("summary:{}", hash_fragment(&source_hash, 16)))),
+            duplicate_score: Some(duplicate_score),
+            novelty_score: Some(novelty_score),
+            indexed_at: Some(Utc::now()),
+            invalidated_at: None,
+            deleted_at: None,
+        })
+        .await
+        .context("failed to upsert trace vector entry")?;
+    }
+    Ok(indexed)
+}
+
+fn deterministic_vector_entry_uuid(
+    tenant_id: &str,
+    submission_id: Uuid,
+    derived_id: Uuid,
+    source_hash: &str,
+) -> Uuid {
+    let input = format!(
+        "ironclaw.trace_commons.vector:{tenant_id}:{submission_id}:{derived_id}:{source_hash}"
+    );
+    Uuid::new_v5(&Uuid::NAMESPACE_URL, input.as_bytes())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TraceMaintenanceAuditCounts {
+    records_marked_revoked: usize,
+    derived_marked_revoked: usize,
+    export_cache_files_pruned: usize,
+    db_mirror_backfilled: usize,
+    vector_entries_indexed: usize,
+}
+
+impl TraceMaintenanceAuditCounts {
+    fn action_counts(self) -> BTreeMap<String, u32> {
+        let mut counts = BTreeMap::new();
+        counts.insert(
+            "records_marked_revoked".to_string(),
+            self.records_marked_revoked.min(u32::MAX as usize) as u32,
+        );
+        counts.insert(
+            "derived_marked_revoked".to_string(),
+            self.derived_marked_revoked.min(u32::MAX as usize) as u32,
+        );
+        counts.insert(
+            "export_cache_files_pruned".to_string(),
+            self.export_cache_files_pruned.min(u32::MAX as usize) as u32,
+        );
+        counts.insert(
+            "db_mirror_backfilled".to_string(),
+            self.db_mirror_backfilled.min(u32::MAX as usize) as u32,
+        );
+        counts.insert(
+            "vector_entries_indexed".to_string(),
+            self.vector_entries_indexed.min(u32::MAX as usize) as u32,
+        );
+        counts
+    }
 }
 
 fn prune_export_cache_files(
@@ -3216,6 +3420,14 @@ fn tenant_storage_key(tenant_id: &str) -> String {
 fn sha256_prefixed(input: &str) -> String {
     let digest = Sha256::digest(input.as_bytes());
     format!("sha256:{}", hex::encode(digest))
+}
+
+fn hash_fragment(hash: &str, len: usize) -> String {
+    hash.strip_prefix("sha256:")
+        .unwrap_or(hash)
+        .chars()
+        .take(len)
+        .collect()
 }
 
 fn principal_storage_ref(token: &str) -> String {
@@ -3908,6 +4120,7 @@ struct TraceMaintenanceResponse {
     derived_marked_revoked: usize,
     export_cache_files_pruned: usize,
     db_mirror_backfilled: usize,
+    vector_entries_indexed: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -4106,14 +4319,29 @@ impl TraceCommonsAuditEvent {
         }
     }
 
+    fn vector_index(auth: &TenantAuth, vector_entries_indexed: usize, dry_run: bool) -> Self {
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: "vector_index".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: Some(format!(
+                "dry_run={dry_run};vector_entries_indexed={vector_entries_indexed}"
+            )),
+            export_count: Some(vector_entries_indexed),
+            export_id: None,
+        }
+    }
+
     fn maintenance(
         auth: &TenantAuth,
         purpose: &str,
         dry_run: bool,
-        records_marked_revoked: usize,
-        derived_marked_revoked: usize,
-        export_cache_files_pruned: usize,
-        db_mirror_backfilled: usize,
+        counts: TraceMaintenanceAuditCounts,
     ) -> Self {
         Self {
             event_id: Uuid::new_v4(),
@@ -4125,9 +4353,14 @@ impl TraceCommonsAuditEvent {
             actor_role: Some(auth.role),
             actor_principal_ref: Some(auth.principal_ref.clone()),
             reason: Some(format!(
-                "purpose={purpose};dry_run={dry_run};records_marked_revoked={records_marked_revoked};derived_marked_revoked={derived_marked_revoked};export_cache_files_pruned={export_cache_files_pruned};db_mirror_backfilled={db_mirror_backfilled}"
+                "purpose={purpose};dry_run={dry_run};records_marked_revoked={};derived_marked_revoked={};export_cache_files_pruned={};db_mirror_backfilled={};vector_entries_indexed={}",
+                counts.records_marked_revoked,
+                counts.derived_marked_revoked,
+                counts.export_cache_files_pruned,
+                counts.db_mirror_backfilled,
+                counts.vector_entries_indexed
             )),
-            export_count: Some(export_cache_files_pruned),
+            export_count: Some(counts.export_cache_files_pruned),
             export_id: None,
         }
     }
@@ -5359,6 +5592,7 @@ mod tests {
                 purpose: None,
                 dry_run: false,
                 backfill_db_mirror: false,
+                index_vectors: false,
                 prune_export_cache: true,
                 max_export_age_hours: None,
             }),
@@ -5374,6 +5608,7 @@ mod tests {
                 purpose: Some("test_retention".to_string()),
                 dry_run: false,
                 backfill_db_mirror: false,
+                index_vectors: false,
                 prune_export_cache: true,
                 max_export_age_hours: None,
             }),
@@ -5448,6 +5683,7 @@ mod tests {
                 purpose: Some("test_db_backfill".to_string()),
                 dry_run: false,
                 backfill_db_mirror: true,
+                index_vectors: false,
                 prune_export_cache: false,
                 max_export_age_hours: None,
             }),
@@ -5477,6 +5713,69 @@ mod tests {
             .expect("object ref count exists");
         assert_eq!(row.get::<i64>(0).expect("object ref count reads"), 1);
 
+        let Json(vector_response) = maintenance_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_vector_index".to_string()),
+                dry_run: false,
+                backfill_db_mirror: false,
+                index_vectors: true,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+            }),
+        )
+        .await
+        .expect("reviewer can index vector metadata");
+        assert_eq!(vector_response.vector_entries_indexed, 1);
+        let vector_entries = db
+            .list_trace_vector_entries("tenant-a")
+            .await
+            .expect("vector entries read");
+        assert_eq!(vector_entries.len(), 1);
+        assert_eq!(vector_entries[0].submission_id, submission_id);
+        assert_eq!(
+            vector_entries[0].status,
+            StorageTraceVectorEntryStatus::Active
+        );
+        assert_eq!(
+            vector_entries[0].source_projection,
+            StorageTraceVectorEntrySourceProjection::CanonicalSummary
+        );
+
+        let Json(vector_idempotent_response) = maintenance_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_vector_index_idempotent".to_string()),
+                dry_run: false,
+                backfill_db_mirror: false,
+                index_vectors: true,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+            }),
+        )
+        .await
+        .expect("vector indexing can be rerun");
+        assert_eq!(vector_idempotent_response.vector_entries_indexed, 0);
+
+        let revoke_status = revoke_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            AxumPath(submission_id),
+        )
+        .await
+        .expect("contributor can revoke indexed trace");
+        assert_eq!(revoke_status, StatusCode::NO_CONTENT);
+        let vector_entries = db
+            .list_trace_vector_entries("tenant-a")
+            .await
+            .expect("invalidated vector entries read");
+        assert_eq!(
+            vector_entries[0].status,
+            StorageTraceVectorEntryStatus::Invalidated
+        );
+
         let Json(second_response) = maintenance_handler(
             State(state),
             auth_headers("review-token-a"),
@@ -5484,6 +5783,7 @@ mod tests {
                 purpose: Some("test_db_backfill_idempotent".to_string()),
                 dry_run: false,
                 backfill_db_mirror: true,
+                index_vectors: false,
                 prune_export_cache: false,
                 max_export_age_hours: None,
             }),
