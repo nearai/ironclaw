@@ -37,6 +37,7 @@ use ironclaw::trace_corpus_storage::{
     TraceDerivedRecord as StorageTraceDerivedRecord,
     TraceDerivedRecordWrite as StorageTraceDerivedRecordWrite,
     TraceDerivedStatus as StorageTraceDerivedStatus,
+    TraceExportManifestRecord as StorageTraceExportManifestRecord,
     TraceExportManifestWrite as StorageTraceExportManifestWrite,
     TraceObjectArtifactKind as StorageTraceObjectArtifactKind,
     TraceObjectRefWrite as StorageTraceObjectRefWrite,
@@ -276,6 +277,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(append_credit_event_handler),
         )
         .route("/v1/datasets/replay", get(dataset_replay_handler))
+        .route(
+            "/v1/datasets/replay/manifests",
+            get(replay_export_manifests_handler),
+        )
         .route("/v1/benchmarks/convert", post(benchmark_convert_handler))
         .route(
             "/v1/ranker/training-candidates",
@@ -1062,6 +1067,18 @@ async fn dataset_replay_handler(
     }))
 }
 
+async fn replay_export_manifests_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<TraceExportManifestSummary>>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_reviewer(&tenant)?;
+    let manifests = read_replay_export_manifest_summaries(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(manifests))
+}
+
 #[derive(Debug, Deserialize)]
 struct BenchmarkConversionRequest {
     limit: Option<usize>,
@@ -1701,6 +1718,26 @@ async fn read_replay_export_metadata_view(
         records: read_all_submission_records(&state.root, &tenant.tenant_id)?,
         derived: read_all_derived_records(&state.root, &tenant.tenant_id)?,
     })
+}
+
+async fn read_replay_export_manifest_summaries(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<Vec<TraceExportManifestSummary>> {
+    if let Some(db) = state.db_mirror.as_ref() {
+        return Ok(db
+            .list_trace_export_manifests(&tenant.tenant_id)
+            .await
+            .context("failed to read Trace Commons export manifests from DB mirror")?
+            .into_iter()
+            .map(TraceExportManifestSummary::from_storage_record)
+            .collect());
+    }
+
+    Ok(read_all_export_manifests(&state.root, &tenant.tenant_id)?
+        .into_iter()
+        .map(TraceExportManifestSummary::from_replay_manifest)
+        .collect())
 }
 
 async fn read_reviewer_metadata_view_from_db(
@@ -3269,6 +3306,37 @@ fn read_export_manifest(path: &Path) -> anyhow::Result<TraceReplayExportManifest
     })
 }
 
+fn read_all_export_manifests(
+    root: &Path,
+    tenant_id: &str,
+) -> anyhow::Result<Vec<TraceReplayExportManifest>> {
+    let tenant_key = tenant_storage_key(tenant_id);
+    let exports_dir = root.join("tenants").join(tenant_key).join("exports");
+    if !exports_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut manifests = Vec::new();
+    for entry in std::fs::read_dir(&exports_dir)
+        .with_context(|| format!("failed to read exports dir {}", exports_dir.display()))?
+    {
+        let entry = entry.context("failed to read export dir entry")?;
+        if !entry
+            .file_type()
+            .context("failed to inspect export dir entry")?
+            .is_dir()
+        {
+            continue;
+        }
+        let manifest_path = entry.path().join("manifest.json");
+        if manifest_path.exists() {
+            manifests.push(read_export_manifest(&manifest_path)?);
+        }
+    }
+    manifests.sort_by_key(|manifest| manifest.generated_at);
+    Ok(manifests)
+}
+
 fn write_benchmark_artifact(
     root: &Path,
     tenant_id: &str,
@@ -4295,6 +4363,58 @@ struct TraceReplayDatasetExport {
     item_count: usize,
     manifest: TraceReplayExportManifest,
     items: Vec<TraceReplayDatasetItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceExportManifestSummary {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    export_manifest_id: Uuid,
+    artifact_kind: StorageTraceObjectArtifactKind,
+    purpose_code: Option<String>,
+    audit_event_id: Option<Uuid>,
+    source_submission_ids: Vec<Uuid>,
+    source_submission_ids_hash: String,
+    item_count: u32,
+    generated_at: DateTime<Utc>,
+    invalidated_at: Option<DateTime<Utc>>,
+    deleted_at: Option<DateTime<Utc>>,
+}
+
+impl TraceExportManifestSummary {
+    fn from_storage_record(record: StorageTraceExportManifestRecord) -> Self {
+        Self {
+            tenant_storage_ref: tenant_storage_ref(&record.tenant_id),
+            tenant_id: record.tenant_id,
+            export_manifest_id: record.export_manifest_id,
+            artifact_kind: record.artifact_kind,
+            purpose_code: record.purpose_code,
+            audit_event_id: record.audit_event_id,
+            source_submission_ids: record.source_submission_ids,
+            source_submission_ids_hash: record.source_submission_ids_hash,
+            item_count: record.item_count,
+            generated_at: record.generated_at,
+            invalidated_at: record.invalidated_at,
+            deleted_at: record.deleted_at,
+        }
+    }
+
+    fn from_replay_manifest(manifest: TraceReplayExportManifest) -> Self {
+        Self {
+            tenant_storage_ref: manifest.tenant_storage_ref,
+            tenant_id: manifest.tenant_id,
+            export_manifest_id: manifest.export_id,
+            artifact_kind: StorageTraceObjectArtifactKind::ExportArtifact,
+            purpose_code: Some(manifest.purpose),
+            audit_event_id: Some(manifest.audit_event_id),
+            item_count: manifest.source_submission_ids.len().min(u32::MAX as usize) as u32,
+            source_submission_ids: manifest.source_submission_ids,
+            source_submission_ids_hash: manifest.source_submission_ids_hash,
+            generated_at: manifest.generated_at,
+            invalidated_at: None,
+            deleted_at: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -7403,6 +7523,90 @@ mod tests {
         assert_eq!(manifests[0].export_manifest_id, export.export_id);
         assert!(manifests[0].invalidated_at.is_some());
         assert!(manifests[0].deleted_at.is_none());
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn reviewer_can_list_db_export_manifest_metadata() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-export-manifest-list.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission dual-writes to DB mirror");
+        let Json(export) = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("manifest_listing".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("dataset export succeeds");
+
+        let Json(manifests) =
+            replay_export_manifests_handler(State(state.clone()), auth_headers("review-token-a"))
+                .await
+                .expect("reviewer can list export manifests");
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].export_manifest_id, export.export_id);
+        assert_eq!(
+            manifests[0].purpose_code.as_deref(),
+            Some("manifest_listing")
+        );
+        assert_eq!(manifests[0].source_submission_ids, vec![submission_id]);
+        assert_eq!(
+            manifests[0].source_submission_ids_hash,
+            export.manifest.source_submission_ids_hash
+        );
+        assert_eq!(manifests[0].item_count, 1);
+        assert!(manifests[0].invalidated_at.is_none());
+
+        let contributor_error =
+            replay_export_manifests_handler(State(state.clone()), auth_headers("token-a"))
+                .await
+                .expect_err("contributor cannot list export manifests");
+        assert_eq!(contributor_error.0, StatusCode::FORBIDDEN);
+
+        revoke_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            AxumPath(submission_id),
+        )
+        .await
+        .expect("contributor can revoke own trace");
+
+        let Json(manifests) =
+            replay_export_manifests_handler(State(state), auth_headers("review-token-a"))
+                .await
+                .expect("reviewer can list invalidated export manifests");
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].export_manifest_id, export.export_id);
+        assert!(manifests[0].invalidated_at.is_some());
     }
 
     #[cfg(feature = "libsql")]
