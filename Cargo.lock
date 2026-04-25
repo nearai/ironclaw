@@ -3996,6 +3996,7 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_mcp",
  "ironclaw_resources",
+ "ironclaw_run_state",
  "ironclaw_wasm",
  "serde_json",
  "tempfile",
@@ -4143,6 +4144,14 @@ dependencies = [
  "ironclaw_host_api",
  "rust_decimal",
  "rust_decimal_macros",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ironclaw_run_state"
+version = "0.1.0"
+dependencies = [
+ "ironclaw_host_api",
  "thiserror 2.0.18",
 ]
 
