@@ -96,6 +96,11 @@ pub enum CapabilityInvocationError {
         capability: CapabilityId,
         status: ApprovalStatus,
     },
+    #[error("capability {capability} approval path requires {store}")]
+    ApprovalStoreMissing {
+        capability: CapabilityId,
+        store: &'static str,
+    },
     #[error("capability {capability} approval lease is missing")]
     ApprovalLeaseMissing { capability: CapabilityId },
     #[error("capability {capability} resume requires {store}")]
@@ -276,15 +281,31 @@ where
                     approval.invocation_fingerprint = Some(invocation_fingerprint.clone());
                 }
 
-                if let Some(approval_requests) = self.approval_requests {
-                    approval_requests
-                        .save_pending(scope.clone(), approval.clone())
-                        .await?;
-                }
-                if let Some(run_state) = self.run_state {
-                    run_state
-                        .block_approval(&scope, invocation_id, approval)
-                        .await?;
+                match (self.run_state, self.approval_requests) {
+                    (Some(run_state), Some(approval_requests)) => {
+                        approval_requests
+                            .save_pending(scope.clone(), approval.clone())
+                            .await?;
+                        run_state
+                            .block_approval(&scope, invocation_id, approval)
+                            .await?;
+                    }
+                    (Some(run_state), None) => {
+                        run_state
+                            .fail(&scope, invocation_id, "ApprovalStoreMissing".to_string())
+                            .await?;
+                        return Err(CapabilityInvocationError::ApprovalStoreMissing {
+                            capability: request.capability_id,
+                            store: "approval_requests",
+                        });
+                    }
+                    (None, Some(_)) => {
+                        return Err(CapabilityInvocationError::ApprovalStoreMissing {
+                            capability: request.capability_id,
+                            store: "run_state",
+                        });
+                    }
+                    (None, None) => {}
                 }
                 return Err(CapabilityInvocationError::AuthorizationRequiresApproval {
                     capability: request.capability_id,
@@ -442,10 +463,23 @@ where
                 capability: request.capability_id,
             });
         };
+        let claimed_lease =
+            match capability_leases.claim(&scope, lease.grant.id, &invocation_fingerprint) {
+                Ok(lease) => lease,
+                Err(error) => {
+                    fail_run(run_state, &scope, invocation_id, "ApprovalLeaseClaim").await?;
+                    return Err(CapabilityInvocationError::Lease(Box::new(error)));
+                }
+            };
+        let mut authorized_context = request.context.clone();
+        authorized_context
+            .grants
+            .grants
+            .push(claimed_lease.grant.clone());
 
         match self
             .authorizer
-            .authorize_dispatch(&request.context, descriptor, &request.estimate)
+            .authorize_dispatch(&authorized_context, descriptor, &request.estimate)
         {
             Decision::Allow { .. } => {}
             Decision::Deny { reason } => {
@@ -469,7 +503,7 @@ where
             }
         }
 
-        if let Err(error) = capability_leases.consume(&scope, lease.grant.id) {
+        if let Err(error) = capability_leases.consume(&scope, claimed_lease.grant.id) {
             fail_run(run_state, &scope, invocation_id, "LeaseConsumption").await?;
             return Err(CapabilityInvocationError::Lease(Box::new(error)));
         }

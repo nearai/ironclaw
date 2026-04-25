@@ -72,6 +72,7 @@ impl CapabilityLease {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilityLeaseStatus {
     Active,
+    Claimed,
     Consumed,
     Revoked,
 }
@@ -84,6 +85,8 @@ pub enum CapabilityLeaseError {
     ExpiredLease { lease_id: CapabilityGrantId },
     #[error("capability lease {lease_id} has no remaining invocations")]
     ExhaustedLease { lease_id: CapabilityGrantId },
+    #[error("capability lease {lease_id} fingerprint does not match")]
+    FingerprintMismatch { lease_id: CapabilityGrantId },
     #[error("capability lease {lease_id} is not active: {status:?}")]
     InactiveLease {
         lease_id: CapabilityGrantId,
@@ -100,6 +103,12 @@ pub trait CapabilityLeaseStore: Send + Sync {
         lease_id: CapabilityGrantId,
     ) -> Result<CapabilityLease, CapabilityLeaseError>;
     fn get(&self, scope: &ResourceScope, lease_id: CapabilityGrantId) -> Option<CapabilityLease>;
+    fn claim(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<CapabilityLease, CapabilityLeaseError>;
     fn consume(
         &self,
         scope: &ResourceScope,
@@ -110,6 +119,7 @@ pub trait CapabilityLeaseStore: Send + Sync {
     fn active_grants_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityGrant> {
         self.active_leases_for_context(context)
             .into_iter()
+            .filter(|lease| lease.invocation_fingerprint.is_none())
             .map(|lease| lease.grant)
             .collect()
     }
@@ -161,6 +171,22 @@ impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
             .cloned()
     }
 
+    fn claim(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let mut leases = self.leases_guard();
+        let lease = leases
+            .get_mut(&CapabilityLeaseKey::new(scope, lease_id))
+            .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
+
+        ensure_claimable(lease, invocation_fingerprint)?;
+        lease.status = CapabilityLeaseStatus::Claimed;
+        Ok(lease.clone())
+    }
+
     fn consume(
         &self,
         scope: &ResourceScope,
@@ -171,12 +197,17 @@ impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
             .get_mut(&CapabilityLeaseKey::new(scope, lease_id))
             .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
 
+        let was_claimed = lease.status == CapabilityLeaseStatus::Claimed;
         ensure_consumable(lease)?;
         if let Some(remaining) = lease.grant.constraints.max_invocations.as_mut() {
             *remaining -= 1;
             if *remaining == 0 {
                 lease.status = CapabilityLeaseStatus::Consumed;
+            } else if was_claimed {
+                lease.status = CapabilityLeaseStatus::Active;
             }
+        } else if was_claimed {
+            lease.status = CapabilityLeaseStatus::Active;
         }
         Ok(lease.clone())
     }
@@ -315,10 +346,27 @@ fn lease_is_authorizing(lease: &CapabilityLease, context: &ExecutionContext) -> 
         && lease.grant.constraints.max_invocations != Some(0)
 }
 
+fn ensure_claimable(
+    lease: &CapabilityLease,
+    invocation_fingerprint: &InvocationFingerprint,
+) -> Result<(), CapabilityLeaseError> {
+    let lease_id = lease.grant.id;
+    if lease.status != CapabilityLeaseStatus::Active {
+        return Err(CapabilityLeaseError::InactiveLease {
+            lease_id,
+            status: lease.status,
+        });
+    }
+    if lease.invocation_fingerprint.as_ref() != Some(invocation_fingerprint) {
+        return Err(CapabilityLeaseError::FingerprintMismatch { lease_id });
+    }
+    ensure_not_expired_or_exhausted(lease)
+}
+
 fn ensure_consumable(lease: &CapabilityLease) -> Result<(), CapabilityLeaseError> {
     let lease_id = lease.grant.id;
     match lease.status {
-        CapabilityLeaseStatus::Active => {}
+        CapabilityLeaseStatus::Active | CapabilityLeaseStatus::Claimed => {}
         CapabilityLeaseStatus::Consumed => {
             return Err(CapabilityLeaseError::ExhaustedLease { lease_id });
         }
@@ -330,6 +378,11 @@ fn ensure_consumable(lease: &CapabilityLease) -> Result<(), CapabilityLeaseError
         }
     }
 
+    ensure_not_expired_or_exhausted(lease)
+}
+
+fn ensure_not_expired_or_exhausted(lease: &CapabilityLease) -> Result<(), CapabilityLeaseError> {
+    let lease_id = lease.grant.id;
     if lease_is_expired(lease) {
         return Err(CapabilityLeaseError::ExpiredLease { lease_id });
     }

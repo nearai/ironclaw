@@ -96,6 +96,83 @@ async fn run_state_transitions_fail_for_unknown_invocation() {
 }
 
 #[tokio::test]
+async fn in_memory_run_state_rejects_duplicate_invocation_in_same_tenant_user() {
+    let store = InMemoryRunStateStore::new();
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+
+    store
+        .start(RunStart {
+            invocation_id,
+            capability_id: CapabilityId::new("echo.one").unwrap(),
+            scope: scope.clone(),
+        })
+        .await
+        .unwrap();
+    let err = store
+        .start(RunStart {
+            invocation_id,
+            capability_id: CapabilityId::new("echo.two").unwrap(),
+            scope: scope.clone(),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        RunStateError::InvocationAlreadyExists { invocation_id: id } if id == invocation_id
+    ));
+    assert_eq!(
+        store
+            .get(&scope, invocation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .capability_id,
+        CapabilityId::new("echo.one").unwrap()
+    );
+}
+
+#[tokio::test]
+async fn filesystem_run_state_rejects_duplicate_invocation_in_same_tenant_user() {
+    let fs = engine_filesystem();
+    let store = FilesystemRunStateStore::new(&fs);
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+
+    store
+        .start(RunStart {
+            invocation_id,
+            capability_id: CapabilityId::new("echo.one").unwrap(),
+            scope: scope.clone(),
+        })
+        .await
+        .unwrap();
+    let err = store
+        .start(RunStart {
+            invocation_id,
+            capability_id: CapabilityId::new("echo.two").unwrap(),
+            scope: scope.clone(),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        RunStateError::InvocationAlreadyExists { invocation_id: id } if id == invocation_id
+    ));
+    assert_eq!(
+        store
+            .get(&scope, invocation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .capability_id,
+        CapabilityId::new("echo.one").unwrap()
+    );
+}
+
+#[tokio::test]
 async fn in_memory_run_state_allows_same_invocation_id_in_different_tenants() {
     let store = InMemoryRunStateStore::new();
     let invocation_id = InvocationId::new();
