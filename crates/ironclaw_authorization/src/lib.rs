@@ -106,7 +106,13 @@ pub trait CapabilityLeaseStore: Send + Sync {
         lease_id: CapabilityGrantId,
     ) -> Result<CapabilityLease, CapabilityLeaseError>;
     fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease>;
-    fn active_grants_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityGrant>;
+    fn active_leases_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityLease>;
+    fn active_grants_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityGrant> {
+        self.active_leases_for_context(context)
+            .into_iter()
+            .map(|lease| lease.grant)
+            .collect()
+    }
 }
 
 /// In-memory lease store for early Reborn flows and tests.
@@ -186,11 +192,10 @@ impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
         leases
     }
 
-    fn active_grants_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityGrant> {
+    fn active_leases_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityLease> {
         self.leases_for_scope(&context.resource_scope)
             .into_iter()
             .filter(|lease| lease_is_authorizing(lease, context))
-            .map(|lease| lease.grant)
             .collect()
     }
 }

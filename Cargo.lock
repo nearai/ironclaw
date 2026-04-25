@@ -4002,6 +4002,7 @@ name = "ironclaw_capabilities"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "ironclaw_approvals",
  "ironclaw_authorization",
  "ironclaw_dispatcher",
  "ironclaw_extensions",

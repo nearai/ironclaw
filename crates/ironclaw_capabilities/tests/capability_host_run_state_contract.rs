@@ -1,3 +1,4 @@
+use ironclaw_approvals::*;
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
 use ironclaw_dispatcher::*;
@@ -247,6 +248,301 @@ async fn capability_host_rejects_mismatched_approval_fingerprint_without_persist
         record.error_kind.as_deref(),
         Some("InvocationFingerprintMismatch")
     );
+}
+
+#[tokio::test]
+async fn capability_host_resumes_approved_invocation_and_consumes_lease() {
+    let (fs, package) = wasm_package_with_module(json_echo_module());
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    let wasm_runtime = WasmRuntime::for_testing().unwrap();
+    let governor = InMemoryResourceGovernor::new();
+    let dispatcher =
+        RuntimeDispatcher::new(&registry, &fs, &governor).with_wasm_runtime(&wasm_runtime);
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate {
+        concurrency_slots: Some(1),
+        output_bytes: Some(10_000),
+        ..ResourceEstimate::default()
+    };
+    let input = json!({"message": "approved"});
+
+    block_host
+        .invoke_json(CapabilityInvocationRequest {
+            context: context.clone(),
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+        })
+        .await
+        .unwrap_err();
+    let blocked = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    let approval_request_id = blocked.approval_request_id.unwrap();
+    let lease = ApprovalResolver::new(&approval_requests, &leases)
+        .approve_dispatch(
+            &scope,
+            approval_request_id,
+            LeaseApproval {
+                issued_by: Principal::User(scope.user_id.clone()),
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                expires_at: None,
+                max_invocations: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+    let lease_authorizer = LeaseBackedAuthorizer::new(&leases);
+    let resume_host = CapabilityHost::new(&registry, &dispatcher, &lease_authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+
+    let result = resume_host
+        .resume_json(CapabilityResumeRequest {
+            context,
+            approval_request_id,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate,
+            input,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.dispatch.output, json!({"message": "approved"}));
+    assert_eq!(
+        run_state
+            .get(&scope, invocation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        RunStatus::Completed
+    );
+    assert_eq!(
+        leases.get(&scope, lease.grant.id).unwrap().status,
+        CapabilityLeaseStatus::Consumed
+    );
+}
+
+#[tokio::test]
+async fn capability_host_rejects_resume_when_input_fingerprint_differs() {
+    let (fs, package) = wasm_package_with_module(json_echo_module());
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    let wasm_runtime = WasmRuntime::for_testing().unwrap();
+    let governor = InMemoryResourceGovernor::new();
+    let dispatcher =
+        RuntimeDispatcher::new(&registry, &fs, &governor).with_wasm_runtime(&wasm_runtime);
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let approved_input = json!({"message": "approved"});
+    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    block_host
+        .invoke_json(CapabilityInvocationRequest {
+            context: context.clone(),
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: estimate.clone(),
+            input: approved_input,
+        })
+        .await
+        .unwrap_err();
+    let approval_request_id = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .approval_request_id
+        .unwrap();
+    let lease = ApprovalResolver::new(&approval_requests, &leases)
+        .approve_dispatch(
+            &scope,
+            approval_request_id,
+            LeaseApproval {
+                issued_by: Principal::User(scope.user_id.clone()),
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                expires_at: None,
+                max_invocations: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+    let lease_authorizer = LeaseBackedAuthorizer::new(&leases);
+    let resume_host = CapabilityHost::new(&registry, &dispatcher, &lease_authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+
+    let err = resume_host
+        .resume_json(CapabilityResumeRequest {
+            context,
+            approval_request_id,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate,
+            input: json!({"message": "tampered"}),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::ApprovalFingerprintMismatch { .. }
+    ));
+    assert_eq!(
+        leases.get(&scope, lease.grant.id).unwrap().status,
+        CapabilityLeaseStatus::Active
+    );
+    let record = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(record.status, RunStatus::Failed);
+    assert_eq!(
+        record.error_kind.as_deref(),
+        Some("InvocationFingerprintMismatch")
+    );
+}
+
+#[tokio::test]
+async fn capability_host_rejects_resume_when_approval_was_denied() {
+    let (fs, package) = wasm_package_with_module(json_echo_module());
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    let wasm_runtime = WasmRuntime::for_testing().unwrap();
+    let governor = InMemoryResourceGovernor::new();
+    let dispatcher =
+        RuntimeDispatcher::new(&registry, &fs, &governor).with_wasm_runtime(&wasm_runtime);
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    block_host
+        .invoke_json(CapabilityInvocationRequest {
+            context: context.clone(),
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: ResourceEstimate::default(),
+            input: json!({"message": "denied"}),
+        })
+        .await
+        .unwrap_err();
+    let approval_request_id = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .approval_request_id
+        .unwrap();
+    approval_requests
+        .deny(&scope, approval_request_id)
+        .await
+        .unwrap();
+    let lease_authorizer = LeaseBackedAuthorizer::new(&leases);
+    let resume_host = CapabilityHost::new(&registry, &dispatcher, &lease_authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+
+    let err = resume_host
+        .resume_json(CapabilityResumeRequest {
+            context,
+            approval_request_id,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: ResourceEstimate::default(),
+            input: json!({"message": "denied"}),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::ApprovalNotApproved {
+            status: ApprovalStatus::Denied,
+            ..
+        }
+    ));
+    let record = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(record.status, RunStatus::Failed);
+    assert_eq!(record.error_kind.as_deref(), Some("ApprovalDenied"));
+}
+
+#[tokio::test]
+async fn capability_host_rejects_resume_when_no_matching_lease_exists() {
+    let (fs, package) = wasm_package_with_module(json_echo_module());
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    let wasm_runtime = WasmRuntime::for_testing().unwrap();
+    let governor = InMemoryResourceGovernor::new();
+    let dispatcher =
+        RuntimeDispatcher::new(&registry, &fs, &governor).with_wasm_runtime(&wasm_runtime);
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    block_host
+        .invoke_json(CapabilityInvocationRequest {
+            context: context.clone(),
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: ResourceEstimate::default(),
+            input: json!({"message": "approved-no-lease"}),
+        })
+        .await
+        .unwrap_err();
+    let approval_request_id = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .approval_request_id
+        .unwrap();
+    approval_requests
+        .approve(&scope, approval_request_id)
+        .await
+        .unwrap();
+    let lease_authorizer = LeaseBackedAuthorizer::new(&leases);
+    let resume_host = CapabilityHost::new(&registry, &dispatcher, &lease_authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+
+    let err = resume_host
+        .resume_json(CapabilityResumeRequest {
+            context,
+            approval_request_id,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: ResourceEstimate::default(),
+            input: json!({"message": "approved-no-lease"}),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::ApprovalLeaseMissing { .. }
+    ));
+    let record = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(record.status, RunStatus::Failed);
+    assert_eq!(record.error_kind.as_deref(), Some("ApprovalLeaseMissing"));
 }
 
 #[tokio::test]
