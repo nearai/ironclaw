@@ -689,6 +689,7 @@ The architecture is real when:
 - `ProcessCancellationRegistry` lets `ProcessHost::kill` signal scoped cooperative cancellation tokens for background executors without allowing cross-tenant cancellation
 - `ProcessResultStore` records scoped terminal process output/error records; in-memory/dev stores can keep small JSON inline, while filesystem-backed stores write successful JSON output to scoped output refs for reviewable storage hygiene
 - `ProcessServices` composes process store, result store, cancellation registry, host, and background manager wiring so callers do not accidentally split lifecycle/result/cancellation state
+- `CapabilityHost::with_process_services(...)` derives its spawn manager from the same `ProcessServices` bundle while leaving lifecycle/result/output APIs in `ironclaw_processes::ProcessHost`
 - `EventingProcessStore` emits tenant/user-scoped process_started/process_completed/process_failed/process_killed events without making dispatcher process-aware
 - `ResourceManagedProcessStore` reserves resources before process start, records reservation IDs through an internal process reservation handle, reconciles on completion, and releases on failure/kill/start failure
 - `CapabilityDispatcher` request/result/failure contracts live in `ironclaw_host_api`, so `ironclaw_capabilities` does not depend on concrete `ironclaw_dispatcher`

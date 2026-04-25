@@ -19,7 +19,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_processes::{
     ProcessError, ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult,
-    ProcessExecutor, ProcessManager, ProcessRecord, ProcessResourceReservation, ProcessStart,
+    ProcessExecutor, ProcessManager, ProcessRecord, ProcessResourceReservation, ProcessResultStore,
+    ProcessServices, ProcessStart, ProcessStore,
 };
 use ironclaw_run_state::{
     ApprovalRequestStore, ApprovalStatus, RunStart, RunStateError, RunStateStore, RunStatus,
@@ -192,6 +193,20 @@ where
     }
 }
 
+enum ProcessManagerBinding<'a> {
+    Borrowed(&'a dyn ProcessManager),
+    Owned(Arc<dyn ProcessManager>),
+}
+
+impl ProcessManagerBinding<'_> {
+    fn as_process_manager(&self) -> &dyn ProcessManager {
+        match self {
+            Self::Borrowed(process_manager) => *process_manager,
+            Self::Owned(process_manager) => process_manager.as_ref(),
+        }
+    }
+}
+
 /// Host-facing capability invocation service.
 pub struct CapabilityHost<'a, D>
 where
@@ -203,7 +218,7 @@ where
     run_state: Option<&'a dyn RunStateStore>,
     approval_requests: Option<&'a dyn ApprovalRequestStore>,
     capability_leases: Option<&'a dyn CapabilityLeaseStore>,
-    process_manager: Option<&'a dyn ProcessManager>,
+    process_manager: Option<ProcessManagerBinding<'a>>,
 }
 
 impl<'a, D> CapabilityHost<'a, D>
@@ -248,7 +263,23 @@ where
     }
 
     pub fn with_process_manager(mut self, process_manager: &'a dyn ProcessManager) -> Self {
-        self.process_manager = Some(process_manager);
+        self.process_manager = Some(ProcessManagerBinding::Borrowed(process_manager));
+        self
+    }
+
+    pub fn with_process_services<S, R, E>(
+        mut self,
+        services: &ProcessServices<S, R>,
+        executor: Arc<E>,
+    ) -> Self
+    where
+        S: ProcessStore + 'static,
+        R: ProcessResultStore + 'static,
+        E: ProcessExecutor + 'static,
+    {
+        let process_manager: Arc<dyn ProcessManager> =
+            Arc::new(services.background_manager(executor));
+        self.process_manager = Some(ProcessManagerBinding::Owned(process_manager));
         self
     }
 
@@ -411,11 +442,13 @@ where
         &self,
         request: CapabilitySpawnRequest,
     ) -> Result<CapabilitySpawnResult, CapabilityInvocationError> {
-        let process_manager = self.process_manager.ok_or_else(|| {
-            CapabilityInvocationError::ProcessManagerMissing {
+        let process_manager = self
+            .process_manager
+            .as_ref()
+            .map(ProcessManagerBinding::as_process_manager)
+            .ok_or_else(|| CapabilityInvocationError::ProcessManagerMissing {
                 capability: request.capability_id.clone(),
-            }
-        })?;
+            })?;
         let invocation_id = request.context.invocation_id;
         let capability_id = request.capability_id.clone();
         let scope = request.context.resource_scope.clone();
