@@ -727,6 +727,10 @@ impl Agent {
                 "  /skills             List installed skills\n",
                 "  /skills search <q>  Search ClawHub registry\n",
                 "\n",
+                "Prompts:\n",
+                "  /prompts                          List MCP prompts from your active servers\n",
+                "  /server:prompt-name [k=v ...]     Inject an MCP prompt into your message\n",
+                "\n",
                 "Agent:\n",
                 "  /heartbeat        Run heartbeat check\n",
                 "  /summarize        Summarize current thread\n",
@@ -813,6 +817,8 @@ impl Agent {
                     &tools,
                 )))
             }
+
+            "prompts" => self.handle_prompts_list(tenant.user_id()).await,
 
             "debug" => {
                 // Debug toggle is handled client-side in the REPL.
@@ -1158,6 +1164,127 @@ impl Agent {
             tracing::warn!("Model persistence task failed: {}", e);
         }
     }
+
+    /// Render the MCP prompts list for `/prompts`. Delegates multi-tenancy
+    /// scoping to `ExtensionManager::list_prompts_for_user` so the slash
+    /// command and the `GET /api/prompts` HTTP handler share one view of
+    /// "the caller's active servers' prompts".
+    pub(super) async fn handle_prompts_list(
+        &self,
+        user_id: &str,
+    ) -> Result<SubmissionResult, Error> {
+        let Some(ext_mgr) = self.deps.extension_manager.as_ref() else {
+            return Ok(SubmissionResult::error("Extensions not enabled."));
+        };
+
+        let entries = match ext_mgr.list_prompts_for_user(user_id).await {
+            Ok(e) => e,
+            Err(e) => {
+                return Ok(SubmissionResult::error(format!(
+                    "Failed to list MCP prompts: {}",
+                    e
+                )));
+            }
+        };
+
+        Ok(SubmissionResult::response(format_prompts_by_server(
+            &entries,
+            self.safety(),
+        )))
+    }
+}
+
+/// Render the `/prompts` output as grouped text (server → prompts →
+/// args). Distinct grammar from `format_vertical_list` above, which is
+/// flat.
+///
+/// Server-supplied `instructions` is a new external ingress (per
+/// `.claude/rules/safety-and-sandbox.md` "Every New Ingress Scans
+/// Before Storage or LLM") so it runs through
+/// `SafetyLayer::sanitize_tool_output` before reaching the user's
+/// channel. The sanitizer here uses a namespaced tool name
+/// (`mcp_instructions:<server>`) so any leak-detection warnings
+/// attribute the content back to the right MCP server.
+fn format_prompts_by_server(
+    entries: &[crate::extensions::ServerPromptsEntry],
+    safety: &ironclaw_safety::SafetyLayer,
+) -> String {
+    use crate::extensions::ServerPromptsResult;
+
+    if entries.is_empty() {
+        return "MCP prompts:\n  (no active MCP servers)".to_string();
+    }
+
+    let mut out = String::from("MCP prompts:\n");
+    for entry in entries {
+        out.push_str(&format!("  {}:\n", entry.server));
+        match &entry.result {
+            ServerPromptsResult::Ok { prompts } if prompts.is_empty() => {
+                out.push_str(&format!("    ({} has no prompts)\n", entry.server));
+            }
+            ServerPromptsResult::Ok { prompts } => {
+                for p in prompts {
+                    let args = match &p.arguments {
+                        Some(args) if !args.is_empty() => {
+                            let mut formatted: Vec<String> = args
+                                .iter()
+                                .map(|a| {
+                                    if a.required {
+                                        format!("{}*", a.name)
+                                    } else {
+                                        a.name.clone()
+                                    }
+                                })
+                                .collect();
+                            formatted.sort_by(|a, b| {
+                                b.ends_with('*').cmp(&a.ends_with('*')).then(a.cmp(b))
+                            });
+                            format!(" (args: {})", formatted.join(", "))
+                        }
+                        _ => String::new(),
+                    };
+                    let desc = p
+                        .description
+                        .as_deref()
+                        .map(|d| format!("  — {}", d))
+                        .unwrap_or_default();
+                    out.push_str(&format!(
+                        "    /{}:{}{}{}\n",
+                        entry.server, p.name, desc, args
+                    ));
+                }
+            }
+            ServerPromptsResult::Error { message } => {
+                out.push_str(&format!("    (error: {})\n", message));
+            }
+        }
+    }
+    out.push_str("\nTo use: include /server:prompt-name [key=value ...] in your message.\n");
+
+    // Server instructions are advisory; we show them informationally but do
+    // NOT inject them into the system prompt (no trust model yet; see
+    // .claude/rules/safety-and-sandbox.md).
+    let with_instructions: Vec<&crate::extensions::ServerPromptsEntry> = entries
+        .iter()
+        .filter(|e| e.instructions.as_deref().is_some_and(|s| !s.is_empty()))
+        .collect();
+    if !with_instructions.is_empty() {
+        out.push_str("\nServer instructions (informational; not injected):\n");
+        for entry in with_instructions {
+            if let Some(instructions) = &entry.instructions {
+                let tool_name = format!("mcp_instructions:{}", entry.server);
+                let sanitized = safety.sanitize_tool_output(&tool_name, instructions);
+                out.push_str(&format!("  {}: {}\n", entry.server, sanitized.content));
+                if sanitized.was_modified {
+                    out.push_str(&format!(
+                        "    (note: {}'s instructions were modified by the safety layer)\n",
+                        entry.server
+                    ));
+                }
+            }
+        }
+    }
+    out.trim_end().to_string()
 }
 
 #[cfg(test)]

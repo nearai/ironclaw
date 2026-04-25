@@ -4649,6 +4649,7 @@ fn status_to_wit(
         StatusUpdate::Suggestions { .. }
         | StatusUpdate::TurnCost { .. }
         | StatusUpdate::SkillActivated { .. }
+        | StatusUpdate::McpPromptsExpanded { .. }
         | StatusUpdate::ToolResultFull { .. }
         | StatusUpdate::TurnMetrics { .. }
         | StatusUpdate::JobStatus { .. }

@@ -2041,6 +2041,89 @@ async def _mcp_handle_authed(request: web.Request) -> web.Response:
     }})
 
 
+async def mcp_prompts_endpoint(request: web.Request) -> web.Response:
+    """POST /mcp-prompts — no-auth MCP endpoint that advertises `prompts` capability.
+
+    Used by the MCP-prompts E2E tests to exercise the `/prompts` slash
+    command, the `/server:prompt-name` mention expander, and the
+    corresponding HTTP API surface without needing to drive the full
+    OAuth flow. Localhost URLs skip the `requires_auth` gate, so this
+    server can be installed and activated straight through the HTTP
+    install endpoint.
+
+    Serves two prompts:
+    - `greet` — optional `name` argument.
+    - `summarize` — required `topic` argument.
+    """
+    body = await request.json()
+    method = body.get("method", "")
+    req_id = body.get("id")
+    state = request.app["mcp_state"]
+    state["requests"].append({"method": method, "params": body.get("params")})
+
+    if method == "initialize":
+        return web.json_response({
+            "jsonrpc": "2.0", "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "tools": {},
+                    "prompts": {"listChanged": False},
+                },
+                "serverInfo": {"name": "mock-mcp-prompts", "version": "1.0.0"},
+            },
+        })
+    if method == "notifications/initialized":
+        return web.json_response({"jsonrpc": "2.0", "id": req_id, "result": {}})
+    if method == "tools/list":
+        return web.json_response({
+            "jsonrpc": "2.0", "id": req_id,
+            "result": {"tools": []},
+        })
+    if method == "prompts/list":
+        return web.json_response({
+            "jsonrpc": "2.0", "id": req_id,
+            "result": {"prompts": [
+                {
+                    "name": "greet",
+                    "description": "Say hello to someone",
+                    "arguments": [{"name": "name", "required": False}],
+                },
+                {
+                    "name": "summarize",
+                    "description": "Summarize a topic",
+                    "arguments": [{"name": "topic", "required": True}],
+                },
+            ]},
+        })
+    if method == "prompts/get":
+        params = body.get("params") or {}
+        name = params.get("name", "")
+        args = params.get("arguments") or {}
+        if name == "greet":
+            who = args.get("name") or "world"
+            text = f"Please greet {who}."
+        elif name == "summarize":
+            topic = args.get("topic") or ""
+            text = f"Please summarize the following topic: {topic}."
+        else:
+            return web.json_response({
+                "jsonrpc": "2.0", "id": req_id,
+                "error": {"code": -32602, "message": f"Unknown prompt: {name}"},
+            })
+        return web.json_response({
+            "jsonrpc": "2.0", "id": req_id,
+            "result": {
+                "messages": [
+                    {"role": "user", "content": {"type": "text", "text": text}},
+                ],
+            },
+        })
+    return web.json_response({"jsonrpc": "2.0", "id": req_id, "error": {
+        "code": -32601, "message": f"Method not found: {method}",
+    }})
+
+
 async def mcp_protected_resource(request: web.Request) -> web.Response:
     """GET /.well-known/oauth-protected-resource[/{path}] — RFC 9728 discovery.
 
@@ -2131,6 +2214,7 @@ def main():
     # Mock MCP server endpoints
     app.router.add_post("/mcp", mcp_endpoint)
     app.router.add_post("/mcp-400", mcp_endpoint_400)
+    app.router.add_post("/mcp-prompts", mcp_prompts_endpoint)
     app.router.add_get("/.well-known/oauth-protected-resource", mcp_protected_resource)
     app.router.add_get("/.well-known/oauth-protected-resource/{tail:.*}", mcp_protected_resource)
     app.router.add_get("/.well-known/oauth-authorization-server", mcp_auth_server_metadata)

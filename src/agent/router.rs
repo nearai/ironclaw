@@ -60,15 +60,24 @@ impl Router {
 
     /// Route an explicit command to determine its intent.
     ///
-    /// Returns `None` if the message is not a command.
-    /// For non-commands, use `IntentClassifier::classify()` instead.
+    /// Returns `Some(intent)` only for *known* job intents (`/job`,
+    /// `/status`, `/cancel`, `/list`, `/help <id>`). Unknown `/xxx`
+    /// patterns — including `/skill-name` force-activations handled by
+    /// `extract_skill_mentions` and `/server:prompt-name` mentions
+    /// handled by `resolve_prompt_mentions` — return `None` so the
+    /// dispatcher's mention extractors and, ultimately, the LLM get to
+    /// handle them. Returning `None` is also correct for plain typos:
+    /// the LLM can respond helpfully ("I don't know `/foo`, did you
+    /// mean `/help`?") rather than the agent producing a stock error.
     pub fn route_command(&self, message: &IncomingMessage) -> Option<MessageIntent> {
         let content = message.content.trim();
 
-        if content.starts_with(&self.command_prefix) {
-            Some(self.parse_command(content))
-        } else {
-            None
+        if !content.starts_with(&self.command_prefix) {
+            return None;
+        }
+        match self.parse_command(content) {
+            MessageIntent::Unknown => None,
+            intent => Some(intent),
         }
     }
 
@@ -116,10 +125,13 @@ impl Router {
                     }
                 }
             }
-            Some(cmd) => MessageIntent::Command {
-                command: cmd.to_string(),
-                args: parts[1..].iter().map(|s| s.to_string()).collect(),
-            },
+            // Unknown `/xxx` is not a Router concern. The dispatcher's
+            // `extract_skill_mentions` handles `/skill-name` and
+            // `resolve_prompt_mentions` handles `/server:prompt`; plain
+            // typos are better answered by the LLM than by a canned
+            // "Unknown command" error. Return `Unknown` so
+            // `route_command` can lift it to `None`.
+            Some(_) => MessageIntent::Unknown,
             None => MessageIntent::Unknown,
         }
     }
@@ -195,6 +207,31 @@ mod tests {
                 assert_eq!(filter, Some("active".to_string()));
             }
             _ => panic!("Expected ListJobs intent"),
+        }
+    }
+
+    /// Unknown `/xxx` at the start of a message must NOT be intercepted
+    /// by the router — that path would short-circuit the dispatcher's
+    /// mention extractors and surface a generic "Unknown command"
+    /// error instead. Three shapes all fall through:
+    /// - `/skill-name` → `extract_skill_mentions` force-activates
+    /// - `/server:prompt` → `resolve_prompt_mentions` splices the block
+    /// - plain typos → the LLM gets to respond helpfully
+    #[test]
+    fn test_unknown_slash_prefix_falls_through_to_dispatcher() {
+        let router = Router::new();
+
+        for content in [
+            "/github fetch issues",
+            "/notion:search docs",
+            "/notion:create-page title=foo",
+            "/unknown-thing",
+        ] {
+            let msg = IncomingMessage::new("test", "user", content);
+            assert!(
+                router.route_command(&msg).is_none(),
+                "router must not intercept `{content}` — dispatcher handles it",
+            );
         }
     }
 }

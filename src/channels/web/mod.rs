@@ -928,6 +928,14 @@ impl Channel for GatewayChannel {
                 thread_id,
                 feedback,
             },
+            StatusUpdate::McpPromptsExpanded {
+                prompt_names,
+                feedback,
+            } => AppEvent::McpPromptsExpanded {
+                prompt_names,
+                thread_id,
+                feedback,
+            },
             StatusUpdate::RoutineUpdate { .. }
             | StatusUpdate::ContextPressure { .. }
             | StatusUpdate::SandboxStatus { .. }

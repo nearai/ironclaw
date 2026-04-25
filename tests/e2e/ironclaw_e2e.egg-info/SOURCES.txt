@@ -18,6 +18,7 @@ scenarios/test_extension_uninstall_cleanup.py
 scenarios/test_extensions.py
 scenarios/test_html_injection.py
 scenarios/test_mcp_auth_flow.py
+scenarios/test_mcp_prompts.py
 scenarios/test_message_persistence.py
 scenarios/test_multi_tenant_greeting.py
 scenarios/test_oauth_credential_fallback.py
@@ -33,6 +34,7 @@ scenarios/test_project_detail.py
 scenarios/test_routine_event_batch.py
 scenarios/test_routine_full_job.py
 scenarios/test_routine_oauth_credential_injection.py
+scenarios/test_settings_extensions_labels.py
 scenarios/test_settings_search.py
 scenarios/test_skill_oauth_flow.py
 scenarios/test_skills.py

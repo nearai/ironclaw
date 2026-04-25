@@ -627,6 +627,7 @@ impl Channel for TuiChannel {
                 }),
             },
             StatusUpdate::SkillActivated { .. }
+            | StatusUpdate::McpPromptsExpanded { .. }
             | StatusUpdate::ImageGenerated { .. }
             | StatusUpdate::ToolResultFull { .. }
             | StatusUpdate::TurnMetrics { .. } => {

@@ -190,6 +190,7 @@ const SLASH_COMMANDS = [
   { cmd: '/version',    desc: 'Show version info' },
   { cmd: '/tools',      desc: 'List available tools' },
   { cmd: '/skills',     desc: 'List installed skills' },
+  { cmd: '/prompts',    desc: 'List MCP prompts from your active servers' },
   { cmd: '/model',      desc: 'Show or switch the LLM model' },
   { cmd: '/thread new', desc: 'Create a new conversation thread' },
 ];

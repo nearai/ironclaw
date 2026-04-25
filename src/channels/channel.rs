@@ -566,6 +566,15 @@ pub enum StatusUpdate {
         skill_names: Vec<String>,
         feedback: Vec<String>,
     },
+    /// One or more `/server:prompt-name` mentions were expanded in-place
+    /// in the user's message. `prompt_names` carries the namespaced
+    /// labels (`server:prompt`) that were injected; `feedback` carries
+    /// per-mention notes so the UI can explain unexpanded mentions.
+    /// Named parallel to `SkillActivated.skill_names`.
+    McpPromptsExpanded {
+        prompt_names: Vec<String>,
+        feedback: Vec<String>,
+    },
     /// Thread list for interactive resume picker.
     ThreadList { threads: Vec<ThreadSummary> },
     /// Engine v2 thread list for TUI activity sidebar.
