@@ -59,7 +59,11 @@ Exit criteria:
 
 ### Phase 1: DB Read Cutover Readiness
 
-Status: next storage/control-plane lane.
+Status: in progress. Reconciliation now covers submissions, derived records,
+object refs, vectors, credit-ledger counts, audit-event counts, replay/export
+manifest counts, export item counts, and revocation/tombstone counts; remaining
+cutover work is parity enforcement, PostgreSQL coverage breadth, and rollout
+diagnostics.
 
 Scope:
 

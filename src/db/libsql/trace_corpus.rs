@@ -15,9 +15,9 @@ use crate::trace_corpus_storage::{
     TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportManifestItemInvalidationReason,
     TraceExportManifestItemRecord, TraceExportManifestItemWrite, TraceExportManifestRecord,
     TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefRecord, TraceObjectRefWrite,
-    TraceSubmissionRecord, TraceSubmissionWrite, TraceTombstoneWrite, TraceVectorEntryRecord,
-    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
-    TraceWorkerKind,
+    TraceSubmissionRecord, TraceSubmissionWrite, TraceTombstoneRecord, TraceTombstoneWrite,
+    TraceVectorEntryRecord, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
+    TraceVectorEntryWrite, TraceWorkerKind,
 };
 
 const TRACE_SUBMISSION_COLUMNS: &str = "\
@@ -43,6 +43,10 @@ const TRACE_EXPORT_MANIFEST_ITEM_COLUMNS: &str = "\
     tenant_id, export_manifest_id, submission_id, trace_id, derived_id, object_ref_id, \
     vector_entry_id, source_status_at_export, source_hash_at_export, source_invalidated_at, \
     source_invalidation_reason, created_at, updated_at";
+
+const TRACE_TOMBSTONE_COLUMNS: &str = "\
+    tenant_id, tombstone_id, submission_id, trace_id, redaction_hash, canonical_summary_hash, \
+    reason, effective_at, retain_until, created_by_principal_ref, created_at";
 
 fn opt_f32(value: Option<f32>) -> libsql::Value {
     match value {
@@ -395,6 +399,24 @@ fn row_to_audit_event(row: &libsql::Row) -> Result<TraceAuditEventRecord, Databa
         decision_inputs_hash: get_opt_text(row, 10),
         metadata,
         occurred_at: get_ts(row, 12),
+    })
+}
+
+fn row_to_tombstone(row: &libsql::Row) -> Result<TraceTombstoneRecord, DatabaseError> {
+    Ok(TraceTombstoneRecord {
+        tenant_id: get_text(row, 0),
+        tombstone_id: parse_uuid(&get_text(row, 1), "trace_tombstones.tombstone_id")?,
+        submission_id: parse_uuid(&get_text(row, 2), "trace_tombstones.submission_id")?,
+        trace_id: get_opt_text(row, 3)
+            .map(|id| parse_uuid(&id, "trace_tombstones.trace_id"))
+            .transpose()?,
+        redaction_hash: get_opt_text(row, 4),
+        canonical_summary_hash: get_opt_text(row, 5),
+        reason: get_text(row, 6),
+        effective_at: get_ts(row, 7),
+        retain_until: get_opt_ts(row, 8),
+        created_by_principal_ref: get_text(row, 9),
+        created_at: get_ts(row, 10),
     })
 }
 
@@ -1357,6 +1379,34 @@ impl TraceCorpusStore for LibSqlBackend {
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(())
+    }
+
+    async fn list_trace_tombstones(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceTombstoneRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {TRACE_TOMBSTONE_COLUMNS}
+                     FROM trace_tombstones
+                     WHERE tenant_id = ?1
+                     ORDER BY effective_at ASC, created_at ASC"
+                ),
+                libsql::params![tenant_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut tombstones = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            tombstones.push(row_to_tombstone(&row)?);
+        }
+        Ok(tombstones)
     }
 
     async fn invalidate_trace_submission_artifacts(

@@ -477,6 +477,21 @@ pub struct TraceTombstoneWrite {
     pub created_by_principal_ref: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceTombstoneRecord {
+    pub tombstone_id: Uuid,
+    pub tenant_id: String,
+    pub submission_id: Uuid,
+    pub trace_id: Option<Uuid>,
+    pub redaction_hash: Option<String>,
+    pub canonical_summary_hash: Option<String>,
+    pub reason: String,
+    pub effective_at: DateTime<Utc>,
+    pub retain_until: Option<DateTime<Utc>>,
+    pub created_by_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TraceArtifactInvalidationCounts {
     pub object_refs_invalidated: u64,
@@ -612,6 +627,11 @@ pub trait TraceCorpusStore: Send + Sync {
         &self,
         tombstone: TraceTombstoneWrite,
     ) -> Result<(), DatabaseError>;
+
+    async fn list_trace_tombstones(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceTombstoneRecord>, DatabaseError>;
 
     async fn invalidate_trace_submission_artifacts(
         &self,

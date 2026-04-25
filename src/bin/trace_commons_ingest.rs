@@ -4107,6 +4107,39 @@ async fn reconcile_db_mirror(
         .list_trace_vector_entries(&tenant.tenant_id)
         .await
         .context("failed to list trace vector entries for DB reconciliation")?;
+    let db_credit_events = db
+        .list_trace_credit_events(&tenant.tenant_id)
+        .await
+        .context("failed to list trace credit events for DB reconciliation")?;
+    let db_audit_events = db
+        .list_trace_audit_events(&tenant.tenant_id)
+        .await
+        .context("failed to list trace audit events for DB reconciliation")?;
+    let db_export_manifests = db
+        .list_trace_export_manifests(&tenant.tenant_id)
+        .await
+        .context("failed to list trace export manifests for DB reconciliation")?;
+    let db_tombstones = db
+        .list_trace_tombstones(&tenant.tenant_id)
+        .await
+        .context("failed to list trace tombstones for DB reconciliation")?;
+    let mut db_export_manifest_item_count = 0usize;
+    for manifest in &db_export_manifests {
+        db_export_manifest_item_count += db
+            .list_trace_export_manifest_items(&tenant.tenant_id, manifest.export_manifest_id)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to list trace export manifest items for manifest {}",
+                    manifest.export_manifest_id
+                )
+            })?
+            .len();
+    }
+    let file_credit_events = read_all_credit_events(&state.root, &tenant.tenant_id)?;
+    let file_audit_events = read_all_audit_events(&state.root, &tenant.tenant_id)?;
+    let file_replay_export_manifests = read_all_export_manifests(&state.root, &tenant.tenant_id)?;
+    let file_revocations = read_all_revocations(&state.root, &tenant.tenant_id)?;
     let mut db_object_ref_count = 0usize;
     let mut accepted_without_active_envelope_object_ref = Vec::new();
     for record in &db_records {
@@ -4220,6 +4253,15 @@ async fn reconcile_db_mirror(
         file_derived_count: file_derived.len(),
         db_derived_count: db_derived.len(),
         missing_derived_submission_ids_in_db,
+        file_credit_event_count: file_credit_events.len(),
+        db_credit_event_count: db_credit_events.len(),
+        file_audit_event_count: file_audit_events.len(),
+        db_audit_event_count: db_audit_events.len(),
+        file_replay_export_manifest_count: file_replay_export_manifests.len(),
+        db_export_manifest_count: db_export_manifests.len(),
+        db_export_manifest_item_count,
+        file_revocation_tombstone_count: file_revocations.len(),
+        db_tombstone_count: db_tombstones.len(),
         db_object_ref_count,
         accepted_without_active_envelope_object_ref,
         active_vector_entries,
@@ -5379,6 +5421,15 @@ struct TraceDbReconciliationReport {
     file_derived_count: usize,
     db_derived_count: usize,
     missing_derived_submission_ids_in_db: Vec<Uuid>,
+    file_credit_event_count: usize,
+    db_credit_event_count: usize,
+    file_audit_event_count: usize,
+    db_audit_event_count: usize,
+    file_replay_export_manifest_count: usize,
+    db_export_manifest_count: usize,
+    db_export_manifest_item_count: usize,
+    file_revocation_tombstone_count: usize,
+    db_tombstone_count: usize,
     db_object_ref_count: usize,
     accepted_without_active_envelope_object_ref: Vec<Uuid>,
     active_vector_entries: usize,
@@ -7800,6 +7851,21 @@ mod tests {
         .expect("vector indexing can be rerun");
         assert_eq!(vector_idempotent_response.vector_entries_indexed, 0);
 
+        let Json(delayed_credit) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::ReviewerBonus,
+                credit_points_delta: 1.25,
+                reason: Some("reconciliation coverage credit".to_string()),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("reviewer can append delayed credit before reconciliation");
+        assert_eq!(delayed_credit.submission_id, submission_id);
+
         let Json(reconciliation_response) = maintenance_handler(
             State(state.clone()),
             auth_headers("review-token-a"),
@@ -7824,6 +7890,15 @@ mod tests {
         assert!(reconciliation.missing_submission_ids_in_db.is_empty());
         assert!(reconciliation.status_mismatches.is_empty());
         assert_eq!(reconciliation.db_object_ref_count, 1);
+        assert!(reconciliation.file_credit_event_count >= 1);
+        assert!(reconciliation.db_credit_event_count >= 1);
+        assert!(reconciliation.file_audit_event_count >= 1);
+        assert!(reconciliation.db_audit_event_count >= 1);
+        assert_eq!(reconciliation.file_replay_export_manifest_count, 0);
+        assert_eq!(reconciliation.db_export_manifest_count, 0);
+        assert_eq!(reconciliation.db_export_manifest_item_count, 0);
+        assert_eq!(reconciliation.file_revocation_tombstone_count, 0);
+        assert_eq!(reconciliation.db_tombstone_count, 0);
         assert!(
             reconciliation
                 .accepted_without_active_envelope_object_ref

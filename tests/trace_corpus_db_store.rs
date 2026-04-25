@@ -3,7 +3,7 @@ mod libsql_trace_corpus_store {
     use std::collections::BTreeMap;
     use std::time::Duration;
 
-    use chrono::Utc;
+    use chrono::{DateTime, Utc};
     use ironclaw::db::{Database, libsql::LibSqlBackend};
     use ironclaw::trace_corpus_storage::{
         TenantScopedTraceObjectRef, TraceAuditAction, TraceAuditEventWrite, TraceAuditSafeMetadata,
@@ -580,21 +580,84 @@ mod libsql_trace_corpus_store {
         assert_eq!(idempotent.object_refs_invalidated, 0);
         assert_eq!(idempotent.derived_records_invalidated, 0);
 
+        let tombstone_id = Uuid::new_v4();
+        let effective_at = DateTime::parse_from_rfc3339("2026-04-25T12:00:00Z")
+            .expect("parse effective timestamp")
+            .with_timezone(&Utc);
+        let retain_until = DateTime::parse_from_rfc3339("2026-05-25T12:00:00Z")
+            .expect("parse retain-until timestamp")
+            .with_timezone(&Utc);
         backend
             .write_trace_tombstone(TraceTombstoneWrite {
-                tombstone_id: Uuid::new_v4(),
+                tombstone_id,
                 tenant_id: tenant_id.to_string(),
                 submission_id,
                 trace_id: Some(inserted.trace_id),
                 redaction_hash: Some("sha256:redaction".to_string()),
                 canonical_summary_hash: Some("sha256:canonical".to_string()),
                 reason: "user requested revocation".to_string(),
-                effective_at: Utc::now(),
-                retain_until: None,
+                effective_at,
+                retain_until: Some(retain_until),
                 created_by_principal_ref: "principal:test-user".to_string(),
             })
             .await
             .expect("append tombstone");
+
+        backend
+            .write_trace_tombstone(TraceTombstoneWrite {
+                tombstone_id: Uuid::new_v4(),
+                tenant_id: "tenant-beta".to_string(),
+                submission_id,
+                trace_id: None,
+                redaction_hash: Some("sha256:other-tenant-redaction".to_string()),
+                canonical_summary_hash: None,
+                reason: "other tenant revocation".to_string(),
+                effective_at,
+                retain_until: None,
+                created_by_principal_ref: "principal:other-tenant-user".to_string(),
+            })
+            .await
+            .expect("append other-tenant tombstone");
+
+        let tombstones = backend
+            .list_trace_tombstones(tenant_id)
+            .await
+            .expect("list tombstones for tenant");
+        assert_eq!(tombstones.len(), 1);
+        assert_eq!(tombstones[0].tenant_id, tenant_id);
+        assert_eq!(tombstones[0].tombstone_id, tombstone_id);
+        assert_eq!(tombstones[0].submission_id, submission_id);
+        assert_eq!(tombstones[0].trace_id, Some(inserted.trace_id));
+        assert_eq!(
+            tombstones[0].redaction_hash.as_deref(),
+            Some("sha256:redaction")
+        );
+        assert_eq!(
+            tombstones[0].canonical_summary_hash.as_deref(),
+            Some("sha256:canonical")
+        );
+        assert_eq!(tombstones[0].reason, "user requested revocation");
+        assert_eq!(tombstones[0].effective_at, effective_at);
+        assert_eq!(tombstones[0].retain_until, Some(retain_until));
+        assert_eq!(
+            tombstones[0].created_by_principal_ref,
+            "principal:test-user"
+        );
+        assert!(tombstones[0].created_at <= Utc::now());
+
+        let other_tenant_tombstones = backend
+            .list_trace_tombstones("tenant-beta")
+            .await
+            .expect("list tombstones for other tenant");
+        assert_eq!(other_tenant_tombstones.len(), 1);
+        assert_eq!(other_tenant_tombstones[0].tenant_id, "tenant-beta");
+        assert_eq!(other_tenant_tombstones[0].reason, "other tenant revocation");
+
+        let missing_tenant_tombstones = backend
+            .list_trace_tombstones("tenant-gamma")
+            .await
+            .expect("list tombstones for missing tenant");
+        assert!(missing_tenant_tombstones.is_empty());
 
         let revoked = backend
             .get_trace_submission(tenant_id, submission_id)

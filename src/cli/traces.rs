@@ -1589,6 +1589,11 @@ async fn trace_commons_maintenance_run(
             "export_cache_files_pruned",
         );
         print_optional_json_field(
+            "  export provenance invalidated",
+            value,
+            "export_provenance_invalidated",
+        );
+        print_optional_json_field(
             "  trace object files deleted",
             value,
             "trace_object_files_deleted",
@@ -1598,6 +1603,9 @@ async fn trace_commons_maintenance_run(
             value,
             "encrypted_artifacts_deleted",
         );
+        for line in maintenance_reconciliation_lines(value) {
+            println!("{line}");
+        }
     }
     Ok(())
 }
@@ -2213,6 +2221,122 @@ fn print_json_map(label: &str, value: Option<&serde_json::Value>) {
         .collect::<Vec<_>>()
         .join(", ");
     println!("{label}: {items}");
+}
+
+fn maintenance_reconciliation_lines(value: &serde_json::Value) -> Vec<String> {
+    let Some(reconciliation) = value
+        .get("db_reconciliation")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Vec::new();
+    };
+
+    let mut lines = vec!["  db reconciliation:".to_string()];
+
+    if let Some(line) = compact_json_items(
+        reconciliation,
+        "    submissions",
+        &[
+            ("file_submission_count", "files"),
+            ("db_submission_count", "db"),
+            ("missing_submission_ids_in_db", "missing_in_db"),
+            ("missing_submission_ids_in_files", "missing_in_files"),
+            ("status_mismatches", "status_mismatches"),
+        ],
+    ) {
+        lines.push(line);
+    }
+    if let Some(line) = compact_json_items(
+        reconciliation,
+        "    derived",
+        &[
+            ("file_derived_count", "files"),
+            ("db_derived_count", "db"),
+            ("missing_derived_submission_ids_in_db", "missing_in_db"),
+        ],
+    ) {
+        lines.push(line);
+    }
+    if let Some(line) = compact_json_items(
+        reconciliation,
+        "    object refs",
+        &[
+            ("db_object_ref_count", "db"),
+            (
+                "accepted_without_active_envelope_object_ref",
+                "accepted_without_active_envelope",
+            ),
+        ],
+    ) {
+        lines.push(line);
+    }
+    if let Some(line) = compact_json_items(
+        reconciliation,
+        "    ledger/audit",
+        &[
+            ("file_credit_event_count", "file_credit_events"),
+            ("db_credit_event_count", "db_credit_events"),
+            ("file_audit_event_count", "file_audit_events"),
+            ("db_audit_event_count", "db_audit_events"),
+        ],
+    ) {
+        lines.push(line);
+    }
+    if let Some(line) = compact_json_items(
+        reconciliation,
+        "    exports/tombstones",
+        &[
+            ("file_replay_export_manifest_count", "file_replay_manifests"),
+            ("db_export_manifest_count", "db_export_manifests"),
+            ("db_export_manifest_item_count", "db_export_items"),
+            (
+                "file_revocation_tombstone_count",
+                "file_revocation_tombstones",
+            ),
+            ("db_tombstone_count", "db_tombstones"),
+        ],
+    ) {
+        lines.push(line);
+    }
+    if let Some(line) = compact_json_items(
+        reconciliation,
+        "    vectors",
+        &[
+            ("active_vector_entries", "active"),
+            ("invalid_active_vector_entries", "invalid_active"),
+        ],
+    ) {
+        lines.push(line);
+    }
+
+    if lines.len() == 1 { Vec::new() } else { lines }
+}
+
+fn compact_json_items(
+    map: &serde_json::Map<String, serde_json::Value>,
+    label: &str,
+    fields: &[(&str, &str)],
+) -> Option<String> {
+    let items = fields
+        .iter()
+        .filter_map(|(field, display_name)| {
+            map.get(*field)
+                .map(compact_json_count_display)
+                .map(|value| format!("{display_name}={value}"))
+        })
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        None
+    } else {
+        Some(format!("{label}: {}", items.join(" ")))
+    }
+}
+
+fn compact_json_count_display(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Array(values) => values.len().to_string(),
+        _ => json_value_display(value),
+    }
 }
 
 fn json_field_display(value: &serde_json::Value, field: &str) -> Option<String> {
@@ -2977,5 +3101,65 @@ mod tests {
             url,
             "https://trace.example/internal/v1/ranker/training-pairs?privacy_risk=low"
         );
+    }
+
+    #[test]
+    fn maintenance_reconciliation_lines_summarize_counts_without_ids() {
+        let value = serde_json::json!({
+            "db_reconciliation": {
+                "file_submission_count": 3,
+                "db_submission_count": 2,
+                "missing_submission_ids_in_db": [
+                    "11111111-1111-1111-1111-111111111111",
+                    "22222222-2222-2222-2222-222222222222"
+                ],
+                "missing_submission_ids_in_files": [],
+                "status_mismatches": [
+                    {
+                        "submission_id": "33333333-3333-3333-3333-333333333333",
+                        "file_status": "accepted",
+                        "db_status": "revoked"
+                    }
+                ],
+                "file_derived_count": 4,
+                "db_derived_count": 3,
+                "missing_derived_submission_ids_in_db": [
+                    "44444444-4444-4444-4444-444444444444"
+                ],
+                "db_object_ref_count": 2,
+                "accepted_without_active_envelope_object_ref": [
+                    "55555555-5555-5555-5555-555555555555"
+                ],
+                "file_credit_event_count": 5,
+                "db_credit_event_count": 4,
+                "file_audit_event_count": 6,
+                "db_audit_event_count": 6,
+                "file_replay_export_manifest_count": 1,
+                "db_export_manifest_count": 2,
+                "db_export_manifest_item_count": 3,
+                "file_revocation_tombstone_count": 1,
+                "db_tombstone_count": 1,
+                "active_vector_entries": 7,
+                "invalid_active_vector_entries": 1
+            }
+        });
+
+        let lines = maintenance_reconciliation_lines(&value);
+
+        assert_eq!(
+            lines,
+            vec![
+                "  db reconciliation:".to_string(),
+                "    submissions: files=3 db=2 missing_in_db=2 missing_in_files=0 status_mismatches=1".to_string(),
+                "    derived: files=4 db=3 missing_in_db=1".to_string(),
+                "    object refs: db=2 accepted_without_active_envelope=1".to_string(),
+                "    ledger/audit: file_credit_events=5 db_credit_events=4 file_audit_events=6 db_audit_events=6".to_string(),
+                "    exports/tombstones: file_replay_manifests=1 db_export_manifests=2 db_export_items=3 file_revocation_tombstones=1 db_tombstones=1".to_string(),
+                "    vectors: active=7 invalid_active=1".to_string(),
+            ]
+        );
+        let rendered = lines.join("\n");
+        assert!(!rendered.contains("11111111-1111-1111-1111-111111111111"));
+        assert!(!rendered.contains("33333333-3333-3333-3333-333333333333"));
     }
 }

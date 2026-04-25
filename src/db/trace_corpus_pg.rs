@@ -14,9 +14,9 @@ use crate::trace_corpus_storage::{
     TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportManifestItemInvalidationReason,
     TraceExportManifestItemRecord, TraceExportManifestItemWrite, TraceExportManifestRecord,
     TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefRecord, TraceObjectRefWrite,
-    TraceSubmissionRecord, TraceSubmissionWrite, TraceTombstoneWrite, TraceVectorEntryRecord,
-    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
-    TraceWorkerKind,
+    TraceSubmissionRecord, TraceSubmissionWrite, TraceTombstoneRecord, TraceTombstoneWrite,
+    TraceVectorEntryRecord, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
+    TraceVectorEntryWrite, TraceWorkerKind,
 };
 
 const TRACE_OBJECT_REF_COLUMNS: &str = "\
@@ -33,6 +33,10 @@ const TRACE_EXPORT_MANIFEST_ITEM_COLUMNS: &str = "\
     tenant_id, export_manifest_id, submission_id, trace_id, derived_id, object_ref_id, \
     vector_entry_id, source_status_at_export, source_hash_at_export, source_invalidated_at, \
     source_invalidation_reason, created_at, updated_at";
+
+const TRACE_TOMBSTONE_COLUMNS: &str = "\
+    tenant_id, tombstone_id, submission_id, trace_id, redaction_hash, canonical_summary_hash, \
+    reason, effective_at, retain_until, created_by_principal_ref, created_at";
 
 fn json_array_strings(
     value: serde_json::Value,
@@ -296,6 +300,22 @@ fn row_to_audit_event(row: &Row) -> Result<TraceAuditEventRecord, DatabaseError>
             DatabaseError::Serialization(format!("trace audit metadata JSON decode failed: {e}"))
         })?,
         occurred_at: row.get("occurred_at"),
+    })
+}
+
+fn row_to_tombstone(row: &Row) -> Result<TraceTombstoneRecord, DatabaseError> {
+    Ok(TraceTombstoneRecord {
+        tenant_id: row.get("tenant_id"),
+        tombstone_id: row.get("tombstone_id"),
+        submission_id: row.get("submission_id"),
+        trace_id: row.get("trace_id"),
+        redaction_hash: row.get("redaction_hash"),
+        canonical_summary_hash: row.get("canonical_summary_hash"),
+        reason: row.get("reason"),
+        effective_at: row.get("effective_at"),
+        retain_until: row.get("retain_until"),
+        created_by_principal_ref: row.get("created_by_principal_ref"),
+        created_at: row.get("created_at"),
     })
 }
 
@@ -1231,6 +1251,29 @@ impl TraceCorpusStore for PgBackend {
         .map_err(DatabaseError::Postgres)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(())
+    }
+
+    async fn list_trace_tombstones(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceTombstoneRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_TOMBSTONE_COLUMNS}
+                     FROM trace_tombstones
+                     WHERE tenant_id = $1
+                     ORDER BY effective_at ASC, created_at ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_tombstone).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
     }
 
     async fn invalidate_trace_submission_artifacts(
