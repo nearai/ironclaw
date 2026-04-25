@@ -2495,8 +2495,15 @@ fn maintenance_reconciliation_lines(value: &serde_json::Value) -> Vec<String> {
         &[
             ("file_credit_event_count", "file_credit_events"),
             ("db_credit_event_count", "db_credit_events"),
+            ("missing_credit_event_ids_in_db", "missing_credit_in_db"),
+            (
+                "missing_credit_event_ids_in_files",
+                "missing_credit_in_files",
+            ),
             ("file_audit_event_count", "file_audit_events"),
             ("db_audit_event_count", "db_audit_events"),
+            ("missing_audit_event_ids_in_db", "missing_audit_in_db"),
+            ("missing_audit_event_ids_in_files", "missing_audit_in_files"),
         ],
     ) {
         lines.push(line);
@@ -3484,6 +3491,43 @@ mod tests {
         let rendered = lines.join("\n");
         assert!(!rendered.contains("11111111-1111-1111-1111-111111111111"));
         assert!(!rendered.contains("33333333-3333-3333-3333-333333333333"));
+    }
+
+    #[test]
+    fn maintenance_reconciliation_lines_summarize_ledger_audit_gap_counts_without_ids() {
+        let value = serde_json::json!({
+            "db_reconciliation": {
+                "file_credit_event_count": 5,
+                "db_credit_event_count": 4,
+                "missing_credit_event_ids_in_db": [
+                    "dddddddd-dddd-dddd-dddd-dddddddddddd"
+                ],
+                "missing_credit_event_ids_in_files": [],
+                "file_audit_event_count": 6,
+                "db_audit_event_count": 5,
+                "missing_audit_event_ids_in_db": [
+                    "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+                    "ffffffff-ffff-ffff-ffff-ffffffffffff"
+                ],
+                "missing_audit_event_ids_in_files": [
+                    "12121212-1212-1212-1212-121212121212"
+                ]
+            }
+        });
+
+        let lines = maintenance_reconciliation_lines(&value);
+
+        assert_eq!(
+            lines,
+            vec![
+                "  db reconciliation:".to_string(),
+                "    ledger/audit: file_credit_events=5 db_credit_events=4 missing_credit_in_db=1 missing_credit_in_files=0 file_audit_events=6 db_audit_events=5 missing_audit_in_db=2 missing_audit_in_files=1".to_string(),
+            ]
+        );
+        let rendered = lines.join("\n");
+        assert!(!rendered.contains("dddddddd-dddd-dddd-dddd-dddddddddddd"));
+        assert!(!rendered.contains("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"));
+        assert!(!rendered.contains("12121212-1212-1212-1212-121212121212"));
     }
 
     #[test]

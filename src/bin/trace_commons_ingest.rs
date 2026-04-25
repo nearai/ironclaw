@@ -6394,6 +6394,48 @@ async fn reconcile_db_mirror(
     let file_audit_events = read_all_audit_events(&state.root, &tenant.tenant_id)?;
     let file_replay_export_manifests = read_all_export_manifests(&state.root, &tenant.tenant_id)?;
     let file_revocations = read_all_revocations(&state.root, &tenant.tenant_id)?;
+    let file_credit_event_ids = file_credit_events
+        .iter()
+        .map(|event| event.event_id)
+        .collect::<BTreeSet<_>>();
+    let db_credit_event_ids = db_credit_events
+        .iter()
+        .map(|event| event.credit_event_id)
+        .collect::<BTreeSet<_>>();
+    let db_file_projected_credit_event_ids = db_credit_events
+        .iter()
+        .filter(|event| trace_credit_event_type_from_storage(event.event_type).is_some())
+        .map(|event| event.credit_event_id)
+        .collect::<BTreeSet<_>>();
+    let missing_credit_event_ids_in_db = file_credit_event_ids
+        .difference(&db_credit_event_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let missing_credit_event_ids_in_files = db_file_projected_credit_event_ids
+        .difference(&file_credit_event_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let file_audit_event_ids = file_audit_events
+        .iter()
+        .map(|event| event.event_id)
+        .collect::<BTreeSet<_>>();
+    let db_audit_event_ids = db_audit_events
+        .iter()
+        .map(|event| event.audit_event_id)
+        .collect::<BTreeSet<_>>();
+    let db_file_projected_audit_event_ids = db_audit_events
+        .iter()
+        .filter(|event| event.canonical_event_json.is_some())
+        .map(|event| event.audit_event_id)
+        .collect::<BTreeSet<_>>();
+    let missing_audit_event_ids_in_db = file_audit_event_ids
+        .difference(&db_audit_event_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let missing_audit_event_ids_in_files = db_file_projected_audit_event_ids
+        .difference(&file_audit_event_ids)
+        .copied()
+        .collect::<Vec<_>>();
     let mut db_object_ref_count = 0usize;
     let mut accepted_without_active_envelope_object_ref = Vec::new();
     let mut unreadable_active_envelope_object_refs = Vec::new();
@@ -6703,8 +6745,12 @@ async fn reconcile_db_mirror(
         derived_hash_mismatches,
         file_credit_event_count: file_credit_events.len(),
         db_credit_event_count: db_credit_events.len(),
+        missing_credit_event_ids_in_db,
+        missing_credit_event_ids_in_files,
         file_audit_event_count: file_audit_events.len(),
         db_audit_event_count: db_audit_events.len(),
+        missing_audit_event_ids_in_db,
+        missing_audit_event_ids_in_files,
         file_replay_export_manifest_count: file_replay_export_manifests.len(),
         db_export_manifest_count: db_export_manifests.len(),
         db_replay_export_manifest_count,
@@ -7956,8 +8002,12 @@ struct TraceDbReconciliationReport {
     derived_hash_mismatches: Vec<TraceDbDerivedHashMismatch>,
     file_credit_event_count: usize,
     db_credit_event_count: usize,
+    missing_credit_event_ids_in_db: Vec<Uuid>,
+    missing_credit_event_ids_in_files: Vec<Uuid>,
     file_audit_event_count: usize,
     db_audit_event_count: usize,
+    missing_audit_event_ids_in_db: Vec<Uuid>,
+    missing_audit_event_ids_in_files: Vec<Uuid>,
     file_replay_export_manifest_count: usize,
     db_export_manifest_count: usize,
     db_replay_export_manifest_count: usize,
@@ -13013,6 +13063,103 @@ mod tests {
         .await
         .expect("backfill can be rerun after repairing file-only revoke audit");
         assert_eq!(third_response.db_mirror_backfilled, 0);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn maintenance_reconciliation_reports_missing_ledger_and_audit_event_ids() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-mirror-reconciliation-events.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let Json(receipt) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        assert_eq!(receipt.status, "accepted");
+
+        let Json(delayed_credit) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::ReviewerBonus,
+                credit_points_delta: 1.0,
+                reason: Some("mirror reconciliation gap".to_string()),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("delayed credit succeeds");
+
+        let audit_event_id = read_all_audit_events(temp.path(), "tenant-a")
+            .expect("file audit events read")
+            .into_iter()
+            .find(|event| event.submission_id == submission_id)
+            .expect("submission audit event exists")
+            .event_id;
+        let conn = db.connect().await.expect("connect to mirror");
+        conn.execute(
+            "DELETE FROM trace_credit_ledger WHERE tenant_id = ?1 AND credit_event_id = ?2",
+            libsql::params!["tenant-a", delayed_credit.event_id.to_string()],
+        )
+        .await
+        .expect("delete mirrored credit event");
+        conn.execute(
+            "DELETE FROM trace_audit_events WHERE tenant_id = ?1 AND audit_event_id = ?2",
+            libsql::params!["tenant-a", audit_event_id.to_string()],
+        )
+        .await
+        .expect("delete mirrored audit event");
+
+        let Json(response) = maintenance_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_event_gap_reconciliation".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: true,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("reviewer can reconcile DB mirror");
+        let reconciliation = response
+            .db_reconciliation
+            .expect("reconciliation report exists");
+        assert_eq!(
+            reconciliation.missing_credit_event_ids_in_db,
+            vec![delayed_credit.event_id]
+        );
+        assert!(reconciliation.missing_credit_event_ids_in_files.is_empty());
+        assert_eq!(
+            reconciliation.missing_audit_event_ids_in_db,
+            vec![audit_event_id]
+        );
+        assert!(reconciliation.missing_audit_event_ids_in_files.is_empty());
     }
 
     #[cfg(feature = "libsql")]
