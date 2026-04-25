@@ -19,7 +19,7 @@ caller/channel/agent/conversation
       -> AuthorizationService / GrantAuthorizer / LeaseBackedAuthorizer
       -> optional RunStateStore / ApprovalRequestStore / CapabilityLeaseStore / ProcessManager
       -> RuntimeDispatcher or ProcessManager
-          -> WASM / Script / MCP or tracked ProcessRecord
+          -> WASM / Script / MCP or tracked/background ProcessRecord
 ```
 
 This service is the middle communication layer between authorization, dispatch, and process lifecycle start workflows.
@@ -67,7 +67,7 @@ This service is the middle communication layer between authorization, dispatch, 
 3. if configured, mark invocation `Running` in `RunStateStore`
 4. lookup CapabilityDescriptor in ExtensionRegistry
 5. call CapabilityDispatchAuthorizer::authorize_spawn, requiring `SpawnProcess` plus descriptor effects
-6. if allowed, ask ProcessManager to create a tenant/user-scoped ProcessRecord
+6. if allowed, ask ProcessManager to create a tenant/user-scoped ProcessRecord and optionally launch background execution
 7. mark the start invocation Completed or Failed
 8. return the ProcessRecord with ProcessId, scope, extension_id, capability_id, runtime, grants, mounts, and status
 ```
@@ -75,7 +75,7 @@ This service is the middle communication layer between authorization, dispatch, 
 Spawn is capability-targeted. It does not start raw host processes or extension-level workers without a declared capability identity.
 
 It does not implement grant matching itself; that belongs to `ironclaw_authorization`.
-It does not select WASM/Script/MCP; that belongs to `ironclaw_dispatcher` behind the narrow `CapabilityDispatcher` interface.
+It does not select WASM/Script/MCP for dispatch; that belongs to `ironclaw_dispatcher` behind the narrow `CapabilityDispatcher` interface. The `DispatchProcessExecutor` adapter can run spawned process input through that same dispatch interface from a background process manager.
 It does not own process lifecycle mechanics after start; that belongs to `ironclaw_processes` behind `ProcessManager`/`ProcessStore`.
 
 ---
@@ -140,7 +140,7 @@ If only one of `RunStateStore` or `ApprovalRequestStore` is configured and autho
 
 For approved resume, `CapabilityHost` compares the replayed request fingerprint to the approved fingerprint before dispatch, claims the matching lease before dispatch, and consumes it after successful dispatch. Denied/expired/non-approved approvals, missing leases, failed lease claims, and fingerprint mismatches fail before runtime dispatch.
 
-For spawn, `CapabilityHost` preserves `ExecutionContext.resource_scope` and creates a process record through `ProcessManager`; the dispatcher is not involved. The process record carries the target capability identity and runtime so later lifecycle operations remain capability-backed.
+For spawn, `CapabilityHost` preserves `ExecutionContext.resource_scope` and creates a process record through `ProcessManager`. It does not call `dispatch_json` directly. If a runtime-backed process manager is configured, the lower-level `DispatchProcessExecutor` adapter can route the background work through `CapabilityDispatcher` after the authorized process record is created. The process record carries the target capability identity and runtime so later lifecycle operations remain capability-backed.
 
 ---
 
@@ -162,7 +162,7 @@ This slice does not implement:
 
 - durable grant/lease storage, revocation, or expiration persistence
 - approval/resume of `Action::SpawnCapability`
-- runtime-backed background execution loops after process creation
+- cooperative cancellation/abort handles for background executor tasks
 - `await`, `subscribe`, or streaming output APIs
 - obligation application beyond returning allowed/denied
 - transcript/job history

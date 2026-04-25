@@ -1,10 +1,18 @@
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
 use async_trait::async_trait;
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
 use ironclaw_dispatcher::*;
 use ironclaw_extensions::*;
+use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::*;
 use ironclaw_processes::*;
+use ironclaw_resources::{InMemoryResourceGovernor, ReservationStatus, ResourceReceipt};
+use ironclaw_wasm::WasmRuntime;
 use serde_json::json;
 
 #[tokio::test]
@@ -189,6 +197,134 @@ async fn capability_host_rejects_spawn_invalid_context_before_process_persistenc
 }
 
 #[tokio::test]
+async fn dispatch_process_executor_routes_process_request_to_capability_dispatcher() {
+    let dispatcher = Arc::new(RecordingSpawnDispatcher::default());
+    let executor = DispatchProcessExecutor::new(dispatcher.clone());
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id);
+
+    let result = executor
+        .execute(ProcessExecutionRequest {
+            process_id: ProcessId::new(),
+            invocation_id,
+            scope: scope.clone(),
+            extension_id: ExtensionId::new("echo").unwrap(),
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            runtime: RuntimeKind::Wasm,
+            estimate: ResourceEstimate::default(),
+            input: json!({"message": "background dispatch"}),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.output, json!({"message": "background dispatch"}));
+    let request = dispatcher.take_request();
+    assert_eq!(
+        request.capability_id,
+        CapabilityId::new("echo.say").unwrap()
+    );
+    assert_eq!(request.scope, scope);
+    assert_eq!(request.input, json!({"message": "background dispatch"}));
+}
+
+#[tokio::test]
+async fn capability_host_spawn_can_run_background_dispatch_process() {
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(package_from_manifest(WASM_MANIFEST))
+        .unwrap();
+    let dispatcher = Arc::new(RecordingSpawnDispatcher::default());
+    let executor = Arc::new(DispatchProcessExecutor::new(dispatcher.clone()));
+    let process_store = Arc::new(InMemoryProcessStore::new());
+    let process_manager = BackgroundProcessManager::new(process_store.clone(), executor);
+    let authorizer = GrantAuthorizer::new();
+    let context = execution_context(CapabilitySet {
+        grants: vec![grant_for(
+            CapabilityId::new("echo.say").unwrap(),
+            Principal::Extension(ExtensionId::new("caller").unwrap()),
+            vec![EffectKind::DispatchCapability, EffectKind::SpawnProcess],
+        )],
+    });
+    let invocation_id = context.resource_scope.invocation_id;
+    let scope = context.resource_scope.clone();
+    let host = CapabilityHost::new(&registry, dispatcher.as_ref(), &authorizer)
+        .with_process_manager(&process_manager);
+
+    let spawned = host
+        .spawn_json(CapabilitySpawnRequest {
+            context,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: ResourceEstimate::default(),
+            input: json!({"message": "background dispatch"}),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(spawned.process.invocation_id, invocation_id);
+    wait_for_process_status(
+        process_store.as_ref(),
+        &scope,
+        spawned.process.process_id,
+        ProcessStatus::Completed,
+    )
+    .await;
+    let request = dispatcher.take_request();
+    assert_eq!(
+        request.capability_id,
+        CapabilityId::new("echo.say").unwrap()
+    );
+    assert_eq!(request.scope, scope);
+    assert_eq!(request.input, json!({"message": "background dispatch"}));
+}
+
+#[tokio::test]
+async fn capability_host_spawn_can_run_background_runtime_dispatcher_process() {
+    let (fs, package) = wasm_package_with_module(json_echo_module());
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    let registry = Arc::new(registry);
+    let fs = Arc::new(fs);
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let wasm_runtime = Arc::new(WasmRuntime::for_testing().unwrap());
+    let dispatcher = Arc::new(
+        RuntimeDispatcher::from_arcs(registry.clone(), fs, governor)
+            .with_wasm_runtime_arc(wasm_runtime),
+    );
+    let executor = Arc::new(DispatchProcessExecutor::new(dispatcher.clone()));
+    let process_store = Arc::new(InMemoryProcessStore::new());
+    let process_manager = BackgroundProcessManager::new(process_store.clone(), executor);
+    let authorizer = GrantAuthorizer::new();
+    let context = execution_context(CapabilitySet {
+        grants: vec![grant_for(
+            CapabilityId::new("echo.say").unwrap(),
+            Principal::Extension(ExtensionId::new("caller").unwrap()),
+            vec![EffectKind::DispatchCapability, EffectKind::SpawnProcess],
+        )],
+    });
+    let scope = context.resource_scope.clone();
+    let host = CapabilityHost::new(registry.as_ref(), dispatcher.as_ref(), &authorizer)
+        .with_process_manager(&process_manager);
+
+    let spawned = host
+        .spawn_json(CapabilitySpawnRequest {
+            context,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: ResourceEstimate::default(),
+            input: json!({"message": "real runtime dispatch"}),
+        })
+        .await
+        .unwrap();
+
+    wait_for_process_status(
+        process_store.as_ref(),
+        &scope,
+        spawned.process.process_id,
+        ProcessStatus::Completed,
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn capability_host_spawn_requires_process_manager() {
     let mut registry = ExtensionRegistry::new();
     registry
@@ -213,6 +349,41 @@ async fn capability_host_spawn_requires_process_manager() {
         err,
         CapabilityInvocationError::ProcessManagerMissing { .. }
     ));
+}
+
+#[derive(Default)]
+struct RecordingSpawnDispatcher {
+    request: std::sync::Mutex<Option<CapabilityDispatchRequest>>,
+}
+
+impl RecordingSpawnDispatcher {
+    fn take_request(&self) -> CapabilityDispatchRequest {
+        self.request.lock().unwrap().take().unwrap()
+    }
+}
+
+#[async_trait]
+impl CapabilityDispatcher for RecordingSpawnDispatcher {
+    async fn dispatch_json(
+        &self,
+        request: CapabilityDispatchRequest,
+    ) -> Result<CapabilityDispatchResult, DispatchError> {
+        *self.request.lock().unwrap() = Some(request.clone());
+        Ok(CapabilityDispatchResult {
+            capability_id: request.capability_id,
+            provider: ExtensionId::new("echo").unwrap(),
+            runtime: RuntimeKind::Wasm,
+            output: request.input,
+            usage: ResourceUsage::default(),
+            receipt: ResourceReceipt {
+                id: ResourceReservationId::new(),
+                scope: request.scope,
+                status: ReservationStatus::Reconciled,
+                estimate: request.estimate,
+                actual: Some(ResourceUsage::default()),
+            },
+        })
+    }
 }
 
 struct InputAssertingProcessManager {
@@ -253,6 +424,50 @@ impl CapabilityDispatcher for NoopDispatcher {
     }
 }
 
+fn wasm_package_with_module(bytes: Vec<u8>) -> (LocalFilesystem, ExtensionPackage) {
+    let storage = tempfile::tempdir().unwrap().keep();
+    std::fs::create_dir_all(storage.join("echo/wasm")).unwrap();
+    std::fs::write(storage.join("echo/wasm/echo.wasm"), bytes).unwrap();
+
+    let mut fs = LocalFilesystem::new();
+    fs.mount_local(
+        VirtualPath::new("/system/extensions").unwrap(),
+        HostPath::from_path_buf(storage),
+    )
+    .unwrap();
+    (fs, package_from_manifest(WASM_MANIFEST))
+}
+
+fn json_echo_module() -> Vec<u8> {
+    wat::parse_str(
+        r#"(module
+            (memory (export "memory") 1)
+            (global $heap (mut i32) (i32.const 1024))
+            (global $out_ptr (mut i32) (i32.const 0))
+            (global $out_len (mut i32) (i32.const 0))
+            (func (export "alloc") (param $len i32) (result i32)
+              (local $ptr i32)
+              global.get $heap
+              local.set $ptr
+              global.get $heap
+              local.get $len
+              i32.add
+              global.set $heap
+              local.get $ptr)
+            (func (export "say") (param $ptr i32) (param $len i32) (result i32)
+              local.get $ptr
+              global.set $out_ptr
+              local.get $len
+              global.set $out_len
+              i32.const 0)
+            (func (export "output_ptr") (result i32)
+              global.get $out_ptr)
+            (func (export "output_len") (result i32)
+              global.get $out_len))"#,
+    )
+    .unwrap()
+}
+
 fn package_from_manifest(manifest: &str) -> ExtensionPackage {
     let manifest = ExtensionManifest::parse(manifest).unwrap();
     let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
@@ -278,6 +493,40 @@ fn grant_for(
             expires_at: None,
             max_invocations: None,
         },
+    }
+}
+
+async fn wait_for_process_status<S>(
+    store: &S,
+    scope: &ResourceScope,
+    process_id: ProcessId,
+    expected: ProcessStatus,
+) where
+    S: ProcessStore + ?Sized,
+{
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let record = store.get(scope, process_id).await.unwrap().unwrap();
+        if record.status == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "process {process_id} did not reach {expected:?}; last status was {:?}",
+            record.status
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+fn sample_scope(invocation_id: InvocationId) -> ResourceScope {
+    ResourceScope {
+        tenant_id: TenantId::new("tenant1").unwrap(),
+        user_id: UserId::new("user1").unwrap(),
+        project_id: Some(ProjectId::new("project1").unwrap()),
+        mission_id: None,
+        thread_id: None,
+        invocation_id,
     }
 }
 

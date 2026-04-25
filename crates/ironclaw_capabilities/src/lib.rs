@@ -4,6 +4,8 @@
 //! It coordinates authorization and runtime dispatch without making callers
 //! understand grant evaluation and without making the dispatcher own auth.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use ironclaw_authorization::{
     CapabilityDispatchAuthorizer, CapabilityLease, CapabilityLeaseError, CapabilityLeaseStore,
@@ -17,7 +19,10 @@ use ironclaw_host_api::{
     ApprovalRequestId, CapabilityId, Decision, DenyReason, ExecutionContext, HostApiError,
     InvocationFingerprint, InvocationId, ProcessId, ResourceEstimate, ResourceScope,
 };
-use ironclaw_processes::{ProcessError, ProcessManager, ProcessRecord, ProcessStart};
+use ironclaw_processes::{
+    ProcessError, ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult,
+    ProcessExecutor, ProcessManager, ProcessRecord, ProcessStart,
+};
 use ironclaw_resources::ResourceGovernor;
 use ironclaw_run_state::{
     ApprovalRequestStore, ApprovalStatus, RunStart, RunStateError, RunStateStore, RunStatus,
@@ -156,6 +161,48 @@ impl From<ProcessError> for CapabilityInvocationError {
 impl From<DispatchError> for CapabilityInvocationError {
     fn from(error: DispatchError) -> Self {
         Self::Dispatch(Box::new(error))
+    }
+}
+
+/// Process executor adapter that runs a spawned capability through the authorized dispatch path.
+pub struct DispatchProcessExecutor<D>
+where
+    D: CapabilityDispatcher + ?Sized,
+{
+    dispatcher: Arc<D>,
+}
+
+impl<D> DispatchProcessExecutor<D>
+where
+    D: CapabilityDispatcher + ?Sized,
+{
+    pub fn new(dispatcher: Arc<D>) -> Self {
+        Self { dispatcher }
+    }
+}
+
+#[async_trait]
+impl<D> ProcessExecutor for DispatchProcessExecutor<D>
+where
+    D: CapabilityDispatcher + ?Sized,
+{
+    async fn execute(
+        &self,
+        request: ProcessExecutionRequest,
+    ) -> Result<ProcessExecutionResult, ProcessExecutionError> {
+        let dispatch = self
+            .dispatcher
+            .dispatch_json(CapabilityDispatchRequest {
+                capability_id: request.capability_id,
+                scope: request.scope,
+                estimate: request.estimate,
+                input: request.input,
+            })
+            .await
+            .map_err(|error| ProcessExecutionError::new(dispatch_error_kind(&error)))?;
+        Ok(ProcessExecutionResult {
+            output: dispatch.output,
+        })
     }
 }
 
@@ -663,6 +710,20 @@ where
         run_state.complete(&scope, invocation_id).await?;
 
         Ok(CapabilityInvocationResult { dispatch })
+    }
+}
+
+fn dispatch_error_kind(error: &DispatchError) -> &'static str {
+    match error {
+        DispatchError::UnknownCapability { .. } => "UnknownCapability",
+        DispatchError::UnknownProvider { .. } => "UnknownProvider",
+        DispatchError::RuntimeMismatch { .. } => "RuntimeMismatch",
+        DispatchError::MissingRuntimeBackend { .. } => "MissingRuntimeBackend",
+        DispatchError::UnsupportedRuntime { .. } => "UnsupportedRuntime",
+        DispatchError::Event(_) => "Event",
+        DispatchError::Mcp(_) => "Mcp",
+        DispatchError::Script(_) => "Script",
+        DispatchError::Wasm(_) => "Wasm",
     }
 }
 

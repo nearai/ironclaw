@@ -1,3 +1,12 @@
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
+};
+
+use async_trait::async_trait;
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::*;
 use ironclaw_processes::*;
@@ -79,6 +88,149 @@ async fn process_store_hides_records_from_other_tenants_and_users() {
 }
 
 #[tokio::test]
+async fn process_store_rejects_terminal_status_overwrite() {
+    let store = InMemoryProcessStore::new();
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    store
+        .start(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+    store.kill(&scope, process_id).await.unwrap();
+
+    let err = store.complete(&scope, process_id).await.unwrap_err();
+
+    assert!(matches!(
+        err,
+        ProcessError::InvalidTransition {
+            process_id: id,
+            from: ProcessStatus::Killed,
+            to: ProcessStatus::Completed,
+        } if id == process_id
+    ));
+    assert_eq!(
+        store.get(&scope, process_id).await.unwrap().unwrap().status,
+        ProcessStatus::Killed
+    );
+}
+
+#[tokio::test]
+async fn background_process_manager_marks_process_completed_after_executor_success() {
+    let store = Arc::new(InMemoryProcessStore::new());
+    let executor = Arc::new(CountingExecutor::success());
+    let manager = BackgroundProcessManager::new(store.clone(), executor.clone());
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+
+    let started = manager
+        .spawn(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+
+    assert_eq!(started.status, ProcessStatus::Running);
+    wait_for_status(store.as_ref(), &scope, process_id, ProcessStatus::Completed).await;
+    assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn background_process_manager_marks_process_failed_after_executor_error() {
+    let store = Arc::new(InMemoryProcessStore::new());
+    let executor = Arc::new(CountingExecutor::failure("RuntimeDispatch"));
+    let manager = BackgroundProcessManager::new(store.clone(), executor);
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+
+    manager
+        .spawn(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+
+    wait_for_status(store.as_ref(), &scope, process_id, ProcessStatus::Failed).await;
+    assert_eq!(
+        store
+            .get(&scope, process_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .error_kind
+            .as_deref(),
+        Some("RuntimeDispatch")
+    );
+}
+
+#[tokio::test]
+async fn background_process_manager_does_not_overwrite_killed_process_on_late_success() {
+    let store = Arc::new(InMemoryProcessStore::new());
+    let executor = Arc::new(CountingExecutor::delayed_success(Duration::from_millis(25)));
+    let manager = BackgroundProcessManager::new(store.clone(), executor);
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+
+    manager
+        .spawn(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+    store.kill(&scope, process_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    assert_eq!(
+        store.get(&scope, process_id).await.unwrap().unwrap().status,
+        ProcessStatus::Killed
+    );
+}
+
+#[tokio::test]
+async fn background_process_manager_can_use_owned_filesystem_store() {
+    let filesystem = Arc::new(engine_filesystem());
+    let store = Arc::new(FilesystemProcessStore::from_arc(filesystem));
+    let executor = Arc::new(CountingExecutor::success());
+    let manager = BackgroundProcessManager::new(store.clone(), executor);
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+
+    manager
+        .spawn(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+
+    wait_for_status(store.as_ref(), &scope, process_id, ProcessStatus::Completed).await;
+}
+
+#[tokio::test]
+async fn filesystem_process_store_rejects_terminal_status_overwrite() {
+    let fs = engine_filesystem();
+    let store = FilesystemProcessStore::new(&fs);
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    store
+        .start(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+    store.kill(&scope, process_id).await.unwrap();
+
+    let err = store.complete(&scope, process_id).await.unwrap_err();
+
+    assert!(matches!(
+        err,
+        ProcessError::InvalidTransition {
+            process_id: id,
+            from: ProcessStatus::Killed,
+            to: ProcessStatus::Completed,
+        } if id == process_id
+    ));
+    assert_eq!(
+        store.get(&scope, process_id).await.unwrap().unwrap().status,
+        ProcessStatus::Killed
+    );
+}
+
+#[tokio::test]
 async fn filesystem_process_store_persists_under_tenant_user_engine_processes() {
     let fs = engine_filesystem();
     let store = FilesystemProcessStore::new(&fs);
@@ -106,6 +258,88 @@ async fn filesystem_process_store_persists_under_tenant_user_engine_processes() 
             .len(),
         1
     );
+}
+
+struct CountingExecutor {
+    result: Result<(), &'static str>,
+    delay: Duration,
+    calls: AtomicUsize,
+}
+
+impl CountingExecutor {
+    fn success() -> Self {
+        Self {
+            result: Ok(()),
+            delay: Duration::ZERO,
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn delayed_success(delay: Duration) -> Self {
+        Self {
+            result: Ok(()),
+            delay,
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn failure(kind: &'static str) -> Self {
+        Self {
+            result: Err(kind),
+            delay: Duration::ZERO,
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl ProcessExecutor for CountingExecutor {
+    async fn execute(
+        &self,
+        request: ProcessExecutionRequest,
+    ) -> Result<ProcessExecutionResult, ProcessExecutionError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(
+            request.capability_id,
+            CapabilityId::new("echo.say").unwrap()
+        );
+        assert_eq!(
+            request.input,
+            serde_json::json!({"message": "runtime payload"})
+        );
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
+        }
+        match self.result {
+            Ok(()) => Ok(ProcessExecutionResult {
+                output: serde_json::json!({"ok": true}),
+            }),
+            Err(kind) => Err(ProcessExecutionError::new(kind)),
+        }
+    }
+}
+
+async fn wait_for_status<S>(
+    store: &S,
+    scope: &ResourceScope,
+    process_id: ProcessId,
+    expected: ProcessStatus,
+) where
+    S: ProcessStore + ?Sized,
+{
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let record = store.get(scope, process_id).await.unwrap().unwrap();
+        if record.status == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "process {process_id} did not reach {expected:?}; last status was {:?}",
+            record.status
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 fn process_start(

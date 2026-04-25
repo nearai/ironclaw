@@ -6,7 +6,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use async_trait::async_trait;
@@ -19,6 +19,7 @@ use ironclaw_host_api::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+use tokio::sync::Mutex as AsyncMutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -68,6 +69,12 @@ pub enum ProcessError {
     UnknownProcess { process_id: ProcessId },
     #[error("process {process_id} already exists")]
     ProcessAlreadyExists { process_id: ProcessId },
+    #[error("process {process_id} cannot transition from {from:?} to {to:?}")]
+    InvalidTransition {
+        process_id: ProcessId,
+        from: ProcessStatus,
+        to: ProcessStatus,
+    },
     #[error("invalid storage path: {0}")]
     InvalidPath(String),
     #[error("filesystem error: {0}")]
@@ -90,9 +97,93 @@ impl From<FilesystemError> for ProcessError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProcessExecutionRequest {
+    pub process_id: ProcessId,
+    pub invocation_id: InvocationId,
+    pub scope: ResourceScope,
+    pub extension_id: ExtensionId,
+    pub capability_id: CapabilityId,
+    pub runtime: RuntimeKind,
+    pub estimate: ResourceEstimate,
+    pub input: Value,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProcessExecutionResult {
+    pub output: Value,
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[error("process execution failed: {kind}")]
+pub struct ProcessExecutionError {
+    pub kind: String,
+}
+
+impl ProcessExecutionError {
+    pub fn new(kind: impl Into<String>) -> Self {
+        Self { kind: kind.into() }
+    }
+}
+
+#[async_trait]
+pub trait ProcessExecutor: Send + Sync {
+    async fn execute(
+        &self,
+        request: ProcessExecutionRequest,
+    ) -> Result<ProcessExecutionResult, ProcessExecutionError>;
+}
+
 #[async_trait]
 pub trait ProcessManager: Send + Sync {
     async fn spawn(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError>;
+}
+
+pub struct BackgroundProcessManager {
+    store: Arc<dyn ProcessStore>,
+    executor: Arc<dyn ProcessExecutor + 'static>,
+}
+
+impl BackgroundProcessManager {
+    pub fn new<S, E>(store: Arc<S>, executor: Arc<E>) -> Self
+    where
+        S: ProcessStore + 'static,
+        E: ProcessExecutor + 'static,
+    {
+        Self { store, executor }
+    }
+}
+
+#[async_trait]
+impl ProcessManager for BackgroundProcessManager {
+    async fn spawn(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
+        let record = self.store.start(start.clone()).await?;
+        let store = Arc::clone(&self.store);
+        let executor = Arc::clone(&self.executor);
+        let scope = start.scope.clone();
+        let process_id = start.process_id;
+        tokio::spawn(async move {
+            let request = ProcessExecutionRequest {
+                process_id: start.process_id,
+                invocation_id: start.invocation_id,
+                scope: start.scope,
+                extension_id: start.extension_id,
+                capability_id: start.capability_id,
+                runtime: start.runtime,
+                estimate: start.estimated_resources,
+                input: start.input,
+            };
+            match executor.execute(request).await {
+                Ok(_result) => {
+                    let _ = store.complete(&scope, process_id).await;
+                }
+                Err(error) => {
+                    let _ = store.fail(&scope, process_id, error.kind).await;
+                }
+            }
+        });
+        Ok(record)
+    }
 }
 
 #[async_trait]
@@ -168,18 +259,21 @@ impl InMemoryProcessStore {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn update(
+    fn update_status(
         &self,
         scope: &ResourceScope,
         process_id: ProcessId,
-        update: impl FnOnce(&mut ProcessRecord),
+        to: ProcessStatus,
+        error_kind: Option<String>,
     ) -> Result<ProcessRecord, ProcessError> {
         let key = ProcessKey::new(scope, process_id);
         let mut records = self.records_guard();
         let record = records
             .get_mut(&key)
             .ok_or(ProcessError::UnknownProcess { process_id })?;
-        update(record);
+        ensure_status_transition(process_id, record.status, to)?;
+        record.status = to;
+        record.error_kind = error_kind;
         Ok(record.clone())
     }
 }
@@ -218,10 +312,7 @@ impl ProcessStore for InMemoryProcessStore {
         scope: &ResourceScope,
         process_id: ProcessId,
     ) -> Result<ProcessRecord, ProcessError> {
-        self.update(scope, process_id, |record| {
-            record.status = ProcessStatus::Completed;
-            record.error_kind = None;
-        })
+        self.update_status(scope, process_id, ProcessStatus::Completed, None)
     }
 
     async fn fail(
@@ -230,10 +321,7 @@ impl ProcessStore for InMemoryProcessStore {
         process_id: ProcessId,
         error_kind: String,
     ) -> Result<ProcessRecord, ProcessError> {
-        self.update(scope, process_id, |record| {
-            record.status = ProcessStatus::Failed;
-            record.error_kind = Some(error_kind);
-        })
+        self.update_status(scope, process_id, ProcessStatus::Failed, Some(error_kind))
     }
 
     async fn kill(
@@ -241,10 +329,7 @@ impl ProcessStore for InMemoryProcessStore {
         scope: &ResourceScope,
         process_id: ProcessId,
     ) -> Result<ProcessRecord, ProcessError> {
-        self.update(scope, process_id, |record| {
-            record.status = ProcessStatus::Killed;
-            record.error_kind = None;
-        })
+        self.update_status(scope, process_id, ProcessStatus::Killed, None)
     }
 
     async fn get(
@@ -273,11 +358,32 @@ impl ProcessStore for InMemoryProcessStore {
     }
 }
 
+enum FilesystemHandle<'a, F>
+where
+    F: RootFilesystem,
+{
+    Borrowed(&'a F),
+    Shared(Arc<F>),
+}
+
+impl<F> FilesystemHandle<'_, F>
+where
+    F: RootFilesystem,
+{
+    fn as_ref(&self) -> &F {
+        match self {
+            Self::Borrowed(filesystem) => filesystem,
+            Self::Shared(filesystem) => filesystem.as_ref(),
+        }
+    }
+}
+
 pub struct FilesystemProcessStore<'a, F>
 where
     F: RootFilesystem,
 {
-    filesystem: &'a F,
+    filesystem: FilesystemHandle<'a, F>,
+    transition_lock: AsyncMutex<()>,
 }
 
 impl<'a, F> FilesystemProcessStore<'a, F>
@@ -285,14 +391,43 @@ where
     F: RootFilesystem,
 {
     pub fn new(filesystem: &'a F) -> Self {
-        Self { filesystem }
+        Self {
+            filesystem: FilesystemHandle::Borrowed(filesystem),
+            transition_lock: AsyncMutex::new(()),
+        }
+    }
+
+    pub fn from_arc(filesystem: Arc<F>) -> FilesystemProcessStore<'static, F> {
+        FilesystemProcessStore {
+            filesystem: FilesystemHandle::Shared(filesystem),
+            transition_lock: AsyncMutex::new(()),
+        }
     }
 
     async fn write_record(&self, record: &ProcessRecord) -> Result<(), ProcessError> {
         let path = process_record_path(&record.scope, record.process_id)?;
         let bytes = serialize_pretty(record)?;
-        self.filesystem.write_file(&path, &bytes).await?;
+        self.filesystem.as_ref().write_file(&path, &bytes).await?;
         Ok(())
+    }
+
+    async fn update_status(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        to: ProcessStatus,
+        error_kind: Option<String>,
+    ) -> Result<ProcessRecord, ProcessError> {
+        let _guard = self.transition_lock.lock().await;
+        let mut record = self
+            .get(scope, process_id)
+            .await?
+            .ok_or(ProcessError::UnknownProcess { process_id })?;
+        ensure_status_transition(process_id, record.status, to)?;
+        record.status = to;
+        record.error_kind = error_kind;
+        self.write_record(&record).await?;
+        Ok(record)
     }
 }
 
@@ -302,7 +437,14 @@ where
     F: RootFilesystem,
 {
     async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
-        if self.get(&start.scope, start.process_id).await?.is_some() {
+        let _guard = self.transition_lock.lock().await;
+        let path = process_record_path(&start.scope, start.process_id)?;
+        let existing = match self.filesystem.as_ref().read_file(&path).await {
+            Ok(_) => true,
+            Err(error) if is_not_found(&error) => false,
+            Err(error) => return Err(error.into()),
+        };
+        if existing {
             return Err(ProcessError::ProcessAlreadyExists {
                 process_id: start.process_id,
             });
@@ -331,14 +473,8 @@ where
         scope: &ResourceScope,
         process_id: ProcessId,
     ) -> Result<ProcessRecord, ProcessError> {
-        let mut record = self
-            .get(scope, process_id)
-            .await?
-            .ok_or(ProcessError::UnknownProcess { process_id })?;
-        record.status = ProcessStatus::Completed;
-        record.error_kind = None;
-        self.write_record(&record).await?;
-        Ok(record)
+        self.update_status(scope, process_id, ProcessStatus::Completed, None)
+            .await
     }
 
     async fn fail(
@@ -347,14 +483,8 @@ where
         process_id: ProcessId,
         error_kind: String,
     ) -> Result<ProcessRecord, ProcessError> {
-        let mut record = self
-            .get(scope, process_id)
-            .await?
-            .ok_or(ProcessError::UnknownProcess { process_id })?;
-        record.status = ProcessStatus::Failed;
-        record.error_kind = Some(error_kind);
-        self.write_record(&record).await?;
-        Ok(record)
+        self.update_status(scope, process_id, ProcessStatus::Failed, Some(error_kind))
+            .await
     }
 
     async fn kill(
@@ -362,14 +492,8 @@ where
         scope: &ResourceScope,
         process_id: ProcessId,
     ) -> Result<ProcessRecord, ProcessError> {
-        let mut record = self
-            .get(scope, process_id)
-            .await?
-            .ok_or(ProcessError::UnknownProcess { process_id })?;
-        record.status = ProcessStatus::Killed;
-        record.error_kind = None;
-        self.write_record(&record).await?;
-        Ok(record)
+        self.update_status(scope, process_id, ProcessStatus::Killed, None)
+            .await
     }
 
     async fn get(
@@ -378,7 +502,7 @@ where
         process_id: ProcessId,
     ) -> Result<Option<ProcessRecord>, ProcessError> {
         let path = process_record_path(scope, process_id)?;
-        let bytes = match self.filesystem.read_file(&path).await {
+        let bytes = match self.filesystem.as_ref().read_file(&path).await {
             Ok(bytes) => bytes,
             Err(error) if is_not_found(&error) => return Ok(None),
             Err(error) => return Err(error.into()),
@@ -396,7 +520,7 @@ where
         scope: &ResourceScope,
     ) -> Result<Vec<ProcessRecord>, ProcessError> {
         let root = process_records_root(scope)?;
-        let entries = match self.filesystem.list_dir(&root).await {
+        let entries = match self.filesystem.as_ref().list_dir(&root).await {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
@@ -404,7 +528,7 @@ where
         let mut records = Vec::new();
         for entry in entries {
             if entry.name.ends_with(".json") {
-                let bytes = self.filesystem.read_file(&entry.path).await?;
+                let bytes = self.filesystem.as_ref().read_file(&entry.path).await?;
                 let record = deserialize::<ProcessRecord>(&bytes)?;
                 if same_tenant_user(&record.scope, scope) {
                     records.push(record);
@@ -414,6 +538,21 @@ where
         records.sort_by_key(|record| record.process_id.as_uuid());
         Ok(records)
     }
+}
+
+fn ensure_status_transition(
+    process_id: ProcessId,
+    from: ProcessStatus,
+    to: ProcessStatus,
+) -> Result<(), ProcessError> {
+    if from != ProcessStatus::Running {
+        return Err(ProcessError::InvalidTransition {
+            process_id,
+            from,
+            to,
+        });
+    }
+    Ok(())
 }
 
 fn process_record_path(
