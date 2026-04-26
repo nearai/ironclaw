@@ -351,6 +351,64 @@ pub enum TracesCommand {
         json: bool,
     },
 
+    /// Run scoped central retention maintenance through the worker route
+    WorkerRetentionMaintenance {
+        /// Trace Commons ingestion base URL or /v1/traces URL
+        #[arg(long)]
+        endpoint: String,
+
+        /// Optional retention purpose recorded in central audit metadata
+        #[arg(long)]
+        purpose: Option<String>,
+
+        /// Run without mutating central state when the service supports it
+        #[arg(long)]
+        dry_run: bool,
+
+        /// RFC3339 cutoff; expired submissions at or before this time are purged
+        #[arg(long)]
+        purge_expired_before: Option<String>,
+
+        /// Maximum age in hours for export-cache pruning
+        #[arg(long)]
+        max_export_age_hours: Option<i64>,
+
+        /// Leave invalid export-cache files in place
+        #[arg(long)]
+        skip_export_cache_prune: bool,
+
+        /// Environment variable containing a retention-worker bearer token
+        #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
+        bearer_token_env: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Index scoped vector metadata through the worker route
+    WorkerVectorIndex {
+        /// Trace Commons ingestion base URL or /v1/traces URL
+        #[arg(long)]
+        endpoint: String,
+
+        /// Optional vector indexing purpose recorded in central audit metadata
+        #[arg(long)]
+        purpose: Option<String>,
+
+        /// Run without mutating central state when the service supports it
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Environment variable containing a vector-worker bearer token
+        #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
+        bearer_token_env: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Start central benchmark conversion for approved replayable traces
     BenchmarkConvert {
         /// Trace Commons ingestion base URL or /v1/traces URL
@@ -382,6 +440,45 @@ pub enum TracesCommand {
         external_ref: Option<String>,
 
         /// Environment variable containing a reviewer/admin bearer token
+        #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
+        bearer_token_env: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Start benchmark conversion through the worker route
+    WorkerBenchmarkConvert {
+        /// Trace Commons ingestion base URL or /v1/traces URL
+        #[arg(long)]
+        endpoint: String,
+
+        /// Explicit conversion purpose recorded in central audit metadata
+        #[arg(long)]
+        purpose: String,
+
+        /// Maximum traces to convert
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Filter by consent scope
+        #[arg(long, value_enum)]
+        consent_scope: Option<TraceScopeArg>,
+
+        /// Filter by central corpus status
+        #[arg(long, value_enum)]
+        status: Option<TraceCorpusStatusArg>,
+
+        /// Filter by residual privacy risk
+        #[arg(long, value_enum)]
+        privacy_risk: Option<TracePrivacyRiskArg>,
+
+        /// Optional benchmark/job/external reference
+        #[arg(long)]
+        external_ref: Option<String>,
+
+        /// Environment variable containing a benchmark-worker bearer token
         #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
         bearer_token_env: String,
 
@@ -1002,6 +1099,38 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
             };
             trace_commons_maintenance_run(&endpoint, &bearer_token_env, options, json).await
         }
+        TracesCommand::WorkerRetentionMaintenance {
+            endpoint,
+            purpose,
+            dry_run,
+            purge_expired_before,
+            max_export_age_hours,
+            skip_export_cache_prune,
+            bearer_token_env,
+            json,
+        } => {
+            trace_commons_retention_maintenance_run(TraceCommonsRetentionMaintenanceOptions {
+                endpoint: &endpoint,
+                bearer_token_env: &bearer_token_env,
+                purpose,
+                dry_run,
+                prune_export_cache: !skip_export_cache_prune,
+                max_export_age_hours,
+                purge_expired_before,
+                json,
+            })
+            .await
+        }
+        TracesCommand::WorkerVectorIndex {
+            endpoint,
+            purpose,
+            dry_run,
+            bearer_token_env,
+            json,
+        } => {
+            trace_commons_vector_index_run(&endpoint, &bearer_token_env, purpose, dry_run, json)
+                .await
+        }
         TracesCommand::BenchmarkConvert {
             endpoint,
             purpose,
@@ -1023,6 +1152,32 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
                 privacy_risk,
                 external_ref,
                 json,
+                path: "/v1/benchmarks/convert",
+            })
+            .await
+        }
+        TracesCommand::WorkerBenchmarkConvert {
+            endpoint,
+            purpose,
+            limit,
+            consent_scope,
+            status,
+            privacy_risk,
+            external_ref,
+            bearer_token_env,
+            json,
+        } => {
+            trace_commons_benchmark_convert(TraceCommonsBenchmarkConvertOptions {
+                endpoint: &endpoint,
+                bearer_token_env: &bearer_token_env,
+                purpose,
+                limit,
+                consent_scope,
+                status,
+                privacy_risk,
+                external_ref,
+                json,
+                path: "/v1/workers/benchmark-convert",
             })
             .await
         }
@@ -1828,6 +1983,134 @@ fn trace_commons_maintenance_body(options: &TraceCommonsMaintenanceOptions) -> s
     body
 }
 
+struct TraceCommonsRetentionMaintenanceOptions<'a> {
+    endpoint: &'a str,
+    bearer_token_env: &'a str,
+    purpose: Option<String>,
+    dry_run: bool,
+    prune_export_cache: bool,
+    max_export_age_hours: Option<i64>,
+    purge_expired_before: Option<String>,
+    json: bool,
+}
+
+async fn trace_commons_retention_maintenance_run(
+    options: TraceCommonsRetentionMaintenanceOptions<'_>,
+) -> anyhow::Result<()> {
+    if let Some(purpose) = options.purpose.as_deref() {
+        require_non_empty_purpose(purpose)?;
+    }
+    let body = trace_commons_retention_maintenance_body(
+        options.purpose,
+        options.dry_run,
+        options.prune_export_cache,
+        options.max_export_age_hours,
+        options.purge_expired_before,
+    );
+    let response = trace_commons_api_request(
+        Method::POST,
+        options.endpoint,
+        "/v1/workers/retention-maintenance",
+        &[],
+        Some(options.bearer_token_env),
+        Some(body),
+    )
+    .await?;
+    if options.json {
+        print_trace_commons_json(&response)?;
+        return Ok(());
+    }
+    println!("Trace Commons retention maintenance requested.");
+    if let Some(value) = response.json.as_ref() {
+        print_optional_json_field("  audit event id", value, "audit_event_id");
+        print_optional_json_field("  purpose", value, "purpose");
+        print_optional_json_field("  dry run", value, "dry_run");
+        print_optional_json_field("  records marked revoked", value, "records_marked_revoked");
+        print_optional_json_field("  records marked expired", value, "records_marked_expired");
+        print_optional_json_field("  records marked purged", value, "records_marked_purged");
+        print_optional_json_field(
+            "  export cache files pruned",
+            value,
+            "export_cache_files_pruned",
+        );
+        print_optional_json_field(
+            "  export provenance invalidated",
+            value,
+            "export_provenance_invalidated",
+        );
+    }
+    Ok(())
+}
+
+fn trace_commons_retention_maintenance_body(
+    purpose: Option<String>,
+    dry_run: bool,
+    prune_export_cache: bool,
+    max_export_age_hours: Option<i64>,
+    purge_expired_before: Option<String>,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "dry_run": dry_run,
+    });
+    if let Some(purpose) = purpose {
+        body["purpose"] = serde_json::Value::String(purpose);
+    }
+    if !prune_export_cache {
+        body["prune_export_cache"] = serde_json::Value::Bool(false);
+    }
+    if let Some(max_export_age_hours) = max_export_age_hours {
+        body["max_export_age_hours"] = serde_json::Value::Number(max_export_age_hours.into());
+    }
+    if let Some(purge_expired_before) = purge_expired_before {
+        body["purge_expired_before"] = serde_json::Value::String(purge_expired_before);
+    }
+    body
+}
+
+async fn trace_commons_vector_index_run(
+    endpoint: &str,
+    bearer_token_env: &str,
+    purpose: Option<String>,
+    dry_run: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    if let Some(purpose) = purpose.as_deref() {
+        require_non_empty_purpose(purpose)?;
+    }
+    let body = trace_commons_vector_index_body(purpose, dry_run);
+    let response = trace_commons_api_request(
+        Method::POST,
+        endpoint,
+        "/v1/workers/vector-index",
+        &[],
+        Some(bearer_token_env),
+        Some(body),
+    )
+    .await?;
+    if json {
+        print_trace_commons_json(&response)?;
+        return Ok(());
+    }
+    println!("Trace Commons vector index requested.");
+    if let Some(value) = response.json.as_ref() {
+        print_optional_json_field("  audit event id", value, "audit_event_id");
+        print_optional_json_field("  purpose", value, "purpose");
+        print_optional_json_field("  dry run", value, "dry_run");
+        print_optional_json_field("  vectors indexed", value, "vector_entries_indexed");
+    }
+    Ok(())
+}
+
+fn trace_commons_vector_index_body(purpose: Option<String>, dry_run: bool) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "dry_run": dry_run,
+    });
+    if let Some(purpose) = purpose {
+        body["purpose"] = serde_json::Value::String(purpose);
+    }
+    body
+}
+
 struct TraceCommonsBenchmarkConvertOptions<'a> {
     endpoint: &'a str,
     bearer_token_env: &'a str,
@@ -1838,6 +2121,7 @@ struct TraceCommonsBenchmarkConvertOptions<'a> {
     privacy_risk: Option<TracePrivacyRiskArg>,
     external_ref: Option<String>,
     json: bool,
+    path: &'a str,
 }
 
 async fn trace_commons_benchmark_convert(
@@ -1866,7 +2150,7 @@ async fn trace_commons_benchmark_convert(
     let response = trace_commons_api_request(
         Method::POST,
         options.endpoint,
-        "/v1/benchmarks/convert",
+        options.path,
         &[],
         Some(options.bearer_token_env),
         Some(body),
@@ -3726,6 +4010,114 @@ mod tests {
             body["allowed_uses"],
             serde_json::json!(["debugging", "aggregate_analytics", "ranking_model_training"])
         );
+    }
+
+    #[test]
+    fn worker_benchmark_convert_uses_dedicated_route() {
+        let url = trace_commons_api_url(
+            "https://trace.example/internal/v1/traces",
+            "/v1/workers/benchmark-convert",
+            &[],
+        )
+        .expect("url builds");
+
+        assert_eq!(
+            url,
+            "https://trace.example/internal/v1/workers/benchmark-convert"
+        );
+    }
+
+    #[test]
+    fn worker_commands_parse_through_cli() {
+        let benchmark = Cli::try_parse_from([
+            "ironclaw",
+            "traces",
+            "worker-benchmark-convert",
+            "--endpoint",
+            "https://trace.example/internal",
+            "--purpose",
+            "nightly-worker-benchmark",
+            "--status",
+            "accepted",
+        ])
+        .expect("worker-benchmark-convert should parse");
+        let Some(Command::Traces(TracesCommand::WorkerBenchmarkConvert {
+            purpose, status, ..
+        })) = benchmark.command
+        else {
+            panic!("expected traces worker-benchmark-convert command");
+        };
+        assert_eq!(purpose, "nightly-worker-benchmark");
+        assert_eq!(status, Some(TraceCorpusStatusArg::Accepted));
+
+        let retention = Cli::try_parse_from([
+            "ironclaw",
+            "traces",
+            "worker-retention-maintenance",
+            "--endpoint",
+            "https://trace.example/internal",
+            "--purpose",
+            "retention-worker",
+            "--dry-run",
+        ])
+        .expect("worker-retention-maintenance should parse");
+        let Some(Command::Traces(TracesCommand::WorkerRetentionMaintenance {
+            purpose,
+            dry_run,
+            ..
+        })) = retention.command
+        else {
+            panic!("expected traces worker-retention-maintenance command");
+        };
+        assert_eq!(purpose.as_deref(), Some("retention-worker"));
+        assert!(dry_run);
+
+        let vector = Cli::try_parse_from([
+            "ironclaw",
+            "traces",
+            "worker-vector-index",
+            "--endpoint",
+            "https://trace.example/internal",
+            "--purpose",
+            "vector-worker",
+        ])
+        .expect("worker-vector-index should parse");
+        let Some(Command::Traces(TracesCommand::WorkerVectorIndex { purpose, .. })) =
+            vector.command
+        else {
+            panic!("expected traces worker-vector-index command");
+        };
+        assert_eq!(purpose.as_deref(), Some("vector-worker"));
+    }
+
+    #[test]
+    fn worker_retention_maintenance_body_uses_narrow_fields() {
+        let body = trace_commons_retention_maintenance_body(
+            Some("retention-cutover".to_string()),
+            true,
+            false,
+            Some(24),
+            Some("2026-04-26T00:00:00Z".to_string()),
+        );
+
+        assert_eq!(body["purpose"], "retention-cutover");
+        assert_eq!(body["dry_run"], true);
+        assert_eq!(body["prune_export_cache"], false);
+        assert_eq!(body["max_export_age_hours"], 24);
+        assert_eq!(body["purge_expired_before"], "2026-04-26T00:00:00Z");
+        assert!(body.get("backfill_db_mirror").is_none());
+        assert!(body.get("index_vectors").is_none());
+        assert!(body.get("reconcile_db_mirror").is_none());
+    }
+
+    #[test]
+    fn worker_vector_index_body_uses_narrow_fields() {
+        let body = trace_commons_vector_index_body(Some("vector-refresh".to_string()), true);
+
+        assert_eq!(body["purpose"], "vector-refresh");
+        assert_eq!(body["dry_run"], true);
+        assert!(body.get("backfill_db_mirror").is_none());
+        assert!(body.get("reconcile_db_mirror").is_none());
     }
 
     #[test]
