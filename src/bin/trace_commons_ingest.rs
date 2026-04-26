@@ -73,6 +73,8 @@ const TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW";
 const TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT";
+const TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN: &str =
+    "TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN";
 const TRACE_BACKFILL_FAILURE_DETAIL_LIMIT: usize = 20;
 
 #[tokio::main]
@@ -109,6 +111,7 @@ struct AppState {
     require_db_mirror_writes: bool,
     require_derived_export_object_refs: bool,
     object_primary_submit_review: bool,
+    require_db_reconciliation_clean: bool,
     require_export_guardrails: bool,
     artifact_store: Option<ConfiguredTraceArtifactStore>,
 }
@@ -367,6 +370,13 @@ impl AppState {
                 "TRACE_COMMONS_DERIVED_EXPORT_REQUIRE_OBJECT_REFS requires TRACE_COMMONS_DB_DUAL_WRITE"
             );
         }
+        let require_db_reconciliation_clean =
+            env_truthy(TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN);
+        if require_db_reconciliation_clean && db_mirror.is_none() {
+            anyhow::bail!(
+                "{TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN} requires TRACE_COMMONS_DB_DUAL_WRITE"
+            );
+        }
         let require_export_guardrails = env_truthy("TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS");
         let artifact_store = trace_artifact_store_from_env(&root)?;
         let object_primary_submit_review = env_truthy(TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW);
@@ -407,6 +417,7 @@ impl AppState {
             require_db_mirror_writes,
             require_derived_export_object_refs,
             object_primary_submit_review,
+            require_db_reconciliation_clean,
             require_export_guardrails,
             artifact_store,
         })
@@ -6545,6 +6556,7 @@ async fn run_maintenance(
         .filter(|purpose| !purpose.is_empty())
         .unwrap_or("trace_commons_retention_revocation_maintenance")
         .to_string();
+    require_db_reconciliation_clean_request(state, &request)?;
     let revocation_reasons = read_all_revocations(&state.root, &tenant.tenant_id)?
         .into_iter()
         .map(|revocation| (revocation.submission_id, revocation.reason))
@@ -6744,6 +6756,7 @@ async fn run_maintenance(
         )
         .await?;
     }
+    enforce_db_reconciliation_clean(state, db_reconciliation.as_ref())?;
     let audit_chain = if request.verify_audit_chain {
         Some(verify_audit_chain(state, &tenant.tenant_id).await?)
     } else {
@@ -8028,6 +8041,37 @@ async fn reconcile_db_mirror(
         accepted_current_derived_without_active_vector_entry,
         invalid_active_vector_entries,
     }))
+}
+
+fn require_db_reconciliation_clean_request(
+    state: &AppState,
+    request: &TraceMaintenanceRequest,
+) -> anyhow::Result<()> {
+    if state.require_db_reconciliation_clean && !request.reconcile_db_mirror {
+        anyhow::bail!(
+            "{TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN} requires reconcile_db_mirror=true"
+        );
+    }
+    Ok(())
+}
+
+fn enforce_db_reconciliation_clean(
+    state: &AppState,
+    report: Option<&TraceDbReconciliationReport>,
+) -> anyhow::Result<()> {
+    if !state.require_db_reconciliation_clean {
+        return Ok(());
+    }
+    let Some(report) = report else {
+        return Ok(());
+    };
+    let gaps = report.blocking_gap_summaries();
+    anyhow::ensure!(
+        gaps.is_empty(),
+        "Trace Commons DB reconciliation is not clean: {}",
+        gaps.join(", ")
+    );
+    Ok(())
 }
 
 fn storage_submission_is_export_source_eligible(record: &StorageTraceSubmissionRecord) -> bool {
@@ -9344,6 +9388,152 @@ struct TraceDbReconciliationReport {
     invalid_active_vector_entries: usize,
 }
 
+impl TraceDbReconciliationReport {
+    fn blocking_gap_summaries(&self) -> Vec<String> {
+        let mut gaps = Vec::new();
+        push_gap_count(
+            &mut gaps,
+            "missing_submission_ids_in_db",
+            self.missing_submission_ids_in_db.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_submission_ids_in_files",
+            self.missing_submission_ids_in_files.len(),
+        );
+        push_gap_count(&mut gaps, "status_mismatches", self.status_mismatches.len());
+        push_gap_count(
+            &mut gaps,
+            "missing_derived_submission_ids_in_db",
+            self.missing_derived_submission_ids_in_db.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_derived_submission_ids_in_files",
+            self.missing_derived_submission_ids_in_files.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "derived_status_mismatches",
+            self.derived_status_mismatches.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "derived_hash_mismatches",
+            self.derived_hash_mismatches.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_credit_event_ids_in_db",
+            self.missing_credit_event_ids_in_db.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_credit_event_ids_in_files",
+            self.missing_credit_event_ids_in_files.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_audit_event_ids_in_db",
+            self.missing_audit_event_ids_in_db.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_audit_event_ids_in_files",
+            self.missing_audit_event_ids_in_files.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "db_export_manifest_item_missing_object_ref_count",
+            self.db_export_manifest_item_missing_object_ref_count,
+        );
+        push_gap_count(
+            &mut gaps,
+            "active_derived_submission_ids_for_invalid_sources",
+            self.active_derived_submission_ids_for_invalid_sources.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "active_export_manifest_ids_for_invalid_sources",
+            self.active_export_manifest_ids_for_invalid_sources.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "active_export_manifest_items_for_invalid_sources",
+            self.active_export_manifest_items_for_invalid_sources.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "accepted_without_active_envelope_object_ref",
+            self.accepted_without_active_envelope_object_ref.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "unreadable_active_envelope_object_refs",
+            self.unreadable_active_envelope_object_refs.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "hash_mismatched_active_envelope_object_refs",
+            self.hash_mismatched_active_envelope_object_refs.len(),
+        );
+        push_gap_bool(
+            &mut gaps,
+            "contributor_credit_reader_parity",
+            self.contributor_credit_reader_parity_ok,
+        );
+        push_gap_bool(
+            &mut gaps,
+            "reviewer_metadata_reader_parity",
+            self.reviewer_metadata_reader_parity_ok,
+        );
+        push_gap_bool(
+            &mut gaps,
+            "analytics_reader_parity",
+            self.analytics_reader_parity_ok,
+        );
+        push_gap_bool(
+            &mut gaps,
+            "audit_reader_parity",
+            self.audit_reader_parity_ok,
+        );
+        push_gap_bool(
+            &mut gaps,
+            "replay_export_manifest_reader_parity",
+            self.replay_export_manifest_reader_parity_ok,
+        );
+        push_gap_count(
+            &mut gaps,
+            "db_reader_parity_failures",
+            self.db_reader_parity_failures.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "accepted_current_derived_without_active_vector_entry",
+            self.accepted_current_derived_without_active_vector_entry
+                .len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "invalid_active_vector_entries",
+            self.invalid_active_vector_entries,
+        );
+        gaps
+    }
+}
+
+fn push_gap_count(gaps: &mut Vec<String>, name: &str, count: usize) {
+    if count > 0 {
+        gaps.push(format!("{name}={count}"));
+    }
+}
+
+fn push_gap_bool(gaps: &mut Vec<String>, name: &str, ok: bool) {
+    if !ok {
+        gaps.push(format!("{name}=failed"));
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct TraceDbExportManifestItemInvalidSource {
     export_manifest_id: Uuid,
@@ -10186,6 +10376,7 @@ mod tests {
             require_db_mirror_writes: false,
             require_derived_export_object_refs: false,
             object_primary_submit_review: false,
+            require_db_reconciliation_clean: false,
             require_export_guardrails: false,
             artifact_store: None,
         })
@@ -10506,6 +10697,7 @@ mod tests {
             require_db_mirror_writes,
             require_derived_export_object_refs,
             object_primary_submit_review: false,
+            require_db_reconciliation_clean: false,
             require_export_guardrails,
             artifact_store,
         })
@@ -10557,8 +10749,43 @@ mod tests {
             require_db_mirror_writes: true,
             require_derived_export_object_refs: false,
             object_primary_submit_review: true,
+            require_db_reconciliation_clean: false,
             require_export_guardrails: false,
             artifact_store: Some(artifact_store),
+        })
+    }
+
+    fn test_state_with_required_db_reconciliation_clean(
+        root: PathBuf,
+        db_mirror: Arc<dyn Database>,
+    ) -> Arc<AppState> {
+        let mut tokens = BTreeMap::new();
+        insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Contributor);
+        insert_token(
+            &mut tokens,
+            "tenant-a",
+            "review-token-a",
+            TokenRole::Reviewer,
+        );
+        Arc::new(AppState {
+            root,
+            tokens: Arc::new(tokens),
+            tenant_policies: Arc::new(BTreeMap::new()),
+            require_tenant_submission_policy: false,
+            db_mirror: Some(db_mirror),
+            db_contributor_reads: false,
+            db_reviewer_reads: false,
+            db_reviewer_require_object_refs: false,
+            db_replay_export_reads: false,
+            db_replay_export_require_object_refs: false,
+            db_audit_reads: false,
+            db_tenant_policy_reads: false,
+            require_db_mirror_writes: false,
+            require_derived_export_object_refs: false,
+            object_primary_submit_review: false,
+            require_db_reconciliation_clean: true,
+            require_export_guardrails: false,
+            artifact_store: None,
         })
     }
 
@@ -16330,6 +16557,118 @@ mod tests {
             reconciliation.active_export_manifest_ids_with_ineligible_items,
             vec![export.export_id]
         );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn maintenance_reconciliation_clean_gate_requires_reconciliation_request() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-reconcile-required-clean.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_required_db_reconciliation_clean(
+            temp.path().to_path_buf(),
+            db as Arc<dyn Database>,
+        );
+
+        let error = maintenance_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_reconciliation_required".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect_err("clean reconciliation gate requires reconcile_db_mirror");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("audit events read");
+        assert!(audit_events.iter().all(|event| event.kind != "maintenance"));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn maintenance_reconciliation_can_fail_closed_on_blocking_gaps() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-reconcile-fail-closed-gaps.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_required_db_reconciliation_clean(
+            temp.path().to_path_buf(),
+            db.clone() as Arc<dyn Database>,
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        db.update_trace_submission_status(
+            "tenant-a",
+            submission_id,
+            StorageTraceCorpusStatus::Revoked,
+            "test-reconciler",
+            Some("simulate missed reconciliation repair"),
+        )
+        .await
+        .expect("DB source status can be changed");
+
+        let error = maintenance_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_reconciliation_fail_closed".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: true,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect_err("required clean reconciliation fails closed on drift");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("audit events read");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "maintenance"
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("test_reconciliation_fail_closed"))
+        }));
     }
 
     #[cfg(feature = "libsql")]
