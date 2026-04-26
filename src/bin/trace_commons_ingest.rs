@@ -1924,6 +1924,9 @@ async fn utility_credit_handler(
             "utility credit jobs require at least one submission_id",
         ));
     }
+    let required_uses = utility_credit_required_allowed_uses(body.event_type);
+    let tenant_policy =
+        tenant_utility_credit_policy_for_request(state.as_ref(), &tenant, required_uses).await?;
     let unique_submission_ids = body
         .submission_ids
         .iter()
@@ -1941,6 +1944,22 @@ async fn utility_credit_handler(
             return Err(api_error(
                 StatusCode::CONFLICT,
                 "utility credit jobs can only credit accepted trace submissions",
+            ));
+        }
+        if !record_matches_utility_credit_policy_abac(
+            &submission,
+            tenant_policy.as_ref(),
+            required_uses,
+        ) {
+            tracing::warn!(
+                tenant_id = %tenant.tenant_id,
+                submission_id = %submission.submission_id,
+                ?required_uses,
+                "Trace Commons tenant policy rejected utility credit source"
+            );
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "trace utility credit source is not allowed for this utility use",
             ));
         }
         sources.push(AutomaticUtilityCreditSource {
@@ -1976,6 +1995,19 @@ async fn utility_credit_handler(
         appended_count: counts.appended,
         skipped_existing_count: counts.skipped_existing,
     }))
+}
+
+fn utility_credit_required_allowed_uses(
+    event_type: TraceCreditLedgerEventType,
+) -> &'static [TraceAllowedUse] {
+    match event_type {
+        TraceCreditLedgerEventType::RegressionCatch => &[TraceAllowedUse::Evaluation],
+        TraceCreditLedgerEventType::TrainingUtility => &[TraceAllowedUse::ModelTraining],
+        TraceCreditLedgerEventType::RankingUtility => &[TraceAllowedUse::RankingModelTraining],
+        TraceCreditLedgerEventType::BenchmarkConversion
+        | TraceCreditLedgerEventType::ReviewerBonus
+        | TraceCreditLedgerEventType::AbusePenalty => &[],
+    }
 }
 
 async fn process_evaluation_worker_handler(
@@ -4184,6 +4216,60 @@ async fn tenant_process_evaluation_policy_for_request(
     Ok(policy)
 }
 
+async fn tenant_utility_credit_policy_for_request(
+    state: &AppState,
+    tenant: &TenantAuth,
+    required_uses: &[TraceAllowedUse],
+) -> ApiResult<Option<TenantSubmissionPolicy>> {
+    let policy = tenant_submission_policy_for_request(state, tenant).await?;
+    enforce_tenant_utility_credit_policy(
+        tenant,
+        policy.as_ref(),
+        state.require_tenant_submission_policy,
+        required_uses,
+    )?;
+    Ok(policy)
+}
+
+fn enforce_tenant_utility_credit_policy(
+    tenant: &TenantAuth,
+    policy: Option<&TenantSubmissionPolicy>,
+    require_policy: bool,
+    required_uses: &[TraceAllowedUse],
+) -> ApiResult<()> {
+    let Some(policy) = policy else {
+        if require_policy {
+            tracing::warn!(
+                tenant_id = %tenant.tenant_id,
+                "Trace Commons tenant policy rejected utility credit without tenant policy"
+            );
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "trace utility credit tenant does not have a contribution policy",
+            ));
+        }
+        return Ok(());
+    };
+
+    if !policy.allowed_uses.is_empty()
+        && !required_uses
+            .iter()
+            .any(|required_use| policy.allowed_uses.contains(required_use))
+    {
+        tracing::warn!(
+            tenant_id = %tenant.tenant_id,
+            ?required_uses,
+            "Trace Commons tenant policy rejected utility credit allowed use"
+        );
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "trace utility credit use is not allowed for this tenant",
+        ));
+    }
+
+    Ok(())
+}
+
 fn enforce_tenant_process_evaluation_policy(
     tenant: &TenantAuth,
     policy: Option<&TenantSubmissionPolicy>,
@@ -4293,6 +4379,37 @@ fn record_matches_export_policy_abac(
     }
 
     policy.allowed_uses.is_empty() || record.allowed_uses.contains(&required_use)
+}
+
+fn record_matches_utility_credit_policy_abac(
+    record: &TraceCommonsSubmissionRecord,
+    policy: Option<&TenantSubmissionPolicy>,
+    required_uses: &[TraceAllowedUse],
+) -> bool {
+    if !required_uses
+        .iter()
+        .any(|required_use| record.allowed_uses.contains(required_use))
+    {
+        return false;
+    }
+
+    let Some(policy) = policy else {
+        return true;
+    };
+
+    if !policy.allowed_consent_scopes.is_empty()
+        && !record
+            .consent_scopes
+            .iter()
+            .any(|scope| policy.allowed_consent_scopes.contains(scope))
+    {
+        return false;
+    }
+
+    policy.allowed_uses.is_empty()
+        || required_uses.iter().any(|required_use| {
+            policy.allowed_uses.contains(required_use) && record.allowed_uses.contains(required_use)
+        })
 }
 
 fn authenticate(state: &AppState, headers: &HeaderMap) -> ApiResult<TenantAuth> {
@@ -16164,6 +16281,9 @@ mod tests {
         );
         let mut envelope = sample_envelope().await;
         make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
         let submission_id = envelope.submission_id;
 
         let _ = submit_trace_handler(
@@ -16232,6 +16352,133 @@ mod tests {
             event.submission_id == submission_id
                 && event.event_type == TraceCreditLedgerEventType::TrainingUtility
                 && (event.credit_points_delta - 1.5).abs() < f32::EPSILON
+        }));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn utility_credit_worker_rejects_sources_without_required_allowed_use() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-utility-credit-source-abac.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db_contributor_reads(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::DebuggingEvaluation];
+        envelope.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::Evaluation];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("evaluation-only submission succeeds");
+        let error = utility_credit_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceUtilityCreditJobRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.5,
+                reason: "training job should not credit evaluation-only trace".to_string(),
+                external_ref: "training-job:evaluation-only".to_string(),
+                submission_ids: vec![submission_id],
+            }),
+        )
+        .await
+        .expect_err("training utility credit requires model-training use");
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+
+        let credit_events = read_all_credit_events(temp.path(), "tenant-a").expect("credit reads");
+        assert!(credit_events.iter().all(|event| {
+            event.submission_id != submission_id
+                || event.event_type != TraceCreditLedgerEventType::TrainingUtility
+        }));
+        let db_credit_events = db
+            .list_trace_credit_events("tenant-a")
+            .await
+            .expect("DB credit events read");
+        assert!(db_credit_events.iter().all(|event| {
+            event.submission_id != submission_id
+                || event.event_type != StorageTraceCreditEventType::TrainingUtility
+        }));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn db_backed_tenant_policy_blocks_disallowed_utility_credit_use() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-utility-credit-policy-abac.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let submit_state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(State(submit_state), auth_headers("token-a"), Json(envelope))
+            .await
+            .expect("source submits before DB-backed policy read is enabled");
+
+        db.upsert_trace_tenant_policy(StorageTraceTenantPolicyWrite {
+            tenant_id: "tenant-a".to_string(),
+            policy_version: "utility-credit-policy-v1".to_string(),
+            allowed_consent_scopes: vec!["model_training".to_string()],
+            allowed_uses: vec!["evaluation".to_string()],
+            updated_by_principal_ref: principal_storage_ref("admin-token-a"),
+        })
+        .await
+        .expect("DB tenant policy writes");
+        let utility_state = test_state_with_db_tenant_policy_reads(
+            temp.path().to_path_buf(),
+            db.clone() as Arc<dyn Database>,
+            true,
+        );
+
+        let error = utility_credit_handler(
+            State(utility_state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceUtilityCreditJobRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.5,
+                reason: "tenant policy blocks training utility".to_string(),
+                external_ref: "training-job:tenant-policy-denied".to_string(),
+                submission_ids: vec![submission_id],
+            }),
+        )
+        .await
+        .expect_err("DB-backed policy must allow training utility use");
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+
+        let credit_events = read_all_credit_events(temp.path(), "tenant-a").expect("credit reads");
+        assert!(credit_events.iter().all(|event| {
+            event.submission_id != submission_id
+                || event.event_type != TraceCreditLedgerEventType::TrainingUtility
         }));
     }
 
