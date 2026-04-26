@@ -82,6 +82,10 @@ const TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES: &str =
 const TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: &str =
     "TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST";
 const DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: usize = 500;
+const TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR: &str =
+    "TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR";
+const TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR: &str =
+    "TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR";
 const TRACE_BACKFILL_FAILURE_DETAIL_LIMIT: usize = 20;
 
 #[tokio::main]
@@ -123,8 +127,21 @@ struct AppState {
     require_db_reconciliation_clean: bool,
     require_export_guardrails: bool,
     max_export_items_per_request: usize,
+    submission_quota: TraceSubmissionQuotaConfig,
     legal_hold_retention_policy_ids: Arc<BTreeSet<String>>,
     artifact_store: Option<ConfiguredTraceArtifactStore>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+struct TraceSubmissionQuotaConfig {
+    max_per_tenant_per_hour: usize,
+    max_per_principal_per_hour: usize,
+}
+
+impl TraceSubmissionQuotaConfig {
+    fn is_disabled(self) -> bool {
+        self.max_per_tenant_per_hour == 0 && self.max_per_principal_per_hour == 0
+    }
 }
 
 #[derive(Clone)]
@@ -390,6 +407,7 @@ impl AppState {
         }
         let require_export_guardrails = env_truthy("TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS");
         let max_export_items_per_request = parse_max_export_items_per_request_from_env()?;
+        let submission_quota = parse_submission_quota_config_from_env()?;
         let legal_hold_retention_policy_ids = parse_legal_hold_retention_policy_ids_from_env()?;
         let artifact_store = trace_artifact_store_from_env(&root)?;
         let object_primary_submit_review = env_truthy(TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW);
@@ -448,6 +466,7 @@ impl AppState {
             require_db_reconciliation_clean,
             require_export_guardrails,
             max_export_items_per_request,
+            submission_quota,
             legal_hold_retention_policy_ids: Arc::new(legal_hold_retention_policy_ids),
             artifact_store,
         })
@@ -836,6 +855,32 @@ fn parse_max_export_items_per_request(configured: &str) -> anyhow::Result<usize>
     Ok(parsed)
 }
 
+fn parse_submission_quota_config_from_env() -> anyhow::Result<TraceSubmissionQuotaConfig> {
+    Ok(TraceSubmissionQuotaConfig {
+        max_per_tenant_per_hour: parse_submission_quota_limit_from_env(
+            TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR,
+        )?,
+        max_per_principal_per_hour: parse_submission_quota_limit_from_env(
+            TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR,
+        )?,
+    })
+}
+
+fn parse_submission_quota_limit_from_env(var_name: &'static str) -> anyhow::Result<usize> {
+    match std::env::var(var_name) {
+        Ok(configured) => parse_submission_quota_limit(var_name, &configured),
+        Err(std::env::VarError::NotPresent) => Ok(0),
+        Err(error) => Err(error).with_context(|| format!("failed to read {var_name}")),
+    }
+}
+
+fn parse_submission_quota_limit(var_name: &'static str, configured: &str) -> anyhow::Result<usize> {
+    configured
+        .trim()
+        .parse::<usize>()
+        .with_context(|| format!("{var_name} must be a non-negative integer"))
+}
+
 fn validate_retention_policy_id(policy_id: &str) -> anyhow::Result<()> {
     let valid = policy_id.len() <= 128
         && policy_id.chars().all(|character| {
@@ -923,6 +968,7 @@ struct TraceCommonsConfigStatusResponse {
     require_db_reconciliation_clean: bool,
     require_export_guardrails: bool,
     max_export_items_per_request: usize,
+    submission_quota: TraceSubmissionQuotaConfig,
     legal_hold_retention_policy_ids: Vec<String>,
     artifact_store_configured: bool,
     artifact_object_store: Option<String>,
@@ -948,6 +994,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         require_db_reconciliation_clean: state.require_db_reconciliation_clean,
         require_export_guardrails: state.require_export_guardrails,
         max_export_items_per_request: state.max_export_items_per_request,
+        submission_quota: state.submission_quota,
         legal_hold_retention_policy_ids: state
             .legal_hold_retention_policy_ids
             .iter()
@@ -1168,6 +1215,7 @@ async fn submit_trace_handler(
         &envelope.privacy.redaction_hash,
         &derived_precheck.canonical_summary_hash,
     )?;
+    enforce_submission_quota(state.as_ref(), &tenant)?;
     apply_embedding_precheck(&mut envelope, &derived_precheck);
     apply_credit_estimate_to_envelope(&mut envelope);
     let corpus_status = status_for_risk(envelope.privacy.residual_pii_risk);
@@ -3544,6 +3592,67 @@ fn enforce_tenant_submission_policy(
     }
 
     Ok(())
+}
+
+fn enforce_submission_quota(state: &AppState, tenant: &TenantAuth) -> ApiResult<()> {
+    let quota = state.submission_quota;
+    if quota.is_disabled() || tenant.role != TokenRole::Contributor {
+        return Ok(());
+    }
+
+    let window_start = Utc::now() - Duration::hours(1);
+    let records =
+        read_all_submission_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    if quota.max_per_tenant_per_hour > 0 {
+        let tenant_count = records
+            .iter()
+            .filter(|record| submission_counts_toward_quota(record))
+            .filter(|record| record.received_at >= window_start)
+            .count();
+        if tenant_count >= quota.max_per_tenant_per_hour {
+            tracing::warn!(
+                tenant_id = %tenant.tenant_id,
+                limit = quota.max_per_tenant_per_hour,
+                "Trace Commons tenant submission quota exceeded"
+            );
+            return Err(api_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "trace contribution tenant submission quota exceeded",
+            ));
+        }
+    }
+
+    if quota.max_per_principal_per_hour > 0 {
+        let principal_count = records
+            .iter()
+            .filter(|record| submission_counts_toward_quota(record))
+            .filter(|record| {
+                record.auth_principal_ref == tenant.principal_ref
+                    && record.received_at >= window_start
+            })
+            .count();
+        if principal_count >= quota.max_per_principal_per_hour {
+            tracing::warn!(
+                tenant_id = %tenant.tenant_id,
+                principal_ref = %tenant.principal_ref,
+                limit = quota.max_per_principal_per_hour,
+                "Trace Commons principal submission quota exceeded"
+            );
+            return Err(api_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "trace contribution principal submission quota exceeded",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn submission_counts_toward_quota(record: &TraceCommonsSubmissionRecord) -> bool {
+    matches!(
+        record.status,
+        TraceCorpusStatus::Accepted | TraceCorpusStatus::Quarantined
+    )
 }
 
 async fn tenant_export_policy_for_request(
@@ -11063,6 +11172,7 @@ mod tests {
             require_db_reconciliation_clean: false,
             require_export_guardrails: false,
             max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
+            submission_quota: TraceSubmissionQuotaConfig::default(),
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store: None,
         })
@@ -11174,6 +11284,15 @@ mod tests {
             false,
             true,
         )
+    }
+
+    fn test_state_with_submission_quota(
+        root: PathBuf,
+        submission_quota: TraceSubmissionQuotaConfig,
+    ) -> Arc<AppState> {
+        let mut state = test_state(root);
+        Arc::make_mut(&mut state).submission_quota = submission_quota;
+        state
     }
 
     fn test_state_with_required_db_mirror_writes(
@@ -11388,6 +11507,7 @@ mod tests {
             require_db_reconciliation_clean: false,
             require_export_guardrails,
             max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
+            submission_quota: TraceSubmissionQuotaConfig::default(),
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store,
         })
@@ -11443,6 +11563,7 @@ mod tests {
             require_db_reconciliation_clean: false,
             require_export_guardrails: true,
             max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
+            submission_quota: TraceSubmissionQuotaConfig::default(),
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store: Some(artifact_store),
         })
@@ -11483,6 +11604,7 @@ mod tests {
             require_db_reconciliation_clean: false,
             require_export_guardrails: false,
             max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
+            submission_quota: TraceSubmissionQuotaConfig::default(),
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store: Some(artifact_store),
         })
@@ -11521,6 +11643,7 @@ mod tests {
             require_db_reconciliation_clean: true,
             require_export_guardrails: false,
             max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
+            submission_quota: TraceSubmissionQuotaConfig::default(),
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store: None,
         })
@@ -11671,6 +11794,127 @@ mod tests {
         assert!(!stored.contains("/tmp/ironclaw/private/token.txt"));
     }
 
+    #[tokio::test]
+    async fn submit_quota_limits_tenant_new_submissions_but_allows_idempotent_retry() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state_with_submission_quota(
+            temp.path().to_path_buf(),
+            TraceSubmissionQuotaConfig {
+                max_per_tenant_per_hour: 1,
+                max_per_principal_per_hour: 0,
+            },
+        );
+        let envelope = sample_envelope().await;
+
+        let Json(first_receipt) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope.clone()),
+        )
+        .await
+        .expect("first submission succeeds");
+        let Json(retry_receipt) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("idempotent retry bypasses quota");
+        assert_eq!(retry_receipt.status, first_receipt.status);
+        assert_eq!(
+            retry_receipt.credit_points_pending,
+            first_receipt.credit_points_pending
+        );
+
+        let blocked = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a-2"),
+            Json(sample_envelope().await),
+        )
+        .await
+        .expect_err("new tenant submission is rate limited");
+        assert_eq!(blocked.0, StatusCode::TOO_MANY_REQUESTS);
+        assert!(blocked.1.0.error.contains("tenant submission quota"));
+
+        let _ = submit_trace_handler(
+            State(state),
+            auth_headers("token-b"),
+            Json(sample_envelope().await),
+        )
+        .await
+        .expect("quota is isolated by tenant");
+    }
+
+    #[tokio::test]
+    async fn submit_quota_limits_principal_without_blocking_other_contributors() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state_with_submission_quota(
+            temp.path().to_path_buf(),
+            TraceSubmissionQuotaConfig {
+                max_per_tenant_per_hour: 0,
+                max_per_principal_per_hour: 1,
+            },
+        );
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(sample_envelope().await),
+        )
+        .await
+        .expect("first principal submission succeeds");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a-2"),
+            Json(sample_envelope().await),
+        )
+        .await
+        .expect("different contributor in same tenant is not blocked by principal quota");
+
+        let blocked = submit_trace_handler(
+            State(state),
+            auth_headers("token-a"),
+            Json(sample_envelope().await),
+        )
+        .await
+        .expect_err("same principal is rate limited");
+        assert_eq!(blocked.0, StatusCode::TOO_MANY_REQUESTS);
+        assert!(blocked.1.0.error.contains("principal submission quota"));
+    }
+
+    #[tokio::test]
+    async fn submit_quota_ignores_revoked_submissions() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state_with_submission_quota(
+            temp.path().to_path_buf(),
+            TraceSubmissionQuotaConfig {
+                max_per_tenant_per_hour: 1,
+                max_per_principal_per_hour: 1,
+            },
+        );
+        let first = sample_envelope().await;
+        let first_submission_id = first.submission_id;
+        let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
+            .await
+            .expect("first submission succeeds");
+        revoke_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            AxumPath(first_submission_id),
+        )
+        .await
+        .expect("contributor can revoke own submission");
+
+        let mut replacement = sample_envelope().await;
+        replacement.events[0].redacted_content =
+            Some("Please inspect a different quota-safe workspace".to_string());
+        replacement.privacy.redaction_hash = sha256_prefixed("quota replacement trace");
+
+        let _ = submit_trace_handler(State(state), auth_headers("token-a"), Json(replacement))
+            .await
+            .expect("revoked submission no longer consumes quota");
+    }
+
     #[test]
     fn parses_tenant_submission_policies_from_json() {
         let policies = parse_tenant_submission_policies(
@@ -11743,6 +11987,29 @@ mod tests {
             parse_error
                 .to_string()
                 .contains(TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST)
+        );
+    }
+
+    #[test]
+    fn parses_submission_quota_limits() {
+        assert_eq!(
+            parse_submission_quota_limit(TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR, "25")
+                .expect("tenant quota parses"),
+            25
+        );
+        assert_eq!(
+            parse_submission_quota_limit(TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR, "0")
+                .expect("zero disables principal quota"),
+            0
+        );
+
+        let parse_error =
+            parse_submission_quota_limit(TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR, "many")
+                .expect_err("non-numeric quota is invalid");
+        assert!(
+            parse_error
+                .to_string()
+                .contains(TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR)
         );
     }
 
@@ -12226,6 +12493,13 @@ mod tests {
         assert_eq!(
             value["max_export_items_per_request"],
             serde_json::json!(DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST)
+        );
+        assert_eq!(
+            value["submission_quota"],
+            serde_json::json!({
+                "max_per_tenant_per_hour": 0,
+                "max_per_principal_per_hour": 0
+            })
         );
         assert_eq!(
             value["artifact_object_store"],
@@ -17109,6 +17383,7 @@ mod tests {
             require_db_reconciliation_clean: false,
             require_export_guardrails: false,
             max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
+            submission_quota: TraceSubmissionQuotaConfig::default(),
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::from([
                 "private_corpus_revocable".to_string()
             ])),
