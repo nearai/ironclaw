@@ -121,7 +121,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_dispatcher",
                 "ironclaw_events",
                 "ironclaw_extensions",
-                "ironclaw_filesystem",
                 "ironclaw_host_runtime",
                 "ironclaw_mcp",
                 "ironclaw_processes",

@@ -1,7 +1,7 @@
 # IronClaw Reborn secrets service contract
 
 **Date:** 2026-04-26
-**Status:** V1 encrypted store + credential mapping slice
+**Status:** V1 encrypted store + filesystem-backed durability + credential mapping slice
 **Crate:** `crates/ironclaw_secrets`
 **Depends on:** `docs/reborn/contracts/host-api.md`
 
@@ -21,7 +21,7 @@ ResourceScope + SecretHandle
   -> SecretMaterial exactly once
 ```
 
-The crate owns scoped storage mechanics, AES-256-GCM/HKDF encryption, encrypted-row repository contracts, one-shot lease state, redacted metadata, and credential mapping shapes. It does not decide authorization, run approval flows, inject secrets into runtime requests, contact networks, emit audit events, or execute product workflows.
+The crate owns scoped storage mechanics, AES-256-GCM/HKDF encryption, encrypted-row repository contracts, filesystem-backed durable persistence over `RootFilesystem`, one-shot lease state, redacted metadata, and credential mapping shapes. It does not decide authorization, run approval flows, inject secrets into runtime requests, contact networks, emit audit events, or execute product workflows.
 
 ---
 
@@ -44,6 +44,7 @@ EncryptedSecretRecord
 EncryptedSecretRepository
 EncryptedSecretStore
 InMemoryEncryptedSecretRepository
+FilesystemEncryptedSecretRepository
 CredentialLocation
 CredentialMapping
 ```
@@ -54,14 +55,15 @@ Ownership remains:
 
 ```text
 host_api       -> opaque SecretHandle and Action::UseSecret shapes
-secrets        -> scoped storage, AES-256-GCM/HKDF encryption, metadata, one-shot leases, encrypted-row repository boundary, and credential mapping metadata
+filesystem     -> virtual-path storage abstraction plus PostgreSQL/libSQL/local backend implementations
+secrets        -> scoped storage, AES-256-GCM/HKDF encryption, metadata, one-shot leases, encrypted-row repository boundary, filesystem-backed encrypted persistence, and credential mapping metadata
 authorization  -> whether a caller may use a SecretHandle
 capabilities   -> caller-facing workflow; currently fails closed on InjectSecretOnce obligations
 host_runtime   -> composition of already-resolved credential material into hardened runtime egress; future secret lease consumption in obligation handlers
 runtimes        -> consume injected values only after host-side authorization and lease handling
 ```
 
-`ironclaw_secrets` intentionally stays independent from workflow/runtime/event/authorization/process crates and from concrete runtime crates. Durable secret persistence should be wired through the Reborn `RootFilesystem` abstraction now that PostgreSQL/libSQL filesystem backends exist, rather than adding direct SQL dependencies to this crate.
+`ironclaw_secrets` intentionally stays independent from workflow/runtime/event/authorization/process crates and from concrete runtime crates. Durable secret persistence is implemented through the Reborn `RootFilesystem` abstraction, so PostgreSQL/libSQL durability comes from filesystem backend composition rather than direct SQL adapters in this crate.
 
 ---
 
@@ -107,10 +109,21 @@ This is the minimum shape needed before wiring secret lease consumption into obl
 
 ---
 
-## 5. Current API flow
+## 5. Filesystem-backed repository
+
+`FilesystemEncryptedSecretRepository<F>` implements `EncryptedSecretRepository` for any `F: RootFilesystem`. It stores redacted JSON records under tenant/user/project-scoped virtual paths:
+
+```text
+/engine/tenants/{tenant_id}/users/{user_id}/projects/{project_id-or-_none}/secrets/{handle}.json
+```
+
+Repository records contain only metadata, ciphertext, salt, and a small tombstone flag used for delete semantics on filesystems that do not expose physical deletion yet. `list`, `get`, `record_usage`, `delete`, and `any_exist` operate through `RootFilesystem` only. There are no direct PostgreSQL/libSQL dependencies in the repository; DB durability is supplied by composing this repository with `PostgresRootFilesystem` or `LibSqlRootFilesystem` from `ironclaw_filesystem`.
+
+## 6. Current API flow
 
 ```rust
-let repository = Arc::new(InMemoryEncryptedSecretRepository::new());
+let root_filesystem = Arc::new(/* LocalFilesystem, LibSqlRootFilesystem, or PostgresRootFilesystem */);
+let repository = Arc::new(FilesystemEncryptedSecretRepository::new(root_filesystem));
 let crypto = SecretsCrypto::new(SecretMaterial::from(master_key))?;
 let secrets = EncryptedSecretStore::new(repository.clone(), crypto);
 
@@ -138,11 +151,10 @@ Runtime composition must obtain material through explicit scoped secret access b
 
 ---
 
-## 6. Non-goals
+## 7. Non-goals
 
 This slice does not implement:
 
-- filesystem-backed durable repository wiring over PostgreSQL/libSQL `RootFilesystem` backends
 - platform keychain master-key resolution/persistence
 - automatic master-key generation or `.env` fallback wiring
 - secret rotation/versioning
@@ -158,7 +170,7 @@ Those should be added as separate service/composition slices without moving runt
 
 ---
 
-## 7. Contract tests
+## 8. Contract tests
 
 The crate tests cover:
 
@@ -172,4 +184,10 @@ The crate tests cover:
 - a new store instance can read through the same encrypted repository with the same master key
 - wrong master keys fail closed without consuming leases
 - successful consume records usage metadata
+- filesystem-backed repository stores encrypted JSON without plaintext
+- filesystem-backed repository survives new store instances over the same root filesystem
+- filesystem-backed repository isolates tenant/user/project scopes and lists only visible records
+- filesystem-backed repository ignores unrelated engine JSON when scanning for active secret records
+- filesystem-backed repository records usage and tombstones deletes without plaintext
+- filesystem-backed repository has feature-gated type contracts for libSQL and PostgreSQL `RootFilesystem` backends without direct SQL adapters in this crate
 - crate boundary remains low-level and does not depend on workflow/runtime/observability crates

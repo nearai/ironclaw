@@ -111,14 +111,13 @@ fn postgres_root_filesystem_implements_root_filesystem_contract() {
 
 #[cfg(feature = "libsql")]
 async fn libsql_root() -> LibSqlRootFilesystem {
+    static NEXT_DB_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let db_id = NEXT_DB_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let db_dir = std::env::temp_dir().join(format!(
-        "ironclaw-root-fs-test-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        "ironclaw-root-fs-test-{}-{db_id}",
+        std::process::id()
     ));
+    let _ = std::fs::remove_dir_all(&db_dir);
     std::fs::create_dir_all(&db_dir).unwrap();
     let db_path = db_dir.join("root-filesystem.db");
     let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());

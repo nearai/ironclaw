@@ -15,7 +15,10 @@ use aes_gcm::{
 use async_trait::async_trait;
 use chrono::Utc;
 use hkdf::Hkdf;
-use ironclaw_host_api::{ProjectId, ResourceScope, SecretHandle, TenantId, Timestamp, UserId};
+use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, RootFilesystem};
+use ironclaw_host_api::{
+    ProjectId, ResourceScope, SecretHandle, TenantId, Timestamp, UserId, VirtualPath,
+};
 pub use secrecy::{ExposeSecret, SecretString as SecretMaterial};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -297,6 +300,292 @@ pub trait EncryptedSecretRepository: Send + Sync {
         handle: &SecretHandle,
         used_at: Timestamp,
     ) -> Result<EncryptedSecretRecord, SecretStoreError>;
+}
+
+/// Filesystem-backed encrypted row repository over any [`RootFilesystem`].
+///
+/// Records are stored as redacted JSON under tenant/user/project-scoped
+/// `/engine` virtual paths. Raw secret material never appears in these files;
+/// only ciphertext, salt, and metadata are serialized.
+pub struct FilesystemEncryptedSecretRepository<F>
+where
+    F: RootFilesystem,
+{
+    filesystem: Arc<F>,
+}
+
+impl<F> FilesystemEncryptedSecretRepository<F>
+where
+    F: RootFilesystem,
+{
+    pub fn new(filesystem: Arc<F>) -> Self {
+        Self { filesystem }
+    }
+
+    pub fn record_path(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<VirtualPath, SecretStoreError> {
+        secret_record_path(scope, handle)
+    }
+
+    fn scope_root(&self, scope: &ResourceScope) -> Result<VirtualPath, SecretStoreError> {
+        secret_scope_root(scope)
+    }
+
+    async fn read_wrapper(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<Option<FilesystemSecretRecord>, SecretStoreError> {
+        let bytes = match self.filesystem.read_file(path).await {
+            Ok(bytes) => bytes,
+            Err(error) if filesystem_not_found(&error) => return Ok(None),
+            Err(error) => return Err(secret_filesystem_error(error)),
+        };
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(secret_json_error)
+    }
+
+    async fn write_wrapper(
+        &self,
+        path: &VirtualPath,
+        wrapper: &FilesystemSecretRecord,
+    ) -> Result<(), SecretStoreError> {
+        let bytes = serde_json::to_vec_pretty(wrapper).map_err(secret_json_error)?;
+        self.filesystem
+            .write_file(path, &bytes)
+            .await
+            .map_err(secret_filesystem_error)
+    }
+
+    async fn read_active_record(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<Option<EncryptedSecretRecord>, SecretStoreError> {
+        Ok(self.read_wrapper(path).await?.and_then(|wrapper| {
+            if wrapper.deleted {
+                None
+            } else {
+                Some(wrapper.record)
+            }
+        }))
+    }
+
+    async fn list_record_files(
+        &self,
+        root: &VirtualPath,
+    ) -> Result<Vec<DirEntry>, SecretStoreError> {
+        match self.filesystem.list_dir(root).await {
+            Ok(entries) => Ok(entries
+                .into_iter()
+                .filter(|entry| entry.file_type == FileType::File && entry.name.ends_with(".json"))
+                .collect()),
+            Err(error) if filesystem_not_found(&error) => Ok(Vec::new()),
+            Err(error) => Err(secret_filesystem_error(error)),
+        }
+    }
+
+    async fn active_records_under(
+        &self,
+        root: &VirtualPath,
+    ) -> Result<Vec<EncryptedSecretRecord>, SecretStoreError> {
+        let mut records = Vec::new();
+        for entry in self.list_record_files(root).await? {
+            if let Some(record) = self.read_active_record(&entry.path).await? {
+                records.push(record);
+            }
+        }
+        Ok(records)
+    }
+
+    async fn any_active_record_under(&self, root: &VirtualPath) -> Result<bool, SecretStoreError> {
+        let entries = match self.filesystem.list_dir(root).await {
+            Ok(entries) => entries,
+            Err(error) if filesystem_not_found(&error) => return Ok(false),
+            Err(error) => return Err(secret_filesystem_error(error)),
+        };
+        for entry in entries {
+            match entry.file_type {
+                FileType::File if is_secret_record_path(&entry.path) => {
+                    if self.read_active_record(&entry.path).await?.is_some() {
+                        return Ok(true);
+                    }
+                }
+                FileType::Directory => {
+                    if Box::pin(self.any_active_record_under(&entry.path)).await? {
+                        return Ok(true);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(false)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FilesystemSecretRecord {
+    deleted: bool,
+    record: EncryptedSecretRecord,
+}
+
+fn secrets_root_path() -> Result<VirtualPath, SecretStoreError> {
+    VirtualPath::new("/engine/tenants").map_err(secret_path_error)
+}
+
+fn secret_scope_root(scope: &ResourceScope) -> Result<VirtualPath, SecretStoreError> {
+    let project_id = scope
+        .project_id
+        .as_ref()
+        .map(ProjectId::as_str)
+        .unwrap_or("_none");
+    VirtualPath::new(format!(
+        "/engine/tenants/{}/users/{}/projects/{project_id}/secrets",
+        scope.tenant_id.as_str(),
+        scope.user_id.as_str()
+    ))
+    .map_err(secret_path_error)
+}
+
+fn secret_record_path(
+    scope: &ResourceScope,
+    handle: &SecretHandle,
+) -> Result<VirtualPath, SecretStoreError> {
+    let root = secret_scope_root(scope)?;
+    VirtualPath::new(format!("{}/{}.json", root.as_str(), handle.as_str()))
+        .map_err(secret_path_error)
+}
+
+fn secret_path_error(error: ironclaw_host_api::HostApiError) -> SecretStoreError {
+    SecretStoreError::StoreUnavailable {
+        reason: format!("invalid secret filesystem path: {error}"),
+    }
+}
+
+fn secret_filesystem_error(error: FilesystemError) -> SecretStoreError {
+    SecretStoreError::StoreUnavailable {
+        reason: format!("secret filesystem backend unavailable: {error}"),
+    }
+}
+
+fn secret_json_error(error: serde_json::Error) -> SecretStoreError {
+    SecretStoreError::StoreUnavailable {
+        reason: format!("invalid secret filesystem record: {error}"),
+    }
+}
+
+fn is_secret_record_path(path: &VirtualPath) -> bool {
+    let path = path.as_str();
+    path.ends_with(".json") && path.contains("/secrets/")
+}
+
+fn filesystem_not_found(error: &FilesystemError) -> bool {
+    match error {
+        FilesystemError::MountNotFound { .. } => false,
+        FilesystemError::Backend { reason, .. } => {
+            let reason = reason.to_ascii_lowercase();
+            reason.contains("not found") || reason.contains("no such file")
+        }
+        _ => false,
+    }
+}
+
+#[async_trait]
+impl<F> EncryptedSecretRepository for FilesystemEncryptedSecretRepository<F>
+where
+    F: RootFilesystem,
+{
+    async fn upsert(
+        &self,
+        mut record: EncryptedSecretRecord,
+    ) -> Result<EncryptedSecretRecord, SecretStoreError> {
+        let path = self.record_path(&record.metadata.scope, &record.metadata.handle)?;
+        if let Some(existing) = self.read_active_record(&path).await? {
+            record.metadata.id = existing.metadata.id;
+            record.metadata.created_at = existing.metadata.created_at;
+            record.metadata.usage_count = existing.metadata.usage_count;
+            record.metadata.last_used_at = existing.metadata.last_used_at;
+        }
+        self.write_wrapper(
+            &path,
+            &FilesystemSecretRecord {
+                deleted: false,
+                record: record.clone(),
+            },
+        )
+        .await?;
+        Ok(record)
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<Option<EncryptedSecretRecord>, SecretStoreError> {
+        let path = self.record_path(scope, handle)?;
+        self.read_active_record(&path).await
+    }
+
+    async fn list(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<EncryptedSecretRecord>, SecretStoreError> {
+        let root = self.scope_root(scope)?;
+        self.active_records_under(&root).await
+    }
+
+    async fn delete(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<bool, SecretStoreError> {
+        let path = self.record_path(scope, handle)?;
+        let Some(record) = self.read_active_record(&path).await? else {
+            return Ok(false);
+        };
+        self.write_wrapper(
+            &path,
+            &FilesystemSecretRecord {
+                deleted: true,
+                record,
+            },
+        )
+        .await?;
+        Ok(true)
+    }
+
+    async fn any_exist(&self) -> Result<bool, SecretStoreError> {
+        self.any_active_record_under(&secrets_root_path()?).await
+    }
+
+    async fn record_usage(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+        used_at: Timestamp,
+    ) -> Result<EncryptedSecretRecord, SecretStoreError> {
+        let path = self.record_path(scope, handle)?;
+        let mut record = self.read_active_record(&path).await?.ok_or_else(|| {
+            SecretStoreError::UnknownSecret {
+                scope: Box::new(scope.clone()),
+                handle: handle.clone(),
+            }
+        })?;
+        record.metadata.usage_count += 1;
+        record.metadata.last_used_at = Some(used_at);
+        record.metadata.updated_at = used_at;
+        self.write_wrapper(
+            &path,
+            &FilesystemSecretRecord {
+                deleted: false,
+                record: record.clone(),
+            },
+        )
+        .await?;
+        Ok(record)
+    }
 }
 
 /// In-memory encrypted row repository for tests and local composition demos.
