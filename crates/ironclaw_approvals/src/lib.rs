@@ -4,7 +4,7 @@
 //! authorization leases. It does not prompt users, execute capabilities, or
 //! dispatch runtime work.
 
-use ironclaw_authorization::{CapabilityLease, CapabilityLeaseStore};
+use ironclaw_authorization::{CapabilityLease, CapabilityLeaseError, CapabilityLeaseStore};
 use ironclaw_host_api::{
     Action, CapabilityGrant, CapabilityGrantId, EffectKind, GrantConstraints, Principal,
     ResourceScope, Timestamp,
@@ -69,7 +69,7 @@ where
         let mut lease = CapabilityLease::new(record.scope.clone(), grant);
         lease.invocation_fingerprint = record.request.invocation_fingerprint.clone();
         self.approvals.approve(scope, request_id).await?;
-        Ok(self.leases.issue(lease))
+        self.leases.issue(lease).map_err(Into::into)
     }
 
     pub async fn deny(
@@ -111,4 +111,6 @@ pub enum ApprovalResolutionError {
     NotPending { status: ApprovalStatus },
     #[error("approval action cannot issue a dispatch lease")]
     UnsupportedAction,
+    #[error("capability lease failed: {0}")]
+    Lease(#[from] CapabilityLeaseError),
 }

@@ -1,4 +1,5 @@
 use ironclaw_authorization::*;
+use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::*;
 
 #[test]
@@ -15,7 +16,7 @@ fn lease_authorizer_allows_matching_active_lease_without_context_grant() {
             vec![EffectKind::DispatchCapability],
         ),
     );
-    leases.issue(lease.clone());
+    leases.issue(lease.clone()).unwrap();
 
     let authorizer = LeaseBackedAuthorizer::new(&leases);
     let decision =
@@ -49,7 +50,7 @@ fn fingerprinted_approval_lease_does_not_authorize_plain_dispatch() {
         ),
     );
     lease.invocation_fingerprint = Some(fingerprint);
-    leases.issue(lease);
+    leases.issue(lease).unwrap();
 
     let authorizer = LeaseBackedAuthorizer::new(&leases);
     let decision =
@@ -85,7 +86,7 @@ fn claim_marks_fingerprinted_lease_claimed_and_hides_it_from_authorizer() {
     );
     lease.invocation_fingerprint = Some(fingerprint.clone());
     let lease_id = lease.grant.id;
-    leases.issue(lease);
+    leases.issue(lease).unwrap();
 
     let claimed = leases
         .claim(&context.resource_scope, lease_id, &fingerprint)
@@ -132,7 +133,7 @@ fn claim_rejects_fingerprint_mismatch_without_mutating_lease() {
     );
     lease.invocation_fingerprint = Some(fingerprint);
     let lease_id = lease.grant.id;
-    leases.issue(lease);
+    leases.issue(lease).unwrap();
 
     let err = leases
         .claim(&context.resource_scope, lease_id, &other_fingerprint)
@@ -165,14 +166,16 @@ fn lease_authorizer_hides_leases_across_tenant_scope() {
     };
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
 
-    leases.issue(CapabilityLease::new(
-        other_scope,
-        grant_for(
-            descriptor.id.clone(),
-            Principal::Extension(context.extension_id.clone()),
-            vec![EffectKind::DispatchCapability],
-        ),
-    ));
+    leases
+        .issue(CapabilityLease::new(
+            other_scope,
+            grant_for(
+                descriptor.id.clone(),
+                Principal::Extension(context.extension_id.clone()),
+                vec![EffectKind::DispatchCapability],
+            ),
+        ))
+        .unwrap();
 
     let authorizer = LeaseBackedAuthorizer::new(&leases);
     let decision =
@@ -208,7 +211,7 @@ fn revocation_is_scoped_to_tenant_and_user() {
         ),
     );
     let lease_id = lease.grant.id;
-    leases.issue(lease.clone());
+    leases.issue(lease.clone()).unwrap();
 
     let err = leases.revoke(&other_scope, lease_id).unwrap_err();
 
@@ -231,14 +234,16 @@ fn lease_authorizer_denies_invalid_context_before_grant_match() {
     let mut context = execution_context(CapabilitySet::default());
     context.tenant_id = TenantId::new("tenant2").unwrap();
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
-    leases.issue(CapabilityLease::new(
-        context.resource_scope.clone(),
-        grant_for(
-            descriptor.id.clone(),
-            Principal::Extension(context.extension_id.clone()),
-            vec![EffectKind::DispatchCapability],
-        ),
-    ));
+    leases
+        .issue(CapabilityLease::new(
+            context.resource_scope.clone(),
+            grant_for(
+                descriptor.id.clone(),
+                Principal::Extension(context.extension_id.clone()),
+                vec![EffectKind::DispatchCapability],
+            ),
+        ))
+        .unwrap();
 
     let authorizer = LeaseBackedAuthorizer::new(&leases);
     let decision =
@@ -272,7 +277,7 @@ fn one_off_lease_does_not_authorize_different_invocation_in_same_tenant() {
             vec![EffectKind::DispatchCapability],
         ),
     );
-    leases.issue(lease);
+    leases.issue(lease).unwrap();
 
     let authorizer = LeaseBackedAuthorizer::new(&leases);
     let decision = authorizer.authorize_dispatch(
@@ -302,7 +307,7 @@ fn consume_decrements_remaining_invocations_and_consumes_one_shot_lease() {
     grant.constraints.max_invocations = Some(2);
     let lease = CapabilityLease::new(context.resource_scope.clone(), grant);
     let lease_id = lease.grant.id;
-    leases.issue(lease);
+    leases.issue(lease).unwrap();
 
     let after_first = leases.consume(&context.resource_scope, lease_id).unwrap();
 
@@ -332,7 +337,7 @@ fn consumed_lease_no_longer_authorizes_dispatch() {
     grant.constraints.max_invocations = Some(1);
     let lease = CapabilityLease::new(context.resource_scope.clone(), grant);
     let lease_id = lease.grant.id;
-    leases.issue(lease);
+    leases.issue(lease).unwrap();
     leases.consume(&context.resource_scope, lease_id).unwrap();
 
     let authorizer = LeaseBackedAuthorizer::new(&leases);
@@ -360,7 +365,7 @@ fn expired_lease_no_longer_authorizes_or_consumes() {
     grant.constraints.expires_at = Some(timestamp("2000-01-01T00:00:00Z"));
     let lease = CapabilityLease::new(context.resource_scope.clone(), grant);
     let lease_id = lease.grant.id;
-    leases.issue(lease);
+    leases.issue(lease).unwrap();
 
     let authorizer = LeaseBackedAuthorizer::new(&leases);
     let decision =
@@ -395,7 +400,7 @@ fn consume_is_scoped_to_exact_invocation() {
     grant.constraints.max_invocations = Some(1);
     let lease = CapabilityLease::new(context.resource_scope.clone(), grant);
     let lease_id = lease.grant.id;
-    leases.issue(lease.clone());
+    leases.issue(lease.clone()).unwrap();
 
     let err = leases
         .consume(&next_invocation_scope, lease_id)
@@ -415,6 +420,116 @@ fn consume_is_scoped_to_exact_invocation() {
 }
 
 #[test]
+fn filesystem_lease_store_persists_and_reloads_issued_leases() {
+    let fs = engine_filesystem();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let mut grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(context.extension_id.clone()),
+        vec![EffectKind::DispatchCapability],
+    );
+    grant.constraints.max_invocations = Some(3);
+    let lease = CapabilityLease::new(context.resource_scope.clone(), grant);
+    let lease_id = lease.grant.id;
+
+    FilesystemCapabilityLeaseStore::new(&fs)
+        .issue(lease.clone())
+        .unwrap();
+    let reloaded = FilesystemCapabilityLeaseStore::new(&fs);
+
+    assert_eq!(reloaded.get(&context.resource_scope, lease_id), Some(lease));
+    assert_eq!(
+        reloaded.leases_for_scope(&context.resource_scope),
+        vec![reloaded.get(&context.resource_scope, lease_id).unwrap()]
+    );
+}
+
+#[test]
+fn filesystem_lease_store_persists_revoke_claim_and_consume() {
+    let fs = engine_filesystem();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let fingerprint = InvocationFingerprint::for_dispatch(
+        &context.resource_scope,
+        &descriptor.id,
+        &ResourceEstimate::default(),
+        &serde_json::json!({"message": "approved"}),
+    )
+    .unwrap();
+    let mut grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(context.extension_id.clone()),
+        vec![EffectKind::DispatchCapability],
+    );
+    grant.constraints.max_invocations = Some(1);
+    let mut lease = CapabilityLease::new(context.resource_scope.clone(), grant);
+    lease.invocation_fingerprint = Some(fingerprint.clone());
+    let lease_id = lease.grant.id;
+    let store = FilesystemCapabilityLeaseStore::new(&fs);
+    store.issue(lease).unwrap();
+
+    let claimed = store
+        .claim(&context.resource_scope, lease_id, &fingerprint)
+        .unwrap();
+    assert_eq!(claimed.status, CapabilityLeaseStatus::Claimed);
+    assert_eq!(
+        FilesystemCapabilityLeaseStore::new(&fs)
+            .get(&context.resource_scope, lease_id)
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Claimed
+    );
+
+    let consumed = FilesystemCapabilityLeaseStore::new(&fs)
+        .consume(&context.resource_scope, lease_id)
+        .unwrap();
+    assert_eq!(consumed.status, CapabilityLeaseStatus::Consumed);
+    assert_eq!(consumed.grant.constraints.max_invocations, Some(0));
+
+    let revoked = FilesystemCapabilityLeaseStore::new(&fs)
+        .revoke(&context.resource_scope, lease_id)
+        .unwrap();
+    assert_eq!(revoked.status, CapabilityLeaseStatus::Revoked);
+    assert_eq!(
+        FilesystemCapabilityLeaseStore::new(&fs)
+            .get(&context.resource_scope, lease_id)
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Revoked
+    );
+}
+
+#[test]
+fn filesystem_lease_store_is_tenant_user_invocation_scoped() {
+    let fs = engine_filesystem();
+    let context = execution_context(CapabilitySet::default());
+    let mut other_invocation_scope = execution_context(CapabilitySet::default()).resource_scope;
+    other_invocation_scope.tenant_id = context.resource_scope.tenant_id.clone();
+    other_invocation_scope.user_id = context.resource_scope.user_id.clone();
+    other_invocation_scope.project_id = context.resource_scope.project_id.clone();
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let lease = CapabilityLease::new(
+        context.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    let lease_id = lease.grant.id;
+    let store = FilesystemCapabilityLeaseStore::new(&fs);
+    store.issue(lease.clone()).unwrap();
+
+    assert_eq!(store.get(&other_invocation_scope, lease_id), None);
+    assert!(matches!(
+        store.revoke(&other_invocation_scope, lease_id).unwrap_err(),
+        CapabilityLeaseError::UnknownLease { lease_id: id } if id == lease_id
+    ));
+    assert_eq!(store.get(&context.resource_scope, lease_id), Some(lease));
+}
+
+#[test]
 fn revoked_lease_no_longer_authorizes_dispatch() {
     let leases = InMemoryCapabilityLeaseStore::new();
     let context = execution_context(CapabilitySet::default());
@@ -428,7 +543,7 @@ fn revoked_lease_no_longer_authorizes_dispatch() {
         ),
     );
     let lease_id = lease.grant.id;
-    leases.issue(lease);
+    leases.issue(lease).unwrap();
     leases.revoke(&context.resource_scope, lease_id).unwrap();
 
     let authorizer = LeaseBackedAuthorizer::new(&leases);
@@ -481,6 +596,19 @@ fn grant_for(
 
 fn timestamp(value: &str) -> Timestamp {
     serde_json::from_value(serde_json::Value::String(value.to_string())).unwrap()
+}
+
+fn engine_filesystem() -> LocalFilesystem {
+    let storage = tempfile::tempdir().unwrap().keep();
+    let engine_root = storage.join("engine");
+    std::fs::create_dir_all(&engine_root).unwrap();
+    let mut fs = LocalFilesystem::new();
+    fs.mount_local(
+        VirtualPath::new("/engine").unwrap(),
+        HostPath::from_path_buf(engine_root),
+    )
+    .unwrap();
+    fs
 }
 
 fn execution_context(grants: CapabilitySet) -> ExecutionContext {
