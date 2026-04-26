@@ -344,8 +344,9 @@ Future backend types:
 ```text
 ObjectStoreBackend
 RemoteFilesystemBackend
-MemoryDocumentBackend
 ```
+
+Memory-specific backend adapters are owned outside this crate. The first Reborn memory seam is `ironclaw_memory::MemoryDocumentFilesystem`, which implements `RootFilesystem` for `/memory/...` documents through memory-owned repository and indexer traits.
 
 ---
 
