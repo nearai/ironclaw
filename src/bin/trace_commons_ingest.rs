@@ -100,6 +100,8 @@ const TRACE_COMMONS_SIGNED_TOKEN_SECRETS: &str = "TRACE_COMMONS_SIGNED_TOKEN_SEC
 const TRACE_COMMONS_SIGNED_TOKEN_ISSUER: &str = "TRACE_COMMONS_SIGNED_TOKEN_ISSUER";
 const TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE: &str = "TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE";
 const TRACE_COMMONS_SIGNED_TOKEN_REVOKED_JTIS: &str = "TRACE_COMMONS_SIGNED_TOKEN_REVOKED_JTIS";
+const TRACE_COMMONS_SIGNED_TOKEN_MAX_TTL_SECONDS: &str =
+    "TRACE_COMMONS_SIGNED_TOKEN_MAX_TTL_SECONDS";
 const TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR: &str =
     "TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR";
 const TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR: &str =
@@ -317,11 +319,15 @@ struct TraceCommonsSignedTokenVerifier {
     issuer: Option<String>,
     audience: Option<String>,
     revoked_jtis: BTreeSet<String>,
+    max_ttl_seconds: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
 struct TraceCommonsSignedTokenClaims {
     tenant_id: String,
+    exp: i64,
+    #[serde(default)]
+    iat: Option<i64>,
     #[serde(default)]
     role: Option<String>,
     #[serde(default)]
@@ -977,6 +983,7 @@ fn trace_commons_signed_token_verifier_from_env()
         issuer: optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_ISSUER)?,
         audience: optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE)?,
         revoked_jtis: parse_signed_token_revoked_jtis_from_env()?,
+        max_ttl_seconds: parse_signed_token_max_ttl_seconds_from_env()?,
     }))
 }
 
@@ -1022,6 +1029,29 @@ fn parse_signed_token_revoked_jtis_from_env() -> anyhow::Result<BTreeSet<String>
         Err(std::env::VarError::NotPresent) => Ok(BTreeSet::new()),
         Err(error) => Err(error)
             .with_context(|| format!("failed to read {TRACE_COMMONS_SIGNED_TOKEN_REVOKED_JTIS}")),
+    }
+}
+
+fn parse_signed_token_max_ttl_seconds_from_env() -> anyhow::Result<Option<i64>> {
+    match std::env::var(TRACE_COMMONS_SIGNED_TOKEN_MAX_TTL_SECONDS) {
+        Ok(configured) => {
+            let configured = configured.trim();
+            if configured.is_empty() {
+                return Ok(None);
+            }
+            let seconds = configured.parse::<i64>().with_context(|| {
+                format!("{TRACE_COMMONS_SIGNED_TOKEN_MAX_TTL_SECONDS} must be an integer")
+            })?;
+            anyhow::ensure!(
+                seconds > 0,
+                "{TRACE_COMMONS_SIGNED_TOKEN_MAX_TTL_SECONDS} must be greater than zero"
+            );
+            Ok(Some(seconds))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(error).with_context(|| {
+            format!("failed to read {TRACE_COMMONS_SIGNED_TOKEN_MAX_TTL_SECONDS}")
+        }),
     }
 }
 
@@ -1080,6 +1110,7 @@ impl TraceCommonsSignedTokenVerifier {
         })?;
 
         let claims = token_data.claims;
+        self.enforce_max_ttl(&claims)?;
         if claims
             .jti
             .as_deref()
@@ -1093,6 +1124,34 @@ impl TraceCommonsSignedTokenVerifier {
         }
 
         signed_token_claims_to_auth(claims)
+    }
+
+    fn enforce_max_ttl(&self, claims: &TraceCommonsSignedTokenClaims) -> ApiResult<()> {
+        let Some(max_ttl_seconds) = self.max_ttl_seconds else {
+            return Ok(());
+        };
+        let iat = claims
+            .iat
+            .ok_or_else(|| api_error(StatusCode::FORBIDDEN, "signed tenant token requires iat"))?;
+        if claims.exp <= iat {
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "invalid signed tenant token",
+            ));
+        }
+        if iat > Utc::now().timestamp() + 60 {
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "not-yet-valid signed tenant token",
+            ));
+        }
+        if claims.exp.saturating_sub(iat) > max_ttl_seconds {
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "signed tenant token ttl exceeds policy",
+            ));
+        }
+        Ok(())
     }
 
     fn secret_for_kid(&self, kid: Option<&str>) -> Option<&SecretString> {
@@ -1338,6 +1397,7 @@ struct TraceCommonsConfigStatusResponse {
     signed_token_issuer_configured: bool,
     signed_token_audience_configured: bool,
     signed_token_revoked_jti_count: usize,
+    signed_token_max_ttl_seconds: Option<i64>,
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
     db_reviewer_require_object_refs: bool,
@@ -1382,6 +1442,10 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .signed_token_verifier
             .as_ref()
             .map_or(0, |verifier| verifier.revoked_jtis.len()),
+        signed_token_max_ttl_seconds: state
+            .signed_token_verifier
+            .as_ref()
+            .and_then(|verifier| verifier.max_ttl_seconds),
         db_contributor_reads: state.db_contributor_reads,
         db_reviewer_reads: state.db_reviewer_reads,
         db_reviewer_require_object_refs: state.db_reviewer_require_object_refs,
@@ -14621,6 +14685,7 @@ mod tests {
             issuer: issuer.map(str::to_string),
             audience: audience.map(str::to_string),
             revoked_jtis: BTreeSet::new(),
+            max_ttl_seconds: None,
         });
         state
     }
@@ -16012,6 +16077,7 @@ mod tests {
             issuer: Some("config-status-issuer".to_string()),
             audience: Some("config-status-audience".to_string()),
             revoked_jtis: BTreeSet::from(["revoked-config-jti".to_string()]),
+            max_ttl_seconds: Some(900),
         });
 
         let contributor_response = app(state.clone())
@@ -16061,6 +16127,10 @@ mod tests {
         assert_eq!(
             value["signed_token_revoked_jti_count"],
             serde_json::json!(1)
+        );
+        assert_eq!(
+            value["signed_token_max_ttl_seconds"],
+            serde_json::json!(900)
         );
         assert_eq!(
             value["require_tenant_submission_policy"],
@@ -28576,6 +28646,110 @@ mod tests {
 
         assert_eq!(error.0, StatusCode::FORBIDDEN);
         assert_eq!(error.1.0.error, "expired signed tenant token");
+    }
+
+    #[tokio::test]
+    async fn rejects_signed_tenant_token_missing_iat_when_max_ttl_configured() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state_with_signed_token_verifier(
+            temp.path().to_path_buf(),
+            "signed-secret",
+            None,
+            None,
+        );
+        Arc::make_mut(&mut state)
+            .signed_token_verifier
+            .as_mut()
+            .expect("verifier exists")
+            .max_ttl_seconds = Some(300);
+        let token = signed_tenant_token(
+            "signed-secret",
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "contributor",
+                "sub": "actor-123",
+                "exp": (Utc::now() + Duration::minutes(5)).timestamp()
+            }),
+        );
+        let envelope = sample_envelope().await;
+
+        let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+            .await
+            .expect_err("max-ttl signed token policy requires issued-at");
+
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert_eq!(error.1.0.error, "signed tenant token requires iat");
+    }
+
+    #[tokio::test]
+    async fn rejects_signed_tenant_token_exceeding_max_ttl_policy() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state_with_signed_token_verifier(
+            temp.path().to_path_buf(),
+            "signed-secret",
+            None,
+            None,
+        );
+        Arc::make_mut(&mut state)
+            .signed_token_verifier
+            .as_mut()
+            .expect("verifier exists")
+            .max_ttl_seconds = Some(300);
+        let issued_at = Utc::now().timestamp();
+        let token = signed_tenant_token(
+            "signed-secret",
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "contributor",
+                "sub": "actor-123",
+                "iat": issued_at,
+                "exp": issued_at + 3600
+            }),
+        );
+        let envelope = sample_envelope().await;
+
+        let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+            .await
+            .expect_err("max-ttl signed token policy rejects long-lived tokens");
+
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert_eq!(error.1.0.error, "signed tenant token ttl exceeds policy");
+    }
+
+    #[tokio::test]
+    async fn accepts_signed_tenant_token_within_max_ttl_policy() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state_with_signed_token_verifier(
+            temp.path().to_path_buf(),
+            "signed-secret",
+            None,
+            None,
+        );
+        Arc::make_mut(&mut state)
+            .signed_token_verifier
+            .as_mut()
+            .expect("verifier exists")
+            .max_ttl_seconds = Some(300);
+        let issued_at = Utc::now().timestamp();
+        let token = signed_tenant_token(
+            "signed-secret",
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "contributor",
+                "sub": "actor-123",
+                "iat": issued_at,
+                "exp": issued_at + 300
+            }),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+
+        let Json(receipt) =
+            submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+                .await
+                .expect("max-ttl signed token policy accepts bounded tokens");
+
+        assert_eq!(receipt.status, "accepted");
     }
 
     #[tokio::test]
