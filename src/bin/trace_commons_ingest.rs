@@ -88,6 +88,9 @@ const TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR: &str =
 const TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR: &str =
     "TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR";
 const TRACE_BACKFILL_FAILURE_DETAIL_LIMIT: usize = 20;
+const TRACE_REVIEW_DUE_AFTER_HOURS: i64 = 24;
+const TRACE_REVIEW_OVERDUE_AFTER_HOURS: i64 = 72;
+const TRACE_REVIEW_HIGH_RISK_URGENT_AFTER_HOURS: i64 = 4;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -1611,11 +1614,20 @@ async fn review_quarantine_handler(
         .into_iter()
         .map(|record| (record.submission_id, record))
         .collect::<BTreeMap<_, _>>();
-    let queue = records
+    let now = Utc::now();
+    let mut queue = records
         .into_iter()
         .filter(|record| record.status == TraceCorpusStatus::Quarantined)
-        .map(|record| TraceReviewQueueItem::from_record(record, &derived_by_submission))
+        .map(|record| TraceReviewQueueItem::from_record(record, &derived_by_submission, now))
         .collect::<Vec<_>>();
+    queue.sort_by(|left, right| {
+        right
+            .review_escalation_state
+            .rank()
+            .cmp(&left.review_escalation_state.rank())
+            .then_with(|| right.review_age_hours.cmp(&left.review_age_hours))
+            .then_with(|| left.received_at.cmp(&right.received_at))
+    });
     append_audit_event_with_db_mirror(
         state.as_ref(),
         &tenant,
@@ -3068,6 +3080,7 @@ async fn active_learning_review_queue_handler(
         .map(|record| (record.submission_id, record))
         .collect::<BTreeMap<_, _>>();
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let now = Utc::now();
     let mut items = records
         .into_iter()
         .filter(|record| {
@@ -3087,6 +3100,7 @@ async fn active_learning_review_queue_handler(
             TraceActiveLearningReviewItem::from_record(
                 record,
                 derived_by_submission.get(&submission_id),
+                now,
             )
         })
         .collect::<Vec<_>>();
@@ -3094,6 +3108,13 @@ async fn active_learning_review_queue_handler(
         right
             .priority_score
             .total_cmp(&left.priority_score)
+            .then_with(|| {
+                right
+                    .review_escalation_state
+                    .rank()
+                    .cmp(&left.review_escalation_state.rank())
+            })
+            .then_with(|| right.review_age_hours.cmp(&left.review_age_hours))
             .then_with(|| left.received_at.cmp(&right.received_at))
     });
     items.truncate(limit);
@@ -9974,6 +9995,10 @@ struct TraceReviewQueueItem {
     submission_score: f32,
     redaction_counts: BTreeMap<String, u32>,
     received_at: DateTime<Utc>,
+    review_age_hours: i64,
+    review_escalation_state: TraceReviewEscalationState,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    review_escalation_reasons: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     canonical_summary: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -9986,7 +10011,9 @@ impl TraceReviewQueueItem {
     fn from_record(
         record: TraceCommonsSubmissionRecord,
         derived_by_submission: &BTreeMap<Uuid, TraceCommonsDerivedRecord>,
+        now: DateTime<Utc>,
     ) -> Self {
+        let escalation = trace_review_escalation(&record, now);
         let derived = derived_by_submission.get(&record.submission_id);
         Self {
             submission_id: record.submission_id,
@@ -9996,6 +10023,9 @@ impl TraceReviewQueueItem {
             submission_score: record.submission_score,
             redaction_counts: record.redaction_counts,
             received_at: record.received_at,
+            review_age_hours: escalation.age_hours,
+            review_escalation_state: escalation.state,
+            review_escalation_reasons: escalation.reasons,
             canonical_summary: derived.map(|record| record.canonical_summary.clone()),
             coverage_tags: derived
                 .map(|record| record.coverage_tags.clone())
@@ -10004,6 +10034,72 @@ impl TraceReviewQueueItem {
                 .map(|record| record.tool_sequence.clone())
                 .unwrap_or_default(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum TraceReviewEscalationState {
+    Fresh,
+    Due,
+    Overdue,
+    Urgent,
+}
+
+impl TraceReviewEscalationState {
+    fn rank(self) -> u8 {
+        match self {
+            Self::Fresh => 0,
+            Self::Due => 1,
+            Self::Overdue => 2,
+            Self::Urgent => 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TraceReviewEscalation {
+    state: TraceReviewEscalationState,
+    age_hours: i64,
+    reasons: Vec<String>,
+}
+
+fn trace_review_escalation(
+    record: &TraceCommonsSubmissionRecord,
+    now: DateTime<Utc>,
+) -> TraceReviewEscalation {
+    let age_hours = now
+        .signed_duration_since(record.received_at)
+        .num_hours()
+        .max(0);
+    let mut reasons = Vec::new();
+    let mut state = TraceReviewEscalationState::Fresh;
+
+    match record.privacy_risk {
+        ResidualPiiRisk::High => reasons.push("high_residual_pii_risk".to_string()),
+        ResidualPiiRisk::Medium => reasons.push("medium_residual_pii_risk".to_string()),
+        ResidualPiiRisk::Low => {}
+    }
+
+    if age_hours >= TRACE_REVIEW_DUE_AFTER_HOURS {
+        state = TraceReviewEscalationState::Due;
+        reasons.push("review_due_24h".to_string());
+    }
+    if age_hours >= TRACE_REVIEW_OVERDUE_AFTER_HOURS {
+        state = TraceReviewEscalationState::Overdue;
+        reasons.push("review_overdue_72h".to_string());
+    }
+    if record.privacy_risk == ResidualPiiRisk::High
+        && age_hours >= TRACE_REVIEW_HIGH_RISK_URGENT_AFTER_HOURS
+    {
+        state = TraceReviewEscalationState::Urgent;
+        reasons.push("high_risk_sla_4h".to_string());
+    }
+
+    TraceReviewEscalation {
+        state,
+        age_hours,
+        reasons,
     }
 }
 
@@ -10672,6 +10768,10 @@ struct TraceActiveLearningReviewItem {
     submission_score: f32,
     redaction_counts: BTreeMap<String, u32>,
     received_at: DateTime<Utc>,
+    review_age_hours: i64,
+    review_escalation_state: TraceReviewEscalationState,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    review_escalation_reasons: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     canonical_summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -10692,8 +10792,10 @@ impl TraceActiveLearningReviewItem {
     fn from_record(
         record: TraceCommonsSubmissionRecord,
         derived: Option<&TraceCommonsDerivedRecord>,
+        now: DateTime<Utc>,
     ) -> Self {
-        let (priority_score, priority_reasons) = active_learning_priority(&record, derived);
+        let escalation = trace_review_escalation(&record, now);
+        let (priority_score, priority_reasons) = active_learning_priority(&record, derived, now);
         Self {
             submission_id: record.submission_id,
             trace_id: record.trace_id,
@@ -10704,6 +10806,9 @@ impl TraceActiveLearningReviewItem {
             submission_score: record.submission_score,
             redaction_counts: record.redaction_counts,
             received_at: record.received_at,
+            review_age_hours: escalation.age_hours,
+            review_escalation_state: escalation.state,
+            review_escalation_reasons: escalation.reasons,
             canonical_summary: derived.map(|record| record.canonical_summary.clone()),
             canonical_summary_hash: derived.map(|record| record.canonical_summary_hash.clone()),
             coverage_tags: derived
@@ -10724,6 +10829,7 @@ impl TraceActiveLearningReviewItem {
 fn active_learning_priority(
     record: &TraceCommonsSubmissionRecord,
     derived: Option<&TraceCommonsDerivedRecord>,
+    now: DateTime<Utc>,
 ) -> (f32, Vec<String>) {
     let mut score = 0.0;
     let mut reasons = Vec::new();
@@ -10741,6 +10847,21 @@ fn active_learning_priority(
             reasons.push("medium_residual_pii_risk".to_string());
         }
         ResidualPiiRisk::Low => {}
+    }
+    match trace_review_escalation(record, now).state {
+        TraceReviewEscalationState::Fresh => {}
+        TraceReviewEscalationState::Due => {
+            score += 0.25;
+            reasons.push("review_due_24h".to_string());
+        }
+        TraceReviewEscalationState::Overdue => {
+            score += 0.5;
+            reasons.push("review_overdue_72h".to_string());
+        }
+        TraceReviewEscalationState::Urgent => {
+            score += 1.0;
+            reasons.push("high_risk_sla_4h".to_string());
+        }
     }
     let uncertainty = 1.0 - ((record.submission_score - 0.5).abs() * 2.0).clamp(0.0, 1.0);
     if uncertainty > 0.0 {
@@ -15787,6 +15908,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trace_review_escalation_marks_high_risk_and_overdue_items() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let envelope = sample_envelope().await;
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
+            .await
+            .expect("submission succeeds");
+
+        let now = Utc::now();
+        let mut record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        record.privacy_risk = ResidualPiiRisk::High;
+        record.received_at = now - Duration::hours(TRACE_REVIEW_HIGH_RISK_URGENT_AFTER_HOURS + 1);
+        let urgent = trace_review_escalation(&record, now);
+        assert_eq!(urgent.state, TraceReviewEscalationState::Urgent);
+        assert!(urgent.age_hours >= TRACE_REVIEW_HIGH_RISK_URGENT_AFTER_HOURS);
+        assert!(
+            urgent
+                .reasons
+                .iter()
+                .any(|reason| reason == "high_risk_sla_4h")
+        );
+
+        record.privacy_risk = ResidualPiiRisk::Medium;
+        record.received_at = now - Duration::hours(TRACE_REVIEW_OVERDUE_AFTER_HOURS + 1);
+        let overdue = trace_review_escalation(&record, now);
+        assert_eq!(overdue.state, TraceReviewEscalationState::Overdue);
+        assert!(
+            overdue
+                .reasons
+                .iter()
+                .any(|reason| reason == "review_overdue_72h")
+        );
+
+        record.privacy_risk = ResidualPiiRisk::Low;
+        record.received_at = now;
+        let fresh = trace_review_escalation(&record, now);
+        assert_eq!(fresh.state, TraceReviewEscalationState::Fresh);
+        assert_eq!(fresh.age_hours, 0);
+        assert!(fresh.reasons.is_empty());
+    }
+
+    #[tokio::test]
+    async fn quarantine_queue_prioritizes_escalated_review_items() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let urgent_envelope = sample_envelope().await;
+        let urgent_id = urgent_envelope.submission_id;
+        let fresh_envelope = sample_envelope().await;
+        let fresh_id = fresh_envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(fresh_envelope),
+        )
+        .await
+        .expect("fresh submission succeeds");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(urgent_envelope),
+        )
+        .await
+        .expect("urgent submission succeeds");
+
+        let now = Utc::now();
+        let mut urgent_record = read_submission_record(temp.path(), "tenant-a", urgent_id)
+            .expect("urgent record reads")
+            .expect("urgent record exists");
+        urgent_record.privacy_risk = ResidualPiiRisk::High;
+        urgent_record.received_at =
+            now - Duration::hours(TRACE_REVIEW_HIGH_RISK_URGENT_AFTER_HOURS + 1);
+        write_submission_record(temp.path(), &urgent_record).expect("urgent record writes");
+
+        let mut fresh_record = read_submission_record(temp.path(), "tenant-a", fresh_id)
+            .expect("fresh record reads")
+            .expect("fresh record exists");
+        fresh_record.privacy_risk = ResidualPiiRisk::Medium;
+        fresh_record.received_at = now - Duration::hours(1);
+        write_submission_record(temp.path(), &fresh_record).expect("fresh record writes");
+
+        let Json(queue) = review_quarantine_handler(State(state), auth_headers("review-token-a"))
+            .await
+            .expect("quarantine queue loads");
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue[0].submission_id, urgent_id);
+        assert_eq!(
+            queue[0].review_escalation_state,
+            TraceReviewEscalationState::Urgent
+        );
+        assert!(queue[0].review_age_hours >= TRACE_REVIEW_HIGH_RISK_URGENT_AFTER_HOURS);
+        assert!(
+            queue[0]
+                .review_escalation_reasons
+                .iter()
+                .any(|reason| reason == "high_risk_sla_4h")
+        );
+        assert_eq!(
+            queue[1].review_escalation_state,
+            TraceReviewEscalationState::Fresh
+        );
+    }
+
+    #[tokio::test]
     async fn export_guardrails_require_explicit_filters_when_enabled() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state_with_export_guardrails(temp.path().to_path_buf());
@@ -17254,6 +17483,16 @@ mod tests {
         )
         .await
         .expect("contributor can revoke own trace");
+        let now = Utc::now();
+        let mut quarantined_record =
+            read_submission_record(temp.path(), "tenant-a", tenant_a_quarantined_id)
+                .expect("quarantined record reads")
+                .expect("quarantined record exists");
+        quarantined_record.privacy_risk = ResidualPiiRisk::High;
+        quarantined_record.received_at =
+            now - Duration::hours(TRACE_REVIEW_HIGH_RISK_URGENT_AFTER_HOURS + 1);
+        write_submission_record(temp.path(), &quarantined_record)
+            .expect("quarantined record writes");
 
         let Json(queue) = active_learning_review_queue_handler(
             State(state.clone()),
@@ -17268,6 +17507,23 @@ mod tests {
         assert_eq!(queue.item_count, 2);
         assert_eq!(queue.tenant_id, "tenant-a");
         assert_eq!(queue.items[0].submission_id, tenant_a_quarantined_id);
+        assert_eq!(
+            queue.items[0].review_escalation_state,
+            TraceReviewEscalationState::Urgent
+        );
+        assert!(queue.items[0].review_age_hours >= TRACE_REVIEW_HIGH_RISK_URGENT_AFTER_HOURS);
+        assert!(
+            queue.items[0]
+                .review_escalation_reasons
+                .iter()
+                .any(|reason| reason == "high_risk_sla_4h")
+        );
+        assert!(
+            queue.items[0]
+                .priority_reasons
+                .iter()
+                .any(|reason| reason == "high_risk_sla_4h")
+        );
         assert!(
             queue
                 .items

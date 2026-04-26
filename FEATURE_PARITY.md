@@ -185,7 +185,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `/subagents spawn` | ✅ | ❌ | P3 | Spawn subagents from chat |
 | `/export-session` | ✅ | ❌ | P3 | Export current session transcript |
 
-Trace Commons incremental note: retention maintenance now honors `TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES` so configured policy classes are skipped for new expiration and purge passes.
+Trace Commons incremental note: reviewer quarantine and active-learning queues now surface prioritization metadata, including `review_age_hours`, `review_escalation_state`, and `review_escalation_reasons`, so CLI non-JSON output can show SLA pressure and escalation causes during triage. Retention maintenance also honors `TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES` so configured policy classes are skipped for new expiration and purge passes.
 
 ### Owner: _Unassigned_
 
