@@ -48,6 +48,74 @@ async fn capability_host_blocks_for_approval_without_dispatch_or_reservation() {
 }
 
 #[tokio::test]
+async fn capability_host_records_blocked_auth_for_authorization_denial() {
+    let (fs, package) = wasm_package_with_module(json_echo_module());
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    let governor = InMemoryResourceGovernor::new();
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
+    let authorizer = GrantAuthorizer::new();
+    let run_state = InMemoryRunStateStore::new();
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
+    let context = execution_context(CapabilitySet::default());
+    let invocation_id = context.invocation_id;
+
+    let err = host
+        .invoke_json(CapabilityInvocationRequest {
+            context,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: ResourceEstimate {
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+            input: json!({"message": "blocked"}),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::AuthorizationDenied { .. }
+    ));
+    let record = run_state.get(invocation_id).unwrap();
+    assert_eq!(record.status, RunStatus::BlockedAuth);
+    assert_eq!(record.error_kind.as_deref(), Some("AuthorizationDenied"));
+}
+
+#[tokio::test]
+async fn capability_host_rejects_invalid_context_before_recording_run_state() {
+    let (fs, package) = wasm_package_with_module(json_echo_module());
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    let governor = InMemoryResourceGovernor::new();
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
+    let authorizer = ApprovalAuthorizer;
+    let run_state = InMemoryRunStateStore::new();
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
+    let mut context = execution_context(CapabilitySet::default());
+    context.resource_scope.tenant_id = TenantId::new("other-tenant").unwrap();
+
+    let err = host
+        .invoke_json(CapabilityInvocationRequest {
+            context,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: ResourceEstimate::default(),
+            input: json!({}),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::AuthorizationDenied {
+            reason: DenyReason::InternalInvariantViolation,
+            ..
+        }
+    ));
+    assert!(run_state.records().is_empty());
+}
+
+#[tokio::test]
 async fn capability_host_records_completed_run_after_authorized_dispatch() {
     let (fs, package) = wasm_package_with_module(json_echo_module());
     let mut registry = ExtensionRegistry::new();

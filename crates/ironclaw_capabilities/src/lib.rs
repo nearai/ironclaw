@@ -136,7 +136,7 @@ where
             Decision::Allow { .. } => {}
             Decision::Deny { reason } => {
                 if let Some(run_state) = self.run_state {
-                    run_state.fail(invocation_id, "AuthorizationDenied".to_string())?;
+                    run_state.block_auth(invocation_id, "AuthorizationDenied".to_string())?;
                 }
                 return Err(CapabilityInvocationError::AuthorizationDenied {
                     capability: request.capability_id,
