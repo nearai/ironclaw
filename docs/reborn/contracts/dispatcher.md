@@ -21,11 +21,23 @@ ExtensionRegistry + RootFilesystem + ResourceGovernor + runtime backends
 
 The dispatcher does not discover extensions, parse manifests, implement policy, open files directly, resolve secrets, or execute product workflows. It wires service crates together and fails closed when a required lane or declaration is missing.
 
+The dispatch port contracts live in `ironclaw_host_api`:
+
+```rust
+CapabilityDispatchRequest
+CapabilityDispatchResult
+CapabilityDispatcher
+DispatchError
+RuntimeDispatchErrorKind
+```
+
+`ironclaw_dispatcher` implements that neutral port. Higher-level workflow crates such as `ironclaw_capabilities` depend on `ironclaw_host_api`, not on the concrete dispatcher crate in production code.
+
 ---
 
 ## 2. Inputs
 
-The dispatcher receives an already-authorized `CapabilityDispatchRequest` from the neutral `ironclaw_host_api` dispatch port:
+The dispatcher receives an already-authorized `CapabilityDispatchRequest`:
 
 ```rust
 pub struct CapabilityDispatchRequest {
@@ -52,7 +64,7 @@ RuntimeDispatcher::from_arcs(registry, root_filesystem, resource_governor)
     .with_wasm_runtime_arc(wasm_runtime)
 ```
 
-The owned form keeps dispatcher composition-only while allowing the process-dispatch adapter to run capability-backed processes without leaking borrowed app state into a spawned task. `RuntimeDispatcher` implements the host API `CapabilityDispatcher` trait, but `ironclaw_capabilities` no longer depends on this concrete crate.
+The owned form keeps dispatcher composition-only while allowing `DispatchProcessExecutor` to run capability-backed processes without leaking borrowed app state into a spawned task.
 
 `ExtensionRegistry` remains the authority for what can run. Runtime crates remain the authority for how a lane runs.
 
@@ -68,7 +80,7 @@ V1 `dispatch_json` performs only routing and consistency checks:
 3. verify descriptor.runtime == package.manifest.runtime_kind()
 4. select runtime lane from RuntimeKind
 5. call the configured backend for that lane
-6. return a normalized host API dispatch result or host-safe failure kind
+6. return normalized result or typed failure with a stable redacted `RuntimeDispatchErrorKind`
 ```
 
 For `RuntimeKind::Wasm`, the dispatcher calls:
@@ -107,6 +119,8 @@ V1 routes these runtime kinds explicitly:
 
 If the selected WASM, Script, or MCP runtime is not configured, dispatch returns `MissingRuntimeBackend` before reserving resources.
 
+Runtime-specific failures are collapsed to stable categories (`Backend`, `ExitFailure`, `OutputDecode`, `Resource`, and similar) before crossing the dispatch port. Raw backend strings, stderr, host paths, and internal runtime detail strings stay inside the runtime crate.
+
 ---
 
 ## 5. Fail-closed rules
@@ -119,7 +133,9 @@ The dispatcher fails before execution when:
 - selected runtime backend is missing
 - selected runtime lane is recognized but not implemented yet
 
-These failures must not reserve resources or perform external effects. Event sink failures are best-effort observability failures and must not turn a preflight or post-execution dispatch outcome into a different workflow result.
+Configured event sink failures are not dispatch failures. Event emission is best-effort observability and must not alter the success value or mask the original runtime/control-plane error.
+
+These failures must not reserve resources or perform external effects.
 
 ---
 
@@ -172,5 +188,7 @@ The crate test suite covers:
 - MCP capability dispatch through a configured MCP executor
 - first-party and system lanes recognized but not executed
 - missing WASM, Script, or MCP backend failure before resource reservation
+- event sink failures ignored on both success and failure paths
+- runtime failure details redacted to `RuntimeDispatchErrorKind`
 
 These tests are intentionally caller-level: they drive `RuntimeDispatcher::dispatch_json`, not only helper functions.

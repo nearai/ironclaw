@@ -109,8 +109,7 @@ trust = "sandbox"
 
 [runtime]
 kind = "script"
-backend = "docker"
-image = "python:3.12-slim"
+runner = "sandboxed_process"
 command = "pytest"
 args = ["tests/"]
 
@@ -154,7 +153,7 @@ Manifest runtime kinds map to `ironclaw_host_api::RuntimeKind`:
 | Manifest `kind` | RuntimeKind | Meaning |
 |---|---|---|
 | `wasm` | `Wasm` | portable module lane |
-| `script` | `Script` | native CLI/script lane; V1 backend is Docker/container |
+| `script` | `Script` | native CLI/script lane selected by a semantic runner profile |
 | `mcp` | `Mcp` | MCP adapter lane |
 | `first_party` | `FirstParty` | trusted first-party service extension |
 | `system` | `System` | host-owned system fixture/service only |
@@ -164,7 +163,7 @@ Runtime metadata is declarative. It is passed to the appropriate runtime crate l
 Rules:
 
 - WASM declarations may name module assets but must not load modules.
-- Script declarations may name Docker image/command/args but must not execute or expose raw Docker flags.
+- Script declarations may name a semantic runner, command, args, and optional backend-specific image metadata, but must not execute or expose raw Docker flags.
 - MCP declarations may describe stdio/remote transport but must not connect during manifest parsing/registry insertion.
 - Host/system declarations require matching trust ceilings and should be rare/first-party only.
 
@@ -258,7 +257,7 @@ pub struct ExtensionPackage {
 
 pub enum ExtensionRuntime {
     Wasm { module: ExtensionAssetPath },
-    Script { backend: ScriptBackend, image: String, command: String, args: Vec<String> },
+    Script { runner: String, image: Option<String>, command: String, args: Vec<String> },
     Mcp { transport: McpTransport, command: Option<String>, args: Vec<String>, url: Option<String> },
     FirstParty { service: String },
     System { service: String },
@@ -290,7 +289,7 @@ Local contract tests should prove:
 - invalid extension ID is rejected.
 - capability ID must be provider-prefixed.
 - runtime kind and trust ceiling parse correctly.
-- script runtime declaration stores Docker backend metadata without executing it.
+- script runtime declaration stores semantic runner metadata without executing it; legacy Docker metadata remains accepted only for the optional Docker backend.
 - MCP runtime declaration stores transport metadata without connecting.
 - invalid manifest-local asset paths are rejected.
 - registry rejects duplicate extension IDs.

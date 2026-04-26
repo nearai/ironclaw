@@ -210,7 +210,7 @@ The current implemented or contract-backed Reborn stack includes these slices:
 
 | Area | Current status |
 | --- | --- |
-| Host API vocabulary | `[exists]` IDs, scopes, runtime kinds, trust classes, capabilities, grants, resources, approvals, events, paths, mount views |
+| Host API vocabulary | `[exists]` IDs, scopes, runtime kinds, trust classes, capabilities, grants, resources, approvals, events, paths, mount views, neutral dispatch port contracts, and redacted runtime dispatch error kinds |
 | Filesystem/mount surface | `[exists]` root/scoped filesystem contracts and filesystem-backed stores used by Reborn services |
 | Extension discovery/registry | `[exists]` manifests, package validation, capability descriptors, runtime declaration mapping |
 | Resource governor | `[exists]` reservation/reconcile/release model and V1 dimensions for hosted resource control |
@@ -219,10 +219,10 @@ The current implemented or contract-backed Reborn stack includes these slices:
 | Host runtime composition | `[exists]` `HostRuntimeServices` composition helper for shared registry/filesystem/governor/authorizer/runtime/process services -> `RuntimeDispatcher`, `CapabilityHost`, and `ProcessHost` handles |
 | Approvals/resume | `[exists/partial]` pending approval records, invocation fingerprints, approval resolver, in-memory exact-invocation leases, `resume_json` replay checks |
 | Run-state | `[exists]` `Running`, `BlockedApproval`, `BlockedAuth`, `Completed`, `Failed` current-state stores with tenant/user partitioning |
-| Dispatcher | `[exists]` routing of already-authorized requests to WASM, Script, and MCP lanes; `FirstParty`/`System` recognized but unsupported |
-| Runtime events | `[partial]` dispatcher/process event vocabulary/sinks for requested/selected/succeeded/failed and process lifecycle; event sink failures are best-effort observability failures |
+| Dispatcher | `[exists]` implementation of the neutral `ironclaw_host_api` dispatch port for already-authorized requests to WASM, Script, and MCP lanes; `FirstParty`/`System` recognized but unsupported; event sink failures are best-effort and runtime failures are redacted to stable kinds |
+| Runtime events | `[partial]` dispatcher/process event vocabulary/sinks for requested/selected/succeeded/failed and process lifecycle; dispatcher event sink failures are ignored so observability outages do not alter dispatch outcomes |
 | WASM lane | `[exists]` configured `WasmRuntime` dispatch path in the live vertical slice |
-| Script lane | `[exists]` `ScriptExecutor` path, including in-process demo backend and optional Docker backend in the demo |
+| Script lane | `[exists]` `ScriptExecutor` path with semantic manifest runner profiles, in-process demo backend, and optional legacy Docker backend support |
 | MCP lane | `[exists]` adapter/executor contract path in the live vertical slice; not a full MCP lifecycle product yet |
 | Process persistence | `[exists]` process store/manager records, scoped process result records with inline JSON or filesystem output refs, `ProcessServices` wiring, host-facing `ProcessHost` status/kill/await/subscribe/result/output APIs, cooperative cancellation tokens, background completion/failure transition protection, lifecycle events, and resource reservation ownership/cleanup |
 | Live vertical slice | `[exists]` runnable demo through discovery -> registry -> `CapabilityHost` -> authorization -> dispatcher -> WASM/Script/MCP -> resources/events; host-runtime composition helper now covers the shared service wiring shape and has non-Docker in-memory and filesystem-backed `ironclaw_host_runtime` live examples |
