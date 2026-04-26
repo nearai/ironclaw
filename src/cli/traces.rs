@@ -444,6 +444,48 @@ pub enum TracesCommand {
         json: bool,
     },
 
+    /// Read the DB-backed tenant contribution policy
+    TenantPolicyGet {
+        /// Trace Commons ingestion base URL or /v1/traces URL
+        #[arg(long)]
+        endpoint: String,
+
+        /// Environment variable containing an admin bearer token
+        #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
+        bearer_token_env: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Write the DB-backed tenant contribution policy
+    TenantPolicySet {
+        /// Trace Commons ingestion base URL or /v1/traces URL
+        #[arg(long)]
+        endpoint: String,
+
+        /// Policy version string recorded with tenant policy audit metadata
+        #[arg(long)]
+        policy_version: String,
+
+        /// Allowed consent scopes, comma separated
+        #[arg(long, value_enum, value_delimiter = ',')]
+        allowed_consent_scopes: Vec<TraceScopeArg>,
+
+        /// Allowed trace-card uses, comma separated
+        #[arg(long, value_enum, value_delimiter = ',')]
+        allowed_uses: Vec<TraceAllowedUseArg>,
+
+        /// Environment variable containing an admin bearer token
+        #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
+        bearer_token_env: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Export approved ranker training candidates
     RankerTrainingCandidates {
         /// Trace Commons ingestion base URL or /v1/traces URL
@@ -631,6 +673,44 @@ impl From<TraceScopeArg> for ConsentScope {
             TraceScopeArg::RankingTraining => ConsentScope::RankingTraining,
             TraceScopeArg::ModelTraining => ConsentScope::ModelTraining,
         }
+    }
+}
+
+fn trace_scope_server_value(scope: TraceScopeArg) -> &'static str {
+    match scope {
+        TraceScopeArg::DebuggingEvaluation => "debugging_evaluation",
+        TraceScopeArg::BenchmarkOnly => "benchmark_only",
+        TraceScopeArg::RankingTraining => "ranking_training",
+        TraceScopeArg::ModelTraining => "model_training",
+    }
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceAllowedUseArg {
+    Debugging,
+    Evaluation,
+    BenchmarkGeneration,
+    RankingModelTraining,
+    ModelTraining,
+    AggregateAnalytics,
+}
+
+impl TraceAllowedUseArg {
+    fn server_value(self) -> &'static str {
+        match self {
+            Self::Debugging => "debugging",
+            Self::Evaluation => "evaluation",
+            Self::BenchmarkGeneration => "benchmark_generation",
+            Self::RankingModelTraining => "ranking_model_training",
+            Self::ModelTraining => "model_training",
+            Self::AggregateAnalytics => "aggregate_analytics",
+        }
+    }
+}
+
+impl std::fmt::Display for TraceAllowedUseArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.server_value())
     }
 }
 
@@ -975,6 +1055,29 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
             bearer_token_env,
             json,
         } => trace_commons_replay_export_manifests(&endpoint, &bearer_token_env, json).await,
+        TracesCommand::TenantPolicyGet {
+            endpoint,
+            bearer_token_env,
+            json,
+        } => trace_commons_tenant_policy_get(&endpoint, &bearer_token_env, json).await,
+        TracesCommand::TenantPolicySet {
+            endpoint,
+            policy_version,
+            allowed_consent_scopes,
+            allowed_uses,
+            bearer_token_env,
+            json,
+        } => {
+            trace_commons_tenant_policy_set(
+                &endpoint,
+                &bearer_token_env,
+                policy_version,
+                allowed_consent_scopes,
+                allowed_uses,
+                json,
+            )
+            .await
+        }
         TracesCommand::RankerTrainingCandidates {
             endpoint,
             purpose,
@@ -1894,6 +1997,86 @@ async fn trace_commons_replay_export_manifests(
     }
 }
 
+async fn trace_commons_tenant_policy_get(
+    endpoint: &str,
+    bearer_token_env: &str,
+    json: bool,
+) -> anyhow::Result<()> {
+    let response = trace_commons_api_request(
+        Method::GET,
+        endpoint,
+        "/v1/admin/tenant-policy",
+        &[],
+        Some(bearer_token_env),
+        None,
+    )
+    .await?;
+    print_trace_commons_tenant_policy_response(response, json)
+}
+
+async fn trace_commons_tenant_policy_set(
+    endpoint: &str,
+    bearer_token_env: &str,
+    policy_version: String,
+    allowed_consent_scopes: Vec<TraceScopeArg>,
+    allowed_uses: Vec<TraceAllowedUseArg>,
+    json: bool,
+) -> anyhow::Result<()> {
+    require_non_empty_policy_version(&policy_version)?;
+    let body =
+        trace_commons_tenant_policy_body(policy_version, allowed_consent_scopes, allowed_uses);
+    let response = trace_commons_api_request(
+        Method::PUT,
+        endpoint,
+        "/v1/admin/tenant-policy",
+        &[],
+        Some(bearer_token_env),
+        Some(body),
+    )
+    .await?;
+    print_trace_commons_tenant_policy_response(response, json)
+}
+
+fn trace_commons_tenant_policy_body(
+    policy_version: String,
+    allowed_consent_scopes: Vec<TraceScopeArg>,
+    allowed_uses: Vec<TraceAllowedUseArg>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "policy_version": policy_version,
+        "allowed_consent_scopes": allowed_consent_scopes
+            .into_iter()
+            .map(trace_scope_server_value)
+            .collect::<Vec<_>>(),
+        "allowed_uses": allowed_uses
+            .into_iter()
+            .map(TraceAllowedUseArg::server_value)
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn print_trace_commons_tenant_policy_response(
+    response: TraceCommonsApiResponse,
+    json: bool,
+) -> anyhow::Result<()> {
+    if json {
+        print_trace_commons_json(&response)?;
+        return Ok(());
+    }
+    let Some(value) = response.json.as_ref() else {
+        println!("{}", response.body.trim());
+        return Ok(());
+    };
+    println!("Trace Commons tenant policy:");
+    print_optional_json_field("  tenant", value, "tenant_id");
+    print_optional_json_field("  policy version", value, "policy_version");
+    print_optional_json_field("  allowed consent scopes", value, "allowed_consent_scopes");
+    print_optional_json_field("  allowed uses", value, "allowed_uses");
+    print_optional_json_field("  updated by", value, "updated_by_principal_ref");
+    print_optional_json_field("  updated at", value, "updated_at");
+    Ok(())
+}
+
 struct TraceCommonsRankerTrainingExportOptions<'a> {
     endpoint: &'a str,
     bearer_token_env: &'a str,
@@ -2296,6 +2479,13 @@ fn optional_usize_query(key: &'static str, value: Option<usize>) -> Vec<(&'stati
 fn require_non_empty_purpose(purpose: &str) -> anyhow::Result<()> {
     if purpose.trim().is_empty() {
         anyhow::bail!("--purpose must not be empty");
+    }
+    Ok(())
+}
+
+fn require_non_empty_policy_version(policy_version: &str) -> anyhow::Result<()> {
+    if policy_version.trim().is_empty() {
+        anyhow::bail!("--policy-version must not be empty");
     }
     Ok(())
 }
@@ -3431,6 +3621,110 @@ mod tests {
         assert_eq!(
             url,
             "https://trace.example/internal/v1/ranker/training-pairs?privacy_risk=low"
+        );
+    }
+
+    #[test]
+    fn tenant_policy_get_parses_through_cli() {
+        let cli = Cli::try_parse_from([
+            "ironclaw",
+            "traces",
+            "tenant-policy-get",
+            "--endpoint",
+            "https://trace.example/internal",
+            "--json",
+        ])
+        .expect("tenant-policy-get should parse");
+
+        let Some(Command::Traces(TracesCommand::TenantPolicyGet { endpoint, json, .. })) =
+            cli.command
+        else {
+            panic!("expected traces tenant-policy-get command");
+        };
+
+        assert_eq!(endpoint, "https://trace.example/internal");
+        assert!(json);
+    }
+
+    #[test]
+    fn tenant_policy_set_parses_through_cli() {
+        let cli = Cli::try_parse_from([
+            "ironclaw",
+            "traces",
+            "tenant-policy-set",
+            "--endpoint",
+            "https://trace.example/internal",
+            "--policy-version",
+            "2026-04-26",
+            "--allowed-consent-scopes",
+            "debugging-evaluation,ranking-training",
+            "--allowed-uses",
+            "debugging,ranking-model-training",
+        ])
+        .expect("tenant-policy-set should parse");
+
+        let Some(Command::Traces(TracesCommand::TenantPolicySet {
+            policy_version,
+            allowed_consent_scopes,
+            allowed_uses,
+            ..
+        })) = cli.command
+        else {
+            panic!("expected traces tenant-policy-set command");
+        };
+
+        assert_eq!(policy_version, "2026-04-26");
+        assert_eq!(
+            allowed_consent_scopes,
+            vec![
+                TraceScopeArg::DebuggingEvaluation,
+                TraceScopeArg::RankingTraining
+            ]
+        );
+        assert_eq!(
+            allowed_uses,
+            vec![
+                TraceAllowedUseArg::Debugging,
+                TraceAllowedUseArg::RankingModelTraining
+            ]
+        );
+    }
+
+    #[test]
+    fn tenant_policy_uses_ingest_endpoint() {
+        let url = trace_commons_api_url(
+            "https://trace.example/internal/v1/traces",
+            "/v1/admin/tenant-policy",
+            &[],
+        )
+        .expect("url builds");
+
+        assert_eq!(url, "https://trace.example/internal/v1/admin/tenant-policy");
+    }
+
+    #[test]
+    fn tenant_policy_body_uses_server_enum_names() {
+        let body = trace_commons_tenant_policy_body(
+            "2026-04-26".to_string(),
+            vec![
+                TraceScopeArg::DebuggingEvaluation,
+                TraceScopeArg::BenchmarkOnly,
+            ],
+            vec![
+                TraceAllowedUseArg::Debugging,
+                TraceAllowedUseArg::AggregateAnalytics,
+                TraceAllowedUseArg::RankingModelTraining,
+            ],
+        );
+
+        assert_eq!(body["policy_version"], "2026-04-26");
+        assert_eq!(
+            body["allowed_consent_scopes"],
+            serde_json::json!(["debugging_evaluation", "benchmark_only"])
+        );
+        assert_eq!(
+            body["allowed_uses"],
+            serde_json::json!(["debugging", "aggregate_analytics", "ranking_model_training"])
         );
     }
 
