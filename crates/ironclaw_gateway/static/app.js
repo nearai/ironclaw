@@ -7518,6 +7518,7 @@ function traceOperatorPanel(baseUrl) {
     + '<div class="trace-actions">'
     + '<button class="btn-secondary" data-action="trace-operator-health">Health</button>'
     + '<button class="btn-secondary" data-action="trace-operator-analytics">Analytics</button>'
+    + '<button class="btn-secondary" data-action="trace-operator-config-status">Config Status</button>'
     + '<button class="btn-secondary" data-action="trace-operator-list">Trace List</button>'
     + '<button class="btn-secondary" data-action="trace-operator-quarantine">Quarantine</button>'
     + '<button class="btn-secondary" data-action="trace-operator-revoke">Central Revoke</button>'
@@ -7526,6 +7527,7 @@ function traceOperatorPanel(baseUrl) {
     + '<button class="btn-secondary" data-action="trace-operator-credit">Append Credit Event</button>'
     + '<button class="btn-secondary" data-action="trace-operator-benchmark">Benchmark Convert</button>'
     + '<button class="btn-secondary" data-action="trace-operator-replay">Replay Export</button>'
+    + '<button class="btn-secondary" data-action="trace-operator-replay-manifests">Replay Manifests</button>'
     + '<button class="btn-secondary" data-action="trace-operator-audit">Audit Events</button>'
     + '<button class="btn-secondary" data-action="trace-operator-retention-jobs">Retention Jobs</button>'
     + '<button class="btn-secondary" data-action="trace-operator-retention-items">Retention Items</button>'
@@ -7593,6 +7595,7 @@ function traceOperatorRequest(action, input) {
   var path = '/health';
   var body = null;
   if (action === 'analytics') path = '/v1/analytics/summary';
+  else if (action === 'config-status') path = '/v1/admin/config-status';
   else if (action === 'list') path = '/v1/traces?' + traceQueryString({
     limit: input.limit,
     status: input.status,
@@ -7602,6 +7605,7 @@ function traceOperatorRequest(action, input) {
   });
   else if (action === 'quarantine') path = '/v1/review/quarantine';
   else if (action === 'replay') path = '/v1/datasets/replay?limit=' + encodeURIComponent(input.limit);
+  else if (action === 'replay-manifests') path = '/v1/datasets/replay/manifests?limit=' + encodeURIComponent(input.limit);
   else if (action === 'audit') path = '/v1/audit/events?limit=' + encodeURIComponent(input.limit);
   else if (action === 'retention-jobs') path = '/v1/admin/retention/jobs?limit=' + encodeURIComponent(input.limit);
   else if (action === 'retention-items') {
@@ -7715,6 +7719,18 @@ function traceOperatorHighlights(data) {
     conversion_id: 'conversion ids',
     manifest_id: 'manifest ids',
     export_manifest_id: 'manifest ids',
+    db_mirror_configured: 'db mirror configured',
+    db_contributor_reads: 'db contributor reads',
+    db_reviewer_reads: 'db reviewer reads',
+    db_replay_export_reads: 'db replay export reads',
+    db_audit_reads: 'db audit reads',
+    db_tenant_policy_reads: 'db tenant policy reads',
+    artifact_store_configured: 'artifact store configured',
+    require_tenant_submission_policy: 'tenant policy required',
+    require_db_mirror_writes: 'db mirror writes required',
+    require_derived_export_object_refs: 'derived export object refs required',
+    require_db_reconciliation_clean: 'db reconciliation clean required',
+    require_export_guardrails: 'export guardrails required',
     skipped_count: 'skipped count',
     skipped: 'skipped count',
     revoked_count: 'revoked count',
@@ -7749,7 +7765,7 @@ function traceCollectFields(value, labels, hits) {
   Object.keys(value).forEach(function(key) {
     var label = labels[key];
     var fieldValue = value[key];
-    if (label && (typeof fieldValue === 'string' || typeof fieldValue === 'number')) {
+    if (label && (typeof fieldValue === 'string' || typeof fieldValue === 'number' || typeof fieldValue === 'boolean')) {
       if (!hits[label]) hits[label] = [];
       var stringValue = String(fieldValue);
       if (hits[label].indexOf(stringValue) === -1) hits[label].push(stringValue);
