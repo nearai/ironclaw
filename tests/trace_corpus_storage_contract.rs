@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use ironclaw::trace_corpus_storage::{
     TenantScopedTraceObjectRef, TraceAuditSafeMetadata, TraceCorpusStatus, TraceCreditEventType,
     TraceObjectArtifactKind, TraceSubmissionWrite,
@@ -89,4 +91,28 @@ fn credit_mutation_audit_metadata_hashes_sensitive_refs() {
     assert_eq!(json["external_ref_hash"], "sha256:artifact-ref");
     assert!(json.get("reason").is_none());
     assert!(json.get("external_ref").is_none());
+}
+
+#[test]
+fn process_evaluation_audit_metadata_is_hash_and_count_only() {
+    let metadata = TraceAuditSafeMetadata::ProcessEvaluation {
+        evaluator_version_hash: "sha256:evaluator-version".to_string(),
+        label_count: 2,
+        rating_counts: BTreeMap::from([("pass".to_string(), 2), ("partial".to_string(), 1)]),
+        score_band: Some("high".to_string()),
+        utility_credit_delta_micros: Some(500_000),
+        utility_external_ref_hash: Some("sha256:process-eval-job".to_string()),
+    };
+    let json = serde_json::to_value(metadata).unwrap();
+
+    assert_eq!(json["kind"], "process_evaluation");
+    assert_eq!(json["evaluator_version_hash"], "sha256:evaluator-version");
+    assert_eq!(json["label_count"], 2);
+    assert_eq!(json["rating_counts"]["pass"], 2);
+    assert_eq!(json["score_band"], "high");
+    assert_eq!(json["utility_credit_delta_micros"], 500_000);
+    assert_eq!(json["utility_external_ref_hash"], "sha256:process-eval-job");
+    assert!(json.get("evaluator_version").is_none());
+    assert!(json.get("labels").is_none());
+    assert!(json.get("utility_external_ref").is_none());
 }

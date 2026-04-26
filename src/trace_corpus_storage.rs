@@ -464,6 +464,14 @@ pub enum TraceAuditSafeMetadata {
         reason_hash: String,
         external_ref_hash: Option<String>,
     },
+    ProcessEvaluation {
+        evaluator_version_hash: String,
+        label_count: u32,
+        rating_counts: BTreeMap<String, u32>,
+        score_band: Option<String>,
+        utility_credit_delta_micros: Option<i64>,
+        utility_external_ref_hash: Option<String>,
+    },
     TenantPolicy {
         policy_version: String,
         allowed_consent_scope_count: u32,

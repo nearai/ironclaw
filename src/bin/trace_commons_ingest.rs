@@ -2103,7 +2103,10 @@ async fn process_evaluation_worker_handler(
             Some(&reason),
         ),
         StorageTraceAuditAction::ProcessEvaluate,
-        StorageTraceAuditSafeMetadata::Empty,
+        process_evaluation_audit_metadata(
+            envelope_before.process_evaluation.as_ref(),
+            utility_credit_request.as_ref(),
+        ),
     )
     .await
     .map_err(internal_error)?;
@@ -2145,6 +2148,41 @@ async fn process_evaluation_worker_handler(
         utility_credit_appended_count: utility_credit_counts.appended,
         utility_credit_skipped_existing_count: utility_credit_counts.skipped_existing,
     }))
+}
+
+fn process_evaluation_audit_metadata(
+    process_evaluation: Option<&ProcessEvaluationLabels>,
+    utility_credit_request: Option<&(f32, String)>,
+) -> StorageTraceAuditSafeMetadata {
+    let Some(process_evaluation) = process_evaluation else {
+        return StorageTraceAuditSafeMetadata::Empty;
+    };
+    let mut rating_counts = BTreeMap::<String, u32>::new();
+    for rating in [
+        process_evaluation.tool_selection,
+        process_evaluation.tool_argument_quality,
+        process_evaluation.tool_ordering,
+        process_evaluation.verification,
+        process_evaluation.side_effect_safety,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        *rating_counts.entry(serde_enum_tag(&rating)).or_insert(0) += 1;
+    }
+    StorageTraceAuditSafeMetadata::ProcessEvaluation {
+        evaluator_version_hash: sha256_prefixed(process_evaluation.evaluator_version.trim()),
+        label_count: process_evaluation.labels.len().min(u32::MAX as usize) as u32,
+        rating_counts,
+        score_band: process_evaluation
+            .overall_score
+            .map(process_eval_score_band)
+            .map(ToOwned::to_owned),
+        utility_credit_delta_micros: utility_credit_request
+            .map(|(points_delta, _)| credit_delta_micros(*points_delta)),
+        utility_external_ref_hash: utility_credit_request
+            .map(|(_, external_ref)| sha256_prefixed(external_ref)),
+    }
 }
 
 struct AutomaticUtilityCreditSource {
@@ -4806,6 +4844,14 @@ fn trace_commons_audit_event_from_storage(
             reason_hash: _,
             external_ref_hash: _,
         } => (None, event.reason.clone(), None),
+        StorageTraceAuditSafeMetadata::ProcessEvaluation {
+            evaluator_version_hash: _,
+            label_count: _,
+            rating_counts: _,
+            score_band: _,
+            utility_credit_delta_micros: _,
+            utility_external_ref_hash: _,
+        } => (None, event.reason.clone(), None),
         StorageTraceAuditSafeMetadata::TenantPolicy {
             policy_version: _,
             allowed_consent_scope_count: _,
@@ -7291,14 +7337,7 @@ fn coverage_tags_for_envelope(envelope: &TraceContributionEnvelope) -> Vec<Strin
             process_evaluation.side_effect_safety,
         );
         if let Some(score) = process_evaluation.overall_score {
-            let bucket = if score >= 0.8 {
-                "high"
-            } else if score >= 0.5 {
-                "medium"
-            } else {
-                "low"
-            };
-            tags.insert(format!("process_eval:{bucket}"));
+            tags.insert(format!("process_eval:{}", process_eval_score_band(score)));
         }
     }
     if let Some(training_dynamics) = &envelope.training_dynamics
@@ -7327,6 +7366,16 @@ fn insert_process_eval_rating_tag(
 ) {
     if let Some(rating) = rating {
         tags.insert(format!("process_{axis}:{}", serde_enum_tag(&rating)));
+    }
+}
+
+fn process_eval_score_band(score: f32) -> &'static str {
+    if score >= 0.8 {
+        "high"
+    } else if score >= 0.5 {
+        "medium"
+    } else {
+        "low"
     }
 }
 
@@ -16927,6 +16976,9 @@ mod tests {
                 submission_id,
                 process_evaluation: ProcessEvaluationLabels {
                     evaluator_version: "db-credit-judge-v1".to_string(),
+                    labels: vec![
+                        ironclaw::trace_contribution::ProcessEvaluatorLabel::ProperVerification,
+                    ],
                     verification: Some(ProcessEvalRating::Pass),
                     overall_score: Some(0.86),
                     ..ProcessEvaluationLabels::default()
@@ -16950,6 +17002,45 @@ mod tests {
                 && event.event_type == StorageTraceCreditEventType::TrainingUtility
                 && event.external_ref.as_deref() == Some("process-eval:db-nightly-42")
         }));
+        let db_audit_events = db
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("DB audit events read");
+        let process_evaluation_audit = db_audit_events
+            .iter()
+            .find(|event| {
+                event.action == StorageTraceAuditAction::ProcessEvaluate
+                    && event.submission_id == Some(submission_id)
+            })
+            .expect("process evaluation audit event is mirrored");
+        match &process_evaluation_audit.metadata {
+            StorageTraceAuditSafeMetadata::ProcessEvaluation {
+                evaluator_version_hash,
+                label_count,
+                rating_counts,
+                score_band,
+                utility_credit_delta_micros,
+                utility_external_ref_hash,
+            } => {
+                assert_eq!(
+                    evaluator_version_hash,
+                    &sha256_prefixed("db-credit-judge-v1")
+                );
+                assert_eq!(*label_count, 1);
+                assert_eq!(rating_counts.get("pass"), Some(&1));
+                assert_eq!(score_band.as_deref(), Some("high"));
+                assert_eq!(
+                    *utility_credit_delta_micros,
+                    Some(credit_delta_micros(0.95))
+                );
+                let expected_external_ref_hash = sha256_prefixed("process-eval:db-nightly-42");
+                assert_eq!(
+                    utility_external_ref_hash.as_deref(),
+                    Some(expected_external_ref_hash.as_str())
+                );
+            }
+            metadata => panic!("unexpected process evaluation metadata: {metadata:?}"),
+        }
         let db_derived = db
             .list_trace_derived_records("tenant-a")
             .await
