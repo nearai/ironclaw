@@ -6,6 +6,7 @@
 
 use std::{
     collections::HashMap,
+    fmt,
     net::IpAddr,
     sync::{Arc, Mutex},
 };
@@ -40,11 +41,33 @@ use ironclaw_processes::{
 };
 use ironclaw_resources::ResourceGovernor;
 use ironclaw_run_state::{ApprovalRequestStore, RunStateStore};
+use ironclaw_safety::LeakDetector;
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
+use ironclaw_secrets::{CredentialLocation, CredentialMapping, ExposeSecret, SecretMaterial};
 use ironclaw_wasm::{
     CapabilityInvocation, WasmError, WasmExecutionRequest, WasmHostHttp, WasmHttpRequest,
     WasmHttpResponse, WasmPolicyHttpClient, WasmRuntime,
 };
+
+/// Already-resolved credential material for runtime HTTP egress.
+///
+/// This type is intentionally configured by the host composition layer after
+/// authorization/secret access. It does not fetch secrets by handle.
+#[derive(Clone)]
+pub struct RuntimeHttpCredential {
+    pub mapping: CredentialMapping,
+    pub material: SecretMaterial,
+}
+
+impl fmt::Debug for RuntimeHttpCredential {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RuntimeHttpCredential")
+            .field("mapping", &self.mapping)
+            .field("material", &"[REDACTED]")
+            .finish()
+    }
+}
 
 /// Dispatcher adapter for the concrete WASM runtime crate.
 pub struct WasmRuntimeAdapter {
@@ -52,6 +75,7 @@ pub struct WasmRuntimeAdapter {
     network_policies: Option<Arc<NetworkObligationPolicyStore>>,
     http_client: Option<Arc<dyn WasmHostHttp>>,
     http_egress_client: Option<Arc<dyn HttpEgressClient>>,
+    runtime_http_credentials: Vec<RuntimeHttpCredential>,
 }
 
 impl WasmRuntimeAdapter {
@@ -61,6 +85,7 @@ impl WasmRuntimeAdapter {
             network_policies: None,
             http_client: None,
             http_egress_client: None,
+            runtime_http_credentials: Vec::new(),
         }
     }
 
@@ -96,6 +121,14 @@ impl WasmRuntimeAdapter {
         self.http_egress_client = Some(client);
         self
     }
+
+    pub fn with_runtime_http_credentials(
+        mut self,
+        credentials: Vec<RuntimeHttpCredential>,
+    ) -> Self {
+        self.runtime_http_credentials = credentials;
+        self
+    }
 }
 
 #[async_trait]
@@ -129,6 +162,7 @@ where
                     scope,
                     policy,
                     Arc::clone(egress_client),
+                    self.runtime_http_credentials.clone(),
                 ))
             } else if let Some(http_client) = &self.http_client {
                 Arc::new(WasmPolicyHttpClient::new(
@@ -186,28 +220,43 @@ struct ScopedWasmHttpEgressClient {
     scope: ResourceScope,
     policy: NetworkPolicy,
     client: Arc<dyn HttpEgressClient>,
+    credentials: Vec<RuntimeHttpCredential>,
 }
 
 impl ScopedWasmHttpEgressClient {
-    fn new(scope: ResourceScope, policy: NetworkPolicy, client: Arc<dyn HttpEgressClient>) -> Self {
+    fn new(
+        scope: ResourceScope,
+        policy: NetworkPolicy,
+        client: Arc<dyn HttpEgressClient>,
+        credentials: Vec<RuntimeHttpCredential>,
+    ) -> Self {
         Self {
             scope,
             policy,
             client,
+            credentials,
         }
     }
 }
 
 impl WasmHostHttp for ScopedWasmHttpEgressClient {
     fn request_utf8(&self, request: WasmHttpRequest) -> Result<WasmHttpResponse, String> {
+        let body = request.body.into_bytes();
+        LeakDetector::new()
+            .scan_http_request(&request.url, &[], Some(&body))
+            .map_err(|_| "network request leak blocked".to_string())?;
+
+        let (url, headers) =
+            inject_runtime_http_credentials(request.url, Vec::new(), &self.credentials)?;
+
         let client = Arc::clone(&self.client);
         let request = HttpEgressRequest {
             scope: self.scope.clone(),
             policy: self.policy.clone(),
             method: request.method,
-            url: request.url,
-            headers: Vec::new(),
-            body: request.body.into_bytes(),
+            url,
+            headers,
+            body,
             timeout: None,
             max_response_bytes: None,
         };
@@ -215,13 +264,142 @@ impl WasmHostHttp for ScopedWasmHttpEgressClient {
             .join()
             .map_err(|_| "network transport failed".to_string())?
             .map_err(|error| network_egress_error_label(&error).to_string())?;
-        let body = String::from_utf8(response.body)
-            .map_err(|_| "network response body is not utf8".to_string())?;
+
+        let body_text = String::from_utf8_lossy(&response.body).into_owned();
+        let scan = LeakDetector::new().scan(&body_text);
+        if scan.should_block {
+            return Err("network response leak blocked".to_string());
+        }
+        let body = scan.redacted_content.unwrap_or(body_text);
+
         Ok(WasmHttpResponse {
             status: response.status,
             body,
         })
     }
+}
+
+fn inject_runtime_http_credentials(
+    raw_url: String,
+    headers: Vec<(String, String)>,
+    credentials: &[RuntimeHttpCredential],
+) -> Result<(String, Vec<(String, String)>), String> {
+    let Some(host) = url::Url::parse(&raw_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+    else {
+        return Ok((raw_url, headers));
+    };
+
+    let matching = credentials
+        .iter()
+        .filter(|credential| credential_matches_host(credential, &host))
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
+        return Ok((raw_url, headers));
+    }
+    if headers.iter().any(|(name, _)| is_sensitive_header(name)) {
+        return Err("manual credential header blocked".to_string());
+    }
+
+    let mut url = raw_url;
+    let mut headers = headers;
+    for credential in matching {
+        match &credential.mapping.location {
+            CredentialLocation::AuthorizationBearer => {
+                headers.push((
+                    "Authorization".to_string(),
+                    format!("Bearer {}", credential.material.expose_secret()),
+                ));
+            }
+            CredentialLocation::AuthorizationBasic { username } => {
+                let encoded = base64_encode(
+                    format!("{}:{}", username, credential.material.expose_secret()).as_bytes(),
+                );
+                headers.push(("Authorization".to_string(), format!("Basic {encoded}")));
+            }
+            CredentialLocation::Header { name, prefix } => {
+                let value = match prefix {
+                    Some(prefix) => format!("{}{}", prefix, credential.material.expose_secret()),
+                    None => credential.material.expose_secret().to_string(),
+                };
+                headers.push((name.clone(), value));
+            }
+            CredentialLocation::QueryParam { name } => {
+                let mut parsed = url::Url::parse(&url).map_err(|_| "invalid credential url")?;
+                parsed
+                    .query_pairs_mut()
+                    .append_pair(name, credential.material.expose_secret());
+                url = parsed.to_string();
+            }
+            CredentialLocation::UrlPath { placeholder } => {
+                if !url.contains(placeholder) && !credential.mapping.optional {
+                    return Err("credential path placeholder missing".to_string());
+                }
+                url = url.replace(placeholder, credential.material.expose_secret());
+            }
+        }
+    }
+    Ok((url, headers))
+}
+
+fn credential_matches_host(credential: &RuntimeHttpCredential, host: &str) -> bool {
+    credential
+        .mapping
+        .host_patterns
+        .iter()
+        .any(|pattern| credential_host_matches_pattern(host, pattern))
+}
+
+fn credential_host_matches_pattern(host: &str, pattern: &str) -> bool {
+    if host.eq_ignore_ascii_case(pattern) {
+        return true;
+    }
+    if let Some(pattern_host) = pattern.split(':').next()
+        && pattern.contains(':')
+        && host.eq_ignore_ascii_case(pattern_host)
+    {
+        return true;
+    }
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        let host = host.to_ascii_lowercase();
+        let suffix = suffix.to_ascii_lowercase();
+        return host.ends_with(&format!(".{suffix}")) && host != suffix;
+    }
+    false
+}
+
+fn is_sensitive_header(name: &str) -> bool {
+    const SENSITIVE_HEADERS: &[&str] = &["authorization", "x-api-key", "api-key", "x-auth-token"];
+    SENSITIVE_HEADERS
+        .iter()
+        .any(|sensitive| name.eq_ignore_ascii_case(sensitive))
+}
+
+fn base64_encode(input: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = String::new();
+    let mut i = 0;
+    while i < input.len() {
+        let b0 = input[i];
+        let b1 = if i + 1 < input.len() { input[i + 1] } else { 0 };
+        let b2 = if i + 2 < input.len() { input[i + 2] } else { 0 };
+
+        result.push(ALPHABET[(b0 >> 2) as usize] as char);
+        result.push(ALPHABET[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        if i + 1 < input.len() {
+            result.push(ALPHABET[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            result.push('=');
+        }
+        if i + 2 < input.len() {
+            result.push(ALPHABET[(b2 & 0x3f) as usize] as char);
+        } else {
+            result.push('=');
+        }
+        i += 3;
+    }
+    result
 }
 
 fn network_egress_error_label(error: &HttpEgressError) -> &'static str {
@@ -713,6 +891,7 @@ where
     wasm_runtime: Option<Arc<WasmRuntime>>,
     wasm_http_client: Option<Arc<dyn WasmHostHttp>>,
     http_egress_client: Option<Arc<dyn HttpEgressClient>>,
+    runtime_http_credentials: Vec<RuntimeHttpCredential>,
     script_runtime: Option<Arc<dyn ScriptExecutor>>,
     mcp_runtime: Option<Arc<dyn McpExecutor>>,
     event_sink: Option<Arc<dyn EventSink>>,
@@ -748,6 +927,7 @@ where
             wasm_runtime: None,
             wasm_http_client: None,
             http_egress_client: None,
+            runtime_http_credentials: Vec::new(),
             script_runtime: None,
             mcp_runtime: None,
             event_sink: None,
@@ -843,6 +1023,14 @@ where
         self
     }
 
+    pub fn with_runtime_http_credentials(
+        mut self,
+        credentials: Vec<RuntimeHttpCredential>,
+    ) -> Self {
+        self.runtime_http_credentials = credentials;
+        self
+    }
+
     pub fn with_script_runtime<T>(mut self, runtime: Arc<T>) -> Self
     where
         T: ScriptExecutor + 'static,
@@ -926,6 +1114,7 @@ where
             if let Some(egress_client) = &self.http_egress_client {
                 adapter = adapter.with_http_egress_client_dyn(Arc::clone(egress_client));
             }
+            adapter = adapter.with_runtime_http_credentials(self.runtime_http_credentials.clone());
             dispatcher = dispatcher.with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::new(adapter));
         }
         if let Some(runtime) = &self.script_runtime {

@@ -190,7 +190,7 @@ Filesystem import rules:
 - no broad WASI preopens are granted
 - missing filesystem context returns a negative guest status instead of ambient access
 
-V1 also defines a host-mediated HTTP import. This import is linked for modules that declare it, but is default-deny unless invocation uses `invoke_json_with_network` or `execute_extension_json_with_network` with a `WasmHostHttp` implementation. The provided `WasmPolicyHttpClient` wrapper enforces `NetworkPolicy` before delegating to a custom host client. `ironclaw_host_runtime` can instead adapt `ironclaw_network::HardenedHttpEgressClient` when an accepted `ApplyNetworkPolicy` obligation is present, giving WASM imports policy checks, DNS/private-address checks, redirect re-validation, pinned resolution, and response-size bounds before bytes return to the guest.
+V1 also defines a host-mediated HTTP import. This import is linked for modules that declare it, but is default-deny unless invocation uses `invoke_json_with_network` or `execute_extension_json_with_network` with a `WasmHostHttp` implementation. The provided `WasmPolicyHttpClient` wrapper enforces `NetworkPolicy` before delegating to a custom host client. `ironclaw_host_runtime` can instead adapt `ironclaw_network::HardenedHttpEgressClient` when an accepted `ApplyNetworkPolicy` obligation is present, giving WASM imports policy checks, DNS/private-address checks, redirect re-validation, pinned resolution, response-size bounds, request leak scanning before credential injection, optional already-resolved credential injection, and response leak scanning before bytes return to the guest.
 
 ```text
 host.http_request_utf8(method, url_ptr, url_len, body_ptr, body_len, out_ptr, out_cap) -> i32 bytes_or_negative_status
@@ -203,7 +203,7 @@ Network import rules:
 - `NetworkPolicy.allowed_targets` must match scheme/host/port
 - `deny_private_ip_ranges` blocks literal private/loopback/link-local IP targets; the hardened Reborn egress client also rejects DNS-resolved private/loopback/link-local targets before connection
 - `max_egress_bytes` bounds request body bytes and, in the V1 shim, returned response body bytes before they are copied into guest memory
-- credentials/secrets are not injected by this import
+- guests never receive secret material; when host runtime configures already-resolved `RuntimeHttpCredential` values, they are injected after guest URL/body leak scanning and before hardened HTTP egress
 - missing network context returns a negative guest status instead of ambient network access
 
 Unsupported imports fail at module preparation as `WasmError::UnsupportedImport`.
@@ -477,7 +477,7 @@ Local contract tests should prove:
 - filesystem imports read/write/list/stat through `ScopedFilesystem` and `MountView`
 - filesystem imports deny by default when no filesystem context is provided
 - filesystem write respects mount permissions and cannot create host-path access
-- network imports use `ironclaw_network::HardenedHttpEgressClient` or, for custom/test clients, `WasmPolicyHttpClient` when host runtime hands off an accepted `ApplyNetworkPolicy` obligation
+- network imports use `ironclaw_network::HardenedHttpEgressClient` plus request/response leak scanning and optional already-resolved credential injection, or, for custom/test clients, `WasmPolicyHttpClient` when host runtime hands off an accepted `ApplyNetworkPolicy` obligation
 - unsupported host imports still fail closed during module preparation
 - invocation returns actual usage suitable for resource reconciliation
 - no privileged host imports are available unless explicitly registered

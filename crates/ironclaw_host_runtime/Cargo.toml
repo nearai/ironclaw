@@ -20,8 +20,11 @@ ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_processes = { path = "../ironclaw_processes" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 ironclaw_run_state = { path = "../ironclaw_run_state" }
+ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_scripts = { path = "../ironclaw_scripts" }
+ironclaw_secrets = { path = "../ironclaw_secrets" }
 ironclaw_wasm = { path = "../ironclaw_wasm" }
+url = "2"
 
 [dev-dependencies]
 serde_json = "1"

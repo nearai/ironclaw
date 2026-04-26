@@ -4169,11 +4169,14 @@ dependencies = [
  "ironclaw_processes",
  "ironclaw_resources",
  "ironclaw_run_state",
+ "ironclaw_safety",
  "ironclaw_scripts",
+ "ironclaw_secrets",
  "ironclaw_wasm",
  "serde_json",
  "tempfile",
  "tokio",
+ "url",
  "wat",
 ]
 

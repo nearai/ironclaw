@@ -16,12 +16,13 @@ use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::*;
-use ironclaw_host_runtime::HostRuntimeServices;
+use ironclaw_host_runtime::{HostRuntimeServices, RuntimeHttpCredential};
 use ironclaw_processes::ProcessServices;
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
 };
+use ironclaw_secrets::{CredentialLocation, CredentialMapping, SecretMaterial};
 use ironclaw_wasm::{WasmHostHttp, WasmHttpRequest, WasmHttpResponse, WasmRuntime};
 use serde_json::json;
 
@@ -168,6 +169,161 @@ async fn host_runtime_services_can_use_hardened_egress_for_wasm_network_imports(
 
     assert_eq!(result.dispatch.output, json!({"ok": true}));
     assert_eq!(server.hits(), 1);
+}
+
+#[tokio::test]
+async fn hardened_wasm_egress_injects_configured_credentials_after_request_scan() {
+    let server = TestHttpServer::spawn(vec![http_response(200, b"{\"ok\":true}")]);
+    let url = server.url("/v1/echo");
+    let (filesystem, package) = wasm_package_with_module(http_module_bytes(&url, 0, ""));
+    let registry = Arc::new(registry_with_package(package));
+    let filesystem = Arc::new(filesystem);
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let authorizer = Arc::new(NetworkPolicyAuthorizer::new(NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Http),
+            host_pattern: "127.0.0.1".to_string(),
+            port: Some(server.port()),
+        }],
+        deny_private_ip_ranges: false,
+        max_egress_bytes: Some(1024),
+    }));
+    let credential = RuntimeHttpCredential {
+        mapping: CredentialMapping {
+            handle: SecretHandle::new("github_token").unwrap(),
+            location: CredentialLocation::AuthorizationBearer,
+            host_patterns: vec!["127.0.0.1".to_string()],
+            optional: false,
+        },
+        material: SecretMaterial::new("ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+    };
+    let services = HostRuntimeServices::new(
+        registry,
+        filesystem,
+        governor,
+        authorizer,
+        ProcessServices::in_memory(),
+    )
+    .with_wasm_runtime(Arc::new(WasmRuntime::for_testing().unwrap()))
+    .with_hardened_network_egress()
+    .with_runtime_http_credentials(vec![credential])
+    .with_builtin_obligation_handler();
+    let dispatcher = services.runtime_dispatcher_arc();
+    let capability_host = services.capability_host_for_runtime_dispatcher(&dispatcher);
+
+    let result = capability_host
+        .invoke_json(CapabilityInvocationRequest {
+            context: execution_context(),
+            capability_id: CapabilityId::new("net-demo.http").unwrap(),
+            estimate: ResourceEstimate::default(),
+            input: json!({}),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.dispatch.output, json!({"ok": true}));
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .to_ascii_lowercase()
+            .contains("authorization: bearer ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    );
+}
+
+#[tokio::test]
+async fn hardened_wasm_egress_blocks_guest_secret_exfiltration_before_connect() {
+    let server = TestHttpServer::spawn(vec![http_response(200, b"{\"ok\":true}")]);
+    let url = server.url("/v1/echo?stolen=AKIAIOSFODNN7EXAMPLE");
+    let (filesystem, package) = wasm_package_with_module(http_module_bytes(&url, 0, ""));
+    let registry = Arc::new(registry_with_package(package));
+    let filesystem = Arc::new(filesystem);
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let authorizer = Arc::new(NetworkPolicyAuthorizer::new(NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Http),
+            host_pattern: "127.0.0.1".to_string(),
+            port: Some(server.port()),
+        }],
+        deny_private_ip_ranges: false,
+        max_egress_bytes: Some(1024),
+    }));
+    let services = HostRuntimeServices::new(
+        registry,
+        filesystem,
+        governor,
+        authorizer,
+        ProcessServices::in_memory(),
+    )
+    .with_wasm_runtime(Arc::new(WasmRuntime::for_testing().unwrap()))
+    .with_hardened_network_egress()
+    .with_builtin_obligation_handler();
+    let dispatcher = services.runtime_dispatcher_arc();
+    let capability_host = services.capability_host_for_runtime_dispatcher(&dispatcher);
+
+    let result = capability_host
+        .invoke_json(CapabilityInvocationRequest {
+            context: execution_context(),
+            capability_id: CapabilityId::new("net-demo.http").unwrap(),
+            estimate: ResourceEstimate::default(),
+            input: json!({}),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.dispatch.output, json!({"ok": false}));
+    assert_eq!(server.hits(), 0);
+}
+
+#[tokio::test]
+async fn hardened_wasm_egress_blocks_secret_like_response_before_guest_output() {
+    let server = TestHttpServer::spawn(vec![http_response(
+        200,
+        b"{\"token\":\"ghp_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+    )]);
+    let url = server.url("/v1/echo");
+    let (filesystem, package) = wasm_package_with_module(http_module_bytes(&url, 0, ""));
+    let registry = Arc::new(registry_with_package(package));
+    let filesystem = Arc::new(filesystem);
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let authorizer = Arc::new(NetworkPolicyAuthorizer::new(NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Http),
+            host_pattern: "127.0.0.1".to_string(),
+            port: Some(server.port()),
+        }],
+        deny_private_ip_ranges: false,
+        max_egress_bytes: Some(1024),
+    }));
+    let services = HostRuntimeServices::new(
+        registry,
+        filesystem,
+        governor,
+        authorizer,
+        ProcessServices::in_memory(),
+    )
+    .with_wasm_runtime(Arc::new(WasmRuntime::for_testing().unwrap()))
+    .with_hardened_network_egress()
+    .with_builtin_obligation_handler();
+    let dispatcher = services.runtime_dispatcher_arc();
+    let capability_host = services.capability_host_for_runtime_dispatcher(&dispatcher);
+
+    let result = capability_host
+        .invoke_json(CapabilityInvocationRequest {
+            context: execution_context(),
+            capability_id: CapabilityId::new("net-demo.http").unwrap(),
+            estimate: ResourceEstimate::default(),
+            input: json!({}),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.dispatch.output, json!({"ok": false}));
+    assert!(
+        !serde_json::to_string(&result.dispatch.output)
+            .unwrap()
+            .contains("ghp_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+    );
 }
 
 #[tokio::test]
@@ -373,6 +529,7 @@ fn http_response(status: u16, body: &[u8]) -> Vec<u8> {
 struct TestHttpServer {
     addr: std::net::SocketAddr,
     hits: Arc<AtomicUsize>,
+    requests: Arc<Mutex<Vec<String>>>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -381,20 +538,24 @@ impl TestHttpServer {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let addr = listener.local_addr().unwrap();
         let hits = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(Mutex::new(Vec::new()));
         let hits_for_thread = Arc::clone(&hits);
+        let requests_for_thread = Arc::clone(&requests);
         let handle = thread::spawn(move || {
             for response in responses {
                 let Ok((mut stream, _)) = listener.accept() else {
                     return;
                 };
                 hits_for_thread.fetch_add(1, Ordering::SeqCst);
-                drain_request(&mut stream);
+                let request = drain_request(&mut stream);
+                requests_for_thread.lock().unwrap().push(request);
                 let _ = stream.write_all(&response);
             }
         });
         Self {
             addr,
             hits,
+            requests,
             handle: Some(handle),
         }
     }
@@ -410,6 +571,10 @@ impl TestHttpServer {
     fn hits(&self) -> usize {
         self.hits.load(Ordering::SeqCst)
     }
+
+    fn requests(&self) -> Vec<String> {
+        self.requests.lock().unwrap().clone()
+    }
 }
 
 impl Drop for TestHttpServer {
@@ -421,10 +586,11 @@ impl Drop for TestHttpServer {
     }
 }
 
-fn drain_request(stream: &mut TcpStream) {
+fn drain_request(stream: &mut TcpStream) -> String {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    let mut buf = [0; 1024];
-    let _ = stream.read(&mut buf);
+    let mut buf = [0; 4096];
+    let read = stream.read(&mut buf).unwrap_or(0);
+    String::from_utf8_lossy(&buf[..read]).into_owned()
 }
 
 fn http_module_bytes(url: &str, method: i32, body: &str) -> Vec<u8> {

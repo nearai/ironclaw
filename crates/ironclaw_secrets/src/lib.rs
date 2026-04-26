@@ -10,7 +10,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{ProjectId, ResourceScope, SecretHandle, TenantId, UserId};
-pub use secrecy::SecretString as SecretMaterial;
+pub use secrecy::{ExposeSecret, SecretString as SecretMaterial};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -58,6 +58,64 @@ pub struct SecretLease {
     pub scope: ResourceScope,
     pub handle: SecretHandle,
     pub status: SecretLeaseStatus,
+}
+
+/// Where a credential should be injected into an outbound HTTP request.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CredentialLocation {
+    AuthorizationBearer,
+    AuthorizationBasic {
+        username: String,
+    },
+    Header {
+        name: String,
+        prefix: Option<String>,
+    },
+    QueryParam {
+        name: String,
+    },
+    UrlPath {
+        placeholder: String,
+    },
+}
+
+/// Metadata describing which scoped secret powers a host-specific credential.
+///
+/// This carries no secret material. Runtime-specific injection is owned by the
+/// caller/composition layer after it has explicitly obtained material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialMapping {
+    pub handle: SecretHandle,
+    pub location: CredentialLocation,
+    pub host_patterns: Vec<String>,
+    pub optional: bool,
+}
+
+impl CredentialMapping {
+    pub fn bearer(handle: SecretHandle, host_pattern: impl Into<String>) -> Self {
+        Self {
+            handle,
+            location: CredentialLocation::AuthorizationBearer,
+            host_patterns: vec![host_pattern.into()],
+            optional: false,
+        }
+    }
+
+    pub fn header(
+        handle: SecretHandle,
+        header_name: impl Into<String>,
+        host_pattern: impl Into<String>,
+    ) -> Self {
+        Self {
+            handle,
+            location: CredentialLocation::Header {
+                name: header_name.into(),
+                prefix: None,
+            },
+            host_patterns: vec![host_pattern.into()],
+            optional: false,
+        }
+    }
 }
 
 /// Secret service failures. Variants intentionally avoid secret material.
