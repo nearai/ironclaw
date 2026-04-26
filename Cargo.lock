@@ -3992,6 +3992,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_architecture"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "ironclaw_authorization"
 version = "0.1.0"
 dependencies = [

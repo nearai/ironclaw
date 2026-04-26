@@ -276,20 +276,24 @@ impl ResourceTally {
 
 /// Synchronous resource governor contract.
 pub trait ResourceGovernor: Send + Sync {
+    /// Sets or replaces limits for a scoped resource account without mutating existing reservations.
     fn set_limit(&self, account: ResourceAccount, limits: ResourceLimits);
 
+    /// Reserves estimated resources before costed/quota-limited work starts, failing closed if any scoped account would exceed limits.
     fn reserve(
         &self,
         scope: ResourceScope,
         estimate: ResourceEstimate,
     ) -> Result<ResourceReservation, ResourceError>;
 
+    /// Reconciles an active reservation with actual usage and releases reserved capacity exactly once.
     fn reconcile(
         &self,
         reservation_id: ResourceReservationId,
         actual: ResourceUsage,
     ) -> Result<ResourceReceipt, ResourceError>;
 
+    /// Releases an active reservation without usage when work is cancelled or fails before reconciliation.
     fn release(
         &self,
         reservation_id: ResourceReservationId,

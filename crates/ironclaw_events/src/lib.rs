@@ -325,12 +325,14 @@ fn is_safe_jsonl_file_name(file_name: &str) -> bool {
 /// Async event sink used by runtime/composition services.
 #[async_trait]
 pub trait EventSink: Send + Sync {
+    /// Persists or forwards a metadata-only runtime/process event without changing runtime outcome policy.
     async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError>;
 }
 
 /// Async audit sink used by control-plane services.
 #[async_trait]
 pub trait AuditSink: Send + Sync {
+    /// Persists or forwards a metadata-only control-plane audit record without leaking raw approval/runtime data.
     async fn emit_audit(&self, record: AuditEnvelope) -> Result<(), EventError>;
 }
 

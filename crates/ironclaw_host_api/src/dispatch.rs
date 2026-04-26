@@ -127,6 +127,7 @@ pub enum DispatchError {
 /// Interface for already-authorized runtime dispatch.
 #[async_trait]
 pub trait CapabilityDispatcher: Send + Sync {
+    /// Dispatches one already-authorized JSON capability request and must not perform caller-facing authorization or approval resolution.
     async fn dispatch_json(
         &self,
         request: CapabilityDispatchRequest,
