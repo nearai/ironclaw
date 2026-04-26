@@ -4253,6 +4253,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_secrets"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_host_api",
+ "secrecy",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ironclaw_skills"
 version = "0.1.0"
 dependencies = [
