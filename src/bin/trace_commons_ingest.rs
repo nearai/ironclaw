@@ -811,6 +811,7 @@ async fn submit_trace_handler(
     ensure_not_revoked_by_tombstone(
         &existing_revocations,
         envelope.submission_id,
+        &envelope.privacy.redaction_hash,
         &derived_precheck.canonical_summary_hash,
     )?;
     apply_embedding_precheck(&mut envelope, &derived_precheck);
@@ -2750,10 +2751,15 @@ fn validate_envelope(envelope: &TraceContributionEnvelope) -> ApiResult<()> {
 fn ensure_not_revoked_by_tombstone(
     tombstones: &[TraceCommonsRevocation],
     submission_id: Uuid,
+    redaction_hash: &str,
     canonical_summary_hash: &str,
 ) -> ApiResult<()> {
+    let redaction_hash = redaction_hash.trim();
+    let canonical_summary_hash = canonical_summary_hash.trim();
     let revoked_match = tombstones.iter().any(|tombstone| {
         tombstone.submission_id == submission_id
+            || (!redaction_hash.is_empty()
+                && tombstone.redaction_hash.as_deref() == Some(redaction_hash))
             || tombstone.canonical_summary_hash.as_deref() == Some(canonical_summary_hash)
     });
     if revoked_match {
@@ -10669,6 +10675,63 @@ mod tests {
         )
         .await
         .expect_err("reingesting revoked trace content is blocked");
+        assert_eq!(duplicate_error.0, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn revocation_tombstone_redaction_hash_blocks_reingest_without_summary_hash() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let original_submission_id = envelope.submission_id;
+        let mut duplicate_envelope = envelope.clone();
+        duplicate_envelope.submission_id = Uuid::new_v4();
+        duplicate_envelope.trace_id = Uuid::new_v4();
+        duplicate_envelope.contributor.revocation_handle = Uuid::new_v4();
+        duplicate_envelope.trace_card.revocation_handle =
+            duplicate_envelope.contributor.revocation_handle.to_string();
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        revoke_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            AxumPath(original_submission_id),
+        )
+        .await
+        .expect("revocation succeeds");
+
+        let mut tombstones =
+            read_all_revocations(temp.path(), "tenant-a").expect("file tombstones read");
+        assert_eq!(tombstones.len(), 1);
+        assert!(tombstones[0].redaction_hash.is_some());
+        tombstones[0].canonical_summary_hash = None;
+        let tombstone_path = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"))
+            .join("revocations")
+            .join(format!("{original_submission_id}.json"));
+        write_json_file(
+            &tombstone_path,
+            &tombstones[0],
+            "test redaction-only revocation tombstone",
+        )
+        .expect("test tombstone overwrite succeeds");
+
+        let duplicate_error = submit_trace_handler(
+            State(state),
+            auth_headers("token-a"),
+            Json(duplicate_envelope),
+        )
+        .await
+        .expect_err("redaction-only tombstone blocks reingest");
         assert_eq!(duplicate_error.0, StatusCode::CONFLICT);
     }
 
