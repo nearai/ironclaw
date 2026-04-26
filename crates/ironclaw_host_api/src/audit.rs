@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Action, ApprovalRequest, AuditEventId, CapabilityId, CorrelationId, DenyReason, EffectKind,
-    ExecutionContext, ExtensionId, InvocationId, MissionId, NetworkMethod, Principal,
-    ProcessId, ProjectId, SecretUseMode, TenantId, ThreadId, Timestamp, UserId,
+    ExecutionContext, ExtensionId, InvocationId, MissionId, NetworkMethod, Principal, ProcessId,
+    ProjectId, SecretUseMode, TenantId, ThreadId, Timestamp, UserId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,11 +145,9 @@ impl ActionSummary {
                 Some(path.as_str().to_string()),
                 vec![EffectKind::DeleteFilesystem],
             ),
-            Action::Dispatch { capability, .. } => Self::capability(
-                "dispatch",
-                capability,
-                vec![EffectKind::DispatchCapability],
-            ),
+            Action::Dispatch { capability, .. } => {
+                Self::capability("dispatch", capability, vec![EffectKind::DispatchCapability])
+            }
             Action::SpawnCapability { capability, .. } => Self::capability(
                 "spawn_capability",
                 capability,
@@ -162,14 +160,12 @@ impl ActionSummary {
             ),
             Action::Network { target, method, .. } => Self::new(
                 "network",
-                Some(network_target(method, target.host.as_str(), target.port)),
+                Some(network_target(method, target.host(), target.port())),
                 vec![EffectKind::Network],
             ),
-            Action::ReserveResources { .. } => Self::new(
-                "reserve_resources",
-                None,
-                vec![EffectKind::ModifyBudget],
-            ),
+            Action::ReserveResources { .. } => {
+                Self::new("reserve_resources", None, vec![EffectKind::ModifyBudget])
+            }
             Action::Approve { request } => Self::new(
                 "approve",
                 Some(request.id.to_string()),
@@ -183,11 +179,9 @@ impl ActionSummary {
                 Some(format!("{}:{operation:?}", extension_id.as_str())),
                 vec![EffectKind::ModifyExtension],
             ),
-            Action::EmitExternalEffect { effect } => Self::new(
-                "emit_external_effect",
-                None,
-                vec![*effect],
-            ),
+            Action::EmitExternalEffect { effect } => {
+                Self::new("emit_external_effect", None, vec![*effect])
+            }
         }
     }
 

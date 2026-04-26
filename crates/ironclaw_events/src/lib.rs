@@ -17,7 +17,7 @@ use ironclaw_host_api::{
     AuditEnvelope, CapabilityId, ErrorKind, ExtensionId, ProcessId, ResourceScope, RuntimeKind,
     Timestamp, VirtualPath,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -418,17 +418,7 @@ where
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(EventError::from(error)),
         };
-        let text = String::from_utf8(bytes).map_err(|error| EventError::Serialize {
-            reason: error.to_string(),
-        })?;
-        text.lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| {
-                serde_json::from_str::<RuntimeEvent>(line).map_err(|error| EventError::Serialize {
-                    reason: error.to_string(),
-                })
-            })
-            .collect()
+        parse_jsonl(&bytes)
     }
 }
 
@@ -449,6 +439,7 @@ where
             Err(error) if is_not_found(&error) => Vec::new(),
             Err(error) => return Err(EventError::from(error)),
         };
+        validate_jsonl::<RuntimeEvent>(&bytes)?;
         bytes.extend_from_slice(&line);
         bytes.push(b'\n');
         self.filesystem.write_file(&self.path, &bytes).await?;
@@ -490,17 +481,7 @@ where
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(EventError::from(error)),
         };
-        let text = String::from_utf8(bytes).map_err(|error| EventError::Serialize {
-            reason: error.to_string(),
-        })?;
-        text.lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| {
-                serde_json::from_str::<AuditEnvelope>(line).map_err(|error| EventError::Serialize {
-                    reason: error.to_string(),
-                })
-            })
-            .collect()
+        parse_jsonl(&bytes)
     }
 }
 
@@ -521,6 +502,7 @@ where
             Err(error) if is_not_found(&error) => Vec::new(),
             Err(error) => return Err(EventError::from(error)),
         };
+        validate_jsonl::<AuditEnvelope>(&bytes)?;
         bytes.extend_from_slice(&line);
         bytes.push(b'\n');
         self.filesystem.write_file(&self.path, &bytes).await?;
@@ -528,11 +510,37 @@ where
     }
 }
 
+fn validate_jsonl<T>(bytes: &[u8]) -> Result<(), EventError>
+where
+    T: DeserializeOwned,
+{
+    parse_jsonl::<T>(bytes).map(|_| ())
+}
+
+fn parse_jsonl<T>(bytes: &[u8]) -> Result<Vec<T>, EventError>
+where
+    T: DeserializeOwned,
+{
+    let text = String::from_utf8(bytes.to_vec()).map_err(|error| EventError::Serialize {
+        reason: error.to_string(),
+    })?;
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str::<T>(line).map_err(|error| EventError::Serialize {
+                reason: error.to_string(),
+            })
+        })
+        .collect()
+}
+
 fn is_not_found(error: &FilesystemError) -> bool {
     match error {
         FilesystemError::Backend { reason, .. } => {
-            reason.contains("No such file")
+            let reason = reason.to_ascii_lowercase();
+            reason.contains("no such file")
                 || reason.contains("not found")
+                || reason.contains("entity not found")
                 || reason.contains("os error 2")
         }
         _ => false,

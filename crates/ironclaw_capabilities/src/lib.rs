@@ -749,7 +749,7 @@ where
     }
 }
 
-fn matching_approval_lease(
+async fn matching_approval_lease(
     capability_leases: &dyn CapabilityLeaseStore,
     context: &ExecutionContext,
     capability_id: &CapabilityId,

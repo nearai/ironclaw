@@ -208,8 +208,9 @@ async fn capability_host_routes_mcp_through_same_authorized_path() {
 
 struct AllowingAuthorizer;
 
+#[async_trait]
 impl CapabilityDispatchAuthorizer for AllowingAuthorizer {
-    fn authorize_dispatch(
+    async fn authorize_dispatch(
         &self,
         _context: &ExecutionContext,
         _descriptor: &CapabilityDescriptor,
