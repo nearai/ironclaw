@@ -216,6 +216,398 @@ pub trait MemoryDocumentIndexer: Send + Sync {
     async fn reindex_document(&self, path: &MemoryDocumentPath) -> Result<(), FilesystemError>;
 }
 
+/// Declared behavior supported by a memory backend.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemoryBackendCapabilities {
+    pub file_documents: bool,
+    pub metadata: bool,
+    pub versioning: bool,
+    pub full_text_search: bool,
+    pub vector_search: bool,
+    pub embeddings: bool,
+    pub graph_memory: bool,
+    pub delete: bool,
+    pub transactions: bool,
+}
+
+/// Host-resolved scoped context passed to memory backends.
+///
+/// Backends receive this context after the host has parsed and authorized the
+/// virtual path. They must not infer broader tenant/user/project authority from
+/// their own configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryContext {
+    scope: MemoryDocumentScope,
+    invocation_id: Option<String>,
+}
+
+impl MemoryContext {
+    pub fn new(scope: MemoryDocumentScope) -> Self {
+        Self {
+            scope,
+            invocation_id: None,
+        }
+    }
+
+    pub fn with_invocation_id(mut self, invocation_id: impl Into<String>) -> Self {
+        self.invocation_id = Some(invocation_id.into());
+        self
+    }
+
+    pub fn scope(&self) -> &MemoryDocumentScope {
+        &self.scope
+    }
+
+    pub fn invocation_id(&self) -> Option<&str> {
+        self.invocation_id.as_deref()
+    }
+}
+
+/// Search request passed to memory backends that expose search APIs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemorySearchRequest {
+    query: String,
+    limit: usize,
+    full_text: bool,
+    vector: bool,
+}
+
+impl MemorySearchRequest {
+    pub fn new(query: impl Into<String>) -> Result<Self, HostApiError> {
+        let query = query.into();
+        if query.trim().is_empty() {
+            return Err(HostApiError::InvalidId {
+                kind: "memory search query",
+                value: query,
+                reason: "query must not be empty".to_string(),
+            });
+        }
+        Ok(Self {
+            query,
+            limit: 20,
+            full_text: true,
+            vector: true,
+        })
+    }
+
+    pub fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = limit.max(1);
+        self
+    }
+
+    pub fn with_full_text(mut self, enabled: bool) -> Self {
+        self.full_text = enabled;
+        self
+    }
+
+    pub fn with_vector(mut self, enabled: bool) -> Self {
+        self.vector = enabled;
+        self
+    }
+
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+
+    pub fn full_text(&self) -> bool {
+        self.full_text
+    }
+
+    pub fn vector(&self) -> bool {
+        self.vector
+    }
+}
+
+/// Search result returned by memory backends that expose search APIs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemorySearchResult {
+    pub path: MemoryDocumentPath,
+    pub score: f32,
+    pub snippet: String,
+}
+
+/// Pluggable memory backend contract.
+///
+/// The host owns authority, scope parsing, and mount exposure. Backends own
+/// storage/search behavior inside the already-resolved [`MemoryContext`].
+#[async_trait]
+pub trait MemoryBackend: Send + Sync {
+    fn capabilities(&self) -> MemoryBackendCapabilities;
+
+    async fn read_document(
+        &self,
+        context: &MemoryContext,
+        path: &MemoryDocumentPath,
+    ) -> Result<Option<Vec<u8>>, FilesystemError> {
+        let _ = (context, path);
+        Err(memory_backend_unsupported(
+            context.scope(),
+            FilesystemOperation::ReadFile,
+            "memory backend does not support file documents",
+        ))
+    }
+
+    async fn write_document(
+        &self,
+        context: &MemoryContext,
+        path: &MemoryDocumentPath,
+        bytes: &[u8],
+    ) -> Result<(), FilesystemError> {
+        let _ = (path, bytes);
+        Err(memory_backend_unsupported(
+            context.scope(),
+            FilesystemOperation::WriteFile,
+            "memory backend does not support file documents",
+        ))
+    }
+
+    async fn list_documents(
+        &self,
+        context: &MemoryContext,
+        scope: &MemoryDocumentScope,
+    ) -> Result<Vec<MemoryDocumentPath>, FilesystemError> {
+        let _ = scope;
+        Err(memory_backend_unsupported(
+            context.scope(),
+            FilesystemOperation::ListDir,
+            "memory backend does not support file documents",
+        ))
+    }
+
+    async fn search(
+        &self,
+        context: &MemoryContext,
+        request: MemorySearchRequest,
+    ) -> Result<Vec<MemorySearchResult>, FilesystemError> {
+        let _ = request;
+        Err(memory_backend_unsupported(
+            context.scope(),
+            FilesystemOperation::ReadFile,
+            "memory backend does not support search",
+        ))
+    }
+}
+
+/// [`RootFilesystem`] adapter exposing any [`MemoryBackend`] as `/memory` files.
+pub struct MemoryBackendFilesystemAdapter {
+    backend: Arc<dyn MemoryBackend>,
+}
+
+impl MemoryBackendFilesystemAdapter {
+    pub fn new<B>(backend: Arc<B>) -> Self
+    where
+        B: MemoryBackend + 'static,
+    {
+        let backend: Arc<dyn MemoryBackend> = backend;
+        Self { backend }
+    }
+
+    pub fn from_dyn(backend: Arc<dyn MemoryBackend>) -> Self {
+        Self { backend }
+    }
+
+    fn ensure_file_documents(
+        &self,
+        path: &VirtualPath,
+        operation: FilesystemOperation,
+    ) -> Result<(), FilesystemError> {
+        if self.backend.capabilities().file_documents {
+            Ok(())
+        } else {
+            Err(memory_error(
+                path.clone(),
+                operation,
+                "memory backend does not support file documents",
+            ))
+        }
+    }
+
+    fn parse_file_path(
+        &self,
+        path: &VirtualPath,
+        operation: FilesystemOperation,
+    ) -> Result<MemoryDocumentPath, FilesystemError> {
+        let parsed = ParsedMemoryPath::from_virtual_path(path, operation)?;
+        let Some(relative_path) = parsed.relative_path else {
+            return Err(memory_error(
+                path.clone(),
+                operation,
+                "memory document path must include a file path after project id",
+            ));
+        };
+        Ok(MemoryDocumentPath {
+            scope: parsed.scope,
+            relative_path,
+        })
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for MemoryBackendFilesystemAdapter {
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        self.ensure_file_documents(path, FilesystemOperation::ReadFile)?;
+        let document_path = self.parse_file_path(path, FilesystemOperation::ReadFile)?;
+        let context = MemoryContext::new(document_path.scope().clone());
+        self.backend
+            .read_document(&context, &document_path)
+            .await?
+            .ok_or_else(|| memory_not_found(path.clone(), FilesystemOperation::ReadFile))
+    }
+
+    async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        self.ensure_file_documents(path, FilesystemOperation::WriteFile)?;
+        let document_path = self.parse_file_path(path, FilesystemOperation::WriteFile)?;
+        let context = MemoryContext::new(document_path.scope().clone());
+        self.backend
+            .write_document(&context, &document_path, bytes)
+            .await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.ensure_file_documents(path, FilesystemOperation::ListDir)?;
+        let parsed = ParsedMemoryPath::from_virtual_path(path, FilesystemOperation::ListDir)?;
+        let context = MemoryContext::new(parsed.scope.clone());
+        let documents = self.backend.list_documents(&context, &parsed.scope).await?;
+        if let Some(relative_path) = parsed.relative_path.as_deref()
+            && documents
+                .iter()
+                .any(|document| document.relative_path() == relative_path)
+        {
+            return Err(memory_error(
+                path.clone(),
+                FilesystemOperation::ListDir,
+                "not a directory",
+            ));
+        }
+        memory_direct_children(path, parsed.relative_path.as_deref(), documents)
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.ensure_file_documents(path, FilesystemOperation::Stat)?;
+        let parsed = ParsedMemoryPath::from_virtual_path(path, FilesystemOperation::Stat)?;
+        let context = MemoryContext::new(parsed.scope.clone());
+        let documents = self.backend.list_documents(&context, &parsed.scope).await?;
+        if let Some(relative_path) = parsed.relative_path.as_deref() {
+            if let Some(document) = documents
+                .iter()
+                .find(|document| document.relative_path() == relative_path)
+            {
+                let len = self
+                    .backend
+                    .read_document(&context, document)
+                    .await?
+                    .map(|bytes| bytes.len() as u64)
+                    .unwrap_or(0);
+                return Ok(FileStat {
+                    path: path.clone(),
+                    file_type: FileType::File,
+                    len,
+                });
+            }
+            let directory_prefix = format!("{relative_path}/");
+            if documents
+                .iter()
+                .any(|document| document.relative_path().starts_with(&directory_prefix))
+            {
+                return Ok(FileStat {
+                    path: path.clone(),
+                    file_type: FileType::Directory,
+                    len: 0,
+                });
+            }
+            return Err(memory_not_found(path.clone(), FilesystemOperation::Stat));
+        }
+
+        if documents.is_empty() {
+            return Err(memory_not_found(path.clone(), FilesystemOperation::Stat));
+        }
+        Ok(FileStat {
+            path: path.clone(),
+            file_type: FileType::Directory,
+            len: 0,
+        })
+    }
+}
+
+/// Memory backend wrapper for existing repository/indexer implementations.
+pub struct RepositoryMemoryBackend<R> {
+    repository: Arc<R>,
+    indexer: Option<Arc<dyn MemoryDocumentIndexer>>,
+    capabilities: MemoryBackendCapabilities,
+}
+
+impl<R> RepositoryMemoryBackend<R>
+where
+    R: MemoryDocumentRepository + 'static,
+{
+    pub fn new(repository: Arc<R>) -> Self {
+        Self {
+            repository,
+            indexer: None,
+            capabilities: MemoryBackendCapabilities {
+                file_documents: true,
+                ..MemoryBackendCapabilities::default()
+            },
+        }
+    }
+
+    pub fn with_indexer<I>(mut self, indexer: Arc<I>) -> Self
+    where
+        I: MemoryDocumentIndexer + 'static,
+    {
+        self.indexer = Some(indexer);
+        self
+    }
+
+    pub fn with_capabilities(mut self, capabilities: MemoryBackendCapabilities) -> Self {
+        self.capabilities = capabilities;
+        self
+    }
+}
+
+#[async_trait]
+impl<R> MemoryBackend for RepositoryMemoryBackend<R>
+where
+    R: MemoryDocumentRepository + 'static,
+{
+    fn capabilities(&self) -> MemoryBackendCapabilities {
+        self.capabilities.clone()
+    }
+
+    async fn read_document(
+        &self,
+        _context: &MemoryContext,
+        path: &MemoryDocumentPath,
+    ) -> Result<Option<Vec<u8>>, FilesystemError> {
+        self.repository.read_document(path).await
+    }
+
+    async fn write_document(
+        &self,
+        _context: &MemoryContext,
+        path: &MemoryDocumentPath,
+        bytes: &[u8],
+    ) -> Result<(), FilesystemError> {
+        self.repository.write_document(path, bytes).await?;
+        if let Some(indexer) = &self.indexer {
+            indexer.reindex_document(path).await?;
+        }
+        Ok(())
+    }
+
+    async fn list_documents(
+        &self,
+        _context: &MemoryContext,
+        scope: &MemoryDocumentScope,
+    ) -> Result<Vec<MemoryDocumentPath>, FilesystemError> {
+        self.repository.list_documents(scope).await
+    }
+}
+
 /// Repository operations used by the memory indexer to keep chunk/search rows in sync.
 #[async_trait]
 pub trait MemoryDocumentIndexRepository: Send + Sync {
@@ -1703,6 +2095,20 @@ fn validated_memory_relative_path(value: String) -> Result<String, HostApiError>
         });
     }
     Ok(value)
+}
+
+fn memory_backend_unsupported(
+    scope: &MemoryDocumentScope,
+    operation: FilesystemOperation,
+    reason: &'static str,
+) -> FilesystemError {
+    memory_error(
+        scope
+            .virtual_prefix()
+            .unwrap_or_else(|_| valid_memory_path()),
+        operation,
+        reason,
+    )
 }
 
 fn memory_not_found(path: VirtualPath, operation: FilesystemOperation) -> FilesystemError {

@@ -4,8 +4,9 @@ use async_trait::async_trait;
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::VirtualPath;
 use ironclaw_memory::{
-    ChunkConfig, ChunkingMemoryDocumentIndexer, MemoryDocumentFilesystem, MemoryDocumentPath,
-    MemoryDocumentRepository, MemoryDocumentScope,
+    ChunkConfig, ChunkingMemoryDocumentIndexer, MemoryBackendFilesystemAdapter,
+    MemoryDocumentFilesystem, MemoryDocumentPath, MemoryDocumentRepository, MemoryDocumentScope,
+    RepositoryMemoryBackend,
 };
 
 #[cfg(feature = "libsql")]
@@ -116,7 +117,9 @@ async fn libsql_memory_document_filesystem_reuses_current_chunking_and_fts_schem
             min_chunk_size: 1,
         }),
     );
-    let filesystem = MemoryDocumentFilesystem::new(repository).with_indexer(indexer);
+    let backend =
+        std::sync::Arc::new(RepositoryMemoryBackend::new(repository).with_indexer(indexer));
+    let filesystem = MemoryBackendFilesystemAdapter::new(backend);
     let path =
         VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/notes.md").unwrap();
 
@@ -168,7 +171,9 @@ async fn libsql_memory_document_filesystem_versions_previous_content_and_replace
     let repository = std::sync::Arc::new(LibSqlMemoryDocumentRepository::new(db.clone()));
     repository.run_migrations().await.unwrap();
     let indexer = std::sync::Arc::new(ChunkingMemoryDocumentIndexer::new(repository.clone()));
-    let filesystem = MemoryDocumentFilesystem::new(repository).with_indexer(indexer);
+    let backend =
+        std::sync::Arc::new(RepositoryMemoryBackend::new(repository).with_indexer(indexer));
+    let filesystem = MemoryBackendFilesystemAdapter::new(backend);
     let path =
         VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/notes.md").unwrap();
 
