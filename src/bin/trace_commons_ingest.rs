@@ -1751,6 +1751,10 @@ struct TraceProcessEvaluationJobRequest {
     submission_id: Uuid,
     process_evaluation: ProcessEvaluationLabels,
     reason: String,
+    #[serde(default)]
+    utility_credit_points_delta: Option<f32>,
+    #[serde(default)]
+    utility_external_ref: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1765,6 +1769,8 @@ struct TraceProcessEvaluationJobResponse {
     review_scorecard: TraceValueScorecard,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     output_object_ref_id: Option<Uuid>,
+    utility_credit_appended_count: usize,
+    utility_credit_skipped_existing_count: usize,
 }
 
 async fn append_credit_event_handler(
@@ -1993,6 +1999,51 @@ async fn process_evaluation_worker_handler(
             "process evaluation overall_score must be finite and between 0.0 and 1.0",
         ));
     }
+    let utility_external_ref = body
+        .utility_external_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|external_ref| !external_ref.is_empty())
+        .map(ToOwned::to_owned);
+    match (
+        body.utility_credit_points_delta,
+        utility_external_ref.as_ref(),
+    ) {
+        (Some(points), None) => {
+            if !points.is_finite() {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "utility_credit_points_delta must be finite",
+                ));
+            }
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "process evaluation utility credit requires a non-empty utility_external_ref",
+            ));
+        }
+        (Some(points), Some(_)) if !points.is_finite() => {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "utility_credit_points_delta must be finite",
+            ));
+        }
+        (Some(points), Some(_)) if points.abs() > MAX_DELAYED_CREDIT_POINTS_DELTA => {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "utility_credit_points_delta exceeds the delayed credit policy limit",
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "utility_external_ref requires utility_credit_points_delta",
+            ));
+        }
+        _ => {}
+    }
+    let utility_credit_request = body
+        .utility_credit_points_delta
+        .zip(utility_external_ref.clone());
 
     let mut record = read_utility_submission_record(state.as_ref(), &tenant, body.submission_id)
         .await
@@ -2057,6 +2108,31 @@ async fn process_evaluation_worker_handler(
     .await
     .map_err(internal_error)?;
 
+    let utility_credit_counts =
+        if let Some((credit_points_delta, external_ref)) = utility_credit_request {
+            append_automatic_utility_credit_events_once_with_counts(
+                state.as_ref(),
+                &tenant,
+                AutomaticUtilityCreditConfig {
+                    idempotency_label: "process-evaluation-training-credit",
+                    idempotency_ref: Some(external_ref.clone()),
+                    event_type: TraceCreditLedgerEventType::TrainingUtility,
+                    credit_points_delta,
+                    reason: format!("process evaluation utility: {reason}"),
+                    external_ref,
+                },
+                [AutomaticUtilityCreditSource {
+                    submission_id: record.submission_id,
+                    trace_id: record.trace_id,
+                    auth_principal_ref: record.auth_principal_ref.clone(),
+                }],
+            )
+            .await
+            .map_err(internal_error)?
+        } else {
+            AutomaticUtilityCreditAppendCounts::default()
+        };
+
     Ok(Json(TraceProcessEvaluationJobResponse {
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
@@ -2066,6 +2142,8 @@ async fn process_evaluation_worker_handler(
         process_eval_value,
         review_scorecard: envelope_before.value_card.scorecard,
         output_object_ref_id,
+        utility_credit_appended_count: utility_credit_counts.appended,
+        utility_credit_skipped_existing_count: utility_credit_counts.skipped_existing,
     }))
 }
 
@@ -14537,6 +14615,8 @@ mod tests {
                     ..ProcessEvaluationLabels::default()
                 },
                 reason: "process worker scope check".to_string(),
+                utility_credit_points_delta: None,
+                utility_external_ref: None,
             }),
         )
         .await
@@ -14564,6 +14644,8 @@ mod tests {
                     ..ProcessEvaluationLabels::default()
                 },
                 reason: "export workers cannot process-evaluate".to_string(),
+                utility_credit_points_delta: None,
+                utility_external_ref: None,
             }),
         )
         .await
@@ -16512,11 +16594,31 @@ mod tests {
                     ..ProcessEvaluationLabels::default()
                 },
                 reason: "missing evaluator version".to_string(),
+                utility_credit_points_delta: None,
+                utility_external_ref: None,
             }),
         )
         .await
         .expect_err("process evaluation worker requires evaluator version");
         assert_eq!(empty_version_error.0, StatusCode::BAD_REQUEST);
+
+        let missing_external_ref_error = process_evaluation_worker_handler(
+            State(state.clone()),
+            auth_headers("process-eval-worker-token-a"),
+            Json(TraceProcessEvaluationJobRequest {
+                submission_id,
+                process_evaluation: ProcessEvaluationLabels {
+                    evaluator_version: "judge-v1".to_string(),
+                    ..ProcessEvaluationLabels::default()
+                },
+                reason: "utility credit missing ref".to_string(),
+                utility_credit_points_delta: Some(0.4),
+                utility_external_ref: Some(" ".to_string()),
+            }),
+        )
+        .await
+        .expect_err("process evaluation utility credit requires external ref");
+        assert_eq!(missing_external_ref_error.0, StatusCode::BAD_REQUEST);
 
         let Json(response) = process_evaluation_worker_handler(
             State(state.clone()),
@@ -16536,6 +16638,8 @@ mod tests {
                     ..ProcessEvaluationLabels::default()
                 },
                 reason: "offline trajectory evaluator".to_string(),
+                utility_credit_points_delta: Some(0.85),
+                utility_external_ref: Some("process-eval:nightly-42".to_string()),
             }),
         )
         .await
@@ -16544,6 +16648,30 @@ mod tests {
         assert_eq!(response.status, TraceCorpusStatus::Accepted);
         assert_eq!(response.process_eval_value, Some(0.91));
         assert_eq!(response.review_scorecard.process_eval_value, Some(0.91));
+        assert_eq!(response.utility_credit_appended_count, 1);
+        assert_eq!(response.utility_credit_skipped_existing_count, 0);
+
+        let Json(retry_response) = process_evaluation_worker_handler(
+            State(state.clone()),
+            auth_headers("process-eval-worker-token-a"),
+            Json(TraceProcessEvaluationJobRequest {
+                submission_id,
+                process_evaluation: ProcessEvaluationLabels {
+                    evaluator_name: Some("trajectory-judge".to_string()),
+                    evaluator_version: "judge-v1".to_string(),
+                    verification: Some(ProcessEvalRating::Pass),
+                    overall_score: Some(0.91),
+                    ..ProcessEvaluationLabels::default()
+                },
+                reason: "offline trajectory evaluator".to_string(),
+                utility_credit_points_delta: Some(0.85),
+                utility_external_ref: Some("process-eval:nightly-42".to_string()),
+            }),
+        )
+        .await
+        .expect("process evaluation utility credit retry is idempotent");
+        assert_eq!(retry_response.utility_credit_appended_count, 0);
+        assert_eq!(retry_response.utility_credit_skipped_existing_count, 1);
 
         let record = read_submission_record(temp.path(), "tenant-a", submission_id)
             .expect("record reads")
@@ -16554,6 +16682,23 @@ mod tests {
             .expect("process evaluation labels stored");
         assert_eq!(labels.evaluator_version, "judge-v1");
         assert_eq!(labels.overall_score, Some(0.91));
+
+        let credit_events = read_all_credit_events(temp.path(), "tenant-a").expect("credit reads");
+        let process_eval_credit_events = credit_events
+            .iter()
+            .filter(|event| {
+                event.submission_id == submission_id
+                    && event.event_type == TraceCreditLedgerEventType::TrainingUtility
+                    && event.external_ref.as_deref() == Some("process-eval:nightly-42")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(process_eval_credit_events.len(), 1);
+        assert!(
+            process_eval_credit_events[0]
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("process evaluation utility"))
+        );
 
         let derived = read_derived_record(temp.path(), "tenant-a", submission_id)
             .expect("derived reads")
@@ -16587,6 +16732,84 @@ mod tests {
                     reason.contains("process_eval_value=0.9100")
                         && reason.contains("offline trajectory evaluator")
                 })
+        }));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn process_evaluation_utility_credit_mirrors_to_db_contributor_events() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-process-eval-credit.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db_contributor_reads(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(response) = process_evaluation_worker_handler(
+            State(state.clone()),
+            auth_headers("process-eval-worker-token-a"),
+            Json(TraceProcessEvaluationJobRequest {
+                submission_id,
+                process_evaluation: ProcessEvaluationLabels {
+                    evaluator_version: "db-credit-judge-v1".to_string(),
+                    verification: Some(ProcessEvalRating::Pass),
+                    overall_score: Some(0.86),
+                    ..ProcessEvaluationLabels::default()
+                },
+                reason: "process evaluator selected this trace for training utility".to_string(),
+                utility_credit_points_delta: Some(0.95),
+                utility_external_ref: Some("process-eval:db-nightly-42".to_string()),
+            }),
+        )
+        .await
+        .expect("process evaluation worker appends utility credit");
+        assert_eq!(response.utility_credit_appended_count, 1);
+        assert_eq!(response.utility_credit_skipped_existing_count, 0);
+
+        let db_credit_events = db
+            .list_trace_credit_events("tenant-a")
+            .await
+            .expect("DB credit events read");
+        assert!(db_credit_events.iter().any(|event| {
+            event.submission_id == submission_id
+                && event.event_type == StorageTraceCreditEventType::TrainingUtility
+                && event.external_ref.as_deref() == Some("process-eval:db-nightly-42")
+        }));
+
+        let tenant_dir = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"));
+        std::fs::remove_file(tenant_dir.join("credit_ledger").join("events.jsonl"))
+            .expect("remove file-backed ledger to prove DB read path");
+        let Json(events) = credit_events_handler(State(state), auth_headers("token-a"))
+            .await
+            .expect("contributor can see DB-backed process evaluation utility credit");
+        assert!(events.iter().any(|event| {
+            event.submission_id == submission_id
+                && event.event_type == TraceCreditLedgerEventType::TrainingUtility
+                && (event.credit_points_delta - 0.95).abs() < f32::EPSILON
+                && event.external_ref.as_deref() == Some("process-eval:db-nightly-42")
         }));
     }
 

@@ -900,6 +900,14 @@ pub struct ProcessEvaluationSubmitArgs {
     #[arg(long)]
     overall_score: Option<f32>,
 
+    /// Optional training utility credit delta to append for the evaluated accepted submission
+    #[arg(long)]
+    utility_credit_points_delta: Option<f32>,
+
+    /// External idempotency reference required when appending process-evaluation utility credit
+    #[arg(long)]
+    utility_external_ref: Option<String>,
+
     /// Environment variable containing a process-evaluation-worker bearer token
     #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
     bearer_token_env: String,
@@ -1366,6 +1374,8 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
                 verification: args.verification,
                 side_effect_safety: args.side_effect_safety,
                 overall_score: args.overall_score,
+                utility_credit_points_delta: args.utility_credit_points_delta,
+                utility_external_ref: args.utility_external_ref,
                 json: args.json,
             })
             .await
@@ -2263,6 +2273,8 @@ struct TraceCommonsProcessEvaluationSubmitOptions<'a> {
     verification: Option<TraceProcessEvaluationRatingArg>,
     side_effect_safety: Option<TraceProcessEvaluationRatingArg>,
     overall_score: Option<f32>,
+    utility_credit_points_delta: Option<f32>,
+    utility_external_ref: Option<String>,
     json: bool,
 }
 
@@ -2281,6 +2293,8 @@ async fn trace_commons_process_evaluation_submit(
         options.verification,
         options.side_effect_safety,
         options.overall_score,
+        options.utility_credit_points_delta,
+        options.utility_external_ref,
     )?;
 
     let response = trace_commons_api_request(
@@ -2309,6 +2323,16 @@ async fn trace_commons_process_evaluation_submit(
         print_optional_json_field("  process eval value", value, "process_eval_value");
         print_optional_json_field("  review scorecard", value, "review_scorecard");
         print_optional_json_field("  output object ref", value, "output_object_ref_id");
+        print_optional_json_field(
+            "  utility credit appended",
+            value,
+            "utility_credit_appended_count",
+        );
+        print_optional_json_field(
+            "  utility credit skipped existing",
+            value,
+            "utility_credit_skipped_existing_count",
+        );
     }
     Ok(())
 }
@@ -2326,6 +2350,8 @@ fn trace_commons_process_evaluation_body(
     verification: Option<TraceProcessEvaluationRatingArg>,
     side_effect_safety: Option<TraceProcessEvaluationRatingArg>,
     overall_score: Option<f32>,
+    utility_credit_points_delta: Option<f32>,
+    utility_external_ref: Option<String>,
 ) -> anyhow::Result<serde_json::Value> {
     require_non_empty_reason(&reason)?;
     if evaluator_version.trim().is_empty() {
@@ -2336,6 +2362,29 @@ fn trace_commons_process_evaluation_body(
     {
         anyhow::bail!("--overall-score must be between 0.0 and 1.0");
     }
+    let utility_external_ref = if let Some(delta) = utility_credit_points_delta {
+        if !delta.is_finite() || delta.abs() > 100.0 {
+            anyhow::bail!("--utility-credit-points-delta must be finite with abs <= 100.0");
+        }
+        let external_ref = utility_external_ref
+            .as_deref()
+            .map(str::trim)
+            .filter(|external_ref| !external_ref.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--utility-external-ref must be non-empty when --utility-credit-points-delta is set"
+                )
+        })?;
+        Some(external_ref.to_string())
+    } else {
+        if utility_external_ref
+            .as_deref()
+            .is_some_and(|external_ref| !external_ref.trim().is_empty())
+        {
+            anyhow::bail!("--utility-external-ref requires --utility-credit-points-delta");
+        }
+        None
+    };
 
     let mut process_evaluation = serde_json::json!({
         "evaluator_version": evaluator_version.trim(),
@@ -2373,11 +2422,16 @@ fn trace_commons_process_evaluation_body(
         process_evaluation["overall_score"] = serde_json::json!(overall_score);
     }
 
-    Ok(serde_json::json!({
+    let mut body = serde_json::json!({
         "submission_id": submission_id,
         "process_evaluation": process_evaluation,
         "reason": reason.trim(),
-    }))
+    });
+    if let (Some(delta), Some(external_ref)) = (utility_credit_points_delta, utility_external_ref) {
+        body["utility_credit_points_delta"] = serde_json::json!(delta);
+        body["utility_external_ref"] = serde_json::Value::String(external_ref);
+    }
+    Ok(body)
 }
 
 async fn trace_commons_analytics_summary(
@@ -5150,6 +5204,10 @@ mod tests {
                     "unknown",
                     "--overall-score",
                     "0.75",
+                    "--utility-credit-points-delta",
+                    "2.5",
+                    "--utility-external-ref",
+                    "process-eval:nightly:42",
                     "--bearer-token-env",
                     "TRACE_COMMONS_PROCESS_EVALUATION_WORKER_TOKEN",
                     "--json",
@@ -5195,6 +5253,11 @@ mod tests {
             Some(TraceProcessEvaluationRatingArg::Unknown)
         );
         assert_eq!(args.overall_score, Some(0.75));
+        assert_eq!(args.utility_credit_points_delta, Some(2.5));
+        assert_eq!(
+            args.utility_external_ref.as_deref(),
+            Some("process-eval:nightly:42")
+        );
         assert_eq!(
             args.bearer_token_env,
             "TRACE_COMMONS_PROCESS_EVALUATION_WORKER_TOKEN"
@@ -5222,6 +5285,8 @@ mod tests {
             Some(TraceProcessEvaluationRatingArg::Fail),
             Some(TraceProcessEvaluationRatingArg::Unknown),
             Some(0.75),
+            Some(2.5),
+            Some(" process-eval:nightly:42 ".to_string()),
         )
         .expect("body builds");
 
@@ -5240,13 +5305,40 @@ mod tests {
                     "side_effect_safety": "unknown",
                     "overall_score": 0.75
                 },
+                "utility_credit_points_delta": 2.5,
+                "utility_external_ref": "process-eval:nightly:42",
                 "reason": "nightly evaluator pass"
             })
         );
     }
 
     #[test]
-    fn process_evaluation_body_rejects_empty_reason_version_and_invalid_score() {
+    fn process_evaluation_body_omits_utility_credit_when_delta_absent() {
+        let submission_id =
+            Uuid::parse_str("018f2b7b-0c11-72fd-95c4-1f9f98feac01").expect("valid uuid");
+        let body = trace_commons_process_evaluation_body(
+            submission_id,
+            "operator reason".to_string(),
+            None,
+            "2026-04-26.1".to_string(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("body builds");
+
+        assert!(body.get("utility_credit_points_delta").is_none());
+        assert!(body.get("utility_external_ref").is_none());
+    }
+
+    #[test]
+    fn process_evaluation_body_rejects_invalid_inputs() {
         let submission_id =
             Uuid::parse_str("018f2b7b-0c11-72fd-95c4-1f9f98feac01").expect("valid uuid");
 
@@ -5256,6 +5348,8 @@ mod tests {
             None,
             "2026-04-26.1".to_string(),
             Vec::new(),
+            None,
+            None,
             None,
             None,
             None,
@@ -5277,6 +5371,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         );
         assert!(empty_version.is_err());
 
@@ -5292,8 +5388,78 @@ mod tests {
             None,
             None,
             Some(1.25),
+            None,
+            None,
         );
         assert!(invalid_score.is_err());
+
+        let non_finite_delta = trace_commons_process_evaluation_body(
+            submission_id,
+            "operator reason".to_string(),
+            None,
+            "2026-04-26.1".to_string(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(f32::NAN),
+            Some("process-eval:nightly:42".to_string()),
+        );
+        assert!(non_finite_delta.is_err());
+
+        let too_large_delta = trace_commons_process_evaluation_body(
+            submission_id,
+            "operator reason".to_string(),
+            None,
+            "2026-04-26.1".to_string(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(100.01),
+            Some("process-eval:nightly:42".to_string()),
+        );
+        assert!(too_large_delta.is_err());
+
+        let empty_external_ref = trace_commons_process_evaluation_body(
+            submission_id,
+            "operator reason".to_string(),
+            None,
+            "2026-04-26.1".to_string(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(2.5),
+            Some(" ".to_string()),
+        );
+        assert!(empty_external_ref.is_err());
+
+        let dangling_external_ref = trace_commons_process_evaluation_body(
+            submission_id,
+            "operator reason".to_string(),
+            None,
+            "2026-04-26.1".to_string(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("process-eval:nightly:42".to_string()),
+        );
+        assert!(dangling_external_ref.is_err());
     }
 
     #[test]

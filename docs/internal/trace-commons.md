@@ -84,8 +84,16 @@ ironclaw traces process-evaluation-submit \
   --evaluator-version process-eval-2026-04-26 \
   --label proper_verification \
   --tool-selection pass \
-  --verification partial
+  --verification partial \
+  --utility-credit-points-delta 0.5 \
+  --utility-external-ref process-eval:nightly:2026-04-26
 ```
+
+When `--utility-credit-points-delta` is set, the helper also sends a trimmed
+`utility_external_ref`; the service uses that external reference to append an
+idempotent `training_utility` delayed credit event for the evaluated accepted
+submission. Non-JSON output prints appended/skipped credit counts when the
+server returns them.
 
 Internal deployments can also add a fail-closed tenant submission policy. When
 `TRACE_COMMONS_TENANT_POLICIES` contains an entry for the authenticated tenant,

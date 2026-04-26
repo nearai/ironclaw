@@ -809,9 +809,10 @@ In the current ingest service, `export_worker` is limited to replay/ranker expor
 `benchmark_worker` is limited to benchmark conversion, `retention_worker` is limited to
 retention/cache cleanup maintenance, and `vector_worker` is limited to vector-index
 maintenance. `process_eval_worker` is limited to writing bounded process-evaluation
-metadata for accepted submissions. These worker roles are intentionally not treated as
-reviewers for generic trace listing, audit reads, policy administration, review decisions,
-or credit mutation.
+metadata for accepted submissions and, when supplied with an external reference, appending
+idempotent `training_utility` delayed credit for the evaluated accepted submission. These
+worker roles are intentionally not treated as reviewers for generic trace listing, audit
+reads, policy administration, review decisions, or unrestricted credit mutation.
 
 ### Submissions
 
@@ -889,7 +890,10 @@ Process-evaluation derived rows should use `worker_kind = process_evaluation`, s
 evaluator version in `worker_version`, keep label and rubric output in bounded metadata or
 an optional `worker_intermediate` object ref, and expose only safe aggregate values such as
 tool-selection, argument-quality, ordering, verification, side-effect-safety ratings, and
-overall score. Derived rows are versioned rather than overwritten. Consumers should require
+overall score. Derived rows are versioned rather than overwritten. Process-evaluation
+requests may also include a bounded utility credit delta plus external reference; the
+service appends `training_utility` delayed credit idempotently and reports appended/skipped
+counts without making the worker a generic credit mutator. Consumers should require
 `status = current` and a non-revoked source submission.
 
 ### Vector Index Metadata
