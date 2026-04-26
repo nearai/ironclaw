@@ -4120,13 +4120,7 @@ fn maybe_print_credit_notice(policy: &StandingTraceContributionPolicy) -> anyhow
     }
 
     let summary = credit_summary(&records);
-    println!(
-        "Trace contribution credit update: {} submitted, pending +{:.2}, final +{:.2}, delayed ledger {:+.2}.",
-        summary.submissions_submitted,
-        summary.pending_credit,
-        summary.final_credit,
-        summary.delayed_credit_delta
-    );
+    println!("{}", credit_notice_message(&summary));
     for explanation in summary.recent_explanations.iter().take(3) {
         println!("  - {explanation}");
     }
@@ -4141,6 +4135,25 @@ fn maybe_print_credit_notice(policy: &StandingTraceContributionPolicy) -> anyhow
 
 fn local_record_noticeable_for_credit(record: &LocalSubmissionRecord) -> bool {
     record.status == LocalSubmissionStatus::Submitted || !record.credit_events.is_empty()
+}
+
+fn credit_notice_message(summary: &CreditSummary) -> String {
+    let mut message = format!(
+        "Trace contribution credit update: {} submitted, {} expired ({} total), pending +{:.2}, final confirmed +{:.2}, delayed ledger {:+.2}. Delayed credit can change after privacy review, replay/eval, duplicate checks, and downstream utility scoring.",
+        summary.submissions_submitted,
+        summary.submissions_expired,
+        summary.submissions_total,
+        summary.pending_credit,
+        summary.final_credit,
+        summary.delayed_credit_delta
+    );
+    if summary.credit_events_total > 0 {
+        message.push_str(&format!(
+            " {} credit event(s) recorded.",
+            summary.credit_events_total
+        ));
+    }
+    message
 }
 
 enum QueueEligibility {
@@ -5635,6 +5648,29 @@ mod tests {
 
         assert_eq!(unchanged, 0);
         assert_eq!(records[0].credit_events.len(), 1);
+    }
+
+    #[test]
+    fn cli_credit_notice_message_includes_delayed_and_event_totals() {
+        let message = credit_notice_message(&CreditSummary {
+            submissions_total: 4,
+            submissions_submitted: 2,
+            submissions_revoked: 1,
+            submissions_expired: 1,
+            pending_credit: 3.5,
+            final_credit: 2.0,
+            delayed_credit_delta: 0.75,
+            credit_events_total: 5,
+            recent_explanations: Vec::new(),
+        });
+
+        assert!(message.contains("2 submitted"));
+        assert!(message.contains("1 expired (4 total)"));
+        assert!(message.contains("pending +3.50"));
+        assert!(message.contains("final confirmed +2.00"));
+        assert!(message.contains("delayed ledger +0.75"));
+        assert!(message.contains("5 credit event(s) recorded"));
+        assert!(message.contains("Delayed credit can change"));
     }
 
     #[test]
