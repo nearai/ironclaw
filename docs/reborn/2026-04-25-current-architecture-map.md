@@ -220,7 +220,7 @@ The current implemented or contract-backed Reborn stack includes these slices:
 | Filesystem/mount surface | `[exists]` root/scoped filesystem contracts and filesystem-backed stores used by Reborn services |
 | Extension discovery/registry | `[exists]` manifests, package validation, capability descriptors, runtime declaration mapping |
 | Resource governor | `[exists]` reservation/reconcile/release model and V1 dimensions for hosted resource control |
-| Secrets | `[exists/partial]` `ironclaw_secrets` service boundary with scoped metadata, in-memory storage, and one-shot secret leases; durable encrypted persistence and runtime injection are not complete |
+| Secrets | `[exists/partial]` `ironclaw_secrets` service boundary with scoped metadata, AES-256-GCM/HKDF encryption, encrypted-row repository contract, in-memory encrypted repository, credential mapping metadata, and one-shot secret leases; concrete PostgreSQL/libSQL adapters and runtime injection are not complete |
 | Network | `[exists/partial]` `ironclaw_network` service boundary with scoped policy evaluation, exact/wildcard target matching, literal private IP denial, and egress-estimate checks; HTTP execution/proxying and DNS rebinding protection are not complete |
 | Capability access | `[exists/partial]` grant matching, action-time authorization, lease-backed authorizer semantics, in-memory and filesystem-backed exact-invocation lease stores |
 | CapabilityHost | `[exists]` caller-facing invocation, approval-blocking, resume, spawn workflow gate, fail-closed `CapabilityObligationHandler` seam, and `ProcessServices` spawn wiring over the neutral host API dispatch port |
@@ -255,7 +255,7 @@ These are explicit gaps, not architecture contradictions:
 | Full MCP server lifecycle | MCP is a current adapter lane, not yet a complete product lifecycle for server install/start/auth/restart/monitoring. |
 | Auth-blocked resume product path | `BlockedAuth` is reserved in run-state; full OAuth/token prompt, callback, and retry-after-auth workflow remains to be implemented. |
 | Concrete obligation handlers | Built-ins now cover metadata-only `AuditBefore` and WASM-enforced `ApplyNetworkPolicy` backed by hardened network egress; already-resolved HTTP credentials can be injected by explicit host-runtime configuration, but `InjectSecretOnce`, `AuditAfter`, `RedactOutput`, `EnforceOutputLimit`, resource reservation, scoped mounts, and non-WASM network enforcement remain fail-closed until required runtime/input/output plumbing exists. |
-| Secret injection and durability | Scoped in-memory secret metadata, credential mapping metadata, and one-shot leases exist; encrypted durable persistence, audit emission, rotation, secret lease consumption in obligation handlers, and production `InjectSecretOnce` secret material injection remain to be implemented. |
+| Secret injection and durability | Scoped secret metadata, credential mapping metadata, AES-256-GCM/HKDF encryption, encrypted-row repository contract, in-memory encrypted repository, and one-shot leases exist; concrete durable PostgreSQL/libSQL adapters, keychain master-key resolution, audit emission, rotation, secret lease consumption in obligation handlers, and production `InjectSecretOnce` secret material injection remain to be implemented. |
 
 ---
 
