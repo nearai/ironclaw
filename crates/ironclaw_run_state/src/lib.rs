@@ -134,35 +134,48 @@ impl From<FilesystemError> for RunStateError {
 /// Current-state store for invocation lifecycle.
 #[async_trait]
 pub trait RunStateStore: Send + Sync {
+    /// Creates a running invocation record in the exact tenant/user scope.
     async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError>;
+
+    /// Marks an invocation blocked on an approval request without granting authority by itself.
     async fn block_approval(
         &self,
         scope: &ResourceScope,
         invocation_id: InvocationId,
         approval: ApprovalRequest,
     ) -> Result<RunRecord, RunStateError>;
+
+    /// Marks an invocation blocked on external auth/secret resolution without exposing secret material.
     async fn block_auth(
         &self,
         scope: &ResourceScope,
         invocation_id: InvocationId,
         error_kind: String,
     ) -> Result<RunRecord, RunStateError>;
+
+    /// Marks an invocation completed only within the matching scope.
     async fn complete(
         &self,
         scope: &ResourceScope,
         invocation_id: InvocationId,
     ) -> Result<RunRecord, RunStateError>;
+
+    /// Marks an invocation failed with a classified error kind, not raw runtime details.
     async fn fail(
         &self,
         scope: &ResourceScope,
         invocation_id: InvocationId,
         error_kind: String,
     ) -> Result<RunRecord, RunStateError>;
+
+    /// Loads one scoped invocation record; wrong-scope lookups must look unknown.
     async fn get(
         &self,
         scope: &ResourceScope,
         invocation_id: InvocationId,
     ) -> Result<Option<RunRecord>, RunStateError>;
+
+    /// Lists invocation records visible to the tenant/user scope only.
     async fn records_for_scope(
         &self,
         scope: &ResourceScope,
@@ -172,26 +185,35 @@ pub trait RunStateStore: Send + Sync {
 /// Store for approval requests emitted by authorization decisions.
 #[async_trait]
 pub trait ApprovalRequestStore: Send + Sync {
+    /// Persists a pending approval request in the tenant/user scope without resolving it.
     async fn save_pending(
         &self,
         scope: ResourceScope,
         request: ApprovalRequest,
     ) -> Result<ApprovalRecord, RunStateError>;
+
+    /// Loads one scoped approval record; wrong-scope lookups must look unknown.
     async fn get(
         &self,
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
     ) -> Result<Option<ApprovalRecord>, RunStateError>;
+
+    /// Marks a pending approval request approved only within the matching scope.
     async fn approve(
         &self,
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
     ) -> Result<ApprovalRecord, RunStateError>;
+
+    /// Marks a pending approval request denied only within the matching scope.
     async fn deny(
         &self,
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
     ) -> Result<ApprovalRecord, RunStateError>;
+
+    /// Lists approval records visible to the tenant/user scope only.
     async fn records_for_scope(
         &self,
         scope: &ResourceScope,

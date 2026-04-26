@@ -11,6 +11,8 @@
 
 `ironclaw_host_runtime` is a composition-only crate for the current Reborn host/runtime vertical slice.
 
+Terminology note: older architecture docs use **kernel** for the small host-core composition layer. In the current implementation, that concrete composition crate is `ironclaw_host_runtime`; there is no active `ironclaw_kernel` crate in the Reborn stack. Treat “kernel” as the architecture concept and `ironclaw_host_runtime` as the concrete crate name unless a deliberate rename happens later.
+
 It wires already-owned service crates together so application setup code does not repeatedly hand-connect the same shared handles:
 
 ```text

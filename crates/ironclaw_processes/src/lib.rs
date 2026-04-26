@@ -219,6 +219,7 @@ impl ProcessExecutionError {
 
 #[async_trait]
 pub trait ProcessExecutor: Send + Sync {
+    /// Runs one background process request and must observe cooperative cancellation where possible.
     async fn execute(
         &self,
         request: ProcessExecutionRequest,
@@ -227,11 +228,13 @@ pub trait ProcessExecutor: Send + Sync {
 
 #[async_trait]
 pub trait ProcessManager: Send + Sync {
+    /// Starts process lifecycle tracking before detached execution begins.
     async fn spawn(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError>;
 }
 
 #[async_trait]
 pub trait ProcessResultStore: Send + Sync {
+    /// Stores successful process output separately from the lifecycle record.
     async fn complete(
         &self,
         scope: &ResourceScope,
@@ -239,6 +242,7 @@ pub trait ProcessResultStore: Send + Sync {
         output: Value,
     ) -> Result<ProcessResultRecord, ProcessError>;
 
+    /// Stores a classified process failure without raw backend detail strings.
     async fn fail(
         &self,
         scope: &ResourceScope,
@@ -246,18 +250,21 @@ pub trait ProcessResultStore: Send + Sync {
         error_kind: String,
     ) -> Result<ProcessResultRecord, ProcessError>;
 
+    /// Stores killed process result metadata without implying executor preemption succeeded.
     async fn kill(
         &self,
         scope: &ResourceScope,
         process_id: ProcessId,
     ) -> Result<ProcessResultRecord, ProcessError>;
 
+    /// Loads scoped result metadata; wrong-scope lookups must look unknown.
     async fn get(
         &self,
         scope: &ResourceScope,
         process_id: ProcessId,
     ) -> Result<Option<ProcessResultRecord>, ProcessError>;
 
+    /// Loads scoped process output, keeping large/sensitive output outside lifecycle records.
     async fn output(
         &self,
         scope: &ResourceScope,
@@ -1127,28 +1134,39 @@ where
 
 #[async_trait]
 pub trait ProcessStore: Send + Sync {
+    /// Persists a running process record without storing raw input.
     async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError>;
+
+    /// Transitions a scoped running process to completed.
     async fn complete(
         &self,
         scope: &ResourceScope,
         process_id: ProcessId,
     ) -> Result<ProcessRecord, ProcessError>;
+
+    /// Transitions a scoped running process to failed with a classified error kind.
     async fn fail(
         &self,
         scope: &ResourceScope,
         process_id: ProcessId,
         error_kind: String,
     ) -> Result<ProcessRecord, ProcessError>;
+
+    /// Marks a scoped process killed and must not reveal cross-tenant process existence.
     async fn kill(
         &self,
         scope: &ResourceScope,
         process_id: ProcessId,
     ) -> Result<ProcessRecord, ProcessError>;
+
+    /// Loads scoped process lifecycle metadata; wrong-scope lookups must look unknown.
     async fn get(
         &self,
         scope: &ResourceScope,
         process_id: ProcessId,
     ) -> Result<Option<ProcessRecord>, ProcessError>;
+
+    /// Lists process lifecycle records visible to the tenant/user scope only.
     async fn records_for_scope(
         &self,
         scope: &ResourceScope,

@@ -99,9 +99,16 @@ pub struct FileStat {
 /// Trusted root filesystem interface over canonical virtual paths.
 #[async_trait]
 pub trait RootFilesystem: Send + Sync {
+    /// Reads a file by canonical virtual path without exposing backend host paths in errors.
     async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError>;
+
+    /// Writes bytes to a canonical virtual path while preserving backend containment.
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError>;
+
+    /// Lists direct children of a canonical virtual directory; callers must handle pagination/backends in future implementations without bypassing scope.
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError>;
+
+    /// Returns metadata for a canonical virtual path without revealing raw host paths.
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError>;
 }
 

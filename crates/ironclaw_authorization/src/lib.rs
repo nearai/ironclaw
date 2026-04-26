@@ -24,6 +24,7 @@ use thiserror::Error;
 /// Authorizes a capability dispatch request against an execution context.
 #[async_trait]
 pub trait CapabilityDispatchAuthorizer: Send + Sync {
+    /// Returns `Allow` only when the context has matching authority for the capability and declared effects; otherwise fails closed.
     async fn authorize_dispatch(
         &self,
         context: &ExecutionContext,
@@ -31,6 +32,7 @@ pub trait CapabilityDispatchAuthorizer: Send + Sync {
         estimate: &ResourceEstimate,
     ) -> Decision;
 
+    /// Returns `Allow` only when dispatch authority and `SpawnProcess` authority are both present for the target capability.
     async fn authorize_spawn(
         &self,
         _context: &ExecutionContext,
@@ -128,30 +130,45 @@ pub enum CapabilityLeaseError {
 /// Store of active/revoked capability leases.
 #[async_trait]
 pub trait CapabilityLeaseStore: Send + Sync {
+    /// Persists a scoped lease before any approval record is marked approved.
     async fn issue(&self, lease: CapabilityLease) -> Result<CapabilityLease, CapabilityLeaseError>;
+
+    /// Revokes a lease only within the exact tenant/user/invocation scope that owns it.
     async fn revoke(
         &self,
         scope: &ResourceScope,
         lease_id: CapabilityGrantId,
     ) -> Result<CapabilityLease, CapabilityLeaseError>;
+
+    /// Loads a lease by exact scope and ID; wrong-scope lookups must behave as unknown.
     async fn get(
         &self,
         scope: &ResourceScope,
         lease_id: CapabilityGrantId,
     ) -> Option<CapabilityLease>;
+
+    /// Atomically marks an active fingerprinted lease as claimed after matching the replay fingerprint.
     async fn claim(
         &self,
         scope: &ResourceScope,
         lease_id: CapabilityGrantId,
         invocation_fingerprint: &InvocationFingerprint,
     ) -> Result<CapabilityLease, CapabilityLeaseError>;
+
+    /// Consumes or decrements an active/claimed lease after successful dispatch.
     async fn consume(
         &self,
         scope: &ResourceScope,
         lease_id: CapabilityGrantId,
     ) -> Result<CapabilityLease, CapabilityLeaseError>;
+
+    /// Lists leases visible to the tenant/user scope without exposing cross-tenant records.
     async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease>;
+
+    /// Returns active, unexpired, unexhausted leases for the exact invocation context.
     async fn active_leases_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityLease>;
+
+    /// Converts only non-fingerprinted active leases into ambient grants for authorization.
     async fn active_grants_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityGrant> {
         self.active_leases_for_context(context)
             .await
