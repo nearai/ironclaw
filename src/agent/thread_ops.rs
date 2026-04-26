@@ -1266,11 +1266,24 @@ impl Agent {
             };
             crate::trace_contribution::apply_credit_estimate_to_envelope(&mut envelope);
 
-            if let Err(error) =
-                crate::trace_contribution::queue_trace_envelope_for_scope(Some(&user_id), &envelope)
-            {
-                tracing::debug!(%error, %thread_id, "Failed to queue autonomous trace");
-                return;
+            match crate::trace_contribution::trace_autonomous_eligibility(&envelope, &policy) {
+                crate::trace_contribution::TraceQueueEligibility::Submit => {
+                    if let Err(error) = crate::trace_contribution::queue_trace_envelope_for_scope(
+                        Some(&user_id),
+                        &envelope,
+                    ) {
+                        tracing::debug!(%error, %thread_id, "Failed to queue autonomous trace");
+                        return;
+                    }
+                }
+                crate::trace_contribution::TraceQueueEligibility::Hold { reason } => {
+                    tracing::debug!(
+                        %thread_id,
+                        submission_id = %envelope.submission_id,
+                        reason = %reason,
+                        "Skipping autonomous trace queue by trace contribution policy"
+                    );
+                }
             }
 
             let report = match crate::trace_contribution::flush_trace_contribution_queue_for_scope(
@@ -3577,6 +3590,85 @@ mod tests {
         assert!(
             queued.is_empty(),
             "endpoint-less autonomous policy must not queue traces"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_autonomous_trace_skips_ineligible_queue_but_emits_credit_notice() {
+        let (agent, _db, _temp_dir, statuses) =
+            make_trace_capture_agent_with_statuses(Arc::new(StubLlm::new("done"))).await;
+        let user_id = format!("trace-runtime-ineligible-policy-user-{}", Uuid::new_v4());
+        let policy = crate::trace_contribution::StandingTraceContributionPolicy {
+            enabled: true,
+            ingestion_endpoint: Some("http://127.0.0.1:9/v1/traces".to_string()),
+            auto_submit_failed_traces: false,
+            auto_submit_high_value_traces: false,
+            require_manual_approval_when_pii_detected: false,
+            min_submission_score: 0.0,
+            credit_notice_interval_hours: 168,
+            ..Default::default()
+        };
+        crate::trace_contribution::write_trace_policy_for_scope(Some(&user_id), &policy)
+            .expect("trace policy writes");
+        write_trace_notice_record_for_user(&user_id, 2.0, 3.5);
+
+        let session = agent.session_manager.get_or_create_session(&user_id).await;
+        let thread_id = {
+            let mut sess = session.lock().await;
+            sess.create_thread(Some("test")).id
+        };
+        let message = IncomingMessage::new("test", &user_id, "finish it");
+
+        let result = agent
+            .process_user_input(
+                &message,
+                agent.tenant_ctx(&user_id).await,
+                Arc::clone(&session),
+                thread_id,
+                "finish it",
+            )
+            .await
+            .expect("process user input");
+        assert!(matches!(result, SubmissionResult::Response { .. }));
+
+        let notice_seen = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let statuses = statuses.lock().await;
+                if statuses.iter().any(|status| {
+                    matches!(
+                        status,
+                        StatusUpdate::Status(message)
+                            if message.contains("Trace contribution credit update")
+                                && message.contains("pending +2.00")
+                                && message.contains("final confirmed +3.50")
+                    )
+                }) {
+                    break true;
+                }
+                drop(statuses);
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(
+            notice_seen,
+            "autonomous credit notice should still emit when the current trace is not queueable"
+        );
+
+        let queued =
+            crate::trace_contribution::queued_trace_envelope_paths_for_scope(Some(&user_id))
+                .expect("read trace queue");
+        assert!(
+            queued.is_empty(),
+            "ineligible autonomous trace should not leave a held queue file"
+        );
+        let held = crate::trace_contribution::read_trace_queue_holds_for_scope(Some(&user_id))
+            .expect("read trace queue holds");
+        assert!(
+            held.is_empty(),
+            "ineligible autonomous trace should not leave a hold sidecar"
         );
     }
 
