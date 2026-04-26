@@ -2256,6 +2256,11 @@ async fn maintenance_handler(
 ) -> ApiResult<Json<TraceMaintenanceResponse>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_maintenance_operator(&tenant, &body)?;
+    require_purge_purpose(
+        body.dry_run,
+        body.purge_expired_before,
+        body.purpose.as_deref(),
+    )?;
     let response = run_maintenance(state.as_ref(), &tenant, body)
         .await
         .map_err(internal_error)?;
@@ -2283,6 +2288,11 @@ async fn retention_maintenance_handler(
 ) -> ApiResult<Json<TraceMaintenanceResponse>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_retention_operator(&tenant)?;
+    require_purge_purpose(
+        body.dry_run,
+        body.purge_expired_before,
+        body.purpose.as_deref(),
+    )?;
     let response = run_maintenance(
         state.as_ref(),
         &tenant,
@@ -2304,6 +2314,29 @@ async fn retention_maintenance_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(response))
+}
+
+fn require_purge_purpose(
+    dry_run: bool,
+    purge_expired_before: Option<DateTime<Utc>>,
+    purpose: Option<&str>,
+) -> ApiResult<()> {
+    if dry_run || purge_expired_before.is_none() {
+        return Ok(());
+    }
+
+    if purpose
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    Err(api_error(
+        StatusCode::BAD_REQUEST,
+        "purging expired traces requires an explicit purpose",
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -13051,6 +13084,40 @@ mod tests {
             false,
             false,
         );
+        let missing_admin_purpose = maintenance_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: None,
+                dry_run: false,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: Some(Utc::now()),
+            }),
+        )
+        .await
+        .expect_err("destructive purge requires an explicit purpose");
+        assert_eq!(missing_admin_purpose.0, StatusCode::BAD_REQUEST);
+
+        let missing_worker_purpose = retention_maintenance_handler(
+            State(state.clone()),
+            auth_headers("retention-worker-token-a"),
+            Json(TraceRetentionMaintenanceRequest {
+                purpose: None,
+                dry_run: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: Some(Utc::now()),
+            }),
+        )
+        .await
+        .expect_err("retention worker purge requires an explicit purpose");
+        assert_eq!(missing_worker_purpose.0, StatusCode::BAD_REQUEST);
+
         let mut envelope = sample_envelope().await;
         make_metadata_only_low_risk(&mut envelope);
         let submission_id = envelope.submission_id;
