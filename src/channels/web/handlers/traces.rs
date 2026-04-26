@@ -536,10 +536,12 @@ mod tests {
     async fn traces_flush_handler_returns_authenticated_user_scoped_credit_notice() {
         let user_id = format!("trace-web-flush-user-{}", Uuid::new_v4());
         let other_user_id = format!("trace-web-flush-other-{}", Uuid::new_v4());
-        let mut policy = StandingTraceContributionPolicy::default();
-        policy.enabled = true;
-        policy.ingestion_endpoint = Some("https://trace.example.com/v1/traces".to_string());
-        policy.credit_notice_interval_hours = 168;
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+            credit_notice_interval_hours: 168,
+            ..Default::default()
+        };
         write_trace_policy_for_scope(Some(&user_id), &policy).expect("user policy writes");
         write_trace_policy_for_scope(Some(&other_user_id), &policy).expect("other policy writes");
         write_trace_records(&user_id, &[submitted_record(2.0)]);

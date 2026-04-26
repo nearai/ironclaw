@@ -5849,13 +5849,15 @@ mod tests {
     async fn queue_flush_holds_failed_submission_and_still_returns_due_credit_notice() {
         let scope = format!("trace-flush-submit-failure-test-{}", Uuid::new_v4());
         let _token_guard = EnvVarRestore::set("TRACE_COMMONS_TEST_TOKEN", "super-secret-token");
-        let mut policy = StandingTraceContributionPolicy::default();
-        policy.enabled = true;
-        policy.ingestion_endpoint = Some("http://127.0.0.1:9/v1/traces".to_string());
-        policy.bearer_token_env = "TRACE_COMMONS_TEST_TOKEN".to_string();
-        policy.auto_submit_high_value_traces = true;
-        policy.min_submission_score = 0.0;
-        policy.credit_notice_interval_hours = 168;
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            ingestion_endpoint: Some("http://127.0.0.1:9/v1/traces".to_string()),
+            bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
+            auto_submit_high_value_traces: true,
+            min_submission_score: 0.0,
+            credit_notice_interval_hours: 168,
+            ..Default::default()
+        };
         write_trace_policy_for_scope(Some(&scope), &policy).expect("policy writes");
 
         let raw = RawTraceContribution::from_recorded_trace(

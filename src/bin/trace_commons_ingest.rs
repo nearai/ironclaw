@@ -101,6 +101,7 @@ struct AppState {
     db_replay_export_require_object_refs: bool,
     db_audit_reads: bool,
     db_tenant_policy_reads: bool,
+    require_db_mirror_writes: bool,
     require_export_guardrails: bool,
     artifact_store: Option<ConfiguredTraceArtifactStore>,
 }
@@ -346,6 +347,12 @@ impl AppState {
                 "TRACE_COMMONS_DB_TENANT_POLICY_READS requires TRACE_COMMONS_DB_DUAL_WRITE"
             );
         }
+        let require_db_mirror_writes = env_truthy("TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES");
+        if require_db_mirror_writes && db_mirror.is_none() {
+            anyhow::bail!(
+                "TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES requires TRACE_COMMONS_DB_DUAL_WRITE"
+            );
+        }
         let require_export_guardrails = env_truthy("TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS");
         let artifact_store = trace_artifact_store_from_env(&root)?;
         Ok(Self {
@@ -361,9 +368,31 @@ impl AppState {
             db_replay_export_require_object_refs,
             db_audit_reads,
             db_tenant_policy_reads,
+            require_db_mirror_writes,
             require_export_guardrails,
             artifact_store,
         })
+    }
+}
+
+fn enforce_db_mirror_write_result(
+    state: &AppState,
+    operation: &str,
+    result: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    match result {
+        Ok(()) => {
+            if state.require_db_mirror_writes && state.db_mirror.is_none() {
+                anyhow::bail!(
+                    "TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES requires TRACE_COMMONS_DB_DUAL_WRITE for {operation}"
+                );
+            }
+            Ok(())
+        }
+        Err(error) if state.require_db_mirror_writes => Err(error.context(format!(
+            "required Trace Commons DB mirror write failed: {operation}"
+        ))),
+        Err(_) => Ok(()),
     }
 }
 
@@ -869,11 +898,13 @@ async fn submit_trace_handler(
         TraceCommonsAuditEvent::submitted(&record),
     )
     .map_err(internal_error)?;
-    if let Err(error) =
-        mirror_submission_to_db(&state, &tenant, &record, &derived_record, &envelope).await
-    {
+    let mirror_result =
+        mirror_submission_to_db(&state, &tenant, &record, &derived_record, &envelope).await;
+    if let Err(error) = &mirror_result {
         tracing::warn!(%error, submission_id = %record.submission_id, "Trace Commons DB dual-write mirror failed");
     }
+    enforce_db_mirror_write_result(state.as_ref(), "submission", mirror_result)
+        .map_err(internal_error)?;
 
     Ok(Json(receipt_from_record(&record)))
 }
@@ -972,17 +1003,18 @@ async fn revoke_submission(
         TraceCommonsAuditEvent::revoked(&tenant, submission_id),
     )
     .map_err(internal_error)?;
-    if let Err(error) = mirror_revocation_to_db(
+    let mirror_result = mirror_revocation_to_db(
         state,
         &tenant,
         submission_id,
         mirrored_record.as_ref(),
         db_record.as_ref(),
     )
-    .await
-    {
+    .await;
+    if let Err(error) = &mirror_result {
         tracing::warn!(%error, %submission_id, "Trace Commons DB dual-write revocation mirror failed");
     }
+    enforce_db_mirror_write_result(state, "revocation", mirror_result).map_err(internal_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1333,9 +1365,12 @@ async fn append_credit_event_handler(
         created_at: Utc::now(),
     };
     append_credit_event(&state.root, &tenant.tenant_id, &event).map_err(internal_error)?;
-    if let Err(error) = mirror_credit_event_to_db(&state, &event).await {
+    let mirror_result = mirror_credit_event_to_db(&state, &event).await;
+    if let Err(error) = &mirror_result {
         tracing::warn!(%error, submission_id = %event.submission_id, "Trace Commons DB dual-write credit mirror failed");
     }
+    enforce_db_mirror_write_result(state.as_ref(), "credit ledger event", mirror_result)
+        .map_err(internal_error)?;
     append_audit_event_with_db_mirror(
         state.as_ref(),
         &tenant,
@@ -1426,9 +1461,11 @@ async fn append_automatic_utility_credit_events_once(
             created_at: Utc::now(),
         };
         append_credit_event(&state.root, &tenant.tenant_id, &event)?;
-        if let Err(error) = mirror_credit_event_to_db(state, &event).await {
+        let mirror_result = mirror_credit_event_to_db(state, &event).await;
+        if let Err(error) = &mirror_result {
             tracing::warn!(%error, submission_id = %event.submission_id, "Trace Commons DB dual-write automatic credit mirror failed");
         }
+        enforce_db_mirror_write_result(state, "automatic credit ledger event", mirror_result)?;
         append_audit_event_with_db_mirror(
             state,
             tenant,
@@ -1562,12 +1599,14 @@ async fn review_decision_handler(
         ),
     )
     .map_err(internal_error)?;
-    if let Err(error) =
+    let mirror_result =
         mirror_review_decision_to_db(&state, &tenant, &record, &envelope, canonical_summary_hash)
-            .await
-    {
+            .await;
+    if let Err(error) = &mirror_result {
         tracing::warn!(%error, %submission_id, "Trace Commons DB dual-write review mirror failed");
     }
+    enforce_db_mirror_write_result(state.as_ref(), "review decision", mirror_result)
+        .map_err(internal_error)?;
 
     Ok(Json(receipt_from_record(&record)))
 }
@@ -1667,20 +1706,22 @@ async fn dataset_replay_handler(
         source_submission_ids_hash,
     );
     write_export_manifest(&state.root, &tenant.tenant_id, &manifest).map_err(internal_error)?;
-    if let Err(error) = mirror_export_manifest_to_db(
+    let mirror_result = mirror_export_manifest_to_db(
         state.as_ref(),
         StorageTraceObjectArtifactKind::ExportArtifact,
         &manifest,
         &items,
     )
-    .await
-    {
+    .await;
+    if let Err(error) = &mirror_result {
         tracing::warn!(
             %error,
             export_id = %manifest.export_id,
             "Trace Commons DB dual-write export manifest mirror failed"
         );
     }
+    enforce_db_mirror_write_result(state.as_ref(), "replay export manifest", mirror_result)
+        .map_err(internal_error)?;
     append_audit_event_with_db_mirror(
         state.as_ref(),
         &tenant,
@@ -1890,19 +1931,21 @@ async fn run_benchmark_conversion(
     } else {
         None
     };
-    if let Err(error) = mirror_benchmark_export_provenance_to_db(
+    let mirror_result = mirror_benchmark_export_provenance_to_db(
         state,
         &artifact,
         artifact_object_ref_material.as_ref(),
     )
-    .await
-    {
+    .await;
+    if let Err(error) = &mirror_result {
         tracing::warn!(
             %error,
             export_id = %conversion_id,
             "Trace Commons DB dual-write benchmark provenance mirror failed"
         );
     }
+    enforce_db_mirror_write_result(state, "benchmark provenance", mirror_result)
+        .map_err(internal_error)?;
     append_audit_event_with_db_mirror(
         state,
         tenant,
@@ -2047,20 +2090,22 @@ async fn ranker_training_candidates_handler(
     } else {
         None
     };
-    if let Err(error) = mirror_ranker_candidate_export_provenance_to_db(
+    let mirror_result = mirror_ranker_candidate_export_provenance_to_db(
         state.as_ref(),
         &provenance,
         &candidates,
         artifact_object_ref_material.as_ref(),
     )
-    .await
-    {
+    .await;
+    if let Err(error) = &mirror_result {
         tracing::warn!(
             %error,
             export_id = %export_id,
             "Trace Commons DB dual-write ranker candidate provenance mirror failed"
         );
     }
+    enforce_db_mirror_write_result(state.as_ref(), "ranker candidate provenance", mirror_result)
+        .map_err(internal_error)?;
     append_audit_event_with_db_mirror(
         state.as_ref(),
         &tenant,
@@ -2186,20 +2231,22 @@ async fn ranker_training_pairs_handler(
     } else {
         None
     };
-    if let Err(error) = mirror_ranker_pair_export_provenance_to_db(
+    let mirror_result = mirror_ranker_pair_export_provenance_to_db(
         state.as_ref(),
         &provenance,
         &pairs,
         artifact_object_ref_material.as_ref(),
     )
-    .await
-    {
+    .await;
+    if let Err(error) = &mirror_result {
         tracing::warn!(
             %error,
             export_id = %export_id,
             "Trace Commons DB dual-write ranker pair provenance mirror failed"
         );
     }
+    enforce_db_mirror_write_result(state.as_ref(), "ranker pair provenance", mirror_result)
+        .map_err(internal_error)?;
     append_audit_event_with_db_mirror(
         state.as_ref(),
         &tenant,
@@ -5812,13 +5859,15 @@ async fn append_audit_event_with_db_mirror(
     metadata: StorageTraceAuditSafeMetadata,
 ) -> anyhow::Result<()> {
     let event = append_audit_event(&state.root, &tenant.tenant_id, event)?;
-    if let Err(error) = mirror_audit_event_to_db(state, tenant, &event, action, metadata).await {
+    let mirror_result = mirror_audit_event_to_db(state, tenant, &event, action, metadata).await;
+    if let Err(error) = &mirror_result {
         tracing::warn!(
             %error,
             event_id = %event.event_id,
             "Trace Commons DB dual-write audit mirror failed"
         );
     }
+    enforce_db_mirror_write_result(state, "audit event", mirror_result)?;
     Ok(())
 }
 
@@ -5832,7 +5881,7 @@ async fn append_trace_content_read_audit(
 ) -> anyhow::Result<()> {
     let event = TraceCommonsAuditEvent::trace_content_read(tenant, submission_id, surface, purpose);
     let event = append_audit_event(&state.root, &tenant.tenant_id, event)?;
-    if let Err(error) = mirror_audit_event_to_db_with_object_ref(
+    let mirror_result = mirror_audit_event_to_db_with_object_ref(
         state,
         tenant,
         &event,
@@ -5840,14 +5889,15 @@ async fn append_trace_content_read_audit(
         StorageTraceAuditSafeMetadata::Empty,
         object_ref_id,
     )
-    .await
-    {
+    .await;
+    if let Err(error) = &mirror_result {
         tracing::warn!(
             %error,
             event_id = %event.event_id,
             "Trace Commons DB dual-write audit mirror failed"
         );
     }
+    enforce_db_mirror_write_result(state, "trace content read audit event", mirror_result)?;
     Ok(())
 }
 
@@ -9606,6 +9656,7 @@ mod tests {
             db_replay_export_require_object_refs: false,
             db_audit_reads: false,
             db_tenant_policy_reads: false,
+            require_db_mirror_writes: false,
             require_export_guardrails: false,
             artifact_store: None,
         })
@@ -9658,6 +9709,7 @@ mod tests {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn test_state_with_options_and_policies(
         root: PathBuf,
         db_mirror: Option<Arc<dyn Database>>,
@@ -9718,6 +9770,28 @@ mod tests {
         )
     }
 
+    fn test_state_with_required_db_mirror_writes(
+        root: PathBuf,
+        db_mirror: Option<Arc<dyn Database>>,
+    ) -> Arc<AppState> {
+        test_state_with_configured_artifact_store_policies_export_guardrails_and_required_db_writes(
+            root,
+            db_mirror,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn test_state_with_options_policies_and_export_guardrails(
         root: PathBuf,
         db_mirror: Option<Arc<dyn Database>>,
@@ -9731,7 +9805,7 @@ mod tests {
         require_tenant_submission_policy: bool,
         require_export_guardrails: bool,
     ) -> Arc<AppState> {
-        test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        test_state_with_configured_artifact_store_policies_export_guardrails_and_required_db_writes(
             root,
             db_mirror,
             artifact_store.map(ConfiguredTraceArtifactStore::legacy),
@@ -9744,6 +9818,7 @@ mod tests {
             tenant_policies,
             require_tenant_submission_policy,
             require_export_guardrails,
+            false,
         )
     }
 
@@ -9752,7 +9827,7 @@ mod tests {
         db_mirror: Arc<dyn Database>,
         require_tenant_submission_policy: bool,
     ) -> Arc<AppState> {
-        test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        test_state_with_configured_artifact_store_policies_export_guardrails_and_required_db_writes(
             root,
             Some(db_mirror),
             None,
@@ -9765,9 +9840,11 @@ mod tests {
             BTreeMap::new(),
             require_tenant_submission_policy,
             false,
+            false,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn test_state_with_configured_artifact_store_policies_and_export_guardrails(
         root: PathBuf,
         db_mirror: Option<Arc<dyn Database>>,
@@ -9781,6 +9858,39 @@ mod tests {
         tenant_policies: BTreeMap<String, TenantSubmissionPolicy>,
         require_tenant_submission_policy: bool,
         require_export_guardrails: bool,
+    ) -> Arc<AppState> {
+        test_state_with_configured_artifact_store_policies_export_guardrails_and_required_db_writes(
+            root,
+            db_mirror,
+            artifact_store,
+            db_contributor_reads,
+            db_reviewer_reads,
+            db_replay_export_reads,
+            db_replay_export_require_object_refs,
+            db_audit_reads,
+            db_tenant_policy_reads,
+            tenant_policies,
+            require_tenant_submission_policy,
+            require_export_guardrails,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn test_state_with_configured_artifact_store_policies_export_guardrails_and_required_db_writes(
+        root: PathBuf,
+        db_mirror: Option<Arc<dyn Database>>,
+        artifact_store: Option<ConfiguredTraceArtifactStore>,
+        db_contributor_reads: bool,
+        db_reviewer_reads: bool,
+        db_replay_export_reads: bool,
+        db_replay_export_require_object_refs: bool,
+        db_audit_reads: bool,
+        db_tenant_policy_reads: bool,
+        tenant_policies: BTreeMap<String, TenantSubmissionPolicy>,
+        require_tenant_submission_policy: bool,
+        require_export_guardrails: bool,
+        require_db_mirror_writes: bool,
     ) -> Arc<AppState> {
         let mut tokens = BTreeMap::new();
         insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Contributor);
@@ -9837,6 +9947,7 @@ mod tests {
             db_replay_export_require_object_refs,
             db_audit_reads,
             db_tenant_policy_reads,
+            require_db_mirror_writes,
             require_export_guardrails,
             artifact_store,
         })
@@ -10844,6 +10955,170 @@ mod tests {
             .expect("derived invalidation row fetch succeeds")
             .expect("derived invalidation count row exists");
         assert_eq!(row.get::<i64>(0).expect("derived count reads"), 1);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn required_db_mirror_writes_fail_closed_on_submission_mirror_failure() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-required-submit-mirror.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_required_db_mirror_writes(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let conn = db.connect().await.expect("connect to mirror");
+        conn.execute("DROP TABLE trace_submissions", ())
+            .await
+            .expect("drop mirrored submissions table");
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+
+        let error = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
+            .await
+            .expect_err("required DB mirror writes fail closed when submit mirror fails");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn required_db_mirror_writes_fail_closed_on_delayed_credit_mirror_failure() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-required-credit-mirror.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_required_db_mirror_writes(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds before mirror table is removed");
+        let conn = db.connect().await.expect("connect to mirror");
+        conn.execute("DROP TABLE trace_credit_ledger", ())
+            .await
+            .expect("drop mirrored credit table");
+
+        let error = append_credit_event_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::ReviewerBonus,
+                credit_points_delta: 2.0,
+                reason: Some("required DB credit mirror".to_string()),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect_err("required DB mirror writes fail closed when credit mirror fails");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn required_db_mirror_writes_fail_closed_on_export_provenance_mirror_failure() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-required-export-mirror.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_required_db_mirror_writes(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        for score in [0.9_f32, 0.1_f32] {
+            let mut envelope = sample_envelope().await;
+            make_metadata_only_low_risk(&mut envelope);
+            envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+            envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+            envelope.value.submission_score = score;
+            let _ = submit_trace_handler(
+                State(state.clone()),
+                auth_headers("token-a"),
+                Json(envelope),
+            )
+            .await
+            .expect("ranker source submission succeeds before mirror table is removed");
+        }
+        let conn = db.connect().await.expect("connect to mirror");
+        conn.execute("DROP TABLE trace_export_manifests", ())
+            .await
+            .expect("drop mirrored export manifest table");
+
+        let benchmark_error = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("required_db_benchmark".to_string()),
+                consent_scope: None,
+                status: None,
+                privacy_risk: None,
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect_err("required DB mirror writes fail closed when benchmark provenance fails");
+        assert_eq!(benchmark_error.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let candidates_error = ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("required_db_ranker_candidates".to_string()),
+                status: None,
+                consent_scope: Some("ranking_training".to_string()),
+                privacy_risk: None,
+            }),
+        )
+        .await
+        .expect_err("required DB mirror writes fail closed when ranker candidate provenance fails");
+        assert_eq!(candidates_error.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let pairs_error = ranker_training_pairs_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("required_db_ranker_pairs".to_string()),
+                status: None,
+                consent_scope: Some("ranking_training".to_string()),
+                privacy_risk: None,
+            }),
+        )
+        .await
+        .expect_err("required DB mirror writes fail closed when ranker pair provenance fails");
+        assert_eq!(pairs_error.0, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[cfg(feature = "libsql")]

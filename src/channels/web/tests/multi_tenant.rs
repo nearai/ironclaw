@@ -1005,9 +1005,11 @@ mod trace_contribution_isolation {
     }
 
     fn enable_trace_policy(scope: &str) {
-        let mut policy = StandingTraceContributionPolicy::default();
-        policy.enabled = true;
-        policy.ingestion_endpoint = Some("http://127.0.0.1:9/v1/traces".to_string());
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            ingestion_endpoint: Some("http://127.0.0.1:9/v1/traces".to_string()),
+            ..Default::default()
+        };
         write_trace_policy_for_scope(Some(scope), &policy).expect("write trace policy");
     }
 
@@ -1549,10 +1551,11 @@ mod trace_contribution_isolation {
         let bob_credit_body = axum::body::to_bytes(bob_credit_resp.into_body(), 1024 * 1024)
             .await
             .expect("read bob credit");
+        let submission_id_string = submission_id.to_string();
         assert!(
             !bob_credit_body
-                .windows(submission_id.to_string().as_bytes().len())
-                .any(|chunk| chunk == submission_id.to_string().as_bytes()),
+                .windows(submission_id_string.len())
+                .any(|chunk| chunk == submission_id_string.as_bytes()),
             "bob credit response must not include alice submission ids"
         );
         let bob_credit: serde_json::Value =

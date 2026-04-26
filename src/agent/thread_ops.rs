@@ -3468,12 +3468,14 @@ mod tests {
         let (agent, _db, _temp_dir, statuses) =
             make_trace_capture_agent_with_statuses(Arc::new(StubLlm::new("done"))).await;
         let user_id = format!("trace-runtime-credit-user-{}", Uuid::new_v4());
-        let mut policy = crate::trace_contribution::StandingTraceContributionPolicy::default();
-        policy.enabled = true;
-        policy.ingestion_endpoint = Some("http://127.0.0.1:9/v1/traces".to_string());
-        policy.auto_submit_high_value_traces = true;
-        policy.min_submission_score = 0.0;
-        policy.credit_notice_interval_hours = 168;
+        let policy = crate::trace_contribution::StandingTraceContributionPolicy {
+            enabled: true,
+            ingestion_endpoint: Some("http://127.0.0.1:9/v1/traces".to_string()),
+            auto_submit_high_value_traces: true,
+            min_submission_score: 0.0,
+            credit_notice_interval_hours: 168,
+            ..Default::default()
+        };
         crate::trace_contribution::write_trace_policy_for_scope(Some(&user_id), &policy)
             .expect("trace policy writes");
         write_trace_notice_record_for_user(&user_id, 4.0, 6.0);
