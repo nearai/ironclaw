@@ -9,7 +9,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_approvals::ApprovalResolver;
 use ironclaw_authorization::{CapabilityDispatchAuthorizer, CapabilityLeaseStore};
-use ironclaw_capabilities::{CapabilityHost, DispatchProcessExecutor};
+use ironclaw_capabilities::{CapabilityHost, CapabilityObligationHandler, DispatchProcessExecutor};
 use ironclaw_dispatcher::{
     DispatchError, RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
 };
@@ -248,6 +248,7 @@ where
     mcp_runtime: Option<Arc<dyn McpExecutor>>,
     event_sink: Option<Arc<dyn EventSink>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
+    obligation_handler: Option<Arc<dyn CapabilityObligationHandler>>,
 }
 
 impl<F, G, S, R, A> HostRuntimeServices<F, G, S, R, A>
@@ -279,6 +280,7 @@ where
             mcp_runtime: None,
             event_sink: None,
             audit_sink: None,
+            obligation_handler: None,
         }
     }
 
@@ -371,6 +373,15 @@ where
         self
     }
 
+    pub fn with_obligation_handler<T>(mut self, handler: Arc<T>) -> Self
+    where
+        T: CapabilityObligationHandler + 'static,
+    {
+        let handler: Arc<dyn CapabilityObligationHandler> = handler;
+        self.obligation_handler = Some(handler);
+        self
+    }
+
     pub fn approval_resolver(
         &self,
     ) -> Option<ApprovalResolver<'_, dyn ApprovalRequestStore, dyn CapabilityLeaseStore>> {
@@ -458,6 +469,9 @@ where
         }
         if let Some(capability_leases) = &self.capability_leases {
             host = host.with_capability_leases(capability_leases.as_ref());
+        }
+        if let Some(obligation_handler) = &self.obligation_handler {
+            host = host.with_obligation_handler(obligation_handler.as_ref());
         }
         host
     }

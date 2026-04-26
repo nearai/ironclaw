@@ -4,7 +4,7 @@
 //! It coordinates authorization and runtime dispatch without making callers
 //! understand grant evaluation and without making the dispatcher own auth.
 
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_authorization::{
@@ -68,6 +68,70 @@ pub struct CapabilitySpawnResult {
     pub process: ProcessRecord,
 }
 
+/// Capability-host phase where authorization obligations are satisfied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityObligationPhase {
+    Invoke,
+    Resume,
+    Spawn,
+}
+
+/// Request passed to a configured obligation handler before side effects continue.
+pub struct CapabilityObligationRequest<'a> {
+    pub phase: CapabilityObligationPhase,
+    pub context: &'a ExecutionContext,
+    pub capability_id: &'a CapabilityId,
+    pub estimate: &'a ResourceEstimate,
+    pub obligations: &'a [Obligation],
+}
+
+/// Stable, sanitized obligation-handler failure categories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityObligationFailureKind {
+    Handler,
+    Audit,
+    Secret,
+    Network,
+    Output,
+    Resource,
+    Mount,
+}
+
+impl fmt::Display for CapabilityObligationFailureKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Handler => "handler",
+            Self::Audit => "audit",
+            Self::Secret => "secret",
+            Self::Network => "network",
+            Self::Output => "output",
+            Self::Resource => "resource",
+            Self::Mount => "mount",
+        })
+    }
+}
+
+/// Obligation handler failures. Variants intentionally avoid raw input/output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CapabilityObligationError {
+    Unsupported {
+        obligations: Vec<Obligation>,
+    },
+    Failed {
+        kind: CapabilityObligationFailureKind,
+    },
+}
+
+/// Host-provided obligation satisfaction seam.
+#[async_trait]
+pub trait CapabilityObligationHandler: Send + Sync {
+    /// Satisfies all obligations for one capability host phase or fails closed.
+    async fn satisfy(
+        &self,
+        request: CapabilityObligationRequest<'_>,
+    ) -> Result<(), CapabilityObligationError>;
+}
+
 /// Capability invocation failures before or during dispatch.
 #[derive(Debug, Error)]
 pub enum CapabilityInvocationError {
@@ -82,6 +146,11 @@ pub enum CapabilityInvocationError {
     UnsupportedObligations {
         capability: CapabilityId,
         obligations: Vec<Obligation>,
+    },
+    #[error("capability {capability} obligation handling failed: {kind}")]
+    ObligationFailed {
+        capability: CapabilityId,
+        kind: CapabilityObligationFailureKind,
     },
     #[error("capability {capability} invocation requires approval")]
     AuthorizationRequiresApproval { capability: CapabilityId },
@@ -224,6 +293,7 @@ where
     approval_requests: Option<&'a dyn ApprovalRequestStore>,
     capability_leases: Option<&'a dyn CapabilityLeaseStore>,
     process_manager: Option<ProcessManagerBinding<'a>>,
+    obligation_handler: Option<&'a dyn CapabilityObligationHandler>,
 }
 
 impl<'a, D> CapabilityHost<'a, D>
@@ -243,6 +313,7 @@ where
             approval_requests: None,
             capability_leases: None,
             process_manager: None,
+            obligation_handler: None,
         }
     }
 
@@ -269,6 +340,11 @@ where
 
     pub fn with_process_manager(mut self, process_manager: &'a dyn ProcessManager) -> Self {
         self.process_manager = Some(ProcessManagerBinding::Borrowed(process_manager));
+        self
+    }
+
+    pub fn with_obligation_handler(mut self, handler: &'a dyn CapabilityObligationHandler) -> Self {
+        self.obligation_handler = Some(handler);
         self
     }
 
@@ -350,12 +426,23 @@ where
             .await
         {
             Decision::Allow { obligations } => {
-                if let Err(error) =
-                    ensure_no_unsupported_obligations(request.capability_id.clone(), obligations)
+                if let Err(error) = self
+                    .satisfy_obligations(
+                        CapabilityObligationPhase::Invoke,
+                        request.capability_id.clone(),
+                        &request.context,
+                        &request.estimate,
+                        obligations,
+                    )
+                    .await
                 {
                     if let Some(run_state) = self.run_state {
                         run_state
-                            .fail(&scope, invocation_id, "UnsupportedObligations".to_string())
+                            .fail(
+                                &scope,
+                                invocation_id,
+                                obligation_error_kind(&error).to_string(),
+                            )
                             .await?;
                     }
                     return Err(error);
@@ -506,12 +593,23 @@ where
             .await
         {
             Decision::Allow { obligations } => {
-                if let Err(error) =
-                    ensure_no_unsupported_obligations(request.capability_id.clone(), obligations)
+                if let Err(error) = self
+                    .satisfy_obligations(
+                        CapabilityObligationPhase::Spawn,
+                        request.capability_id.clone(),
+                        &request.context,
+                        &request.estimate,
+                        obligations,
+                    )
+                    .await
                 {
                     if let Some(run_state) = self.run_state {
                         run_state
-                            .fail(&scope, invocation_id, "UnsupportedObligations".to_string())
+                            .fail(
+                                &scope,
+                                invocation_id,
+                                obligation_error_kind(&error).to_string(),
+                            )
                             .await?;
                     }
                     return Err(error);
@@ -712,10 +810,23 @@ where
             .await
         {
             Decision::Allow { obligations } => {
-                if let Err(error) =
-                    ensure_no_unsupported_obligations(request.capability_id.clone(), obligations)
+                if let Err(error) = self
+                    .satisfy_obligations(
+                        CapabilityObligationPhase::Resume,
+                        request.capability_id.clone(),
+                        &authorized_context,
+                        &request.estimate,
+                        obligations,
+                    )
+                    .await
                 {
-                    fail_run(run_state, &scope, invocation_id, "UnsupportedObligations").await?;
+                    fail_run(
+                        run_state,
+                        &scope,
+                        invocation_id,
+                        obligation_error_kind(&error),
+                    )
+                    .await?;
                     return Err(error);
                 }
             }
@@ -779,20 +890,58 @@ where
 
         Ok(CapabilityInvocationResult { dispatch })
     }
+
+    async fn satisfy_obligations(
+        &self,
+        phase: CapabilityObligationPhase,
+        capability: CapabilityId,
+        context: &ExecutionContext,
+        estimate: &ResourceEstimate,
+        obligations: Vec<Obligation>,
+    ) -> Result<(), CapabilityInvocationError> {
+        if obligations.is_empty() {
+            return Ok(());
+        }
+
+        let Some(handler) = self.obligation_handler else {
+            return Err(CapabilityInvocationError::UnsupportedObligations {
+                capability,
+                obligations,
+            });
+        };
+
+        handler
+            .satisfy(CapabilityObligationRequest {
+                phase,
+                context,
+                capability_id: &capability,
+                estimate,
+                obligations: &obligations,
+            })
+            .await
+            .map_err(|error| match error {
+                CapabilityObligationError::Unsupported { obligations } => {
+                    CapabilityInvocationError::UnsupportedObligations {
+                        capability: capability.clone(),
+                        obligations,
+                    }
+                }
+                CapabilityObligationError::Failed { kind } => {
+                    CapabilityInvocationError::ObligationFailed {
+                        capability: capability.clone(),
+                        kind,
+                    }
+                }
+            })
+    }
 }
 
-fn ensure_no_unsupported_obligations(
-    capability: CapabilityId,
-    obligations: Vec<Obligation>,
-) -> Result<(), CapabilityInvocationError> {
-    if obligations.is_empty() {
-        return Ok(());
+fn obligation_error_kind(error: &CapabilityInvocationError) -> &'static str {
+    match error {
+        CapabilityInvocationError::UnsupportedObligations { .. } => "UnsupportedObligations",
+        CapabilityInvocationError::ObligationFailed { .. } => "ObligationFailed",
+        _ => "ObligationFailed",
     }
-
-    Err(CapabilityInvocationError::UnsupportedObligations {
-        capability,
-        obligations,
-    })
 }
 
 async fn matching_approval_lease(

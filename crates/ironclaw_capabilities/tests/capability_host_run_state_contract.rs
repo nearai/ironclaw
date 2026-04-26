@@ -2,13 +2,14 @@ use async_trait::async_trait;
 use ironclaw_approvals::*;
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
-use ironclaw_dispatcher::*;
 use ironclaw_extensions::*;
 use ironclaw_filesystem::*;
 use ironclaw_host_api::*;
 use ironclaw_resources::*;
 use ironclaw_run_state::*;
 use serde_json::json;
+
+use ironclaw_dispatcher::*;
 
 #[tokio::test]
 async fn capability_host_rejects_invalid_context_before_persisting_run_state() {
