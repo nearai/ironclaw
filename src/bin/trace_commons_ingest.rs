@@ -2062,6 +2062,23 @@ async fn process_evaluation_worker_handler(
             "process evaluation jobs can only label accepted trace submissions",
         ));
     }
+    let tenant_policy =
+        tenant_process_evaluation_policy_for_request(state.as_ref(), &tenant).await?;
+    if !record_matches_export_policy_abac(
+        &record,
+        tenant_policy.as_ref(),
+        TraceAllowedUse::Evaluation,
+    ) {
+        tracing::warn!(
+            tenant_id = %tenant.tenant_id,
+            submission_id = %record.submission_id,
+            "Trace Commons tenant policy rejected process evaluation source"
+        );
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "trace process evaluation source is not allowed by tenant policy",
+        ));
+    }
 
     let TraceEnvelopeBodyRead {
         envelope: mut envelope_before,
@@ -4152,6 +4169,54 @@ async fn tenant_export_policy_for_request(
         required_use,
     )?;
     Ok(policy)
+}
+
+async fn tenant_process_evaluation_policy_for_request(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> ApiResult<Option<TenantSubmissionPolicy>> {
+    let policy = tenant_submission_policy_for_request(state, tenant).await?;
+    enforce_tenant_process_evaluation_policy(
+        tenant,
+        policy.as_ref(),
+        state.require_tenant_submission_policy,
+    )?;
+    Ok(policy)
+}
+
+fn enforce_tenant_process_evaluation_policy(
+    tenant: &TenantAuth,
+    policy: Option<&TenantSubmissionPolicy>,
+    require_policy: bool,
+) -> ApiResult<()> {
+    let Some(policy) = policy else {
+        if require_policy {
+            tracing::warn!(
+                tenant_id = %tenant.tenant_id,
+                "Trace Commons tenant policy rejected process evaluation without tenant policy"
+            );
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "trace process evaluation tenant does not have a contribution policy",
+            ));
+        }
+        return Ok(());
+    };
+
+    if !policy.allowed_uses.is_empty()
+        && !policy.allowed_uses.contains(&TraceAllowedUse::Evaluation)
+    {
+        tracing::warn!(
+            tenant_id = %tenant.tenant_id,
+            "Trace Commons tenant policy rejected process evaluation allowed use"
+        );
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "trace process evaluation use is not allowed for this tenant",
+        ));
+    }
+
+    Ok(())
 }
 
 fn enforce_tenant_export_policy(
@@ -17034,6 +17099,195 @@ mod tests {
                         && reason.contains("offline trajectory evaluator")
                 })
         }));
+    }
+
+    #[tokio::test]
+    async fn process_evaluation_worker_rejects_policy_disallowed_sources_before_body_read() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut policies = BTreeMap::new();
+        policies.insert(
+            "tenant-a".to_string(),
+            TenantSubmissionPolicy {
+                allowed_consent_scopes: BTreeSet::from([ConsentScope::BenchmarkOnly]),
+                allowed_uses: BTreeSet::from([
+                    TraceAllowedUse::BenchmarkGeneration,
+                    TraceAllowedUse::Evaluation,
+                ]),
+            },
+        );
+        let state = test_state_with_required_tenant_policies(temp.path().to_path_buf(), policies);
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::BenchmarkOnly];
+        envelope.trace_card.consent_scope = ConsentScope::BenchmarkOnly;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::BenchmarkGeneration];
+        let submission_id = envelope.submission_id;
+
+        let Json(receipt) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("benchmark-only submission succeeds under tenant policy");
+        assert_eq!(receipt.status, "accepted");
+
+        let error = process_evaluation_worker_handler(
+            State(state.clone()),
+            auth_headers("process-eval-worker-token-a"),
+            Json(TraceProcessEvaluationJobRequest {
+                submission_id,
+                process_evaluation: ProcessEvaluationLabels {
+                    evaluator_version: "judge-v1".to_string(),
+                    overall_score: Some(0.7),
+                    ..ProcessEvaluationLabels::default()
+                },
+                reason: "policy-disallowed process evaluation".to_string(),
+                utility_credit_points_delta: Some(0.5),
+                utility_external_ref: Some("process-eval:policy-denied".to_string()),
+            }),
+        )
+        .await
+        .expect_err("process evaluation requires an evaluation-allowed source");
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let stored = read_envelope_by_record(state.as_ref(), &record).expect("envelope reads");
+        assert!(stored.process_evaluation.is_none());
+        let credit_events = read_all_credit_events(temp.path(), "tenant-a").expect("credit reads");
+        assert!(credit_events.iter().all(|event| {
+            event.submission_id != submission_id
+                || event.event_type != TraceCreditLedgerEventType::TrainingUtility
+        }));
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        assert!(audit_events.iter().all(|event| {
+            event.submission_id != submission_id
+                || (event.kind != "trace_content_read" && event.kind != "process_evaluation")
+        }));
+    }
+
+    #[tokio::test]
+    async fn process_evaluation_worker_allows_policy_evaluation_sources() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut policies = BTreeMap::new();
+        policies.insert(
+            "tenant-a".to_string(),
+            TenantSubmissionPolicy {
+                allowed_consent_scopes: BTreeSet::from([ConsentScope::DebuggingEvaluation]),
+                allowed_uses: BTreeSet::from([
+                    TraceAllowedUse::Debugging,
+                    TraceAllowedUse::Evaluation,
+                    TraceAllowedUse::AggregateAnalytics,
+                ]),
+            },
+        );
+        let state = test_state_with_required_tenant_policies(temp.path().to_path_buf(), policies);
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let Json(receipt) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("evaluation-allowed submission succeeds under tenant policy");
+        assert_eq!(receipt.status, "accepted");
+
+        let Json(response) = process_evaluation_worker_handler(
+            State(state),
+            auth_headers("process-eval-worker-token-a"),
+            Json(TraceProcessEvaluationJobRequest {
+                submission_id,
+                process_evaluation: ProcessEvaluationLabels {
+                    evaluator_version: "judge-v1".to_string(),
+                    overall_score: Some(0.82),
+                    ..ProcessEvaluationLabels::default()
+                },
+                reason: "policy-allowed process evaluation".to_string(),
+                utility_credit_points_delta: None,
+                utility_external_ref: None,
+            }),
+        )
+        .await
+        .expect("process evaluation can label evaluation-allowed source");
+        assert_eq!(response.submission_id, submission_id);
+        assert_eq!(response.process_eval_value, Some(0.82));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn db_backed_tenant_policy_blocks_process_evaluation_source_without_evaluation_use() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("process-eval-policy-abac.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let submit_state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::BenchmarkOnly];
+        envelope.trace_card.consent_scope = ConsentScope::BenchmarkOnly;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::BenchmarkGeneration];
+        let submission_id = envelope.submission_id;
+        let Json(receipt) =
+            submit_trace_handler(State(submit_state), auth_headers("token-a"), Json(envelope))
+                .await
+                .expect("source submits before DB-backed policy read is enabled");
+        assert_eq!(receipt.status, "accepted");
+
+        db.upsert_trace_tenant_policy(StorageTraceTenantPolicyWrite {
+            tenant_id: "tenant-a".to_string(),
+            policy_version: "process-eval-policy-v1".to_string(),
+            allowed_consent_scopes: vec!["benchmark_only".to_string()],
+            allowed_uses: vec!["benchmark_generation".to_string(), "evaluation".to_string()],
+            updated_by_principal_ref: principal_storage_ref("admin-token-a"),
+        })
+        .await
+        .expect("DB tenant policy writes");
+        let process_state = test_state_with_db_tenant_policy_reads(
+            temp.path().to_path_buf(),
+            db.clone() as Arc<dyn Database>,
+            true,
+        );
+
+        let error = process_evaluation_worker_handler(
+            State(process_state.clone()),
+            auth_headers("process-eval-worker-token-a"),
+            Json(TraceProcessEvaluationJobRequest {
+                submission_id,
+                process_evaluation: ProcessEvaluationLabels {
+                    evaluator_version: "judge-v1".to_string(),
+                    overall_score: Some(0.76),
+                    ..ProcessEvaluationLabels::default()
+                },
+                reason: "DB policy-disallowed process evaluation".to_string(),
+                utility_credit_points_delta: None,
+                utility_external_ref: None,
+            }),
+        )
+        .await
+        .expect_err("DB-backed policy requires source evaluation use");
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let stored =
+            read_envelope_by_record(process_state.as_ref(), &record).expect("envelope reads");
+        assert!(stored.process_evaluation.is_none());
     }
 
     #[cfg(feature = "libsql")]
