@@ -7208,7 +7208,7 @@ fn coverage_tags_for_envelope(envelope: &TraceContributionEnvelope) -> Vec<Strin
     }
     if let Some(process_evaluation) = &envelope.process_evaluation {
         for label in &process_evaluation.labels {
-            tags.insert(format!("process_label:{label:?}").to_ascii_lowercase());
+            tags.insert(format!("process_label:{}", serde_enum_tag(label)));
         }
         insert_process_eval_rating_tag(
             &mut tags,
@@ -7267,8 +7267,18 @@ fn insert_process_eval_rating_tag(
     rating: Option<ProcessEvalRating>,
 ) {
     if let Some(rating) = rating {
-        tags.insert(format!("process_{axis}:{rating:?}").to_ascii_lowercase());
+        tags.insert(format!("process_{axis}:{}", serde_enum_tag(&rating)));
     }
+}
+
+fn serde_enum_tag<T>(value: &T) -> String
+where
+    T: Serialize + std::fmt::Debug,
+{
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| format!("{value:?}").to_ascii_lowercase())
 }
 
 fn write_derived_record(root: &Path, record: &TraceCommonsDerivedRecord) -> anyhow::Result<()> {
@@ -11682,6 +11692,7 @@ struct TraceReaderAnalyticsProjection {
     by_tool: BTreeMap<String, usize>,
     by_tool_category: BTreeMap<String, usize>,
     coverage_tags: BTreeMap<String, usize>,
+    process_evaluation: TraceProcessEvaluationAnalytics,
     duplicate_groups: usize,
     average_novelty_score_bits: u32,
 }
@@ -11823,6 +11834,7 @@ fn analytics_reader_projection(
         by_tool: response.by_tool,
         by_tool_category: response.by_tool_category,
         coverage_tags: response.coverage_tags,
+        process_evaluation: response.process_evaluation,
         duplicate_groups: response.duplicate_groups,
         average_novelty_score_bits: response.average_novelty_score.to_bits(),
     }
@@ -12359,8 +12371,53 @@ struct TraceCommonsAnalyticsResponse {
     by_tool: BTreeMap<String, usize>,
     by_tool_category: BTreeMap<String, usize>,
     coverage_tags: BTreeMap<String, usize>,
+    process_evaluation: TraceProcessEvaluationAnalytics,
     duplicate_groups: usize,
     average_novelty_score: f32,
+}
+
+#[derive(Debug, Default, Clone, Serialize, PartialEq, Eq)]
+struct TraceProcessEvaluationAnalytics {
+    evaluated_traces: usize,
+    by_label: BTreeMap<String, usize>,
+    by_rating: BTreeMap<String, BTreeMap<String, usize>>,
+    by_score_band: BTreeMap<String, usize>,
+}
+
+impl TraceProcessEvaluationAnalytics {
+    fn record_coverage_tags(&mut self, coverage_tags: &[String]) {
+        let mut has_process_evaluation = false;
+        for tag in coverage_tags {
+            if let Some(label) = tag.strip_prefix("process_label:") {
+                has_process_evaluation = true;
+                *self.by_label.entry(label.to_string()).or_insert(0) += 1;
+                continue;
+            }
+            if let Some(score_band) = tag.strip_prefix("process_eval:") {
+                has_process_evaluation = true;
+                *self
+                    .by_score_band
+                    .entry(score_band.to_string())
+                    .or_insert(0) += 1;
+                continue;
+            }
+            if let Some((axis, rating)) = tag
+                .strip_prefix("process_")
+                .and_then(|value| value.split_once(':'))
+            {
+                has_process_evaluation = true;
+                *self
+                    .by_rating
+                    .entry(axis.to_string())
+                    .or_default()
+                    .entry(rating.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+        if has_process_evaluation {
+            self.evaluated_traces += 1;
+        }
+    }
 }
 
 impl TraceCommonsAnalyticsResponse {
@@ -12379,6 +12436,7 @@ impl TraceCommonsAnalyticsResponse {
             by_tool: BTreeMap::new(),
             by_tool_category: BTreeMap::new(),
             coverage_tags: BTreeMap::new(),
+            process_evaluation: TraceProcessEvaluationAnalytics::default(),
             duplicate_groups: 0,
             average_novelty_score: 0.0,
         };
@@ -12413,6 +12471,9 @@ impl TraceCommonsAnalyticsResponse {
             for tag in &record.coverage_tags {
                 *response.coverage_tags.entry(tag.clone()).or_insert(0) += 1;
             }
+            response
+                .process_evaluation
+                .record_coverage_tags(&record.coverage_tags);
             *summary_hash_counts
                 .entry(record.canonical_summary_hash.clone())
                 .or_insert(0) += 1;
@@ -16659,6 +16720,10 @@ mod tests {
                 process_evaluation: ProcessEvaluationLabels {
                     evaluator_name: Some("trajectory-judge".to_string()),
                     evaluator_version: "judge-v1".to_string(),
+                    labels: vec![
+                        ironclaw::trace_contribution::ProcessEvaluatorLabel::CorrectToolSelection,
+                        ironclaw::trace_contribution::ProcessEvaluatorLabel::ProperVerification,
+                    ],
                     verification: Some(ProcessEvalRating::Pass),
                     overall_score: Some(0.91),
                     ..ProcessEvaluationLabels::default()
@@ -16713,7 +16778,38 @@ mod tests {
             derived
                 .coverage_tags
                 .iter()
+                .any(|tag| tag == "process_label:proper_verification")
+        );
+        assert!(
+            derived
+                .coverage_tags
+                .iter()
                 .any(|tag| tag == "process_verification:pass")
+        );
+
+        let Json(analytics) =
+            analytics_handler(State(state.clone()), auth_headers("review-token-a"))
+                .await
+                .expect("reviewer analytics reads process evaluation aggregates");
+        assert_eq!(analytics.process_evaluation.evaluated_traces, 1);
+        assert_eq!(
+            analytics
+                .process_evaluation
+                .by_label
+                .get("proper_verification"),
+            Some(&1)
+        );
+        assert_eq!(
+            analytics
+                .process_evaluation
+                .by_rating
+                .get("verification")
+                .and_then(|ratings| ratings.get("pass")),
+            Some(&1)
+        );
+        assert_eq!(
+            analytics.process_evaluation.by_score_band.get("high"),
+            Some(&1)
         );
 
         let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
@@ -21348,7 +21444,13 @@ mod tests {
             event_count: Some(4),
             tool_sequence: vec!["shell".to_string()],
             tool_categories: vec!["filesystem".to_string()],
-            coverage_tags: vec!["tool:shell".to_string(), "privacy:low".to_string()],
+            coverage_tags: vec![
+                "tool:shell".to_string(),
+                "privacy:low".to_string(),
+                "process_label:proper_verification".to_string(),
+                "process_verification:pass".to_string(),
+                "process_eval:high".to_string(),
+            ],
             duplicate_score: Some(0.2),
             novelty_score: Some(0.8),
             cluster_id: Some("cluster:db-only".to_string()),
@@ -21430,6 +21532,26 @@ mod tests {
             analytics.by_tool_category.get("calendar"),
             Some(&1),
             "derived tool categories should come from DB"
+        );
+        assert_eq!(analytics.process_evaluation.evaluated_traces, 1);
+        assert_eq!(
+            analytics
+                .process_evaluation
+                .by_label
+                .get("proper_verification"),
+            Some(&1)
+        );
+        assert_eq!(
+            analytics
+                .process_evaluation
+                .by_rating
+                .get("verification")
+                .and_then(|ratings| ratings.get("pass")),
+            Some(&1)
+        );
+        assert_eq!(
+            analytics.process_evaluation.by_score_band.get("high"),
+            Some(&1)
         );
 
         let Json(list) = list_traces_handler(

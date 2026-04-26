@@ -893,8 +893,11 @@ tool-selection, argument-quality, ordering, verification, side-effect-safety rat
 overall score. Derived rows are versioned rather than overwritten. Process-evaluation
 requests may also include a bounded utility credit delta plus external reference; the
 service appends `training_utility` delayed credit idempotently and reports appended/skipped
-counts without making the worker a generic credit mutator. Consumers should require
-`status = current` and a non-revoked source submission.
+counts without making the worker a generic credit mutator. Derived coverage tags use the
+wire-format enum values, for example `process_label:proper_verification`,
+`process_verification:pass`, and `process_eval:high`, so analytics can aggregate process
+quality without reading trace bodies. Consumers should require `status = current` and a
+non-revoked source submission.
 
 ### Vector Index Metadata
 

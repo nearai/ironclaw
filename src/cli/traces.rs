@@ -2465,6 +2465,19 @@ async fn trace_commons_analytics_summary(
     print_json_map("  by status", value.get("by_status"));
     print_json_map("  by privacy risk", value.get("by_privacy_risk"));
     print_json_map("  by task success", value.get("by_task_success"));
+    if let Some(process_evaluation) = value.get("process_evaluation") {
+        print_optional_json_field(
+            "  process evaluated traces",
+            process_evaluation,
+            "evaluated_traces",
+        );
+        print_json_map("  process labels", process_evaluation.get("by_label"));
+        print_json_map("  process ratings", process_evaluation.get("by_rating"));
+        print_json_map(
+            "  process score bands",
+            process_evaluation.get("by_score_band"),
+        );
+    }
     Ok(())
 }
 
