@@ -96,6 +96,254 @@ pub struct FileStat {
     pub len: u64,
 }
 
+/// Stable identifier for a mounted filesystem backend.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BackendId(String);
+
+impl BackendId {
+    pub fn new(value: impl Into<String>) -> Result<Self, HostApiError> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err(HostApiError::InvalidId {
+                kind: "filesystem backend",
+                value,
+                reason: "backend id must not be empty".to_string(),
+            });
+        }
+        if value.contains('/')
+            || value.contains('\\')
+            || value.contains('\0')
+            || value.chars().any(char::is_control)
+        {
+            return Err(HostApiError::InvalidId {
+                kind: "filesystem backend",
+                value,
+                reason: "backend id must be a simple non-path identifier".to_string(),
+            });
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Coarse class of backend implementation behind a virtual mount.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackendKind {
+    LocalFilesystem,
+    DatabaseFilesystem,
+    MemoryDocuments,
+    ObjectStore,
+    Custom(String),
+}
+
+/// Storage shape represented by a mount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageClass {
+    /// File-like contents addressed by virtual paths.
+    FileContent,
+    /// Structured records that may expose file-shaped projections.
+    StructuredRecords,
+    /// Derived data such as chunks, indexes, or embeddings.
+    DerivedProjection,
+}
+
+/// Semantic kind of content exposed at a mount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentKind {
+    GenericFile,
+    ProjectFile,
+    Artifact,
+    MemoryDocument,
+    SystemState,
+    ExtensionPackage,
+    StructuredRecord,
+}
+
+/// Indexing/embedding policy associated with file-shaped content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexPolicy {
+    NotIndexed,
+    FullText,
+    Vector,
+    FullTextAndVector,
+    BackendDefined,
+}
+
+/// Capabilities advertised by a mounted backend for diagnostics and routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BackendCapabilities {
+    pub read: bool,
+    pub write: bool,
+    pub list: bool,
+    pub stat: bool,
+    pub delete: bool,
+    pub indexed: bool,
+    pub embedded: bool,
+}
+
+/// Trusted catalog record for one virtual filesystem mount.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountDescriptor {
+    pub virtual_root: VirtualPath,
+    pub backend_id: BackendId,
+    pub backend_kind: BackendKind,
+    pub storage_class: StorageClass,
+    pub content_kind: ContentKind,
+    pub index_policy: IndexPolicy,
+    pub capabilities: BackendCapabilities,
+}
+
+/// Catalog answer for the backend that owns a virtual path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathPlacement {
+    pub path: VirtualPath,
+    pub matched_root: VirtualPath,
+    pub backend_id: BackendId,
+    pub backend_kind: BackendKind,
+    pub storage_class: StorageClass,
+    pub content_kind: ContentKind,
+    pub index_policy: IndexPolicy,
+    pub capabilities: BackendCapabilities,
+}
+
+impl PathPlacement {
+    fn from_descriptor(path: VirtualPath, descriptor: &MountDescriptor) -> Self {
+        Self {
+            path,
+            matched_root: descriptor.virtual_root.clone(),
+            backend_id: descriptor.backend_id.clone(),
+            backend_kind: descriptor.backend_kind.clone(),
+            storage_class: descriptor.storage_class,
+            content_kind: descriptor.content_kind,
+            index_policy: descriptor.index_policy,
+            capabilities: descriptor.capabilities,
+        }
+    }
+}
+
+/// Trusted catalog over virtual filesystem mount placement.
+///
+/// The catalog explains where a [`VirtualPath`] is placed; it does not grant
+/// runtime access. Untrusted callers must still go through [`ScopedFilesystem`]
+/// and a scoped [`MountView`].
+#[async_trait]
+pub trait FilesystemCatalog: Send + Sync {
+    async fn describe_path(&self, path: &VirtualPath) -> Result<PathPlacement, FilesystemError>;
+
+    async fn mounts(&self) -> Result<Vec<MountDescriptor>, FilesystemError>;
+}
+
+/// Root filesystem that composes multiple backend roots behind one virtual namespace.
+pub struct CompositeRootFilesystem {
+    mounts: Vec<CompositeMount>,
+}
+
+struct CompositeMount {
+    descriptor: MountDescriptor,
+    backend: Arc<dyn RootFilesystem>,
+}
+
+impl CompositeRootFilesystem {
+    pub fn new() -> Self {
+        Self { mounts: Vec::new() }
+    }
+
+    pub fn mount<F>(
+        &mut self,
+        descriptor: MountDescriptor,
+        backend: Arc<F>,
+    ) -> Result<(), FilesystemError>
+    where
+        F: RootFilesystem + 'static,
+    {
+        let backend: Arc<dyn RootFilesystem> = backend;
+        self.mount_dyn(descriptor, backend)
+    }
+
+    pub fn mount_dyn(
+        &mut self,
+        descriptor: MountDescriptor,
+        backend: Arc<dyn RootFilesystem>,
+    ) -> Result<(), FilesystemError> {
+        if self
+            .mounts
+            .iter()
+            .any(|mount| mount.descriptor.virtual_root.as_str() == descriptor.virtual_root.as_str())
+        {
+            return Err(FilesystemError::MountConflict {
+                path: descriptor.virtual_root,
+            });
+        }
+        self.mounts.push(CompositeMount {
+            descriptor,
+            backend,
+        });
+        Ok(())
+    }
+
+    fn matching_mount(&self, path: &VirtualPath) -> Result<&CompositeMount, FilesystemError> {
+        self.mounts
+            .iter()
+            .filter(|mount| {
+                virtual_prefix_matches(mount.descriptor.virtual_root.as_str(), path.as_str())
+            })
+            .max_by_key(|mount| mount.descriptor.virtual_root.as_str().len())
+            .ok_or_else(|| FilesystemError::MountNotFound { path: path.clone() })
+    }
+}
+
+impl Default for CompositeRootFilesystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl FilesystemCatalog for CompositeRootFilesystem {
+    async fn describe_path(&self, path: &VirtualPath) -> Result<PathPlacement, FilesystemError> {
+        let mount = self.matching_mount(path)?;
+        Ok(PathPlacement::from_descriptor(
+            path.clone(),
+            &mount.descriptor,
+        ))
+    }
+
+    async fn mounts(&self) -> Result<Vec<MountDescriptor>, FilesystemError> {
+        let mut mounts: Vec<_> = self
+            .mounts
+            .iter()
+            .map(|mount| mount.descriptor.clone())
+            .collect();
+        mounts.sort_by(|left, right| left.virtual_root.as_str().cmp(right.virtual_root.as_str()));
+        Ok(mounts)
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for CompositeRootFilesystem {
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        self.matching_mount(path)?.backend.read_file(path).await
+    }
+
+    async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        self.matching_mount(path)?
+            .backend
+            .write_file(path, bytes)
+            .await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.matching_mount(path)?.backend.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.matching_mount(path)?.backend.stat(path).await
+    }
+}
+
 /// Trusted root filesystem interface over canonical virtual paths.
 #[async_trait]
 pub trait RootFilesystem: Send + Sync {
