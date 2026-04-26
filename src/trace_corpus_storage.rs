@@ -543,6 +543,102 @@ pub struct TraceTombstoneRecord {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceRetentionJobStatus {
+    Planned,
+    Running,
+    DryRun,
+    Complete,
+    Failed,
+    Paused,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRetentionJobWrite {
+    pub tenant_id: String,
+    pub retention_job_id: Uuid,
+    pub purpose: String,
+    pub dry_run: bool,
+    pub status: TraceRetentionJobStatus,
+    pub requested_by_principal_ref: String,
+    pub requested_by_role: String,
+    pub purge_expired_before: Option<DateTime<Utc>>,
+    pub prune_export_cache: bool,
+    pub max_export_age_hours: Option<i64>,
+    pub audit_event_id: Option<Uuid>,
+    pub action_counts: BTreeMap<String, u32>,
+    pub selected_revoked_count: u32,
+    pub selected_expired_count: u32,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRetentionJobRecord {
+    pub tenant_id: String,
+    pub retention_job_id: Uuid,
+    pub purpose: String,
+    pub dry_run: bool,
+    pub status: TraceRetentionJobStatus,
+    pub requested_by_principal_ref: String,
+    pub requested_by_role: String,
+    pub purge_expired_before: Option<DateTime<Utc>>,
+    pub prune_export_cache: bool,
+    pub max_export_age_hours: Option<i64>,
+    pub audit_event_id: Option<Uuid>,
+    pub action_counts: BTreeMap<String, u32>,
+    pub selected_revoked_count: u32,
+    pub selected_expired_count: u32,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceRetentionJobItemAction {
+    Revoke,
+    Expire,
+    Purge,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceRetentionJobItemStatus {
+    Pending,
+    Done,
+    Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRetentionJobItemWrite {
+    pub tenant_id: String,
+    pub retention_job_id: Uuid,
+    pub submission_id: Uuid,
+    pub action: TraceRetentionJobItemAction,
+    pub status: TraceRetentionJobItemStatus,
+    pub reason: String,
+    pub action_counts: BTreeMap<String, u32>,
+    pub verified_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRetentionJobItemRecord {
+    pub tenant_id: String,
+    pub retention_job_id: Uuid,
+    pub submission_id: Uuid,
+    pub action: TraceRetentionJobItemAction,
+    pub status: TraceRetentionJobItemStatus,
+    pub reason: String,
+    pub action_counts: BTreeMap<String, u32>,
+    pub verified_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TraceArtifactInvalidationCounts {
     pub object_refs_invalidated: u64,
@@ -693,6 +789,27 @@ pub trait TraceCorpusStore: Send + Sync {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceTombstoneRecord>, DatabaseError>;
+
+    async fn upsert_trace_retention_job(
+        &self,
+        job: TraceRetentionJobWrite,
+    ) -> Result<TraceRetentionJobRecord, DatabaseError>;
+
+    async fn upsert_trace_retention_job_item(
+        &self,
+        item: TraceRetentionJobItemWrite,
+    ) -> Result<TraceRetentionJobItemRecord, DatabaseError>;
+
+    async fn list_trace_retention_jobs(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRetentionJobRecord>, DatabaseError>;
+
+    async fn list_trace_retention_job_items(
+        &self,
+        tenant_id: &str,
+        retention_job_id: Uuid,
+    ) -> Result<Vec<TraceRetentionJobItemRecord>, DatabaseError>;
 
     async fn invalidate_trace_submission_artifacts(
         &self,

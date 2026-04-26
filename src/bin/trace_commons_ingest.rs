@@ -47,6 +47,11 @@ use ironclaw::trace_corpus_storage::{
     TraceObjectArtifactKind as StorageTraceObjectArtifactKind,
     TraceObjectRefRecord as StorageTraceObjectRefRecord,
     TraceObjectRefWrite as StorageTraceObjectRefWrite,
+    TraceRetentionJobItemAction as StorageTraceRetentionJobItemAction,
+    TraceRetentionJobItemStatus as StorageTraceRetentionJobItemStatus,
+    TraceRetentionJobItemWrite as StorageTraceRetentionJobItemWrite,
+    TraceRetentionJobStatus as StorageTraceRetentionJobStatus,
+    TraceRetentionJobWrite as StorageTraceRetentionJobWrite,
     TraceSubmissionRecord as StorageTraceSubmissionRecord,
     TraceSubmissionWrite as StorageTraceSubmissionWrite,
     TraceTenantPolicyRecord as StorageTraceTenantPolicyRecord,
@@ -1419,6 +1424,7 @@ async fn revoke_submission(
         submission_id,
         mirrored_record.as_ref(),
         db_record.as_ref(),
+        None,
     )
     .await;
     if let Err(error) = &mirror_result {
@@ -5893,6 +5899,7 @@ async fn mirror_revocation_to_db(
     submission_id: Uuid,
     record: Option<&TraceCommonsSubmissionRecord>,
     db_record: Option<&StorageTraceSubmissionRecord>,
+    retention_ledger: Option<&mut TraceMaintenanceLedgerAccumulator>,
 ) -> anyhow::Result<()> {
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
@@ -6011,31 +6018,21 @@ async fn mirror_revocation_to_db(
             || export_manifests_invalidated > 0
             || export_manifest_items_invalidated > 0)
     {
-        let mut action_counts = BTreeMap::new();
-        action_counts.insert(
-            "object_refs_invalidated".to_string(),
-            invalidation_counts
-                .object_refs_invalidated
-                .min(u64::from(u32::MAX)) as u32,
+        let action_counts = lifecycle_invalidation_action_counts(
+            invalidation_counts,
+            vector_entries_invalidated,
+            export_manifests_invalidated,
+            export_manifest_items_invalidated,
         );
-        action_counts.insert(
-            "derived_records_invalidated".to_string(),
-            invalidation_counts
-                .derived_records_invalidated
-                .min(u64::from(u32::MAX)) as u32,
-        );
-        action_counts.insert(
-            "vector_entries_invalidated".to_string(),
-            vector_entries_invalidated.min(u64::from(u32::MAX)) as u32,
-        );
-        action_counts.insert(
-            "export_manifests_invalidated".to_string(),
-            export_manifests_invalidated.min(u64::from(u32::MAX)) as u32,
-        );
-        action_counts.insert(
-            "export_manifest_items_invalidated".to_string(),
-            export_manifest_items_invalidated.min(u64::from(u32::MAX)) as u32,
-        );
+        if let Some(ledger) = retention_ledger {
+            ledger.record_lifecycle_item(
+                audit_submission_id,
+                StorageTraceRetentionJobItemAction::Revoke,
+                "contributor_revocation",
+                action_counts.clone(),
+                "records_marked_revoked",
+            );
+        }
         db.append_trace_audit_event(StorageTraceAuditEventWrite {
             audit_event_id,
             tenant_id: audit_tenant_id,
@@ -6080,6 +6077,7 @@ async fn mirror_expiration_to_db(
     state: &AppState,
     tenant: &TenantAuth,
     submission_id: Uuid,
+    retention_ledger: Option<&mut TraceMaintenanceLedgerAccumulator>,
 ) -> anyhow::Result<()> {
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
@@ -6124,6 +6122,20 @@ async fn mirror_expiration_to_db(
         )
         .await
         .context("failed to mirror trace expiration export manifest item invalidation")?;
+    if let Some(ledger) = retention_ledger {
+        ledger.record_lifecycle_item(
+            record.submission_id,
+            StorageTraceRetentionJobItemAction::Expire,
+            "retention_expired",
+            lifecycle_invalidation_action_counts(
+                invalidation_counts,
+                vector_entries_invalidated,
+                export_manifests_invalidated,
+                export_manifest_items_invalidated,
+            ),
+            "records_marked_expired",
+        );
+    }
     append_lifecycle_invalidation_audit_to_db(
         db.as_ref(),
         tenant,
@@ -6147,6 +6159,7 @@ async fn mirror_purge_to_db(
     state: &AppState,
     tenant: &TenantAuth,
     submission_id: Uuid,
+    retention_ledger: Option<&mut TraceMaintenanceLedgerAccumulator>,
 ) -> anyhow::Result<()> {
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
@@ -6191,6 +6204,20 @@ async fn mirror_purge_to_db(
         )
         .await
         .context("failed to mirror trace purge export manifest item invalidation")?;
+    if let Some(ledger) = retention_ledger {
+        ledger.record_lifecycle_item(
+            record.submission_id,
+            StorageTraceRetentionJobItemAction::Purge,
+            "retention_purged",
+            lifecycle_invalidation_action_counts(
+                invalidation_counts,
+                vector_entries_invalidated,
+                export_manifests_invalidated,
+                export_manifest_items_invalidated,
+            ),
+            "records_marked_purged",
+        );
+    }
     append_lifecycle_invalidation_audit_to_db(
         db.as_ref(),
         tenant,
@@ -6219,6 +6246,38 @@ struct TraceLifecycleInvalidationAuditInput {
     vector_entries_invalidated: u64,
     export_manifests_invalidated: u64,
     export_manifest_items_invalidated: u64,
+}
+
+#[derive(Debug, Default)]
+struct TraceMaintenanceLedgerAccumulator {
+    items: Vec<TraceMaintenanceLedgerItem>,
+}
+
+impl TraceMaintenanceLedgerAccumulator {
+    fn record_lifecycle_item(
+        &mut self,
+        submission_id: Uuid,
+        action: StorageTraceRetentionJobItemAction,
+        reason: &'static str,
+        mut action_counts: BTreeMap<String, u32>,
+        status_count_label: &'static str,
+    ) {
+        action_counts.insert(status_count_label.to_string(), 1);
+        self.items.push(TraceMaintenanceLedgerItem {
+            submission_id,
+            action,
+            reason: reason.to_string(),
+            action_counts,
+        });
+    }
+}
+
+#[derive(Debug)]
+struct TraceMaintenanceLedgerItem {
+    submission_id: Uuid,
+    action: StorageTraceRetentionJobItemAction,
+    reason: String,
+    action_counts: BTreeMap<String, u32>,
 }
 
 async fn append_lifecycle_invalidation_audit_to_db(
@@ -6296,6 +6355,79 @@ fn lifecycle_invalidation_action_counts(
         export_manifest_items_invalidated.min(u64::from(u32::MAX)) as u32,
     );
     action_counts
+}
+
+struct TraceMaintenanceLedgerWriteInput<'a> {
+    retention_job_id: Uuid,
+    purpose: &'a str,
+    dry_run: bool,
+    purge_expired_before: Option<DateTime<Utc>>,
+    prune_export_cache: bool,
+    max_export_age_hours: Option<i64>,
+    audit_event_id: Uuid,
+    maintenance_counts: TraceMaintenanceAuditCounts,
+    selected_revoked_count: usize,
+    selected_expired_count: usize,
+    started_at: DateTime<Utc>,
+    completed_at: DateTime<Utc>,
+}
+
+async fn write_retention_maintenance_ledger_to_db(
+    state: &AppState,
+    tenant: &TenantAuth,
+    input: TraceMaintenanceLedgerWriteInput<'_>,
+    ledger: &TraceMaintenanceLedgerAccumulator,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+
+    db.upsert_trace_retention_job(StorageTraceRetentionJobWrite {
+        tenant_id: tenant.tenant_id.clone(),
+        retention_job_id: input.retention_job_id,
+        purpose: input.purpose.to_string(),
+        dry_run: input.dry_run,
+        status: if input.dry_run {
+            StorageTraceRetentionJobStatus::DryRun
+        } else {
+            StorageTraceRetentionJobStatus::Complete
+        },
+        requested_by_principal_ref: tenant.principal_ref.clone(),
+        requested_by_role: format!("{:?}", tenant.role).to_ascii_lowercase(),
+        purge_expired_before: input.purge_expired_before,
+        prune_export_cache: input.prune_export_cache,
+        max_export_age_hours: input.max_export_age_hours,
+        audit_event_id: Some(input.audit_event_id),
+        action_counts: input.maintenance_counts.action_counts(),
+        selected_revoked_count: input.selected_revoked_count.min(u32::MAX as usize) as u32,
+        selected_expired_count: input.selected_expired_count.min(u32::MAX as usize) as u32,
+        started_at: Some(input.started_at),
+        completed_at: Some(input.completed_at),
+    })
+    .await
+    .context("failed to write trace retention job")?;
+
+    for item in &ledger.items {
+        db.upsert_trace_retention_job_item(StorageTraceRetentionJobItemWrite {
+            tenant_id: tenant.tenant_id.clone(),
+            retention_job_id: input.retention_job_id,
+            submission_id: item.submission_id,
+            action: item.action,
+            status: StorageTraceRetentionJobItemStatus::Done,
+            reason: item.reason.clone(),
+            action_counts: item.action_counts.clone(),
+            verified_at: Some(input.completed_at),
+        })
+        .await
+        .with_context(|| {
+            format!(
+                "failed to write trace retention job item for submission {}",
+                item.submission_id
+            )
+        })?;
+    }
+
+    Ok(())
 }
 
 async fn mirror_review_decision_to_db(
@@ -8410,6 +8542,8 @@ async fn run_maintenance(
         .collect::<BTreeMap<_, _>>();
     let mut revoked_submission_ids = revocation_reasons.keys().copied().collect::<BTreeSet<_>>();
     let mut expired_submission_ids = BTreeSet::new();
+    let mut retention_ledger = TraceMaintenanceLedgerAccumulator::default();
+    let maintenance_started_at = Utc::now();
 
     let mut records = read_all_submission_records(&state.root, &tenant.tenant_id)?;
     let mut records_marked_revoked = 0usize;
@@ -8422,8 +8556,15 @@ async fn run_maintenance(
                 .entry(record.submission_id)
                 .or_insert_with(|| "contributor_revocation".to_string());
             if !request.dry_run {
-                mirror_revocation_to_db(state, tenant, record.submission_id, Some(record), None)
-                    .await?;
+                mirror_revocation_to_db(
+                    state,
+                    tenant,
+                    record.submission_id,
+                    Some(record),
+                    None,
+                    Some(&mut retention_ledger),
+                )
+                .await?;
             }
             continue;
         }
@@ -8440,8 +8581,15 @@ async fn run_maintenance(
                 record.status = TraceCorpusStatus::Revoked;
                 record.credit_points_final = Some(0.0);
                 write_submission_record(&state.root, record)?;
-                mirror_revocation_to_db(state, tenant, record.submission_id, Some(record), None)
-                    .await?;
+                mirror_revocation_to_db(
+                    state,
+                    tenant,
+                    record.submission_id,
+                    Some(record),
+                    None,
+                    Some(&mut retention_ledger),
+                )
+                .await?;
             }
             continue;
         }
@@ -8452,7 +8600,13 @@ async fn run_maintenance(
                 record.status = TraceCorpusStatus::Expired;
                 record.credit_points_final = Some(record.credit_points_final.unwrap_or(0.0));
                 write_submission_record(&state.root, record)?;
-                mirror_expiration_to_db(state, tenant, record.submission_id).await?;
+                mirror_expiration_to_db(
+                    state,
+                    tenant,
+                    record.submission_id,
+                    Some(&mut retention_ledger),
+                )
+                .await?;
             }
         }
     }
@@ -8508,7 +8662,13 @@ async fn run_maintenance(
             record.status = TraceCorpusStatus::Purged;
             record.purged_at = Some(now);
             write_submission_record(&state.root, record)?;
-            mirror_purge_to_db(state, tenant, record.submission_id).await?;
+            mirror_purge_to_db(
+                state,
+                tenant,
+                record.submission_id,
+                Some(&mut retention_ledger),
+            )
+            .await?;
         }
     }
 
@@ -8626,6 +8786,27 @@ async fn run_maintenance(
         )
         .await?;
     }
+    let ledger_result = write_retention_maintenance_ledger_to_db(
+        state,
+        tenant,
+        TraceMaintenanceLedgerWriteInput {
+            retention_job_id: audit_event_id,
+            purpose: &purpose,
+            dry_run: request.dry_run,
+            purge_expired_before: request.purge_expired_before,
+            prune_export_cache: request.prune_export_cache,
+            max_export_age_hours: request.max_export_age_hours,
+            audit_event_id,
+            maintenance_counts,
+            selected_revoked_count: revoked_submission_ids.len(),
+            selected_expired_count: expired_submission_ids.len(),
+            started_at: maintenance_started_at,
+            completed_at: Utc::now(),
+        },
+        &retention_ledger,
+    )
+    .await;
+    enforce_db_mirror_write_result(state, "retention maintenance ledger", ledger_result)?;
     enforce_db_reconciliation_clean(state, db_reconciliation.as_ref())?;
     let audit_chain = if request.verify_audit_chain {
         Some(verify_audit_chain(state, &tenant.tenant_id).await?)
@@ -9026,9 +9207,15 @@ async fn backfill_db_mirror_from_files(
             continue;
         }
         if record.is_revoked()
-            && let Err(error) =
-                mirror_revocation_to_db(state, tenant, record.submission_id, Some(record), None)
-                    .await
+            && let Err(error) = mirror_revocation_to_db(
+                state,
+                tenant,
+                record.submission_id,
+                Some(record),
+                None,
+                None,
+            )
+            .await
         {
             report.record_failure(
                 "submission",
@@ -20196,6 +20383,140 @@ mod tests {
             }
             metadata => panic!("unexpected purge audit metadata: {metadata:?}"),
         }
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn maintenance_purge_writes_durable_retention_job_ledger() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-retention-ledger.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let metadata_path = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"))
+            .join("metadata")
+            .join(format!("{submission_id}.json"));
+        let mut metadata_json = serde_json::to_value(record).expect("record serializes");
+        metadata_json["expires_at"] =
+            serde_json::json!((Utc::now() - chrono::Duration::days(1)).to_rfc3339());
+        write_json_file(&metadata_path, &metadata_json, "expired trace metadata")
+            .expect("expired metadata writes");
+
+        let Json(response) = maintenance_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_retention_ledger".to_string()),
+                dry_run: false,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: Some(Utc::now()),
+            }),
+        )
+        .await
+        .expect("maintenance purges traces");
+        assert_eq!(response.records_marked_expired, 1);
+        assert_eq!(response.records_marked_purged, 1);
+
+        let jobs = db
+            .list_trace_retention_jobs("tenant-a")
+            .await
+            .expect("retention jobs read");
+        assert_eq!(jobs.len(), 1);
+        let job = &jobs[0];
+        assert_eq!(job.tenant_id, "tenant-a");
+        assert_eq!(job.purpose, "test_retention_ledger");
+        assert!(!job.dry_run);
+        assert_eq!(job.status, StorageTraceRetentionJobStatus::Complete);
+        assert_eq!(job.audit_event_id, Some(response.audit_event_id));
+        assert_eq!(job.selected_revoked_count, 0);
+        assert_eq!(job.selected_expired_count, 1);
+        assert_eq!(
+            job.action_counts
+                .get("records_marked_expired")
+                .copied()
+                .unwrap_or_default(),
+            1
+        );
+        assert_eq!(
+            job.action_counts
+                .get("records_marked_purged")
+                .copied()
+                .unwrap_or_default(),
+            1
+        );
+
+        let items = db
+            .list_trace_retention_job_items("tenant-a", job.retention_job_id)
+            .await
+            .expect("retention job items read");
+        assert_eq!(items.len(), 2);
+        let expire_item = items
+            .iter()
+            .find(|item| item.action == StorageTraceRetentionJobItemAction::Expire)
+            .expect("expiration item exists");
+        assert_eq!(expire_item.submission_id, submission_id);
+        assert_eq!(expire_item.status, StorageTraceRetentionJobItemStatus::Done);
+        assert_eq!(expire_item.reason, "retention_expired");
+        assert_eq!(
+            expire_item
+                .action_counts
+                .get("records_marked_expired")
+                .copied()
+                .unwrap_or_default(),
+            1
+        );
+        let purge_item = items
+            .iter()
+            .find(|item| item.action == StorageTraceRetentionJobItemAction::Purge)
+            .expect("purge item exists");
+        assert_eq!(purge_item.submission_id, submission_id);
+        assert_eq!(purge_item.status, StorageTraceRetentionJobItemStatus::Done);
+        assert_eq!(purge_item.reason, "retention_purged");
+        assert_eq!(
+            purge_item
+                .action_counts
+                .get("records_marked_purged")
+                .copied()
+                .unwrap_or_default(),
+            1
+        );
+        assert!(
+            purge_item
+                .action_counts
+                .contains_key("object_refs_invalidated")
+        );
     }
 
     #[cfg(feature = "libsql")]

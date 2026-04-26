@@ -1235,6 +1235,59 @@ CREATE TABLE IF NOT EXISTS trace_tombstones (
 
 CREATE INDEX IF NOT EXISTS idx_trace_tombstones_effective
     ON trace_tombstones (tenant_id, effective_at DESC);
+
+CREATE TABLE IF NOT EXISTS trace_retention_jobs (
+    tenant_id TEXT NOT NULL,
+    retention_job_id TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    dry_run INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    requested_by_principal_ref TEXT NOT NULL,
+    requested_by_role TEXT NOT NULL,
+    purge_expired_before TEXT,
+    prune_export_cache INTEGER NOT NULL DEFAULT 1,
+    max_export_age_hours INTEGER,
+    audit_event_id TEXT,
+    action_counts TEXT NOT NULL DEFAULT '{}',
+    selected_revoked_count INTEGER NOT NULL DEFAULT 0,
+    selected_expired_count INTEGER NOT NULL DEFAULT 0,
+    started_at TEXT,
+    completed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (tenant_id, retention_job_id),
+    FOREIGN KEY (tenant_id)
+        REFERENCES trace_tenants (tenant_id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_trace_retention_jobs_created
+    ON trace_retention_jobs (tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trace_retention_jobs_status
+    ON trace_retention_jobs (tenant_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS trace_retention_job_items (
+    tenant_id TEXT NOT NULL,
+    retention_job_id TEXT NOT NULL,
+    submission_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    action_counts TEXT NOT NULL DEFAULT '{}',
+    verified_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (tenant_id, retention_job_id, submission_id, action),
+    FOREIGN KEY (tenant_id, retention_job_id)
+        REFERENCES trace_retention_jobs (tenant_id, retention_job_id)
+        ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, submission_id)
+        REFERENCES trace_submissions (tenant_id, submission_id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_trace_retention_job_items_submission
+    ON trace_retention_job_items (tenant_id, submission_id, created_at DESC);
 "#,
     ),
     (
@@ -1416,6 +1469,64 @@ SET audit_sequence = (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_trace_audit_events_tenant_sequence
     ON trace_audit_events (tenant_id, audit_sequence);
+"#,
+    ),
+    (
+        35,
+        "trace_retention_jobs",
+        r#"
+CREATE TABLE IF NOT EXISTS trace_retention_jobs (
+    tenant_id TEXT NOT NULL,
+    retention_job_id TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    dry_run INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    requested_by_principal_ref TEXT NOT NULL,
+    requested_by_role TEXT NOT NULL,
+    purge_expired_before TEXT,
+    prune_export_cache INTEGER NOT NULL DEFAULT 1,
+    max_export_age_hours INTEGER,
+    audit_event_id TEXT,
+    action_counts TEXT NOT NULL DEFAULT '{}',
+    selected_revoked_count INTEGER NOT NULL DEFAULT 0,
+    selected_expired_count INTEGER NOT NULL DEFAULT 0,
+    started_at TEXT,
+    completed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (tenant_id, retention_job_id),
+    FOREIGN KEY (tenant_id)
+        REFERENCES trace_tenants (tenant_id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_trace_retention_jobs_created
+    ON trace_retention_jobs (tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trace_retention_jobs_status
+    ON trace_retention_jobs (tenant_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS trace_retention_job_items (
+    tenant_id TEXT NOT NULL,
+    retention_job_id TEXT NOT NULL,
+    submission_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    action_counts TEXT NOT NULL DEFAULT '{}',
+    verified_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (tenant_id, retention_job_id, submission_id, action),
+    FOREIGN KEY (tenant_id, retention_job_id)
+        REFERENCES trace_retention_jobs (tenant_id, retention_job_id)
+        ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, submission_id)
+        REFERENCES trace_submissions (tenant_id, submission_id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_trace_retention_job_items_submission
+    ON trace_retention_job_items (tenant_id, submission_id, created_at DESC);
 "#,
     ),
 ];

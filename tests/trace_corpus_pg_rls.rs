@@ -250,6 +250,8 @@ async fn assert_trace_rls_policies_installed(backend: &PgBackend) {
         "trace_vector_entries".to_string(),
         "trace_export_manifests".to_string(),
         "trace_export_manifest_items".to_string(),
+        "trace_retention_jobs".to_string(),
+        "trace_retention_job_items".to_string(),
     ];
     let client = backend.pool().get().await.expect("get policy connection");
     let rows = client

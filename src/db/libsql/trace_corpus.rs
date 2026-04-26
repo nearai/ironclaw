@@ -16,8 +16,10 @@ use crate::trace_corpus_storage::{
     TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportManifestItemInvalidationReason,
     TraceExportManifestItemRecord, TraceExportManifestItemWrite, TraceExportManifestRecord,
     TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefRecord, TraceObjectRefWrite,
-    TraceSubmissionRecord, TraceSubmissionWrite, TraceTenantPolicyRecord, TraceTenantPolicyWrite,
-    TraceTombstoneRecord, TraceTombstoneWrite, TraceVectorEntryRecord,
+    TraceRetentionJobItemAction, TraceRetentionJobItemRecord, TraceRetentionJobItemStatus,
+    TraceRetentionJobItemWrite, TraceRetentionJobRecord, TraceRetentionJobStatus,
+    TraceRetentionJobWrite, TraceSubmissionRecord, TraceSubmissionWrite, TraceTenantPolicyRecord,
+    TraceTenantPolicyWrite, TraceTombstoneRecord, TraceTombstoneWrite, TraceVectorEntryRecord,
     TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
     TraceWorkerKind,
 };
@@ -53,6 +55,16 @@ const TRACE_EXPORT_MANIFEST_ITEM_COLUMNS: &str = "\
 const TRACE_TOMBSTONE_COLUMNS: &str = "\
     tenant_id, tombstone_id, submission_id, trace_id, redaction_hash, canonical_summary_hash, \
     reason, effective_at, retain_until, created_by_principal_ref, created_at";
+
+const TRACE_RETENTION_JOB_COLUMNS: &str = "\
+    tenant_id, retention_job_id, purpose, dry_run, status, requested_by_principal_ref, \
+    requested_by_role, purge_expired_before, prune_export_cache, max_export_age_hours, \
+    audit_event_id, action_counts, selected_revoked_count, selected_expired_count, \
+    started_at, completed_at, created_at, updated_at";
+
+const TRACE_RETENTION_JOB_ITEM_COLUMNS: &str = "\
+    tenant_id, retention_job_id, submission_id, action, status, reason, action_counts, \
+    verified_at, created_at, updated_at";
 
 async fn ensure_libsql_object_ref_belongs_to_submission(
     conn: &libsql::Connection,
@@ -549,6 +561,68 @@ fn row_to_tombstone(row: &libsql::Row) -> Result<TraceTombstoneRecord, DatabaseE
         retain_until: get_opt_ts(row, 8),
         created_by_principal_ref: get_text(row, 9),
         created_at: get_ts(row, 10),
+    })
+}
+
+fn row_to_retention_job(row: &libsql::Row) -> Result<TraceRetentionJobRecord, DatabaseError> {
+    Ok(TraceRetentionJobRecord {
+        tenant_id: get_text(row, 0),
+        retention_job_id: parse_uuid(&get_text(row, 1), "trace_retention_jobs.retention_job_id")?,
+        purpose: get_text(row, 2),
+        dry_run: row.get::<i64>(3).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace_retention_jobs.dry_run column read failed: {e}"
+            ))
+        })? != 0,
+        status: enum_from_storage::<TraceRetentionJobStatus>(
+            &get_text(row, 4),
+            "TraceRetentionJobStatus",
+        )?,
+        requested_by_principal_ref: get_text(row, 5),
+        requested_by_role: get_text(row, 6),
+        purge_expired_before: get_opt_ts(row, 7),
+        prune_export_cache: row.get::<i64>(8).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace_retention_jobs.prune_export_cache column read failed: {e}"
+            ))
+        })? != 0,
+        max_export_age_hours: row.get::<i64>(9).ok(),
+        audit_event_id: get_opt_text(row, 10)
+            .map(|id| parse_uuid(&id, "trace_retention_jobs.audit_event_id"))
+            .transpose()?,
+        action_counts: json_u32_map(&get_text(row, 11), "trace_retention_jobs.action_counts")?,
+        selected_revoked_count: get_u32(row, 12, "trace_retention_jobs.selected_revoked_count")?,
+        selected_expired_count: get_u32(row, 13, "trace_retention_jobs.selected_expired_count")?,
+        started_at: get_opt_ts(row, 14),
+        completed_at: get_opt_ts(row, 15),
+        created_at: get_ts(row, 16),
+        updated_at: get_ts(row, 17),
+    })
+}
+
+fn row_to_retention_job_item(
+    row: &libsql::Row,
+) -> Result<TraceRetentionJobItemRecord, DatabaseError> {
+    Ok(TraceRetentionJobItemRecord {
+        tenant_id: get_text(row, 0),
+        retention_job_id: parse_uuid(
+            &get_text(row, 1),
+            "trace_retention_job_items.retention_job_id",
+        )?,
+        submission_id: parse_uuid(&get_text(row, 2), "trace_retention_job_items.submission_id")?,
+        action: enum_from_storage::<TraceRetentionJobItemAction>(
+            &get_text(row, 3),
+            "TraceRetentionJobItemAction",
+        )?,
+        status: enum_from_storage::<TraceRetentionJobItemStatus>(
+            &get_text(row, 4),
+            "TraceRetentionJobItemStatus",
+        )?,
+        reason: get_text(row, 5),
+        action_counts: json_u32_map(&get_text(row, 6), "trace_retention_job_items.action_counts")?,
+        verified_at: get_opt_ts(row, 7),
+        created_at: get_ts(row, 8),
+        updated_at: get_ts(row, 9),
     })
 }
 
@@ -1748,6 +1822,207 @@ impl TraceCorpusStore for LibSqlBackend {
             tombstones.push(row_to_tombstone(&row)?);
         }
         Ok(tombstones)
+    }
+
+    async fn upsert_trace_retention_job(
+        &self,
+        job: TraceRetentionJobWrite,
+    ) -> Result<TraceRetentionJobRecord, DatabaseError> {
+        self.ensure_trace_tenant(&job.tenant_id).await?;
+        let conn = self.connect().await?;
+        let action_counts = json_string(&job.action_counts)?;
+        conn.execute(
+            "INSERT INTO trace_retention_jobs (
+                tenant_id, retention_job_id, purpose, dry_run, status,
+                requested_by_principal_ref, requested_by_role, purge_expired_before,
+                prune_export_cache, max_export_age_hours, audit_event_id, action_counts,
+                selected_revoked_count, selected_expired_count, started_at, completed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+             ON CONFLICT (tenant_id, retention_job_id) DO UPDATE SET
+                purpose = excluded.purpose,
+                dry_run = excluded.dry_run,
+                status = excluded.status,
+                requested_by_principal_ref = excluded.requested_by_principal_ref,
+                requested_by_role = excluded.requested_by_role,
+                purge_expired_before = excluded.purge_expired_before,
+                prune_export_cache = excluded.prune_export_cache,
+                max_export_age_hours = excluded.max_export_age_hours,
+                audit_event_id = excluded.audit_event_id,
+                action_counts = excluded.action_counts,
+                selected_revoked_count = excluded.selected_revoked_count,
+                selected_expired_count = excluded.selected_expired_count,
+                started_at = excluded.started_at,
+                completed_at = excluded.completed_at,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+            libsql::params![
+                job.tenant_id.as_str(),
+                job.retention_job_id.to_string(),
+                job.purpose.as_str(),
+                i64::from(job.dry_run),
+                enum_to_storage(job.status)?,
+                job.requested_by_principal_ref.as_str(),
+                job.requested_by_role.as_str(),
+                fmt_opt_ts(&job.purge_expired_before),
+                i64::from(job.prune_export_cache),
+                job.max_export_age_hours,
+                opt_uuid(job.audit_event_id),
+                action_counts,
+                i64::from(job.selected_revoked_count),
+                i64::from(job.selected_expired_count),
+                fmt_opt_ts(&job.started_at),
+                fmt_opt_ts(&job.completed_at),
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {TRACE_RETENTION_JOB_COLUMNS}
+                     FROM trace_retention_jobs
+                     WHERE tenant_id = ?1 AND retention_job_id = ?2"
+                ),
+                libsql::params![job.tenant_id.as_str(), job.retention_job_id.to_string()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        match rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            Some(row) => row_to_retention_job(&row),
+            None => Err(DatabaseError::NotFound {
+                entity: "trace_retention_job".to_string(),
+                id: job.retention_job_id.to_string(),
+            }),
+        }
+    }
+
+    async fn upsert_trace_retention_job_item(
+        &self,
+        item: TraceRetentionJobItemWrite,
+    ) -> Result<TraceRetentionJobItemRecord, DatabaseError> {
+        self.ensure_trace_tenant(&item.tenant_id).await?;
+        let conn = self.connect().await?;
+        let action_counts = json_string(&item.action_counts)?;
+        conn.execute(
+            "INSERT INTO trace_retention_job_items (
+                tenant_id, retention_job_id, submission_id, action, status, reason,
+                action_counts, verified_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT (tenant_id, retention_job_id, submission_id, action) DO UPDATE SET
+                status = excluded.status,
+                reason = excluded.reason,
+                action_counts = excluded.action_counts,
+                verified_at = excluded.verified_at,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+            libsql::params![
+                item.tenant_id.as_str(),
+                item.retention_job_id.to_string(),
+                item.submission_id.to_string(),
+                enum_to_storage(item.action)?,
+                enum_to_storage(item.status)?,
+                item.reason.as_str(),
+                action_counts,
+                fmt_opt_ts(&item.verified_at),
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let action = enum_to_storage(item.action)?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {TRACE_RETENTION_JOB_ITEM_COLUMNS}
+                     FROM trace_retention_job_items
+                     WHERE tenant_id = ?1
+                       AND retention_job_id = ?2
+                       AND submission_id = ?3
+                       AND action = ?4"
+                ),
+                libsql::params![
+                    item.tenant_id.as_str(),
+                    item.retention_job_id.to_string(),
+                    item.submission_id.to_string(),
+                    action.as_str(),
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        match rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            Some(row) => row_to_retention_job_item(&row),
+            None => Err(DatabaseError::NotFound {
+                entity: "trace_retention_job_item".to_string(),
+                id: format!(
+                    "{}:{}:{}",
+                    item.retention_job_id, item.submission_id, action
+                ),
+            }),
+        }
+    }
+
+    async fn list_trace_retention_jobs(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRetentionJobRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {TRACE_RETENTION_JOB_COLUMNS}
+                     FROM trace_retention_jobs
+                     WHERE tenant_id = ?1
+                     ORDER BY created_at ASC"
+                ),
+                libsql::params![tenant_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut jobs = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            jobs.push(row_to_retention_job(&row)?);
+        }
+        Ok(jobs)
+    }
+
+    async fn list_trace_retention_job_items(
+        &self,
+        tenant_id: &str,
+        retention_job_id: Uuid,
+    ) -> Result<Vec<TraceRetentionJobItemRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {TRACE_RETENTION_JOB_ITEM_COLUMNS}
+                     FROM trace_retention_job_items
+                     WHERE tenant_id = ?1 AND retention_job_id = ?2
+                     ORDER BY created_at ASC, submission_id ASC, action ASC"
+                ),
+                libsql::params![tenant_id, retention_job_id.to_string()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut items = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            items.push(row_to_retention_job_item(&row)?);
+        }
+        Ok(items)
     }
 
     async fn invalidate_trace_submission_artifacts(

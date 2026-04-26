@@ -17,8 +17,10 @@ use crate::trace_corpus_storage::{
     TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportManifestItemInvalidationReason,
     TraceExportManifestItemRecord, TraceExportManifestItemWrite, TraceExportManifestRecord,
     TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefRecord, TraceObjectRefWrite,
-    TraceSubmissionRecord, TraceSubmissionWrite, TraceTenantPolicyRecord, TraceTenantPolicyWrite,
-    TraceTombstoneRecord, TraceTombstoneWrite, TraceVectorEntryRecord,
+    TraceRetentionJobItemAction, TraceRetentionJobItemRecord, TraceRetentionJobItemStatus,
+    TraceRetentionJobItemWrite, TraceRetentionJobRecord, TraceRetentionJobStatus,
+    TraceRetentionJobWrite, TraceSubmissionRecord, TraceSubmissionWrite, TraceTenantPolicyRecord,
+    TraceTenantPolicyWrite, TraceTombstoneRecord, TraceTombstoneWrite, TraceVectorEntryRecord,
     TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
     TraceWorkerKind,
 };
@@ -41,6 +43,16 @@ const TRACE_EXPORT_MANIFEST_ITEM_COLUMNS: &str = "\
 const TRACE_TOMBSTONE_COLUMNS: &str = "\
     tenant_id, tombstone_id, submission_id, trace_id, redaction_hash, canonical_summary_hash, \
     reason, effective_at, retain_until, created_by_principal_ref, created_at";
+
+const TRACE_RETENTION_JOB_COLUMNS: &str = "\
+    tenant_id, retention_job_id, purpose, dry_run, status, requested_by_principal_ref, \
+    requested_by_role, purge_expired_before, prune_export_cache, max_export_age_hours, \
+    audit_event_id, action_counts, selected_revoked_count, selected_expired_count, \
+    started_at, completed_at, created_at, updated_at";
+
+const TRACE_RETENTION_JOB_ITEM_COLUMNS: &str = "\
+    tenant_id, retention_job_id, submission_id, action, status, reason, action_counts, \
+    verified_at, created_at, updated_at";
 
 async fn ensure_pg_object_ref_belongs_to_submission(
     tx: &Transaction<'_>,
@@ -426,6 +438,69 @@ fn row_to_tombstone(row: &Row) -> Result<TraceTombstoneRecord, DatabaseError> {
         retain_until: row.get("retain_until"),
         created_by_principal_ref: row.get("created_by_principal_ref"),
         created_at: row.get("created_at"),
+    })
+}
+
+fn row_to_retention_job(row: &Row) -> Result<TraceRetentionJobRecord, DatabaseError> {
+    let status: String = row.get("status");
+    let action_counts: serde_json::Value = row.get("action_counts");
+    Ok(TraceRetentionJobRecord {
+        tenant_id: row.get("tenant_id"),
+        retention_job_id: row.get("retention_job_id"),
+        purpose: row.get("purpose"),
+        dry_run: row.get("dry_run"),
+        status: enum_from_storage::<TraceRetentionJobStatus>(&status, "TraceRetentionJobStatus")?,
+        requested_by_principal_ref: row.get("requested_by_principal_ref"),
+        requested_by_role: row.get("requested_by_role"),
+        purge_expired_before: row.get("purge_expired_before"),
+        prune_export_cache: row.get("prune_export_cache"),
+        max_export_age_hours: row.get("max_export_age_hours"),
+        audit_event_id: row.get("audit_event_id"),
+        action_counts: json_u32_map(action_counts, "retention_job.action_counts")?,
+        selected_revoked_count: row
+            .get::<_, i32>("selected_revoked_count")
+            .try_into()
+            .map_err(|e| {
+                DatabaseError::Serialization(format!(
+                    "invalid trace_retention_jobs.selected_revoked_count column value: {e}"
+                ))
+            })?,
+        selected_expired_count: row
+            .get::<_, i32>("selected_expired_count")
+            .try_into()
+            .map_err(|e| {
+                DatabaseError::Serialization(format!(
+                    "invalid trace_retention_jobs.selected_expired_count column value: {e}"
+                ))
+            })?,
+        started_at: row.get("started_at"),
+        completed_at: row.get("completed_at"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    })
+}
+
+fn row_to_retention_job_item(row: &Row) -> Result<TraceRetentionJobItemRecord, DatabaseError> {
+    let action: String = row.get("action");
+    let status: String = row.get("status");
+    let action_counts: serde_json::Value = row.get("action_counts");
+    Ok(TraceRetentionJobItemRecord {
+        tenant_id: row.get("tenant_id"),
+        retention_job_id: row.get("retention_job_id"),
+        submission_id: row.get("submission_id"),
+        action: enum_from_storage::<TraceRetentionJobItemAction>(
+            &action,
+            "TraceRetentionJobItemAction",
+        )?,
+        status: enum_from_storage::<TraceRetentionJobItemStatus>(
+            &status,
+            "TraceRetentionJobItemStatus",
+        )?,
+        reason: row.get("reason"),
+        action_counts: json_u32_map(action_counts, "retention_job_item.action_counts")?,
+        verified_at: row.get("verified_at"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
     })
 }
 
@@ -1565,6 +1640,176 @@ impl TraceCorpusStore for PgBackend {
             .await
             .map_err(DatabaseError::Postgres)?;
         let records = rows.iter().map(row_to_tombstone).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn upsert_trace_retention_job(
+        &self,
+        job: TraceRetentionJobWrite,
+    ) -> Result<TraceRetentionJobRecord, DatabaseError> {
+        self.ensure_trace_tenant(&job.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &job.tenant_id).await?;
+        let status = enum_to_storage(job.status)?;
+        let action_counts = serde_json::to_value(&job.action_counts).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace retention job action_counts encode failed: {e}"
+            ))
+        })?;
+        let selected_revoked_count = i32::try_from(job.selected_revoked_count).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace retention job selected_revoked_count exceeds PostgreSQL integer range: {e}"
+            ))
+        })?;
+        let selected_expired_count = i32::try_from(job.selected_expired_count).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace retention job selected_expired_count exceeds PostgreSQL integer range: {e}"
+            ))
+        })?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_retention_jobs (
+                        tenant_id, retention_job_id, purpose, dry_run, status,
+                        requested_by_principal_ref, requested_by_role, purge_expired_before,
+                        prune_export_cache, max_export_age_hours, audit_event_id, action_counts,
+                        selected_revoked_count, selected_expired_count, started_at, completed_at
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                     ON CONFLICT (tenant_id, retention_job_id) DO UPDATE SET
+                        purpose = excluded.purpose,
+                        dry_run = excluded.dry_run,
+                        status = excluded.status,
+                        requested_by_principal_ref = excluded.requested_by_principal_ref,
+                        requested_by_role = excluded.requested_by_role,
+                        purge_expired_before = excluded.purge_expired_before,
+                        prune_export_cache = excluded.prune_export_cache,
+                        max_export_age_hours = excluded.max_export_age_hours,
+                        audit_event_id = excluded.audit_event_id,
+                        action_counts = excluded.action_counts,
+                        selected_revoked_count = excluded.selected_revoked_count,
+                        selected_expired_count = excluded.selected_expired_count,
+                        started_at = excluded.started_at,
+                        completed_at = excluded.completed_at,
+                        updated_at = NOW()
+                     RETURNING {TRACE_RETENTION_JOB_COLUMNS}"
+                ),
+                &[
+                    &job.tenant_id,
+                    &job.retention_job_id,
+                    &job.purpose,
+                    &job.dry_run,
+                    &status,
+                    &job.requested_by_principal_ref,
+                    &job.requested_by_role,
+                    &job.purge_expired_before,
+                    &job.prune_export_cache,
+                    &job.max_export_age_hours,
+                    &job.audit_event_id,
+                    &action_counts,
+                    &selected_revoked_count,
+                    &selected_expired_count,
+                    &job.started_at,
+                    &job.completed_at,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_retention_job(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn upsert_trace_retention_job_item(
+        &self,
+        item: TraceRetentionJobItemWrite,
+    ) -> Result<TraceRetentionJobItemRecord, DatabaseError> {
+        self.ensure_trace_tenant(&item.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &item.tenant_id).await?;
+        let action = enum_to_storage(item.action)?;
+        let status = enum_to_storage(item.status)?;
+        let action_counts = serde_json::to_value(&item.action_counts).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace retention job item action_counts encode failed: {e}"
+            ))
+        })?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_retention_job_items (
+                        tenant_id, retention_job_id, submission_id, action, status, reason,
+                        action_counts, verified_at
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                     ON CONFLICT (tenant_id, retention_job_id, submission_id, action) DO UPDATE SET
+                        status = excluded.status,
+                        reason = excluded.reason,
+                        action_counts = excluded.action_counts,
+                        verified_at = excluded.verified_at,
+                        updated_at = NOW()
+                     RETURNING {TRACE_RETENTION_JOB_ITEM_COLUMNS}"
+                ),
+                &[
+                    &item.tenant_id,
+                    &item.retention_job_id,
+                    &item.submission_id,
+                    &action,
+                    &status,
+                    &item.reason,
+                    &action_counts,
+                    &item.verified_at,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_retention_job_item(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_retention_jobs(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRetentionJobRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_RETENTION_JOB_COLUMNS}
+                     FROM trace_retention_jobs
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_retention_job).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn list_trace_retention_job_items(
+        &self,
+        tenant_id: &str,
+        retention_job_id: Uuid,
+    ) -> Result<Vec<TraceRetentionJobItemRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_RETENTION_JOB_ITEM_COLUMNS}
+                     FROM trace_retention_job_items
+                     WHERE tenant_id = $1 AND retention_job_id = $2
+                     ORDER BY created_at ASC, submission_id ASC, action ASC"
+                ),
+                &[&tenant_id, &retention_job_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_retention_job_item).collect();
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         records
     }

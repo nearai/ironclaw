@@ -11,9 +11,10 @@ mod libsql_trace_corpus_store {
         TraceCreditSettlementState, TraceDerivedRecordWrite, TraceDerivedStatus,
         TraceExportManifestItemInvalidationReason, TraceExportManifestItemWrite,
         TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefWrite,
-        TraceSubmissionWrite, TraceTenantPolicyWrite, TraceTombstoneWrite,
-        TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
-        TraceWorkerKind,
+        TraceRetentionJobItemAction, TraceRetentionJobItemStatus, TraceRetentionJobItemWrite,
+        TraceRetentionJobStatus, TraceRetentionJobWrite, TraceSubmissionWrite,
+        TraceTenantPolicyWrite, TraceTombstoneWrite, TraceVectorEntrySourceProjection,
+        TraceVectorEntryStatus, TraceVectorEntryWrite, TraceWorkerKind,
     };
     use uuid::Uuid;
 
@@ -1493,6 +1494,104 @@ mod libsql_trace_corpus_store {
             err.to_string().contains("does not belong to tenant"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn libsql_store_preserves_retention_job_scope_and_items() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let db_path = temp_dir.path().join("trace-retention-jobs.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("create libsql backend");
+        backend.run_migrations().await.expect("run migrations");
+
+        let submission_id = Uuid::new_v4();
+        backend
+            .upsert_trace_submission(sample_submission("tenant-alpha", submission_id))
+            .await
+            .expect("insert alpha submission");
+        backend
+            .upsert_trace_submission(sample_submission("tenant-beta", submission_id))
+            .await
+            .expect("insert beta submission");
+
+        let retention_job_id = Uuid::new_v4();
+        let mut action_counts = BTreeMap::new();
+        action_counts.insert("records_marked_expired".to_string(), 1);
+        action_counts.insert("records_marked_purged".to_string(), 1);
+        let job = backend
+            .upsert_trace_retention_job(TraceRetentionJobWrite {
+                tenant_id: "tenant-alpha".to_string(),
+                retention_job_id,
+                purpose: "test_retention_purge".to_string(),
+                dry_run: false,
+                status: TraceRetentionJobStatus::Complete,
+                requested_by_principal_ref: "principal:retention-worker".to_string(),
+                requested_by_role: "retention_worker".to_string(),
+                purge_expired_before: Some(Utc::now()),
+                prune_export_cache: true,
+                max_export_age_hours: Some(24),
+                audit_event_id: Some(Uuid::new_v4()),
+                action_counts: action_counts.clone(),
+                selected_revoked_count: 0,
+                selected_expired_count: 1,
+                started_at: Some(Utc::now()),
+                completed_at: Some(Utc::now()),
+            })
+            .await
+            .expect("insert alpha retention job");
+        assert_eq!(job.tenant_id, "tenant-alpha");
+        assert_eq!(job.retention_job_id, retention_job_id);
+        assert_eq!(job.status, TraceRetentionJobStatus::Complete);
+        assert_eq!(job.action_counts, action_counts);
+        assert_eq!(job.selected_expired_count, 1);
+
+        let mut item_counts = BTreeMap::new();
+        item_counts.insert("object_refs_invalidated".to_string(), 1);
+        item_counts.insert("derived_records_invalidated".to_string(), 1);
+        item_counts.insert("records_marked_purged".to_string(), 1);
+        let item = backend
+            .upsert_trace_retention_job_item(TraceRetentionJobItemWrite {
+                tenant_id: "tenant-alpha".to_string(),
+                retention_job_id,
+                submission_id,
+                action: TraceRetentionJobItemAction::Purge,
+                status: TraceRetentionJobItemStatus::Done,
+                reason: "retention_purged".to_string(),
+                action_counts: item_counts.clone(),
+                verified_at: Some(Utc::now()),
+            })
+            .await
+            .expect("insert alpha retention job item");
+        assert_eq!(item.tenant_id, "tenant-alpha");
+        assert_eq!(item.submission_id, submission_id);
+        assert_eq!(item.action, TraceRetentionJobItemAction::Purge);
+        assert_eq!(item.status, TraceRetentionJobItemStatus::Done);
+        assert_eq!(item.action_counts, item_counts);
+
+        let jobs = backend
+            .list_trace_retention_jobs("tenant-alpha")
+            .await
+            .expect("list alpha retention jobs");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].retention_job_id, retention_job_id);
+        let beta_jobs = backend
+            .list_trace_retention_jobs("tenant-beta")
+            .await
+            .expect("list beta retention jobs");
+        assert!(beta_jobs.is_empty());
+
+        let items = backend
+            .list_trace_retention_job_items("tenant-alpha", retention_job_id)
+            .await
+            .expect("list alpha retention job items");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].submission_id, submission_id);
+        let beta_items = backend
+            .list_trace_retention_job_items("tenant-beta", retention_job_id)
+            .await
+            .expect("list beta retention job items");
+        assert!(beta_items.is_empty());
     }
 
     #[tokio::test]

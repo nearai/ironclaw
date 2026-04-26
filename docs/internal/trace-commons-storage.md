@@ -360,38 +360,45 @@ CREATE TABLE trace_tombstones (
 CREATE INDEX idx_trace_tombstones_hashes ON trace_tombstones(tenant_id, redaction_hash, canonical_summary_hash);
 
 CREATE TABLE trace_retention_jobs (
-    retention_job_id UUID PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    policy_id TEXT NOT NULL,
-    cutoff_at TIMESTAMPTZ NOT NULL,
+    tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
+    retention_job_id UUID NOT NULL,
+    purpose TEXT NOT NULL,
+    dry_run BOOLEAN NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('planned', 'dry_run', 'running', 'complete', 'failed', 'paused')),
-    selected_count INTEGER NOT NULL DEFAULT 0,
-    purged_count INTEGER NOT NULL DEFAULT 0,
-    failed_count INTEGER NOT NULL DEFAULT 0,
-    dry_run_report_object_ref_id UUID,
+    requested_by_principal_ref TEXT NOT NULL,
+    requested_by_role TEXT NOT NULL,
+    purge_expired_before TIMESTAMPTZ,
+    prune_export_cache BOOLEAN NOT NULL DEFAULT TRUE,
+    max_export_age_hours BIGINT,
+    audit_event_id UUID,
+    action_counts JSONB NOT NULL DEFAULT '{}'::JSONB,
+    selected_revoked_count INTEGER NOT NULL DEFAULT 0 CHECK (selected_revoked_count >= 0),
+    selected_expired_count INTEGER NOT NULL DEFAULT 0 CHECK (selected_expired_count >= 0),
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    FOREIGN KEY (tenant_id, dry_run_report_object_ref_id) REFERENCES trace_object_refs(tenant_id, object_ref_id)
+    PRIMARY KEY (tenant_id, retention_job_id)
 );
+CREATE INDEX idx_trace_retention_jobs_created ON trace_retention_jobs(tenant_id, created_at DESC);
+CREATE INDEX idx_trace_retention_jobs_status ON trace_retention_jobs(tenant_id, status, updated_at DESC);
 
 CREATE TABLE trace_retention_job_items (
-    retention_job_id UUID NOT NULL REFERENCES trace_retention_jobs(retention_job_id) ON DELETE CASCADE,
     tenant_id TEXT NOT NULL,
+    retention_job_id UUID NOT NULL,
     submission_id UUID NOT NULL,
-    action TEXT NOT NULL CHECK (action IN ('expire', 'revoke', 'delete_object', 'delete_vector', 'invalidate_export', 'write_tombstone')),
-    status TEXT NOT NULL CHECK (status IN ('pending', 'done', 'failed', 'skipped_policy_changed')),
-    object_ref_id UUID,
-    vector_entry_id UUID,
-    export_manifest_id UUID REFERENCES trace_export_manifests(export_manifest_id),
+    action TEXT NOT NULL CHECK (action IN ('revoke', 'expire', 'purge')),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'done', 'failed', 'skipped')),
+    reason TEXT NOT NULL,
+    action_counts JSONB NOT NULL DEFAULT '{}'::JSONB,
     verified_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (retention_job_id, tenant_id, submission_id, action),
-    FOREIGN KEY (tenant_id, submission_id, object_ref_id) REFERENCES trace_object_refs(tenant_id, submission_id, object_ref_id),
-    FOREIGN KEY (tenant_id, submission_id, vector_entry_id) REFERENCES trace_vector_entries(tenant_id, submission_id, vector_entry_id)
+    PRIMARY KEY (tenant_id, retention_job_id, submission_id, action),
+    FOREIGN KEY (tenant_id, retention_job_id) REFERENCES trace_retention_jobs(tenant_id, retention_job_id) ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, submission_id) REFERENCES trace_submissions(tenant_id, submission_id) ON DELETE CASCADE
 );
+CREATE INDEX idx_trace_retention_job_items_submission ON trace_retention_job_items(tenant_id, submission_id, created_at DESC);
 ```
 
 V31 adds the first PostgreSQL RLS policy layer for the tenant-scoped Trace Commons metadata tables:
@@ -683,38 +690,46 @@ CREATE TABLE IF NOT EXISTS trace_tombstones (
 CREATE INDEX IF NOT EXISTS idx_trace_tombstones_hashes ON trace_tombstones(tenant_id, redaction_hash, canonical_summary_hash);
 
 CREATE TABLE IF NOT EXISTS trace_retention_jobs (
-    retention_job_id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
-    policy_id TEXT NOT NULL,
-    cutoff_at TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('planned', 'dry_run', 'running', 'complete', 'failed', 'paused')),
-    selected_count INTEGER NOT NULL DEFAULT 0,
-    purged_count INTEGER NOT NULL DEFAULT 0,
-    failed_count INTEGER NOT NULL DEFAULT 0,
-    dry_run_report_object_ref_id TEXT,
+    retention_job_id TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    dry_run INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    requested_by_principal_ref TEXT NOT NULL,
+    requested_by_role TEXT NOT NULL,
+    purge_expired_before TEXT,
+    prune_export_cache INTEGER NOT NULL DEFAULT 1,
+    max_export_age_hours INTEGER,
+    audit_event_id TEXT,
+    action_counts TEXT NOT NULL DEFAULT '{}',
+    selected_revoked_count INTEGER NOT NULL DEFAULT 0,
+    selected_expired_count INTEGER NOT NULL DEFAULT 0,
     started_at TEXT,
     completed_at TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    FOREIGN KEY (tenant_id, dry_run_report_object_ref_id) REFERENCES trace_object_refs(tenant_id, object_ref_id)
+    PRIMARY KEY (tenant_id, retention_job_id),
+    FOREIGN KEY (tenant_id) REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE
 );
+CREATE INDEX IF NOT EXISTS idx_trace_retention_jobs_created ON trace_retention_jobs(tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trace_retention_jobs_status ON trace_retention_jobs(tenant_id, status, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS trace_retention_job_items (
-    retention_job_id TEXT NOT NULL REFERENCES trace_retention_jobs(retention_job_id) ON DELETE CASCADE,
     tenant_id TEXT NOT NULL,
+    retention_job_id TEXT NOT NULL,
     submission_id TEXT NOT NULL,
-    action TEXT NOT NULL CHECK (action IN ('expire', 'revoke', 'delete_object', 'delete_vector', 'invalidate_export', 'write_tombstone')),
-    status TEXT NOT NULL CHECK (status IN ('pending', 'done', 'failed', 'skipped_policy_changed')),
-    object_ref_id TEXT,
-    vector_entry_id TEXT,
-    export_manifest_id TEXT REFERENCES trace_export_manifests(export_manifest_id),
+    action TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    action_counts TEXT NOT NULL DEFAULT '{}',
     verified_at TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    PRIMARY KEY (retention_job_id, tenant_id, submission_id, action),
-    FOREIGN KEY (tenant_id, submission_id, object_ref_id) REFERENCES trace_object_refs(tenant_id, submission_id, object_ref_id),
-    FOREIGN KEY (tenant_id, submission_id, vector_entry_id) REFERENCES trace_vector_entries(tenant_id, submission_id, vector_entry_id)
+    PRIMARY KEY (tenant_id, retention_job_id, submission_id, action),
+    FOREIGN KEY (tenant_id, retention_job_id) REFERENCES trace_retention_jobs(tenant_id, retention_job_id) ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, submission_id) REFERENCES trace_submissions(tenant_id, submission_id) ON DELETE CASCADE
 );
+CREATE INDEX IF NOT EXISTS idx_trace_retention_job_items_submission ON trace_retention_job_items(tenant_id, submission_id, created_at DESC);
 ```
 
 ### Rust Store Contract Shape
@@ -993,7 +1008,7 @@ Do not mutate historical ledger rows. Materialized credit totals can be cached s
 
 Every export item needs an audit event or an audit batch event with a cryptographic item list hash. The pilot replay, benchmark, and ranker export paths already write a deterministic source-list hash into both the exported artifact/manifest and the mirrored audit `decision_inputs_hash`; benchmark and ranker exports also persist file-backed provenance manifests, and replay dataset exports promote that hash plus item-level source snapshots into durable DB manifests.
 
-Pilot `V29` implements the compact `trace_export_manifests` control row for replay dataset exports in both PostgreSQL and libSQL. It stores tenant id, export manifest id, artifact kind, purpose, audit event id, source submission ids, source-list hash, item count, generation time, and invalidation/deletion timestamps. Pilot `V30` adds `trace_export_manifest_items` rows for each replay export source, including source object ref ids, source status/hash snapshots, and per-item revocation, expiration, or purge invalidation.
+Pilot `V29` implements the compact `trace_export_manifests` control row for replay dataset exports in both PostgreSQL and libSQL. It stores tenant id, export manifest id, artifact kind, purpose, audit event id, source submission ids, source-list hash, item count, generation time, and invalidation/deletion timestamps. Pilot `V30` adds `trace_export_manifest_items` rows for each replay export source, including source object ref ids, source status/hash snapshots, and per-item revocation, expiration, or purge invalidation. Pilot `V36` adds `trace_retention_jobs` and `trace_retention_job_items` rows so maintenance/retention runs have a tenant-scoped durable ledger of run parameters, aggregate action counts, and per-submission expire/purge/revoke lifecycle counts.
 
 ### Benchmark Artifacts
 
@@ -1035,13 +1050,15 @@ Tombstones should outlive content deletion long enough to prevent re-ingest or r
 
 | Column | Purpose |
 |--------|---------|
-| `retention_job_id` | Job id. |
-| `tenant_id` | Tenant boundary or system tenant for cross-tenant scheduler metadata. |
-| `policy_id` | Central retention policy. |
-| `cutoff_at` | Selection cutoff. |
+| `tenant_id`, `retention_job_id` | Tenant-scoped job id. |
+| `purpose` | Maintenance run purpose such as `retention_maintenance`. |
+| `dry_run` | Whether the run only planned actions. |
 | `status` | `planned`, `dry_run`, `running`, `complete`, `failed`, `paused`. |
-| `selected_count`, `purged_count`, `failed_count` | Job counters. |
-| `dry_run_report_object_ref_id` | Safety review artifact. |
+| `requested_by_principal_ref`, `requested_by_role` | Actor or worker that requested the run. |
+| `purge_expired_before`, `prune_export_cache`, `max_export_age_hours` | Selection knobs used by the maintenance run. |
+| `audit_event_id` | Linked append-only maintenance audit event. |
+| `action_counts` | Aggregate lifecycle/export/object/vector counts. |
+| `selected_revoked_count`, `selected_expired_count` | Source selection counters. |
 | `started_at`, `completed_at` | Lifecycle timestamps. |
 
 `trace_retention_job_items`
@@ -1049,9 +1066,10 @@ Tombstones should outlive content deletion long enough to prevent re-ingest or r
 | Column | Purpose |
 |--------|---------|
 | `retention_job_id`, `tenant_id`, `submission_id` | Selected source. |
-| `action` | `expire`, `revoke`, `delete_object`, `delete_vector`, `invalidate_export`, `write_tombstone`. |
-| `status` | `pending`, `done`, `failed`, `skipped_policy_changed`. |
-| `object_ref_id`, `vector_entry_id`, `export_manifest_id` | Optional target. |
+| `action` | `revoke`, `expire`, or `purge`. |
+| `status` | `pending`, `done`, `failed`, `skipped`. |
+| `reason` | Lifecycle reason, for example `retention_expired`. |
+| `action_counts` | Per-submission object/vector/export invalidation counts. |
 | `verified_at` | Post-action verification time. |
 
 Retention jobs must be resumable and must verify that tenant, policy, consent, and revocation state still match immediately before destructive actions.
@@ -1138,7 +1156,7 @@ Implementation checklist for the first real storage migration:
 - After parity checks pass, promote critical writes with `TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES=true` so DB mirror failures fail closed instead of creating file-only accepted submissions, credit events, export provenance, or audit/content-read rows.
 - Keep DB reads behind surface-specific rollout flags until parity checks pass. Contributor credit/status reads are gated by `TRACE_COMMONS_DB_CONTRIBUTOR_READS=true`, reviewer metadata reads by `TRACE_COMMONS_DB_REVIEWER_READS=true`, replay export selection by `TRACE_COMMONS_DB_REPLAY_EXPORT_READS=true`, and audit event reads by `TRACE_COMMONS_DB_AUDIT_READS=true`.
 - Keep object payloads in encrypted artifact/object storage; write only object refs and hashes into DB. Completed for the local encrypted artifact sidecar, DB object-ref-backed replay envelope reads, schema-versioned benchmark conversion artifacts with audited registry/evaluation lifecycle updates, source object-ref gating for benchmark/ranker derived exports, object-primary submit/review envelope body storage, and object-primary replay export body reads; remote service-owned object storage and broader object-primary read surfaces remain future work.
-- Propagate revocation and retention expiration to DB metadata before DB-first reads. Completed for submission status, tombstones, object-ref invalidation, derived-record invalidation, vector-entry invalidation, replay export manifest/item invalidation, file-backed benchmark/ranker provenance invalidation, contributor credit/status reads, reviewer metadata reads, maintenance repair of already file-marked revoked submissions, retention-expired submission/object/derived/export invalidation, and audit events for invalidation counts.
+- Propagate revocation and retention expiration to DB metadata before DB-first reads. Completed for submission status, tombstones, object-ref invalidation, derived-record invalidation, vector-entry invalidation, replay export manifest/item invalidation, file-backed benchmark/ranker provenance invalidation, contributor credit/status reads, reviewer metadata reads, maintenance repair of already file-marked revoked submissions, retention-expired submission/object/derived/export invalidation, audit events for invalidation counts, and durable retention job/item ledger rows for maintenance runs.
 - Add a backfill tool that reads the file-backed tenant directories, validates envelopes, recomputes redaction and summary hashes, writes metadata, and emits audit import events. Initial maintenance-triggered DB mirror backfill exists for already-derived file-backed submissions and now isolates per-item failures with bounded reporting; full recompute/import manifests remain future work.
 - Add a reconciliation command that compares file-backed responses with DB-backed metadata for status, review queues, credit, analytics, replay export, object refs, and tombstones. Maintenance reconciliation now covers metadata counts, invalid-source derived/export diagnostics, reader-projection parity for contributor, reviewer metadata, analytics, audit, and replay/export manifest surfaces, and compact `blocking_gaps`; `TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN=true` can require reconciliation and make remaining gaps fail closed during production promotion. Remaining work is PostgreSQL breadth, remote object storage, and broader object-primary reads.
 
