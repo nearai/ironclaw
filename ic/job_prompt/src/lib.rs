@@ -1,10 +1,10 @@
 // Generate bindings from the WIT interface
 wit_bindgen::generate!({
     world: "sandboxed-tool",
-    path: "wit/tool.wit",
+    path: "../wit/tool.wit",
 });
 
-use self::near::agent::host::{self, LogLevel};
+use near::agent::host::{self, LogLevel};
 use exports::near::agent::tool::{Guest, Request, Response};
 use serde::{Deserialize, Serialize};
 
@@ -75,10 +75,15 @@ impl Guest for JobPromptTool {
             suggestions,
         };
 
-        // Return success
-        Response {
-            output: Some(serde_json::to_string(&output).unwrap()),
-            error: None,
+        match serde_json::to_string(&output) {
+            Ok(output) => Response {
+                output: Some(output),
+                error: None,
+            },
+            Err(e) => Response {
+                output: None,
+                error: Some(format!("Failed to serialize output: {}", e)),
+            },
         }
     }
 

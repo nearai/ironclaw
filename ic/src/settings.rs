@@ -1643,6 +1643,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn from_db_map_restores_tool_permissions() {
+        use crate::tools::permissions::PermissionState;
+
+        let mut db = std::collections::HashMap::new();
+        db.insert(
+            "tool_permissions.http".to_string(),
+            serde_json::json!("always_allow"),
+        );
+        db.insert(
+            "tool_permissions.shell".to_string(),
+            serde_json::json!("ask_each_time"),
+        );
+
+        let restored = Settings::from_db_map(&db);
+        assert_eq!(
+            restored.tool_permissions.get("http"),
+            Some(&PermissionState::AlwaysAllow)
+        );
+        assert_eq!(
+            restored.tool_permissions.get("shell"),
+            Some(&PermissionState::AskEachTime)
+        );
+    }
+
     /// Regression: TOML overlay must not clobber a DB-persisted selected_model
     /// when the TOML file matches the DB. This is the normal case after /model
     /// successfully writes to both DB and TOML.

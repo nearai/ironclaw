@@ -219,6 +219,112 @@ async fn insert_and_notify_pending_gate(
     }
 }
 
+fn approval_thread_scope_hint(message: &IncomingMessage) -> Option<&str> {
+    if message.channel == "gateway" {
+        message.conversation_scope()
+    } else {
+        None
+    }
+}
+
+fn is_valid_tool_permission_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '_' | '-'))
+}
+
+async fn persist_always_allow(
+    state: &EngineState,
+    pending: &PendingGate,
+) -> Option<serde_json::Value> {
+    if !is_valid_tool_permission_name(&pending.action_name) {
+        debug!(
+            tool = %pending.action_name,
+            "Skipping persisted AlwaysAllow for invalid tool name"
+        );
+        return None;
+    }
+
+    let is_locked = state
+        .effect_adapter
+        .tools()
+        .get_resolved(&pending.action_name)
+        .await
+        .map(|(_, tool)| {
+            matches!(
+                tool.requires_approval(&pending.parameters),
+                crate::tools::ApprovalRequirement::Always
+            )
+        })
+        .unwrap_or(false);
+    if is_locked {
+        debug!(
+            tool = %pending.action_name,
+            "Skipping persisted AlwaysAllow for ApprovalRequirement::Always tool"
+        );
+        return None;
+    }
+
+    let Some(store) = state.effect_adapter.settings_store().await else {
+        return None;
+    };
+
+    let key = format!("tool_permissions.{}", pending.action_name);
+    let prior = match store.get_setting(&pending.user_id, &key).await {
+        Ok(value) => value,
+        Err(error) => {
+            debug!(
+                tool = %pending.action_name,
+                %error,
+                "resolve_gate: failed to load prior tool permission"
+            );
+            return None;
+        }
+    };
+
+    let value = serde_json::to_value(crate::tools::permissions::PermissionState::AlwaysAllow)
+        .unwrap_or_else(|_| serde_json::json!("always_allow"));
+    match store.set_setting(&pending.user_id, &key, &value).await {
+        Ok(()) => {}
+        Err(error) => {
+            tracing::warn!(
+                tool = %pending.action_name,
+                user_id = %pending.user_id,
+                %error,
+                "resolve_gate: failed to persist AlwaysAllow"
+            );
+        }
+    }
+
+    prior
+}
+
+async fn revert_always_allow(
+    state: &EngineState,
+    pending: &PendingGate,
+    prior: Option<serde_json::Value>,
+) {
+    let Some(store) = state.effect_adapter.settings_store().await else {
+        return;
+    };
+
+    let key = format!("tool_permissions.{}", pending.action_name);
+    let result = match prior {
+        Some(ref value) => store.set_setting(&pending.user_id, &key, value).await.map(|_| ()),
+        None => store.delete_setting(&pending.user_id, &key).await.map(|_| ()),
+    };
+
+    if let Err(error) = result {
+        tracing::warn!(
+            tool = %pending.action_name,
+            user_id = %pending.user_id,
+            %error,
+            "resolve_gate: failed to revert persisted AlwaysAllow"
+        );
+    }
+}
+
 async fn execute_pending_gate_action(
     agent: &Agent,
     state: &EngineState,
@@ -547,6 +653,9 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         agent.safety().clone(),
         agent.hooks().clone(),
     ));
+    if let Some(store) = agent.deps.store.clone() {
+        effect_adapter.set_settings_store_from_db(store).await;
+    }
 
     // Build centralized auth manager for pre-flight credential checks.
     let has_secrets = agent.tools().secrets_store().is_some();
@@ -1046,11 +1155,12 @@ pub async fn handle_approval(
         .as_ref()
         .ok_or_else(|| engine_err("init", "engine state is empty"))?;
 
-    // Don't pass the v1 thread_id as a hint — the v1 session uses different
-    // UUIDs from the engine.  The user_id alone is sufficient for single-user
-    // deployments; ambiguity resolution kicks in for multi-user.
-    let pending = match resolve_pending_gate_for_user(&state.pending_gates, &message.user_id, None)
-        .await
+    let pending = match resolve_pending_gate_for_user(
+        &state.pending_gates,
+        &message.user_id,
+        approval_thread_scope_hint(message),
+    )
+    .await
     {
         PendingGateResolution::Resolved(p) => p,
         PendingGateResolution::None => {
@@ -1223,7 +1333,12 @@ pub async fn resolve_gate(
         })?;
 
     match resolution {
-        ironclaw_engine::GateResolution::Approved { always } => {
+        ironclaw_engine::GateResolution::Approved { always: raw_always } => {
+            let always = raw_always
+                && matches!(
+                    pending.resume_kind,
+                    ironclaw_engine::ResumeKind::Approval { allow_always: true }
+                );
             if let Some(ref sse) = state.sse {
                 sse.broadcast_for_user(
                     &message.user_id,
@@ -1242,7 +1357,7 @@ pub async fn resolve_gate(
                     },
                 );
             }
-            if always {
+            let prior_permission = if always {
                 state
                     .effect_adapter
                     .auto_approve_tool(&pending.action_name)
@@ -1250,7 +1365,10 @@ pub async fn resolve_gate(
                 if let Some(registry_name) = legacy_extension_alias(&pending.action_name) {
                     state.effect_adapter.auto_approve_tool(&registry_name).await;
                 }
-            }
+                persist_always_allow(state, &pending).await
+            } else {
+                None
+            };
             let result = execute_pending_gate_action(
                 agent,
                 state,
@@ -1272,6 +1390,7 @@ pub async fn resolve_gate(
                         .revoke_auto_approve(&registry_name)
                         .await;
                 }
+                revert_always_allow(state, &pending, prior_permission).await;
             }
             return result;
         }
@@ -1968,6 +2087,36 @@ async fn handle_with_engine_inner(
         ));
     }
 
+    let validation = agent.safety().validate_input(content);
+    if !validation.is_valid {
+        let details = validation
+            .errors
+            .iter()
+            .map(|e| format!("{}: {}", e.field, e.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Ok(Some(format!(
+            "Input rejected by safety validation: {details}"
+        )));
+    }
+
+    let violations = agent.safety().check_policy(content);
+    if violations
+        .iter()
+        .any(|rule| rule.action == crate::safety::PolicyAction::Block)
+    {
+        return Ok(Some("Input rejected by safety policy.".into()));
+    }
+
+    if let Some(warning) = agent.safety().scan_inbound_for_secrets(content) {
+        tracing::warn!(
+            user_id = %message.user_id,
+            channel = %message.channel,
+            "engine v2: inbound message blocked — contains leaked secret"
+        );
+        return Ok(Some(warning));
+    }
+
     // Send "Thinking..." status to the channel
     let _ = agent
         .channels
@@ -2003,6 +2152,14 @@ async fn handle_with_engine_inner(
     let project_id =
         resolve_user_project(&state.store, &message.user_id, state.default_project_id).await?;
 
+    let thread_config = {
+        let mut config = ThreadConfig::default();
+        if crate::llm::user_signals_execution_intent(content) {
+            config.require_action_attempt = true;
+        }
+        config
+    };
+
     // Handle the message — spawns a new thread or injects into active one
     let thread_id = state
         .conversation_manager
@@ -2011,7 +2168,7 @@ async fn handle_with_engine_inner(
             content,
             project_id,
             &message.user_id,
-            ThreadConfig::default(),
+            thread_config,
         )
         .await
         .map_err(|e| engine_err("thread error", e))?;

@@ -374,6 +374,17 @@ pub fn extract_host_from_params(params: &serde_json::Value) -> Option<String> {
         .and_then(|u| u.host_str().map(|h| h.to_string()))
 }
 
+pub(crate) fn dedup_credential_mappings(
+    mappings: Vec<crate::secrets::CredentialMapping>,
+) -> Vec<crate::secrets::CredentialMapping> {
+    let mut seen: std::collections::HashSet<(String, crate::secrets::CredentialLocation)> =
+        std::collections::HashSet::new();
+    mappings
+        .into_iter()
+        .filter(|mapping| seen.insert((mapping.secret_name.clone(), mapping.location.clone())))
+        .collect()
+}
+
 impl Default for HttpTool {
     fn default() -> Self {
         Self::new()
@@ -462,8 +473,11 @@ impl Tool for HttpTool {
             reqwest::redirect::Policy::none(),
         )?;
 
-        // Parse headers
+        // Parse headers. Snapshot the caller-supplied values before credential
+        // injection so the recorder never sees injected secrets.
         let mut headers_vec = parse_headers_param(params.get("headers"))?;
+        let caller_headers = headers_vec.clone();
+        let caller_url = parsed_url.clone();
         let timeout_secs = parse_timeout_secs_param(params.get("timeout_secs"))?;
         let save_to = parse_save_to_param(params.get("save_to"))?;
         let effective_timeout = Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
@@ -523,7 +537,7 @@ impl Tool for HttpTool {
             self.secrets_store.as_ref(),
         ) {
             let cred_host = parsed_url.host_str().unwrap_or("");
-            let matched: Vec<crate::secrets::CredentialMapping> = registry.find_for_host(cred_host);
+            let matched = dedup_credential_mappings(registry.find_for_host(cred_host));
             for mapping in &matched {
                 match store
                     .get_decrypted(&ctx.user_id, &mapping.secret_name)
@@ -561,11 +575,11 @@ impl Tool for HttpTool {
         // Build the interceptor request descriptor for recording/replay
         let intercept_req = crate::llm::recording::HttpExchangeRequest {
             method: method_upper,
-            url: parsed_url.to_string(),
-            headers: headers_vec.clone(),
+            url: caller_url.to_string(),
+            headers: caller_headers,
             body: body_bytes
                 .as_ref()
-                .map(|b| String::from_utf8_lossy(b).into_owned()),
+                .map(|b| crate::llm::recording::redact_body(&String::from_utf8_lossy(b))),
         };
 
         // Check HTTP interceptor (replay mode returns pre-recorded response)
@@ -1482,5 +1496,18 @@ mod tests {
     fn test_save_to_rejects_bare_tmp() {
         let err = validate_save_to_path("/tmp").unwrap_err();
         assert!(err.to_string().contains("must be under /tmp/"));
+    }
+
+    #[test]
+    fn test_dedup_credential_mappings_keeps_unique_locations() {
+        use crate::secrets::CredentialMapping;
+
+        let deduped = dedup_credential_mappings(vec![
+            CredentialMapping::bearer("github_token", "api.github.com"),
+            CredentialMapping::bearer("github_token", "*.github.com"),
+            CredentialMapping::header("github_token", "X-GitHub-Token", "api.github.com"),
+        ]);
+
+        assert_eq!(deduped.len(), 2);
     }
 }

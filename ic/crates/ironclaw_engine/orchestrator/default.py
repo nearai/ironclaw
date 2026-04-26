@@ -137,6 +137,24 @@ def signals_tool_intent(text):
     return False
 
 
+def signals_execution_intent(text):
+    """Detect explicit execution requests in user-authored text."""
+    stripped = strip_code_blocks(text)
+    lower = stripped.lower()
+
+    exec_phrases = [
+        "run it", "run that", "run them", "run this", "run the ",
+        "execute it", "execute that", "execute them", "execute this",
+        "execute the ",
+        "ship it", "deploy it", "deploy that", "deploy this", "deploy the ",
+        "send it", "send that", "send the ",
+        "fetch it", "fetch that", "fetch the ",
+        "please run ", "please execute ", "please fetch ",
+        "please send ", "please deploy ",
+    ]
+    return any(phrase in lower for phrase in exec_phrases)
+
+
 def format_output(result, max_chars=8000):
     """Format code execution result for the next LLM context message."""
     parts = []
@@ -437,6 +455,8 @@ def run_loop(context, goal, actions, state, config):
     max_nudges = config.get("max_tool_intent_nudges", 2)
     nudge_enabled = config.get("enable_tool_intent_nudge", True)
     max_consecutive_errors = config.get("max_consecutive_errors", 5)
+    obligation_enabled = config.get("require_action_attempt", False)
+    max_obligation_nudges = config.get("max_action_requirement_nudges", 2)
     consecutive_nudges = 0
     consecutive_errors = 0
     step_count = config.get("step_count", 0)
@@ -444,6 +464,16 @@ def run_loop(context, goal, actions, state, config):
         state = {}
     state.setdefault("history", [])
     state.setdefault("compaction_count", 0)
+    state.setdefault("_obligation_resolved", False)
+    state.setdefault("_obligation_nudge_count", 0)
+    if not obligation_enabled and context:
+        for msg in reversed(context):
+            if msg.get("role") in ("User", "user"):
+                if signals_execution_intent(msg.get("content", "")):
+                    obligation_enabled = True
+                    state["_obligation_resolved"] = False
+                    state["_obligation_nudge_count"] = 0
+                break
     working_messages = ensure_working_messages(state, context)
 
     for step in range(step_count, max_iterations):
@@ -453,7 +483,12 @@ def run_loop(context, goal, actions, state, config):
             __transition_to__("completed", "stopped by signal")
             return complete_result(state, "stopped")
         if signal and isinstance(signal, dict) and "inject" in signal:
-            append_message(working_messages, "User", signal["inject"])
+            injected_text = signal["inject"]
+            append_message(working_messages, "User", injected_text)
+            if signals_execution_intent(injected_text):
+                obligation_enabled = True
+                state["_obligation_resolved"] = False
+                state["_obligation_nudge_count"] = 0
 
         # 2. Check budget
         budget = __check_budget__()
@@ -527,6 +562,22 @@ def run_loop(context, goal, actions, state, config):
                 )
                 continue
 
+            available_actions = __get_actions__()
+            if (obligation_enabled
+                    and consecutive_nudges == 0
+                    and len(available_actions) > 0
+                    and not state.get("_obligation_resolved", False)
+                    and state.get("_obligation_nudge_count", 0) < max_obligation_nudges):
+                state["_obligation_nudge_count"] = state.get("_obligation_nudge_count", 0) + 1
+                append_message(
+                    working_messages,
+                    "User",
+                    "You were asked to perform an action, but you responded with text only.\n"
+                    "Do NOT describe or explain — call the appropriate tool now.\n"
+                    "Use the tool_calls mechanism to invoke the tool.",
+                )
+                continue
+
             # Non-intent text response — reset nudge counter and finish
             if not signals_tool_intent(text):
                 consecutive_nudges = 0
@@ -536,6 +587,7 @@ def run_loop(context, goal, actions, state, config):
             return complete_result(state, "completed", text)
 
         elif resp_type == "code":
+            state["_obligation_resolved"] = True
             code = response.get("code", "")
             append_message(working_messages, "Assistant", "```repl\n" + code + "\n```")
 
@@ -567,6 +619,7 @@ def run_loop(context, goal, actions, state, config):
                     "nudge_count": consecutive_nudges,
                     "consecutive_errors": consecutive_errors,
                     "compaction_count": state.get("compaction_count", 0),
+                    "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
                 })
                 __transition_to__("waiting", "gate paused: " + gate.get("gate_name", "unknown"))
                 return {
@@ -586,6 +639,7 @@ def run_loop(context, goal, actions, state, config):
                     "nudge_count": consecutive_nudges,
                     "consecutive_errors": consecutive_errors,
                     "compaction_count": state.get("compaction_count", 0),
+                    "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
                 })
                 if approval.get("need_authentication"):
                     __transition_to__("waiting", "authentication needed")
@@ -623,9 +677,11 @@ def run_loop(context, goal, actions, state, config):
                 "nudge_count": consecutive_nudges,
                 "consecutive_errors": consecutive_errors,
                 "compaction_count": state.get("compaction_count", 0),
+                "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
             })
 
         elif resp_type == "actions":
+            state["_obligation_resolved"] = True
             # Tier 0: structured tool calls.
             # NOTE: consecutive_nudges is NOT reset here (V1 semantics).
             # Only non-intent text responses reset the counter.
@@ -669,6 +725,7 @@ def run_loop(context, goal, actions, state, config):
                         "nudge_count": consecutive_nudges,
                         "consecutive_errors": consecutive_errors,
                         "compaction_count": state.get("compaction_count", 0),
+                        "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
                     })
                     gate = r
                     # Get action info from the original call or the result
@@ -689,6 +746,7 @@ def run_loop(context, goal, actions, state, config):
                         "nudge_count": consecutive_nudges,
                         "consecutive_errors": consecutive_errors,
                         "compaction_count": state.get("compaction_count", 0),
+                        "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
                     })
                     __transition_to__("waiting", "authentication needed")
                     return {
@@ -705,6 +763,7 @@ def run_loop(context, goal, actions, state, config):
                         "nudge_count": consecutive_nudges,
                         "consecutive_errors": consecutive_errors,
                         "compaction_count": state.get("compaction_count", 0),
+                        "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
                     })
                     __transition_to__("waiting", "approval needed")
                     return {
@@ -719,6 +778,7 @@ def run_loop(context, goal, actions, state, config):
                 "nudge_count": consecutive_nudges,
                 "consecutive_errors": consecutive_errors,
                 "compaction_count": state.get("compaction_count", 0),
+                "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
             })
 
     # Max iterations reached

@@ -101,6 +101,47 @@ pub fn llm_signals_tool_intent(response: &str) -> bool {
     false
 }
 
+/// Detect explicit execution requests in a user message.
+///
+/// This is narrower than general intent detection. It only matches imperative
+/// requests that should require an action attempt before the engine accepts a
+/// text-only completion.
+pub fn user_signals_execution_intent(text: &str) -> bool {
+    let stripped = strip_code_blocks(text);
+    let lower = stripped.to_lowercase();
+
+    const EXEC_PHRASES: &[&str] = &[
+        "run it",
+        "run that",
+        "run them",
+        "run this",
+        "run the ",
+        "execute it",
+        "execute that",
+        "execute them",
+        "execute this",
+        "execute the ",
+        "ship it",
+        "deploy it",
+        "deploy that",
+        "deploy this",
+        "deploy the ",
+        "send it",
+        "send that",
+        "send the ",
+        "fetch it",
+        "fetch that",
+        "fetch the ",
+        "please run ",
+        "please execute ",
+        "please fetch ",
+        "please send ",
+        "please deploy ",
+    ];
+
+    EXEC_PHRASES.iter().any(|phrase| lower.contains(phrase))
+}
+
 /// Strip fenced code blocks (``` ... ```), indented code lines (4+ spaces / tab),
 /// and double-quoted strings so that tool-intent detection only fires on prose.
 fn strip_code_blocks(text: &str) -> String {
@@ -3148,5 +3189,21 @@ That's my plan."#;
             truncate_at_tool_tags(input),
             "Text <function_call>{}</function_call> middle "
         );
+    }
+
+    #[test]
+    fn test_user_signals_execution_intent() {
+        assert!(user_signals_execution_intent("run it"));
+        assert!(user_signals_execution_intent("Please execute the migration"));
+        assert!(user_signals_execution_intent(
+            "after that, deploy the service"
+        ));
+        assert!(!user_signals_execution_intent("go ahead"));
+        assert!(!user_signals_execution_intent(
+            "the docs say \"run the tests\""
+        ));
+        assert!(!user_signals_execution_intent(
+            "```\nrun the tests\n```"
+        ));
     }
 }

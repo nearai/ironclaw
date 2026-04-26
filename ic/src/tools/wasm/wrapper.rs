@@ -1105,14 +1105,23 @@ impl Tool for WasmToolWrapper {
         // Pre-resolve host credentials from secrets store (async, before blocking task).
         // This decrypts the secrets once so the sync http_request() host function
         // can inject them without needing async access.
-        let credential_user_id = &ctx.user_id;
-        let host_credentials = resolve_host_credentials(
+        let credential_user_id = ctx.user_id.clone();
+        let resolution = resolve_host_credentials(
             &self.capabilities,
             self.secrets_store.as_deref(),
-            credential_user_id,
+            &credential_user_id,
             self.oauth_refresh.as_ref(),
         )
         .await;
+        if !resolution.missing_required.is_empty() {
+            return Err(ToolError::ExecutionFailed(format!(
+                "WASM tool '{}' requires credentials that are not configured for user '{}': {}. Configure the missing credentials before re-running the tool.",
+                self.name(),
+                credential_user_id,
+                resolution.missing_required.join(", ")
+            )));
+        }
+        let host_credentials = resolution.resolved;
 
         // Serialize context for WASM
         let context_json = serde_json::to_string(ctx).ok();
@@ -1414,28 +1423,43 @@ async fn persist_refreshed_oauth_tokens(
 /// If an `OAuthRefreshConfig` is provided and the access token is expired
 /// (or within 5 minutes of expiry), attempts a transparent refresh first.
 ///
-/// Silently skips credentials that can't be resolved (e.g., missing secrets).
-/// The tool will get a 401/403 from the API, which is the expected UX when
-/// auth hasn't been configured yet.
+/// Missing credentials are reported back to the caller so the tool can fail
+/// closed before issuing unauthenticated requests.
+struct HostCredentialsResolution {
+    resolved: Vec<ResolvedHostCredential>,
+    missing_required: Vec<String>,
+}
+
 async fn resolve_host_credentials(
     capabilities: &Capabilities,
     store: Option<&(dyn SecretsStore + Send + Sync)>,
     user_id: &str,
     oauth_refresh: Option<&OAuthRefreshConfig>,
-) -> Vec<ResolvedHostCredential> {
+) -> HostCredentialsResolution {
     let store = match store {
         Some(s) => s,
         None => {
-            // If tool requires credentials but has no secrets store, this is a configuration error
-            if let Some(http_cap) = &capabilities.http
-                && !http_cap.credentials.is_empty()
-            {
-                tracing::warn!(
-                    user_id = %user_id,
-                    "WASM tool requires credentials but secrets_store is not configured - authentication will fail"
-                );
-            }
-            return Vec::new();
+            let missing_required = capabilities
+                .http
+                .as_ref()
+                .map(|http_cap| {
+                    http_cap
+                        .credentials
+                        .values()
+                        .filter(|mapping| {
+                            !matches!(
+                                mapping.location,
+                                crate::secrets::CredentialLocation::UrlPath { .. }
+                            )
+                        })
+                        .map(|mapping| mapping.secret_name.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            return HostCredentialsResolution {
+                resolved: Vec::new(),
+                missing_required,
+            };
         }
     };
 
@@ -1469,14 +1493,23 @@ async fn resolve_host_credentials(
 
     let http_cap = match &capabilities.http {
         Some(cap) => cap,
-        None => return Vec::new(),
+        None => {
+            return HostCredentialsResolution {
+                resolved: Vec::new(),
+                missing_required: Vec::new(),
+            };
+        }
     };
 
     if http_cap.credentials.is_empty() {
-        return Vec::new();
+        return HostCredentialsResolution {
+            resolved: Vec::new(),
+            missing_required: Vec::new(),
+        };
     }
 
     let mut resolved = Vec::new();
+    let mut missing_required = Vec::new();
 
     for mapping in http_cap.credentials.values() {
         // Skip UrlPath credentials, they're handled by placeholder substitution
@@ -1499,22 +1532,7 @@ async fn resolve_host_credentials(
                     error = %e,
                     "No matching host credential resolved for WASM tool in the requested scope"
                 );
-
-                // If lookup fails and we're not already looking up "default", try "default" as fallback
-                if user_id != "default" {
-                    tracing::debug!(
-                        secret_name = %mapping.secret_name,
-                        user_id = %user_id,
-                        error = %e,
-                        "Credential not found for user, trying default global credentials"
-                    );
-                    store
-                        .get_decrypted("default", &mapping.secret_name)
-                        .await
-                        .ok()
-                } else {
-                    None
-                }
+                None
             }
         };
 
@@ -1524,8 +1542,11 @@ async fn resolve_host_credentials(
                 tracing::warn!(
                     secret_name = %mapping.secret_name,
                     user_id = %user_id,
-                    "Could not resolve credential for WASM tool (not found in user context or default)"
+                    "Could not resolve credential for WASM tool"
                 );
+                if !missing_required.contains(&mapping.secret_name) {
+                    missing_required.push(mapping.secret_name.clone());
+                }
                 continue;
             }
         };
@@ -1552,7 +1573,10 @@ async fn resolve_host_credentials(
         );
     }
 
-    resolved
+    HostCredentialsResolution {
+        resolved,
+        missing_required,
+    }
 }
 
 /// Extract the hostname from a URL string.
@@ -2250,7 +2274,8 @@ mod tests {
 
         let caps = Capabilities::default();
         let result = resolve_host_credentials(&caps, None, "user1", None).await;
-        assert!(result.is_empty());
+        assert!(result.resolved.is_empty());
+        assert!(result.missing_required.is_empty());
     }
 
     #[tokio::test]
@@ -2261,7 +2286,8 @@ mod tests {
 
         let caps = Capabilities::default();
         let result = resolve_host_credentials(&caps, Some(&store), "user1", None).await;
-        assert!(result.is_empty());
+        assert!(result.resolved.is_empty());
+        assert!(result.missing_required.is_empty());
     }
 
     #[tokio::test]
@@ -2301,10 +2327,10 @@ mod tests {
         };
 
         let result = resolve_host_credentials(&caps, Some(&store), "user1", None).await;
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].host_patterns, vec!["www.googleapis.com"]);
+        assert_eq!(result.resolved.len(), 1);
+        assert_eq!(result.resolved[0].host_patterns, vec!["www.googleapis.com"]);
         assert_eq!(
-            result[0].headers.get("Authorization"),
+            result.resolved[0].headers.get("Authorization"),
             Some(&format!("Bearer {TEST_GOOGLE_OAUTH_TOKEN}"))
         );
     }
@@ -2347,9 +2373,9 @@ mod tests {
         };
 
         let result = resolve_host_credentials(&caps, Some(&store), &ctx.user_id, None).await;
-        assert_eq!(result.len(), 1);
+        assert_eq!(result.resolved.len(), 1);
         assert_eq!(
-            result[0].headers.get("Authorization"),
+            result.resolved[0].headers.get("Authorization"),
             Some(&format!("Bearer {TEST_GOOGLE_OAUTH_TOKEN}"))
         );
     }
@@ -2431,7 +2457,8 @@ mod tests {
         };
 
         let result = resolve_host_credentials(&caps, Some(&store), "user1", None).await;
-        assert!(result.is_empty());
+        assert!(result.resolved.is_empty());
+        assert_eq!(result.missing_required, vec!["missing_token".to_string()]);
     }
 
     #[tokio::test]
@@ -2486,9 +2513,9 @@ mod tests {
         // Should resolve the existing fresh token without attempting refresh
         let result =
             resolve_host_credentials(&caps, Some(&store), "user1", Some(&oauth_config)).await;
-        assert_eq!(result.len(), 1);
+        assert_eq!(result.resolved.len(), 1);
         assert_eq!(
-            result[0].headers.get("Authorization"),
+            result.resolved[0].headers.get("Authorization"),
             Some(&format!("Bearer {TEST_GOOGLE_OAUTH_FRESH}"))
         );
     }
@@ -2533,7 +2560,8 @@ mod tests {
 
         // No OAuth config, expired token can't be resolved (get_decrypted returns Expired)
         let result = resolve_host_credentials(&caps, Some(&store), "user1", None).await;
-        assert!(result.is_empty());
+        assert!(result.resolved.is_empty());
+        assert_eq!(result.missing_required, vec!["my_token".to_string()]);
     }
 
     #[tokio::test]
@@ -2586,9 +2614,9 @@ mod tests {
         // Should use the legacy token directly without attempting refresh
         let result =
             resolve_host_credentials(&caps, Some(&store), "user1", Some(&oauth_config)).await;
-        assert_eq!(result.len(), 1);
+        assert_eq!(result.resolved.len(), 1);
         assert_eq!(
-            result[0].headers.get("Authorization"),
+            result.resolved[0].headers.get("Authorization"),
             Some(&format!("Bearer {TEST_GOOGLE_OAUTH_LEGACY}"))
         );
     }
@@ -2651,9 +2679,9 @@ mod tests {
 
         let resolved =
             resolve_host_credentials(&caps, Some(&store), "user1", Some(&oauth_config)).await;
-        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved.resolved.len(), 1);
         assert_eq!(
-            resolved[0].headers.get("Authorization"),
+            resolved.resolved[0].headers.get("Authorization"),
             Some(&"Bearer mock-refreshed-access-token".to_string())
         );
 
@@ -2759,7 +2787,11 @@ mod tests {
 
         let resolved =
             resolve_host_credentials(&caps, Some(&store), "user1", Some(&oauth_config)).await;
-        assert!(resolved.is_empty());
+        assert!(resolved.resolved.is_empty());
+        assert_eq!(
+            resolved.missing_required,
+            vec!["google_oauth_token".to_string()]
+        );
 
         let lookups = store.decrypted_lookups();
         assert!(lookups.contains(&("user1".to_string(), "google_oauth_token".to_string())));
@@ -2826,7 +2858,11 @@ mod tests {
 
         let resolved =
             resolve_host_credentials(&caps, Some(&store), "user1", Some(&oauth_config)).await;
-        assert!(resolved.is_empty());
+        assert!(resolved.resolved.is_empty());
+        assert_eq!(
+            resolved.missing_required,
+            vec!["google_oauth_token".to_string()]
+        );
 
         let lookups = store.decrypted_lookups();
         assert!(lookups.contains(&("user1".to_string(), "google_oauth_token".to_string())));
@@ -3047,12 +3083,15 @@ mod tests {
             ..Default::default()
         };
 
-        // Resolve credentials for a different user (routine context)
-        // Should fallback to "default" and find the token
+        // Resolve credentials for a different user (routine context).
+        // WASM tool credential resolution must not borrow the default scope.
         let result = resolve_host_credentials(&caps, Some(&store), "routine_user_123", None).await;
 
-        assert!(!result.is_empty(), "fallback to default"); // safety: test code only
-        assert_eq!(result[0].secret_value, "global_token_value"); // safety: test code only
+        assert!(result.resolved.is_empty(), "must not fallback to default"); // safety: test code only
+        assert_eq!(
+            result.missing_required,
+            vec!["google_oauth_token".to_string()]
+        );
     }
 
     fn test_capabilities_with_google_oauth() -> Capabilities {
@@ -3116,8 +3155,12 @@ mod tests {
         // Should prefer user_123's token over default
         let result = resolve_host_credentials(&caps, Some(&store), "user_123", None).await;
 
-        assert!(!result.is_empty(), "has user credentials"); // safety: test code only
-        assert_eq!(result[0].secret_value, "user_specific_token", "user token"); // safety: test code only
+        assert!(!result.resolved.is_empty(), "has user credentials"); // safety: test code only
+        assert_eq!(
+            result.resolved[0].secret_value,
+            "user_specific_token",
+            "user token"
+        ); // safety: test code only
     }
 
     #[tokio::test]
@@ -3143,8 +3186,8 @@ mod tests {
         // Should NOT attempt fallback (already looking up default)
         let result = resolve_host_credentials(&caps, Some(&store), "default", None).await;
 
-        assert!(!result.is_empty(), "Should find default token"); // safety: test code only
-        assert_eq!(result[0].secret_value, "default_token"); // safety: test code only
+        assert!(!result.resolved.is_empty(), "Should find default token"); // safety: test code only
+        assert_eq!(result.resolved[0].secret_value, "default_token"); // safety: test code only
     }
 
     #[tokio::test]
@@ -3162,6 +3205,10 @@ mod tests {
         let result = resolve_host_credentials(&caps, Some(&store), "user_456", None).await;
 
         // Should return empty since credential can't be found anywhere
-        assert!(result.is_empty(), "no credentials found"); // safety: test code only
+        assert!(result.resolved.is_empty(), "no credentials found"); // safety: test code only
+        assert_eq!(
+            result.missing_required,
+            vec!["google_oauth_token".to_string()]
+        );
     }
 }

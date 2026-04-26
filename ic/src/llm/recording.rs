@@ -195,11 +195,201 @@ impl HttpInterceptor for RecordingHttpInterceptor {
     }
 
     async fn after_response(&self, request: &HttpExchangeRequest, response: &HttpExchangeResponse) {
+        let mut sanitized_req = request.clone();
+        redact_exchange_request(&mut sanitized_req);
+        let mut sanitized_resp = response.clone();
+        redact_exchange_response(&mut sanitized_resp);
         self.exchanges.lock().await.push(HttpExchange {
-            request: request.clone(),
-            response: response.clone(),
+            request: sanitized_req,
+            response: sanitized_resp,
         });
     }
+}
+
+const SENSITIVE_HEADER_NAMES: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "x-api-key",
+    "x-auth-token",
+    "x-goog-api-key",
+    "openai-organization",
+    "anthropic-api-key",
+];
+
+const SENSITIVE_QUERY_PARAMS: &[&str] = &[
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "token",
+    "api_key",
+    "apikey",
+    "client_secret",
+    "password",
+    "auth",
+    "jwt",
+    "session",
+];
+
+const SENSITIVE_BODY_KEYS: &[&str] = &[
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "token",
+    "api_key",
+    "apikey",
+    "client_secret",
+    "password",
+    "secret",
+    "private_key",
+    "auth",
+    "jwt",
+    "session",
+    "authorization",
+];
+
+fn is_sensitive_header(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    SENSITIVE_HEADER_NAMES.iter().any(|header| *header == lower)
+}
+
+fn redact_headers(headers: &mut [(String, String)]) {
+    for (name, value) in headers.iter_mut() {
+        if is_sensitive_header(name) {
+            *value = "[REDACTED]".to_string();
+        }
+    }
+}
+
+fn strip_stale_at(url: String) -> String {
+    url.replace("://@", "://")
+}
+
+fn redact_url(url: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        tracing::trace!(url, "redact_url: unparseable URL");
+        return url.to_string();
+    };
+
+    let had_userinfo = parsed.password().is_some() || !parsed.username().is_empty();
+    if parsed.password().is_some() {
+        let _ = parsed.set_password(None);
+    }
+    if !parsed.username().is_empty() {
+        let _ = parsed.set_username("");
+    }
+
+    if parsed.query().is_none() {
+        return if had_userinfo {
+            strip_stale_at(parsed.to_string())
+        } else {
+            url.to_string()
+        };
+    }
+
+    let pairs: Vec<(String, String)> = parsed
+        .query_pairs()
+        .map(|(key, value)| {
+            let lower = key.to_ascii_lowercase();
+            let redacted = SENSITIVE_QUERY_PARAMS.iter().any(|param| *param == lower);
+            let value = if redacted {
+                "[REDACTED]".to_string()
+            } else {
+                value.into_owned()
+            };
+            (key.into_owned(), value)
+        })
+        .collect();
+
+    parsed.query_pairs_mut().clear();
+    for (key, value) in &pairs {
+        parsed.query_pairs_mut().append_pair(key, value);
+    }
+
+    strip_stale_at(parsed.to_string())
+}
+
+fn redact_json_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map.iter_mut() {
+                let lower = key.to_ascii_lowercase();
+                if SENSITIVE_BODY_KEYS.iter().any(|sensitive| *sensitive == lower) {
+                    *value = serde_json::Value::String("[REDACTED]".to_string());
+                } else {
+                    redact_json_value(value);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                redact_json_value(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redact_form_urlencoded(body: &str) -> Option<String> {
+    if !body.contains('=') || body.starts_with('{') || body.starts_with('[') {
+        return None;
+    }
+
+    let pairs: Vec<(String, String)> = url::form_urlencoded::parse(body.as_bytes())
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    if pairs.is_empty() || (pairs.len() == 1 && pairs[0].0.is_empty()) {
+        return None;
+    }
+
+    let mut any_redacted = false;
+    let redacted_pairs: Vec<(String, String)> = pairs
+        .into_iter()
+        .map(|(key, value)| {
+            let lower = key.to_ascii_lowercase();
+            if SENSITIVE_BODY_KEYS.iter().any(|sensitive| *sensitive == lower) {
+                any_redacted = true;
+                (key, "[REDACTED]".to_string())
+            } else {
+                (key, value)
+            }
+        })
+        .collect();
+
+    if !any_redacted {
+        return None;
+    }
+
+    Some(
+        url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(&redacted_pairs)
+            .finish(),
+    )
+}
+
+pub(crate) fn redact_body(body: &str) -> String {
+    if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(body) {
+        redact_json_value(&mut parsed);
+        return serde_json::to_string(&parsed).unwrap_or_else(|_| body.to_string());
+    }
+    if let Some(redacted) = redact_form_urlencoded(body) {
+        return redacted;
+    }
+    body.to_string()
+}
+
+fn redact_exchange_request(request: &mut HttpExchangeRequest) {
+    redact_headers(&mut request.headers);
+    request.url = redact_url(&request.url);
+    if let Some(body) = &request.body {
+        request.body = Some(redact_body(body));
+    }
+}
+
+fn redact_exchange_response(response: &mut HttpExchangeResponse) {
+    redact_headers(&mut response.headers);
+    response.body = redact_body(&response.body);
 }
 
 /// Replays recorded HTTP exchanges during test runs.
@@ -225,10 +415,13 @@ impl HttpInterceptor for ReplayingHttpInterceptor {
         let mut queue = self.exchanges.lock().await;
         if let Some(exchange) = queue.pop_front() {
             // Soft-check: warn if the request doesn't match
-            if exchange.request.url != request.url || exchange.request.method != request.method {
+            let redacted_incoming_url = redact_url(&request.url);
+            if exchange.request.url != redacted_incoming_url
+                || exchange.request.method != request.method
+            {
                 tracing::warn!(
                     expected_url = %exchange.request.url,
-                    actual_url = %request.url,
+                    actual_url = %redacted_incoming_url,
                     expected_method = %exchange.request.method,
                     actual_method = %request.method,
                     "HTTP replay: request mismatch (returning recorded response anyway)"
@@ -956,5 +1149,85 @@ mod tests {
         assert!(trace.memory_snapshot.is_empty());
         assert!(trace.http_exchanges.is_empty());
         assert!(trace.steps[0].expected_tool_results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recording_http_interceptor_redacts_credentials() {
+        let interceptor = RecordingHttpInterceptor::new();
+        let request = HttpExchangeRequest {
+            method: "POST".to_string(),
+            url: "https://user:secret@api.example.com/data?access_token=abc&page=1".to_string(),
+            headers: vec![
+                ("Authorization".to_string(), "Bearer topsecret".to_string()),
+                ("Accept".to_string(), "application/json".to_string()),
+            ],
+            body: Some(r#"{"password":"hunter2","ok":"yes"}"#.to_string()),
+        };
+        let response = HttpExchangeResponse {
+            status: 200,
+            headers: vec![("Set-Cookie".to_string(), "session=abc".to_string())],
+            body: r#"{"refresh_token":"xyz","expires_in":3600}"#.to_string(),
+        };
+
+        interceptor.after_response(&request, &response).await;
+        let exchanges = interceptor.take_exchanges().await;
+        let recorded = &exchanges[0];
+
+        assert_eq!(recorded.request.headers[0].1, "[REDACTED]");
+        assert!(recorded.request.url.contains("page=1"));
+        assert!(!recorded.request.url.contains("secret"));
+        assert!(!recorded.request.url.contains("access_token=abc"));
+        assert!(!recorded.request.body.as_deref().unwrap_or("").contains("hunter2"));
+        assert_eq!(recorded.response.headers[0].1, "[REDACTED]");
+        assert!(!recorded.response.body.contains("xyz"));
+        assert!(recorded.response.body.contains("3600"));
+    }
+
+    #[test]
+    fn redact_url_scrubs_userinfo() {
+        let redacted = redact_url("https://user:pat_secret@api.example.com/v1/repos");
+        assert!(!redacted.contains("pat_secret"));
+        assert!(!redacted.contains("user@"));
+        assert!(redacted.contains("api.example.com"));
+    }
+
+    #[test]
+    fn redact_body_scrubs_exact_sensitive_keys() {
+        let redacted = redact_body(
+            r#"{"token":"secret","token_count":5,"nested":{"password":"pw","ok":"yes"}}"#,
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&redacted).expect("redacted body should stay valid json");
+        assert_eq!(parsed["token"], "[REDACTED]");
+        assert_eq!(parsed["token_count"], 5);
+        assert_eq!(parsed["nested"]["password"], "[REDACTED]");
+        assert_eq!(parsed["nested"]["ok"], "yes");
+    }
+
+    #[tokio::test]
+    async fn replaying_http_interceptor_matches_redacted_query_params() {
+        let interceptor = ReplayingHttpInterceptor::new(vec![HttpExchange {
+            request: HttpExchangeRequest {
+                method: "GET".to_string(),
+                url: redact_url("https://api.example.com/data?access_token=secret&page=1"),
+                headers: vec![],
+                body: None,
+            },
+            response: HttpExchangeResponse {
+                status: 200,
+                headers: vec![],
+                body: "{}".to_string(),
+            },
+        }]);
+
+        let response = interceptor
+            .before_request(&HttpExchangeRequest {
+                method: "GET".to_string(),
+                url: "https://api.example.com/data?access_token=real_secret&page=1".to_string(),
+                headers: vec![],
+                body: None,
+            })
+            .await;
+        assert_eq!(response.expect("should match redacted URL").status, 200);
     }
 }

@@ -361,7 +361,30 @@ enum TelegramStatusAction {
 
 const TELEGRAM_STATUS_MAX_CHARS: usize = 600;
 /// Telegram's hard limit for message text length.
-const TELEGRAM_MAX_MESSAGE_LEN: usize = 4096;
+///
+/// The API nominally allows 4096, but Markdown entities and multi-codepoint
+/// emoji can cause edge-case rejections. Leave a small safety margin.
+const TELEGRAM_MAX_MESSAGE_LEN: usize = 4000;
+
+fn utf16_code_unit_len(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+fn prefix_within_utf16_limit(text: &str, max_units: usize) -> usize {
+    let mut units = 0;
+    let mut end = 0;
+
+    for (byte_idx, ch) in text.char_indices() {
+        let ch_units = ch.len_utf16();
+        if units + ch_units > max_units {
+            break;
+        }
+        units += ch_units;
+        end = byte_idx + ch.len_utf8();
+    }
+
+    end
+}
 
 fn truncate_status_message(input: &str, max_chars: usize) -> String {
     let mut iter = input.chars();
@@ -373,7 +396,7 @@ fn truncate_status_message(input: &str, max_chars: usize) -> String {
     }
 }
 
-/// Split a long message into chunks that fit within Telegram's 4096-char limit.
+/// Split a long message into chunks that fit within Telegram's hard limit.
 ///
 /// Tries to split at the most natural boundary available (in priority order):
 /// 1. Double newline (paragraph break)
@@ -382,7 +405,11 @@ fn truncate_status_message(input: &str, max_chars: usize) -> String {
 /// 4. Word boundary (space)
 /// 5. Hard cut at the limit (last resort for pathological input)
 fn split_message(text: &str) -> Vec<String> {
-    if text.chars().count() <= TELEGRAM_MAX_MESSAGE_LEN {
+    split_message_with_limit(text, TELEGRAM_MAX_MESSAGE_LEN)
+}
+
+fn split_message_with_limit(text: &str, limit_utf16: usize) -> Vec<String> {
+    if utf16_code_unit_len(text) <= limit_utf16 {
         return vec![text.to_string()];
     }
 
@@ -390,18 +417,23 @@ fn split_message(text: &str) -> Vec<String> {
     let mut remaining = text;
 
     while !remaining.is_empty() {
-        // Count chars to find the byte offset for our window.
-        let window_bytes = remaining
-            .char_indices()
-            .take(TELEGRAM_MAX_MESSAGE_LEN)
-            .last()
-            .map(|(byte_idx, ch)| byte_idx + ch.len_utf8())
-            .unwrap_or(remaining.len());
+        let window_bytes = prefix_within_utf16_limit(remaining, limit_utf16);
 
         if window_bytes >= remaining.len() {
             // Remainder fits entirely.
             chunks.push(remaining.to_string());
             break;
+        }
+
+        if window_bytes == 0 {
+            let first_char_len = remaining
+                .chars()
+                .next()
+                .map(|ch| ch.len_utf8())
+                .unwrap_or(remaining.len());
+            chunks.push(remaining[..first_char_len].to_string());
+            remaining = &remaining[first_char_len..];
+            continue;
         }
 
         let window = &remaining[..window_bytes];
@@ -879,10 +911,13 @@ impl Guest for TelegramChannel {
 // Send Message Helper
 // ============================================================================
 
-/// Errors from send_message, split so callers can match on parse-entity failures.
+/// Errors from send_message, split so callers can match on parse-entity failures
+/// and too-long rejections independently.
 enum SendError {
     /// Telegram returned 400 with "can't parse entities" (Markdown issue).
     ParseEntities(String),
+    /// Telegram returned 400 with "message is too long".
+    TooLong(String),
     /// Any other failure.
     Other(String),
 }
@@ -891,6 +926,7 @@ impl std::fmt::Display for SendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SendError::ParseEntities(detail) => write!(f, "parse entities error: {}", detail),
+            SendError::TooLong(detail) => write!(f, "message too long: {}", detail),
             SendError::Other(msg) => write!(f, "{}", msg),
         }
     }
@@ -909,6 +945,7 @@ fn normalize_thread_id(thread_id: Option<i64>) -> Option<i64> {
 /// Returns the sent message_id on success. When `parse_mode` is set and
 /// Telegram returns a 400 "can't parse entities" error, returns
 /// `SendError::ParseEntities` so the caller can retry without formatting.
+/// Returns `SendError::TooLong` when Telegram rejects the message as too long.
 fn send_message(
     chat_id: i64,
     text: &str,
@@ -954,6 +991,9 @@ fn send_message(
                 let body_str = String::from_utf8_lossy(&http_response.body);
                 if body_str.contains("can't parse entities") {
                     return Err(SendError::ParseEntities(body_str.to_string()));
+                }
+                if body_str.contains("message is too long") {
+                    return Err(SendError::TooLong(body_str.to_string()));
                 }
                 return Err(SendError::Other(format!(
                     "Telegram API returned 400: {}",
@@ -1313,62 +1353,119 @@ fn send_response(
 
     // Split large messages into chunks that fit Telegram's limit.
     let chunks = split_message(&response.content);
-    let total = chunks.len();
 
     // The first chunk replies to the original message; subsequent chunks
     // reply to the previously sent chunk so they form a visual thread.
     let mut reply_to = reply_to_message_id;
 
-    for (i, chunk) in chunks.into_iter().enumerate() {
-        // Try Markdown, fall back to plain text on parse errors
-        let result = send_message(chat_id, &chunk, reply_to, Some("Markdown"), message_thread_id);
-
-        let msg_id = match result {
-            Ok(id) => {
-                channel_host::log(
-                    channel_host::LogLevel::Debug,
-                    &format!(
-                        "Sent message chunk {}/{} to chat {}: message_id={}",
-                        i + 1,
-                        total,
-                        chat_id,
-                        id,
-                    ),
-                );
-                id
-            }
-            Err(SendError::ParseEntities(detail)) => {
-                channel_host::log(
-                    channel_host::LogLevel::Warn,
-                    &format!(
-                        "Markdown parse failed on chunk {}/{} ({}), retrying as plain text",
-                        i + 1,
-                        total,
-                        detail
-                    ),
-                );
-                let id = send_message(chat_id, &chunk, reply_to, None, message_thread_id)
-                    .map_err(|e| format!("Plain-text retry also failed: {}", e))?;
-                channel_host::log(
-                    channel_host::LogLevel::Debug,
-                    &format!(
-                        "Sent plain-text chunk {}/{} to chat {}: message_id={}",
-                        i + 1,
-                        total,
-                        chat_id,
-                        id,
-                    ),
-                );
-                id
-            }
-            Err(e) => return Err(e.to_string()),
-        };
-
-        // Each subsequent chunk threads off the previous sent message.
+    for chunk in &chunks {
+        let msg_id = send_chunk(chat_id, chunk, reply_to, message_thread_id)?;
         reply_to = Some(msg_id);
     }
 
     Ok(())
+}
+
+const MAX_SPLIT_DEPTH: u8 = 2;
+
+fn send_chunk(
+    chat_id: i64,
+    text: &str,
+    reply_to: Option<i64>,
+    message_thread_id: Option<i64>,
+) -> Result<i64, String> {
+    send_chunk_inner(
+        chat_id,
+        text,
+        reply_to,
+        message_thread_id,
+        TELEGRAM_MAX_MESSAGE_LEN,
+        0,
+        true,
+    )
+}
+
+fn send_chunk_inner(
+    chat_id: i64,
+    text: &str,
+    reply_to: Option<i64>,
+    message_thread_id: Option<i64>,
+    limit_utf16: usize,
+    depth: u8,
+    use_markdown: bool,
+) -> Result<i64, String> {
+    let parse_mode = if use_markdown { Some("Markdown") } else { None };
+    match send_message(chat_id, text, reply_to, parse_mode, message_thread_id) {
+        Ok(id) => Ok(id),
+        Err(SendError::ParseEntities(detail)) if use_markdown => {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!("Markdown parse failed ({}), retrying as plain text", detail),
+            );
+            send_chunk_inner(
+                chat_id,
+                text,
+                reply_to,
+                message_thread_id,
+                limit_utf16,
+                depth,
+                false,
+            )
+        }
+        Err(SendError::TooLong(_)) if depth < MAX_SPLIT_DEPTH => resplit_and_send(
+            chat_id,
+            text,
+            reply_to,
+            message_thread_id,
+            limit_utf16,
+            depth,
+            use_markdown,
+        ),
+        Err(SendError::TooLong(_)) => Err(format!(
+            "Message still too long after splitting {} levels deep ({} UTF-16 units)",
+            depth,
+            utf16_code_unit_len(text),
+        )),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn resplit_and_send(
+    chat_id: i64,
+    text: &str,
+    reply_to: Option<i64>,
+    message_thread_id: Option<i64>,
+    limit_utf16: usize,
+    depth: u8,
+    use_markdown: bool,
+) -> Result<i64, String> {
+    let new_limit = (limit_utf16 / 2).max(1);
+    let sub_chunks = split_message_with_limit(text, new_limit);
+    if sub_chunks.len() <= 1 {
+        return Err(format!(
+            "Too-long message could not be split further at limit {} ({} UTF-16 units)",
+            new_limit,
+            utf16_code_unit_len(text),
+        ));
+    }
+
+    let mut reply = reply_to;
+    let mut last_id = None;
+    for sub_chunk in &sub_chunks {
+        let id = send_chunk_inner(
+            chat_id,
+            sub_chunk,
+            reply,
+            message_thread_id,
+            new_limit,
+            depth + 1,
+            use_markdown,
+        )?;
+        reply = Some(id);
+        last_id = Some(id);
+    }
+
+    last_id.ok_or_else(|| "Re-split produced no chunks".to_string())
 }
 
 /// Send a single attachment, choosing sendPhoto or sendDocument based on MIME type.

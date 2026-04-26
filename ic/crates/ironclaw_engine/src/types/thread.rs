@@ -122,6 +122,14 @@ pub struct ThreadConfig {
     pub enable_tool_intent_nudge: bool,
     /// Maximum number of tool intent nudges per thread.
     pub max_tool_intent_nudges: u32,
+    /// Require at least one action or code attempt before accepting a text
+    /// completion for this thread.
+    #[serde(default)]
+    pub require_action_attempt: bool,
+    /// Maximum number of corrective nudges when action-attempt obligation is
+    /// enabled.
+    #[serde(default = "default_max_action_requirement_nudges")]
+    pub max_action_requirement_nudges: u32,
 
     // ── Budget controls (Phase 4, from RLM cross-reference) ──
     /// Maximum cumulative input+output tokens before termination.
@@ -154,6 +162,8 @@ impl Default for ThreadConfig {
             max_duration: None,
             enable_tool_intent_nudge: true,
             max_tool_intent_nudges: 2,
+            require_action_attempt: false,
+            max_action_requirement_nudges: 2,
             max_tokens_total: None,
             max_consecutive_errors: None,
             max_budget_usd: None,
@@ -164,6 +174,10 @@ impl Default for ThreadConfig {
             max_depth: 1,
         }
     }
+}
+
+fn default_max_action_requirement_nudges() -> u32 {
+    2
 }
 
 // ── Thread ──────────────────────────────────────────────────

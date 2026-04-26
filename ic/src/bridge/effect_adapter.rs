@@ -21,7 +21,10 @@ use ironclaw_engine::{
 
 use crate::bridge::auth_manager::{AuthCheckResult, AuthManager};
 use crate::context::JobContext;
+use crate::db::{Database, SettingsStore};
+use crate::extensions::naming::legacy_extension_alias;
 use crate::hooks::{HookEvent, HookOutcome, HookRegistry};
+use crate::tools::permissions::PermissionState;
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::{ApprovalRequirement, ToolRegistry};
 use ironclaw_safety::SafetyLayer;
@@ -36,6 +39,8 @@ pub struct EffectBridgeAdapter {
     hooks: Arc<HookRegistry>,
     /// Tools the user has approved with "always" (persists within session).
     auto_approved: RwLock<HashSet<String>>,
+    /// DB-backed settings store for persisted `tool_permissions.*` checks.
+    settings_store: RwLock<Option<Arc<dyn SettingsStore + Send + Sync>>>,
     /// Per-step tool call counter (reset externally between steps).
     call_count: std::sync::atomic::AtomicU32,
     /// Per-user per-tool sliding window rate limiter.
@@ -57,6 +62,7 @@ impl EffectBridgeAdapter {
             safety,
             hooks,
             auto_approved: RwLock::new(HashSet::new()),
+            settings_store: RwLock::new(None),
             call_count: std::sync::atomic::AtomicU32::new(0),
             rate_limiter: RateLimiter::new(),
             mission_manager: RwLock::new(None),
@@ -75,6 +81,22 @@ impl EffectBridgeAdapter {
     /// Revoke auto-approve for a tool (rollback on resume failure).
     pub async fn revoke_auto_approve(&self, tool_name: &str) {
         self.auto_approved.write().await.remove(tool_name);
+    }
+
+    /// Set the settings store used for persisted `tool_permissions.*` checks.
+    pub async fn set_settings_store(&self, store: Arc<dyn SettingsStore + Send + Sync>) {
+        *self.settings_store.write().await = Some(store);
+    }
+
+    /// Set the settings store from the primary database handle.
+    pub async fn set_settings_store_from_db(&self, store: Arc<dyn Database>) {
+        let settings_store: Arc<dyn SettingsStore + Send + Sync> = store;
+        self.set_settings_store(settings_store).await;
+    }
+
+    /// Get the current settings store, if configured.
+    pub async fn settings_store(&self) -> Option<Arc<dyn SettingsStore + Send + Sync>> {
+        self.settings_store.read().await.clone()
     }
 
     /// Access the underlying tool registry (for param redaction, etc.).
@@ -146,6 +168,36 @@ impl EffectBridgeAdapter {
             )),
             _ => None,
         }
+    }
+
+    async fn is_tool_auto_approved(&self, user_id: &str, lookup_name: &str) -> bool {
+        if self.auto_approved.read().await.contains(lookup_name) {
+            return true;
+        }
+
+        let Some(store) = self.settings_store().await else {
+            return false;
+        };
+
+        for key in permission_setting_keys(lookup_name) {
+            match store.get_setting(user_id, &key).await {
+                Ok(Some(value)) => {
+                    return permission_state_from_value(&value)
+                        .is_some_and(|state| state == PermissionState::AlwaysAllow);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::debug!(
+                        user_id,
+                        tool = lookup_name,
+                        %error,
+                        "engine v2: failed to read persisted tool permission"
+                    );
+                }
+            }
+        }
+
+        false
     }
 
     /// Handle mission_* function calls. Returns None if not a mission call.
@@ -460,7 +512,7 @@ impl EffectBridgeAdapter {
                     });
                 }
                 ApprovalRequirement::UnlessAutoApproved => {
-                    let is_approved = self.auto_approved.read().await.contains(lookup_name);
+                    let is_approved = self.is_tool_auto_approved(&context.user_id, lookup_name).await;
                     if !is_approved && !approval_already_granted {
                         // Credential presence alone does NOT bypass approval.
                         // Credentials indicate the call *can* be authenticated,
@@ -856,12 +908,25 @@ fn is_v1_auth_tool(name: &str) -> bool {
     matches!(name, "tool_auth" | "tool-auth")
 }
 
+fn permission_state_from_value(value: &serde_json::Value) -> Option<PermissionState> {
+    serde_json::from_value(value.clone()).ok()
+}
+
+fn permission_setting_keys(tool_name: &str) -> Vec<String> {
+    let mut keys = vec![format!("tool_permissions.{tool_name}")];
+    if let Some(alias) = legacy_extension_alias(tool_name) {
+        keys.push(format!("tool_permissions.{alias}"));
+    }
+    keys
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::context::JobContext;
     use crate::tools::{Tool, ToolError, ToolOutput};
     use async_trait::async_trait;
+    use std::collections::HashMap;
 
     fn make_adapter() -> EffectBridgeAdapter {
         use ironclaw_safety::SafetyConfig;
@@ -1067,6 +1132,150 @@ mod tests {
             )
             .await;
         assert!(matches!(third, Err(EngineError::GatePaused { .. })));
+    }
+
+    #[derive(Default)]
+    struct TestSettingsStore {
+        values: RwLock<HashMap<String, HashMap<String, serde_json::Value>>>,
+    }
+
+    #[async_trait]
+    impl SettingsStore for TestSettingsStore {
+        async fn get_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+        ) -> Result<Option<serde_json::Value>, crate::error::DatabaseError> {
+            Ok(self
+                .values
+                .read()
+                .await
+                .get(user_id)
+                .and_then(|row| row.get(key).cloned()))
+        }
+
+        async fn get_setting_full(
+            &self,
+            _user_id: &str,
+            _key: &str,
+        ) -> Result<Option<crate::history::SettingRow>, crate::error::DatabaseError> {
+            Ok(None)
+        }
+
+        async fn set_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+            value: &serde_json::Value,
+        ) -> Result<(), crate::error::DatabaseError> {
+            self.values
+                .write()
+                .await
+                .entry(user_id.to_string())
+                .or_default()
+                .insert(key.to_string(), value.clone());
+            Ok(())
+        }
+
+        async fn delete_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+        ) -> Result<bool, crate::error::DatabaseError> {
+            Ok(self
+                .values
+                .write()
+                .await
+                .get_mut(user_id)
+                .and_then(|row| row.remove(key))
+                .is_some())
+        }
+
+        async fn list_settings(
+            &self,
+            _user_id: &str,
+        ) -> Result<Vec<crate::history::SettingRow>, crate::error::DatabaseError> {
+            Ok(vec![])
+        }
+
+        async fn get_all_settings(
+            &self,
+            user_id: &str,
+        ) -> Result<HashMap<String, serde_json::Value>, crate::error::DatabaseError> {
+            Ok(self
+                .values
+                .read()
+                .await
+                .get(user_id)
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        async fn set_all_settings(
+            &self,
+            user_id: &str,
+            settings: &HashMap<String, serde_json::Value>,
+        ) -> Result<(), crate::error::DatabaseError> {
+            self.values
+                .write()
+                .await
+                .insert(user_id.to_string(), settings.clone());
+            Ok(())
+        }
+
+        async fn has_settings(&self, user_id: &str) -> Result<bool, crate::error::DatabaseError> {
+            Ok(self
+                .values
+                .read()
+                .await
+                .get(user_id)
+                .is_some_and(|row| !row.is_empty()))
+        }
+    }
+
+    #[tokio::test]
+    async fn persisted_always_allow_skips_gate() {
+        use ironclaw_safety::SafetyConfig;
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(ApprovalTestTool)).await;
+
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let settings = Arc::new(TestSettingsStore::default());
+        settings
+            .set_setting(
+                "test_user",
+                "tool_permissions.approval_test",
+                &serde_json::json!("always_allow"),
+            )
+            .await
+            .expect("persist setting");
+        adapter
+            .set_settings_store(settings as Arc<dyn SettingsStore + Send + Sync>)
+            .await;
+
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let result = adapter
+            .execute_action(
+                "approval_test",
+                serde_json::json!({"value": "x"}),
+                &lease(),
+                &exec_ctx(thread_id, Some("call_persisted_1")),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Ok(ActionResult { is_error: false, .. })),
+            "persisted AlwaysAllow should bypass approval gate, got: {result:?}"
+        );
     }
 
     // ── extract_credential_name tests ──────────────────────────
