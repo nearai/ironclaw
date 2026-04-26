@@ -102,6 +102,7 @@ const TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE: &str = "TRACE_COMMONS_SIGNED_TOKEN_AU
 const TRACE_COMMONS_SIGNED_TOKEN_REVOKED_JTIS: &str = "TRACE_COMMONS_SIGNED_TOKEN_REVOKED_JTIS";
 const TRACE_COMMONS_SIGNED_TOKEN_MAX_TTL_SECONDS: &str =
     "TRACE_COMMONS_SIGNED_TOKEN_MAX_TTL_SECONDS";
+const TRACE_COMMONS_SIGNED_TOKEN_REQUIRE_JTI: &str = "TRACE_COMMONS_SIGNED_TOKEN_REQUIRE_JTI";
 const TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR: &str =
     "TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR";
 const TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR: &str =
@@ -320,6 +321,7 @@ struct TraceCommonsSignedTokenVerifier {
     audience: Option<String>,
     revoked_jtis: BTreeSet<String>,
     max_ttl_seconds: Option<i64>,
+    require_jti: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -984,6 +986,7 @@ fn trace_commons_signed_token_verifier_from_env()
         audience: optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE)?,
         revoked_jtis: parse_signed_token_revoked_jtis_from_env()?,
         max_ttl_seconds: parse_signed_token_max_ttl_seconds_from_env()?,
+        require_jti: env_truthy(TRACE_COMMONS_SIGNED_TOKEN_REQUIRE_JTI),
     }))
 }
 
@@ -1111,6 +1114,18 @@ impl TraceCommonsSignedTokenVerifier {
 
         let claims = token_data.claims;
         self.enforce_max_ttl(&claims)?;
+        if self.require_jti
+            && claims
+                .jti
+                .as_deref()
+                .map(str::trim)
+                .is_none_or(str::is_empty)
+        {
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "signed tenant token requires jti",
+            ));
+        }
         if claims
             .jti
             .as_deref()
@@ -1398,6 +1413,7 @@ struct TraceCommonsConfigStatusResponse {
     signed_token_audience_configured: bool,
     signed_token_revoked_jti_count: usize,
     signed_token_max_ttl_seconds: Option<i64>,
+    signed_token_require_jti: bool,
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
     db_reviewer_require_object_refs: bool,
@@ -1446,6 +1462,10 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .signed_token_verifier
             .as_ref()
             .and_then(|verifier| verifier.max_ttl_seconds),
+        signed_token_require_jti: state
+            .signed_token_verifier
+            .as_ref()
+            .is_some_and(|verifier| verifier.require_jti),
         db_contributor_reads: state.db_contributor_reads,
         db_reviewer_reads: state.db_reviewer_reads,
         db_reviewer_require_object_refs: state.db_reviewer_require_object_refs,
@@ -14686,6 +14706,7 @@ mod tests {
             audience: audience.map(str::to_string),
             revoked_jtis: BTreeSet::new(),
             max_ttl_seconds: None,
+            require_jti: false,
         });
         state
     }
@@ -16078,6 +16099,7 @@ mod tests {
             audience: Some("config-status-audience".to_string()),
             revoked_jtis: BTreeSet::from(["revoked-config-jti".to_string()]),
             max_ttl_seconds: Some(900),
+            require_jti: true,
         });
 
         let contributor_response = app(state.clone())
@@ -16132,6 +16154,7 @@ mod tests {
             value["signed_token_max_ttl_seconds"],
             serde_json::json!(900)
         );
+        assert_eq!(value["signed_token_require_jti"], serde_json::json!(true));
         assert_eq!(
             value["require_tenant_submission_policy"],
             serde_json::json!(true)
@@ -28748,6 +28771,74 @@ mod tests {
             submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
                 .await
                 .expect("max-ttl signed token policy accepts bounded tokens");
+
+        assert_eq!(receipt.status, "accepted");
+    }
+
+    #[tokio::test]
+    async fn rejects_signed_tenant_token_missing_jti_when_required() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state_with_signed_token_verifier(
+            temp.path().to_path_buf(),
+            "signed-secret",
+            None,
+            None,
+        );
+        Arc::make_mut(&mut state)
+            .signed_token_verifier
+            .as_mut()
+            .expect("verifier exists")
+            .require_jti = true;
+        let token = signed_tenant_token(
+            "signed-secret",
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "contributor",
+                "sub": "actor-123",
+                "exp": (Utc::now() + Duration::minutes(5)).timestamp()
+            }),
+        );
+        let envelope = sample_envelope().await;
+
+        let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+            .await
+            .expect_err("signed token jti policy rejects missing jti");
+
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert_eq!(error.1.0.error, "signed tenant token requires jti");
+    }
+
+    #[tokio::test]
+    async fn accepts_signed_tenant_token_with_required_jti() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state_with_signed_token_verifier(
+            temp.path().to_path_buf(),
+            "signed-secret",
+            None,
+            None,
+        );
+        Arc::make_mut(&mut state)
+            .signed_token_verifier
+            .as_mut()
+            .expect("verifier exists")
+            .require_jti = true;
+        let token = signed_tenant_token(
+            "signed-secret",
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "contributor",
+                "sub": "actor-123",
+                "jti": "accepted-jti-1",
+                "exp": (Utc::now() + Duration::minutes(5)).timestamp()
+            }),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+
+        let Json(receipt) =
+            submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+                .await
+                .expect("signed token jti policy accepts jti-bearing token");
 
         assert_eq!(receipt.status, "accepted");
     }
