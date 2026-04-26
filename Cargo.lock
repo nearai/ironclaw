@@ -4037,8 +4037,6 @@ name = "ironclaw_dispatcher"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "ironclaw_authorization",
- "ironclaw_capabilities",
  "ironclaw_events",
  "ironclaw_extensions",
  "ironclaw_filesystem",
