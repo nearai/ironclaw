@@ -71,6 +71,7 @@ async fn capability_host_records_blocked_auth_for_authorization_denial() {
     let host = CapabilityHost::new(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
     let context = execution_context(CapabilitySet::default());
     let invocation_id = context.invocation_id;
+    let scope = context.resource_scope.clone();
 
     let err = host
         .invoke_json(CapabilityInvocationRequest {
@@ -89,7 +90,7 @@ async fn capability_host_records_blocked_auth_for_authorization_denial() {
         err,
         CapabilityInvocationError::AuthorizationDenied { .. }
     ));
-    let record = run_state.get(invocation_id).await.unwrap().unwrap();
+    let record = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(record.status, RunStatus::BlockedAuth);
     assert_eq!(record.error_kind.as_deref(), Some("AuthorizationDenied"));
 }
@@ -105,6 +106,7 @@ async fn capability_host_rejects_invalid_context_before_recording_run_state() {
     let run_state = InMemoryRunStateStore::new();
     let host = CapabilityHost::new(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
     let mut context = execution_context(CapabilitySet::default());
+    let original_scope = context.resource_scope.clone();
     context.resource_scope.tenant_id = TenantId::new("other-tenant").unwrap();
 
     let err = host
@@ -124,7 +126,13 @@ async fn capability_host_rejects_invalid_context_before_recording_run_state() {
             ..
         }
     ));
-    assert!(run_state.records().await.unwrap().is_empty());
+    assert!(
+        run_state
+            .records_for_scope(&original_scope)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

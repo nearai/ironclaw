@@ -152,7 +152,7 @@ where
             Decision::Deny { reason } => {
                 if let Some(run_state) = self.run_state {
                     run_state
-.block_auth(&scope, invocation_id, "AuthorizationDenied".to_string())
+                        .block_auth(&scope, invocation_id, "AuthorizationDenied".to_string())
                         .await?;
                 }
                 return Err(CapabilityInvocationError::AuthorizationDenied {
