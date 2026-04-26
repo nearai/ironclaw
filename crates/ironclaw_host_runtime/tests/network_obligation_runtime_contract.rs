@@ -1,6 +1,12 @@
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    thread,
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -118,6 +124,50 @@ async fn apply_network_policy_obligation_blocks_wasm_network_import_before_clien
 
     assert_eq!(result.dispatch.output, json!({"ok": false}));
     assert!(client.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn host_runtime_services_can_use_hardened_egress_for_wasm_network_imports() {
+    let server = TestHttpServer::spawn(vec![http_response(200, b"{\"ok\":true}")]);
+    let url = server.url("/v1/echo");
+    let (filesystem, package) = wasm_package_with_module(http_module_bytes(&url, 0, ""));
+    let registry = Arc::new(registry_with_package(package));
+    let filesystem = Arc::new(filesystem);
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let authorizer = Arc::new(NetworkPolicyAuthorizer::new(NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Http),
+            host_pattern: "127.0.0.1".to_string(),
+            port: Some(server.port()),
+        }],
+        deny_private_ip_ranges: false,
+        max_egress_bytes: Some(1024),
+    }));
+    let services = HostRuntimeServices::new(
+        registry,
+        filesystem,
+        governor,
+        authorizer,
+        ProcessServices::in_memory(),
+    )
+    .with_wasm_runtime(Arc::new(WasmRuntime::for_testing().unwrap()))
+    .with_hardened_network_egress()
+    .with_builtin_obligation_handler();
+    let dispatcher = services.runtime_dispatcher_arc();
+    let capability_host = services.capability_host_for_runtime_dispatcher(&dispatcher);
+
+    let result = capability_host
+        .invoke_json(CapabilityInvocationRequest {
+            context: execution_context(),
+            capability_id: CapabilityId::new("net-demo.http").unwrap(),
+            estimate: ResourceEstimate::default(),
+            input: json!({}),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.dispatch.output, json!({"ok": true}));
+    assert_eq!(server.hits(), 1);
 }
 
 #[tokio::test]
@@ -304,6 +354,77 @@ fn execution_context() -> ExecutionContext {
         mounts: MountView::default(),
         resource_scope,
     }
+}
+
+fn http_response(status: u16, body: &[u8]) -> Vec<u8> {
+    let reason = match status {
+        200 => "OK",
+        _ => "Status",
+    };
+    let mut response = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    response.extend_from_slice(body);
+    response
+}
+
+struct TestHttpServer {
+    addr: std::net::SocketAddr,
+    hits: Arc<AtomicUsize>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl TestHttpServer {
+    fn spawn(responses: Vec<Vec<u8>>) -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_for_thread = Arc::clone(&hits);
+        let handle = thread::spawn(move || {
+            for response in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                hits_for_thread.fetch_add(1, Ordering::SeqCst);
+                drain_request(&mut stream);
+                let _ = stream.write_all(&response);
+            }
+        });
+        Self {
+            addr,
+            hits,
+            handle: Some(handle),
+        }
+    }
+
+    fn port(&self) -> u16 {
+        self.addr.port()
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("http://{}{}", self.addr, path)
+    }
+
+    fn hits(&self) -> usize {
+        self.hits.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for TestHttpServer {
+    fn drop(&mut self) {
+        let _ = TcpStream::connect_timeout(&self.addr, Duration::from_millis(50));
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn drain_request(stream: &mut TcpStream) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let mut buf = [0; 1024];
+    let _ = stream.read(&mut buf);
 }
 
 fn http_module_bytes(url: &str, method: i32, body: &str) -> Vec<u8> {

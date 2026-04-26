@@ -1,7 +1,8 @@
 # ironclaw_network guardrails
 
-- Own network policy evaluation helpers and scoped network permits only.
-- Do not perform HTTP I/O, DNS resolution, proxying, secret injection, resource reservation, audit/event emission, or product workflow here.
+- Own network policy evaluation helpers, scoped network permits, and hardened runtime HTTP egress only.
+- HTTP egress must policy-check, DNS-resolve, private-address-check, redirect-revalidate, pin validated resolution, and bound response size before returning data.
+- Do not perform secret injection, resource reservation, audit/event emission, approval prompts, trace recording, OAuth repair, or product workflow here.
 - Preserve tenant/user/project scope in requests, permits, and errors.
 - Fail closed when no target pattern matches or no allowed targets are configured.
 - Keep host matching intentionally simple: exact host or one leading wildcard label (`*.example.com`), never arbitrary regex.

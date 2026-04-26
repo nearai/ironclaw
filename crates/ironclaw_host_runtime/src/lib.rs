@@ -31,7 +31,10 @@ use ironclaw_host_api::{
     Obligation, ResourceScope, RuntimeDispatchErrorKind, RuntimeKind,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
-use ironclaw_network::is_private_or_loopback_ip;
+use ironclaw_network::{
+    HardenedHttpEgressClient, HttpEgressClient, HttpEgressError, HttpEgressRequest,
+    is_private_or_loopback_ip,
+};
 use ironclaw_processes::{
     ProcessExecutor, ProcessHost, ProcessResultStore, ProcessServices, ProcessStore,
 };
@@ -48,6 +51,7 @@ pub struct WasmRuntimeAdapter {
     runtime: Arc<WasmRuntime>,
     network_policies: Option<Arc<NetworkObligationPolicyStore>>,
     http_client: Option<Arc<dyn WasmHostHttp>>,
+    http_egress_client: Option<Arc<dyn HttpEgressClient>>,
 }
 
 impl WasmRuntimeAdapter {
@@ -56,6 +60,7 @@ impl WasmRuntimeAdapter {
             runtime,
             network_policies: None,
             http_client: None,
+            http_egress_client: None,
         }
     }
 
@@ -77,6 +82,20 @@ impl WasmRuntimeAdapter {
         self.http_client = Some(client);
         self
     }
+
+    pub fn with_http_egress_client<T>(mut self, client: Arc<T>) -> Self
+    where
+        T: HttpEgressClient + 'static,
+    {
+        let client: Arc<dyn HttpEgressClient> = client;
+        self.http_egress_client = Some(client);
+        self
+    }
+
+    pub fn with_http_egress_client_dyn(mut self, client: Arc<dyn HttpEgressClient>) -> Self {
+        self.http_egress_client = Some(client);
+        self
+    }
 }
 
 #[async_trait]
@@ -93,6 +112,7 @@ where
             .network_policies
             .as_ref()
             .and_then(|store| store.take(&request.scope, request.capability_id));
+        let scope = request.scope.clone();
         let execution_request = WasmExecutionRequest {
             package: request.package,
             capability_id: request.capability_id,
@@ -103,15 +123,23 @@ where
             },
         };
         let execution = if let Some(policy) = network_policy {
-            let Some(http_client) = &self.http_client else {
+            let http: Arc<dyn WasmHostHttp> = if let Some(egress_client) = &self.http_egress_client
+            {
+                Arc::new(ScopedWasmHttpEgressClient::new(
+                    scope,
+                    policy,
+                    Arc::clone(egress_client),
+                ))
+            } else if let Some(http_client) = &self.http_client {
+                Arc::new(WasmPolicyHttpClient::new(
+                    SharedWasmHostHttp::new(Arc::clone(http_client)),
+                    policy,
+                ))
+            } else {
                 return Err(DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::NetworkDenied,
                 });
             };
-            let http = Arc::new(WasmPolicyHttpClient::new(
-                SharedWasmHostHttp::new(Arc::clone(http_client)),
-                policy,
-            ));
             self.runtime
                 .execute_extension_json_with_network(
                     request.filesystem,
@@ -150,6 +178,64 @@ impl SharedWasmHostHttp {
 impl WasmHostHttp for SharedWasmHostHttp {
     fn request_utf8(&self, request: WasmHttpRequest) -> Result<WasmHttpResponse, String> {
         self.inner.request_utf8(request)
+    }
+}
+
+#[derive(Clone)]
+struct ScopedWasmHttpEgressClient {
+    scope: ResourceScope,
+    policy: NetworkPolicy,
+    client: Arc<dyn HttpEgressClient>,
+}
+
+impl ScopedWasmHttpEgressClient {
+    fn new(scope: ResourceScope, policy: NetworkPolicy, client: Arc<dyn HttpEgressClient>) -> Self {
+        Self {
+            scope,
+            policy,
+            client,
+        }
+    }
+}
+
+impl WasmHostHttp for ScopedWasmHttpEgressClient {
+    fn request_utf8(&self, request: WasmHttpRequest) -> Result<WasmHttpResponse, String> {
+        let client = Arc::clone(&self.client);
+        let request = HttpEgressRequest {
+            scope: self.scope.clone(),
+            policy: self.policy.clone(),
+            method: request.method,
+            url: request.url,
+            headers: Vec::new(),
+            body: request.body.into_bytes(),
+            timeout: None,
+            max_response_bytes: None,
+        };
+        let response = std::thread::spawn(move || client.request(request))
+            .join()
+            .map_err(|_| "network transport failed".to_string())?
+            .map_err(|error| network_egress_error_label(&error).to_string())?;
+        let body = String::from_utf8(response.body)
+            .map_err(|_| "network response body is not utf8".to_string())?;
+        Ok(WasmHttpResponse {
+            status: response.status,
+            body,
+        })
+    }
+}
+
+fn network_egress_error_label(error: &HttpEgressError) -> &'static str {
+    match error {
+        HttpEgressError::InvalidUrl { .. } => "InvalidUrl",
+        HttpEgressError::UnsupportedScheme { .. } => "UnsupportedScheme",
+        HttpEgressError::TargetDenied { .. } => "TargetDenied",
+        HttpEgressError::PrivateTargetDenied { .. } => "PrivateTargetDenied",
+        HttpEgressError::RequestTooLarge { .. } => "RequestTooLarge",
+        HttpEgressError::ResponseTooLarge { .. } => "ResponseTooLarge",
+        HttpEgressError::RedirectDenied { .. } => "RedirectDenied",
+        HttpEgressError::TooManyRedirects { .. } => "TooManyRedirects",
+        HttpEgressError::Timeout { .. } => "Timeout",
+        HttpEgressError::Transport { .. } => "Transport",
     }
 }
 
@@ -626,6 +712,7 @@ where
     capability_leases: Option<Arc<dyn CapabilityLeaseStore>>,
     wasm_runtime: Option<Arc<WasmRuntime>>,
     wasm_http_client: Option<Arc<dyn WasmHostHttp>>,
+    http_egress_client: Option<Arc<dyn HttpEgressClient>>,
     script_runtime: Option<Arc<dyn ScriptExecutor>>,
     mcp_runtime: Option<Arc<dyn McpExecutor>>,
     event_sink: Option<Arc<dyn EventSink>>,
@@ -660,6 +747,7 @@ where
             capability_leases: None,
             wasm_runtime: None,
             wasm_http_client: None,
+            http_egress_client: None,
             script_runtime: None,
             mcp_runtime: None,
             event_sink: None,
@@ -733,6 +821,25 @@ where
 
     pub fn with_wasm_http_client_dyn(mut self, client: Arc<dyn WasmHostHttp>) -> Self {
         self.wasm_http_client = Some(client);
+        self
+    }
+
+    pub fn with_http_egress_client<T>(mut self, client: Arc<T>) -> Self
+    where
+        T: HttpEgressClient + 'static,
+    {
+        let client: Arc<dyn HttpEgressClient> = client;
+        self.http_egress_client = Some(client);
+        self
+    }
+
+    pub fn with_http_egress_client_dyn(mut self, client: Arc<dyn HttpEgressClient>) -> Self {
+        self.http_egress_client = Some(client);
+        self
+    }
+
+    pub fn with_hardened_network_egress(mut self) -> Self {
+        self.http_egress_client = Some(Arc::new(HardenedHttpEgressClient::new()));
         self
     }
 
@@ -815,6 +922,9 @@ where
                 .with_network_policy_store(Arc::clone(&self.network_obligation_policies));
             if let Some(http_client) = &self.wasm_http_client {
                 adapter = adapter.with_http_client_dyn(Arc::clone(http_client));
+            }
+            if let Some(egress_client) = &self.http_egress_client {
+                adapter = adapter.with_http_egress_client_dyn(Arc::clone(egress_client));
             }
             dispatcher = dispatcher.with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::new(adapter));
         }

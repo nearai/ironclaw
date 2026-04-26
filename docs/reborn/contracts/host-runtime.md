@@ -49,7 +49,7 @@ ProcessHost<'_>
 ApprovalResolver<'_, dyn ApprovalRequestStore, dyn CapabilityLeaseStore>
 ```
 
-It may hold shared `Arc` handles to configured services, runtime backends, observability sinks, an optional WASM host HTTP client, and an optional capability-obligation handler. It adapts concrete runtime crates into `ironclaw_dispatcher::RuntimeAdapter` implementations when building `RuntimeDispatcher`, and it provides a small `BuiltinObligationHandler` for metadata-only obligations plus WASM network-policy handoff.
+It may hold shared `Arc` handles to configured services, runtime backends, observability sinks, an optional WASM host HTTP client or hardened network egress client, and an optional capability-obligation handler. It adapts concrete runtime crates into `ironclaw_dispatcher::RuntimeAdapter` implementations when building `RuntimeDispatcher`, and it provides a small `BuiltinObligationHandler` for metadata-only obligations plus WASM network-policy handoff.
 
 It must not:
 
@@ -57,7 +57,7 @@ It must not:
 - execute runtime lanes directly outside adapter wrappers
 - own process state transitions or cancellation semantics
 - own approval resolution or lease semantics; `approval_resolver()` only wires `ironclaw_approvals::ApprovalResolver`
-- own broad runtime/input/output obligation semantics; `with_obligation_handler(...)` passes a shared `CapabilityObligationHandler` through to `CapabilityHost`, and `BuiltinObligationHandler` is limited to audit-before metadata plus `ApplyNetworkPolicy` preflight/hand-off to WASM host HTTP imports
+- own broad runtime/input/output obligation semantics; `with_obligation_handler(...)` passes a shared `CapabilityObligationHandler` through to `CapabilityHost`, and `BuiltinObligationHandler` is limited to audit-before metadata plus `ApplyNetworkPolicy` preflight/hand-off to WASM host HTTP imports and `ironclaw_network` egress
 - expose process lifecycle APIs through `CapabilityHost`
 - turn process subscriptions into a message bus
 - weaken tenant/user scoped persistence boundaries
@@ -92,6 +92,8 @@ let services = HostRuntimeServices::new(
 .with_capability_leases(capability_leases)
 .with_script_runtime(script_runtime)
 .with_wasm_http_client(wasm_http_client)
+// or install the built-in hardened Reborn network egress client:
+.with_hardened_network_egress()
 .with_event_sink(event_sink)
 .with_audit_sink(audit_sink)
 .with_builtin_obligation_handler();
@@ -135,7 +137,7 @@ ProcessHost status/kill/result/output
 
 `approval_resolver()` uses the same `ApprovalRequestStore`, `CapabilityLeaseStore`, and optional `AuditSink` handles configured for `CapabilityHost::resume_json(...)`. This prevents accidental split wiring where one component approves a request into one lease store while resume checks another, or where approval audit disappears because the resolver was not wired to the shared audit sink.
 
-If configured, the shared `CapabilityObligationHandler` is passed into each `CapabilityHost` built by this helper. `HostRuntimeServices::with_builtin_obligation_handler()` installs the built-in handler with the shared `NetworkObligationPolicyStore`. It supports `AuditBefore` by emitting a redacted `AuditStage::Before` audit envelope through the configured `AuditSink`, and supports `ApplyNetworkPolicy` by validating policy metadata and storing the scoped policy in `NetworkObligationPolicyStore`; without a policy store, `ApplyNetworkPolicy` fails closed. The WASM runtime adapter consumes that scoped policy during dispatch and wraps the configured `WasmHostHttp` with `WasmPolicyHttpClient`, so actual WASM `host.http_request_utf8` calls are checked before the host HTTP client is called. If a network policy is present for Script or MCP lanes, those adapters fail closed with `NetworkDenied` until they have enforceable network plumbing. This handoff still does not perform DNS resolution, credential injection, or egress reservation by itself. `InjectSecretOnce`, `AuditAfter`, `RedactOutput`, `EnforceOutputLimit`, resource reservation, and scoped-mount obligations remain unsupported and fail closed until their required runtime/input/output plumbing exists. Unsupported or failed handler outcomes remain fail-closed inside `CapabilityHost` before dispatch, process start, or approval lease claim.
+If configured, the shared `CapabilityObligationHandler` is passed into each `CapabilityHost` built by this helper. `HostRuntimeServices::with_builtin_obligation_handler()` installs the built-in handler with the shared `NetworkObligationPolicyStore`. It supports `AuditBefore` by emitting a redacted `AuditStage::Before` audit envelope through the configured `AuditSink`, and supports `ApplyNetworkPolicy` by validating policy metadata and storing the scoped policy in `NetworkObligationPolicyStore`; without a policy store, `ApplyNetworkPolicy` fails closed. The WASM runtime adapter consumes that scoped policy during dispatch. If `with_hardened_network_egress()` or `with_http_egress_client(...)` is configured, WASM `host.http_request_utf8` calls go through `ironclaw_network::HardenedHttpEgressClient`/`HttpEgressClient`, which policy-checks, DNS-resolves, private-address-checks, redirect-revalidates, pins validated resolution, and bounds response size before returning bytes. If only a custom `WasmHostHttp` is configured, the adapter still wraps it with `WasmPolicyHttpClient` as a lower-level test/custom-client policy guard. If a network policy is present for Script or MCP lanes, those adapters fail closed with `NetworkDenied` until they have enforceable network plumbing. This handoff still does not perform credential injection or egress resource reservation by itself. `InjectSecretOnce`, `AuditAfter`, `RedactOutput`, `EnforceOutputLimit`, resource reservation, and scoped-mount obligations remain unsupported and fail closed until their required runtime/input/output plumbing exists. Unsupported or failed handler outcomes remain fail-closed inside `CapabilityHost` before dispatch, process start, or approval lease claim.
 
 This also prevents accidental split wiring where one component starts a process and another reads results or signals cancellation from a different store/registry.
 
