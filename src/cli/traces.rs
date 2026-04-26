@@ -15,9 +15,10 @@ use uuid::Uuid;
 
 use crate::trace_contribution::{
     ConsentScope, CreditSummary, DeterministicTraceRedactor, RecordedTraceContributionOptions,
-    ResidualPiiRisk, StandingTraceContributionPolicy, TraceChannel, TraceContributionEnvelope,
-    TraceCreditEvent, TraceCreditEventKind, TraceRedactor, TraceSubmissionStatusUpdate,
-    estimate_initial_credit, fetch_trace_submission_statuses, privacy_filter_adapter_from_env,
+    ResidualPiiRisk, StandingTraceContributionPolicy, TraceChannel, TraceContributionAcceptance,
+    TraceContributionEnvelope, TraceCreditEvent, TraceCreditEventKind, TraceRedactor,
+    TraceSubmissionStatusUpdate, estimate_initial_credit, fetch_trace_submission_statuses,
+    preflight_trace_contribution_policy, privacy_filter_adapter_from_env,
     trace_submission_status_endpoint,
 };
 
@@ -1251,7 +1252,12 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
         }
         TracesCommand::Enqueue { envelope } => {
             let envelope = load_envelope(&envelope)?;
-            enqueue_envelope(&envelope)?;
+            let policy = read_policy()?;
+            enqueue_envelope_with_policy(
+                &envelope,
+                &policy,
+                TraceContributionAcceptance::QueueFromPreview,
+            )?;
             println!(
                 "Queued redacted trace contribution {}",
                 envelope.submission_id
@@ -1771,6 +1777,19 @@ fn show_policy_status(json: bool) -> anyhow::Result<()> {
 }
 
 async fn preview_recorded_trace(options: PreviewOptions) -> anyhow::Result<()> {
+    let queue_policy = if options.enqueue {
+        let policy = read_policy()?;
+        preflight_cli_trace_upload(
+            &policy,
+            TraceContributionAcceptance::QueueFromPreview,
+            options.include_message_text,
+            options.include_tool_payloads,
+        )?;
+        Some(policy)
+    } else {
+        None
+    };
+
     let raw_json = std::fs::read_to_string(&options.recorded_trace).map_err(|e| {
         anyhow::anyhow!(
             "failed to read recorded trace {}: {}",
@@ -1824,7 +1843,14 @@ async fn preview_recorded_trace(options: PreviewOptions) -> anyhow::Result<()> {
     }
 
     if options.enqueue {
-        enqueue_envelope(&envelope)?;
+        let policy = queue_policy.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("trace contribution queue policy was not initialized")
+        })?;
+        enqueue_envelope_with_policy(
+            &envelope,
+            policy,
+            TraceContributionAcceptance::QueueFromPreview,
+        )?;
         println!(
             "Queued redacted trace contribution {} for autonomous submission.",
             envelope.submission_id
@@ -4570,12 +4596,65 @@ fn write_policy(policy: &StandingTraceContributionPolicy) -> anyhow::Result<()> 
         .map_err(|e| anyhow::anyhow!("failed to write trace policy {}: {}", path.display(), e))
 }
 
-fn enqueue_envelope(envelope: &TraceContributionEnvelope) -> anyhow::Result<PathBuf> {
-    let path = queue_dir().join(format!("{}.json", envelope.submission_id));
-    std::fs::create_dir_all(queue_dir()).map_err(|e| {
+fn preflight_cli_trace_upload(
+    policy: &StandingTraceContributionPolicy,
+    intent: TraceContributionAcceptance,
+    include_message_text: bool,
+    include_tool_payloads: bool,
+) -> anyhow::Result<()> {
+    preflight_trace_contribution_policy(policy, intent)
+        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    if intent != TraceContributionAcceptance::PreviewOnly {
+        if include_message_text && !policy.include_message_text {
+            anyhow::bail!("trace contribution policy does not allow message text upload");
+        }
+        if include_tool_payloads && !policy.include_tool_payloads {
+            anyhow::bail!("trace contribution policy does not allow tool payload upload");
+        }
+    }
+    Ok(())
+}
+
+fn preflight_cli_trace_envelope_upload(
+    policy: &StandingTraceContributionPolicy,
+    intent: TraceContributionAcceptance,
+    envelope: &TraceContributionEnvelope,
+) -> anyhow::Result<()> {
+    preflight_cli_trace_upload(
+        policy,
+        intent,
+        envelope.consent.message_text_included,
+        envelope.consent.tool_payloads_included,
+    )
+}
+
+fn enqueue_envelope_with_policy(
+    envelope: &TraceContributionEnvelope,
+    policy: &StandingTraceContributionPolicy,
+    intent: TraceContributionAcceptance,
+) -> anyhow::Result<PathBuf> {
+    enqueue_envelope_to_dir_with_policy(envelope, policy, intent, &queue_dir())
+}
+
+fn enqueue_envelope_to_dir_with_policy(
+    envelope: &TraceContributionEnvelope,
+    policy: &StandingTraceContributionPolicy,
+    intent: TraceContributionAcceptance,
+    dir: &Path,
+) -> anyhow::Result<PathBuf> {
+    preflight_cli_trace_envelope_upload(policy, intent, envelope)?;
+    enqueue_envelope_to_dir(envelope, dir)
+}
+
+fn enqueue_envelope_to_dir(
+    envelope: &TraceContributionEnvelope,
+    dir: &Path,
+) -> anyhow::Result<PathBuf> {
+    let path = dir.join(format!("{}.json", envelope.submission_id));
+    std::fs::create_dir_all(dir).map_err(|e| {
         anyhow::anyhow!(
             "failed to create trace contribution queue {}: {}",
-            queue_dir().display(),
+            dir.display(),
             e
         )
     })?;
@@ -4626,6 +4705,12 @@ fn redaction_summary(counts: &BTreeMap<String, u32>) -> String {
 mod tests {
     use super::*;
     use crate::cli::{Cli, Command};
+    use crate::trace_contribution::{
+        ConsentMetadata, ContributorMetadata, DETERMINISTIC_REDACTION_PIPELINE_VERSION,
+        IronclawTraceMetadata, OutcomeMetadata, PrivacyMetadata, ReplayMetadata,
+        TRACE_CONTRIBUTION_POLICY_VERSION, TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceCard,
+        TraceValueCard, ValueMetadata,
+    };
     use clap::Parser;
 
     #[test]
@@ -4647,6 +4732,148 @@ mod tests {
         counts.insert("local_path".to_string(), 2);
         counts.insert("secret".to_string(), 1);
         assert_eq!(redaction_summary(&counts), "2 local_path, 1 secret");
+    }
+
+    fn trace_queue_policy_fixture() -> StandingTraceContributionPolicy {
+        StandingTraceContributionPolicy {
+            enabled: true,
+            ingestion_endpoint: Some("https://trace.example/internal/v1/traces".to_string()),
+            ..StandingTraceContributionPolicy::default()
+        }
+    }
+
+    fn trace_queue_envelope_fixture(
+        message_text_included: bool,
+        tool_payloads_included: bool,
+    ) -> TraceContributionEnvelope {
+        TraceContributionEnvelope {
+            schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION.to_string(),
+            trace_id: Uuid::new_v4(),
+            submission_id: Uuid::new_v4(),
+            created_at: chrono::Utc::now(),
+            ironclaw: IronclawTraceMetadata {
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                engine_version: None,
+                feature_flags: BTreeMap::new(),
+                channel: TraceChannel::Cli,
+                model_name: None,
+            },
+            consent: ConsentMetadata {
+                policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+                scopes: vec![ConsentScope::DebuggingEvaluation],
+                message_text_included,
+                tool_payloads_included,
+                revocable: true,
+            },
+            contributor: ContributorMetadata {
+                pseudonymous_contributor_id: None,
+                tenant_scope_ref: None,
+                credit_account_ref: None,
+                revocation_handle: Uuid::new_v4(),
+            },
+            privacy: PrivacyMetadata {
+                redaction_pipeline_version: DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
+                redaction_counts: BTreeMap::new(),
+                privacy_filter_summary: None,
+                pii_labels_present: Vec::new(),
+                residual_pii_risk: ResidualPiiRisk::Low,
+                redaction_hash: "sha256:test".to_string(),
+                warnings: Vec::new(),
+            },
+            events: Vec::new(),
+            outcome: OutcomeMetadata::default(),
+            replay: ReplayMetadata {
+                replayable: false,
+                required_tools: Vec::new(),
+                tool_manifest_hashes: BTreeMap::new(),
+                expected_assertions: Vec::new(),
+                replay_notes: Vec::new(),
+            },
+            embedding_analysis: None,
+            value: ValueMetadata::default(),
+            trace_card: TraceCard::default(),
+            value_card: TraceValueCard::default(),
+            hindsight: None,
+            training_dynamics: None,
+            process_evaluation: None,
+        }
+    }
+
+    #[test]
+    fn cli_trace_upload_preflight_keeps_preview_local_but_gates_queue_intents() {
+        let envelope = trace_queue_envelope_fixture(true, true);
+        let policy = StandingTraceContributionPolicy::default();
+
+        preflight_cli_trace_envelope_upload(
+            &policy,
+            TraceContributionAcceptance::PreviewOnly,
+            &envelope,
+        )
+        .expect("local preview remains available before opt-in");
+        let error = preflight_cli_trace_envelope_upload(
+            &policy,
+            TraceContributionAcceptance::QueueFromPreview,
+            &envelope,
+        )
+        .expect_err("queueing requires standing opt-in");
+
+        assert!(error.to_string().contains("opt-in is disabled"));
+    }
+
+    #[test]
+    fn cli_enqueue_rejects_capture_fields_disallowed_by_policy_before_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let policy = trace_queue_policy_fixture();
+        let envelope = trace_queue_envelope_fixture(true, false);
+        let path = dir.path().join(format!("{}.json", envelope.submission_id));
+
+        let error = enqueue_envelope_to_dir_with_policy(
+            &envelope,
+            &policy,
+            TraceContributionAcceptance::QueueFromPreview,
+            dir.path(),
+        )
+        .expect_err("message text requires standing opt-in capture permission");
+
+        assert!(error.to_string().contains("message text upload"));
+        assert!(!path.exists(), "rejected envelopes must not be queued");
+    }
+
+    #[test]
+    fn cli_enqueue_rejects_tool_payloads_disallowed_by_policy_before_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let policy = trace_queue_policy_fixture();
+        let envelope = trace_queue_envelope_fixture(false, true);
+        let path = dir.path().join(format!("{}.json", envelope.submission_id));
+
+        let error = enqueue_envelope_to_dir_with_policy(
+            &envelope,
+            &policy,
+            TraceContributionAcceptance::QueueFromPreview,
+            dir.path(),
+        )
+        .expect_err("tool payloads require standing opt-in capture permission");
+
+        assert!(error.to_string().contains("tool payload upload"));
+        assert!(!path.exists(), "rejected envelopes must not be queued");
+    }
+
+    #[test]
+    fn cli_enqueue_accepts_policy_matching_envelope_capture() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut policy = trace_queue_policy_fixture();
+        policy.include_message_text = true;
+        let envelope = trace_queue_envelope_fixture(true, false);
+
+        let path = enqueue_envelope_to_dir_with_policy(
+            &envelope,
+            &policy,
+            TraceContributionAcceptance::QueueFromPreview,
+            dir.path(),
+        )
+        .expect("matching standing policy should queue envelope");
+
+        assert!(path.exists());
     }
 
     #[test]

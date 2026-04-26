@@ -47,7 +47,7 @@ ironclaw traces credit
 ironclaw traces opt-out
 ```
 
-The submit token is read from `IRONCLAW_TRACE_SUBMIT_TOKEN` by default. The token is not stored in the policy file.
+The submit token is read from `IRONCLAW_TRACE_SUBMIT_TOKEN` by default. The token is not stored in the policy file. `preview --enqueue` and `enqueue --envelope` use the same standing-policy gate as autonomous flush: the policy must be enabled, must have an ingestion endpoint, and must allow any message text or tool payloads already present in the redacted envelope. Plain `preview` remains local and does not require opt-in.
 
 ## Private Ingestion Service MVP
 
