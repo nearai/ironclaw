@@ -1,7 +1,7 @@
 # IronClaw Reborn secrets service contract
 
 **Date:** 2026-04-26
-**Status:** V1 encrypted store + PostgreSQL/libSQL repository adapters + credential mapping slice
+**Status:** V1 encrypted store + credential mapping slice
 **Crate:** `crates/ironclaw_secrets`
 **Depends on:** `docs/reborn/contracts/host-api.md`
 
@@ -21,7 +21,7 @@ ResourceScope + SecretHandle
   -> SecretMaterial exactly once
 ```
 
-The crate owns scoped storage mechanics, AES-256-GCM/HKDF encryption, encrypted-row repository contracts, feature-gated PostgreSQL/libSQL repository adapters, one-shot lease state, redacted metadata, and credential mapping shapes. It does not decide authorization, run approval flows, inject secrets into runtime requests, contact networks, emit audit events, or execute product workflows.
+The crate owns scoped storage mechanics, AES-256-GCM/HKDF encryption, encrypted-row repository contracts, one-shot lease state, redacted metadata, and credential mapping shapes. It does not decide authorization, run approval flows, inject secrets into runtime requests, contact networks, emit audit events, or execute product workflows.
 
 ---
 
@@ -44,8 +44,6 @@ EncryptedSecretRecord
 EncryptedSecretRepository
 EncryptedSecretStore
 InMemoryEncryptedSecretRepository
-PostgresEncryptedSecretRepository // feature = "postgres"
-LibSqlEncryptedSecretRepository // feature = "libsql"
 CredentialLocation
 CredentialMapping
 ```
@@ -56,14 +54,14 @@ Ownership remains:
 
 ```text
 host_api       -> opaque SecretHandle and Action::UseSecret shapes
-secrets        -> scoped storage, AES-256-GCM/HKDF encryption, metadata, one-shot leases, encrypted-row repository boundary/adapters, and credential mapping metadata
+secrets        -> scoped storage, AES-256-GCM/HKDF encryption, metadata, one-shot leases, encrypted-row repository boundary, and credential mapping metadata
 authorization  -> whether a caller may use a SecretHandle
 capabilities   -> caller-facing workflow; currently fails closed on InjectSecretOnce obligations
 host_runtime   -> composition of already-resolved credential material into hardened runtime egress; future secret lease consumption in obligation handlers
 runtimes        -> consume injected values only after host-side authorization and lease handling
 ```
 
-`ironclaw_secrets` intentionally stays independent from workflow/runtime/event/authorization/process crates and from concrete Reborn filesystem/runtime crates. Because the Reborn filesystem abstraction does not yet have PostgreSQL/libSQL implementations, durable secret storage uses direct DB-backed `EncryptedSecretRepository` adapters rather than filesystem-backed virtual paths.
+`ironclaw_secrets` intentionally stays independent from workflow/runtime/event/authorization/process crates and from concrete Reborn filesystem/runtime crates. Durable backends can implement `EncryptedSecretRepository` outside those boundaries.
 
 ---
 
@@ -88,8 +86,6 @@ Rules:
 - `SecretsCrypto` and `EncryptedSecretRecord` debug output redacts master keys, ciphertext, and salts
 
 `EncryptedSecretStore<R>` implements `SecretStore` over an `EncryptedSecretRepository`. It encrypts on `put`, decrypts only after a scoped one-shot lease is consumed, records usage after successful decrypt, and leaves a lease active if decryption fails.
-
-The PostgreSQL and libSQL repository adapters are ports/adaptations of the existing `src/secrets/store.rs` persistence code. They reuse the existing `secrets` table shape (`user_id`, `name`, `encrypted_value`, `key_salt`, metadata timestamps/counters), but encode Reborn tenant/user/project scope into the stored owner key so the legacy two-column uniqueness constraint still preserves multi-tenant isolation.
 
 ---
 
@@ -146,7 +142,7 @@ Runtime composition must obtain material through explicit scoped secret access b
 
 This slice does not implement:
 
-- full production composition that chooses PostgreSQL/libSQL repositories from app DB handles
+- concrete PostgreSQL/libSQL encrypted repository adapters
 - platform keychain master-key resolution/persistence
 - automatic master-key generation or `.env` fallback wiring
 - secret rotation/versioning
@@ -158,7 +154,7 @@ This slice does not implement:
 - OAuth/token refresh flows
 - network policy enforcement
 
-Those should be added as separate service/composition slices without moving runtime or product workflow semantics into this crate. Additional durable adapters must preserve the same tenant/user/project keying and sanitized error behavior.
+Those should be added as separate service/composition slices without moving runtime or product workflow semantics into this crate. Concrete durable adapters must preserve the same tenant/user/project keying and sanitized error behavior.
 
 ---
 
@@ -176,6 +172,4 @@ The crate tests cover:
 - a new store instance can read through the same encrypted repository with the same master key
 - wrong master keys fail closed without consuming leases
 - successful consume records usage metadata
-- libSQL encrypted repository adapter persists scoped rows, usage metadata, and tenant/project isolation through the existing secrets table
-- PostgreSQL encrypted repository adapter compiles against the same repository contract and existing secrets table shape
-- crate boundary remains low-level and does not depend on workflow/runtime/filesystem/observability crates
+- crate boundary remains low-level and does not depend on workflow/runtime/observability crates
