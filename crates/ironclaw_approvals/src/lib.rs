@@ -68,8 +68,12 @@ where
         };
         let mut lease = CapabilityLease::new(record.scope.clone(), grant);
         lease.invocation_fingerprint = record.request.invocation_fingerprint.clone();
-        self.approvals.approve(scope, request_id).await?;
-        self.leases.issue(lease).map_err(Into::into)
+        let lease = self.leases.issue(lease)?;
+        if let Err(error) = self.approvals.approve(scope, request_id).await {
+            let _ = self.leases.revoke(&lease.scope, lease.grant.id);
+            return Err(error.into());
+        }
+        Ok(lease)
     }
 
     pub async fn deny(

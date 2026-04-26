@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use ironclaw_approvals::*;
 use ironclaw_authorization::*;
 use ironclaw_host_api::*;
@@ -52,6 +53,85 @@ async fn approving_pending_dispatch_request_issues_scoped_capability_lease() {
         ApprovalStatus::Approved
     );
     assert_eq!(leases.get(&lease.scope, lease.grant.id).unwrap(), lease);
+}
+
+#[tokio::test]
+async fn approving_pending_request_keeps_pending_when_lease_issue_fails() {
+    let approvals = InMemoryApprovalRequestStore::new();
+    let leases = FailingIssueLeaseStore;
+    let resolver = ApprovalResolver::new(&approvals, &leases);
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id, CapabilityId::new("echo.say").unwrap());
+    let request_id = approval.id;
+    approvals
+        .save_pending(scope.clone(), approval)
+        .await
+        .unwrap();
+
+    let err = resolver
+        .approve_dispatch(
+            &scope,
+            request_id,
+            LeaseApproval {
+                issued_by: Principal::User(scope.user_id.clone()),
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                expires_at: None,
+                max_invocations: Some(1),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ApprovalResolutionError::Lease(CapabilityLeaseError::Persistence { .. })
+    ));
+    assert_eq!(
+        approvals
+            .get(&scope, request_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        ApprovalStatus::Pending
+    );
+}
+
+#[tokio::test]
+async fn approving_pending_request_revokes_issued_lease_when_approval_update_fails() {
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id, CapabilityId::new("echo.say").unwrap());
+    let request_id = approval.id;
+    let approvals = FailingApproveApprovalStore {
+        record: ApprovalRecord {
+            scope: scope.clone(),
+            request: approval,
+            status: ApprovalStatus::Pending,
+        },
+    };
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let resolver = ApprovalResolver::new(&approvals, &leases);
+
+    let err = resolver
+        .approve_dispatch(
+            &scope,
+            request_id,
+            LeaseApproval {
+                issued_by: Principal::User(scope.user_id.clone()),
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                expires_at: None,
+                max_invocations: Some(1),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, ApprovalResolutionError::RunState(_)));
+    let issued = leases.leases_for_scope(&scope);
+    assert_eq!(issued.len(), 1);
+    assert_eq!(issued[0].status, CapabilityLeaseStatus::Revoked);
 }
 
 #[tokio::test]
@@ -181,6 +261,109 @@ async fn approving_request_from_other_tenant_fails_closed() {
     assert_eq!(leases.leases_for_scope(&tenant_b), Vec::new());
 }
 
+struct FailingApproveApprovalStore {
+    record: ApprovalRecord,
+}
+
+#[async_trait]
+impl ApprovalRequestStore for FailingApproveApprovalStore {
+    async fn save_pending(
+        &self,
+        _scope: ResourceScope,
+        _request: ApprovalRequest,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        Ok(self.record.clone())
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<Option<ApprovalRecord>, RunStateError> {
+        if self.record.scope == *scope && self.record.request.id == request_id {
+            Ok(Some(self.record.clone()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn approve(
+        &self,
+        _scope: &ResourceScope,
+        _request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        Err(RunStateError::Filesystem(
+            "injected approval write failure".to_string(),
+        ))
+    }
+
+    async fn deny(
+        &self,
+        _scope: &ResourceScope,
+        _request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        Ok(self.record.clone())
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<ApprovalRecord>, RunStateError> {
+        if same_tenant_user_for_test(&self.record.scope, scope) {
+            Ok(vec![self.record.clone()])
+        } else {
+            Ok(Vec::new())
+        }
+    }
+}
+
+struct FailingIssueLeaseStore;
+
+impl CapabilityLeaseStore for FailingIssueLeaseStore {
+    fn issue(&self, _lease: CapabilityLease) -> Result<CapabilityLease, CapabilityLeaseError> {
+        Err(CapabilityLeaseError::Persistence {
+            reason: "injected lease write failure".to_string(),
+        })
+    }
+
+    fn revoke(
+        &self,
+        _scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        Err(CapabilityLeaseError::UnknownLease { lease_id })
+    }
+
+    fn get(&self, _scope: &ResourceScope, _lease_id: CapabilityGrantId) -> Option<CapabilityLease> {
+        None
+    }
+
+    fn claim(
+        &self,
+        _scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+        _invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        Err(CapabilityLeaseError::UnknownLease { lease_id })
+    }
+
+    fn consume(
+        &self,
+        _scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        Err(CapabilityLeaseError::UnknownLease { lease_id })
+    }
+
+    fn leases_for_scope(&self, _scope: &ResourceScope) -> Vec<CapabilityLease> {
+        Vec::new()
+    }
+
+    fn active_leases_for_context(&self, _context: &ExecutionContext) -> Vec<CapabilityLease> {
+        Vec::new()
+    }
+}
+
 fn approval_request(invocation_id: InvocationId, capability: CapabilityId) -> ApprovalRequest {
     ApprovalRequest {
         id: ApprovalRequestId::new(),
@@ -227,6 +410,10 @@ fn sample_scope(invocation_id: InvocationId, tenant: &str, user: &str) -> Resour
         thread_id: None,
         invocation_id,
     }
+}
+
+fn same_tenant_user_for_test(left: &ResourceScope, right: &ResourceScope) -> bool {
+    left.tenant_id == right.tenant_id && left.user_id == right.user_id
 }
 
 fn execution_context(grants: CapabilitySet) -> ExecutionContext {

@@ -11,5 +11,6 @@ ironclaw_run_state = { path = "../ironclaw_run_state" }
 thiserror = "2"
 
 [dev-dependencies]
+async-trait = "0.1"
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt"] }
