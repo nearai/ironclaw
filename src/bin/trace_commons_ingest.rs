@@ -71,6 +71,8 @@ const TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE: &str =
     "trace_commons_service_local_encrypted";
 const TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW";
+const TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT: &str =
+    "TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT";
 const TRACE_BACKFILL_FAILURE_DETAIL_LIMIT: usize = 20;
 
 #[tokio::main]
@@ -368,12 +370,23 @@ impl AppState {
         let require_export_guardrails = env_truthy("TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS");
         let artifact_store = trace_artifact_store_from_env(&root)?;
         let object_primary_submit_review = env_truthy(TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW);
+        let object_primary_replay_export = env_truthy(TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT);
         validate_object_primary_submit_review_config(
             object_primary_submit_review,
             db_mirror.is_some(),
             require_db_mirror_writes,
             db_reviewer_reads,
             db_reviewer_require_object_refs,
+            artifact_store
+                .as_ref()
+                .map(ConfiguredTraceArtifactStore::object_store_name),
+        )?;
+        validate_object_primary_replay_export_config(
+            object_primary_replay_export,
+            db_mirror.is_some(),
+            require_db_mirror_writes,
+            db_replay_export_reads,
+            db_replay_export_require_object_refs,
             artifact_store
                 .as_ref()
                 .map(ConfiguredTraceArtifactStore::object_store_name),
@@ -430,6 +443,40 @@ fn validate_object_primary_submit_review_config(
     anyhow::ensure!(
         artifact_store_name == Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE),
         "{TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW} requires TRACE_COMMONS_OBJECT_STORE=local_service"
+    );
+    Ok(())
+}
+
+fn validate_object_primary_replay_export_config(
+    enabled: bool,
+    db_mirror_configured: bool,
+    require_db_mirror_writes: bool,
+    db_replay_export_reads: bool,
+    db_replay_export_require_object_refs: bool,
+    artifact_store_name: Option<&str>,
+) -> anyhow::Result<()> {
+    if !enabled {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        db_mirror_configured,
+        "{TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT} requires TRACE_COMMONS_DB_DUAL_WRITE"
+    );
+    anyhow::ensure!(
+        require_db_mirror_writes,
+        "{TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT} requires TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES"
+    );
+    anyhow::ensure!(
+        db_replay_export_reads,
+        "{TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT} requires TRACE_COMMONS_DB_REPLAY_EXPORT_READS"
+    );
+    anyhow::ensure!(
+        db_replay_export_require_object_refs,
+        "{TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT} requires TRACE_COMMONS_DB_REPLAY_EXPORT_REQUIRE_OBJECT_REFS"
+    );
+    anyhow::ensure!(
+        artifact_store_name == Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE),
+        "{TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT} requires TRACE_COMMONS_OBJECT_STORE=local_service"
     );
     Ok(())
 }
@@ -10469,6 +10516,23 @@ mod tests {
         db_mirror: Arc<dyn Database>,
         artifact_store: ConfiguredTraceArtifactStore,
     ) -> Arc<AppState> {
+        test_state_with_object_primary_submit_review_options(root, db_mirror, artifact_store, false)
+    }
+
+    fn test_state_with_object_primary_submit_review_and_replay_export(
+        root: PathBuf,
+        db_mirror: Arc<dyn Database>,
+        artifact_store: ConfiguredTraceArtifactStore,
+    ) -> Arc<AppState> {
+        test_state_with_object_primary_submit_review_options(root, db_mirror, artifact_store, true)
+    }
+
+    fn test_state_with_object_primary_submit_review_options(
+        root: PathBuf,
+        db_mirror: Arc<dyn Database>,
+        artifact_store: ConfiguredTraceArtifactStore,
+        db_replay_export_reads: bool,
+    ) -> Arc<AppState> {
         let mut tokens = BTreeMap::new();
         insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Contributor);
         insert_token(
@@ -10486,8 +10550,8 @@ mod tests {
             db_contributor_reads: false,
             db_reviewer_reads: true,
             db_reviewer_require_object_refs: true,
-            db_replay_export_reads: false,
-            db_replay_export_require_object_refs: false,
+            db_replay_export_reads,
+            db_replay_export_require_object_refs: db_replay_export_reads,
             db_audit_reads: false,
             db_tenant_policy_reads: false,
             require_db_mirror_writes: true,
@@ -10780,6 +10844,86 @@ mod tests {
                 artifact_store_name,
             )
             .expect_err("incomplete object-primary config must fail");
+            assert!(
+                error.to_string().contains(expected),
+                "expected {expected} in {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn object_primary_replay_export_validates_production_guards() {
+        validate_object_primary_replay_export_config(
+            true,
+            true,
+            true,
+            true,
+            true,
+            Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE),
+        )
+        .expect("complete replay export guard config is valid");
+
+        let cases = [
+            (
+                false,
+                true,
+                true,
+                true,
+                Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE),
+                "TRACE_COMMONS_DB_DUAL_WRITE",
+            ),
+            (
+                true,
+                false,
+                true,
+                true,
+                Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE),
+                "TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES",
+            ),
+            (
+                true,
+                true,
+                false,
+                true,
+                Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE),
+                "TRACE_COMMONS_DB_REPLAY_EXPORT_READS",
+            ),
+            (
+                true,
+                true,
+                true,
+                false,
+                Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE),
+                "TRACE_COMMONS_DB_REPLAY_EXPORT_REQUIRE_OBJECT_REFS",
+            ),
+            (true, true, true, true, None, "TRACE_COMMONS_OBJECT_STORE"),
+            (
+                true,
+                true,
+                true,
+                true,
+                Some(TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE),
+                "TRACE_COMMONS_OBJECT_STORE",
+            ),
+        ];
+        for (
+            db_mirror_configured,
+            require_db_mirror_writes,
+            db_replay_export_reads,
+            db_replay_export_require_object_refs,
+            artifact_store_name,
+            expected,
+        ) in cases
+        {
+            let error = validate_object_primary_replay_export_config(
+                true,
+                db_mirror_configured,
+                require_db_mirror_writes,
+                db_replay_export_reads,
+                db_replay_export_require_object_refs,
+                artifact_store_name,
+            )
+            .expect_err("incomplete object-primary replay config must fail");
             assert!(
                 error.to_string().contains(expected),
                 "expected {expected} in {error}"
@@ -11792,6 +11936,122 @@ mod tests {
             read_envelope_from_object_ref(state.as_ref(), "tenant-a", &object_ref)
                 .expect("DB object ref reads encrypted envelope");
         assert_eq!(object_ref_round_trip.submission_id, submission_id);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn object_primary_replay_export_reads_object_ref_without_plaintext_body() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_root = temp.path().join("replay-service-object-store");
+        let artifact_store = test_artifact_store(&artifact_root);
+        let configured_store = ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            artifact_store,
+        );
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-object-primary-replay.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_object_primary_submit_review_and_replay_export(
+            temp.path().to_path_buf(),
+            db.clone() as Arc<dyn Database>,
+            configured_store,
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.replay.replayable = true;
+        envelope.replay.required_tools.push("shell".to_string());
+        let submission_id = envelope.submission_id;
+
+        let Json(receipt) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("object-primary replay source submits");
+        assert_eq!(receipt.status, "accepted");
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        assert!(
+            !temp.path().join(&record.object_key).exists(),
+            "object-primary replay source should not write a plaintext envelope body"
+        );
+        let submitted_ref = db
+            .get_latest_active_trace_object_ref(
+                "tenant-a",
+                submission_id,
+                StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            )
+            .await
+            .expect("submitted object ref reads")
+            .expect("submitted object ref exists");
+
+        let Json(export) = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("object_primary_replay_export".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("replay export reads service object store through DB object ref");
+        assert_eq!(export.item_count, 1);
+        assert_eq!(export.items[0].submission_id, submission_id);
+        assert_eq!(export.items[0].required_tools, vec!["shell"]);
+        assert_eq!(
+            export.items[0].object_ref_id,
+            Some(submitted_ref.object_ref_id)
+        );
+
+        let db_audit_events = db
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("DB audit events read");
+        assert!(db_audit_events.iter().any(|event| {
+            event.action == StorageTraceAuditAction::Read
+                && event.submission_id == Some(submission_id)
+                && event.object_ref_id == Some(submitted_ref.object_ref_id)
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("surface=replay_dataset_export"))
+        }));
+
+        let invalidated = db
+            .invalidate_trace_submission_artifacts(
+                "tenant-a",
+                submission_id,
+                StorageTraceDerivedStatus::Current,
+            )
+            .await
+            .expect("invalidate submitted object ref");
+        assert_eq!(invalidated.object_refs_invalidated, 1);
+        let error = dataset_replay_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("object_primary_replay_export_missing_ref".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect_err("object-primary replay export fails closed without active object ref");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[cfg(feature = "libsql")]
