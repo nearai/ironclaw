@@ -49,7 +49,7 @@ pub struct ProcessRecord {
     pub grants: CapabilitySet,
     pub mounts: MountView,
     pub estimated_resources: ResourceEstimate,
-    pub resource_reservation_id: Option<ResourceReservationId>,
+    pub resource_reservation_id: Option<ResourceReservationId>, // store-assigned only
     pub error_kind: Option<String>,
 }
 ```
@@ -89,6 +89,8 @@ async fn records_for_scope(scope) -> Result<Vec<ProcessRecord>>;
 ```
 
 `ProcessManager::spawn` is the lower-level lifecycle mechanic used by `CapabilityHost`. It receives the spawn input in `ProcessStart` so runtime-backed managers can start work, but `ProcessRecord` does not persist raw input. The in-memory and filesystem stores implement the manager by recording a new `Running` process.
+
+`ProcessStart.resource_reservation_id` is an internal store-assigned channel. Callers must not pre-fill it. `ResourceManagedProcessStore::start` rejects caller-supplied reservation IDs before persisting any process record so forged reservation IDs cannot bypass `ResourceGovernor::reserve`. The wrapper also tracks the reservations it created per process and refuses `complete`, `fail`, or `kill` cleanup for reservation IDs it did not create for that process.
 
 `ProcessHost` is the current host-facing lifecycle API layered over `ProcessStore`:
 
@@ -164,7 +166,7 @@ fail / kill
   -> release reservation without recording usage
 ```
 
-Resource denial fails before process record creation. The wrapper verifies that the inner store preserves the reservation ID it created and releases the reservation if start fails. The wrapper is deliberately below `CapabilityHost` and above concrete stores so resource ownership can compose with in-memory, filesystem, eventing, and future durable stores without making `ironclaw_dispatcher` process-aware.
+Resource denial fails before process record creation. Caller-supplied reservation IDs are rejected before process record creation. The wrapper verifies that the inner store preserves the reservation ID it created and releases the reservation if start fails. The wrapper is deliberately below `CapabilityHost` and above concrete stores so resource ownership can compose with in-memory, filesystem, eventing, and future durable stores without making `ironclaw_dispatcher` process-aware.
 
 `EventingProcessStore` wraps any `ProcessStore` and emits best-effort lifecycle events after successful state transitions:
 

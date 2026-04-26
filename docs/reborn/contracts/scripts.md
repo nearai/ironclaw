@@ -17,7 +17,7 @@ The public runtime kind is:
 RuntimeKind::Script
 ```
 
-The V1 backend is Docker/container execution, but Docker is a backend detail. Extension manifests may declare script metadata, but they do not receive raw Docker flags, host paths, ambient environment, secrets, or network access by default.
+The V1 Docker/container executor remains available as an implementation backend, but Docker is not the public script contract. Extension manifests declare a semantic runner profile plus command metadata; the host selects the concrete backend for that runner. Manifests do not receive raw Docker flags, host paths, ambient environment, secrets, or network access by default.
 
 ---
 
@@ -58,8 +58,7 @@ Script command metadata comes from a validated extension manifest:
 ```toml
 [runtime]
 kind = "script"
-backend = "docker"
-image = "alpine:latest"
+runner = "sandboxed_process"
 command = "script-echo"
 args = ["--json"]
 ```
@@ -70,8 +69,8 @@ At execution time, the runtime builds a `ScriptBackendRequest` from the manifest
 provider
 capability_id
 scope
-backend
-image
+runner
+image (optional, only for Docker-backed runners)
 command
 args
 stdin_json
@@ -79,12 +78,12 @@ stdin_json
 
 Rules:
 
-- command/image/args come from the manifest, not model/user input
+- runner/command/args come from the manifest, not model/user input
 - invocation input is serialized as JSON and passed through stdin
-- backend receives normalized fields, not raw Docker flags
+- backend receives normalized runner fields, not raw Docker flags
 - capability IDs must be declared by the package
 - descriptor runtime must match package runtime
-- only `backend = "docker"` is accepted in V1
+- legacy `backend = "docker"` manifests remain accepted for the optional Docker backend, but new manifests should use `runner = "sandboxed_process"` or another host-defined semantic runner profile
 
 ---
 
@@ -121,9 +120,9 @@ Actual usage currently records:
 
 ---
 
-## 5. Docker backend posture
+## 5. Optional Docker backend posture
 
-`DockerScriptBackend` invokes Docker through normalized fields only:
+`DockerScriptBackend` invokes Docker only when the manifest resolves to `runner = "docker"` with an image. It uses normalized fields only:
 
 ```text
 docker run --rm -i --network none <image> <command> <args...>
@@ -166,7 +165,6 @@ Fail-closed behavior:
 This contract does not add:
 
 - arbitrary host shell access
-- multiple sandbox backends
 - host filesystem mounts
 - artifact export
 - secret injection
@@ -189,6 +187,6 @@ Current contract tests cover:
 - output limit failure releases reservation
 - non-script packages are rejected before reserving
 - undeclared capabilities are rejected before reserving
-- command metadata comes from the manifest, not invocation input
+- runner/command metadata comes from the manifest, not invocation input
 - dispatcher routes script capabilities through a configured `ScriptExecutor`
 - dispatcher fails before reservation when script backend is missing

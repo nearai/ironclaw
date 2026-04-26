@@ -88,6 +88,70 @@ async fn dispatcher_emits_events_for_wasm_and_script_success() {
 }
 
 #[tokio::test]
+async fn dispatcher_ignores_event_sink_failures_on_success() {
+    let fs = filesystem_with_echo_extensions();
+    let registry =
+        ExtensionDiscovery::discover(&fs, &VirtualPath::new("/system/extensions").unwrap())
+            .await
+            .unwrap();
+    let governor = InMemoryResourceGovernor::new();
+    let wasm_runtime = WasmRuntime::for_testing().unwrap();
+    let events = FailingEventSink;
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
+        .with_wasm_runtime(&wasm_runtime)
+        .with_event_sink(&events);
+
+    let result = dispatcher
+        .dispatch_json(CapabilityDispatchRequest {
+            capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
+            scope: sample_scope(),
+            estimate: ResourceEstimate {
+                concurrency_slots: Some(1),
+                output_bytes: Some(10_000),
+                ..ResourceEstimate::default()
+            },
+            input: json!({"message": "event sink fails"}),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.output, json!({"message": "event sink fails"}));
+}
+
+#[tokio::test]
+async fn dispatcher_preserves_original_error_when_failure_event_sink_fails() {
+    let fs = filesystem_with_echo_extensions();
+    let registry =
+        ExtensionDiscovery::discover(&fs, &VirtualPath::new("/system/extensions").unwrap())
+            .await
+            .unwrap();
+    let governor = InMemoryResourceGovernor::new();
+    let events = FailingEventSink;
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor).with_event_sink(&events);
+
+    let err = dispatcher
+        .dispatch_json(CapabilityDispatchRequest {
+            capability_id: CapabilityId::new("echo-script.say").unwrap(),
+            scope: sample_scope(),
+            estimate: ResourceEstimate {
+                concurrency_slots: Some(1),
+                process_count: Some(1),
+                ..ResourceEstimate::default()
+            },
+            input: json!({"message": "missing backend"}),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        DispatchError::MissingRuntimeBackend {
+            runtime: RuntimeKind::Script
+        }
+    ));
+}
+
+#[tokio::test]
 async fn dispatcher_emits_events_for_mcp_success() {
     let fs = filesystem_with_echo_extensions();
     let mut registry = ExtensionRegistry::new();
@@ -221,6 +285,17 @@ async fn dispatcher_emits_failed_event_for_missing_backend_without_reserving() {
         recorded[1].error_kind.as_deref(),
         Some("MissingRuntimeBackend")
     );
+}
+
+struct FailingEventSink;
+
+#[async_trait]
+impl EventSink for FailingEventSink {
+    async fn emit(&self, _event: RuntimeEvent) -> Result<(), EventError> {
+        Err(EventError::Sink {
+            reason: "event sink unavailable".to_string(),
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -406,8 +481,7 @@ trust = "sandbox"
 
 [runtime]
 kind = "script"
-backend = "docker"
-image = "alpine:latest"
+runner = "sandboxed_process"
 command = "sh"
 args = ["-c", "cat"]
 

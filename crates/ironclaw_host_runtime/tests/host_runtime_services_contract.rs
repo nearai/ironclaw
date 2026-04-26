@@ -197,7 +197,7 @@ impl ProcessExecutor for CancellationObservingExecutor {
 struct NoopDispatcher;
 
 #[async_trait]
-impl ironclaw_capabilities::CapabilityDispatcher for NoopDispatcher {
+impl ironclaw_host_api::CapabilityDispatcher for NoopDispatcher {
     async fn dispatch_json(
         &self,
         _request: CapabilityDispatchRequest,
@@ -289,8 +289,7 @@ trust = "sandbox"
 
 [runtime]
 kind = "script"
-backend = "docker"
-image = "example/echo"
+runner = "sandboxed_process"
 command = "echo"
 
 [[capabilities]]

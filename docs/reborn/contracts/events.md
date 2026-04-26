@@ -106,6 +106,8 @@ dispatch_failed
 
 `MissingRuntimeBackend`, unknown capability, runtime mismatch, unsupported runtime, and runtime execution failures all emit a failed event without leaking internal paths or secret values.
 
+Runtime dispatcher event emission is best-effort observability. If the configured `EventSink` fails, the dispatcher ignores that sink error and still returns the original dispatch success or original dispatch failure. Event sink outages must not turn successful capability calls into failures or mask runtime/control-plane errors.
+
 The live vertical slice currently emits nine events for its three successful lanes: WASM, Script, and MCP.
 
 ---

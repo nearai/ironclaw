@@ -3,7 +3,6 @@ use std::sync::Arc;
 use ironclaw_extensions::*;
 use ironclaw_filesystem::*;
 use ironclaw_host_api::*;
-use ironclaw_resources::*;
 use ironclaw_wasm::*;
 use serde_json::json;
 use tempfile::tempdir;
@@ -279,8 +278,7 @@ trust = "sandbox"
 
 [runtime]
 kind = "script"
-backend = "docker"
-image = "python:3.12-slim"
+runner = "sandboxed_process"
 command = "run"
 args = []
 

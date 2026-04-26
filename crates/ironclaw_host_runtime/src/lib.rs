@@ -7,11 +7,12 @@
 use std::sync::Arc;
 
 use ironclaw_authorization::{CapabilityDispatchAuthorizer, CapabilityLeaseStore};
-use ironclaw_capabilities::{CapabilityDispatcher, CapabilityHost, DispatchProcessExecutor};
+use ironclaw_capabilities::{CapabilityHost, DispatchProcessExecutor};
 use ironclaw_dispatcher::RuntimeDispatcher;
 use ironclaw_events::EventSink;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::RootFilesystem;
+use ironclaw_host_api::CapabilityDispatcher;
 use ironclaw_mcp::McpExecutor;
 use ironclaw_processes::{
     ProcessExecutor, ProcessHost, ProcessResultStore, ProcessServices, ProcessStore,

@@ -75,8 +75,10 @@ This service is the middle communication layer between authorization, dispatch, 
 Spawn is capability-targeted. It does not start raw host processes or extension-level workers without a declared capability identity.
 
 It does not implement grant matching itself; that belongs to `ironclaw_authorization`.
-It does not select WASM/Script/MCP for dispatch; that belongs to `ironclaw_dispatcher` behind the narrow `CapabilityDispatcher` interface. The `DispatchProcessExecutor` adapter can run spawned process input through that same dispatch interface from a background process manager.
+It does not select WASM/Script/MCP for dispatch; that belongs to `ironclaw_dispatcher` behind the narrow `ironclaw_host_api::CapabilityDispatcher` interface. Production `ironclaw_capabilities` code depends on the neutral host API dispatch port, not the concrete dispatcher crate. The `DispatchProcessExecutor` adapter can run spawned process input through that same dispatch interface from a background process manager.
 It does not own process lifecycle or process-result mechanics after start; those belong to `ironclaw_processes` behind `ProcessManager`/`ProcessStore`/`ProcessResultStore`. Applications can use `ProcessServices` to compose those process pieces consistently before handing a `ProcessManager` to `CapabilityHost`.
+
+Dispatch failures are reported as sanitized error-kind strings derived from `DispatchError`/`RuntimeDispatchErrorKind`; `CapabilityInvocationError` does not expose boxed runtime/backend error details.
 
 ---
 

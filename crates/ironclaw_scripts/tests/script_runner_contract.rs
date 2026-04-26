@@ -57,8 +57,8 @@ fn script_runtime_reserves_executes_and_reconciles_success() {
 
     let requests = backend.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].backend, "docker");
-    assert_eq!(requests[0].image, "alpine:latest");
+    assert_eq!(requests[0].runner, "docker");
+    assert_eq!(requests[0].image.as_deref(), Some("alpine:latest"));
     assert_eq!(requests[0].command, "script-echo");
     assert_eq!(requests[0].args, vec!["--json".to_string()]);
     assert_eq!(requests[0].capability_id, capability_id);

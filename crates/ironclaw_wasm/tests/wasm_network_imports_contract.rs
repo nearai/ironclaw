@@ -1,7 +1,6 @@
 use std::sync::{Arc, Mutex};
 
 use ironclaw_host_api::*;
-use ironclaw_resources::*;
 use ironclaw_wasm::*;
 use serde_json::json;
 

@@ -133,6 +133,20 @@ pub enum ProcessError {
         expected: ResourceReservationId,
         actual: Option<ResourceReservationId>,
     },
+    #[error(
+        "process {process_id} start cannot supply pre-existing resource reservation {reservation_id}"
+    )]
+    ResourceReservationAlreadyAssigned {
+        process_id: ProcessId,
+        reservation_id: ResourceReservationId,
+    },
+    #[error(
+        "process {process_id} resource reservation {reservation_id:?} is not owned by this store"
+    )]
+    ResourceReservationNotOwned {
+        process_id: ProcessId,
+        reservation_id: Option<ResourceReservationId>,
+    },
     #[error("resource lifecycle error: {0}")]
     Resource(ResourceError),
     #[error("process result store is not configured")]
@@ -775,6 +789,7 @@ where
     inner: S,
     governor: Arc<G>,
     completion_usage: ResourceUsage,
+    owned_reservations: Mutex<HashMap<ProcessKey, ResourceReservationId>>,
 }
 
 impl<S, G> ResourceManagedProcessStore<S, G>
@@ -787,6 +802,7 @@ where
             inner,
             governor,
             completion_usage: ResourceUsage::default(),
+            owned_reservations: Mutex::new(HashMap::new()),
         }
     }
 
@@ -795,24 +811,61 @@ where
         self
     }
 
+    fn record_owned_reservation(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        reservation_id: ResourceReservationId,
+    ) {
+        self.owned_reservations
+            .lock()
+            .unwrap()
+            .insert(ProcessKey::new(scope, process_id), reservation_id);
+    }
+
+    fn take_owned_reservation(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        record_reservation_id: Option<ResourceReservationId>,
+    ) -> Result<ResourceReservationId, ProcessError> {
+        let reservation_id = self
+            .owned_reservations
+            .lock()
+            .unwrap()
+            .remove(&ProcessKey::new(scope, process_id))
+            .ok_or(ProcessError::ResourceReservationNotOwned {
+                process_id,
+                reservation_id: record_reservation_id,
+            })?;
+        if Some(reservation_id) != record_reservation_id {
+            self.owned_reservations
+                .lock()
+                .unwrap()
+                .insert(ProcessKey::new(scope, process_id), reservation_id);
+            return Err(ProcessError::ResourceReservationMismatch {
+                process_id,
+                expected: reservation_id,
+                actual: record_reservation_id,
+            });
+        }
+        Ok(reservation_id)
+    }
+
     fn release_reservation(
         &self,
-        reservation_id: Option<ResourceReservationId>,
+        reservation_id: ResourceReservationId,
     ) -> Result<(), ProcessError> {
-        if let Some(reservation_id) = reservation_id {
-            self.governor.release(reservation_id)?;
-        }
+        self.governor.release(reservation_id)?;
         Ok(())
     }
 
     fn reconcile_reservation(
         &self,
-        reservation_id: Option<ResourceReservationId>,
+        reservation_id: ResourceReservationId,
     ) -> Result<(), ProcessError> {
-        if let Some(reservation_id) = reservation_id {
-            self.governor
-                .reconcile(reservation_id, self.completion_usage.clone())?;
-        }
+        self.governor
+            .reconcile(reservation_id, self.completion_usage.clone())?;
         Ok(())
     }
 }
@@ -824,8 +877,11 @@ where
     G: ResourceGovernor + ?Sized,
 {
     async fn start(&self, mut start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
-        if start.resource_reservation_id.is_some() {
-            return self.inner.start(start).await;
+        if let Some(reservation_id) = start.resource_reservation_id {
+            return Err(ProcessError::ResourceReservationAlreadyAssigned {
+                process_id: start.process_id,
+                reservation_id,
+            });
         }
 
         let reservation = self
@@ -833,9 +889,12 @@ where
             .reserve(start.scope.clone(), start.estimated_resources.clone())?;
         start.resource_reservation_id = Some(reservation.id);
         match self.inner.start(start).await {
-            Ok(record) if record.resource_reservation_id == Some(reservation.id) => Ok(record),
+            Ok(record) if record.resource_reservation_id == Some(reservation.id) => {
+                self.record_owned_reservation(&record.scope, record.process_id, reservation.id);
+                Ok(record)
+            }
             Ok(record) => {
-                self.release_reservation(Some(reservation.id))?;
+                self.release_reservation(reservation.id)?;
                 Err(ProcessError::ResourceReservationMismatch {
                     process_id: record.process_id,
                     expected: reservation.id,
@@ -843,7 +902,7 @@ where
                 })
             }
             Err(error) => {
-                self.release_reservation(Some(reservation.id))?;
+                self.release_reservation(reservation.id)?;
                 Err(error)
             }
         }
@@ -854,8 +913,29 @@ where
         scope: &ResourceScope,
         process_id: ProcessId,
     ) -> Result<ProcessRecord, ProcessError> {
-        let record = self.inner.complete(scope, process_id).await?;
-        self.reconcile_reservation(record.resource_reservation_id)?;
+        let current = self
+            .inner
+            .get(scope, process_id)
+            .await?
+            .ok_or(ProcessError::UnknownProcess { process_id })?;
+        let reservation_id =
+            self.take_owned_reservation(scope, process_id, current.resource_reservation_id)?;
+        let record = match self.inner.complete(scope, process_id).await {
+            Ok(record) => record,
+            Err(error) => {
+                self.record_owned_reservation(scope, process_id, reservation_id);
+                return Err(error);
+            }
+        };
+        if record.resource_reservation_id != Some(reservation_id) {
+            self.reconcile_reservation(reservation_id)?;
+            return Err(ProcessError::ResourceReservationMismatch {
+                process_id: record.process_id,
+                expected: reservation_id,
+                actual: record.resource_reservation_id,
+            });
+        }
+        self.reconcile_reservation(reservation_id)?;
         Ok(record)
     }
 
@@ -865,8 +945,29 @@ where
         process_id: ProcessId,
         error_kind: String,
     ) -> Result<ProcessRecord, ProcessError> {
-        let record = self.inner.fail(scope, process_id, error_kind).await?;
-        self.release_reservation(record.resource_reservation_id)?;
+        let current = self
+            .inner
+            .get(scope, process_id)
+            .await?
+            .ok_or(ProcessError::UnknownProcess { process_id })?;
+        let reservation_id =
+            self.take_owned_reservation(scope, process_id, current.resource_reservation_id)?;
+        let record = match self.inner.fail(scope, process_id, error_kind).await {
+            Ok(record) => record,
+            Err(error) => {
+                self.record_owned_reservation(scope, process_id, reservation_id);
+                return Err(error);
+            }
+        };
+        if record.resource_reservation_id != Some(reservation_id) {
+            self.release_reservation(reservation_id)?;
+            return Err(ProcessError::ResourceReservationMismatch {
+                process_id: record.process_id,
+                expected: reservation_id,
+                actual: record.resource_reservation_id,
+            });
+        }
+        self.release_reservation(reservation_id)?;
         Ok(record)
     }
 
@@ -875,8 +976,29 @@ where
         scope: &ResourceScope,
         process_id: ProcessId,
     ) -> Result<ProcessRecord, ProcessError> {
-        let record = self.inner.kill(scope, process_id).await?;
-        self.release_reservation(record.resource_reservation_id)?;
+        let current = self
+            .inner
+            .get(scope, process_id)
+            .await?
+            .ok_or(ProcessError::UnknownProcess { process_id })?;
+        let reservation_id =
+            self.take_owned_reservation(scope, process_id, current.resource_reservation_id)?;
+        let record = match self.inner.kill(scope, process_id).await {
+            Ok(record) => record,
+            Err(error) => {
+                self.record_owned_reservation(scope, process_id, reservation_id);
+                return Err(error);
+            }
+        };
+        if record.resource_reservation_id != Some(reservation_id) {
+            self.release_reservation(reservation_id)?;
+            return Err(ProcessError::ResourceReservationMismatch {
+                process_id: record.process_id,
+                expected: reservation_id,
+                actual: record.resource_reservation_id,
+            });
+        }
+        self.release_reservation(reservation_id)?;
         Ok(record)
     }
 

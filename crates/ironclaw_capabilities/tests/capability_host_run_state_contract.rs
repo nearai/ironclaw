@@ -748,7 +748,7 @@ async fn capability_host_records_failed_run_after_dispatch_error() {
         .await
         .unwrap_err();
 
-    assert!(matches!(err, CapabilityInvocationError::Dispatch(_)));
+    assert!(matches!(err, CapabilityInvocationError::Dispatch { .. }));
     let record = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(record.status, RunStatus::Failed);
     assert_eq!(record.error_kind.as_deref(), Some("Dispatch"));

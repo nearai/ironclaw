@@ -7,99 +7,19 @@
 
 use std::sync::Arc;
 
-use ironclaw_events::{EventError, EventSink, RuntimeEvent};
+use async_trait::async_trait;
+use ironclaw_events::{EventSink, RuntimeEvent};
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::{
-    CapabilityId, ExtensionId, ResourceEstimate, ResourceScope, ResourceUsage, RuntimeKind,
+pub use ironclaw_host_api::{
+    CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher, DispatchError,
+    RuntimeDispatchErrorKind,
 };
+use ironclaw_host_api::{CapabilityId, ExtensionId, ResourceScope, RuntimeKind};
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
-use ironclaw_resources::{ResourceGovernor, ResourceReceipt};
+use ironclaw_resources::ResourceGovernor;
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
 use ironclaw_wasm::{CapabilityInvocation, WasmError, WasmExecutionRequest, WasmRuntime};
-use serde_json::Value;
-use thiserror::Error;
-
-/// Request/response dispatch request for one declared capability.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CapabilityDispatchRequest {
-    pub capability_id: CapabilityId,
-    pub scope: ResourceScope,
-    pub estimate: ResourceEstimate,
-    pub input: Value,
-}
-
-/// Normalized dispatch result returned by the composition layer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CapabilityDispatchResult {
-    pub capability_id: CapabilityId,
-    pub provider: ExtensionId,
-    pub runtime: RuntimeKind,
-    pub output: Value,
-    pub usage: ResourceUsage,
-    pub receipt: ResourceReceipt,
-}
-
-/// Runtime dispatch failures.
-#[derive(Debug, Error)]
-pub enum DispatchError {
-    #[error("unknown capability {capability}")]
-    UnknownCapability { capability: CapabilityId },
-    #[error("capability {capability} provider {provider} is not registered")]
-    UnknownProvider {
-        capability: CapabilityId,
-        provider: ExtensionId,
-    },
-    #[error(
-        "capability {capability} descriptor runtime {descriptor_runtime:?} does not match package runtime {package_runtime:?}"
-    )]
-    RuntimeMismatch {
-        capability: CapabilityId,
-        descriptor_runtime: RuntimeKind,
-        package_runtime: RuntimeKind,
-    },
-    #[error("runtime backend {runtime:?} is not configured")]
-    MissingRuntimeBackend { runtime: RuntimeKind },
-    #[error(
-        "runtime {runtime:?} is recognized but not supported by this dispatcher yet for capability {capability}"
-    )]
-    UnsupportedRuntime {
-        capability: CapabilityId,
-        runtime: RuntimeKind,
-    },
-    #[error("event sink failed: {0}")]
-    Event(Box<EventError>),
-    #[error("MCP dispatch failed: {0}")]
-    Mcp(Box<McpError>),
-    #[error("script dispatch failed: {0}")]
-    Script(Box<ScriptError>),
-    #[error("WASM dispatch failed: {0}")]
-    Wasm(Box<WasmError>),
-}
-
-impl From<EventError> for DispatchError {
-    fn from(error: EventError) -> Self {
-        Self::Event(Box::new(error))
-    }
-}
-
-impl From<McpError> for DispatchError {
-    fn from(error: McpError) -> Self {
-        Self::Mcp(Box::new(error))
-    }
-}
-
-impl From<ScriptError> for DispatchError {
-    fn from(error: ScriptError) -> Self {
-        Self::Script(Box::new(error))
-    }
-}
-
-impl From<WasmError> for DispatchError {
-    fn from(error: WasmError) -> Self {
-        Self::Wasm(Box::new(error))
-    }
-}
 
 enum ServiceHandle<'a, T>
 where
@@ -319,7 +239,7 @@ where
                 {
                     Ok(execution) => execution,
                     Err(error) => {
-                        let error = DispatchError::from(error);
+                        let error = wasm_dispatch_error(&error);
                         self.emit_dispatch_failure(
                             scope,
                             capability_id,
@@ -387,7 +307,7 @@ where
                 ) {
                     Ok(execution) => execution,
                     Err(error) => {
-                        let error = DispatchError::from(error);
+                        let error = script_dispatch_error(&error);
                         self.emit_dispatch_failure(
                             scope,
                             capability_id,
@@ -459,7 +379,7 @@ where
                 {
                     Ok(execution) => execution,
                     Err(error) => {
-                        let error = DispatchError::from(error);
+                        let error = mcp_dispatch_error(&error);
                         self.emit_dispatch_failure(
                             scope,
                             capability_id,
@@ -528,22 +448,115 @@ where
 
     async fn emit_event(&self, event: RuntimeEvent) -> Result<(), DispatchError> {
         if let Some(sink) = self.event_sink.as_ref() {
-            sink.as_ref().emit(event).await?;
+            let _ = sink.as_ref().emit(event).await;
         }
         Ok(())
     }
 }
 
-fn dispatch_error_kind(error: &DispatchError) -> &'static str {
+#[async_trait]
+impl<F, G> CapabilityDispatcher for RuntimeDispatcher<'_, F, G>
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
+    async fn dispatch_json(
+        &self,
+        request: CapabilityDispatchRequest,
+    ) -> Result<CapabilityDispatchResult, DispatchError> {
+        RuntimeDispatcher::dispatch_json(self, request).await
+    }
+}
+
+fn dispatch_error_kind(error: &DispatchError) -> String {
     match error {
-        DispatchError::UnknownCapability { .. } => "UnknownCapability",
-        DispatchError::UnknownProvider { .. } => "UnknownProvider",
-        DispatchError::RuntimeMismatch { .. } => "RuntimeMismatch",
-        DispatchError::MissingRuntimeBackend { .. } => "MissingRuntimeBackend",
-        DispatchError::UnsupportedRuntime { .. } => "UnsupportedRuntime",
-        DispatchError::Event(_) => "Event",
-        DispatchError::Mcp(_) => "Mcp",
-        DispatchError::Script(_) => "Script",
-        DispatchError::Wasm(_) => "Wasm",
+        DispatchError::UnknownCapability { .. } => "UnknownCapability".to_string(),
+        DispatchError::UnknownProvider { .. } => "UnknownProvider".to_string(),
+        DispatchError::RuntimeMismatch { .. } => "RuntimeMismatch".to_string(),
+        DispatchError::MissingRuntimeBackend { .. } => "MissingRuntimeBackend".to_string(),
+        DispatchError::UnsupportedRuntime { .. } => "UnsupportedRuntime".to_string(),
+        DispatchError::Mcp { kind }
+        | DispatchError::Script { kind }
+        | DispatchError::Wasm { kind } => kind.as_str().to_string(),
+    }
+}
+
+fn mcp_dispatch_error(error: &McpError) -> DispatchError {
+    DispatchError::Mcp {
+        kind: mcp_error_kind(error),
+    }
+}
+
+fn script_dispatch_error(error: &ScriptError) -> DispatchError {
+    DispatchError::Script {
+        kind: script_error_kind(error),
+    }
+}
+
+fn wasm_dispatch_error(error: &WasmError) -> DispatchError {
+    DispatchError::Wasm {
+        kind: wasm_error_kind(error),
+    }
+}
+
+fn mcp_error_kind(error: &McpError) -> RuntimeDispatchErrorKind {
+    match error {
+        McpError::Resource(_) => RuntimeDispatchErrorKind::Resource,
+        McpError::Client { .. } => RuntimeDispatchErrorKind::Client,
+        McpError::UnsupportedTransport { .. } => RuntimeDispatchErrorKind::UnsupportedRunner,
+        McpError::ExtensionRuntimeMismatch { .. } => {
+            RuntimeDispatchErrorKind::ExtensionRuntimeMismatch
+        }
+        McpError::CapabilityNotDeclared { .. } => RuntimeDispatchErrorKind::UndeclaredCapability,
+        McpError::DescriptorMismatch { .. } => RuntimeDispatchErrorKind::ExtensionRuntimeMismatch,
+        McpError::InvalidInvocation { .. } => RuntimeDispatchErrorKind::InputEncode,
+        McpError::OutputLimitExceeded { .. } => RuntimeDispatchErrorKind::OutputTooLarge,
+    }
+}
+
+fn script_error_kind(error: &ScriptError) -> RuntimeDispatchErrorKind {
+    match error {
+        ScriptError::Resource(_) => RuntimeDispatchErrorKind::Resource,
+        ScriptError::Backend { .. } => RuntimeDispatchErrorKind::Backend,
+        ScriptError::UnsupportedRunner { .. } => RuntimeDispatchErrorKind::UnsupportedRunner,
+        ScriptError::ExtensionRuntimeMismatch { .. } => {
+            RuntimeDispatchErrorKind::ExtensionRuntimeMismatch
+        }
+        ScriptError::CapabilityNotDeclared { .. } => RuntimeDispatchErrorKind::UndeclaredCapability,
+        ScriptError::DescriptorMismatch { .. } => {
+            RuntimeDispatchErrorKind::ExtensionRuntimeMismatch
+        }
+        ScriptError::InvalidInvocation { .. } => RuntimeDispatchErrorKind::InputEncode,
+        ScriptError::ExitFailure { .. } => RuntimeDispatchErrorKind::ExitFailure,
+        ScriptError::OutputLimitExceeded { .. } => RuntimeDispatchErrorKind::OutputTooLarge,
+        ScriptError::InvalidOutput { .. } => RuntimeDispatchErrorKind::OutputDecode,
+    }
+}
+
+fn wasm_error_kind(error: &WasmError) -> RuntimeDispatchErrorKind {
+    match error {
+        WasmError::Engine { .. } | WasmError::Cache { .. } => RuntimeDispatchErrorKind::Executor,
+        WasmError::Extension(_) => RuntimeDispatchErrorKind::Manifest,
+        WasmError::Filesystem(_) => RuntimeDispatchErrorKind::FilesystemDenied,
+        WasmError::Resource(_) => RuntimeDispatchErrorKind::Resource,
+        WasmError::InvalidModule { .. } => RuntimeDispatchErrorKind::Manifest,
+        WasmError::UnsupportedImport { .. } => RuntimeDispatchErrorKind::Executor,
+        WasmError::DescriptorMismatch { .. } => RuntimeDispatchErrorKind::ExtensionRuntimeMismatch,
+        WasmError::ExtensionRuntimeMismatch { .. } => {
+            RuntimeDispatchErrorKind::ExtensionRuntimeMismatch
+        }
+        WasmError::CapabilityNotDeclared { .. } => RuntimeDispatchErrorKind::UndeclaredCapability,
+        WasmError::InvalidInvocation { .. } => RuntimeDispatchErrorKind::InputEncode,
+        WasmError::MissingReservation => RuntimeDispatchErrorKind::Resource,
+        WasmError::MissingExport { .. } => RuntimeDispatchErrorKind::Executor,
+        WasmError::MissingMemory => RuntimeDispatchErrorKind::Memory,
+        WasmError::GuestAllocation { .. } => RuntimeDispatchErrorKind::Memory,
+        WasmError::GuestError { .. } => RuntimeDispatchErrorKind::Guest,
+        WasmError::InvalidGuestOutput { .. } => RuntimeDispatchErrorKind::OutputDecode,
+        WasmError::FuelExhausted { .. } => RuntimeDispatchErrorKind::Resource,
+        WasmError::MemoryExceeded { .. } => RuntimeDispatchErrorKind::Memory,
+        WasmError::Timeout { .. } => RuntimeDispatchErrorKind::Resource,
+        WasmError::OutputLimitExceeded { .. } => RuntimeDispatchErrorKind::OutputTooLarge,
+        WasmError::Trap { .. } => RuntimeDispatchErrorKind::Guest,
     }
 }

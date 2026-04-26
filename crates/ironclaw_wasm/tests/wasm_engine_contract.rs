@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ironclaw_host_api::*;
-use ironclaw_resources::*;
 use ironclaw_wasm::*;
 
 #[test]

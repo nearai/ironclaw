@@ -157,7 +157,7 @@ The filesystem example uses `ProcessServices::filesystem(...)` and verifies that
 /engine/tenants/{tenant_id}/users/{user_id}/process-outputs/{process_id}/output.json
 ```
 
-Both examples use an in-process `ScriptBackend` with a manifest-declared script capability so they can demonstrate the full composition path without requiring Docker:
+Both examples use an in-process `ScriptBackend` with a manifest-declared `runner = "sandboxed_process"` script capability so they can demonstrate the full composition path without requiring Docker:
 
 ```text
 HostRuntimeServices

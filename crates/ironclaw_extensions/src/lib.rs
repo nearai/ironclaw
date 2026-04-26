@@ -72,8 +72,8 @@ pub enum ExtensionRuntime {
         module: ExtensionAssetPath,
     },
     Script {
-        backend: String,
-        image: String,
+        runner: String,
+        image: Option<String>,
         command: String,
         args: Vec<String>,
     },
@@ -376,8 +376,9 @@ enum RawRuntime {
         module: String,
     },
     Script {
-        backend: String,
-        image: String,
+        runner: Option<String>,
+        backend: Option<String>,
+        image: Option<String>,
         command: String,
         #[serde(default)]
         args: Vec<String>,
@@ -404,21 +405,34 @@ impl RawRuntime {
                 module: ExtensionAssetPath::new(module)?,
             }),
             Self::Script {
+                runner,
                 backend,
                 image,
                 command,
                 args,
             } => {
-                validate_non_empty("script backend", &backend)?;
-                if backend != "docker" {
-                    return Err(ExtensionError::InvalidManifest {
-                        reason: "script runtime backend must be docker in V1".to_string(),
-                    });
+                let runner = match (runner, backend) {
+                    (Some(runner), None) => runner,
+                    (None, Some(backend)) => backend,
+                    (Some(_), Some(_)) => {
+                        return Err(ExtensionError::InvalidManifest {
+                            reason: "script runtime must specify either runner or legacy backend, not both".to_string(),
+                        });
+                    }
+                    (None, None) => {
+                        return Err(ExtensionError::InvalidManifest {
+                            reason: "script runtime runner is required".to_string(),
+                        });
+                    }
+                };
+                validate_non_empty("script runner", &runner)?;
+                if runner == "docker" {
+                    let image = image.as_deref().unwrap_or_default();
+                    validate_non_empty("script image", image)?;
                 }
-                validate_non_empty("script image", &image)?;
                 validate_non_empty("script command", &command)?;
                 Ok(ExtensionRuntime::Script {
-                    backend,
+                    runner,
                     image,
                     command,
                     args,

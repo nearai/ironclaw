@@ -1,6 +1,7 @@
 use std::{
+    collections::HashMap,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -13,6 +14,7 @@ use ironclaw_host_api::*;
 use ironclaw_processes::*;
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
+    ResourceTally,
 };
 use tokio::{sync::Notify, time::timeout};
 
@@ -584,6 +586,32 @@ async fn resource_managed_store_denies_before_process_record_creation() {
 }
 
 #[tokio::test]
+async fn resource_managed_store_rejects_caller_supplied_reservation_id() {
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let store = ResourceManagedProcessStore::new(InMemoryProcessStore::new(), governor.clone());
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let mut start = process_start(process_id, invocation_id, scope.clone());
+    start.resource_reservation_id = Some(ResourceReservationId::new());
+
+    let err = store.start(start).await.unwrap_err();
+
+    assert!(matches!(
+        err,
+        ProcessError::ResourceReservationAlreadyAssigned {
+            process_id: id,
+            ..
+        } if id == process_id
+    ));
+    assert!(store.get(&scope, process_id).await.unwrap().is_none());
+    assert_eq!(
+        governor.reserved_for(&ResourceAccount::tenant(scope.tenant_id.clone())),
+        ResourceTally::default()
+    );
+}
+
+#[tokio::test]
 async fn resource_managed_store_releases_when_inner_store_drops_reservation_id() {
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let store = ResourceManagedProcessStore::new(ReservationDroppingStore, governor.clone());
@@ -647,6 +675,21 @@ async fn resource_managed_store_releases_reservation_when_inner_start_fails() {
             .process_count,
         0
     );
+}
+
+#[tokio::test]
+async fn resource_managed_store_does_not_reconcile_unowned_process_reservation_on_complete() {
+    assert_unowned_process_reservation_rejected(UnownedTransition::Complete).await;
+}
+
+#[tokio::test]
+async fn resource_managed_store_does_not_release_unowned_process_reservation_on_fail() {
+    assert_unowned_process_reservation_rejected(UnownedTransition::Fail).await;
+}
+
+#[tokio::test]
+async fn resource_managed_store_does_not_release_unowned_process_reservation_on_kill() {
+    assert_unowned_process_reservation_rejected(UnownedTransition::Kill).await;
 }
 
 #[tokio::test]
@@ -1097,6 +1140,185 @@ async fn filesystem_process_store_persists_under_tenant_user_engine_processes() 
             .len(),
         1
     );
+}
+
+enum UnownedTransition {
+    Complete,
+    Fail,
+    Kill,
+}
+
+async fn assert_unowned_process_reservation_rejected(transition: UnownedTransition) {
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor.set_limit(
+        account.clone(),
+        ResourceLimits {
+            max_process_count: Some(2),
+            ..ResourceLimits::default()
+        },
+    );
+    let estimate = ResourceEstimate {
+        process_count: Some(1),
+        ..ResourceEstimate::default()
+    };
+    let forged_reservation = governor.reserve(scope.clone(), estimate.clone()).unwrap();
+    let process_id = ProcessId::new();
+    let inner = ForgedProcessStore::default();
+    inner.insert(ProcessRecord {
+        process_id,
+        parent_process_id: None,
+        invocation_id: InvocationId::new(),
+        scope: scope.clone(),
+        extension_id: ExtensionId::new("echo").unwrap(),
+        capability_id: CapabilityId::new("echo.say").unwrap(),
+        runtime: RuntimeKind::Wasm,
+        grants: CapabilitySet::default(),
+        mounts: MountView::default(),
+        estimated_resources: estimate,
+        resource_reservation_id: Some(forged_reservation.id),
+        status: ProcessStatus::Running,
+        error_kind: None,
+    });
+    let store = ResourceManagedProcessStore::new(inner.clone(), governor.clone());
+
+    let err = match transition {
+        UnownedTransition::Complete => store.complete(&scope, process_id).await.unwrap_err(),
+        UnownedTransition::Fail => store
+            .fail(&scope, process_id, "forged".to_string())
+            .await
+            .unwrap_err(),
+        UnownedTransition::Kill => store.kill(&scope, process_id).await.unwrap_err(),
+    };
+
+    assert!(matches!(
+        err,
+        ProcessError::ResourceReservationNotOwned {
+            process_id: actual_process_id,
+            reservation_id: Some(actual_reservation_id),
+        } if actual_process_id == process_id && actual_reservation_id == forged_reservation.id
+    ));
+    assert_eq!(governor.reserved_for(&account).process_count, 1);
+    assert_eq!(governor.usage_for(&account), ResourceTally::default());
+    let record = inner.get(&scope, process_id).await.unwrap().unwrap();
+    assert_eq!(record.status, ProcessStatus::Running);
+}
+
+type ForgedProcessKey = (TenantId, UserId, ProcessId);
+
+type ForgedProcessRecords = Arc<Mutex<HashMap<ForgedProcessKey, ProcessRecord>>>;
+
+#[derive(Clone, Default)]
+struct ForgedProcessStore {
+    records: ForgedProcessRecords,
+}
+
+impl ForgedProcessStore {
+    fn insert(&self, record: ProcessRecord) {
+        self.records.lock().unwrap().insert(
+            (
+                record.scope.tenant_id.clone(),
+                record.scope.user_id.clone(),
+                record.process_id,
+            ),
+            record,
+        );
+    }
+
+    fn update_status(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        status: ProcessStatus,
+        error_kind: Option<String>,
+    ) -> Result<ProcessRecord, ProcessError> {
+        let mut records = self.records.lock().unwrap();
+        let record = records
+            .get_mut(&(scope.tenant_id.clone(), scope.user_id.clone(), process_id))
+            .ok_or(ProcessError::UnknownProcess { process_id })?;
+        record.status = status;
+        record.error_kind = error_kind;
+        Ok(record.clone())
+    }
+}
+
+#[async_trait]
+impl ProcessStore for ForgedProcessStore {
+    async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
+        let record = ProcessRecord {
+            process_id: start.process_id,
+            parent_process_id: start.parent_process_id,
+            invocation_id: start.invocation_id,
+            scope: start.scope,
+            extension_id: start.extension_id,
+            capability_id: start.capability_id,
+            runtime: start.runtime,
+            status: ProcessStatus::Running,
+            grants: start.grants,
+            mounts: start.mounts,
+            estimated_resources: start.estimated_resources,
+            resource_reservation_id: start.resource_reservation_id,
+            error_kind: None,
+        };
+        self.insert(record.clone());
+        Ok(record)
+    }
+
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ProcessRecord, ProcessError> {
+        self.update_status(scope, process_id, ProcessStatus::Completed, None)
+    }
+
+    async fn fail(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        error_kind: String,
+    ) -> Result<ProcessRecord, ProcessError> {
+        self.update_status(scope, process_id, ProcessStatus::Failed, Some(error_kind))
+    }
+
+    async fn kill(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ProcessRecord, ProcessError> {
+        self.update_status(scope, process_id, ProcessStatus::Killed, None)
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<Option<ProcessRecord>, ProcessError> {
+        Ok(self
+            .records
+            .lock()
+            .unwrap()
+            .get(&(scope.tenant_id.clone(), scope.user_id.clone(), process_id))
+            .cloned())
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<ProcessRecord>, ProcessError> {
+        Ok(self
+            .records
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|record| {
+                record.scope.tenant_id == scope.tenant_id && record.scope.user_id == scope.user_id
+            })
+            .cloned()
+            .collect())
+    }
 }
 
 struct ReservationDroppingStore;

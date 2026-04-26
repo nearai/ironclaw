@@ -10,13 +10,10 @@ use async_trait::async_trait;
 use ironclaw_authorization::{
     CapabilityDispatchAuthorizer, CapabilityLease, CapabilityLeaseError, CapabilityLeaseStore,
 };
-use ironclaw_dispatcher::{
-    CapabilityDispatchRequest, CapabilityDispatchResult, DispatchError, RuntimeDispatcher,
-};
 use ironclaw_extensions::ExtensionRegistry;
-use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, Decision, DenyReason, ExecutionContext, HostApiError,
+    ApprovalRequestId, CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher,
+    CapabilityId, Decision, DenyReason, DispatchError, ExecutionContext, HostApiError,
     InvocationFingerprint, InvocationId, ProcessId, ResourceEstimate, ResourceScope,
 };
 use ironclaw_processes::{
@@ -24,7 +21,6 @@ use ironclaw_processes::{
     ProcessExecutor, ProcessManager, ProcessRecord, ProcessResultStore, ProcessServices,
     ProcessStart, ProcessStore,
 };
-use ironclaw_resources::ResourceGovernor;
 use ironclaw_run_state::{
     ApprovalRequestStore, ApprovalStatus, RunStart, RunStateError, RunStateStore, RunStatus,
 };
@@ -69,29 +65,6 @@ pub struct CapabilityInvocationResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilitySpawnResult {
     pub process: ProcessRecord,
-}
-
-/// Interface for already-authorized runtime dispatch.
-#[async_trait]
-pub trait CapabilityDispatcher: Send + Sync {
-    async fn dispatch_json(
-        &self,
-        request: CapabilityDispatchRequest,
-    ) -> Result<CapabilityDispatchResult, DispatchError>;
-}
-
-#[async_trait]
-impl<F, G> CapabilityDispatcher for RuntimeDispatcher<'_, F, G>
-where
-    F: RootFilesystem,
-    G: ResourceGovernor,
-{
-    async fn dispatch_json(
-        &self,
-        request: CapabilityDispatchRequest,
-    ) -> Result<CapabilityDispatchResult, DispatchError> {
-        RuntimeDispatcher::dispatch_json(self, request).await
-    }
 }
 
 /// Capability invocation failures before or during dispatch.
@@ -143,8 +116,8 @@ pub enum CapabilityInvocationError {
     RunState(Box<RunStateError>),
     #[error("process update failed: {0}")]
     Process(Box<ProcessError>),
-    #[error("dispatch failed: {0}")]
-    Dispatch(Box<DispatchError>),
+    #[error("dispatch failed: {kind}")]
+    Dispatch { kind: String },
 }
 
 impl From<RunStateError> for CapabilityInvocationError {
@@ -161,7 +134,9 @@ impl From<ProcessError> for CapabilityInvocationError {
 
 impl From<DispatchError> for CapabilityInvocationError {
     fn from(error: DispatchError) -> Self {
-        Self::Dispatch(Box::new(error))
+        Self::Dispatch {
+            kind: dispatch_error_kind(&error),
+        }
     }
 }
 
@@ -746,17 +721,16 @@ where
     }
 }
 
-fn dispatch_error_kind(error: &DispatchError) -> &'static str {
+fn dispatch_error_kind(error: &DispatchError) -> String {
     match error {
-        DispatchError::UnknownCapability { .. } => "UnknownCapability",
-        DispatchError::UnknownProvider { .. } => "UnknownProvider",
-        DispatchError::RuntimeMismatch { .. } => "RuntimeMismatch",
-        DispatchError::MissingRuntimeBackend { .. } => "MissingRuntimeBackend",
-        DispatchError::UnsupportedRuntime { .. } => "UnsupportedRuntime",
-        DispatchError::Event(_) => "Event",
-        DispatchError::Mcp(_) => "Mcp",
-        DispatchError::Script(_) => "Script",
-        DispatchError::Wasm(_) => "Wasm",
+        DispatchError::UnknownCapability { .. } => "UnknownCapability".to_string(),
+        DispatchError::UnknownProvider { .. } => "UnknownProvider".to_string(),
+        DispatchError::RuntimeMismatch { .. } => "RuntimeMismatch".to_string(),
+        DispatchError::MissingRuntimeBackend { .. } => "MissingRuntimeBackend".to_string(),
+        DispatchError::UnsupportedRuntime { .. } => "UnsupportedRuntime".to_string(),
+        DispatchError::Mcp { kind }
+        | DispatchError::Script { kind }
+        | DispatchError::Wasm { kind } => kind.as_str().to_string(),
     }
 }
 

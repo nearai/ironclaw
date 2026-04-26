@@ -596,6 +596,28 @@ pub struct SandboxQuota {
 
 ---
 
+## 11a. Dispatch port contracts
+
+`ironclaw_host_api` owns the neutral already-authorized dispatch port so caller-facing workflow crates can avoid depending on the concrete dispatcher implementation:
+
+```rust
+pub struct CapabilityDispatchRequest;
+pub struct CapabilityDispatchResult;
+pub trait CapabilityDispatcher;
+pub enum DispatchError;
+pub enum RuntimeDispatchErrorKind;
+```
+
+Rules:
+
+- `CapabilityDispatchRequest` is already authorized; grant checks and approvals happen before this boundary.
+- `CapabilityDispatchResult` exposes normalized host facts: capability ID, provider, runtime, output, usage, and resource receipt.
+- `DispatchError` uses stable control-plane variants for registry/routing failures and `RuntimeDispatchErrorKind` for WASM/Script/MCP failures.
+- Runtime/backend detail strings, stderr, host paths, and secret-bearing messages must not cross this port.
+- `ironclaw_dispatcher` implements the port; it does not own the port vocabulary.
+
+---
+
 ## 12. Actions
 
 ```rust

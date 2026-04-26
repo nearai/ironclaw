@@ -67,8 +67,8 @@ pub struct ScriptBackendRequest {
     pub provider: ExtensionId,
     pub capability_id: CapabilityId,
     pub scope: ResourceScope,
-    pub backend: String,
-    pub image: String,
+    pub runner: String,
+    pub image: Option<String>,
     pub command: String,
     pub args: Vec<String>,
     pub stdin_json: String,
@@ -110,12 +110,16 @@ pub struct DockerScriptBackend;
 
 impl ScriptBackend for DockerScriptBackend {
     fn execute(&self, request: ScriptBackendRequest) -> Result<ScriptBackendOutput, String> {
-        if request.backend != "docker" {
+        if request.runner != "docker" {
             return Err(format!(
-                "DockerScriptBackend cannot execute backend {}",
-                request.backend
+                "DockerScriptBackend cannot execute runner {}",
+                request.runner
             ));
         }
+        let image = request
+            .image
+            .as_deref()
+            .ok_or_else(|| "DockerScriptBackend requires an image".to_string())?;
 
         let started = Instant::now();
         let mut child = Command::new("docker")
@@ -124,7 +128,7 @@ impl ScriptBackend for DockerScriptBackend {
             .arg("-i")
             .arg("--network")
             .arg("none")
-            .arg(&request.image)
+            .arg(image)
             .arg(&request.command)
             .args(&request.args)
             .stdin(Stdio::piped())
@@ -174,8 +178,8 @@ pub enum ScriptError {
     Resource(Box<ResourceError>),
     #[error("script backend error: {reason}")]
     Backend { reason: String },
-    #[error("unsupported script backend {backend}")]
-    UnsupportedBackend { backend: String },
+    #[error("unsupported script runner {runner}")]
+    UnsupportedRunner { runner: String },
     #[error("extension {extension} uses runtime {actual:?}, not RuntimeKind::Script")]
     ExtensionRuntimeMismatch {
         extension: ExtensionId,
@@ -325,13 +329,13 @@ where
             });
         }
 
-        let (backend, image, command, args) = match &request.package.manifest.runtime {
+        let (runner, image, command, args) = match &request.package.manifest.runtime {
             ExtensionRuntime::Script {
-                backend,
+                runner,
                 image,
                 command,
                 args,
-            } => (backend, image, command, args),
+            } => (runner, image, command, args),
             other => {
                 return Err(ScriptError::ExtensionRuntimeMismatch {
                     extension: request.package.id.clone(),
@@ -339,9 +343,9 @@ where
                 });
             }
         };
-        if backend != "docker" {
-            return Err(ScriptError::UnsupportedBackend {
-                backend: backend.clone(),
+        if runner == "docker" && image.is_none() {
+            return Err(ScriptError::UnsupportedRunner {
+                runner: runner.clone(),
             });
         }
 
@@ -355,7 +359,7 @@ where
             provider: request.package.id.clone(),
             capability_id: request.capability_id.clone(),
             scope: request.scope.clone(),
-            backend: backend.clone(),
+            runner: runner.clone(),
             image: image.clone(),
             command: command.clone(),
             args: args.clone(),

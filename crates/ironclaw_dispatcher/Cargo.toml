@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+async-trait = "0.1"
 ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
@@ -17,7 +18,6 @@ serde_json = "1"
 thiserror = "2"
 
 [dev-dependencies]
-async-trait = "0.1"
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
 tempfile = "3"

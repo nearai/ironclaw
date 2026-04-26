@@ -55,7 +55,7 @@ event[7]=runtime_selected capability=echo-mcp.say runtime=mcp error=none
 event[8]=dispatch_succeeded capability=echo-mcp.say runtime=mcp error=none
 ```
 
-The default example uses an in-process echo script backend and in-process echo MCP client so the demo works without Docker or an external MCP server installed. It still exercises the real `CapabilityHost`, `GrantAuthorizer`, `ScriptRuntime`, `McpRuntime`, manifest-derived command metadata, `RuntimeDispatcher`, resource lifecycle, and event emission path. Run-state and approval persistence are validated by the `ironclaw_run_state` and `ironclaw_capabilities` contract tests rather than by this happy-path demo.
+The default example uses an in-process echo script backend, a semantic `runner = "sandboxed_process"` script manifest, and an in-process echo MCP client so the demo works without Docker or an external MCP server installed. It still exercises the real `CapabilityHost`, `GrantAuthorizer`, `ScriptRuntime`, `McpRuntime`, manifest-derived command metadata, `RuntimeDispatcher`, resource lifecycle, and event emission path. Run-state and approval persistence are validated by the `ironclaw_run_state` and `ironclaw_capabilities` contract tests rather than by this happy-path demo.
 
 ---
 

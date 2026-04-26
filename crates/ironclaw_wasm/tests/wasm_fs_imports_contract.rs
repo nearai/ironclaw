@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use ironclaw_filesystem::*;
 use ironclaw_host_api::*;
-use ironclaw_resources::*;
 use ironclaw_wasm::*;
 use serde_json::json;
 use tempfile::tempdir;

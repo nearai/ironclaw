@@ -68,3 +68,29 @@ pub struct SandboxQuota {
     pub network_egress_bytes: Option<u64>,
     pub process_count: Option<u32>,
 }
+
+/// Active reservation returned by a resource governor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceReservation {
+    pub id: crate::ResourceReservationId,
+    pub scope: ResourceScope,
+    pub estimate: ResourceEstimate,
+}
+
+/// Reservation lifecycle status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReservationStatus {
+    Active,
+    Reconciled,
+    Released,
+}
+
+/// Receipt returned when a reservation is reconciled or released.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceReceipt {
+    pub id: crate::ResourceReservationId,
+    pub scope: ResourceScope,
+    pub status: ReservationStatus,
+    pub estimate: ResourceEstimate,
+    pub actual: Option<ResourceUsage>,
+}

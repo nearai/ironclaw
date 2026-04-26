@@ -370,8 +370,7 @@ trust = "sandbox"
 
 [runtime]
 kind = "script"
-backend = "docker"
-image = "alpine:latest"
+runner = "sandboxed_process"
 command = "sh"
 args = ["-c", "cat"]
 

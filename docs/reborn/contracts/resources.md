@@ -188,12 +188,15 @@ Spawned/background capability processes can own reservations through `ironclaw_p
 
 ```text
 ProcessStart.estimated_resources
+  -> reject caller-supplied ProcessStart.resource_reservation_id
   -> ResourceGovernor::reserve(scope, estimate)
   -> ProcessRecord.resource_reservation_id = Some(id)
   -> process runs
   -> complete: reconcile(id, configured_completion_usage)
   -> fail/kill: release(id)
 ```
+
+`ResourceManagedProcessStore` owns reservation creation and cleanup for processes. Reservation IDs are authority-bearing: callers cannot inject them through `ProcessStart`, and process state transitions only reconcile/release reservations the wrapper created for that process.
 
 The wrapper reserves before process records are created, releases the reservation if the underlying store rejects `start`, and verifies the resulting process record preserved the reservation ID. Resource denial therefore prevents process persistence. When a background process already owns a reservation, the process executor dispatch path uses a default runtime estimate to avoid double-reserving the same process estimate. Completion reconciliation currently uses configured/default usage because `ProcessExecutionResult` does not yet report measured usage.
 

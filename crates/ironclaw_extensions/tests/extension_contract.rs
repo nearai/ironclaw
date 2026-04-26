@@ -55,17 +55,17 @@ fn capability_id_must_be_prefixed_by_provider_extension() {
 }
 
 #[test]
-fn script_runtime_keeps_docker_metadata_without_execution() {
+fn script_runtime_keeps_runner_metadata_without_execution() {
     let manifest = ExtensionManifest::parse(SCRIPT_MANIFEST).unwrap();
     assert_eq!(manifest.runtime_kind(), RuntimeKind::Script);
     assert!(matches!(
         manifest.runtime,
         ExtensionRuntime::Script {
-            ref backend,
-            ref image,
+            ref runner,
+            image: Some(ref image),
             ref command,
             ref args,
-        } if backend == "docker" && image == "python:3.12-slim" && command == "pytest" && args == &["tests/".to_string()]
+        } if runner == "docker" && image == "python:3.12-slim" && command == "pytest" && args == &["tests/".to_string()]
     ));
 
     let descriptor = ExtensionPackage::from_manifest(
@@ -262,6 +262,27 @@ default_permission = "ask"
 parameters_schema = { type = "object" }
 "#;
 
+const SCRIPT_RUNNER_MANIFEST: &str = r#"
+id = "project-tools"
+name = "Project Tools"
+version = "0.1.0"
+description = "Project-local CLI helpers"
+trust = "sandbox"
+
+[runtime]
+kind = "script"
+runner = "sandboxed_process"
+command = "pytest"
+args = ["tests/"]
+
+[[capabilities]]
+id = "project-tools.pytest"
+description = "Run pytest"
+effects = ["execute_code"]
+default_permission = "ask"
+parameters_schema = { type = "object" }
+"#;
+
 const MCP_MANIFEST: &str = r#"
 id = "github-mcp"
 name = "GitHub MCP"
@@ -361,13 +382,31 @@ parameters_schema = { type = "object" }
 }
 
 #[test]
-fn script_runtime_requires_docker_backend_in_v1() {
-    let manifest = SCRIPT_MANIFEST.replace("backend = \"docker\"", "backend = \"podman\"");
+fn script_runtime_accepts_semantic_runner_without_docker_backend() {
+    let manifest = ExtensionManifest::parse(SCRIPT_RUNNER_MANIFEST).unwrap();
+
+    assert!(matches!(
+        manifest.runtime,
+        ExtensionRuntime::Script {
+            ref runner,
+            image: None,
+            ref command,
+            ref args,
+        } if runner == "sandboxed_process" && command == "pytest" && args == &["tests/".to_string()]
+    ));
+}
+
+#[test]
+fn script_runtime_rejects_runner_and_legacy_backend_together() {
+    let manifest = SCRIPT_MANIFEST.replace(
+        "backend = \"docker\"",
+        "backend = \"docker\"\nrunner = \"sandboxed_process\"",
+    );
     let err = ExtensionManifest::parse(&manifest).unwrap_err();
 
     assert!(matches!(
         err,
-        ExtensionError::InvalidManifest { reason } if reason.contains("docker")
+        ExtensionError::InvalidManifest { reason } if reason.contains("either runner or legacy backend")
     ));
 }
 

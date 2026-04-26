@@ -209,11 +209,9 @@ trust = "sandbox"
 
 [runtime]
 kind = "script"
-# The manifest parser currently accepts the V1 script backend string `docker`.
-# This example does not invoke Docker; HostRuntimeServices injects the
-# in-process InProcessEchoBackend below as the actual runtime backend.
-backend = "docker"
-image = "example/echo"
+# A semantic runner profile is host-selected. This example does not invoke
+# Docker; HostRuntimeServices injects the in-process InProcessEchoBackend below.
+runner = "sandboxed_process"
 command = "echo"
 
 [[capabilities]]

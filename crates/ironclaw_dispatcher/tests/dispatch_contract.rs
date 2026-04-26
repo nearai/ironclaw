@@ -112,6 +112,60 @@ async fn dispatcher_routes_script_capability_through_script_runtime() {
 }
 
 #[tokio::test]
+async fn dispatcher_redacts_script_failure_details() {
+    let fs = mounted_empty_extension_root();
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(package_from_manifest(SCRIPT_MANIFEST))
+        .unwrap();
+    let backend = RecordingScriptBackend::new(ScriptBackendOutput {
+        exit_code: 13,
+        stdout: Vec::new(),
+        stderr: b"secret token and host path /tmp/private".to_vec(),
+        wall_clock_ms: 3,
+    });
+    let script_runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), backend);
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    governor.set_limit(
+        ResourceAccount::tenant(scope.tenant_id.clone()),
+        ResourceLimits {
+            max_concurrency_slots: Some(1),
+            max_process_count: Some(10),
+            max_output_bytes: Some(10_000),
+            ..ResourceLimits::default()
+        },
+    );
+
+    let dispatcher =
+        RuntimeDispatcher::new(&registry, &fs, &governor).with_script_runtime(&script_runtime);
+    let err = dispatcher
+        .dispatch_json(CapabilityDispatchRequest {
+            capability_id: CapabilityId::new("script.echo").unwrap(),
+            scope,
+            estimate: ResourceEstimate {
+                concurrency_slots: Some(1),
+                process_count: Some(1),
+                output_bytes: Some(10_000),
+                ..ResourceEstimate::default()
+            },
+            input: json!({"message": "redact stderr"}),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        DispatchError::Script {
+            kind: RuntimeDispatchErrorKind::ExitFailure
+        }
+    ));
+    let message = err.to_string();
+    assert!(!message.contains("secret token"));
+    assert!(!message.contains("/tmp/private"));
+}
+
+#[tokio::test]
 async fn dispatcher_routes_mcp_capability_through_mcp_runtime() {
     let fs = mounted_empty_extension_root();
     let mut registry = ExtensionRegistry::new();
@@ -523,8 +577,7 @@ trust = "sandbox"
 
 [runtime]
 kind = "script"
-backend = "docker"
-image = "alpine:latest"
+runner = "sandboxed_process"
 command = "script-echo"
 args = ["--json"]
 

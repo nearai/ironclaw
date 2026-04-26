@@ -11,6 +11,7 @@ repository = "https://github.com/nearai/ironclaw"
 publish = false
 
 [dependencies]
+async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 serde = { version = "1", features = ["derive"] }
