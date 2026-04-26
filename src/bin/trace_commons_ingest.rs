@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::net::SocketAddr;
@@ -6555,34 +6556,153 @@ fn read_all_submission_records(
     Ok(records)
 }
 
+const TRACE_SIMILARITY_NEIGHBOR_THRESHOLD: f32 = 0.25;
+const TRACE_SIMILARITY_MAX_NEIGHBORS: usize = 5;
+
+#[derive(Debug, Clone)]
+struct TraceSimilarityCandidate<'a> {
+    submission_id: Uuid,
+    trace_id: Uuid,
+    canonical_summary: Option<&'a str>,
+    canonical_summary_hash: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+struct TraceSimilarityNeighbor {
+    trace_id: String,
+    source_hash: Option<String>,
+    score: f32,
+}
+
+fn nearest_trace_neighbors<'a>(
+    target_submission_id: Uuid,
+    target_summary: &str,
+    target_hash: &str,
+    candidates: impl IntoIterator<Item = TraceSimilarityCandidate<'a>>,
+) -> Vec<TraceSimilarityNeighbor> {
+    let mut neighbors = candidates
+        .into_iter()
+        .filter(|candidate| candidate.submission_id != target_submission_id)
+        .filter_map(|candidate| {
+            let score = trace_summary_similarity_score(
+                target_summary,
+                target_hash,
+                candidate.canonical_summary,
+                candidate.canonical_summary_hash,
+            );
+            (score >= TRACE_SIMILARITY_NEIGHBOR_THRESHOLD).then(|| TraceSimilarityNeighbor {
+                trace_id: candidate.trace_id.to_string(),
+                source_hash: candidate.canonical_summary_hash.map(str::to_string),
+                score,
+            })
+        })
+        .collect::<Vec<_>>();
+    neighbors.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left.trace_id.cmp(&right.trace_id))
+    });
+    neighbors.truncate(TRACE_SIMILARITY_MAX_NEIGHBORS);
+    neighbors
+}
+
+fn trace_summary_similarity_score(
+    target_summary: &str,
+    target_hash: &str,
+    candidate_summary: Option<&str>,
+    candidate_hash: Option<&str>,
+) -> f32 {
+    if candidate_hash.is_some_and(|hash| hash == target_hash) {
+        return 1.0;
+    }
+    let Some(candidate_summary) = candidate_summary else {
+        return 0.0;
+    };
+    trace_summary_similarity(target_summary, candidate_summary)
+}
+
+fn trace_summary_similarity(left: &str, right: &str) -> f32 {
+    let left_tokens = trace_similarity_tokens(left);
+    let right_tokens = trace_similarity_tokens(right);
+    if left_tokens.is_empty() || right_tokens.is_empty() {
+        return 0.0;
+    }
+    let intersection = left_tokens.intersection(&right_tokens).count() as f32;
+    let union = left_tokens.union(&right_tokens).count() as f32;
+    if union == 0.0 {
+        0.0
+    } else {
+        (intersection / union).clamp(0.0, 1.0)
+    }
+}
+
+fn trace_similarity_tokens(input: &str) -> BTreeSet<String> {
+    const STOP_WORDS: &[&str] = &[
+        "and", "are", "for", "from", "that", "the", "this", "trace", "with",
+    ];
+
+    let mut tokens = BTreeSet::new();
+    let mut current = String::new();
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            current.push(ch.to_ascii_lowercase());
+        } else {
+            push_trace_similarity_token(&mut tokens, &mut current, STOP_WORDS);
+        }
+    }
+    push_trace_similarity_token(&mut tokens, &mut current, STOP_WORDS);
+    tokens
+}
+
+fn push_trace_similarity_token(
+    tokens: &mut BTreeSet<String>,
+    current: &mut String,
+    stop_words: &[&str],
+) {
+    if current.len() > 1 && !stop_words.contains(&current.as_str()) {
+        tokens.insert(std::mem::take(current));
+    } else {
+        current.clear();
+    }
+}
+
 fn build_derived_precheck(
     envelope: &TraceContributionEnvelope,
     existing: &[TraceCommonsDerivedRecord],
 ) -> TraceCommonsDerivedPrecheck {
     let canonical_summary = canonical_summary_for_embedding(envelope);
     let canonical_summary_hash = sha256_prefixed(&canonical_summary);
-    let nearest_trace_ids = existing
-        .iter()
-        .filter(|record| record.canonical_summary_hash == canonical_summary_hash)
-        .map(|record| record.trace_id.to_string())
-        .take(5)
-        .collect::<Vec<_>>();
-    let duplicate_score = if nearest_trace_ids.is_empty() {
-        0.0
-    } else {
-        1.0
-    };
-    let novelty_score = if nearest_trace_ids.is_empty() {
+    let neighbors = nearest_trace_neighbors(
+        envelope.submission_id,
+        &canonical_summary,
+        &canonical_summary_hash,
+        existing.iter().map(|record| TraceSimilarityCandidate {
+            submission_id: record.submission_id,
+            trace_id: record.trace_id,
+            canonical_summary: Some(record.canonical_summary.as_str()),
+            canonical_summary_hash: Some(record.canonical_summary_hash.as_str()),
+        }),
+    );
+    let duplicate_score = neighbors
+        .first()
+        .map(|neighbor| neighbor.score)
+        .unwrap_or_default();
+    let novelty_score = if neighbors.is_empty() {
         0.65
     } else {
-        0.05
+        (1.0 - duplicate_score).clamp(0.05, 0.95)
     };
     let coverage_tags = coverage_tags_for_envelope(envelope);
 
     TraceCommonsDerivedPrecheck {
         canonical_summary,
         canonical_summary_hash,
-        nearest_trace_ids,
+        nearest_trace_ids: neighbors
+            .iter()
+            .map(|neighbor| neighbor.trace_id.clone())
+            .collect(),
         novelty_score,
         duplicate_score,
         coverage_tags,
@@ -8319,22 +8439,31 @@ async fn index_vector_metadata_from_db(
                 record.submission_id
             )
         })?;
-        let nearest_trace_ids = eligible
+        let neighbors = nearest_trace_neighbors(
+            record.submission_id,
+            record.canonical_summary.as_deref().unwrap_or_default(),
+            &source_hash,
+            eligible.iter().map(|candidate| TraceSimilarityCandidate {
+                submission_id: candidate.submission_id,
+                trace_id: candidate.trace_id,
+                canonical_summary: candidate.canonical_summary.as_deref(),
+                canonical_summary_hash: candidate.canonical_summary_hash.as_deref(),
+            }),
+        );
+        let nearest_trace_ids = neighbors
             .iter()
-            .filter(|candidate| candidate.submission_id != record.submission_id)
-            .filter(|candidate| candidate.canonical_summary_hash.as_ref() == Some(&source_hash))
-            .map(|candidate| candidate.trace_id.to_string())
-            .take(5)
+            .map(|neighbor| neighbor.trace_id.clone())
             .collect::<Vec<_>>();
-        let duplicate_score = if nearest_trace_ids.is_empty() {
-            record.duplicate_score.unwrap_or_default()
-        } else {
-            1.0
-        };
-        let novelty_score = if nearest_trace_ids.is_empty() {
+        let duplicate_score = record.duplicate_score.unwrap_or_default().max(
+            neighbors
+                .first()
+                .map(|neighbor| neighbor.score)
+                .unwrap_or_default(),
+        );
+        let novelty_score = if neighbors.is_empty() {
             record.novelty_score.unwrap_or(0.5)
         } else {
-            0.1
+            (1.0 - duplicate_score).clamp(0.05, 0.95)
         };
         let indexed_at = Utc::now();
         let vector_store = "trace_commons_metadata_precheck".to_string();
@@ -8342,10 +8471,14 @@ async fn index_vector_metadata_from_db(
         let embedding_dimension = 1;
         let embedding_version = "trace_commons_vector_metadata_v1".to_string();
         let source_projection = StorageTraceVectorEntrySourceProjection::CanonicalSummary;
-        let cluster_id = record
-            .cluster_id
-            .clone()
-            .or_else(|| Some(format!("summary:{}", hash_fragment(&source_hash, 16))));
+        let cluster_id = record.cluster_id.clone().or_else(|| {
+            let cluster_hash = neighbors
+                .first()
+                .filter(|neighbor| neighbor.score >= 0.5)
+                .and_then(|neighbor| neighbor.source_hash.as_deref())
+                .unwrap_or(&source_hash);
+            Some(format!("summary:{}", hash_fragment(cluster_hash, 16)))
+        });
         db.upsert_trace_vector_entry(StorageTraceVectorEntryWrite {
             tenant_id: tenant.tenant_id.clone(),
             submission_id: record.submission_id,
@@ -12326,6 +12459,103 @@ mod tests {
         assert!(TokenRole::parse("trainer").is_err());
     }
 
+    #[test]
+    fn trace_summary_similarity_exact_hash_wins_and_fuzzy_neighbors_are_ranked() {
+        let target_submission =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid parses");
+        let exact_trace =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000011").expect("uuid parses");
+        let fuzzy_trace =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000012").expect("uuid parses");
+        let unrelated_trace =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000013").expect("uuid parses");
+
+        let neighbors = nearest_trace_neighbors(
+            target_submission,
+            "Task type: calendar scheduling timezone retry",
+            "sha256:target",
+            [
+                TraceSimilarityCandidate {
+                    submission_id: Uuid::parse_str("00000000-0000-0000-0000-000000000021")
+                        .expect("uuid parses"),
+                    trace_id: fuzzy_trace,
+                    canonical_summary: Some(
+                        "Task type: calendar scheduling timezone ambiguity retry",
+                    ),
+                    canonical_summary_hash: Some("sha256:fuzzy"),
+                },
+                TraceSimilarityCandidate {
+                    submission_id: Uuid::parse_str("00000000-0000-0000-0000-000000000022")
+                        .expect("uuid parses"),
+                    trace_id: exact_trace,
+                    canonical_summary: Some("different text but same hash"),
+                    canonical_summary_hash: Some("sha256:target"),
+                },
+                TraceSimilarityCandidate {
+                    submission_id: Uuid::parse_str("00000000-0000-0000-0000-000000000023")
+                        .expect("uuid parses"),
+                    trace_id: unrelated_trace,
+                    canonical_summary: Some("database migration checksum repair"),
+                    canonical_summary_hash: Some("sha256:unrelated"),
+                },
+            ],
+        );
+
+        assert_eq!(neighbors.len(), 2);
+        assert_eq!(neighbors[0].trace_id, exact_trace.to_string());
+        assert_eq!(neighbors[0].score, 1.0);
+        assert_eq!(neighbors[1].trace_id, fuzzy_trace.to_string());
+        assert!(neighbors[1].score > TRACE_SIMILARITY_NEIGHBOR_THRESHOLD);
+        assert!(neighbors[1].score < 1.0);
+    }
+
+    #[test]
+    fn trace_summary_similarity_excludes_same_submission_and_sorts_ties() {
+        let target_submission =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid parses");
+        let first_trace =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000011").expect("uuid parses");
+        let second_trace =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000012").expect("uuid parses");
+
+        let neighbors = nearest_trace_neighbors(
+            target_submission,
+            "tool call retry calendar auth failure",
+            "sha256:target",
+            [
+                TraceSimilarityCandidate {
+                    submission_id: target_submission,
+                    trace_id: Uuid::parse_str("00000000-0000-0000-0000-000000000010")
+                        .expect("uuid parses"),
+                    canonical_summary: Some("tool call retry calendar auth failure"),
+                    canonical_summary_hash: Some("sha256:target"),
+                },
+                TraceSimilarityCandidate {
+                    submission_id: Uuid::parse_str("00000000-0000-0000-0000-000000000021")
+                        .expect("uuid parses"),
+                    trace_id: second_trace,
+                    canonical_summary: Some("tool call retry calendar auth"),
+                    canonical_summary_hash: Some("sha256:two"),
+                },
+                TraceSimilarityCandidate {
+                    submission_id: Uuid::parse_str("00000000-0000-0000-0000-000000000022")
+                        .expect("uuid parses"),
+                    trace_id: first_trace,
+                    canonical_summary: Some("tool call retry calendar auth"),
+                    canonical_summary_hash: Some("sha256:one"),
+                },
+            ],
+        );
+
+        assert_eq!(
+            neighbors
+                .iter()
+                .map(|neighbor| neighbor.trace_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![first_trace.to_string(), second_trace.to_string()]
+        );
+    }
+
     async fn sample_envelope() -> TraceContributionEnvelope {
         let trace = TraceFile {
             model_name: "test-model".to_string(),
@@ -15315,6 +15545,15 @@ mod tests {
         let first = sample_envelope().await;
         let second = sample_envelope().await;
         let second_id = second.submission_id;
+        let mut third = sample_envelope().await;
+        for event in &mut third.events {
+            if event.event_type
+                == ironclaw::trace_contribution::TraceContributionEventType::UserMessage
+            {
+                event.redacted_content = Some("Please inspect the workspace carefully".to_string());
+                break;
+            }
+        }
 
         let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
             .await
@@ -15322,15 +15561,25 @@ mod tests {
         let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(second))
             .await
             .expect("second submission succeeds");
+        let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(third))
+            .await
+            .expect("third similar submission succeeds");
 
         let derived = read_all_derived_records(temp.path(), "tenant-a").expect("derived reads");
-        assert_eq!(derived.len(), 2);
+        assert_eq!(derived.len(), 3);
         assert_eq!(
             derived[0].canonical_summary_hash,
             derived[1].canonical_summary_hash
         );
         assert_eq!(derived[0].duplicate_score, 0.0);
         assert_eq!(derived[1].duplicate_score, 1.0);
+        assert_ne!(
+            derived[0].canonical_summary_hash,
+            derived[2].canonical_summary_hash
+        );
+        assert!(derived[2].duplicate_score > TRACE_SIMILARITY_NEIGHBOR_THRESHOLD);
+        assert!(derived[2].duplicate_score < 1.0);
+        assert!(derived[2].novelty_score < 0.65);
         assert!(
             derived[1]
                 .coverage_tags
@@ -15354,9 +15603,9 @@ mod tests {
         let Json(analytics) = analytics_handler(State(state), auth_headers("review-token-a"))
             .await
             .expect("analytics succeeds");
-        assert_eq!(analytics.submissions_total, 2);
+        assert_eq!(analytics.submissions_total, 3);
         assert_eq!(analytics.duplicate_groups, 1);
-        assert_eq!(analytics.by_privacy_risk.get("medium"), Some(&2));
+        assert_eq!(analytics.by_privacy_risk.get("medium"), Some(&3));
         let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
         assert!(audit_events.iter().any(|event| {
             event.kind == "read"
@@ -15364,7 +15613,7 @@ mod tests {
                     .reason
                     .as_deref()
                     .is_some_and(|reason| reason.contains("surface=analytics_summary"))
-                && event.export_count == Some(2)
+                && event.export_count == Some(3)
         }));
     }
 
@@ -18826,6 +19075,115 @@ mod tests {
                 "sha256:0000",
             )
             .expect_err("vector payload refuses the wrong hash");
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn vector_index_scores_fuzzy_neighbors_from_redacted_summaries() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-vector-fuzzy.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut first = sample_envelope().await;
+        make_metadata_only_low_risk(&mut first);
+        let mut second = sample_envelope().await;
+        make_metadata_only_low_risk(&mut second);
+
+        let Json(first_receipt) =
+            submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
+                .await
+                .expect("first accepted submission succeeds");
+        assert_eq!(first_receipt.status, "accepted");
+        let Json(second_receipt) =
+            submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(second))
+                .await
+                .expect("second accepted submission succeeds");
+        assert_eq!(second_receipt.status, "accepted");
+
+        let derived = db
+            .list_trace_derived_records("tenant-a")
+            .await
+            .expect("derived rows read before summary update");
+        assert_eq!(derived.len(), 2);
+        let first_summary = "Task type: workspace inspection\nUser intent: inspect project files\nTools used: file_search shell";
+        let second_summary = "Task type: workspace inspection\nUser intent: inspect project files carefully\nTools used: file_search shell";
+        let conn = db.connect().await.expect("connect to mirror");
+        conn.execute(
+            "UPDATE trace_derived_records
+             SET canonical_summary = ?1, canonical_summary_hash = ?2,
+                 duplicate_score = 0.0, novelty_score = 0.65
+             WHERE tenant_id = ?3 AND derived_id = ?4",
+            libsql::params![
+                first_summary,
+                sha256_prefixed(first_summary),
+                "tenant-a",
+                derived[0].derived_id.to_string(),
+            ],
+        )
+        .await
+        .expect("first derived summary updates");
+        conn.execute(
+            "UPDATE trace_derived_records
+             SET canonical_summary = ?1, canonical_summary_hash = ?2,
+                 duplicate_score = 0.0, novelty_score = 0.65
+             WHERE tenant_id = ?3 AND derived_id = ?4",
+            libsql::params![
+                second_summary,
+                sha256_prefixed(second_summary),
+                "tenant-a",
+                derived[1].derived_id.to_string(),
+            ],
+        )
+        .await
+        .expect("second derived summary updates");
+
+        let derived = db
+            .list_trace_derived_records("tenant-a")
+            .await
+            .expect("derived rows read");
+        assert_eq!(derived.len(), 2);
+        assert_ne!(
+            derived[0].canonical_summary_hash,
+            derived[1].canonical_summary_hash
+        );
+
+        let Json(response) = vector_index_handler(
+            State(state),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceVectorIndexRequest {
+                purpose: Some("vector_fuzzy_neighbors".to_string()),
+                dry_run: false,
+            }),
+        )
+        .await
+        .expect("vector indexing succeeds");
+        assert_eq!(response.vector_entries_indexed, 2);
+
+        let vector_entries = db
+            .list_trace_vector_entries("tenant-a")
+            .await
+            .expect("vector entries read");
+        assert_eq!(vector_entries.len(), 2);
+        assert!(vector_entries.iter().all(|entry| {
+            entry.nearest_trace_ids.len() == 1
+                && entry
+                    .duplicate_score
+                    .is_some_and(|score| score > TRACE_SIMILARITY_NEIGHBOR_THRESHOLD && score < 1.0)
+                && entry
+                    .novelty_score
+                    .is_some_and(|score| score > 0.05 && score < 0.95)
+        }));
     }
 
     #[cfg(feature = "libsql")]
