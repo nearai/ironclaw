@@ -2486,6 +2486,7 @@ async fn utility_credit_handler(
         }
         if !record_matches_utility_credit_policy_abac(
             &submission,
+            &tenant,
             tenant_policy.as_ref(),
             required_uses,
         ) {
@@ -2636,6 +2637,7 @@ async fn process_evaluation_worker_handler(
         tenant_process_evaluation_policy_for_request(state.as_ref(), &tenant).await?;
     if !record_matches_export_policy_abac(
         &record,
+        &tenant,
         tenant_policy.as_ref(),
         TraceAllowedUse::Evaluation,
     ) {
@@ -3298,6 +3300,7 @@ async fn dataset_replay_handler(
         .filter(|record| {
             record_matches_export_policy_abac(
                 record,
+                &tenant,
                 tenant_policy.as_ref(),
                 TraceAllowedUse::Evaluation,
             )
@@ -3615,6 +3618,7 @@ async fn run_benchmark_conversion(
         .filter(|record| {
             record_matches_export_policy_abac(
                 record,
+                tenant,
                 tenant_policy.as_ref(),
                 TraceAllowedUse::BenchmarkGeneration,
             )
@@ -4545,6 +4549,7 @@ async fn collect_ranker_training_candidates(
         .filter(|record| {
             record_matches_export_policy_abac(
                 record,
+                tenant,
                 tenant_policy,
                 TraceAllowedUse::RankingModelTraining,
             )
@@ -5081,6 +5086,7 @@ async fn tenant_export_policy_for_request(
     required_use: TraceAllowedUse,
 ) -> ApiResult<Option<TenantSubmissionPolicy>> {
     let policy = tenant_submission_policy_for_request(state, tenant).await?;
+    enforce_scoped_token_export_policy(tenant, surface, requested_scope, required_use)?;
     enforce_tenant_export_policy(
         tenant,
         surface,
@@ -5097,6 +5103,7 @@ async fn tenant_process_evaluation_policy_for_request(
     tenant: &TenantAuth,
 ) -> ApiResult<Option<TenantSubmissionPolicy>> {
     let policy = tenant_submission_policy_for_request(state, tenant).await?;
+    enforce_scoped_token_required_use(tenant, "process evaluation", TraceAllowedUse::Evaluation)?;
     enforce_tenant_process_evaluation_policy(
         tenant,
         policy.as_ref(),
@@ -5111,6 +5118,7 @@ async fn tenant_utility_credit_policy_for_request(
     required_uses: &[TraceAllowedUse],
 ) -> ApiResult<Option<TenantSubmissionPolicy>> {
     let policy = tenant_submission_policy_for_request(state, tenant).await?;
+    enforce_scoped_token_any_required_use(tenant, "utility credit", required_uses)?;
     enforce_tenant_utility_credit_policy(
         tenant,
         policy.as_ref(),
@@ -5118,6 +5126,84 @@ async fn tenant_utility_credit_policy_for_request(
         required_uses,
     )?;
     Ok(policy)
+}
+
+fn enforce_scoped_token_export_policy(
+    tenant: &TenantAuth,
+    surface: &str,
+    requested_scope: Option<ConsentScope>,
+    required_use: TraceAllowedUse,
+) -> ApiResult<()> {
+    if let Some(scope) = requested_scope {
+        enforce_scoped_token_requested_scope(tenant, surface, scope)?;
+    }
+    enforce_scoped_token_required_use(tenant, surface, required_use)
+}
+
+fn enforce_scoped_token_requested_scope(
+    tenant: &TenantAuth,
+    surface: &str,
+    requested_scope: ConsentScope,
+) -> ApiResult<()> {
+    if !tenant.allowed_consent_scopes.is_empty()
+        && !tenant.allowed_consent_scopes.contains(&requested_scope)
+    {
+        tracing::warn!(
+            tenant_id = %tenant.tenant_id,
+            surface,
+            ?requested_scope,
+            "Trace Commons scoped token rejected disallowed consent scope"
+        );
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "scoped tenant token does not allow this trace consent scope",
+        ));
+    }
+    Ok(())
+}
+
+fn enforce_scoped_token_required_use(
+    tenant: &TenantAuth,
+    surface: &str,
+    required_use: TraceAllowedUse,
+) -> ApiResult<()> {
+    if !tenant.allowed_uses.is_empty() && !tenant.allowed_uses.contains(&required_use) {
+        tracing::warn!(
+            tenant_id = %tenant.tenant_id,
+            surface,
+            ?required_use,
+            "Trace Commons scoped token rejected disallowed trace use"
+        );
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "scoped tenant token does not allow this trace use",
+        ));
+    }
+    Ok(())
+}
+
+fn enforce_scoped_token_any_required_use(
+    tenant: &TenantAuth,
+    surface: &str,
+    required_uses: &[TraceAllowedUse],
+) -> ApiResult<()> {
+    if !tenant.allowed_uses.is_empty()
+        && !required_uses
+            .iter()
+            .any(|required_use| tenant.allowed_uses.contains(required_use))
+    {
+        tracing::warn!(
+            tenant_id = %tenant.tenant_id,
+            surface,
+            ?required_uses,
+            "Trace Commons scoped token rejected disallowed utility use"
+        );
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "scoped tenant token does not allow this trace use",
+        ));
+    }
+    Ok(())
 }
 
 fn enforce_tenant_utility_credit_policy(
@@ -5251,9 +5337,14 @@ fn enforce_tenant_export_policy(
 
 fn record_matches_export_policy_abac(
     record: &TraceCommonsSubmissionRecord,
+    tenant: &TenantAuth,
     policy: Option<&TenantSubmissionPolicy>,
     required_use: TraceAllowedUse,
 ) -> bool {
+    if !record_matches_scoped_token_export_abac(record, tenant, required_use) {
+        return false;
+    }
+
     let Some(policy) = policy else {
         return true;
     };
@@ -5270,11 +5361,38 @@ fn record_matches_export_policy_abac(
     policy.allowed_uses.is_empty() || record.allowed_uses.contains(&required_use)
 }
 
+fn record_matches_scoped_token_export_abac(
+    record: &TraceCommonsSubmissionRecord,
+    tenant: &TenantAuth,
+    required_use: TraceAllowedUse,
+) -> bool {
+    if !tenant.allowed_consent_scopes.is_empty()
+        && !record
+            .consent_scopes
+            .iter()
+            .any(|scope| tenant.allowed_consent_scopes.contains(scope))
+    {
+        return false;
+    }
+
+    if !tenant.allowed_uses.is_empty() {
+        return tenant.allowed_uses.contains(&required_use)
+            && record.allowed_uses.contains(&required_use);
+    }
+
+    true
+}
+
 fn record_matches_utility_credit_policy_abac(
     record: &TraceCommonsSubmissionRecord,
+    tenant: &TenantAuth,
     policy: Option<&TenantSubmissionPolicy>,
     required_uses: &[TraceAllowedUse],
 ) -> bool {
+    if !record_matches_scoped_token_utility_credit_abac(record, tenant, required_uses) {
+        return false;
+    }
+
     if !required_uses
         .iter()
         .any(|required_use| record.allowed_uses.contains(required_use))
@@ -5299,6 +5417,29 @@ fn record_matches_utility_credit_policy_abac(
         || required_uses.iter().any(|required_use| {
             policy.allowed_uses.contains(required_use) && record.allowed_uses.contains(required_use)
         })
+}
+
+fn record_matches_scoped_token_utility_credit_abac(
+    record: &TraceCommonsSubmissionRecord,
+    tenant: &TenantAuth,
+    required_uses: &[TraceAllowedUse],
+) -> bool {
+    if !tenant.allowed_consent_scopes.is_empty()
+        && !record
+            .consent_scopes
+            .iter()
+            .any(|scope| tenant.allowed_consent_scopes.contains(scope))
+    {
+        return false;
+    }
+
+    if !tenant.allowed_uses.is_empty() {
+        return required_uses.iter().any(|required_use| {
+            tenant.allowed_uses.contains(required_use) && record.allowed_uses.contains(required_use)
+        });
+    }
+
+    true
 }
 
 fn authenticate(state: &AppState, headers: &HeaderMap) -> ApiResult<TenantAuth> {
@@ -28468,6 +28609,296 @@ mod tests {
             error.1.0.error,
             "signed tenant token does not allow this trace contribution allowed use"
         );
+    }
+
+    #[tokio::test]
+    async fn signed_claim_abac_controls_export_surfaces_and_source_filtering() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let secret = "signed-export-abac-secret";
+        let state =
+            test_state_with_signed_token_verifier(temp.path().to_path_buf(), secret, None, None);
+        let exp = (Utc::now() + Duration::minutes(5)).timestamp();
+
+        let benchmark_submit_token = signed_tenant_token(
+            secret,
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "contributor",
+                "sub": "benchmark-contributor",
+                "allowed_consent_scopes": ["benchmark_only"],
+                "allowed_uses": ["benchmark_generation"],
+                "exp": exp
+            }),
+        );
+        let mut benchmark_source = sample_envelope().await;
+        make_metadata_only_low_risk(&mut benchmark_source);
+        benchmark_source.consent.scopes = vec![ConsentScope::BenchmarkOnly];
+        benchmark_source.trace_card.consent_scope = ConsentScope::BenchmarkOnly;
+        benchmark_source.trace_card.allowed_uses = vec![TraceAllowedUse::BenchmarkGeneration];
+        let benchmark_submission_id = benchmark_source.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(&benchmark_submit_token),
+            Json(benchmark_source),
+        )
+        .await
+        .expect("benchmark-scoped signed contributor can submit benchmark source");
+
+        let ranking_submit_token = signed_tenant_token(
+            secret,
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "contributor",
+                "sub": "ranking-contributor",
+                "allowed_consent_scopes": ["ranking_training"],
+                "allowed_uses": ["ranking_model_training"],
+                "exp": exp
+            }),
+        );
+        let mut ranking_source = sample_envelope().await;
+        make_metadata_only_low_risk(&mut ranking_source);
+        ranking_source.consent.scopes = vec![ConsentScope::RankingTraining];
+        ranking_source.trace_card.consent_scope = ConsentScope::RankingTraining;
+        ranking_source.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        ranking_source.value.submission_score = 0.92;
+        let ranking_submission_id = ranking_source.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(&ranking_submit_token),
+            Json(ranking_source),
+        )
+        .await
+        .expect("ranking-scoped signed contributor can submit ranking source");
+
+        let benchmark_worker_token = signed_tenant_token(
+            secret,
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "benchmark_worker",
+                "sub": "benchmark-worker",
+                "allowed_consent_scopes": ["benchmark_only"],
+                "allowed_uses": ["benchmark_generation"],
+                "exp": exp
+            }),
+        );
+        let Json(benchmark) = benchmark_worker_convert_handler(
+            State(state.clone()),
+            auth_headers(&benchmark_worker_token),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("signed_claim_benchmark_export".to_string()),
+                consent_scope: None,
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: Some("signed-claim:benchmark-export".to_string()),
+            }),
+        )
+        .await
+        .expect("signed benchmark worker can export only benchmark-scoped sources");
+        assert_eq!(benchmark.item_count, 1);
+        assert_eq!(
+            benchmark.source_submission_ids,
+            vec![benchmark_submission_id]
+        );
+        assert!(
+            !benchmark
+                .source_submission_ids
+                .contains(&ranking_submission_id)
+        );
+
+        let ranker_error = ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers(&benchmark_worker_token),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("signed_claim_ranker_denied".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking_training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect_err("benchmark-scoped signed token cannot build ranker exports");
+        assert_eq!(ranker_error.0, StatusCode::FORBIDDEN);
+
+        let ranker_worker_token = signed_tenant_token(
+            secret,
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "export_worker",
+                "sub": "ranker-worker",
+                "allowed_consent_scopes": ["ranking_training"],
+                "allowed_uses": ["ranking_model_training"],
+                "exp": exp
+            }),
+        );
+        let Json(candidates) = ranker_training_candidates_handler(
+            State(state),
+            auth_headers(&ranker_worker_token),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("signed_claim_ranker_export".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: None,
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect("signed ranker worker can export only ranking-scoped sources");
+        assert_eq!(candidates.item_count, 1);
+        assert_eq!(
+            candidates.candidates[0].submission_id,
+            ranking_submission_id
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_claim_abac_controls_process_eval_and_utility_sources() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let secret = "signed-worker-abac-secret";
+        let state =
+            test_state_with_signed_token_verifier(temp.path().to_path_buf(), secret, None, None);
+        let exp = (Utc::now() + Duration::minutes(5)).timestamp();
+
+        let eval_submit_token = signed_tenant_token(
+            secret,
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "contributor",
+                "sub": "eval-contributor",
+                "allowed_consent_scopes": ["debugging_evaluation"],
+                "allowed_uses": ["evaluation"],
+                "exp": exp
+            }),
+        );
+        let mut eval_source = sample_envelope().await;
+        make_metadata_only_low_risk(&mut eval_source);
+        eval_source.consent.scopes = vec![ConsentScope::DebuggingEvaluation];
+        eval_source.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
+        eval_source.trace_card.allowed_uses = vec![TraceAllowedUse::Evaluation];
+        let eval_submission_id = eval_source.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(&eval_submit_token),
+            Json(eval_source),
+        )
+        .await
+        .expect("evaluation-scoped signed contributor can submit eval source");
+
+        let model_submit_token = signed_tenant_token(
+            secret,
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "contributor",
+                "sub": "model-contributor",
+                "allowed_consent_scopes": ["model_training"],
+                "allowed_uses": ["model_training"],
+                "exp": exp
+            }),
+        );
+        let mut model_source = sample_envelope().await;
+        make_metadata_only_low_risk(&mut model_source);
+        model_source.consent.scopes = vec![ConsentScope::ModelTraining];
+        model_source.trace_card.consent_scope = ConsentScope::ModelTraining;
+        model_source.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let model_submission_id = model_source.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(&model_submit_token),
+            Json(model_source),
+        )
+        .await
+        .expect("model-scoped signed contributor can submit model source");
+
+        let process_eval_token = signed_tenant_token(
+            secret,
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "process_eval_worker",
+                "sub": "process-eval-worker",
+                "allowed_consent_scopes": ["debugging_evaluation"],
+                "allowed_uses": ["evaluation"],
+                "exp": exp
+            }),
+        );
+        let Json(process_eval) = process_evaluation_worker_handler(
+            State(state.clone()),
+            auth_headers(&process_eval_token),
+            Json(TraceProcessEvaluationJobRequest {
+                submission_id: eval_submission_id,
+                process_evaluation: ProcessEvaluationLabels {
+                    evaluator_version: "signed-process-judge-v1".to_string(),
+                    overall_score: Some(0.83),
+                    ..ProcessEvaluationLabels::default()
+                },
+                reason: "signed claim process evaluation allowed".to_string(),
+                utility_credit_points_delta: None,
+                utility_external_ref: None,
+            }),
+        )
+        .await
+        .expect("signed process evaluator can label evaluation-scoped source");
+        assert_eq!(process_eval.submission_id, eval_submission_id);
+
+        let process_eval_error = process_evaluation_worker_handler(
+            State(state.clone()),
+            auth_headers(&process_eval_token),
+            Json(TraceProcessEvaluationJobRequest {
+                submission_id: model_submission_id,
+                process_evaluation: ProcessEvaluationLabels {
+                    evaluator_version: "signed-process-judge-v1".to_string(),
+                    overall_score: Some(0.42),
+                    ..ProcessEvaluationLabels::default()
+                },
+                reason: "signed claim process evaluation denied".to_string(),
+                utility_credit_points_delta: None,
+                utility_external_ref: None,
+            }),
+        )
+        .await
+        .expect_err("signed process evaluator cannot label model-only source");
+        assert_eq!(process_eval_error.0, StatusCode::FORBIDDEN);
+
+        let utility_token = signed_tenant_token(
+            secret,
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "utility_worker",
+                "sub": "utility-worker",
+                "allowed_consent_scopes": ["model_training"],
+                "allowed_uses": ["model_training"],
+                "exp": exp
+            }),
+        );
+        let Json(utility_credit) = utility_credit_handler(
+            State(state.clone()),
+            auth_headers(&utility_token),
+            Json(TraceUtilityCreditJobRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.25,
+                reason: "signed utility worker model training value".to_string(),
+                external_ref: "signed-utility:model-ok".to_string(),
+                submission_ids: vec![model_submission_id],
+            }),
+        )
+        .await
+        .expect("signed utility worker can credit model-scoped source");
+        assert_eq!(utility_credit.appended_count, 1);
+
+        let utility_error = utility_credit_handler(
+            State(state),
+            auth_headers(&utility_token),
+            Json(TraceUtilityCreditJobRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.25,
+                reason: "signed utility worker cannot credit eval-only source".to_string(),
+                external_ref: "signed-utility:eval-denied".to_string(),
+                submission_ids: vec![eval_submission_id],
+            }),
+        )
+        .await
+        .expect_err("signed utility worker cannot credit source outside claim scope");
+        assert_eq!(utility_error.0, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
