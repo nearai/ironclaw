@@ -176,7 +176,7 @@ host.log_utf8(level: i32, ptr: i32, len: i32) -> i32 status
 host.time_unix_ms() -> i64
 ```
 
-`host.log_utf8` reads UTF-8 bytes from the guest's exported `memory`, bounds message size/count, and records structured logs in `CapabilityResult.logs`. `host.time_unix_ms` returns host wall-clock milliseconds since Unix epoch. These imports do not grant filesystem, network, secret, process, or dispatch authority.
+`host.log_utf8` reads UTF-8 bytes from the guest's exported `memory`, bounds message size/count, additionally caps total captured log bytes by the runtime output-byte budget, and records structured logs in `CapabilityResult.logs`. Over-budget logs return a non-zero status to the guest and are not captured. `host.time_unix_ms` returns host wall-clock milliseconds since Unix epoch. These imports do not grant filesystem, network, secret, process, or dispatch authority.
 
 Unsupported imports fail at module preparation as `WasmError::UnsupportedImport`.
 
@@ -405,7 +405,7 @@ Local contract tests should prove:
 - executor reserves before preparation/invocation and reconciles successful usage
 - executor releases reservations on preparation, invocation, or reconciliation failure
 - resource-denied executions fail before module preparation/invocation
-- core `host.log_utf8` captures bounded structured logs in capability results
+- core `host.log_utf8` captures bounded structured logs in capability results and cannot exceed the runtime output-byte budget
 - core `host.time_unix_ms` is available without adding privileged authority
 - unsupported host imports still fail closed during module preparation
 - invocation returns actual usage suitable for resource reconciliation

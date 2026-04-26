@@ -733,7 +733,7 @@ impl WasmRuntime {
     fn fueled_store(&self) -> Result<Store<RuntimeStoreData>, WasmError> {
         let mut store = Store::new(
             &self.engine,
-            RuntimeStoreData::new(self.config.max_memory_bytes),
+            RuntimeStoreData::new(self.config.max_memory_bytes, self.config.max_output_bytes),
         );
         store.limiter(|data| &mut data.limiter);
         store.epoch_deadline_trap();
@@ -806,25 +806,38 @@ impl WasmRuntime {
 struct RuntimeStoreData {
     limiter: WasmRuntimeLimiter,
     logs: Vec<WasmLogEntry>,
+    log_bytes: u64,
+    max_log_bytes: u64,
 }
 
 impl RuntimeStoreData {
-    fn new(memory_limit: u64) -> Self {
+    fn new(memory_limit: u64, max_log_bytes: u64) -> Self {
         Self {
             limiter: WasmRuntimeLimiter::new(memory_limit),
             logs: Vec::new(),
+            log_bytes: 0,
+            max_log_bytes,
         }
     }
 
-    fn push_log(&mut self, level: WasmLogLevel, message: String) {
+    fn push_log(&mut self, level: WasmLogLevel, message: String) -> bool {
         if self.logs.len() >= MAX_LOG_ENTRIES {
-            return;
+            return false;
         }
+        let message_len = message.len() as u64;
+        let Some(next_log_bytes) = self.log_bytes.checked_add(message_len) else {
+            return false;
+        };
+        if next_log_bytes > self.max_log_bytes {
+            return false;
+        }
+        self.log_bytes = next_log_bytes;
         self.logs.push(WasmLogEntry {
             level,
             message,
             timestamp_unix_ms: unix_time_ms(),
         });
+        true
     }
 }
 
@@ -966,10 +979,14 @@ fn host_log_utf8(caller: &mut Caller<'_, RuntimeStoreData>, level: i32, ptr: i32
     let Ok(message) = String::from_utf8(bytes) else {
         return -5;
     };
-    caller
+    if caller
         .data_mut()
-        .push_log(WasmLogLevel::from_i32(level), message);
-    0
+        .push_log(WasmLogLevel::from_i32(level), message)
+    {
+        0
+    } else {
+        -2
+    }
 }
 
 fn unix_time_ms() -> u64 {

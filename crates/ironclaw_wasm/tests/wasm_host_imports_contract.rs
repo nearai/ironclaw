@@ -10,7 +10,7 @@ fn core_log_import_records_guest_log_without_privileged_authority() {
     let runtime = WasmRuntime::for_testing().unwrap();
     let module = runtime.prepare(log_module_spec()).unwrap();
     let descriptor = make_descriptor("host-core", "host-core.log", RuntimeKind::Wasm);
-    let reservation = sample_reservation();
+    let reservation = sample_active_reservation();
 
     let result = runtime
         .invoke_json(
@@ -31,11 +31,33 @@ fn core_log_import_records_guest_log_without_privileged_authority() {
 }
 
 #[test]
+fn core_log_import_is_bounded_by_output_budget() {
+    let mut config = WasmRuntimeConfig::for_testing();
+    config.max_output_bytes = 13;
+    let runtime = WasmRuntime::new(config).unwrap();
+    let module = runtime.prepare(log_status_module_spec()).unwrap();
+    let descriptor = make_descriptor("host-core", "host-core.log_status", RuntimeKind::Wasm);
+    let reservation = sample_active_reservation();
+
+    let result = runtime
+        .invoke_json(
+            &module,
+            &descriptor,
+            Some(&reservation),
+            CapabilityInvocation { input: json!({}) },
+        )
+        .unwrap();
+
+    assert_eq!(result.output, json!({"status": -2}));
+    assert!(result.logs.is_empty());
+}
+
+#[test]
 fn core_time_import_is_available_to_guest() {
     let runtime = WasmRuntime::for_testing().unwrap();
     let module = runtime.prepare(time_module_spec()).unwrap();
     let descriptor = make_descriptor("host-core", "host-core.time", RuntimeKind::Wasm);
-    let reservation = sample_reservation();
+    let reservation = sample_active_reservation();
 
     let result = runtime
         .invoke_json(
@@ -124,6 +146,15 @@ fn log_module_spec() -> WasmModuleSpec {
     }
 }
 
+fn log_status_module_spec() -> WasmModuleSpec {
+    WasmModuleSpec {
+        provider: ExtensionId::new("host-core").unwrap(),
+        capability: CapabilityId::new("host-core.log_status").unwrap(),
+        export: "log_status".to_string(),
+        bytes: log_status_module_bytes(),
+    }
+}
+
 fn time_module_spec() -> WasmModuleSpec {
     WasmModuleSpec {
         provider: ExtensionId::new("host-core").unwrap(),
@@ -161,6 +192,52 @@ fn log_module_bytes() -> Vec<u8> {
               global.set $out_ptr
               local.get $len
               global.set $out_len
+              i32.const 0)
+            (func (export "output_ptr") (result i32)
+              global.get $out_ptr)
+            (func (export "output_len") (result i32)
+              global.get $out_len))"#,
+    )
+    .unwrap()
+}
+
+fn log_status_module_bytes() -> Vec<u8> {
+    wat::parse_str(
+        r#"(module
+            (import "host" "log_utf8" (func $log (param i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (data (i32.const 64) "hello host log")
+            (data (i32.const 128) "{\"status\":-2}")
+            (global $heap (mut i32) (i32.const 1024))
+            (global $out_ptr (mut i32) (i32.const 0))
+            (global $out_len (mut i32) (i32.const 0))
+            (func (export "alloc") (param $len i32) (result i32)
+              (local $ptr i32)
+              global.get $heap
+              local.set $ptr
+              global.get $heap
+              local.get $len
+              i32.add
+              global.set $heap
+              local.get $ptr)
+            (func (export "log_status") (param i32 i32) (result i32)
+              i32.const 2
+              i32.const 64
+              i32.const 14
+              call $log
+              i32.const -2
+              i32.eq
+              if
+                i32.const 128
+                global.set $out_ptr
+                i32.const 13
+                global.set $out_len
+              else
+                i32.const 128
+                global.set $out_ptr
+                i32.const 13
+                global.set $out_len
+              end
               i32.const 0)
             (func (export "output_ptr") (result i32)
               global.get $out_ptr)
@@ -258,12 +335,12 @@ fn sample_scope() -> ResourceScope {
     }
 }
 
-fn sample_reservation() -> ResourceReservation {
-    ResourceReservation {
-        id: ResourceReservationId::new(),
-        scope: sample_scope(),
-        estimate: ResourceEstimate::default(),
-    }
+fn sample_active_reservation() -> ActiveResourceReservation {
+    let governor = InMemoryResourceGovernor::new();
+    let reservation = governor
+        .reserve(sample_scope(), ResourceEstimate::default())
+        .unwrap();
+    governor.active_reservation(reservation.id).unwrap()
 }
 
 const WASM_MANIFEST: &str = r#"
