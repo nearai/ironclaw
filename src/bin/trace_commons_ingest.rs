@@ -699,6 +699,10 @@ fn app(state: Arc<AppState>) -> Router {
         )
         .route("/v1/benchmarks/convert", post(benchmark_convert_handler))
         .route(
+            "/v1/benchmarks/{conversion_id}/lifecycle",
+            post(benchmark_lifecycle_handler),
+        )
+        .route(
             "/v1/workers/benchmark-convert",
             post(benchmark_worker_convert_handler),
         )
@@ -2120,6 +2124,42 @@ struct BenchmarkConversionRequest {
     external_ref: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct BenchmarkLifecycleUpdateRequest {
+    #[serde(default)]
+    registry: Option<TraceBenchmarkRegistryPatch>,
+    #[serde(default)]
+    evaluation: Option<TraceBenchmarkEvaluationPatch>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceBenchmarkRegistryPatch {
+    #[serde(default)]
+    status: Option<TraceBenchmarkRegistryStatus>,
+    #[serde(default)]
+    registry_ref: Option<String>,
+    #[serde(default)]
+    published_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceBenchmarkEvaluationPatch {
+    #[serde(default)]
+    status: Option<TraceBenchmarkEvaluationStatus>,
+    #[serde(default)]
+    evaluator_ref: Option<String>,
+    #[serde(default)]
+    evaluated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    score: Option<f32>,
+    #[serde(default)]
+    pass_count: Option<u32>,
+    #[serde(default)]
+    fail_count: Option<u32>,
+}
+
 async fn benchmark_convert_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -2138,6 +2178,17 @@ async fn benchmark_worker_convert_handler(
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_benchmarker(&tenant)?;
     run_benchmark_conversion(state.as_ref(), &tenant, body).await
+}
+
+async fn benchmark_lifecycle_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(conversion_id): AxumPath<Uuid>,
+    Json(body): Json<BenchmarkLifecycleUpdateRequest>,
+) -> ApiResult<Json<TraceBenchmarkConversionArtifact>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_benchmarker(&tenant)?;
+    update_benchmark_lifecycle(state.as_ref(), &tenant, conversion_id, body).await
 }
 
 async fn run_benchmark_conversion(
@@ -2343,6 +2394,78 @@ async fn run_benchmark_conversion(
     )
     .await
     .map_err(internal_error)?;
+    Ok(Json(artifact))
+}
+
+async fn update_benchmark_lifecycle(
+    state: &AppState,
+    tenant: &TenantAuth,
+    conversion_id: Uuid,
+    body: BenchmarkLifecycleUpdateRequest,
+) -> ApiResult<Json<TraceBenchmarkConversionArtifact>> {
+    if body.registry.is_none() && body.evaluation.is_none() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "benchmark lifecycle update requires registry or evaluation metadata",
+        ));
+    }
+
+    let mut artifact = read_benchmark_conversion_artifact(state, tenant, conversion_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "benchmark artifact not found"))?;
+    apply_benchmark_lifecycle_update(&mut artifact, body)?;
+
+    if !state.object_primary_derived_exports {
+        write_benchmark_artifact(&state.root, &tenant.tenant_id, &artifact)
+            .map_err(internal_error)?;
+    }
+    let artifact_object_ref_material = if state.db_mirror.is_some() {
+        Some(
+            trace_export_artifact_object_ref_material(
+                state,
+                &tenant.tenant_id,
+                TraceArtifactKind::BenchmarkConversion,
+                conversion_id,
+                &benchmark_artifact_path(&state.root, &tenant.tenant_id, conversion_id),
+                &artifact,
+            )
+            .map_err(internal_error)?,
+        )
+    } else {
+        None
+    };
+    let mirror_result = mirror_benchmark_export_provenance_to_db(
+        state,
+        &artifact,
+        artifact_object_ref_material.as_ref(),
+    )
+    .await;
+    if let Err(error) = &mirror_result {
+        tracing::warn!(
+            %error,
+            export_id = %conversion_id,
+            "Trace Commons DB dual-write benchmark lifecycle mirror failed"
+        );
+    }
+    enforce_db_mirror_write_result(state, "benchmark lifecycle", mirror_result)
+        .map_err(internal_error)?;
+
+    let audit_event = TraceCommonsAuditEvent::benchmark_lifecycle_update(tenant, &artifact);
+    append_audit_event_with_db_mirror(
+        state,
+        tenant,
+        audit_event,
+        StorageTraceAuditAction::BenchmarkConvert,
+        StorageTraceAuditSafeMetadata::Export {
+            artifact_kind: StorageTraceObjectArtifactKind::BenchmarkArtifact,
+            purpose_code: Some(artifact.purpose.clone()),
+            item_count: artifact.item_count.min(u32::MAX as usize) as u32,
+        },
+    )
+    .await
+    .map_err(internal_error)?;
+
     Ok(Json(artifact))
 }
 
@@ -6711,6 +6834,70 @@ fn write_benchmark_artifact(
     write_json_file(&path, artifact, "trace benchmark conversion artifact")
 }
 
+async fn read_benchmark_conversion_artifact(
+    state: &AppState,
+    tenant: &TenantAuth,
+    conversion_id: Uuid,
+) -> anyhow::Result<Option<TraceBenchmarkConversionArtifact>> {
+    let path = benchmark_artifact_path(&state.root, &tenant.tenant_id, conversion_id);
+    if path.exists() {
+        let body = std::fs::read_to_string(&path).with_context(|| {
+            format!(
+                "failed to read trace benchmark conversion artifact {}",
+                path.display()
+            )
+        })?;
+        let artifact = serde_json::from_str(&body).with_context(|| {
+            format!(
+                "failed to parse trace benchmark conversion artifact {}",
+                path.display()
+            )
+        })?;
+        return Ok(Some(artifact));
+    }
+
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(None);
+    };
+    let Some(store) = state.artifact_store.as_ref() else {
+        return Ok(None);
+    };
+    let items = db
+        .list_trace_export_manifest_items(&tenant.tenant_id, conversion_id)
+        .await
+        .context("failed to list benchmark export manifest items for artifact read")?;
+    for item in items {
+        let Some(object_ref_id) = item.object_ref_id else {
+            continue;
+        };
+        let object_refs = db
+            .list_trace_object_refs(&tenant.tenant_id, item.submission_id)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to list trace object refs for benchmark artifact source {}",
+                    item.submission_id
+                )
+            })?;
+        let Some(object_ref) = object_refs.into_iter().find(|object_ref| {
+            object_ref.object_ref_id == object_ref_id
+                && object_ref.artifact_kind == StorageTraceObjectArtifactKind::BenchmarkArtifact
+                && object_ref.invalidated_at.is_none()
+                && object_ref.deleted_at.is_none()
+        }) else {
+            continue;
+        };
+        let artifact = store.get_json_by_object_key(
+            &tenant_storage_ref(&tenant.tenant_id),
+            TraceArtifactKind::BenchmarkConversion,
+            &object_ref.object_key,
+            &object_ref.content_sha256,
+        )?;
+        return Ok(Some(artifact));
+    }
+    Ok(None)
+}
+
 fn benchmark_artifact_path(root: &Path, tenant_id: &str, conversion_id: Uuid) -> PathBuf {
     let tenant_key = tenant_storage_key(tenant_id);
     root.join("tenants")
@@ -7523,7 +7710,9 @@ fn audit_backfill_storage_projection(
         "maintenance" => StorageTraceAuditAction::Retain,
         "purge" => StorageTraceAuditAction::Purge,
         "vector_index" => StorageTraceAuditAction::VectorIndex,
-        "benchmark_conversion" => StorageTraceAuditAction::BenchmarkConvert,
+        "benchmark_conversion" | "benchmark_lifecycle_update" => {
+            StorageTraceAuditAction::BenchmarkConvert
+        }
         "tenant_policy_update" => StorageTraceAuditAction::PolicyUpdate,
         _ => StorageTraceAuditAction::Read,
     };
@@ -7545,14 +7734,16 @@ fn audit_backfill_storage_projection(
                     .min(u32::MAX as usize) as u32,
             }
         }
-        "benchmark_conversion" => StorageTraceAuditSafeMetadata::Export {
-            artifact_kind: StorageTraceObjectArtifactKind::BenchmarkArtifact,
-            purpose_code: Some(event.kind.clone()),
-            item_count: event
-                .export_count
-                .unwrap_or_default()
-                .min(u32::MAX as usize) as u32,
-        },
+        "benchmark_conversion" | "benchmark_lifecycle_update" => {
+            StorageTraceAuditSafeMetadata::Export {
+                artifact_kind: StorageTraceObjectArtifactKind::BenchmarkArtifact,
+                purpose_code: Some(event.kind.clone()),
+                item_count: event
+                    .export_count
+                    .unwrap_or_default()
+                    .min(u32::MAX as usize) as u32,
+            }
+        }
         _ => StorageTraceAuditSafeMetadata::Empty,
     };
     (action, metadata)
@@ -9290,6 +9481,16 @@ enum TraceBenchmarkRegistryStatus {
     Revoked,
 }
 
+impl TraceBenchmarkRegistryStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Candidate => "candidate",
+            Self::Published => "published",
+            Self::Revoked => "revoked",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TraceBenchmarkEvaluationMetadata {
     status: TraceBenchmarkEvaluationStatus,
@@ -9303,6 +9504,8 @@ struct TraceBenchmarkEvaluationMetadata {
     pass_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fail_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_update_reason: Option<String>,
 }
 
 impl Default for TraceBenchmarkEvaluationMetadata {
@@ -9314,6 +9517,7 @@ impl Default for TraceBenchmarkEvaluationMetadata {
             score: None,
             pass_count: None,
             fail_count: None,
+            last_update_reason: None,
         }
     }
 }
@@ -9327,6 +9531,84 @@ enum TraceBenchmarkEvaluationStatus {
     Passed,
     Failed,
     Inconclusive,
+}
+
+impl TraceBenchmarkEvaluationStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRun => "not_run",
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Inconclusive => "inconclusive",
+        }
+    }
+}
+
+fn apply_benchmark_lifecycle_update(
+    artifact: &mut TraceBenchmarkConversionArtifact,
+    update: BenchmarkLifecycleUpdateRequest,
+) -> ApiResult<()> {
+    if let Some(registry) = update.registry {
+        if let Some(status) = registry.status {
+            artifact.registry.status = status;
+        }
+        if let Some(registry_ref) = registry.registry_ref {
+            artifact.registry.registry_ref = normalize_benchmark_lifecycle_ref(registry_ref)?;
+        }
+        if let Some(published_at) = registry.published_at {
+            artifact.registry.published_at = Some(published_at);
+        }
+    }
+
+    if let Some(evaluation) = update.evaluation {
+        if let Some(status) = evaluation.status {
+            artifact.evaluation.status = status;
+        }
+        if let Some(evaluator_ref) = evaluation.evaluator_ref {
+            artifact.evaluation.evaluator_ref = normalize_benchmark_lifecycle_ref(evaluator_ref)?;
+        }
+        if let Some(evaluated_at) = evaluation.evaluated_at {
+            artifact.evaluation.evaluated_at = Some(evaluated_at);
+        }
+        if let Some(score) = evaluation.score {
+            if !(0.0..=1.0).contains(&score) {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "benchmark evaluation score must be between 0 and 1",
+                ));
+            }
+            artifact.evaluation.score = Some(score);
+        }
+        if let Some(pass_count) = evaluation.pass_count {
+            artifact.evaluation.pass_count = Some(pass_count);
+        }
+        if let Some(fail_count) = evaluation.fail_count {
+            artifact.evaluation.fail_count = Some(fail_count);
+        }
+    }
+
+    if let Some(reason) = update.reason.map(|reason| reason.trim().to_string())
+        && !reason.is_empty()
+    {
+        artifact.evaluation.last_update_reason = Some(reason);
+    }
+    Ok(())
+}
+
+fn normalize_benchmark_lifecycle_ref(value: String) -> ApiResult<Option<String>> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.len() > 512 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "benchmark lifecycle references are limited to 512 characters",
+        ));
+    }
+    Ok(Some(value))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -10447,6 +10729,32 @@ impl TraceCommonsAuditEvent {
             export_count: Some(candidate_count),
             export_id: Some(conversion_id),
             decision_inputs_hash: Some(source_submission_ids_hash),
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
+    fn benchmark_lifecycle_update(
+        auth: &TenantAuth,
+        artifact: &TraceBenchmarkConversionArtifact,
+    ) -> Self {
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: "benchmark_lifecycle_update".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: Some(format!(
+                "registry_status={};evaluation_status={}",
+                artifact.registry.status.as_str(),
+                artifact.evaluation.status.as_str()
+            )),
+            export_count: Some(artifact.item_count),
+            export_id: Some(artifact.conversion_id),
+            decision_inputs_hash: Some(artifact.source_submission_ids_hash.clone()),
             previous_event_hash: None,
             event_hash: None,
         }
@@ -14697,6 +15005,104 @@ mod tests {
         assert_eq!(persisted["evaluation"]["status"], "not_run");
         assert!(persisted["registry"]["registry_ref"].is_null());
         assert!(persisted["evaluation"]["evaluator_ref"].is_null());
+    }
+
+    #[tokio::test]
+    async fn benchmark_lifecycle_update_persists_registry_and_evaluator_state() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("benchmark source submission succeeds");
+
+        let Json(benchmark) = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("lifecycle_update".to_string()),
+                consent_scope: None,
+                status: None,
+                privacy_risk: None,
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("benchmark conversion succeeds");
+
+        let evaluated_at = Utc::now();
+        let Json(updated) = benchmark_lifecycle_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            AxumPath(benchmark.conversion_id),
+            Json(BenchmarkLifecycleUpdateRequest {
+                registry: Some(TraceBenchmarkRegistryPatch {
+                    status: Some(TraceBenchmarkRegistryStatus::Published),
+                    registry_ref: Some("benchmark-registry:trace-replay-smoke".to_string()),
+                    published_at: Some(evaluated_at),
+                }),
+                evaluation: Some(TraceBenchmarkEvaluationPatch {
+                    status: Some(TraceBenchmarkEvaluationStatus::Passed),
+                    evaluator_ref: Some("evaluator:trace-replay-smoke".to_string()),
+                    evaluated_at: Some(evaluated_at),
+                    score: Some(0.97),
+                    pass_count: Some(7),
+                    fail_count: Some(0),
+                }),
+                reason: Some("published by evaluator worker".to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark lifecycle update succeeds");
+
+        assert_eq!(
+            updated.registry.status,
+            TraceBenchmarkRegistryStatus::Published
+        );
+        assert_eq!(
+            updated.registry.registry_ref.as_deref(),
+            Some("benchmark-registry:trace-replay-smoke")
+        );
+        assert_eq!(
+            updated.evaluation.status,
+            TraceBenchmarkEvaluationStatus::Passed
+        );
+        assert_eq!(updated.evaluation.score, Some(0.97));
+        assert_eq!(updated.evaluation.pass_count, Some(7));
+        assert_eq!(updated.evaluation.fail_count, Some(0));
+
+        let artifact_path =
+            benchmark_artifact_path(temp.path(), "tenant-a", benchmark.conversion_id);
+        let persisted: TraceBenchmarkConversionArtifact = serde_json::from_str(
+            &std::fs::read_to_string(artifact_path).expect("benchmark artifact reads"),
+        )
+        .expect("benchmark artifact parses");
+        assert_eq!(
+            persisted.registry.status,
+            TraceBenchmarkRegistryStatus::Published
+        );
+        assert_eq!(
+            persisted.evaluation.status,
+            TraceBenchmarkEvaluationStatus::Passed
+        );
+
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("audit events read");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "benchmark_lifecycle_update"
+                && event.export_id == Some(benchmark.conversion_id)
+                && event.reason.as_deref().is_some_and(|reason| {
+                    reason.contains("registry_status=published")
+                        && reason.contains("evaluation_status=passed")
+                })
+        }));
     }
 
     #[test]
@@ -19950,6 +20356,57 @@ mod tests {
             )
             .expect("benchmark artifact reads from object store");
         assert_eq!(stored_benchmark.conversion_id, benchmark.conversion_id);
+
+        let Json(updated_benchmark) = benchmark_lifecycle_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(benchmark.conversion_id),
+            Json(BenchmarkLifecycleUpdateRequest {
+                registry: Some(TraceBenchmarkRegistryPatch {
+                    status: Some(TraceBenchmarkRegistryStatus::Published),
+                    registry_ref: Some("benchmark-registry:object-primary".to_string()),
+                    published_at: Some(Utc::now()),
+                }),
+                evaluation: Some(TraceBenchmarkEvaluationPatch {
+                    status: Some(TraceBenchmarkEvaluationStatus::Passed),
+                    evaluator_ref: Some("evaluator:object-primary".to_string()),
+                    evaluated_at: Some(Utc::now()),
+                    score: Some(1.0),
+                    pass_count: Some(1),
+                    fail_count: Some(0),
+                }),
+                reason: Some("object-primary lifecycle update".to_string()),
+            }),
+        )
+        .await
+        .expect("object-primary benchmark lifecycle update succeeds");
+        assert_eq!(
+            updated_benchmark.registry.status,
+            TraceBenchmarkRegistryStatus::Published
+        );
+        assert!(
+            !benchmark_artifact_path(temp.path(), "tenant-a", benchmark.conversion_id).exists(),
+            "object-primary lifecycle update must not recreate plaintext benchmark artifact"
+        );
+        let updated_benchmark_object_ref = db
+            .list_trace_object_refs("tenant-a", first_submission_id)
+            .await
+            .expect("updated benchmark object refs read")
+            .into_iter()
+            .find(|object_ref| object_ref.object_ref_id == benchmark_object_ref_id)
+            .expect("updated benchmark artifact object ref exists");
+        let stored_updated_benchmark: TraceBenchmarkConversionArtifact = configured_store
+            .get_json_by_object_key(
+                &tenant_storage_ref("tenant-a"),
+                TraceArtifactKind::BenchmarkConversion,
+                &updated_benchmark_object_ref.object_key,
+                &updated_benchmark_object_ref.content_sha256,
+            )
+            .expect("updated benchmark artifact reads from object store");
+        assert_eq!(
+            stored_updated_benchmark.evaluation.status,
+            TraceBenchmarkEvaluationStatus::Passed
+        );
 
         let Json(ranker_candidates) = ranker_training_candidates_handler(
             State(state.clone()),
