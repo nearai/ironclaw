@@ -193,6 +193,15 @@ Approval resolution is ordered fail-closed around lease persistence:
 
 This prevents an approval record from becoming `Approved` without durable resume authority, and with lease stores that can revoke the issued record it prevents an approval-write failure from leaving an active orphan lease. The resolver still spans separate stores, so this is a fail-closed coordination rule rather than a single database ACID transaction.
 
+Approval resolution can also emit best-effort audit events when configured with an `EventSink`:
+
+```text
+approve_dispatch success -> approval_approved
+deny success             -> approval_denied
+```
+
+The events carry only `ResourceScope`, `CapabilityId`, and `ApprovalRequestId`. They do not include approval reasons, replay input, invocation fingerprints, lease contents, raw host paths, or secret values. Event sink failures are ignored and must not change approval resolution outcomes.
+
 ---
 
 ## 6. Authorization integration
@@ -223,7 +232,6 @@ This slice intentionally keeps approval resolution narrow:
 
 - no UI/user prompt implementation
 - no single-store ACID transaction across approval status update and lease issuance yet; resolver ordering and rollback provide fail-closed semantics across separate stores
-- no approval resolution audit event yet
 - no approval support for non-dispatch actions yet
 - no `Action::SpawnCapability`/long-running task approval workflow yet; spawn start authorization exists, but approval/resume for spawn is a later slice
 - no reusable approval-scope expansion yet; V1 leases are exact-invocation only

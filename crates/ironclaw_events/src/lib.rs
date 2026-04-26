@@ -14,7 +14,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, ProcessId, ResourceScope, RuntimeKind, Timestamp, VirtualPath,
+    ApprovalRequestId, CapabilityId, ExtensionId, ProcessId, ResourceScope, RuntimeKind, Timestamp,
+    VirtualPath,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -53,6 +54,8 @@ pub enum RuntimeEventKind {
     ProcessCompleted,
     ProcessFailed,
     ProcessKilled,
+    ApprovalApproved,
+    ApprovalDenied,
 }
 
 /// Redacted runtime event payload.
@@ -63,6 +66,7 @@ pub struct RuntimeEvent {
     pub kind: RuntimeEventKind,
     pub scope: ResourceScope,
     pub capability_id: CapabilityId,
+    pub approval_request_id: Option<ApprovalRequestId>,
     pub provider: Option<ExtensionId>,
     pub runtime: Option<RuntimeKind>,
     pub process_id: Option<ProcessId>,
@@ -76,6 +80,7 @@ impl RuntimeEvent {
             kind: RuntimeEventKind::DispatchRequested,
             scope,
             capability_id,
+            approval_request_id: None,
             provider: None,
             runtime: None,
             process_id: None,
@@ -94,6 +99,7 @@ impl RuntimeEvent {
             kind: RuntimeEventKind::RuntimeSelected,
             scope,
             capability_id,
+            approval_request_id: None,
             provider: Some(provider),
             runtime: Some(runtime),
             process_id: None,
@@ -113,6 +119,7 @@ impl RuntimeEvent {
             kind: RuntimeEventKind::DispatchSucceeded,
             scope,
             capability_id,
+            approval_request_id: None,
             provider: Some(provider),
             runtime: Some(runtime),
             process_id: None,
@@ -132,6 +139,7 @@ impl RuntimeEvent {
             kind: RuntimeEventKind::DispatchFailed,
             scope,
             capability_id,
+            approval_request_id: None,
             provider,
             runtime,
             process_id: None,
@@ -151,6 +159,7 @@ impl RuntimeEvent {
             kind: RuntimeEventKind::ProcessStarted,
             scope,
             capability_id,
+            approval_request_id: None,
             provider: Some(provider),
             runtime: Some(runtime),
             process_id: Some(process_id),
@@ -170,6 +179,7 @@ impl RuntimeEvent {
             kind: RuntimeEventKind::ProcessCompleted,
             scope,
             capability_id,
+            approval_request_id: None,
             provider: Some(provider),
             runtime: Some(runtime),
             process_id: Some(process_id),
@@ -190,6 +200,7 @@ impl RuntimeEvent {
             kind: RuntimeEventKind::ProcessFailed,
             scope,
             capability_id,
+            approval_request_id: None,
             provider: Some(provider),
             runtime: Some(runtime),
             process_id: Some(process_id),
@@ -209,9 +220,46 @@ impl RuntimeEvent {
             kind: RuntimeEventKind::ProcessKilled,
             scope,
             capability_id,
+            approval_request_id: None,
             provider: Some(provider),
             runtime: Some(runtime),
             process_id: Some(process_id),
+            output_bytes: None,
+            error_kind: None,
+        })
+    }
+
+    pub fn approval_approved(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        approval_request_id: ApprovalRequestId,
+    ) -> Self {
+        Self::new(RuntimeEventPayload {
+            kind: RuntimeEventKind::ApprovalApproved,
+            scope,
+            capability_id,
+            approval_request_id: Some(approval_request_id),
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: None,
+            error_kind: None,
+        })
+    }
+
+    pub fn approval_denied(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        approval_request_id: ApprovalRequestId,
+    ) -> Self {
+        Self::new(RuntimeEventPayload {
+            kind: RuntimeEventKind::ApprovalDenied,
+            scope,
+            capability_id,
+            approval_request_id: Some(approval_request_id),
+            provider: None,
+            runtime: None,
+            process_id: None,
             output_bytes: None,
             error_kind: None,
         })
@@ -224,6 +272,7 @@ impl RuntimeEvent {
             kind: payload.kind,
             scope: payload.scope,
             capability_id: payload.capability_id,
+            approval_request_id: payload.approval_request_id,
             provider: payload.provider,
             runtime: payload.runtime,
             process_id: payload.process_id,
@@ -251,6 +300,7 @@ struct RuntimeEventPayload {
     kind: RuntimeEventKind,
     scope: ResourceScope,
     capability_id: CapabilityId,
+    approval_request_id: Option<ApprovalRequestId>,
     provider: Option<ExtensionId>,
     runtime: Option<RuntimeKind>,
     process_id: Option<ProcessId>,

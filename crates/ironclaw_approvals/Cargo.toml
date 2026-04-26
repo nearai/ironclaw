@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 ironclaw_authorization = { path = "../ironclaw_authorization" }
+ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_run_state = { path = "../ironclaw_run_state" }
 thiserror = "2"
