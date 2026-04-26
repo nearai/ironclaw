@@ -5,6 +5,7 @@
 //! dispatch runtime work.
 
 use ironclaw_authorization::{CapabilityLease, CapabilityLeaseError, CapabilityLeaseStore};
+use ironclaw_events::{EventSink, RuntimeEvent};
 use ironclaw_host_api::{
     Action, CapabilityGrant, CapabilityGrantId, EffectKind, GrantConstraints, Principal,
     ResourceScope, Timestamp,
@@ -19,6 +20,7 @@ where
 {
     approvals: &'a A,
     leases: &'a L,
+    event_sink: Option<&'a dyn EventSink>,
 }
 
 impl<'a, A, L> ApprovalResolver<'a, A, L>
@@ -27,7 +29,16 @@ where
     L: CapabilityLeaseStore + ?Sized,
 {
     pub fn new(approvals: &'a A, leases: &'a L) -> Self {
-        Self { approvals, leases }
+        Self {
+            approvals,
+            leases,
+            event_sink: None,
+        }
+    }
+
+    pub fn with_event_sink(mut self, event_sink: &'a dyn EventSink) -> Self {
+        self.event_sink = Some(event_sink);
+        self
     }
 
     pub async fn approve_dispatch(
@@ -73,6 +84,12 @@ where
             let _ = self.leases.revoke(&lease.scope, lease.grant.id);
             return Err(error.into());
         }
+        self.emit_best_effort(RuntimeEvent::approval_approved(
+            record.scope,
+            capability.clone(),
+            request_id,
+        ))
+        .await;
         Ok(lease)
     }
 
@@ -92,10 +109,22 @@ where
             });
         }
 
-        self.approvals
-            .deny(scope, request_id)
-            .await
-            .map_err(Into::into)
+        let denied = self.approvals.deny(scope, request_id).await?;
+        if let Action::Dispatch { capability, .. } = denied.request.action.as_ref() {
+            self.emit_best_effort(RuntimeEvent::approval_denied(
+                denied.scope.clone(),
+                capability.clone(),
+                request_id,
+            ))
+            .await;
+        }
+        Ok(denied)
+    }
+
+    async fn emit_best_effort(&self, event: RuntimeEvent) {
+        if let Some(sink) = self.event_sink {
+            let _ = sink.emit(event).await;
+        }
     }
 }
 

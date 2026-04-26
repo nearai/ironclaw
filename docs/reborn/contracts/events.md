@@ -9,7 +9,7 @@
 
 ## 1. Purpose
 
-`ironclaw_events` defines the first runtime/process event vocabulary and sink interfaces for Reborn. The V1 slices cover dispatcher-level observability and process lifecycle observability:
+`ironclaw_events` defines the first runtime/process/control-plane event vocabulary and sink interfaces for Reborn. The V1 slices cover dispatcher-level observability, process lifecycle observability, and approval-resolution audit metadata:
 
 ```text
 dispatch requested
@@ -20,9 +20,11 @@ process started
 process completed
 process failed
 process killed
+approval approved
+approval denied
 ```
 
-Events carry typed scope/capability/runtime/process metadata. They must not contain raw host paths, raw secrets, or unredacted request payloads. Event `error_kind` fields use the shared host-safe `ErrorKind` contract; unsafe detail-like values are collapsed to `Unclassified`.
+Events carry typed scope/capability/runtime/process/approval metadata. They must not contain raw host paths, raw secrets, unredacted request payloads, approval reasons, invocation fingerprints, or lease contents. Event `error_kind` fields use the shared host-safe `ErrorKind` contract; unsafe detail-like values are collapsed to `Unclassified`.
 
 ---
 
@@ -35,6 +37,7 @@ pub struct RuntimeEvent {
     pub kind: RuntimeEventKind,
     pub scope: ResourceScope,
     pub capability_id: CapabilityId,
+    pub approval_request_id: Option<ApprovalRequestId>,
     pub provider: Option<ExtensionId>,
     pub runtime: Option<RuntimeKind>,
     pub process_id: Option<ProcessId>,
@@ -55,6 +58,8 @@ pub enum RuntimeEventKind {
     ProcessCompleted,
     ProcessFailed,
     ProcessKilled,
+    ApprovalApproved,
+    ApprovalDenied,
 }
 ```
 
@@ -136,7 +141,30 @@ Process event emission is observability for this slice. It is deliberately outsi
 
 ---
 
-## 7. Non-goals
+## 7. Approval resolution audit events
+
+`ironclaw_approvals::ApprovalResolver` can be configured with an optional `EventSink`. After a successful dispatch approval or denial state transition, it emits:
+
+```text
+approve_dispatch success -> approval_approved
+deny success             -> approval_denied
+```
+
+Each approval audit event carries only:
+
+```text
+ResourceScope
+CapabilityId
+ApprovalRequestId
+```
+
+It does not include the approval reason, replay input, invocation fingerprint, lease ID, lease contents, approver-specific secret material, or runtime output. Approval event emission is best-effort observability: sink failures are ignored and must not change approval resolution outcomes.
+
+Approval events are emitted by `ironclaw_approvals`, not by `ironclaw_dispatcher`, so the dispatcher remains authorization-, approval-, and state-blind.
+
+---
+
+## 8. Non-goals
 
 This contract does not implement:
 

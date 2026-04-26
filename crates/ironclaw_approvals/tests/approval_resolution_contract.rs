@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use ironclaw_approvals::*;
 use ironclaw_authorization::*;
+use ironclaw_events::{EventError, EventSink, InMemoryEventSink, RuntimeEvent, RuntimeEventKind};
 use ironclaw_host_api::*;
 use ironclaw_run_state::*;
 
@@ -174,6 +175,125 @@ async fn lease_from_approved_request_is_resume_only_and_not_plain_authority() {
 }
 
 #[tokio::test]
+async fn approving_pending_dispatch_request_emits_redacted_approval_audit_event() {
+    let approvals = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let events = InMemoryEventSink::new();
+    let resolver = ApprovalResolver::new(&approvals, &leases).with_event_sink(&events);
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id, CapabilityId::new("echo.say").unwrap());
+    let request_id = approval.id;
+    approvals
+        .save_pending(scope.clone(), approval)
+        .await
+        .unwrap();
+
+    resolver
+        .approve_dispatch(
+            &scope,
+            request_id,
+            LeaseApproval {
+                issued_by: Principal::User(scope.user_id.clone()),
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                expires_at: None,
+                max_invocations: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+
+    let emitted = events.events();
+    assert_eq!(emitted.len(), 1);
+    assert_eq!(emitted[0].kind, RuntimeEventKind::ApprovalApproved);
+    assert_eq!(emitted[0].scope, scope);
+    assert_eq!(
+        emitted[0].capability_id,
+        CapabilityId::new("echo.say").unwrap()
+    );
+    assert_eq!(emitted[0].approval_request_id, Some(request_id));
+    assert_eq!(emitted[0].provider, None);
+    assert_eq!(emitted[0].runtime, None);
+    assert_eq!(emitted[0].process_id, None);
+    assert_eq!(emitted[0].output_bytes, None);
+    assert_eq!(emitted[0].error_kind, None);
+}
+
+#[tokio::test]
+async fn denying_pending_dispatch_request_emits_redacted_approval_audit_event() {
+    let approvals = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let events = InMemoryEventSink::new();
+    let resolver = ApprovalResolver::new(&approvals, &leases).with_event_sink(&events);
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id, CapabilityId::new("echo.say").unwrap());
+    let request_id = approval.id;
+    approvals
+        .save_pending(scope.clone(), approval)
+        .await
+        .unwrap();
+
+    resolver.deny(&scope, request_id).await.unwrap();
+
+    let emitted = events.events();
+    assert_eq!(emitted.len(), 1);
+    assert_eq!(emitted[0].kind, RuntimeEventKind::ApprovalDenied);
+    assert_eq!(emitted[0].scope, scope);
+    assert_eq!(
+        emitted[0].capability_id,
+        CapabilityId::new("echo.say").unwrap()
+    );
+    assert_eq!(emitted[0].approval_request_id, Some(request_id));
+    assert_eq!(emitted[0].provider, None);
+    assert_eq!(emitted[0].runtime, None);
+    assert_eq!(emitted[0].process_id, None);
+    assert_eq!(emitted[0].output_bytes, None);
+    assert_eq!(emitted[0].error_kind, None);
+}
+
+#[tokio::test]
+async fn approval_audit_event_sink_failure_does_not_change_resolution_outcome() {
+    let approvals = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let events = FailingEventSink;
+    let resolver = ApprovalResolver::new(&approvals, &leases).with_event_sink(&events);
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id, CapabilityId::new("echo.say").unwrap());
+    let request_id = approval.id;
+    approvals
+        .save_pending(scope.clone(), approval)
+        .await
+        .unwrap();
+
+    let lease = resolver
+        .approve_dispatch(
+            &scope,
+            request_id,
+            LeaseApproval {
+                issued_by: Principal::User(scope.user_id.clone()),
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                expires_at: None,
+                max_invocations: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        approvals
+            .get(&scope, request_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        ApprovalStatus::Approved
+    );
+    assert_eq!(leases.get(&scope, lease.grant.id), Some(lease));
+}
+
+#[tokio::test]
 async fn denying_pending_request_does_not_issue_lease() {
     let approvals = InMemoryApprovalRequestStore::new();
     let leases = InMemoryCapabilityLeaseStore::new();
@@ -259,6 +379,17 @@ async fn approving_request_from_other_tenant_fails_closed() {
     assert!(matches!(err, ApprovalResolutionError::RunState(_)));
     assert_eq!(leases.leases_for_scope(&tenant_a), Vec::new());
     assert_eq!(leases.leases_for_scope(&tenant_b), Vec::new());
+}
+
+struct FailingEventSink;
+
+#[async_trait]
+impl EventSink for FailingEventSink {
+    async fn emit(&self, _event: RuntimeEvent) -> Result<(), EventError> {
+        Err(EventError::Sink {
+            reason: "event sink unavailable".to_string(),
+        })
+    }
 }
 
 struct FailingApproveApprovalStore {
