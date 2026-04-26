@@ -896,8 +896,11 @@ service appends `training_utility` delayed credit idempotently and reports appen
 counts without making the worker a generic credit mutator. Derived coverage tags use the
 wire-format enum values, for example `process_label:proper_verification`,
 `process_verification:pass`, and `process_eval:high`, so analytics can aggregate process
-quality without reading trace bodies. Consumers should require `status = current` and a
-non-revoked source submission.
+quality without reading trace bodies. DB-backed reviewer metadata reads normalize these
+records into one primary duplicate-precheck row per submission and merge process-evaluation
+coverage tags into that row, so list/export/analytics paths do not double-count a trace
+just because a process evaluator appended a second derived record. Consumers should require
+`status = current` and a non-revoked source submission.
 
 ### Vector Index Metadata
 

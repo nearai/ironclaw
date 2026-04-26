@@ -4597,15 +4597,12 @@ async fn read_reviewer_metadata_view_from_db(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let derived = db
+    let derived_records = db
         .list_trace_derived_records(&tenant.tenant_id)
         .await
-        .context("failed to read Trace Commons derived records from DB mirror")?
-        .into_iter()
-        .filter_map(|record| {
-            trace_commons_derived_record_from_storage(record, &submission_metadata)
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+        .context("failed to read Trace Commons derived records from DB mirror")?;
+    let derived =
+        trace_commons_metadata_derived_records_from_storage(derived_records, &submission_metadata)?;
     Ok(TraceCommonsMetadataView { records, derived })
 }
 
@@ -4914,6 +4911,68 @@ fn trace_commons_derived_record_from_storage(
             created_at: record.created_at,
         })
     })())
+}
+
+fn trace_commons_metadata_derived_records_from_storage(
+    records: Vec<StorageTraceDerivedRecord>,
+    submission_metadata: &BTreeMap<Uuid, (TraceCorpusStatus, ResidualPiiRisk, String)>,
+) -> anyhow::Result<Vec<TraceCommonsDerivedRecord>> {
+    let mut primary_by_submission = BTreeMap::<Uuid, StorageTraceDerivedRecord>::new();
+    let mut fallback_by_submission = BTreeMap::<Uuid, StorageTraceDerivedRecord>::new();
+    let mut process_tags_by_submission = BTreeMap::<Uuid, BTreeSet<String>>::new();
+
+    for record in records {
+        if record.status == StorageTraceDerivedStatus::Current
+            && record.worker_kind == StorageTraceWorkerKind::ProcessEvaluation
+        {
+            process_tags_by_submission
+                .entry(record.submission_id)
+                .or_default()
+                .extend(
+                    record
+                        .coverage_tags
+                        .iter()
+                        .filter(|tag| is_process_evaluation_coverage_tag(tag))
+                        .cloned(),
+                );
+        }
+
+        if record.worker_kind == StorageTraceWorkerKind::DuplicatePrecheck {
+            primary_by_submission.insert(record.submission_id, record);
+        } else {
+            fallback_by_submission.insert(record.submission_id, record);
+        }
+    }
+
+    for (submission_id, record) in fallback_by_submission {
+        primary_by_submission.entry(submission_id).or_insert(record);
+    }
+
+    primary_by_submission
+        .into_values()
+        .filter_map(|record| {
+            let submission_id = record.submission_id;
+            trace_commons_derived_record_from_storage(record, submission_metadata).map(|result| {
+                result.map(|mut derived| {
+                    if let Some(process_tags) = process_tags_by_submission.get(&submission_id) {
+                        let mut tags = derived.coverage_tags.into_iter().collect::<BTreeSet<_>>();
+                        tags.extend(process_tags.iter().cloned());
+                        derived.coverage_tags = tags.into_iter().collect();
+                    }
+                    derived
+                })
+            })
+        })
+        .collect()
+}
+
+fn is_process_evaluation_coverage_tag(tag: &str) -> bool {
+    tag.starts_with("process_label:")
+        || tag.starts_with("process_eval:")
+        || tag
+            .strip_prefix("process_")
+            .and_then(|value| value.split_once(':'))
+            .is_some()
 }
 
 fn trace_commons_credit_event_from_storage(
@@ -16891,6 +16950,38 @@ mod tests {
                 && event.event_type == StorageTraceCreditEventType::TrainingUtility
                 && event.external_ref.as_deref() == Some("process-eval:db-nightly-42")
         }));
+        let db_derived = db
+            .list_trace_derived_records("tenant-a")
+            .await
+            .expect("DB derived records read");
+        assert!(db_derived.iter().any(|record| {
+            record.submission_id == submission_id
+                && record.worker_kind == StorageTraceWorkerKind::DuplicatePrecheck
+        }));
+        assert!(db_derived.iter().any(|record| {
+            record.submission_id == submission_id
+                && record.worker_kind == StorageTraceWorkerKind::ProcessEvaluation
+        }));
+
+        let db_reviewer_state = test_state_with_db_reviewer_reads(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let Json(analytics) =
+            analytics_handler(State(db_reviewer_state), auth_headers("review-token-a"))
+                .await
+                .expect("DB reviewer analytics merges process evaluation tags into primary row");
+        assert_eq!(analytics.submissions_total, 1);
+        assert_eq!(analytics.duplicate_groups, 0);
+        assert_eq!(analytics.process_evaluation.evaluated_traces, 1);
+        assert_eq!(
+            analytics
+                .process_evaluation
+                .by_rating
+                .get("verification")
+                .and_then(|ratings| ratings.get("pass")),
+            Some(&1)
+        );
 
         let tenant_dir = temp
             .path()
