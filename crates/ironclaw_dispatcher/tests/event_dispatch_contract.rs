@@ -357,7 +357,7 @@ fn filesystem_with_echo_extensions_and_engine() -> (LocalFilesystem, VirtualPath
     .unwrap();
     (
         fs,
-        VirtualPath::new("/engine/events/reborn-test.jsonl").unwrap(),
+        scoped_runtime_event_log_path(&sample_scope(), "reborn-test.jsonl").unwrap(),
     )
 }
 

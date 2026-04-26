@@ -23,8 +23,9 @@ CapabilityHost
 
 ApprovalResolver
   -> reads Pending ApprovalRecord under the same tenant/user scope
-  -> approve: marks Approved and issues a scoped CapabilityLease carrying the invocation fingerprint
+  -> approve: durably issues a scoped CapabilityLease carrying the invocation fingerprint, then marks Approved
   -> deny: marks Denied and issues no lease
+  -> optionally emits metadata-only AuditEnvelope::approval_resolved records
 
 LeaseBackedAuthorizer
   -> combines ExecutionContext.grants with active non-fingerprinted scoped leases
@@ -176,10 +177,18 @@ grant.constraints.max_invocations = LeaseApproval.max_invocations
 lease.invocation_fingerprint = ApprovalRequest.invocation_fingerprint
 ```
 
-Denying a request only transitions the approval record:
+Denying a request only transitions the approval record and records the resolver actor:
 
 ```rust
-resolver.deny(&scope, approval_request_id).await?;
+resolver
+    .deny(
+        &scope,
+        approval_request_id,
+        DenyApproval {
+            denied_by: Principal::User(scope.user_id.clone()),
+        },
+    )
+    .await?;
 ```
 
 No lease is issued for denied requests.
@@ -193,14 +202,15 @@ Approval resolution is ordered fail-closed around lease persistence:
 
 This prevents an approval record from becoming `Approved` without durable resume authority, and with lease stores that can revoke the issued record it prevents an approval-write failure from leaving an active orphan lease. The resolver still spans separate stores, so this is a fail-closed coordination rule rather than a single database ACID transaction.
 
-Approval resolution can also emit best-effort audit events when configured with an `EventSink`:
+Approval resolution can also emit best-effort audit records when configured with an `AuditSink`:
 
-```text
-approve_dispatch success -> approval_approved
-deny success             -> approval_denied
+```rust
+let resolver = ApprovalResolver::new(&approvals, &leases).with_audit_sink(&audit);
 ```
 
-The events carry only `ResourceScope`, `CapabilityId`, and `ApprovalRequestId`. They do not include approval reasons, replay input, invocation fingerprints, lease IDs, lease contents, raw host paths, or secret values. The same redaction contract applies when events are persisted through `JsonlEventSink` at a host-selected virtual path such as `/engine/events/approval-audit.jsonl`. Event sink failures are ignored and must not change approval resolution outcomes.
+Successful approve and deny transitions emit `AuditEnvelope::approval_resolved(...)` records with `AuditStage::ApprovalResolved`, the original approval correlation ID, the approval request ID, a summarized action, and `DecisionSummary { kind: "approved" | "denied", actor: Some(resolver principal), ... }`.
+
+The audit records do not include approval reasons, replay input, invocation fingerprints, lease IDs, lease contents, raw host paths, or secret values. The same redaction contract applies when records are persisted through `JsonlAuditSink` at a tenant/user scoped virtual path from `scoped_audit_log_path(&scope, "approval-audit.jsonl")`. Audit sink failures are ignored and must not change approval resolution outcomes.
 
 ---
 
@@ -231,7 +241,7 @@ The dispatcher remains auth-blind and state-blind. It never resolves approvals o
 This slice intentionally keeps approval resolution narrow:
 
 - no UI/user prompt implementation
-- no single-store ACID transaction across approval status update and lease issuance yet; resolver ordering and rollback provide fail-closed semantics across separate stores
+- no single-store ACID transaction across approval status update and lease issuance yet; resolver ordering and rollback provide fail-closed semantics across separate async stores
 - no approval support for non-dispatch actions yet
 - no `Action::SpawnCapability`/long-running task approval workflow yet; spawn start authorization exists, but approval/resume for spawn is a later slice
 - no reusable approval-scope expansion yet; V1 leases are exact-invocation only

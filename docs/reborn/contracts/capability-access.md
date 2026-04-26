@@ -19,7 +19,7 @@ ExecutionContext + CapabilityDescriptor + ResourceEstimate
   -> Decision::Allow | Decision::Deny | Decision::RequireApproval
 ```
 
-The authorizer does not execute capabilities, reserve resources, prompt users, inspect runtime internals, or discover extensions.
+The authorizer does not execute capabilities, reserve resources, prompt users, inspect runtime internals, or discover extensions. Authorization and lease-store access are async so durable filesystem/DB-backed stores do not block async control-plane paths.
 
 ---
 
@@ -91,12 +91,27 @@ Lease lookup is tenant/user/invocation scoped; a lease issued under one tenant/u
 
 V1 supports active, claimed, consumed, and revoked lease state. Revocation, claim, and consumption are tenant/user/invocation scoped. Consumed, claimed, revoked, expired, exhausted, and fingerprinted approval leases are ignored by generic lease-backed authorization.
 
+`CapabilityLeaseStore` is async:
+
+```rust
+#[async_trait]
+pub trait CapabilityLeaseStore: Send + Sync {
+    async fn issue(&self, lease: CapabilityLease) -> Result<CapabilityLease, CapabilityLeaseError>;
+    async fn get(&self, scope: &ResourceScope, lease_id: CapabilityGrantId) -> Option<CapabilityLease>;
+    async fn revoke(&self, scope: &ResourceScope, lease_id: CapabilityGrantId) -> Result<CapabilityLease, CapabilityLeaseError>;
+    async fn claim(...);
+    async fn consume(...);
+    async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease>;
+    async fn active_leases_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityLease>;
+}
+```
+
 Lease storage implementations now include:
 
 - `InMemoryCapabilityLeaseStore` for tests and ephemeral composition.
 - `FilesystemCapabilityLeaseStore` for durable virtual-path persistence under `/engine/tenants/{tenant_id}/users/{user_id}/capability-leases/{invocation_id}/{lease_id}.json`.
 
-The filesystem store persists issue, claim, consume, and revoke transitions. Reads are fail-closed for authorization: unreadable or missing lease records do not become ambient grants.
+The filesystem store persists issue, claim, consume, and revoke transitions with awaited filesystem operations; it must not use nested `block_on` inside async approval/resume paths. Reads are fail-closed for authorization: unreadable or missing lease records do not become ambient grants.
 
 See `docs/reborn/contracts/approvals.md` for how approval resolution issues leases and how resume claims/consumes them.
 

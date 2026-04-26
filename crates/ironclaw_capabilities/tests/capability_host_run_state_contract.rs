@@ -252,7 +252,7 @@ async fn capability_host_resumes_approved_invocation_and_consumes_lease() {
         RunStatus::Completed
     );
     assert_eq!(
-        leases.get(&scope, lease.grant.id).unwrap().status,
+        leases.get(&scope, lease.grant.id).await.unwrap().status,
         CapabilityLeaseStatus::Consumed
     );
 }
@@ -328,7 +328,7 @@ async fn capability_host_rejects_resume_when_input_fingerprint_differs() {
         CapabilityInvocationError::ApprovalFingerprintMismatch { .. }
     ));
     assert_eq!(
-        leases.get(&scope, lease.grant.id).unwrap().status,
+        leases.get(&scope, lease.grant.id).await.unwrap().status,
         CapabilityLeaseStatus::Active
     );
     let record = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
@@ -540,7 +540,7 @@ async fn capability_host_does_not_allow_approval_lease_through_plain_invoke_json
         }
     ));
     assert_eq!(
-        leases.get(&scope, lease.grant.id).unwrap().status,
+        leases.get(&scope, lease.grant.id).await.unwrap().status,
         CapabilityLeaseStatus::Active
     );
 }
@@ -661,7 +661,7 @@ async fn capability_host_claims_approval_lease_before_resume_dispatch() {
 
     assert_eq!(result.dispatch.output, json!({"message": "approved"}));
     assert_eq!(
-        leases.get(&scope, lease.grant.id).unwrap().status,
+        leases.get(&scope, lease.grant.id).await.unwrap().status,
         CapabilityLeaseStatus::Consumed
     );
 }
@@ -767,7 +767,11 @@ impl CapabilityDispatcher for ClaimStatusAssertingDispatcher<'_> {
         request: CapabilityDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
         assert_eq!(
-            self.leases.get(&self.scope, self.lease_id).unwrap().status,
+            self.leases
+                .get(&self.scope, self.lease_id)
+                .await
+                .unwrap()
+                .status,
             CapabilityLeaseStatus::Claimed
         );
         Ok(CapabilityDispatchResult {
@@ -789,8 +793,9 @@ impl CapabilityDispatcher for ClaimStatusAssertingDispatcher<'_> {
 
 struct ApprovalAuthorizer;
 
+#[async_trait]
 impl CapabilityDispatchAuthorizer for ApprovalAuthorizer {
-    fn authorize_dispatch(
+    async fn authorize_dispatch(
         &self,
         context: &ExecutionContext,
         descriptor: &CapabilityDescriptor,
@@ -815,8 +820,9 @@ impl CapabilityDispatchAuthorizer for ApprovalAuthorizer {
 
 struct MismatchedFingerprintAuthorizer;
 
+#[async_trait]
 impl CapabilityDispatchAuthorizer for MismatchedFingerprintAuthorizer {
-    fn authorize_dispatch(
+    async fn authorize_dispatch(
         &self,
         context: &ExecutionContext,
         descriptor: &CapabilityDescriptor,

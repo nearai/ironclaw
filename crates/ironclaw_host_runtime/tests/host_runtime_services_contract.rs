@@ -7,9 +7,11 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_approvals::*;
 use ironclaw_authorization::*;
 use ironclaw_capabilities::CapabilitySpawnRequest;
 use ironclaw_dispatcher::{CapabilityDispatchRequest, CapabilityDispatchResult, DispatchError};
+use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::*;
@@ -19,7 +21,7 @@ use ironclaw_processes::{
     ProcessServices, ProcessStatus,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_run_state::RunStateStore;
+use ironclaw_run_state::{ApprovalRequestStore, RunStateStore};
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
 };
@@ -125,6 +127,66 @@ async fn host_runtime_services_capability_and_process_hosts_share_cancellation()
 }
 
 #[tokio::test]
+async fn host_runtime_services_composes_approval_resolver_with_shared_audit_sink() {
+    let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
+    let filesystem = Arc::new(LocalFilesystem::new());
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let authorizer = Arc::new(GrantAuthorizer::new());
+    let process_services = ProcessServices::in_memory();
+    let approval_requests = Arc::new(ironclaw_run_state::InMemoryApprovalRequestStore::new());
+    let leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let audit = Arc::new(InMemoryAuditSink::new());
+    let services =
+        HostRuntimeServices::new(registry, filesystem, governor, authorizer, process_services)
+            .with_approval_requests(approval_requests.clone())
+            .with_capability_leases(leases.clone())
+            .with_audit_sink(audit.clone());
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id);
+    let approval = ApprovalRequest {
+        id: ApprovalRequestId::new(),
+        correlation_id: CorrelationId::new(),
+        requested_by: Principal::Extension(ExtensionId::new("caller").unwrap()),
+        action: Box::new(Action::Dispatch {
+            capability: CapabilityId::new("echo-script.say").unwrap(),
+            estimated_resources: ResourceEstimate::default(),
+        }),
+        invocation_fingerprint: None,
+        reason: "composition approval".to_string(),
+        reusable_scope: None,
+    };
+    let request_id = approval.id;
+    approval_requests
+        .save_pending(scope.clone(), approval)
+        .await
+        .unwrap();
+
+    let resolver = services.approval_resolver().expect(
+        "approval resolver should be available when approval and lease stores are configured",
+    );
+    let lease = resolver
+        .approve_dispatch(
+            &scope,
+            request_id,
+            LeaseApproval {
+                issued_by: Principal::User(scope.user_id.clone()),
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                expires_at: None,
+                max_invocations: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(leases.get(&scope, lease.grant.id).await, Some(lease));
+    let records = audit.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].stage, AuditStage::ApprovalResolved);
+    assert_eq!(records[0].approval_request_id, Some(request_id));
+    assert_eq!(records[0].decision.kind, "approved");
+}
+
+#[tokio::test]
 async fn host_runtime_services_can_configure_spawn_run_state_stores() {
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
     let filesystem = Arc::new(LocalFilesystem::new());
@@ -213,6 +275,17 @@ fn registry_with_manifest(manifest: &str) -> ExtensionRegistry {
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
     registry
+}
+
+fn sample_scope(invocation_id: InvocationId) -> ResourceScope {
+    ResourceScope {
+        tenant_id: TenantId::new("tenant1").unwrap(),
+        user_id: UserId::new("user1").unwrap(),
+        project_id: Some(ProjectId::new("project1").unwrap()),
+        mission_id: None,
+        thread_id: None,
+        invocation_id,
+    }
 }
 
 fn grant_for(

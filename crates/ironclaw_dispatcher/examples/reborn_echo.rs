@@ -2,7 +2,7 @@ use std::{error::Error, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_dispatcher::RuntimeDispatcher;
-use ironclaw_events::{JsonlEventSink, RuntimeEventKind};
+use ironclaw_events::{JsonlEventSink, RuntimeEventKind, scoped_runtime_event_log_path};
 use ironclaw_extensions::ExtensionDiscovery;
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{
@@ -41,7 +41,7 @@ where
     let script_runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), script_backend);
     let mcp_runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), EchoMcpClient);
     let scope = sample_scope()?;
-    let event_path = VirtualPath::new("/engine/events/reborn-demo.jsonl")?;
+    let event_path = scoped_runtime_event_log_path(&scope, "reborn-demo.jsonl")?;
     let events = JsonlEventSink::new(Arc::clone(&fs), event_path.clone());
     let dispatcher = RuntimeDispatcher::new(&registry, fs.as_ref(), &governor)
         .with_wasm_runtime(&wasm_runtime)

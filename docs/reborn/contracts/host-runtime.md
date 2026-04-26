@@ -21,10 +21,11 @@ CapabilityDispatchAuthorizer
 RunStateStore / ApprovalRequestStore / CapabilityLeaseStore
 ProcessServices
 WASM / Script / MCP runtime backends
-EventSink
+EventSink / AuditSink
   -> HostRuntimeServices
       -> RuntimeDispatcher
       -> CapabilityHost
+      -> ApprovalResolver
       -> ProcessHost
 ```
 
@@ -41,16 +42,17 @@ RuntimeDispatcher<'static, F, G>
 Arc<RuntimeDispatcher<'static, F, G>>
 CapabilityHost<'_, D>
 ProcessHost<'_>
+ApprovalResolver<'_, dyn ApprovalRequestStore, dyn CapabilityLeaseStore>
 ```
 
-It may hold shared `Arc` handles to configured services and runtime backends.
+It may hold shared `Arc` handles to configured services, runtime backends, and observability sinks.
 
 It must not:
 
 - implement grant matching or spawn policy
 - execute runtime lanes directly
 - own process state transitions or cancellation semantics
-- own approval resolution or lease semantics
+- own approval resolution or lease semantics; `approval_resolver()` only wires `ironclaw_approvals::ApprovalResolver`
 - expose process lifecycle APIs through `CapabilityHost`
 - turn process subscriptions into a message bus
 - weaken tenant/user scoped persistence boundaries
@@ -83,10 +85,12 @@ let services = HostRuntimeServices::new(
 .with_approval_requests(approval_requests)
 .with_capability_leases(capability_leases)
 .with_script_runtime(script_runtime)
-.with_event_sink(event_sink);
+.with_event_sink(event_sink)
+.with_audit_sink(audit_sink);
 
 let dispatcher = services.runtime_dispatcher_arc();
 let capability_host = services.capability_host_for_runtime_dispatcher(&dispatcher);
+let approval_resolver = services.approval_resolver();
 let process_host = services.process_host();
 ```
 
@@ -102,7 +106,7 @@ let capability_host = services.capability_host(&dispatcher, executor);
 
 ## 4. Tenant and lifecycle invariants
 
-The helper preserves the same service handles for `CapabilityHost` and `ProcessHost`:
+The helper preserves the same service handles for `CapabilityHost`, `ApprovalResolver`, and `ProcessHost`:
 
 ```text
 CapabilityHost::spawn_json(...)
@@ -118,7 +122,9 @@ ProcessHost status/kill/result/output
       -> same shared ProcessCancellationRegistry
 ```
 
-This prevents accidental split wiring where one component starts a process and another reads results or signals cancellation from a different store/registry.
+`approval_resolver()` uses the same `ApprovalRequestStore`, `CapabilityLeaseStore`, and optional `AuditSink` handles configured for `CapabilityHost::resume_json(...)`. This prevents accidental split wiring where one component approves a request into one lease store while resume checks another, or where approval audit disappears because the resolver was not wired to the shared audit sink.
+
+This also prevents accidental split wiring where one component starts a process and another reads results or signals cancellation from a different store/registry.
 
 Tenant/user scope still comes from `ExecutionContext.resource_scope`, and all persistence remains under the lower-level store contracts.
 

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use ironclaw_approvals::*;
 use ironclaw_authorization::*;
 use ironclaw_events::{
-    EventError, EventSink, InMemoryEventSink, JsonlEventSink, RuntimeEvent, RuntimeEventKind,
+    AuditSink, EventError, InMemoryAuditSink, JsonlAuditSink, scoped_audit_log_path,
 };
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
@@ -58,7 +58,10 @@ async fn approving_pending_dispatch_request_issues_scoped_capability_lease() {
             .status,
         ApprovalStatus::Approved
     );
-    assert_eq!(leases.get(&lease.scope, lease.grant.id).unwrap(), lease);
+    assert_eq!(
+        leases.get(&lease.scope, lease.grant.id).await.unwrap(),
+        lease
+    );
 }
 
 #[tokio::test]
@@ -135,7 +138,7 @@ async fn approving_pending_request_revokes_issued_lease_when_approval_update_fai
         .unwrap_err();
 
     assert!(matches!(err, ApprovalResolutionError::RunState(_)));
-    let issued = leases.leases_for_scope(&scope);
+    let issued = leases.leases_for_scope(&scope).await;
     assert_eq!(issued.len(), 1);
     assert_eq!(issued[0].status, CapabilityLeaseStatus::Revoked);
 }
@@ -168,8 +171,9 @@ async fn lease_from_approved_request_is_resume_only_and_not_plain_authority() {
         .unwrap();
 
     let authorizer = LeaseBackedAuthorizer::new(&leases);
-    let decision =
-        authorizer.authorize_dispatch(&context, &descriptor, &ResourceEstimate::default());
+    let decision = authorizer
+        .authorize_dispatch(&context, &descriptor, &ResourceEstimate::default())
+        .await;
 
     assert!(matches!(
         decision,
@@ -183,14 +187,14 @@ async fn lease_from_approved_request_is_resume_only_and_not_plain_authority() {
 async fn approving_pending_dispatch_request_emits_redacted_approval_audit_event() {
     let approvals = InMemoryApprovalRequestStore::new();
     let leases = InMemoryCapabilityLeaseStore::new();
-    let events = InMemoryEventSink::new();
-    let resolver = ApprovalResolver::new(&approvals, &leases).with_event_sink(&events);
+    let audit = InMemoryAuditSink::new();
+    let resolver = ApprovalResolver::new(&approvals, &leases).with_audit_sink(&audit);
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
     let approval = approval_request(invocation_id, CapabilityId::new("echo.say").unwrap());
     let request_id = approval.id;
     approvals
-        .save_pending(scope.clone(), approval)
+        .save_pending(scope.clone(), approval.clone())
         .await
         .unwrap();
 
@@ -208,53 +212,73 @@ async fn approving_pending_dispatch_request_emits_redacted_approval_audit_event(
         .await
         .unwrap();
 
-    let emitted = events.events();
+    let emitted = audit.records();
     assert_eq!(emitted.len(), 1);
-    assert_eq!(emitted[0].kind, RuntimeEventKind::ApprovalApproved);
-    assert_eq!(emitted[0].scope, scope);
-    assert_eq!(
-        emitted[0].capability_id,
-        CapabilityId::new("echo.say").unwrap()
-    );
-    assert_eq!(emitted[0].approval_request_id, Some(request_id));
-    assert_eq!(emitted[0].provider, None);
-    assert_eq!(emitted[0].runtime, None);
+    assert_eq!(emitted[0].stage, AuditStage::ApprovalResolved);
+    assert_eq!(emitted[0].correlation_id, approval.correlation_id);
+    assert_eq!(emitted[0].tenant_id, scope.tenant_id);
+    assert_eq!(emitted[0].user_id, scope.user_id);
+    assert_eq!(emitted[0].invocation_id, scope.invocation_id);
     assert_eq!(emitted[0].process_id, None);
-    assert_eq!(emitted[0].output_bytes, None);
-    assert_eq!(emitted[0].error_kind, None);
+    assert_eq!(
+        emitted[0].extension_id,
+        Some(ExtensionId::new("caller").unwrap())
+    );
+    assert_eq!(emitted[0].action.kind, "dispatch");
+    assert_eq!(emitted[0].action.target.as_deref(), Some("echo.say"));
+    assert_eq!(emitted[0].decision.kind, "approved");
+    assert_eq!(
+        emitted[0].decision.actor,
+        Some(Principal::User(scope.user_id.clone()))
+    );
+    assert_eq!(emitted[0].result, None);
 }
 
 #[tokio::test]
 async fn denying_pending_dispatch_request_emits_redacted_approval_audit_event() {
     let approvals = InMemoryApprovalRequestStore::new();
     let leases = InMemoryCapabilityLeaseStore::new();
-    let events = InMemoryEventSink::new();
-    let resolver = ApprovalResolver::new(&approvals, &leases).with_event_sink(&events);
+    let audit = InMemoryAuditSink::new();
+    let resolver = ApprovalResolver::new(&approvals, &leases).with_audit_sink(&audit);
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
     let approval = approval_request(invocation_id, CapabilityId::new("echo.say").unwrap());
     let request_id = approval.id;
     approvals
-        .save_pending(scope.clone(), approval)
+        .save_pending(scope.clone(), approval.clone())
         .await
         .unwrap();
 
-    resolver.deny(&scope, request_id).await.unwrap();
+    resolver
+        .deny(
+            &scope,
+            request_id,
+            DenyApproval {
+                denied_by: Principal::User(scope.user_id.clone()),
+            },
+        )
+        .await
+        .unwrap();
 
-    let emitted = events.events();
+    let emitted = audit.records();
     assert_eq!(emitted.len(), 1);
-    assert_eq!(emitted[0].kind, RuntimeEventKind::ApprovalDenied);
-    assert_eq!(emitted[0].scope, scope);
+    assert_eq!(emitted[0].stage, AuditStage::ApprovalResolved);
+    assert_eq!(emitted[0].correlation_id, approval.correlation_id);
+    assert_eq!(emitted[0].tenant_id, scope.tenant_id);
+    assert_eq!(emitted[0].user_id, scope.user_id);
+    assert_eq!(emitted[0].invocation_id, scope.invocation_id);
     assert_eq!(
-        emitted[0].capability_id,
-        CapabilityId::new("echo.say").unwrap()
+        emitted[0].extension_id,
+        Some(ExtensionId::new("caller").unwrap())
     );
-    assert_eq!(emitted[0].approval_request_id, Some(request_id));
-    assert_eq!(emitted[0].provider, None);
-    assert_eq!(emitted[0].runtime, None);
-    assert_eq!(emitted[0].process_id, None);
-    assert_eq!(emitted[0].output_bytes, None);
-    assert_eq!(emitted[0].error_kind, None);
+    assert_eq!(emitted[0].action.kind, "dispatch");
+    assert_eq!(emitted[0].action.target.as_deref(), Some("echo.say"));
+    assert_eq!(emitted[0].decision.kind, "denied");
+    assert_eq!(
+        emitted[0].decision.actor,
+        Some(Principal::User(scope.user_id.clone()))
+    );
+    assert_eq!(emitted[0].result, None);
 }
 
 #[tokio::test]
@@ -266,14 +290,14 @@ async fn approval_audit_events_persist_to_jsonl_without_sensitive_approval_detai
         HostPath::from_path_buf(storage.clone()),
     )
     .unwrap();
-    let event_path = VirtualPath::new("/engine/events/approval-audit.jsonl").unwrap();
-    let events = JsonlEventSink::new(Arc::new(fs), event_path.clone());
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let event_path = scoped_audit_log_path(&scope, "approval-audit.jsonl").unwrap();
+    let audit = JsonlAuditSink::new(Arc::new(fs), event_path.clone());
     let approvals = InMemoryApprovalRequestStore::new();
     let leases = InMemoryCapabilityLeaseStore::new();
-    let resolver = ApprovalResolver::new(&approvals, &leases).with_event_sink(&events);
-    let invocation_id = InvocationId::new();
+    let resolver = ApprovalResolver::new(&approvals, &leases).with_audit_sink(&audit);
     let capability = CapabilityId::new("echo.say").unwrap();
-    let scope = sample_scope(invocation_id, "tenant1", "user1");
     let mut approval = approval_request(invocation_id, capability.clone());
     approval.reason = "operator reason with /tmp/secret-host-path and token=redact-me".to_string();
     approval.invocation_fingerprint = Some(
@@ -286,6 +310,7 @@ async fn approval_audit_events_persist_to_jsonl_without_sensitive_approval_detai
         .unwrap(),
     );
     let request_id = approval.id;
+    let correlation_id = approval.correlation_id;
     let fingerprint = approval
         .invocation_fingerprint
         .as_ref()
@@ -311,21 +336,23 @@ async fn approval_audit_events_persist_to_jsonl_without_sensitive_approval_detai
         .await
         .unwrap();
 
-    let persisted = events.read_events().await.unwrap();
+    let persisted = audit.read_records().await.unwrap();
     assert_eq!(persisted.len(), 1);
-    assert_eq!(persisted[0].kind, RuntimeEventKind::ApprovalApproved);
-    assert_eq!(persisted[0].scope, scope);
-    assert_eq!(persisted[0].capability_id, capability);
-    assert_eq!(persisted[0].approval_request_id, Some(request_id));
-    assert_eq!(persisted[0].provider, None);
-    assert_eq!(persisted[0].runtime, None);
-    assert_eq!(persisted[0].process_id, None);
-    assert_eq!(persisted[0].output_bytes, None);
-    assert_eq!(persisted[0].error_kind, None);
+    assert_eq!(persisted[0].stage, AuditStage::ApprovalResolved);
+    assert_eq!(persisted[0].correlation_id, correlation_id);
+    assert_eq!(persisted[0].action.kind, "dispatch");
+    assert_eq!(persisted[0].action.target.as_deref(), Some("echo.say"));
+    assert_eq!(persisted[0].decision.kind, "approved");
+    assert_eq!(
+        persisted[0].decision.actor,
+        Some(Principal::User(scope.user_id.clone()))
+    );
+    assert_eq!(persisted[0].result, None);
 
-    let bytes = events.filesystem().read_file(&event_path).await.unwrap();
+    let bytes = audit.filesystem().read_file(&event_path).await.unwrap();
     let text = String::from_utf8(bytes).unwrap();
-    assert!(text.contains("approval_approved"));
+    assert!(text.contains("approval_resolved"));
+    assert!(text.contains("approved"));
     assert!(text.contains(request_id.to_string().as_str()));
     assert!(text.contains("echo.say"));
     assert!(!text.contains(storage.to_string_lossy().as_ref()));
@@ -340,8 +367,8 @@ async fn approval_audit_events_persist_to_jsonl_without_sensitive_approval_detai
 async fn approval_audit_event_sink_failure_does_not_change_resolution_outcome() {
     let approvals = InMemoryApprovalRequestStore::new();
     let leases = InMemoryCapabilityLeaseStore::new();
-    let events = FailingEventSink;
-    let resolver = ApprovalResolver::new(&approvals, &leases).with_event_sink(&events);
+    let audit = FailingAuditSink;
+    let resolver = ApprovalResolver::new(&approvals, &leases).with_audit_sink(&audit);
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
     let approval = approval_request(invocation_id, CapabilityId::new("echo.say").unwrap());
@@ -374,7 +401,7 @@ async fn approval_audit_event_sink_failure_does_not_change_resolution_outcome() 
             .status,
         ApprovalStatus::Approved
     );
-    assert_eq!(leases.get(&scope, lease.grant.id), Some(lease));
+    assert_eq!(leases.get(&scope, lease.grant.id).await, Some(lease));
 }
 
 #[tokio::test]
@@ -391,10 +418,19 @@ async fn denying_pending_request_does_not_issue_lease() {
         .await
         .unwrap();
 
-    let denied = resolver.deny(&scope, request_id).await.unwrap();
+    let denied = resolver
+        .deny(
+            &scope,
+            request_id,
+            DenyApproval {
+                denied_by: Principal::User(scope.user_id.clone()),
+            },
+        )
+        .await
+        .unwrap();
 
     assert_eq!(denied.status, ApprovalStatus::Denied);
-    assert_eq!(leases.leases_for_scope(&scope), Vec::new());
+    assert_eq!(leases.leases_for_scope(&scope).await, Vec::new());
 }
 
 #[tokio::test]
@@ -412,7 +448,16 @@ async fn denying_non_pending_request_fails_without_changing_status() {
         .unwrap();
     approvals.approve(&scope, request_id).await.unwrap();
 
-    let err = resolver.deny(&scope, request_id).await.unwrap_err();
+    let err = resolver
+        .deny(
+            &scope,
+            request_id,
+            DenyApproval {
+                denied_by: Principal::User(scope.user_id.clone()),
+            },
+        )
+        .await
+        .unwrap_err();
 
     assert!(matches!(
         err,
@@ -461,17 +506,17 @@ async fn approving_request_from_other_tenant_fails_closed() {
         .unwrap_err();
 
     assert!(matches!(err, ApprovalResolutionError::RunState(_)));
-    assert_eq!(leases.leases_for_scope(&tenant_a), Vec::new());
-    assert_eq!(leases.leases_for_scope(&tenant_b), Vec::new());
+    assert_eq!(leases.leases_for_scope(&tenant_a).await, Vec::new());
+    assert_eq!(leases.leases_for_scope(&tenant_b).await, Vec::new());
 }
 
-struct FailingEventSink;
+struct FailingAuditSink;
 
 #[async_trait]
-impl EventSink for FailingEventSink {
-    async fn emit(&self, _event: RuntimeEvent) -> Result<(), EventError> {
+impl AuditSink for FailingAuditSink {
+    async fn emit_audit(&self, _record: AuditEnvelope) -> Result<(), EventError> {
         Err(EventError::Sink {
-            reason: "event sink unavailable".to_string(),
+            reason: "audit sink unavailable".to_string(),
         })
     }
 }
@@ -534,14 +579,18 @@ impl ApprovalRequestStore for FailingApproveApprovalStore {
 
 struct FailingIssueLeaseStore;
 
+#[async_trait]
 impl CapabilityLeaseStore for FailingIssueLeaseStore {
-    fn issue(&self, _lease: CapabilityLease) -> Result<CapabilityLease, CapabilityLeaseError> {
+    async fn issue(
+        &self,
+        _lease: CapabilityLease,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
         Err(CapabilityLeaseError::Persistence {
             reason: "injected lease write failure".to_string(),
         })
     }
 
-    fn revoke(
+    async fn revoke(
         &self,
         _scope: &ResourceScope,
         lease_id: CapabilityGrantId,
@@ -549,11 +598,15 @@ impl CapabilityLeaseStore for FailingIssueLeaseStore {
         Err(CapabilityLeaseError::UnknownLease { lease_id })
     }
 
-    fn get(&self, _scope: &ResourceScope, _lease_id: CapabilityGrantId) -> Option<CapabilityLease> {
+    async fn get(
+        &self,
+        _scope: &ResourceScope,
+        _lease_id: CapabilityGrantId,
+    ) -> Option<CapabilityLease> {
         None
     }
 
-    fn claim(
+    async fn claim(
         &self,
         _scope: &ResourceScope,
         lease_id: CapabilityGrantId,
@@ -562,7 +615,7 @@ impl CapabilityLeaseStore for FailingIssueLeaseStore {
         Err(CapabilityLeaseError::UnknownLease { lease_id })
     }
 
-    fn consume(
+    async fn consume(
         &self,
         _scope: &ResourceScope,
         lease_id: CapabilityGrantId,
@@ -570,11 +623,11 @@ impl CapabilityLeaseStore for FailingIssueLeaseStore {
         Err(CapabilityLeaseError::UnknownLease { lease_id })
     }
 
-    fn leases_for_scope(&self, _scope: &ResourceScope) -> Vec<CapabilityLease> {
+    async fn leases_for_scope(&self, _scope: &ResourceScope) -> Vec<CapabilityLease> {
         Vec::new()
     }
 
-    fn active_leases_for_context(&self, _context: &ExecutionContext) -> Vec<CapabilityLease> {
+    async fn active_leases_for_context(&self, _context: &ExecutionContext) -> Vec<CapabilityLease> {
         Vec::new()
     }
 }

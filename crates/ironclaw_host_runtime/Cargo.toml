@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+ironclaw_approvals = { path = "../ironclaw_approvals" }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
 ironclaw_dispatcher = { path = "../ironclaw_dispatcher" }

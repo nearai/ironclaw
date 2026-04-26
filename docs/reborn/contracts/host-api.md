@@ -868,7 +868,8 @@ pub struct AuditEnvelope {
     pub thread_id: Option<ThreadId>,
     pub invocation_id: InvocationId,
     pub process_id: Option<ProcessId>,
-    pub extension_id: ExtensionId,
+    pub extension_id: Option<ExtensionId>,
+    pub approval_request_id: Option<ApprovalRequestId>,
 
     pub action: ActionSummary,
     pub decision: DecisionSummary,
@@ -884,6 +885,7 @@ pub struct ActionSummary {
 pub struct DecisionSummary {
     pub kind: String,
     pub reason: Option<DenyReason>,
+    pub actor: Option<Principal>,
 }
 
 pub struct ActionResultSummary {
