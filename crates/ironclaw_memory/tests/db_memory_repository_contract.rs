@@ -4,9 +4,10 @@ use async_trait::async_trait;
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::VirtualPath;
 use ironclaw_memory::{
-    ChunkConfig, ChunkingMemoryDocumentIndexer, MemoryBackendFilesystemAdapter,
+    ChunkConfig, ChunkingMemoryDocumentIndexer, DocumentMetadata, MemoryBackend,
+    MemoryBackendCapabilities, MemoryBackendFilesystemAdapter, MemoryContext,
     MemoryDocumentFilesystem, MemoryDocumentPath, MemoryDocumentRepository, MemoryDocumentScope,
-    RepositoryMemoryBackend,
+    MemorySearchRequest, RepositoryMemoryBackend,
 };
 
 #[cfg(feature = "libsql")]
@@ -212,6 +213,162 @@ async fn libsql_memory_document_filesystem_versions_previous_content_and_replace
     let only_chunk = chunk_rows.next().await.unwrap().expect("chunk row");
     assert_eq!(only_chunk.get::<String>(0).unwrap(), "second content");
     assert!(chunk_rows.next().await.unwrap().is_none());
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_repository_backend_inherits_config_metadata_for_skip_indexing() {
+    let (db, _dir) = libsql_db().await;
+    let repository = std::sync::Arc::new(LibSqlMemoryDocumentRepository::new(db.clone()));
+    repository.run_migrations().await.unwrap();
+    let config_path = MemoryDocumentPath::new("tenant-a", "alice", None, "folder/.config").unwrap();
+    repository.write_document(&config_path, b"").await.unwrap();
+    repository
+        .write_document_metadata(&config_path, &serde_json::json!({"skip_indexing": true}))
+        .await
+        .unwrap();
+    let indexer = std::sync::Arc::new(ChunkingMemoryDocumentIndexer::new(repository.clone()));
+    let backend =
+        std::sync::Arc::new(RepositoryMemoryBackend::new(repository).with_indexer(indexer));
+    let filesystem = MemoryBackendFilesystemAdapter::new(backend);
+    let path = VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/folder/a.md")
+        .unwrap();
+
+    filesystem
+        .write_file(&path, b"alpha beta gamma")
+        .await
+        .unwrap();
+
+    let conn = db.connect().unwrap();
+    let mut rows = conn
+        .query("SELECT COUNT(*) FROM memory_chunks", ())
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<i64>(0).unwrap(), 0);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_repository_backend_honors_skip_versioning_from_config() {
+    let (db, _dir) = libsql_db().await;
+    let repository = std::sync::Arc::new(LibSqlMemoryDocumentRepository::new(db.clone()));
+    repository.run_migrations().await.unwrap();
+    let config_path = MemoryDocumentPath::new("tenant-a", "alice", None, "logs/.config").unwrap();
+    repository.write_document(&config_path, b"").await.unwrap();
+    repository
+        .write_document_metadata(&config_path, &serde_json::json!({"skip_versioning": true}))
+        .await
+        .unwrap();
+    let backend = std::sync::Arc::new(RepositoryMemoryBackend::new(repository));
+    let filesystem = MemoryBackendFilesystemAdapter::new(backend);
+    let path =
+        VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/logs/a.md").unwrap();
+
+    filesystem.write_file(&path, b"first").await.unwrap();
+    filesystem.write_file(&path, b"second").await.unwrap();
+
+    let conn = db.connect().unwrap();
+    let mut rows = conn
+        .query("SELECT COUNT(*) FROM memory_document_versions", ())
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<i64>(0).unwrap(), 0);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_repository_backend_validates_schema_from_config_before_write() {
+    let (db, _dir) = libsql_db().await;
+    let repository = std::sync::Arc::new(LibSqlMemoryDocumentRepository::new(db.clone()));
+    repository.run_migrations().await.unwrap();
+    let config_path =
+        MemoryDocumentPath::new("tenant-a", "alice", None, "settings/.config").unwrap();
+    repository.write_document(&config_path, b"").await.unwrap();
+    repository
+        .write_document_metadata(
+            &config_path,
+            &serde_json::json!({
+                "schema": {
+                    "type": "object",
+                    "properties": {"provider": {"type": "string"}},
+                    "required": ["provider"]
+                }
+            }),
+        )
+        .await
+        .unwrap();
+    let backend = std::sync::Arc::new(RepositoryMemoryBackend::new(repository));
+    let filesystem = MemoryBackendFilesystemAdapter::new(backend);
+    let path =
+        VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/settings/llm.json")
+            .unwrap();
+
+    let err = filesystem
+        .write_file(&path, br#"{"missing":"provider"}"#)
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("schema validation failed"));
+    let conn = db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM memory_documents WHERE path = 'settings/llm.json'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<i64>(0).unwrap(), 0);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_repository_backend_searches_indexed_chunks() {
+    let (db, _dir) = libsql_db().await;
+    let repository = std::sync::Arc::new(LibSqlMemoryDocumentRepository::new(db));
+    repository.run_migrations().await.unwrap();
+    let indexer = std::sync::Arc::new(ChunkingMemoryDocumentIndexer::new(repository.clone()));
+    let backend = RepositoryMemoryBackend::new(repository)
+        .with_indexer(indexer)
+        .with_capabilities(MemoryBackendCapabilities {
+            file_documents: true,
+            full_text_search: true,
+            ..MemoryBackendCapabilities::default()
+        });
+    let context = MemoryContext::new(MemoryDocumentScope::new("tenant-a", "alice", None).unwrap());
+    let path = MemoryDocumentPath::new("tenant-a", "alice", None, "notes/search.md").unwrap();
+
+    backend
+        .write_document(&context, &path, b"alpha beta searchable-token")
+        .await
+        .unwrap();
+
+    let results = backend
+        .search(
+            &context,
+            MemorySearchRequest::new("searchable-token")
+                .unwrap()
+                .with_limit(3),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].path.relative_path(), "notes/search.md");
+    assert!(results[0].snippet.contains("searchable-token"));
+}
+
+#[test]
+fn document_metadata_merges_like_current_workspace_metadata() {
+    let base = serde_json::json!({"skip_indexing": true, "schema": {"type": "object"}});
+    let overlay = serde_json::json!({"skip_indexing": false, "skip_versioning": true});
+    let merged = DocumentMetadata::from_value(&DocumentMetadata::merge(&base, &overlay));
+
+    assert_eq!(merged.skip_indexing, Some(false));
+    assert_eq!(merged.skip_versioning, Some(true));
+    assert_eq!(merged.schema, Some(serde_json::json!({"type": "object"})));
 }
 
 #[cfg(feature = "libsql")]

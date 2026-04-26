@@ -4,7 +4,7 @@
 //! generic filesystem crate owns only virtual path authority, scoped mounts,
 //! backend cataloging, and backend routing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -12,6 +12,7 @@ use ironclaw_filesystem::{
     DirEntry, FileStat, FileType, FilesystemError, FilesystemOperation, RootFilesystem,
 };
 use ironclaw_host_api::{HostApiError, VirtualPath};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Tenant/user/project scope for DB-backed memory documents exposed as virtual files.
@@ -120,6 +121,73 @@ impl MemoryDocumentPath {
     }
 }
 
+/// Name of the folder-level configuration document.
+pub const CONFIG_FILE_NAME: &str = ".config";
+
+/// Typed overlay for memory document metadata.
+///
+/// Ported from the current workspace metadata model. Unknown fields are
+/// preserved for forward compatibility.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DocumentMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_indexing: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_versioning: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hygiene: Option<HygieneMetadata>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<serde_json::Value>,
+
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl DocumentMetadata {
+    pub fn from_value(value: &serde_json::Value) -> Self {
+        serde_json::from_value(value.clone()).unwrap_or_default()
+    }
+
+    pub fn to_value(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}))
+    }
+
+    pub fn merge(base: &serde_json::Value, overlay: &serde_json::Value) -> serde_json::Value {
+        let mut merged = match base {
+            serde_json::Value::Object(map) => map.clone(),
+            _ => serde_json::Map::new(),
+        };
+        if let serde_json::Value::Object(over) = overlay {
+            for (key, value) in over {
+                merged.insert(key.clone(), value.clone());
+            }
+        }
+        serde_json::Value::Object(merged)
+    }
+}
+
+/// Hygiene metadata preserved from the current workspace metadata model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HygieneMetadata {
+    pub enabled: bool,
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u32,
+}
+
+fn default_retention_days() -> u32 {
+    30
+}
+
+/// Options resolved by the memory backend before persisting a document write.
+#[derive(Debug, Clone, Default)]
+pub struct MemoryWriteOptions {
+    pub metadata: DocumentMetadata,
+    pub changed_by: Option<String>,
+}
+
 struct ParsedMemoryPath {
     scope: MemoryDocumentScope,
     relative_path: Option<String>,
@@ -204,16 +272,141 @@ pub trait MemoryDocumentRepository: Send + Sync {
         bytes: &[u8],
     ) -> Result<(), FilesystemError>;
 
+    async fn write_document_with_options(
+        &self,
+        path: &MemoryDocumentPath,
+        bytes: &[u8],
+        options: &MemoryWriteOptions,
+    ) -> Result<(), FilesystemError> {
+        let _ = options;
+        self.write_document(path, bytes).await
+    }
+
+    async fn read_document_metadata(
+        &self,
+        path: &MemoryDocumentPath,
+    ) -> Result<Option<serde_json::Value>, FilesystemError> {
+        let _ = path;
+        Ok(None)
+    }
+
+    async fn write_document_metadata(
+        &self,
+        path: &MemoryDocumentPath,
+        metadata: &serde_json::Value,
+    ) -> Result<(), FilesystemError> {
+        let _ = (path, metadata);
+        Ok(())
+    }
+
     async fn list_documents(
         &self,
         scope: &MemoryDocumentScope,
     ) -> Result<Vec<MemoryDocumentPath>, FilesystemError>;
+
+    async fn search_documents(
+        &self,
+        scope: &MemoryDocumentScope,
+        request: &MemorySearchRequest,
+    ) -> Result<Vec<MemorySearchResult>, FilesystemError> {
+        let _ = request;
+        Err(memory_backend_unsupported(
+            scope,
+            FilesystemOperation::ReadFile,
+            "memory backend does not support search",
+        ))
+    }
 }
 
 /// Hook invoked after successful memory document writes so derived state can be refreshed.
 #[async_trait]
 pub trait MemoryDocumentIndexer: Send + Sync {
     async fn reindex_document(&self, path: &MemoryDocumentPath) -> Result<(), FilesystemError>;
+}
+
+async fn resolve_document_metadata<R>(
+    repository: &R,
+    path: &MemoryDocumentPath,
+) -> Result<DocumentMetadata, FilesystemError>
+where
+    R: MemoryDocumentRepository + ?Sized,
+{
+    let doc_meta = repository
+        .read_document_metadata(path)
+        .await?
+        .unwrap_or_else(|| serde_json::json!({}));
+    let configs = repository.list_documents(path.scope()).await?;
+    let mut config_metadata = HashMap::<String, serde_json::Value>::new();
+    for config_path in configs
+        .into_iter()
+        .filter(|candidate| is_config_path(candidate.relative_path()))
+    {
+        if let Some(metadata) = repository.read_document_metadata(&config_path).await? {
+            config_metadata.insert(config_path.relative_path().to_string(), metadata);
+        }
+    }
+    let base = find_nearest_config(path.relative_path(), &config_metadata)
+        .unwrap_or_else(|| serde_json::json!({}));
+    Ok(DocumentMetadata::from_value(&DocumentMetadata::merge(
+        &base, &doc_meta,
+    )))
+}
+
+fn is_config_path(path: &str) -> bool {
+    path.rsplit('/').next().unwrap_or(path) == CONFIG_FILE_NAME
+}
+
+fn find_nearest_config(
+    path: &str,
+    configs: &HashMap<String, serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let mut current = path;
+    while let Some(slash_pos) = current.rfind('/') {
+        let parent = &current[..slash_pos];
+        let config_path = format!("{parent}/{CONFIG_FILE_NAME}");
+        if let Some(metadata) = configs.get(config_path.as_str()) {
+            return Some(metadata.clone());
+        }
+        current = parent;
+    }
+    configs.get(CONFIG_FILE_NAME).cloned()
+}
+
+fn validate_content_against_schema(
+    path: &MemoryDocumentPath,
+    content: &str,
+    schema: &serde_json::Value,
+) -> Result<(), FilesystemError> {
+    if schema.is_null() {
+        return Ok(());
+    }
+    let instance: serde_json::Value = serde_json::from_str(content).map_err(|error| {
+        memory_error(
+            path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+            FilesystemOperation::WriteFile,
+            format!("schema validation failed: content is not valid JSON: {error}"),
+        )
+    })?;
+    let validator = jsonschema::validator_for(schema).map_err(|error| {
+        memory_error(
+            path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+            FilesystemOperation::WriteFile,
+            format!("schema validation failed: invalid schema: {error}"),
+        )
+    })?;
+    let errors = validator
+        .iter_errors(&instance)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(memory_error(
+            path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+            FilesystemOperation::WriteFile,
+            format!("schema validation failed: {}", errors.join("; ")),
+        ))
+    }
 }
 
 /// Declared behavior supported by a memory backend.
@@ -550,6 +743,8 @@ where
             indexer: None,
             capabilities: MemoryBackendCapabilities {
                 file_documents: true,
+                metadata: true,
+                versioning: true,
                 ..MemoryBackendCapabilities::default()
             },
         }
@@ -592,7 +787,24 @@ where
         path: &MemoryDocumentPath,
         bytes: &[u8],
     ) -> Result<(), FilesystemError> {
-        self.repository.write_document(path, bytes).await?;
+        let content = std::str::from_utf8(bytes).map_err(|_| {
+            memory_error(
+                path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+                FilesystemOperation::WriteFile,
+                "memory document content must be UTF-8",
+            )
+        })?;
+        let metadata = resolve_document_metadata(self.repository.as_ref(), path).await?;
+        if let Some(schema) = &metadata.schema {
+            validate_content_against_schema(path, content, schema)?;
+        }
+        let options = MemoryWriteOptions {
+            metadata,
+            changed_by: Some(scoped_memory_owner_key(path.scope())),
+        };
+        self.repository
+            .write_document_with_options(path, bytes, &options)
+            .await?;
         if let Some(indexer) = &self.indexer {
             indexer.reindex_document(path).await?;
         }
@@ -605,6 +817,23 @@ where
         scope: &MemoryDocumentScope,
     ) -> Result<Vec<MemoryDocumentPath>, FilesystemError> {
         self.repository.list_documents(scope).await
+    }
+
+    async fn search(
+        &self,
+        context: &MemoryContext,
+        request: MemorySearchRequest,
+    ) -> Result<Vec<MemorySearchResult>, FilesystemError> {
+        if !self.capabilities.full_text_search && !self.capabilities.vector_search {
+            return Err(memory_backend_unsupported(
+                context.scope(),
+                FilesystemOperation::ReadFile,
+                "memory backend does not support search",
+            ));
+        }
+        self.repository
+            .search_documents(context.scope(), &request)
+            .await
     }
 }
 
@@ -760,6 +989,10 @@ where
                 "memory document content must be UTF-8",
             )
         })?;
+        let metadata = resolve_document_metadata(self.repository.as_ref(), path).await?;
+        if metadata.skip_indexing == Some(true) {
+            return self.repository.delete_document_chunks(path).await;
+        }
         let content_hash_at_read = content_sha256(content);
         let chunks = chunk_document(content, self.chunk_config.clone())
             .into_iter()
@@ -782,6 +1015,7 @@ where
 #[derive(Default)]
 pub struct InMemoryMemoryDocumentRepository {
     documents: Mutex<BTreeMap<MemoryDocumentPath, Vec<u8>>>,
+    metadata: Mutex<BTreeMap<MemoryDocumentPath, serde_json::Value>>,
 }
 
 impl InMemoryMemoryDocumentRepository {
@@ -819,6 +1053,36 @@ impl MemoryDocumentRepository for InMemoryMemoryDocumentRepository {
             )
         })?;
         documents.insert(path.clone(), bytes.to_vec());
+        Ok(())
+    }
+
+    async fn read_document_metadata(
+        &self,
+        path: &MemoryDocumentPath,
+    ) -> Result<Option<serde_json::Value>, FilesystemError> {
+        let metadata = self.metadata.lock().map_err(|_| {
+            memory_error(
+                path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+                FilesystemOperation::ReadFile,
+                "memory document metadata repository lock poisoned",
+            )
+        })?;
+        Ok(metadata.get(path).cloned())
+    }
+
+    async fn write_document_metadata(
+        &self,
+        path: &MemoryDocumentPath,
+        metadata: &serde_json::Value,
+    ) -> Result<(), FilesystemError> {
+        let mut metadata_store = self.metadata.lock().map_err(|_| {
+            memory_error(
+                path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+                FilesystemOperation::WriteFile,
+                "memory document metadata repository lock poisoned",
+            )
+        })?;
+        metadata_store.insert(path.clone(), metadata.clone());
         Ok(())
     }
 
@@ -1160,6 +1424,172 @@ impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
         Ok(())
     }
 
+    async fn write_document_with_options(
+        &self,
+        path: &MemoryDocumentPath,
+        bytes: &[u8],
+        options: &MemoryWriteOptions,
+    ) -> Result<(), FilesystemError> {
+        let content = std::str::from_utf8(bytes).map_err(|_| {
+            memory_error(
+                path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+                FilesystemOperation::WriteFile,
+                "memory document content must be UTF-8",
+            )
+        })?;
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let conn = self
+            .connect(virtual_path.clone(), FilesystemOperation::WriteFile)
+            .await?;
+        let owner_key = scoped_memory_owner_key(path.scope());
+        let db_path = db_path_for_memory_document(path);
+        let existing = {
+            let mut rows = conn
+                .query(
+                    "SELECT id, content FROM memory_documents WHERE user_id = ?1 AND agent_id IS NULL AND path = ?2",
+                    libsql::params![owner_key.as_str(), db_path.as_str()],
+                )
+                .await
+                .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?;
+            rows.next()
+                .await
+                .map_err(|error| {
+                    memory_error(
+                        virtual_path.clone(),
+                        FilesystemOperation::WriteFile,
+                        error.to_string(),
+                    )
+                })?
+                .map(|row| {
+                    let id: String = row.get(0)?;
+                    let previous_content: String = row.get(1)?;
+                    Ok::<_, libsql::Error>((id, previous_content))
+                })
+                .transpose()
+                .map_err(|error| {
+                    memory_error(
+                        virtual_path.clone(),
+                        FilesystemOperation::WriteFile,
+                        error.to_string(),
+                    )
+                })?
+        };
+
+        if let Some((document_id, previous_content)) = existing {
+            if options.metadata.skip_versioning != Some(true)
+                && previous_content != content
+                && !previous_content.is_empty()
+            {
+                let _ = libsql_save_document_version(
+                    &conn,
+                    &virtual_path,
+                    &document_id,
+                    &previous_content,
+                    options.changed_by.as_deref(),
+                )
+                .await;
+            }
+            conn.execute(
+                "UPDATE memory_documents SET content = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
+                libsql::params![document_id, content],
+            )
+            .await
+            .map_err(|error| memory_error(virtual_path, FilesystemOperation::WriteFile, error.to_string()))?;
+        } else {
+            conn.execute(
+                r#"
+                INSERT INTO memory_documents (id, user_id, agent_id, path, content, metadata)
+                VALUES (?1, ?2, NULL, ?3, ?4, '{}')
+                "#,
+                libsql::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    owner_key,
+                    db_path,
+                    content
+                ],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path,
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    async fn read_document_metadata(
+        &self,
+        path: &MemoryDocumentPath,
+    ) -> Result<Option<serde_json::Value>, FilesystemError> {
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let conn = self
+            .connect(virtual_path.clone(), FilesystemOperation::ReadFile)
+            .await?;
+        let owner_key = scoped_memory_owner_key(path.scope());
+        let db_path = db_path_for_memory_document(path);
+        let mut rows = conn
+            .query(
+                "SELECT metadata FROM memory_documents WHERE user_id = ?1 AND agent_id IS NULL AND path = ?2",
+                libsql::params![owner_key, db_path],
+            )
+            .await
+            .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::ReadFile, error.to_string()))?;
+        let Some(row) = rows.next().await.map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::ReadFile,
+                error.to_string(),
+            )
+        })?
+        else {
+            return Ok(None);
+        };
+        let metadata: String = row.get(0).map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::ReadFile,
+                error.to_string(),
+            )
+        })?;
+        serde_json::from_str(&metadata).map(Some).map_err(|error| {
+            memory_error(
+                virtual_path,
+                FilesystemOperation::ReadFile,
+                error.to_string(),
+            )
+        })
+    }
+
+    async fn write_document_metadata(
+        &self,
+        path: &MemoryDocumentPath,
+        metadata: &serde_json::Value,
+    ) -> Result<(), FilesystemError> {
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let conn = self
+            .connect(virtual_path.clone(), FilesystemOperation::WriteFile)
+            .await?;
+        let owner_key = scoped_memory_owner_key(path.scope());
+        let db_path = db_path_for_memory_document(path);
+        let metadata = serde_json::to_string(metadata).map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
+        conn.execute(
+            "UPDATE memory_documents SET metadata = ?3, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE user_id = ?1 AND agent_id IS NULL AND path = ?2",
+            libsql::params![owner_key, db_path, metadata],
+        )
+        .await
+        .map_err(|error| memory_error(virtual_path, FilesystemOperation::WriteFile, error.to_string()))?;
+        Ok(())
+    }
+
     async fn list_documents(
         &self,
         scope: &MemoryDocumentScope,
@@ -1227,6 +1657,81 @@ impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
             }
         }
         Ok(documents)
+    }
+
+    async fn search_documents(
+        &self,
+        scope: &MemoryDocumentScope,
+        request: &MemorySearchRequest,
+    ) -> Result<Vec<MemorySearchResult>, FilesystemError> {
+        if !request.full_text() {
+            return Ok(Vec::new());
+        }
+        let Some(fts_query) = escape_fts5_query(request.query()) else {
+            return Ok(Vec::new());
+        };
+        let virtual_path = scope
+            .virtual_prefix()
+            .unwrap_or_else(|_| valid_memory_path());
+        let conn = self
+            .connect(virtual_path.clone(), FilesystemOperation::ReadFile)
+            .await?;
+        let owner_key = scoped_memory_owner_key(scope);
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT d.path, c.content
+                FROM memory_chunks_fts fts
+                JOIN memory_chunks c ON c._rowid = fts.rowid
+                JOIN memory_documents d ON d.id = c.document_id
+                WHERE d.user_id = ?1 AND d.agent_id IS NULL
+                  AND memory_chunks_fts MATCH ?2
+                ORDER BY rank
+                LIMIT ?3
+                "#,
+                libsql::params![owner_key, fts_query, request.limit() as i64],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::ReadFile,
+                    error.to_string(),
+                )
+            })?;
+        let mut results = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::ReadFile,
+                error.to_string(),
+            )
+        })? {
+            let db_path: String = row.get(0).map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::ReadFile,
+                    error.to_string(),
+                )
+            })?;
+            let Some(path) = memory_document_from_db_path(scope, &db_path) else {
+                continue;
+            };
+            let snippet: String = row.get(1).map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::ReadFile,
+                    error.to_string(),
+                )
+            })?;
+            let score = 1.0 / (results.len() as f32 + 1.0);
+            results.push(MemorySearchResult {
+                path,
+                score,
+                snippet,
+            });
+        }
+        Ok(results)
     }
 }
 
@@ -1456,6 +1961,19 @@ async fn libsql_save_document_version(
 }
 
 #[cfg(feature = "libsql")]
+fn escape_fts5_query(query: &str) -> Option<String> {
+    let phrases = query
+        .split_whitespace()
+        .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
+        .collect::<Vec<_>>();
+    if phrases.is_empty() {
+        None
+    } else {
+        Some(phrases.join(" "))
+    }
+}
+
+#[cfg(feature = "libsql")]
 const LIBSQL_MEMORY_DOCUMENTS_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS memory_documents (
     id TEXT PRIMARY KEY,
@@ -1669,6 +2187,123 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
         Ok(())
     }
 
+    async fn write_document_with_options(
+        &self,
+        path: &MemoryDocumentPath,
+        bytes: &[u8],
+        options: &MemoryWriteOptions,
+    ) -> Result<(), FilesystemError> {
+        let content = std::str::from_utf8(bytes).map_err(|_| {
+            memory_error(
+                path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+                FilesystemOperation::WriteFile,
+                "memory document content must be UTF-8",
+            )
+        })?;
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let client = self
+            .client(virtual_path.clone(), FilesystemOperation::WriteFile)
+            .await?;
+        let owner_key = scoped_memory_owner_key(path.scope());
+        let db_path = db_path_for_memory_document(path);
+        let existing = client
+            .query_opt(
+                "SELECT id, content FROM memory_documents WHERE user_id = $1 AND agent_id IS NULL AND path = $2",
+                &[&owner_key, &db_path],
+            )
+            .await
+            .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?;
+        if let Some(row) = existing {
+            let document_id: uuid::Uuid = row.get("id");
+            let previous_content: String = row.get("content");
+            if options.metadata.skip_versioning != Some(true)
+                && previous_content != content
+                && !previous_content.is_empty()
+            {
+                let _ = postgres_save_document_version(
+                    &client,
+                    &virtual_path,
+                    document_id,
+                    &previous_content,
+                    options.changed_by.as_deref(),
+                )
+                .await;
+            }
+            client
+                .execute(
+                    "UPDATE memory_documents SET content = $2, updated_at = NOW() WHERE id = $1",
+                    &[&document_id, &content],
+                )
+                .await
+                .map_err(|error| {
+                    memory_error(
+                        virtual_path,
+                        FilesystemOperation::WriteFile,
+                        error.to_string(),
+                    )
+                })?;
+        } else {
+            client
+                .execute(
+                    r#"
+                    INSERT INTO memory_documents (user_id, agent_id, path, content, metadata)
+                    VALUES ($1, NULL, $2, $3, '{}'::jsonb)
+                    "#,
+                    &[&owner_key, &db_path, &content],
+                )
+                .await
+                .map_err(|error| {
+                    memory_error(
+                        virtual_path,
+                        FilesystemOperation::WriteFile,
+                        error.to_string(),
+                    )
+                })?;
+        }
+        Ok(())
+    }
+
+    async fn read_document_metadata(
+        &self,
+        path: &MemoryDocumentPath,
+    ) -> Result<Option<serde_json::Value>, FilesystemError> {
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let client = self
+            .client(virtual_path.clone(), FilesystemOperation::ReadFile)
+            .await?;
+        let owner_key = scoped_memory_owner_key(path.scope());
+        let db_path = db_path_for_memory_document(path);
+        let row = client
+            .query_opt(
+                "SELECT metadata FROM memory_documents WHERE user_id = $1 AND agent_id IS NULL AND path = $2",
+                &[&owner_key, &db_path],
+            )
+            .await
+            .map_err(|error| memory_error(virtual_path, FilesystemOperation::ReadFile, error.to_string()))?;
+        Ok(row.map(|row| row.get("metadata")))
+    }
+
+    async fn write_document_metadata(
+        &self,
+        path: &MemoryDocumentPath,
+        metadata: &serde_json::Value,
+    ) -> Result<(), FilesystemError> {
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let client = self
+            .client(virtual_path.clone(), FilesystemOperation::WriteFile)
+            .await?;
+        let owner_key = scoped_memory_owner_key(path.scope());
+        let db_path = db_path_for_memory_document(path);
+        client
+            .execute(
+                "UPDATE memory_documents SET metadata = $3, updated_at = NOW() WHERE user_id = $1 AND agent_id IS NULL AND path = $2",
+                &[&owner_key, &db_path, metadata],
+            )
+            .await
+            .map_err(|error| memory_error(virtual_path, FilesystemOperation::WriteFile, error.to_string()))?;
+        Ok(())
+    }
+
     async fn list_documents(
         &self,
         scope: &MemoryDocumentScope,
@@ -1703,6 +2338,52 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
             .filter_map(|row| {
                 let db_path: String = row.get("path");
                 memory_document_from_db_path(scope, &db_path)
+            })
+            .collect())
+    }
+
+    async fn search_documents(
+        &self,
+        scope: &MemoryDocumentScope,
+        request: &MemorySearchRequest,
+    ) -> Result<Vec<MemorySearchResult>, FilesystemError> {
+        if !request.full_text() {
+            return Ok(Vec::new());
+        }
+        let virtual_path = scope
+            .virtual_prefix()
+            .unwrap_or_else(|_| valid_memory_path());
+        let client = self
+            .client(virtual_path.clone(), FilesystemOperation::ReadFile)
+            .await?;
+        let owner_key = scoped_memory_owner_key(scope);
+        let rows = client
+            .query(
+                r#"
+                SELECT d.path, c.content, ts_rank_cd(c.content_tsv, plainto_tsquery('english', $2)) as rank
+                FROM memory_chunks c
+                JOIN memory_documents d ON d.id = c.document_id
+                WHERE d.user_id = $1 AND d.agent_id IS NULL
+                  AND c.content_tsv @@ plainto_tsquery('english', $2)
+                ORDER BY rank DESC
+                LIMIT $3
+                "#,
+                &[&owner_key, &request.query(), &(request.limit() as i64)],
+            )
+            .await
+            .map_err(|error| memory_error(virtual_path, FilesystemOperation::ReadFile, error.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                let db_path: String = row.get("path");
+                let path = memory_document_from_db_path(scope, &db_path)?;
+                let snippet: String = row.get("content");
+                let score: f32 = row.try_get::<_, f32>("rank").unwrap_or(0.0);
+                Some(MemorySearchResult {
+                    path,
+                    score,
+                    snippet,
+                })
             })
             .collect())
     }
@@ -1954,7 +2635,6 @@ CREATE INDEX IF NOT EXISTS idx_memory_documents_metadata
     ON memory_documents USING GIN (metadata jsonb_path_ops);
 "#;
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn scoped_memory_owner_key(scope: &MemoryDocumentScope) -> String {
     format!("tenant:{}:user:{}", scope.tenant_id(), scope.user_id())
 }
