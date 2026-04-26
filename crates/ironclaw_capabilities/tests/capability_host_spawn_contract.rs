@@ -6,7 +6,6 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
-use ironclaw_dispatcher::*;
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extensions::*;
 use ironclaw_filesystem::LocalFilesystem;
@@ -18,6 +17,9 @@ use ironclaw_resources::{
 };
 use ironclaw_wasm::WasmRuntime;
 use serde_json::json;
+
+mod support;
+use support::RuntimeDispatcher;
 
 #[tokio::test]
 async fn capability_host_spawns_authorized_capability_process() {

@@ -24,6 +24,7 @@ RunStateStore / ApprovalRequestStore / CapabilityLeaseStore
 ProcessServices
 WASM / Script / MCP runtime backends
 EventSink / AuditSink
+CapabilityObligationHandler
   -> HostRuntimeServices
       -> WASM / Script / MCP RuntimeAdapter wrappers
       -> RuntimeDispatcher
@@ -48,7 +49,7 @@ ProcessHost<'_>
 ApprovalResolver<'_, dyn ApprovalRequestStore, dyn CapabilityLeaseStore>
 ```
 
-It may hold shared `Arc` handles to configured services, runtime backends, and observability sinks. It adapts concrete runtime crates into `ironclaw_dispatcher::RuntimeAdapter` implementations when building `RuntimeDispatcher`.
+It may hold shared `Arc` handles to configured services, runtime backends, observability sinks, and an optional capability-obligation handler. It adapts concrete runtime crates into `ironclaw_dispatcher::RuntimeAdapter` implementations when building `RuntimeDispatcher`.
 
 It must not:
 
@@ -56,6 +57,7 @@ It must not:
 - execute runtime lanes directly outside adapter wrappers
 - own process state transitions or cancellation semantics
 - own approval resolution or lease semantics; `approval_resolver()` only wires `ironclaw_approvals::ApprovalResolver`
+- own obligation semantics; `with_obligation_handler(...)` only passes a shared `CapabilityObligationHandler` through to `CapabilityHost`
 - expose process lifecycle APIs through `CapabilityHost`
 - turn process subscriptions into a message bus
 - weaken tenant/user scoped persistence boundaries
@@ -90,7 +92,8 @@ let services = HostRuntimeServices::new(
 .with_capability_leases(capability_leases)
 .with_script_runtime(script_runtime)
 .with_event_sink(event_sink)
-.with_audit_sink(audit_sink);
+.with_audit_sink(audit_sink)
+.with_obligation_handler(obligation_handler);
 
 let dispatcher = services.runtime_dispatcher_arc();
 let capability_host = services.capability_host_for_runtime_dispatcher(&dispatcher);
@@ -104,7 +107,7 @@ For tests or custom process executors, callers can also provide an arbitrary dis
 let capability_host = services.capability_host(&dispatcher, executor);
 ```
 
-`capability_host_for_runtime_dispatcher(...)` derives a `DispatchProcessExecutor` from the same runtime dispatcher used for immediate dispatch. Spawned capability-backed process work therefore routes through the authorized dispatch interface after `CapabilityHost::spawn_json(...)` has authorized and recorded the process start. The concrete WASM, Script, and MCP runtimes are wrapped by `WasmRuntimeAdapter`, `ScriptRuntimeAdapter`, and `McpRuntimeAdapter` here instead of being hardcoded into `ironclaw_dispatcher`.
+`capability_host_for_runtime_dispatcher(...)` derives a `DispatchProcessExecutor` from the same runtime dispatcher used for immediate dispatch. Spawned capability-backed process work therefore routes through the authorized dispatch interface after `CapabilityHost::spawn_json(...)` has authorized, satisfied configured obligations, and recorded the process start. The concrete WASM, Script, and MCP runtimes are wrapped by `WasmRuntimeAdapter`, `ScriptRuntimeAdapter`, and `McpRuntimeAdapter` here instead of being hardcoded into `ironclaw_dispatcher`.
 
 ---
 
@@ -127,6 +130,8 @@ ProcessHost status/kill/result/output
 ```
 
 `approval_resolver()` uses the same `ApprovalRequestStore`, `CapabilityLeaseStore`, and optional `AuditSink` handles configured for `CapabilityHost::resume_json(...)`. This prevents accidental split wiring where one component approves a request into one lease store while resume checks another, or where approval audit disappears because the resolver was not wired to the shared audit sink.
+
+If configured, the shared `CapabilityObligationHandler` is passed into each `CapabilityHost` built by this helper. `HostRuntimeServices` does not inspect or satisfy obligations itself; unsupported or failed handler outcomes remain fail-closed inside `CapabilityHost` before dispatch, process start, or approval lease claim.
 
 This also prevents accidental split wiring where one component starts a process and another reads results or signals cancellation from a different store/registry.
 

@@ -4,4 +4,5 @@
 - Use the neutral `CapabilityDispatcher` port; do not add a normal dependency on concrete `ironclaw_dispatcher` or runtime crates.
 - Do not absorb process lifecycle/result APIs; those belong in `ironclaw_processes::ProcessHost`.
 - Approval resume must validate and claim the matching fingerprinted lease before dispatch.
-- Authorization denial or unsupported obligations must fail before runtime dispatch or process start.
+- Authorization denial or unsupported/failed obligations must fail before runtime dispatch, process start, or approval lease claim.
+- Keep obligation handling behind the `CapabilityObligationHandler` seam; do not add direct dependencies on secrets, network, events, or concrete runtime crates for obligation semantics.

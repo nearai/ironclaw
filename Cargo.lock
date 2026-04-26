@@ -4020,7 +4020,6 @@ dependencies = [
  "async-trait",
  "ironclaw_approvals",
  "ironclaw_authorization",
- "ironclaw_dispatcher",
  "ironclaw_events",
  "ironclaw_extensions",
  "ironclaw_filesystem",

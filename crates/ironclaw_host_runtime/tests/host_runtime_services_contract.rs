@@ -9,7 +9,10 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_approvals::*;
 use ironclaw_authorization::*;
-use ironclaw_capabilities::CapabilitySpawnRequest;
+use ironclaw_capabilities::{
+    CapabilityObligationError, CapabilityObligationHandler, CapabilityObligationPhase,
+    CapabilityObligationRequest, CapabilitySpawnRequest,
+};
 use ironclaw_dispatcher::{CapabilityDispatchRequest, CapabilityDispatchResult, DispatchError};
 use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
@@ -187,6 +190,37 @@ async fn host_runtime_services_composes_approval_resolver_with_shared_audit_sink
 }
 
 #[tokio::test]
+async fn host_runtime_services_configures_capability_obligation_handler() {
+    let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
+    let filesystem = Arc::new(LocalFilesystem::new());
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let authorizer = Arc::new(ObligationAuthorizer);
+    let process_services = ProcessServices::in_memory();
+    let observed = Arc::new(AtomicBool::new(false));
+    let handler = Arc::new(FlaggingObligationHandler {
+        observed: Arc::clone(&observed),
+    });
+    let services =
+        HostRuntimeServices::new(registry, filesystem, governor, authorizer, process_services)
+            .with_obligation_handler(handler);
+    let dispatcher = NoopDispatcher;
+    let capability_host = services.capability_host(&dispatcher, Arc::new(ImmediateExecutor));
+    let context = execution_context(CapabilitySet::default());
+
+    capability_host
+        .spawn_json(CapabilitySpawnRequest {
+            context,
+            capability_id: CapabilityId::new("echo-script.say").unwrap(),
+            estimate: ResourceEstimate::default(),
+            input: json!({"message": "obligated spawn"}),
+        })
+        .await
+        .unwrap();
+
+    assert!(observed.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
 async fn host_runtime_services_can_configure_spawn_run_state_stores() {
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
     let filesystem = Arc::new(LocalFilesystem::new());
@@ -238,6 +272,20 @@ impl ScriptBackend for EchoScriptBackend {
     }
 }
 
+struct ImmediateExecutor;
+
+#[async_trait]
+impl ProcessExecutor for ImmediateExecutor {
+    async fn execute(
+        &self,
+        _request: ProcessExecutionRequest,
+    ) -> Result<ProcessExecutionResult, ProcessExecutionError> {
+        Ok(ProcessExecutionResult {
+            output: json!({"ok": true}),
+        })
+    }
+}
+
 struct CancellationObservingExecutor {
     observed_cancel: Arc<AtomicBool>,
 }
@@ -253,6 +301,50 @@ impl ProcessExecutor for CancellationObservingExecutor {
         Ok(ProcessExecutionResult {
             output: json!({"cancelled": true}),
         })
+    }
+}
+
+struct FlaggingObligationHandler {
+    observed: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl CapabilityObligationHandler for FlaggingObligationHandler {
+    async fn satisfy(
+        &self,
+        request: CapabilityObligationRequest<'_>,
+    ) -> Result<(), CapabilityObligationError> {
+        assert_eq!(request.phase, CapabilityObligationPhase::Spawn);
+        assert_eq!(request.obligations, &[Obligation::AuditBefore]);
+        self.observed.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+struct ObligationAuthorizer;
+
+#[async_trait]
+impl CapabilityDispatchAuthorizer for ObligationAuthorizer {
+    async fn authorize_dispatch(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+    ) -> Decision {
+        Decision::Allow {
+            obligations: vec![Obligation::AuditBefore],
+        }
+    }
+
+    async fn authorize_spawn(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+    ) -> Decision {
+        Decision::Allow {
+            obligations: vec![Obligation::AuditBefore],
+        }
     }
 }
 
