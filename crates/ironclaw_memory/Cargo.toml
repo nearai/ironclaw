@@ -12,8 +12,8 @@ publish = false
 
 [features]
 default = []
-postgres = ["dep:deadpool-postgres", "dep:tokio-postgres", "dep:uuid"]
-libsql = ["dep:libsql", "dep:uuid"]
+postgres = ["dep:deadpool-postgres", "dep:tokio-postgres", "dep:pgvector"]
+libsql = ["dep:libsql"]
 
 [dependencies]
 async-trait = "0.1"
@@ -21,8 +21,10 @@ deadpool-postgres = { version = "0.14", optional = true }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
-tokio-postgres = { version = "0.7", optional = true }
-uuid = { version = "1", features = ["v4"], optional = true }
+pgvector = { version = "0.4", features = ["postgres"], optional = true }
+sha2 = "0.10"
+tokio-postgres = { version = "0.7", features = ["with-uuid-1"], optional = true }
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"

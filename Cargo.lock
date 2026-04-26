@@ -4205,6 +4205,8 @@ dependencies = [
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "libsql",
+ "pgvector",
+ "sha2",
  "tempfile",
  "tokio",
  "tokio-postgres",

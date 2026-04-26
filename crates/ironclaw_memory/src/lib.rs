@@ -12,6 +12,7 @@ use ironclaw_filesystem::{
     DirEntry, FileStat, FileType, FilesystemError, FilesystemOperation, RootFilesystem,
 };
 use ironclaw_host_api::{HostApiError, VirtualPath};
+use sha2::{Digest, Sha256};
 
 /// Tenant/user/project scope for DB-backed memory documents exposed as virtual files.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -213,6 +214,176 @@ pub trait MemoryDocumentRepository: Send + Sync {
 #[async_trait]
 pub trait MemoryDocumentIndexer: Send + Sync {
     async fn reindex_document(&self, path: &MemoryDocumentPath) -> Result<(), FilesystemError>;
+}
+
+/// Repository operations used by the memory indexer to keep chunk/search rows in sync.
+#[async_trait]
+pub trait MemoryDocumentIndexRepository: Send + Sync {
+    async fn replace_document_chunks_if_current(
+        &self,
+        path: &MemoryDocumentPath,
+        expected_content_hash: &str,
+        chunks: &[MemoryChunkWrite],
+    ) -> Result<(), FilesystemError>;
+
+    async fn delete_document_chunks(
+        &self,
+        path: &MemoryDocumentPath,
+    ) -> Result<(), FilesystemError>;
+}
+
+/// Configuration for document chunking.
+///
+/// Ported from the current workspace chunker so Reborn memory indexing preserves
+/// existing search recall behavior.
+#[derive(Debug, Clone)]
+pub struct ChunkConfig {
+    pub chunk_size: usize,
+    pub overlap_percent: f32,
+    pub min_chunk_size: usize,
+}
+
+impl Default for ChunkConfig {
+    fn default() -> Self {
+        Self {
+            chunk_size: 800,
+            overlap_percent: 0.15,
+            min_chunk_size: 50,
+        }
+    }
+}
+
+impl ChunkConfig {
+    pub fn with_chunk_size(mut self, size: usize) -> Self {
+        self.chunk_size = size;
+        self
+    }
+
+    pub fn with_overlap(mut self, percent: f32) -> Self {
+        self.overlap_percent = percent.clamp(0.0, 0.5);
+        self
+    }
+
+    fn overlap_size(&self) -> usize {
+        (self.chunk_size as f32 * self.overlap_percent) as usize
+    }
+
+    fn step_size(&self) -> usize {
+        self.chunk_size.saturating_sub(self.overlap_size())
+    }
+}
+
+/// A new chunk to insert for a document.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryChunkWrite {
+    pub content: String,
+    pub embedding: Option<Vec<f32>>,
+}
+
+/// Split a document into overlapping chunks using current workspace semantics.
+pub fn chunk_document(content: &str, config: ChunkConfig) -> Vec<String> {
+    if content.is_empty() {
+        return Vec::new();
+    }
+
+    let words: Vec<&str> = content.split_whitespace().collect();
+    if words.is_empty() {
+        return Vec::new();
+    }
+
+    if words.len() <= config.chunk_size {
+        return vec![content.to_string()];
+    }
+
+    let step = config.step_size();
+    let mut chunks = Vec::new();
+    let mut start = 0;
+
+    while start < words.len() {
+        let end = (start + config.chunk_size).min(words.len());
+        let chunk_words = &words[start..end];
+
+        if chunk_words.len() < config.min_chunk_size
+            && let Some(last) = chunks.pop()
+        {
+            let combined = format!("{} {}", last, chunk_words.join(" "));
+            chunks.push(combined);
+            break;
+        }
+
+        chunks.push(chunk_words.join(" "));
+        start += step;
+
+        if start + config.min_chunk_size >= words.len() && end == words.len() {
+            break;
+        }
+    }
+
+    chunks
+}
+
+/// Compute a SHA-256 content hash using the current workspace format.
+pub fn content_sha256(content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+/// Memory document indexer that chunks documents and updates DB-backed chunk rows.
+pub struct ChunkingMemoryDocumentIndexer<R> {
+    repository: Arc<R>,
+    chunk_config: ChunkConfig,
+}
+
+impl<R> ChunkingMemoryDocumentIndexer<R>
+where
+    R: MemoryDocumentRepository + MemoryDocumentIndexRepository + 'static,
+{
+    pub fn new(repository: Arc<R>) -> Self {
+        Self {
+            repository,
+            chunk_config: ChunkConfig::default(),
+        }
+    }
+
+    pub fn with_chunk_config(mut self, chunk_config: ChunkConfig) -> Self {
+        self.chunk_config = chunk_config;
+        self
+    }
+}
+
+#[async_trait]
+impl<R> MemoryDocumentIndexer for ChunkingMemoryDocumentIndexer<R>
+where
+    R: MemoryDocumentRepository + MemoryDocumentIndexRepository + 'static,
+{
+    async fn reindex_document(&self, path: &MemoryDocumentPath) -> Result<(), FilesystemError> {
+        let Some(bytes) = self.repository.read_document(path).await? else {
+            return Ok(());
+        };
+        let content = std::str::from_utf8(&bytes).map_err(|_| {
+            memory_error(
+                path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+                FilesystemOperation::WriteFile,
+                "memory document content must be UTF-8",
+            )
+        })?;
+        let content_hash_at_read = content_sha256(content);
+        let chunks = chunk_document(content, self.chunk_config.clone())
+            .into_iter()
+            .map(|content| MemoryChunkWrite {
+                content,
+                embedding: None,
+            })
+            .collect::<Vec<_>>();
+        if chunks.is_empty() {
+            self.repository.delete_document_chunks(path).await
+        } else {
+            self.repository
+                .replace_document_chunks_if_current(path, &content_hash_at_read, &chunks)
+                .await
+        }
+    }
 }
 
 /// In-memory memory document repository for tests and examples.
@@ -517,28 +688,58 @@ impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
             .await?;
         let owner_key = scoped_memory_owner_key(path.scope());
         let db_path = db_path_for_memory_document(path);
-        let mut rows = conn
-            .query(
-                "SELECT id FROM memory_documents WHERE user_id = ?1 AND agent_id IS NULL AND path = ?2",
-                libsql::params![owner_key.as_str(), db_path.as_str()],
-            )
-            .await
-            .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?;
-        if rows
-            .next()
-            .await
-            .map_err(|error| {
-                memory_error(
-                    virtual_path.clone(),
-                    FilesystemOperation::WriteFile,
-                    error.to_string(),
+        let existing = {
+            let mut rows = conn
+                .query(
+                    "SELECT id, content FROM memory_documents WHERE user_id = ?1 AND agent_id IS NULL AND path = ?2",
+                    libsql::params![owner_key.as_str(), db_path.as_str()],
                 )
-            })?
-            .is_some()
-        {
+                .await
+                .map_err(|error| {
+                    memory_error(
+                        virtual_path.clone(),
+                        FilesystemOperation::WriteFile,
+                        error.to_string(),
+                    )
+                })?;
+            rows.next()
+                .await
+                .map_err(|error| {
+                    memory_error(
+                        virtual_path.clone(),
+                        FilesystemOperation::WriteFile,
+                        error.to_string(),
+                    )
+                })?
+                .map(|row| {
+                    let id: String = row.get(0)?;
+                    let previous_content: String = row.get(1)?;
+                    Ok::<_, libsql::Error>((id, previous_content))
+                })
+                .transpose()
+                .map_err(|error| {
+                    memory_error(
+                        virtual_path.clone(),
+                        FilesystemOperation::WriteFile,
+                        error.to_string(),
+                    )
+                })?
+        };
+
+        if let Some((document_id, previous_content)) = existing {
+            if previous_content != content && !previous_content.is_empty() {
+                let _ = libsql_save_document_version(
+                    &conn,
+                    &virtual_path,
+                    &document_id,
+                    &previous_content,
+                    Some(owner_key.as_str()),
+                )
+                .await;
+            }
             conn.execute(
-                "UPDATE memory_documents SET content = ?3, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE user_id = ?1 AND agent_id IS NULL AND path = ?2",
-                libsql::params![owner_key, db_path, content],
+                "UPDATE memory_documents SET content = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
+                libsql::params![document_id, content],
             )
             .await
             .map_err(|error| memory_error(virtual_path, FilesystemOperation::WriteFile, error.to_string()))?;
@@ -638,6 +839,231 @@ impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
 }
 
 #[cfg(feature = "libsql")]
+#[async_trait]
+impl MemoryDocumentIndexRepository for LibSqlMemoryDocumentRepository {
+    async fn replace_document_chunks_if_current(
+        &self,
+        path: &MemoryDocumentPath,
+        expected_content_hash: &str,
+        chunks: &[MemoryChunkWrite],
+    ) -> Result<(), FilesystemError> {
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let conn = self
+            .connect(virtual_path.clone(), FilesystemOperation::WriteFile)
+            .await?;
+        let Some((document_id, content)) =
+            libsql_document_id_and_content(&conn, path, &virtual_path).await?
+        else {
+            return Ok(());
+        };
+        if content_sha256(&content) != expected_content_hash {
+            return Ok(());
+        }
+
+        let tx = conn
+            .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
+                )
+            })?;
+        tx.execute(
+            "DELETE FROM memory_chunks WHERE document_id = ?1",
+            libsql::params![document_id.as_str()],
+        )
+        .await
+        .map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
+        for (index, chunk) in chunks.iter().enumerate() {
+            let embedding_blob = chunk.embedding.as_ref().map(|embedding| {
+                libsql::Value::Blob(
+                    embedding
+                        .iter()
+                        .flat_map(|value| value.to_le_bytes())
+                        .collect(),
+                )
+            });
+            tx.execute(
+                r#"
+                INSERT INTO memory_chunks (id, document_id, chunk_index, content, embedding)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                "#,
+                libsql::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    document_id.as_str(),
+                    index as i64,
+                    chunk.content.as_str(),
+                    embedding_blob,
+                ],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
+                )
+            })?;
+        }
+        tx.commit().await.map_err(|error| {
+            memory_error(
+                virtual_path,
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
+        Ok(())
+    }
+
+    async fn delete_document_chunks(
+        &self,
+        path: &MemoryDocumentPath,
+    ) -> Result<(), FilesystemError> {
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let conn = self
+            .connect(virtual_path.clone(), FilesystemOperation::WriteFile)
+            .await?;
+        let Some((document_id, _content)) =
+            libsql_document_id_and_content(&conn, path, &virtual_path).await?
+        else {
+            return Ok(());
+        };
+        conn.execute(
+            "DELETE FROM memory_chunks WHERE document_id = ?1",
+            libsql::params![document_id],
+        )
+        .await
+        .map_err(|error| {
+            memory_error(
+                virtual_path,
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "libsql")]
+async fn libsql_document_id_and_content(
+    conn: &libsql::Connection,
+    path: &MemoryDocumentPath,
+    virtual_path: &VirtualPath,
+) -> Result<Option<(String, String)>, FilesystemError> {
+    let owner_key = scoped_memory_owner_key(path.scope());
+    let db_path = db_path_for_memory_document(path);
+    let mut rows = conn
+        .query(
+            "SELECT id, content FROM memory_documents WHERE user_id = ?1 AND agent_id IS NULL AND path = ?2",
+            libsql::params![owner_key, db_path],
+        )
+        .await
+        .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?;
+    rows.next()
+        .await
+        .map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?
+        .map(|row| {
+            let id: String = row.get(0)?;
+            let content: String = row.get(1)?;
+            Ok::<_, libsql::Error>((id, content))
+        })
+        .transpose()
+        .map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })
+}
+
+#[cfg(feature = "libsql")]
+async fn libsql_save_document_version(
+    conn: &libsql::Connection,
+    virtual_path: &VirtualPath,
+    document_id: &str,
+    content: &str,
+    changed_by: Option<&str>,
+) -> Result<i32, FilesystemError> {
+    conn.execute("BEGIN IMMEDIATE", libsql::params![])
+        .await
+        .map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
+    let result = async {
+        let next_version = {
+            let mut rows = conn
+                .query(
+                    "SELECT COALESCE(MAX(version), 0) + 1 FROM memory_document_versions WHERE document_id = ?1",
+                    libsql::params![document_id],
+                )
+                .await
+                .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?;
+            let row = rows
+                .next()
+                .await
+                .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?
+                .ok_or_else(|| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, "missing version row"))?;
+            row.get::<i64>(0)
+                .map(|version| version as i32)
+                .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?
+        };
+        conn.execute(
+            r#"
+            INSERT INTO memory_document_versions
+                (id, document_id, version, content, content_hash, changed_by)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            libsql::params![
+                uuid::Uuid::new_v4().to_string(),
+                document_id,
+                next_version as i64,
+                content,
+                content_sha256(content),
+                changed_by,
+            ],
+        )
+        .await
+        .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?;
+        Ok::<i32, FilesystemError>(next_version)
+    }
+    .await;
+
+    if result.is_ok() {
+        conn.execute("COMMIT", libsql::params![])
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
+                )
+            })?;
+    } else {
+        let _ = conn.execute("ROLLBACK", libsql::params![]).await;
+    }
+    result
+}
+
+#[cfg(feature = "libsql")]
 const LIBSQL_MEMORY_DOCUMENTS_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS memory_documents (
     id TEXT PRIMARY KEY,
@@ -647,10 +1073,69 @@ CREATE TABLE IF NOT EXISTS memory_documents (
     content TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    metadata TEXT NOT NULL DEFAULT '{}'
+    metadata TEXT NOT NULL DEFAULT '{}',
+    UNIQUE (user_id, agent_id, path)
 );
+
 CREATE INDEX IF NOT EXISTS idx_memory_documents_user ON memory_documents(user_id);
 CREATE INDEX IF NOT EXISTS idx_memory_documents_path ON memory_documents(user_id, path);
+CREATE INDEX IF NOT EXISTS idx_memory_documents_updated ON memory_documents(updated_at DESC);
+
+CREATE TRIGGER IF NOT EXISTS update_memory_documents_updated_at
+    AFTER UPDATE ON memory_documents
+    FOR EACH ROW
+    WHEN NEW.updated_at = OLD.updated_at
+    BEGIN
+        UPDATE memory_documents SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = NEW.id;
+    END;
+
+CREATE TABLE IF NOT EXISTS memory_chunks (
+    _rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    document_id TEXT NOT NULL REFERENCES memory_documents(id) ON DELETE CASCADE,
+    chunk_index INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    embedding BLOB,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE (document_id, chunk_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_chunks_document ON memory_chunks(document_id);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_chunks_fts USING fts5(
+    content,
+    content='memory_chunks',
+    content_rowid='_rowid'
+);
+
+CREATE TRIGGER IF NOT EXISTS memory_chunks_fts_insert AFTER INSERT ON memory_chunks BEGIN
+    INSERT INTO memory_chunks_fts(rowid, content) VALUES (new._rowid, new.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memory_chunks_fts_delete AFTER DELETE ON memory_chunks BEGIN
+    INSERT INTO memory_chunks_fts(memory_chunks_fts, rowid, content)
+        VALUES ('delete', old._rowid, old.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memory_chunks_fts_update AFTER UPDATE ON memory_chunks BEGIN
+    INSERT INTO memory_chunks_fts(memory_chunks_fts, rowid, content)
+        VALUES ('delete', old._rowid, old.content);
+    INSERT INTO memory_chunks_fts(rowid, content) VALUES (new._rowid, new.content);
+END;
+
+CREATE TABLE IF NOT EXISTS memory_document_versions (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL REFERENCES memory_documents(id) ON DELETE CASCADE,
+    version INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    changed_by TEXT,
+    UNIQUE(document_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_doc_versions_lookup
+    ON memory_document_versions(document_id, version DESC);
 "#;
 
 /// PostgreSQL repository adapter for the existing `memory_documents` table shape.
@@ -738,14 +1223,40 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
             .await?;
         let owner_key = scoped_memory_owner_key(path.scope());
         let db_path = db_path_for_memory_document(path);
-        let updated = client
-            .execute(
-                "UPDATE memory_documents SET content = $3, updated_at = NOW() WHERE user_id = $1 AND agent_id IS NULL AND path = $2",
-                &[&owner_key, &db_path, &content],
+        let existing = client
+            .query_opt(
+                "SELECT id, content FROM memory_documents WHERE user_id = $1 AND agent_id IS NULL AND path = $2",
+                &[&owner_key, &db_path],
             )
             .await
             .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?;
-        if updated == 0 {
+        if let Some(row) = existing {
+            let document_id: uuid::Uuid = row.get("id");
+            let previous_content: String = row.get("content");
+            if previous_content != content && !previous_content.is_empty() {
+                let _ = postgres_save_document_version(
+                    &client,
+                    &virtual_path,
+                    document_id,
+                    &previous_content,
+                    Some(owner_key.as_str()),
+                )
+                .await;
+            }
+            client
+                .execute(
+                    "UPDATE memory_documents SET content = $2, updated_at = NOW() WHERE id = $1",
+                    &[&document_id, &content],
+                )
+                .await
+                .map_err(|error| {
+                    memory_error(
+                        virtual_path,
+                        FilesystemOperation::WriteFile,
+                        error.to_string(),
+                    )
+                })?;
+        } else {
             client
                 .execute(
                     r#"
@@ -806,8 +1317,186 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
 }
 
 #[cfg(feature = "postgres")]
+#[async_trait]
+impl MemoryDocumentIndexRepository for PostgresMemoryDocumentRepository {
+    async fn replace_document_chunks_if_current(
+        &self,
+        path: &MemoryDocumentPath,
+        expected_content_hash: &str,
+        chunks: &[MemoryChunkWrite],
+    ) -> Result<(), FilesystemError> {
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let mut client = self
+            .client(virtual_path.clone(), FilesystemOperation::WriteFile)
+            .await?;
+        let owner_key = scoped_memory_owner_key(path.scope());
+        let db_path = db_path_for_memory_document(path);
+        let tx = client.transaction().await.map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
+        let Some(row) = tx
+            .query_opt(
+                "SELECT id, content FROM memory_documents WHERE user_id = $1 AND agent_id IS NULL AND path = $2 FOR UPDATE",
+                &[&owner_key, &db_path],
+            )
+            .await
+            .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?
+        else {
+            return Ok(());
+        };
+        let document_id: uuid::Uuid = row.get("id");
+        let content: String = row.get("content");
+        if content_sha256(&content) != expected_content_hash {
+            return Ok(());
+        }
+        tx.execute(
+            "DELETE FROM memory_chunks WHERE document_id = $1",
+            &[&document_id],
+        )
+        .await
+        .map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
+        for (index, chunk) in chunks.iter().enumerate() {
+            let chunk_id = uuid::Uuid::new_v4();
+            let chunk_index = index as i32;
+            let embedding_vec = chunk
+                .embedding
+                .as_ref()
+                .map(|embedding| pgvector::Vector::from(embedding.clone()));
+            tx.execute(
+                r#"
+                INSERT INTO memory_chunks (id, document_id, chunk_index, content, embedding)
+                VALUES ($1, $2, $3, $4, $5)
+                "#,
+                &[
+                    &chunk_id,
+                    &document_id,
+                    &chunk_index,
+                    &chunk.content,
+                    &embedding_vec,
+                ],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
+                )
+            })?;
+        }
+        tx.commit().await.map_err(|error| {
+            memory_error(
+                virtual_path,
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
+        Ok(())
+    }
+
+    async fn delete_document_chunks(
+        &self,
+        path: &MemoryDocumentPath,
+    ) -> Result<(), FilesystemError> {
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let client = self
+            .client(virtual_path.clone(), FilesystemOperation::WriteFile)
+            .await?;
+        let owner_key = scoped_memory_owner_key(path.scope());
+        let db_path = db_path_for_memory_document(path);
+        client
+            .execute(
+                r#"
+                DELETE FROM memory_chunks
+                WHERE document_id IN (
+                    SELECT id FROM memory_documents
+                    WHERE user_id = $1 AND agent_id IS NULL AND path = $2
+                )
+                "#,
+                &[&owner_key, &db_path],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path,
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
+                )
+            })?;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_save_document_version(
+    client: &deadpool_postgres::Object,
+    virtual_path: &VirtualPath,
+    document_id: uuid::Uuid,
+    content: &str,
+    changed_by: Option<&str>,
+) -> Result<i32, FilesystemError> {
+    client
+        .execute(
+            "SELECT 1 FROM memory_documents WHERE id = $1 FOR UPDATE",
+            &[&document_id],
+        )
+        .await
+        .map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
+    let row = client
+        .query_one(
+            "SELECT COALESCE(MAX(version), 0) + 1 AS next_version FROM memory_document_versions WHERE document_id = $1",
+            &[&document_id],
+        )
+        .await
+        .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?;
+    let next_version: i32 = row.get(0);
+    client
+        .execute(
+            r#"
+            INSERT INTO memory_document_versions
+                (id, document_id, version, content, content_hash, changed_by)
+            VALUES (gen_random_uuid(), $1, $2, $3, $4, $5)
+            "#,
+            &[
+                &document_id,
+                &next_version,
+                &content,
+                &content_sha256(content),
+                &changed_by,
+            ],
+        )
+        .await
+        .map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
+    Ok(next_version)
+}
+
+#[cfg(feature = "postgres")]
 const POSTGRES_MEMORY_DOCUMENTS_SCHEMA: &str = r#"
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS vector;
+
 CREATE TABLE IF NOT EXISTS memory_documents (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id TEXT NOT NULL,
@@ -816,10 +1505,61 @@ CREATE TABLE IF NOT EXISTS memory_documents (
     content TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    metadata JSONB NOT NULL DEFAULT '{}'
+    metadata JSONB NOT NULL DEFAULT '{}',
+    CONSTRAINT unique_path_per_user UNIQUE (user_id, agent_id, path)
 );
+
 CREATE INDEX IF NOT EXISTS idx_memory_documents_user ON memory_documents(user_id);
 CREATE INDEX IF NOT EXISTS idx_memory_documents_path ON memory_documents(user_id, path);
+CREATE INDEX IF NOT EXISTS idx_memory_documents_path_prefix ON memory_documents(user_id, path text_pattern_ops);
+CREATE INDEX IF NOT EXISTS idx_memory_documents_updated ON memory_documents(updated_at DESC);
+
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+DROP TRIGGER IF EXISTS update_memory_documents_updated_at ON memory_documents;
+CREATE TRIGGER update_memory_documents_updated_at
+    BEFORE UPDATE ON memory_documents
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TABLE IF NOT EXISTS memory_chunks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id UUID NOT NULL REFERENCES memory_documents(id) ON DELETE CASCADE,
+    chunk_index INT NOT NULL,
+    content TEXT NOT NULL,
+    content_tsv TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
+    embedding VECTOR(1536),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT unique_chunk_per_doc UNIQUE (document_id, chunk_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_chunks_tsv ON memory_chunks USING GIN(content_tsv);
+CREATE INDEX IF NOT EXISTS idx_memory_chunks_embedding ON memory_chunks
+    USING hnsw(embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+CREATE INDEX IF NOT EXISTS idx_memory_chunks_document ON memory_chunks(document_id);
+
+CREATE TABLE IF NOT EXISTS memory_document_versions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id UUID NOT NULL REFERENCES memory_documents(id) ON DELETE CASCADE,
+    version INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    changed_by TEXT,
+    UNIQUE(document_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_doc_versions_lookup
+    ON memory_document_versions(document_id, version DESC);
+CREATE INDEX IF NOT EXISTS idx_memory_documents_metadata
+    ON memory_documents USING GIN (metadata jsonb_path_ops);
 "#;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]

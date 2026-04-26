@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::VirtualPath;
 use ironclaw_memory::{
-    MemoryDocumentFilesystem, MemoryDocumentPath, MemoryDocumentRepository, MemoryDocumentScope,
+    ChunkConfig, ChunkingMemoryDocumentIndexer, MemoryDocumentFilesystem, MemoryDocumentPath,
+    MemoryDocumentRepository, MemoryDocumentScope,
 };
 
 #[cfg(feature = "libsql")]
@@ -100,6 +101,112 @@ async fn libsql_memory_document_filesystem_reads_and_writes_through_db_repositor
         filesystem.read_file(&path).await.unwrap(),
         b"filesystem db note"
     );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_memory_document_filesystem_reuses_current_chunking_and_fts_schema() {
+    let (db, _dir) = libsql_db().await;
+    let repository = std::sync::Arc::new(LibSqlMemoryDocumentRepository::new(db.clone()));
+    repository.run_migrations().await.unwrap();
+    let indexer = std::sync::Arc::new(
+        ChunkingMemoryDocumentIndexer::new(repository.clone()).with_chunk_config(ChunkConfig {
+            chunk_size: 4,
+            overlap_percent: 0.0,
+            min_chunk_size: 1,
+        }),
+    );
+    let filesystem = MemoryDocumentFilesystem::new(repository).with_indexer(indexer);
+    let path =
+        VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/notes.md").unwrap();
+
+    filesystem
+        .write_file(&path, b"alpha beta gamma delta epsilon zeta")
+        .await
+        .unwrap();
+
+    let conn = db.connect().unwrap();
+    let mut chunk_rows = conn
+        .query(
+            "SELECT c.chunk_index, c.content FROM memory_chunks c JOIN memory_documents d ON d.id = c.document_id ORDER BY c.chunk_index",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut chunks = Vec::new();
+    while let Some(row) = chunk_rows.next().await.unwrap() {
+        chunks.push((row.get::<i64>(0).unwrap(), row.get::<String>(1).unwrap()));
+    }
+    assert_eq!(
+        chunks,
+        vec![
+            (0, "alpha beta gamma delta".to_string()),
+            (1, "epsilon zeta".to_string()),
+        ]
+    );
+
+    let mut fts_rows = conn
+        .query(
+            r#"
+            SELECT c.content
+            FROM memory_chunks_fts fts
+            JOIN memory_chunks c ON c._rowid = fts.rowid
+            WHERE memory_chunks_fts MATCH 'epsilon'
+            "#,
+            (),
+        )
+        .await
+        .unwrap();
+    let row = fts_rows.next().await.unwrap().expect("fts result");
+    assert_eq!(row.get::<String>(0).unwrap(), "epsilon zeta");
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_memory_document_filesystem_versions_previous_content_and_replaces_chunks() {
+    let (db, _dir) = libsql_db().await;
+    let repository = std::sync::Arc::new(LibSqlMemoryDocumentRepository::new(db.clone()));
+    repository.run_migrations().await.unwrap();
+    let indexer = std::sync::Arc::new(ChunkingMemoryDocumentIndexer::new(repository.clone()));
+    let filesystem = MemoryDocumentFilesystem::new(repository).with_indexer(indexer);
+    let path =
+        VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/notes.md").unwrap();
+
+    filesystem
+        .write_file(&path, b"first content")
+        .await
+        .unwrap();
+    filesystem
+        .write_file(&path, b"second content")
+        .await
+        .unwrap();
+
+    let conn = db.connect().unwrap();
+    let mut version_rows = conn
+        .query(
+            "SELECT content, content_hash, changed_by FROM memory_document_versions",
+            (),
+        )
+        .await
+        .unwrap();
+    let version = version_rows.next().await.unwrap().expect("version row");
+    assert_eq!(version.get::<String>(0).unwrap(), "first content");
+    assert_eq!(
+        version.get::<String>(1).unwrap(),
+        "sha256:2cd4837c7726f70047c8fdafb52801dbfef2cb4f7bc4cfb2e0441980f9d4a3b8"
+    );
+    assert_eq!(
+        version.get::<Option<String>>(2).unwrap().as_deref(),
+        Some("tenant:tenant-a:user:alice")
+    );
+
+    let mut chunk_rows = conn
+        .query("SELECT content FROM memory_chunks ORDER BY chunk_index", ())
+        .await
+        .unwrap();
+    let only_chunk = chunk_rows.next().await.unwrap().expect("chunk row");
+    assert_eq!(only_chunk.get::<String>(0).unwrap(), "second content");
+    assert!(chunk_rows.next().await.unwrap().is_none());
 }
 
 #[cfg(feature = "libsql")]
