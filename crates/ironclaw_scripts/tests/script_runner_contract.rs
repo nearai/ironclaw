@@ -147,6 +147,42 @@ fn script_runtime_releases_reservation_when_backend_exits_nonzero() {
 }
 
 #[test]
+fn script_runtime_releases_reservation_when_reconcile_fails_after_successful_execution() {
+    let backend = RecordingScriptBackend::success(ScriptBackendOutput::json(json!({"ok": true})));
+    let runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), backend);
+    let governor = ReconcileFailingGovernor::new();
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor.set_limit(
+        account.clone(),
+        ResourceLimits {
+            max_concurrency_slots: Some(1),
+            ..ResourceLimits::default()
+        },
+    );
+    let capability_id = CapabilityId::new("script.echo").unwrap();
+
+    let err = runtime
+        .execute_extension_json(
+            &governor,
+            ScriptExecutionRequest {
+                package: &script_package(),
+                capability_id: &capability_id,
+                scope,
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    ..ResourceEstimate::default()
+                },
+                invocation: ScriptInvocation { input: json!({}) },
+            },
+        )
+        .unwrap_err();
+
+    assert!(matches!(err, ScriptError::Resource(_)));
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+}
+
+#[test]
 fn script_runtime_releases_reservation_when_output_limit_fails() {
     let backend = RecordingScriptBackend::success(ScriptBackendOutput {
         exit_code: 0,
@@ -273,6 +309,72 @@ impl ScriptBackend for RecordingScriptBackend {
     fn execute(&self, request: ScriptBackendRequest) -> Result<ScriptBackendOutput, String> {
         self.requests.lock().unwrap().push(request);
         self.output.lock().unwrap().clone()
+    }
+}
+
+struct ReconcileFailingGovernor {
+    inner: InMemoryResourceGovernor,
+}
+
+impl ReconcileFailingGovernor {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryResourceGovernor::new(),
+        }
+    }
+
+    fn set_limit(&self, account: ResourceAccount, limits: ResourceLimits) {
+        self.inner.set_limit(account, limits);
+    }
+
+    fn reserved_for(&self, account: &ResourceAccount) -> ResourceTally {
+        self.inner.reserved_for(account)
+    }
+}
+
+impl ResourceGovernor for ReconcileFailingGovernor {
+    fn set_limit(&self, account: ResourceAccount, limits: ResourceLimits) {
+        self.inner.set_limit(account, limits);
+    }
+
+    fn try_set_limit(
+        &self,
+        account: ResourceAccount,
+        limits: ResourceLimits,
+    ) -> Result<(), ResourceError> {
+        self.inner.try_set_limit(account, limits)
+    }
+
+    fn reserve(
+        &self,
+        scope: ResourceScope,
+        estimate: ResourceEstimate,
+    ) -> Result<ResourceReservation, ResourceError> {
+        self.inner.reserve(scope, estimate)
+    }
+
+    fn active_reservation(
+        &self,
+        reservation_id: ResourceReservationId,
+    ) -> Result<ActiveResourceReservation, ResourceError> {
+        self.inner.active_reservation(reservation_id)
+    }
+
+    fn reconcile(
+        &self,
+        _reservation_id: ResourceReservationId,
+        _actual: ResourceUsage,
+    ) -> Result<ResourceReceipt, ResourceError> {
+        Err(ResourceError::UnknownReservation {
+            id: ResourceReservationId::new(),
+        })
+    }
+
+    fn release(
+        &self,
+        reservation_id: ResourceReservationId,
+    ) -> Result<ResourceReceipt, ResourceError> {
+        self.inner.release(reservation_id)
     }
 }
 

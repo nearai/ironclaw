@@ -284,7 +284,16 @@ where
             process_count: 1,
             ..ResourceUsage::default()
         };
-        let receipt = governor.reconcile(reservation.id, usage.clone())?;
+        let receipt = match governor.reconcile(reservation.id, usage.clone()) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                return Err(release_after_failure(
+                    governor,
+                    reservation.id,
+                    ScriptError::Resource(Box::new(error)),
+                ));
+            }
+        };
         Ok(ScriptExecutionResult {
             result: ScriptCapabilityResult {
                 output: parsed,
