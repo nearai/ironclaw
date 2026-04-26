@@ -3982,9 +3982,11 @@ dependencies = [
  "async-trait",
  "ironclaw_authorization",
  "ironclaw_events",
+ "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_run_state",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
 ]
