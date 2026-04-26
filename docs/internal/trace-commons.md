@@ -87,10 +87,12 @@ static tokens. Claims may also include `allowed_consent_scopes` and
 trace-card uses the bearer token can upload. Set
 `TRACE_COMMONS_SIGNED_TOKEN_ISSUER` and/or
 `TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE` to require matching `iss` and `aud`
-claims. The config-status route reports only whether signed-token auth and
-issuer/audience checks are enabled; it never returns the secret or configured
-claim values. Submitted-trace audit rows record only the safe auth method
-(`static_token` or `signed_claim`) plus the hashed actor principal.
+claims. Set `TRACE_COMMONS_SIGNED_TOKEN_REVOKED_JTIS` to a comma-separated
+emergency denylist of JWT `jti` values. The config-status route reports only
+whether signed-token auth and issuer/audience checks are enabled plus the
+revoked-`jti` count; it never returns the secret or configured claim values.
+Submitted-trace audit rows record only the safe auth method (`static_token` or
+`signed_claim`) plus the hashed actor principal.
 Process-evaluation workers can submit bounded process quality metadata through
 `POST /v1/workers/process-evaluation` using the CLI helper:
 

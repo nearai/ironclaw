@@ -98,6 +98,7 @@ const TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT: &str = "TRACE_COMMONS_ANALYTICS_MI
 const TRACE_COMMONS_SIGNED_TOKEN_SECRET: &str = "TRACE_COMMONS_SIGNED_TOKEN_SECRET";
 const TRACE_COMMONS_SIGNED_TOKEN_ISSUER: &str = "TRACE_COMMONS_SIGNED_TOKEN_ISSUER";
 const TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE: &str = "TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE";
+const TRACE_COMMONS_SIGNED_TOKEN_REVOKED_JTIS: &str = "TRACE_COMMONS_SIGNED_TOKEN_REVOKED_JTIS";
 const TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR: &str =
     "TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR";
 const TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR: &str =
@@ -313,6 +314,7 @@ struct TraceCommonsSignedTokenVerifier {
     secret: SecretString,
     issuer: Option<String>,
     audience: Option<String>,
+    revoked_jtis: BTreeSet<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -324,6 +326,8 @@ struct TraceCommonsSignedTokenClaims {
     principal_ref: Option<String>,
     #[serde(default)]
     sub: Option<String>,
+    #[serde(default)]
+    jti: Option<String>,
     #[serde(default)]
     allowed_consent_scopes: BTreeSet<ConsentScope>,
     #[serde(default)]
@@ -962,7 +966,22 @@ fn trace_commons_signed_token_verifier_from_env()
         secret: SecretString::from(secret),
         issuer: optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_ISSUER)?,
         audience: optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE)?,
+        revoked_jtis: parse_signed_token_revoked_jtis_from_env()?,
     }))
+}
+
+fn parse_signed_token_revoked_jtis_from_env() -> anyhow::Result<BTreeSet<String>> {
+    match std::env::var(TRACE_COMMONS_SIGNED_TOKEN_REVOKED_JTIS) {
+        Ok(configured) => Ok(configured
+            .split(',')
+            .map(str::trim)
+            .filter(|jti| !jti.is_empty())
+            .map(str::to_string)
+            .collect()),
+        Err(std::env::VarError::NotPresent) => Ok(BTreeSet::new()),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to read {TRACE_COMMONS_SIGNED_TOKEN_REVOKED_JTIS}")),
+    }
 }
 
 fn optional_trimmed_env(name: &'static str) -> anyhow::Result<Option<String>> {
@@ -1011,7 +1030,20 @@ impl TraceCommonsSignedTokenVerifier {
             api_error(StatusCode::FORBIDDEN, message)
         })?;
 
-        signed_token_claims_to_auth(token_data.claims)
+        let claims = token_data.claims;
+        if claims
+            .jti
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|jti| self.revoked_jtis.contains(jti))
+        {
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "revoked signed tenant token",
+            ));
+        }
+
+        signed_token_claims_to_auth(claims)
     }
 }
 
@@ -1244,6 +1276,7 @@ struct TraceCommonsConfigStatusResponse {
     signed_token_auth_enabled: bool,
     signed_token_issuer_configured: bool,
     signed_token_audience_configured: bool,
+    signed_token_revoked_jti_count: usize,
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
     db_reviewer_require_object_refs: bool,
@@ -1280,6 +1313,10 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .signed_token_verifier
             .as_ref()
             .is_some_and(|verifier| verifier.audience.is_some()),
+        signed_token_revoked_jti_count: state
+            .signed_token_verifier
+            .as_ref()
+            .map_or(0, |verifier| verifier.revoked_jtis.len()),
         db_contributor_reads: state.db_contributor_reads,
         db_reviewer_reads: state.db_reviewer_reads,
         db_reviewer_require_object_refs: state.db_reviewer_require_object_refs,
@@ -14376,6 +14413,7 @@ mod tests {
             secret: SecretString::from(secret.to_string()),
             issuer: issuer.map(str::to_string),
             audience: audience.map(str::to_string),
+            revoked_jtis: BTreeSet::new(),
         });
         state
     }
@@ -15750,6 +15788,7 @@ mod tests {
             secret: SecretString::from("config-status-signed-secret".to_string()),
             issuer: Some("config-status-issuer".to_string()),
             audience: Some("config-status-audience".to_string()),
+            revoked_jtis: BTreeSet::from(["revoked-config-jti".to_string()]),
         });
 
         let contributor_response = app(state.clone())
@@ -15796,6 +15835,10 @@ mod tests {
             serde_json::json!(true)
         );
         assert_eq!(
+            value["signed_token_revoked_jti_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
             value["require_tenant_submission_policy"],
             serde_json::json!(true)
         );
@@ -15826,6 +15869,7 @@ mod tests {
             "signed_token_secret",
             "signed_token_issuer",
             "signed_token_audience",
+            "signed_token_revoked_jtis",
         ] {
             assert!(
                 !object.contains_key(forbidden_key),
@@ -15839,6 +15883,7 @@ mod tests {
         assert!(!body_text.contains("config-status-signed-secret"));
         assert!(!body_text.contains("config-status-issuer"));
         assert!(!body_text.contains("config-status-audience"));
+        assert!(!body_text.contains("revoked-config-jti"));
 
         let file_audit_events =
             read_all_audit_events(temp.path(), "tenant-a").expect("file audit events read");
@@ -28301,5 +28346,40 @@ mod tests {
             error.1.0.error,
             "signed tenant token does not allow this trace contribution allowed use"
         );
+    }
+
+    #[tokio::test]
+    async fn rejects_revoked_signed_tenant_token_jti() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state_with_signed_token_verifier(
+            temp.path().to_path_buf(),
+            "signed-secret",
+            None,
+            None,
+        );
+        Arc::make_mut(&mut state)
+            .signed_token_verifier
+            .as_mut()
+            .expect("verifier exists")
+            .revoked_jtis
+            .insert("revoked-jti-1".to_string());
+        let token = signed_tenant_token(
+            "signed-secret",
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "contributor",
+                "sub": "actor-123",
+                "jti": "revoked-jti-1",
+                "exp": (Utc::now() + Duration::minutes(5)).timestamp()
+            }),
+        );
+        let envelope = sample_envelope().await;
+
+        let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+            .await
+            .expect_err("revoked signed token jti is rejected");
+
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert_eq!(error.1.0.error, "revoked signed tenant token");
     }
 }
