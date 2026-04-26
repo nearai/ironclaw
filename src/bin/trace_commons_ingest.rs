@@ -729,6 +729,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(review_decision_handler),
         )
         .route(
+            "/v1/review/{submission_id}/lease",
+            post(claim_review_lease_handler).delete(release_review_lease_handler),
+        )
+        .route(
             "/v1/review/{submission_id}/credit-events",
             post(append_credit_event_handler),
         )
@@ -1304,6 +1308,10 @@ async fn submit_trace_handler(
         allowed_uses: envelope.trace_card.allowed_uses.clone(),
         redaction_counts: envelope.privacy.redaction_counts.clone(),
         received_at,
+        review_assigned_to_principal_ref: None,
+        review_assigned_at: None,
+        review_lease_expires_at: None,
+        review_due_at: None,
         retention_policy_id: retention_policy.name,
         expires_at,
         purged_at: None,
@@ -1689,6 +1697,43 @@ struct TraceReviewDecisionRequest {
     credit_points_pending: Option<f32>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TraceReviewLeaseRequest {
+    #[serde(default)]
+    lease_ttl_seconds: Option<i64>,
+    #[serde(default)]
+    review_due_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceReviewLeaseResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    submission_id: Uuid,
+    trace_id: Uuid,
+    status: TraceCorpusStatus,
+    review_assigned_to_principal_ref: Option<String>,
+    review_assigned_at: Option<DateTime<Utc>>,
+    review_lease_expires_at: Option<DateTime<Utc>>,
+    review_due_at: Option<DateTime<Utc>>,
+}
+
+impl TraceReviewLeaseResponse {
+    fn from_record(record: &TraceCommonsSubmissionRecord) -> Self {
+        Self {
+            tenant_id: record.tenant_id.clone(),
+            tenant_storage_ref: record.tenant_storage_ref.clone(),
+            submission_id: record.submission_id,
+            trace_id: record.trace_id,
+            status: record.status,
+            review_assigned_to_principal_ref: record.review_assigned_to_principal_ref.clone(),
+            review_assigned_at: record.review_assigned_at,
+            review_lease_expires_at: record.review_lease_expires_at,
+            review_due_at: record.review_due_at,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum TraceReviewDecision {
@@ -1723,6 +1768,8 @@ const RANKER_TRAINING_CANDIDATE_CREDIT_POINTS_DELTA: f32 = 0.5;
 const RANKER_TRAINING_PAIR_CREDIT_POINTS_DELTA: f32 = 0.75;
 const RANKER_TRAINING_CANDIDATES_EXPORT_PURPOSE_CODE: &str = "ranker_training_candidates_export";
 const RANKER_TRAINING_PAIRS_EXPORT_PURPOSE_CODE: &str = "ranker_training_pairs_export";
+const DEFAULT_REVIEW_LEASE_TTL_SECONDS: i64 = 30 * 60;
+const MAX_REVIEW_LEASE_TTL_SECONDS: i64 = 24 * 60 * 60;
 
 impl TraceCreditLedgerEventType {
     fn requires_external_ref(self) -> bool {
@@ -2431,6 +2478,12 @@ async fn review_decision_handler(
             "terminal trace submissions are not eligible for review approval",
         ));
     }
+    if review_lease_held_by_other(&record, &tenant, Utc::now()) {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "trace review lease is held by another reviewer",
+        ));
+    }
     let mut envelope = read_envelope_for_review_decision(
         state.as_ref(),
         &tenant,
@@ -2485,6 +2538,7 @@ async fn review_decision_handler(
             record.artifact_receipt = stored.artifact_receipt;
         }
     }
+    clear_review_lease_metadata(&mut record);
 
     if file_record_available {
         write_submission_record(&state.root, &record).map_err(internal_error)?;
@@ -2517,6 +2571,191 @@ async fn review_decision_handler(
         .map_err(internal_error)?;
 
     Ok(Json(receipt_from_record(&record)))
+}
+
+async fn claim_review_lease_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(submission_id): AxumPath<Uuid>,
+    Json(body): Json<TraceReviewLeaseRequest>,
+) -> ApiResult<Json<TraceReviewLeaseResponse>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_reviewer(&tenant)?;
+    let db = require_db_reviewer_lease_store(state.as_ref())?;
+    let ttl_seconds = body
+        .lease_ttl_seconds
+        .unwrap_or(DEFAULT_REVIEW_LEASE_TTL_SECONDS);
+    if !(1..=MAX_REVIEW_LEASE_TTL_SECONDS).contains(&ttl_seconds) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "review lease ttl must be between 1 second and 24 hours",
+        ));
+    }
+    let now = Utc::now();
+    let lease_expires_at = now + Duration::seconds(ttl_seconds);
+    let claimed = db
+        .claim_trace_review_lease(
+            &tenant.tenant_id,
+            submission_id,
+            &tenant.principal_ref,
+            lease_expires_at,
+            body.review_due_at,
+            now,
+        )
+        .await
+        .map_err(internal_error)?;
+    let Some(record) = claimed else {
+        return review_lease_claim_conflict(state.as_ref(), &tenant, submission_id).await;
+    };
+    let record = trace_commons_record_from_storage_submission(record)
+        .ok_or_else(|| {
+            internal_error(anyhow::anyhow!(
+                "review lease record has unsupported status"
+            ))
+        })?
+        .map_err(internal_error)?;
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::review_lease(
+            &tenant,
+            submission_id,
+            "claim",
+            record.review_lease_expires_at,
+            record.review_due_at,
+        ),
+        StorageTraceAuditAction::Review,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(TraceReviewLeaseResponse::from_record(&record)))
+}
+
+async fn release_review_lease_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(submission_id): AxumPath<Uuid>,
+) -> ApiResult<Json<TraceReviewLeaseResponse>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_reviewer(&tenant)?;
+    let db = require_db_reviewer_lease_store(state.as_ref())?;
+    let released = db
+        .release_trace_review_lease(&tenant.tenant_id, submission_id, &tenant.principal_ref)
+        .await
+        .map_err(internal_error)?;
+    let Some(record) = released else {
+        return review_lease_release_conflict(state.as_ref(), &tenant, submission_id).await;
+    };
+    let record = trace_commons_record_from_storage_submission(record)
+        .ok_or_else(|| {
+            internal_error(anyhow::anyhow!(
+                "review lease record has unsupported status"
+            ))
+        })?
+        .map_err(internal_error)?;
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::review_lease(&tenant, submission_id, "release", None, None),
+        StorageTraceAuditAction::Review,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(TraceReviewLeaseResponse::from_record(&record)))
+}
+
+fn require_db_reviewer_lease_store(state: &AppState) -> ApiResult<&dyn Database> {
+    if !state.db_reviewer_reads {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "review leases require TRACE_COMMONS_DB_REVIEWER_READS=true",
+        ));
+    }
+    state.db_mirror.as_deref().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "review leases require a configured Trace Commons DB mirror",
+        )
+    })
+}
+
+async fn review_lease_claim_conflict(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_id: Uuid,
+) -> ApiResult<Json<TraceReviewLeaseResponse>> {
+    let record = read_reviewer_submission_record(state, tenant, submission_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "trace submission not found"))?;
+    if record.status != TraceCorpusStatus::Quarantined {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "review leases can only be claimed for quarantined traces",
+        ));
+    }
+    if review_lease_held_by_other(&record, tenant, Utc::now()) {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "trace review lease is held by another reviewer",
+        ));
+    }
+    Err(api_error(
+        StatusCode::CONFLICT,
+        "trace review lease could not be claimed",
+    ))
+}
+
+async fn review_lease_release_conflict(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_id: Uuid,
+) -> ApiResult<Json<TraceReviewLeaseResponse>> {
+    let record = read_reviewer_submission_record(state, tenant, submission_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "trace submission not found"))?;
+    if record.status != TraceCorpusStatus::Quarantined {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "review leases can only be released for quarantined traces",
+        ));
+    }
+    if review_lease_held_by_other(&record, tenant, Utc::now()) {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "trace review lease is held by another reviewer",
+        ));
+    }
+    Err(api_error(
+        StatusCode::CONFLICT,
+        "no active review lease is owned by this reviewer",
+    ))
+}
+
+fn review_lease_held_by_other(
+    record: &TraceCommonsSubmissionRecord,
+    tenant: &TenantAuth,
+    now: DateTime<Utc>,
+) -> bool {
+    record
+        .review_assigned_to_principal_ref
+        .as_deref()
+        .is_some_and(|assigned| {
+            assigned != tenant.principal_ref
+                && record
+                    .review_lease_expires_at
+                    .is_some_and(|expires_at| expires_at > now)
+        })
+}
+
+fn clear_review_lease_metadata(record: &mut TraceCommonsSubmissionRecord) {
+    record.review_assigned_to_principal_ref = None;
+    record.review_assigned_at = None;
+    record.review_lease_expires_at = None;
+    record.review_due_at = None;
 }
 
 #[derive(Debug, Deserialize)]
@@ -5116,6 +5355,10 @@ fn trace_commons_record_from_storage_submission(
                 .collect::<anyhow::Result<Vec<_>>>()?,
             redaction_counts: record.redaction_counts,
             received_at: record.received_at,
+            review_assigned_to_principal_ref: record.review_assigned_to_principal_ref,
+            review_assigned_at: record.review_assigned_at,
+            review_lease_expires_at: record.review_lease_expires_at,
+            review_due_at: record.review_due_at,
             retention_policy_id: record.retention_policy_id,
             expires_at: record.expires_at,
             purged_at: record.purged_at,
@@ -11006,6 +11249,14 @@ struct TraceCommonsSubmissionRecord {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     redaction_counts: BTreeMap<String, u32>,
     received_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    review_assigned_to_principal_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    review_assigned_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    review_lease_expires_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    review_due_at: Option<DateTime<Utc>>,
     #[serde(default = "default_retention_policy_id")]
     retention_policy_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -11181,6 +11432,14 @@ struct TraceReviewQueueItem {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     review_escalation_reasons: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    review_assigned_to_principal_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    review_assigned_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    review_lease_expires_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    review_due_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     canonical_summary: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     coverage_tags: Vec<String>,
@@ -11207,6 +11466,10 @@ impl TraceReviewQueueItem {
             review_age_hours: escalation.age_hours,
             review_escalation_state: escalation.state,
             review_escalation_reasons: escalation.reasons,
+            review_assigned_to_principal_ref: record.review_assigned_to_principal_ref,
+            review_assigned_at: record.review_assigned_at,
+            review_lease_expires_at: record.review_lease_expires_at,
+            review_due_at: record.review_due_at,
             canonical_summary: derived.map(|record| record.canonical_summary.clone()),
             coverage_tags: derived
                 .map(|record| record.coverage_tags.clone())
@@ -12036,6 +12299,14 @@ struct TraceActiveLearningReviewItem {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     review_escalation_reasons: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    review_assigned_to_principal_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    review_assigned_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    review_lease_expires_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    review_due_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     canonical_summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     canonical_summary_hash: Option<String>,
@@ -12072,6 +12343,10 @@ impl TraceActiveLearningReviewItem {
             review_age_hours: escalation.age_hours,
             review_escalation_state: escalation.state,
             review_escalation_reasons: escalation.reasons,
+            review_assigned_to_principal_ref: record.review_assigned_to_principal_ref,
+            review_assigned_at: record.review_assigned_at,
+            review_lease_expires_at: record.review_lease_expires_at,
+            review_due_at: record.review_due_at,
             canonical_summary: derived.map(|record| record.canonical_summary.clone()),
             canonical_summary_hash: derived.map(|record| record.canonical_summary_hash.clone()),
             coverage_tags: derived
@@ -12810,6 +13085,40 @@ impl TraceCommonsAuditEvent {
             actor_role: Some(auth.role),
             actor_principal_ref: Some(auth.principal_ref.clone()),
             reason: reason.map(ToOwned::to_owned),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
+    fn review_lease(
+        auth: &TenantAuth,
+        submission_id: Uuid,
+        action: &str,
+        lease_expires_at: Option<DateTime<Utc>>,
+        review_due_at: Option<DateTime<Utc>>,
+    ) -> Self {
+        let mut reason = format!("action={action}");
+        if let Some(lease_expires_at) = lease_expires_at {
+            reason.push_str(";lease_expires_at=");
+            reason.push_str(&lease_expires_at.to_rfc3339());
+        }
+        if let Some(review_due_at) = review_due_at {
+            reason.push_str(";review_due_at=");
+            reason.push_str(&review_due_at.to_rfc3339());
+        }
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id,
+            kind: "review_lease".to_string(),
+            created_at: Utc::now(),
+            status: Some(TraceCorpusStatus::Quarantined),
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: Some(reason),
             export_count: None,
             export_id: None,
             decision_inputs_hash: None,
@@ -17470,6 +17779,176 @@ mod tests {
         .await
         .expect_err("contributor cannot export datasets");
         assert_eq!(contributor_export_error.0, StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn db_backed_review_leases_are_claimed_released_and_enforced() {
+        use chrono::SecondsFormat;
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-review-leases.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db_reviewer_reads(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let envelope = sample_envelope().await;
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let contributor_error = claim_review_lease_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewLeaseRequest {
+                lease_ttl_seconds: Some(300),
+                review_due_at: None,
+            }),
+        )
+        .await
+        .expect_err("contributors cannot claim review leases");
+        assert_eq!(contributor_error.0, StatusCode::FORBIDDEN);
+
+        let due_at = Utc::now() + Duration::hours(1);
+        let Json(claim) = claim_review_lease_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewLeaseRequest {
+                lease_ttl_seconds: Some(300),
+                review_due_at: Some(due_at),
+            }),
+        )
+        .await
+        .expect("reviewer can claim lease");
+        assert_eq!(claim.submission_id, submission_id);
+        assert_eq!(
+            claim.review_assigned_to_principal_ref,
+            Some(principal_storage_ref("review-token-a"))
+        );
+        assert!(claim.review_assigned_at.is_some());
+        assert!(claim.review_lease_expires_at.is_some());
+        assert_eq!(
+            claim
+                .review_due_at
+                .map(|timestamp| timestamp.timestamp_millis()),
+            Some(due_at.timestamp_millis())
+        );
+
+        let Json(queue) =
+            review_quarantine_handler(State(state.clone()), auth_headers("review-token-a"))
+                .await
+                .expect("quarantine queue loads");
+        assert_eq!(queue.len(), 1);
+        let reviewer_principal_ref = principal_storage_ref("review-token-a");
+        assert_eq!(
+            queue[0].review_assigned_to_principal_ref.as_deref(),
+            Some(reviewer_principal_ref.as_str())
+        );
+
+        let Json(released) = release_review_lease_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+        )
+        .await
+        .expect("lease owner can release lease");
+        assert!(released.review_assigned_to_principal_ref.is_none());
+        assert!(released.review_lease_expires_at.is_none());
+
+        let _ = claim_review_lease_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewLeaseRequest {
+                lease_ttl_seconds: Some(300),
+                review_due_at: None,
+            }),
+        )
+        .await
+        .expect("reviewer can reclaim lease");
+
+        let active_conflict = review_decision_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Approve,
+                reason: Some("admin cannot bypass active reviewer lease".to_string()),
+                credit_points_pending: Some(1.0),
+            }),
+        )
+        .await
+        .expect_err("active lease blocks other reviewer decision");
+        assert_eq!(active_conflict.0, StatusCode::CONFLICT);
+        assert!(active_conflict.1.0.error.contains("lease"));
+
+        let expired =
+            (Utc::now() - Duration::minutes(5)).to_rfc3339_opts(SecondsFormat::Millis, true);
+        let conn = db.connect().await.expect("connect to mirror");
+        conn.execute(
+            "UPDATE trace_submissions
+             SET review_lease_expires_at = ?3
+             WHERE tenant_id = ?1 AND submission_id = ?2",
+            libsql::params!["tenant-a", submission_id.to_string(), expired],
+        )
+        .await
+        .expect("test can expire lease");
+
+        let Json(admin_claim) = claim_review_lease_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewLeaseRequest {
+                lease_ttl_seconds: Some(300),
+                review_due_at: None,
+            }),
+        )
+        .await
+        .expect("expired lease can be claimed by another reviewer");
+        assert_eq!(
+            admin_claim.review_assigned_to_principal_ref,
+            Some(principal_storage_ref("admin-token-a"))
+        );
+
+        let Json(receipt) = review_decision_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Approve,
+                reason: Some("redaction reviewed after lease handoff".to_string()),
+                credit_points_pending: Some(1.0),
+            }),
+        )
+        .await
+        .expect("lease owner can approve trace");
+        assert_eq!(receipt.status, "accepted");
+
+        let stored = db
+            .get_trace_submission("tenant-a", submission_id)
+            .await
+            .expect("submission reads")
+            .expect("submission exists");
+        assert!(stored.review_assigned_to_principal_ref.is_none());
+        assert!(stored.review_assigned_at.is_none());
+        assert!(stored.review_lease_expires_at.is_none());
+        assert!(stored.review_due_at.is_none());
     }
 
     #[tokio::test]

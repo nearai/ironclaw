@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use tokio_postgres::{Row, Transaction};
 use uuid::Uuid;
 
@@ -196,6 +197,10 @@ fn row_to_submission(row: &Row) -> Result<TraceSubmissionRecord, DatabaseError> 
         received_at: row.get("received_at"),
         updated_at: row.get("updated_at"),
         reviewed_at: row.get("reviewed_at"),
+        review_assigned_to_principal_ref: row.get("review_assigned_to_principal_ref"),
+        review_assigned_at: row.get("review_assigned_at"),
+        review_lease_expires_at: row.get("review_lease_expires_at"),
+        review_due_at: row.get("review_due_at"),
         revoked_at: row.get("revoked_at"),
         expires_at: row.get("expires_at"),
         purged_at: row.get("purged_at"),
@@ -596,8 +601,9 @@ impl TraceCorpusStore for PgBackend {
                     consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
                     privacy_risk, redaction_pipeline_version, redaction_hash,
                     redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
-                    credit_points_final, received_at, updated_at, reviewed_at, revoked_at,
-                    expires_at, purged_at",
+                    credit_points_final, received_at, updated_at, reviewed_at,
+                    review_assigned_to_principal_ref, review_assigned_at,
+                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at",
                 &[
                     &submission.tenant_id,
                     &submission.submission_id,
@@ -644,8 +650,9 @@ impl TraceCorpusStore for PgBackend {
                     consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
                     privacy_risk, redaction_pipeline_version, redaction_hash,
                     redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
-                    credit_points_final, received_at, updated_at, reviewed_at, revoked_at,
-                    expires_at, purged_at
+                    credit_points_final, received_at, updated_at, reviewed_at,
+                    review_assigned_to_principal_ref, review_assigned_at,
+                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at
                  FROM trace_submissions
                  WHERE tenant_id = $1 AND submission_id = $2",
                 &[&tenant_id, &submission_id],
@@ -671,8 +678,9 @@ impl TraceCorpusStore for PgBackend {
                     consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
                     privacy_risk, redaction_pipeline_version, redaction_hash,
                     redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
-                    credit_points_final, received_at, updated_at, reviewed_at, revoked_at,
-                    expires_at, purged_at
+                    credit_points_final, received_at, updated_at, reviewed_at,
+                    review_assigned_to_principal_ref, review_assigned_at,
+                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at
                  FROM trace_submissions
                  WHERE tenant_id = $1
                  ORDER BY received_at ASC",
@@ -799,6 +807,26 @@ impl TraceCorpusStore for PgBackend {
                          WHEN $3 IN ('accepted', 'quarantined', 'rejected') THEN NOW()
                          ELSE reviewed_at
                      END,
+                     review_assigned_to_principal_ref = CASE
+                         WHEN $3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
+                         THEN NULL
+                         ELSE review_assigned_to_principal_ref
+                     END,
+                     review_assigned_at = CASE
+                         WHEN $3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
+                         THEN NULL
+                         ELSE review_assigned_at
+                     END,
+                     review_lease_expires_at = CASE
+                         WHEN $3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
+                         THEN NULL
+                         ELSE review_lease_expires_at
+                     END,
+                     review_due_at = CASE
+                         WHEN $3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
+                         THEN NULL
+                         ELSE review_due_at
+                     END,
                      revoked_at = CASE WHEN $3 = 'revoked' THEN NOW() ELSE revoked_at END,
                      purged_at = CASE WHEN $3 = 'purged' THEN NOW() ELSE purged_at END,
                      credit_points_pending = CASE
@@ -844,6 +872,96 @@ impl TraceCorpusStore for PgBackend {
             },
         })
         .await
+    }
+
+    async fn claim_trace_review_lease(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        actor_principal_ref: &str,
+        lease_expires_at: DateTime<Utc>,
+        review_due_at: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) -> Result<Option<TraceSubmissionRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "UPDATE trace_submissions
+                 SET review_assigned_to_principal_ref = $3,
+                     review_assigned_at = $6,
+                     review_lease_expires_at = $4,
+                     review_due_at = $5,
+                     updated_at = $6
+                 WHERE tenant_id = $1
+                   AND submission_id = $2
+                   AND status = 'quarantined'
+                   AND (
+                        review_lease_expires_at IS NULL
+                        OR review_lease_expires_at <= $6
+                        OR review_assigned_to_principal_ref = $3
+                   )
+                 RETURNING
+                    tenant_id, submission_id, trace_id, status, auth_principal_ref,
+                    contributor_pseudonym, submitted_tenant_scope_ref, schema_version,
+                    consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
+                    privacy_risk, redaction_pipeline_version, redaction_hash,
+                    redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
+                    credit_points_final, received_at, updated_at, reviewed_at,
+                    review_assigned_to_principal_ref, review_assigned_at,
+                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at",
+                &[
+                    &tenant_id,
+                    &submission_id,
+                    &actor_principal_ref,
+                    &lease_expires_at,
+                    &review_due_at,
+                    &now,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row.as_ref().map(row_to_submission).transpose()?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn release_trace_review_lease(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        actor_principal_ref: &str,
+    ) -> Result<Option<TraceSubmissionRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "UPDATE trace_submissions
+                 SET review_assigned_to_principal_ref = NULL,
+                     review_assigned_at = NULL,
+                     review_lease_expires_at = NULL,
+                     review_due_at = NULL,
+                     updated_at = NOW()
+                 WHERE tenant_id = $1
+                   AND submission_id = $2
+                   AND status = 'quarantined'
+                   AND review_assigned_to_principal_ref = $3
+                 RETURNING
+                    tenant_id, submission_id, trace_id, status, auth_principal_ref,
+                    contributor_pseudonym, submitted_tenant_scope_ref, schema_version,
+                    consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
+                    privacy_risk, redaction_pipeline_version, redaction_hash,
+                    redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
+                    credit_points_final, received_at, updated_at, reviewed_at,
+                    review_assigned_to_principal_ref, review_assigned_at,
+                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at",
+                &[&tenant_id, &submission_id, &actor_principal_ref],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row.as_ref().map(row_to_submission).transpose()?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
     }
 
     async fn append_trace_object_ref(

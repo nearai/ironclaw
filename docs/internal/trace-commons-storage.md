@@ -8,7 +8,7 @@ The MVP ingestion service still serves tenant-scoped JSON files under `TRACE_COM
 
 This branch now contains the first production-storage bridge:
 
-- `migrations/V25__trace_corpus_storage.sql`, `migrations/V26__trace_object_ref_lifecycle.sql`, `migrations/V27__trace_corpus_rich_metadata.sql`, `migrations/V28__trace_vector_entries.sql`, `migrations/V29__trace_export_manifests.sql`, `migrations/V30__trace_export_manifest_items.sql`, `migrations/V32__trace_audit_hash_chain.sql`, `migrations/V33__trace_tenant_policies.sql`, and matching libSQL incremental migrations.
+- `migrations/V25__trace_corpus_storage.sql`, `migrations/V26__trace_object_ref_lifecycle.sql`, `migrations/V27__trace_corpus_rich_metadata.sql`, `migrations/V28__trace_vector_entries.sql`, `migrations/V29__trace_export_manifests.sql`, `migrations/V30__trace_export_manifest_items.sql`, `migrations/V32__trace_audit_hash_chain.sql`, `migrations/V33__trace_tenant_policies.sql`, `migrations/V37__trace_review_leases.sql`, and matching libSQL incremental migrations.
 - `src/trace_corpus_storage.rs` and `TraceCorpusStore` implementations for PostgreSQL and libSQL.
 - Optional ingest-service DB dual-write behind `TRACE_COMMONS_DB_DUAL_WRITE=true`.
 - Optional DB-backed tenant policy reads behind `TRACE_COMMONS_DB_TENANT_POLICY_READS=true`.
@@ -21,6 +21,7 @@ This branch now contains the first production-storage bridge:
 - Optional object-primary replay export mode behind `TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT=true`, which requires DB replay selection, required replay object refs, required DB mirror writes, and the service-local encrypted object store.
 - Optional object-primary benchmark/ranker export mode behind `TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS=true`, which requires DB reviewer reads, required source object refs, export guardrails, required DB mirror writes, and the service-local encrypted object store before skipping plaintext benchmark artifact and ranker provenance files.
 - Optional legal-hold retention policy IDs behind `TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES`, preventing maintenance from newly expiring or purging matching policy classes.
+- Optional DB-backed review leases behind `TRACE_COMMONS_DB_REVIEWER_READS=true`, scoped by tenant and reviewer/admin principal for concurrent privacy review coordination.
 - Optional fail-closed maintenance promotion gate behind `TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN=true`, which requires DB dual-write, rejects maintenance requests that omit `reconcile_db_mirror: true`, exposes compact `blocking_gaps`, and turns DB/file reconciliation gaps into `409 Conflict` maintenance failures.
 - Caller-level tests for tenant-scoped writes, DB-backed tenant policy enforcement, review/revocation state, delayed credit events, encrypted artifact receipts, and DB object-ref replay reads through the service-owned local object-store backend.
 
@@ -145,6 +146,10 @@ CREATE TABLE trace_submissions (
     credit_points_final NUMERIC(18, 6),
     received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     reviewed_at TIMESTAMPTZ,
+    review_assigned_to_principal_ref TEXT,
+    review_assigned_at TIMESTAMPTZ,
+    review_lease_expires_at TIMESTAMPTZ,
+    review_due_at TIMESTAMPTZ,
     revoked_at TIMESTAMPTZ,
     expires_at TIMESTAMPTZ,
     purged_at TIMESTAMPTZ,
@@ -156,6 +161,7 @@ CREATE INDEX idx_trace_submissions_status_received ON trace_submissions(tenant_i
 CREATE INDEX idx_trace_submissions_summary_hash ON trace_submissions(tenant_id, canonical_summary_hash);
 CREATE INDEX idx_trace_submissions_expires ON trace_submissions(tenant_id, expires_at);
 CREATE INDEX idx_trace_submissions_contributor ON trace_submissions(tenant_id, contributor_pseudonym);
+CREATE INDEX idx_trace_submissions_review_lease ON trace_submissions(tenant_id, status, review_lease_expires_at, received_at DESC);
 
 CREATE TABLE trace_object_refs (
     object_ref_id UUID PRIMARY KEY,
@@ -475,6 +481,10 @@ CREATE TABLE IF NOT EXISTS trace_submissions (
     credit_points_final TEXT,
     received_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     reviewed_at TEXT,
+    review_assigned_to_principal_ref TEXT,
+    review_assigned_at TEXT,
+    review_lease_expires_at TEXT,
+    review_due_at TEXT,
     revoked_at TEXT,
     expires_at TEXT,
     purged_at TEXT,
@@ -486,6 +496,7 @@ CREATE INDEX IF NOT EXISTS idx_trace_submissions_status_received ON trace_submis
 CREATE INDEX IF NOT EXISTS idx_trace_submissions_summary_hash ON trace_submissions(tenant_id, canonical_summary_hash);
 CREATE INDEX IF NOT EXISTS idx_trace_submissions_expires ON trace_submissions(tenant_id, expires_at);
 CREATE INDEX IF NOT EXISTS idx_trace_submissions_contributor ON trace_submissions(tenant_id, contributor_pseudonym);
+CREATE INDEX IF NOT EXISTS idx_trace_submissions_review_lease ON trace_submissions(tenant_id, status, review_lease_expires_at, received_at DESC);
 
 CREATE TABLE IF NOT EXISTS trace_object_refs (
     object_ref_id TEXT PRIMARY KEY,
@@ -734,7 +745,7 @@ CREATE INDEX IF NOT EXISTS idx_trace_retention_job_items_submission ON trace_ret
 
 ### Rust Store Contract Shape
 
-The initial Rust contract now lives in `src/trace_corpus_storage.rs`. `TraceCorpusStore` is part of the shared `Database` trait because both PostgreSQL and libSQL implementations exist in this branch. `src/bin/trace_commons_ingest.rs` still serves file-backed responses, but it can mirror submit/review/credit/revoke mutations into the configured DB for dark-launch verification.
+The initial Rust contract now lives in `src/trace_corpus_storage.rs`. `TraceCorpusStore` is part of the shared `Database` trait because both PostgreSQL and libSQL implementations exist in this branch. `src/bin/trace_commons_ingest.rs` still serves file-backed responses, but it can mirror submit/review/credit/revoke mutations into the configured DB for dark-launch verification and uses DB-backed reviewer reads for durable review leases.
 
 The first implementation-facing shape should stay close to:
 
@@ -855,9 +866,10 @@ reads, policy administration, review decisions, or unrestricted credit mutation.
 | `submission_score` | Current scoring result. |
 | `credit_points_pending` | Mutable pending credit estimate; do not count it as settled credit. |
 | `credit_points_final` | Explicit final credit snapshot when settled. Missing values are treated as `0` for aggregate settled totals. |
+| `review_assigned_to_principal_ref`, `review_assigned_at`, `review_lease_expires_at`, `review_due_at` | Optional DB-backed review lease state, scoped to the authenticated reviewer/admin principal and cleared when the trace leaves quarantine. |
 | `received_at`, `reviewed_at`, `revoked_at`, `expires_at`, `purged_at` | Lifecycle timestamps. |
 
-Indexes: `(tenant_id, submission_id) unique`, `(tenant_id, status, received_at)`, `(tenant_id, canonical_summary_hash)`, `(tenant_id, expires_at)`, `(tenant_id, contributor_pseudonym)`.
+Indexes: `(tenant_id, submission_id) unique`, `(tenant_id, status, received_at)`, `(tenant_id, canonical_summary_hash)`, `(tenant_id, expires_at)`, `(tenant_id, contributor_pseudonym)`, `(tenant_id, status, review_lease_expires_at, received_at)`.
 
 ### Envelopes and Object References
 
@@ -1008,7 +1020,7 @@ Do not mutate historical ledger rows. Materialized credit totals can be cached s
 
 Every export item needs an audit event or an audit batch event with a cryptographic item list hash. The pilot replay, benchmark, and ranker export paths already write a deterministic source-list hash into both the exported artifact/manifest and the mirrored audit `decision_inputs_hash`; benchmark and ranker exports also persist file-backed provenance manifests, and replay dataset exports promote that hash plus item-level source snapshots into durable DB manifests.
 
-Pilot `V29` implements the compact `trace_export_manifests` control row for replay dataset exports in both PostgreSQL and libSQL. It stores tenant id, export manifest id, artifact kind, purpose, audit event id, source submission ids, source-list hash, item count, generation time, and invalidation/deletion timestamps. Pilot `V30` adds `trace_export_manifest_items` rows for each replay export source, including source object ref ids, source status/hash snapshots, and per-item revocation, expiration, or purge invalidation. Pilot `V36` adds `trace_retention_jobs` and `trace_retention_job_items` rows so maintenance/retention runs have a tenant-scoped durable ledger of run parameters, aggregate action counts, and per-submission expire/purge/revoke lifecycle counts.
+Pilot `V29` implements the compact `trace_export_manifests` control row for replay dataset exports in both PostgreSQL and libSQL. It stores tenant id, export manifest id, artifact kind, purpose, audit event id, source submission ids, source-list hash, item count, generation time, and invalidation/deletion timestamps. Pilot `V30` adds `trace_export_manifest_items` rows for each replay export source, including source object ref ids, source status/hash snapshots, and per-item revocation, expiration, or purge invalidation. Pilot `V36` adds `trace_retention_jobs` and `trace_retention_job_items` rows so maintenance/retention runs have a tenant-scoped durable ledger of run parameters, aggregate action counts, and per-submission expire/purge/revoke lifecycle counts. Pilot `V37` adds durable review lease fields to `trace_submissions` for reviewer/admin claim/release coordination.
 
 ### Benchmark Artifacts
 

@@ -1529,6 +1529,18 @@ CREATE INDEX IF NOT EXISTS idx_trace_retention_job_items_submission
     ON trace_retention_job_items (tenant_id, submission_id, created_at DESC);
 "#,
     ),
+    (
+        36,
+        "trace_review_leases",
+        r#"
+ALTER TABLE trace_submissions ADD COLUMN review_assigned_to_principal_ref TEXT;
+ALTER TABLE trace_submissions ADD COLUMN review_assigned_at TEXT;
+ALTER TABLE trace_submissions ADD COLUMN review_lease_expires_at TEXT;
+ALTER TABLE trace_submissions ADD COLUMN review_due_at TEXT;
+CREATE INDEX IF NOT EXISTS idx_trace_submissions_review_lease
+    ON trace_submissions (tenant_id, status, review_lease_expires_at, received_at DESC);
+"#,
+    ),
 ];
 
 /// Migrations whose ADD COLUMN should be skipped when the column already
@@ -1551,6 +1563,10 @@ const IDEMPOTENT_ADD_COLUMN_MIGRATIONS: &[(i64, &str, &str)] = &[
     (31, "trace_audit_events", "event_hash"),
     (33, "trace_audit_events", "canonical_event_json"),
     (34, "trace_audit_events", "audit_sequence"),
+    (36, "trace_submissions", "review_assigned_to_principal_ref"),
+    (36, "trace_submissions", "review_assigned_at"),
+    (36, "trace_submissions", "review_lease_expires_at"),
+    (36, "trace_submissions", "review_due_at"),
 ];
 
 /// Check whether `table` already contains `column` via `pragma_table_info`.

@@ -162,6 +162,10 @@ pub struct TraceSubmissionRecord {
     pub received_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub reviewed_at: Option<DateTime<Utc>>,
+    pub review_assigned_to_principal_ref: Option<String>,
+    pub review_assigned_at: Option<DateTime<Utc>>,
+    pub review_lease_expires_at: Option<DateTime<Utc>>,
+    pub review_due_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
     pub purged_at: Option<DateTime<Utc>>,
@@ -686,6 +690,23 @@ pub trait TraceCorpusStore: Send + Sync {
         actor_principal_ref: &str,
         reason: Option<&str>,
     ) -> Result<(), DatabaseError>;
+
+    async fn claim_trace_review_lease(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        actor_principal_ref: &str,
+        lease_expires_at: DateTime<Utc>,
+        review_due_at: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) -> Result<Option<TraceSubmissionRecord>, DatabaseError>;
+
+    async fn release_trace_review_lease(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        actor_principal_ref: &str,
+    ) -> Result<Option<TraceSubmissionRecord>, DatabaseError>;
 
     async fn append_trace_object_ref(
         &self,

@@ -120,6 +120,7 @@ Private ingestion service routes used by the operator panel:
 | GET | `/v1/review/quarantine` | Reviewer/admin quarantine queue |
 | GET | `/v1/review/active-learning` | Reviewer/admin active-learning review queue |
 | POST | `/v1/review/{submission_id}/decision` | Approve/reject quarantined trace |
+| POST/DELETE | `/v1/review/{submission_id}/lease` | Claim or release a DB-backed review lease |
 | POST | `/v1/review/{submission_id}/credit-events` | Append delayed credit event |
 | GET | `/v1/datasets/replay` | Export approved replay dataset slice |
 | GET | `/v1/datasets/replay/manifests` | List replay export manifest metadata |

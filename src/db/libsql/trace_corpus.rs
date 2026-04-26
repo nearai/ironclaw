@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use super::{LibSqlBackend, fmt_opt_ts, fmt_ts, get_opt_text, get_opt_ts, get_text, get_ts};
@@ -31,7 +32,8 @@ const TRACE_SUBMISSION_COLUMNS: &str = "\
     privacy_risk, redaction_pipeline_version, redaction_hash, \
     redaction_counts, canonical_summary_hash, submission_score, \
     credit_points_pending, credit_points_final, received_at, updated_at, \
-    reviewed_at, revoked_at, expires_at, purged_at";
+    reviewed_at, review_assigned_to_principal_ref, review_assigned_at, \
+    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at";
 
 const TRACE_TENANT_POLICY_COLUMNS: &str = "\
     tenant_id, policy_version, allowed_consent_scopes, allowed_uses, \
@@ -293,9 +295,13 @@ fn row_to_submission(row: &libsql::Row) -> Result<TraceSubmissionRecord, Databas
         received_at: get_ts(row, 20),
         updated_at: get_ts(row, 21),
         reviewed_at: get_opt_ts(row, 22),
-        revoked_at: get_opt_ts(row, 23),
-        expires_at: get_opt_ts(row, 24),
-        purged_at: get_opt_ts(row, 25),
+        review_assigned_to_principal_ref: get_opt_text(row, 23),
+        review_assigned_at: get_opt_ts(row, 24),
+        review_lease_expires_at: get_opt_ts(row, 25),
+        review_due_at: get_opt_ts(row, 26),
+        revoked_at: get_opt_ts(row, 27),
+        expires_at: get_opt_ts(row, 28),
+        purged_at: get_opt_ts(row, 29),
     })
 }
 
@@ -888,6 +894,26 @@ impl TraceCorpusStore for LibSqlBackend {
                      THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                      ELSE reviewed_at
                  END,
+                 review_assigned_to_principal_ref = CASE
+                     WHEN ?3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
+                     THEN NULL
+                     ELSE review_assigned_to_principal_ref
+                 END,
+                 review_assigned_at = CASE
+                     WHEN ?3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
+                     THEN NULL
+                     ELSE review_assigned_at
+                 END,
+                 review_lease_expires_at = CASE
+                     WHEN ?3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
+                     THEN NULL
+                     ELSE review_lease_expires_at
+                 END,
+                 review_due_at = CASE
+                     WHEN ?3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
+                     THEN NULL
+                     ELSE review_due_at
+                 END,
                  revoked_at = CASE
                      WHEN ?3 = 'revoked' THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                      ELSE revoked_at
@@ -938,6 +964,78 @@ impl TraceCorpusStore for LibSqlBackend {
             },
         })
         .await
+    }
+
+    async fn claim_trace_review_lease(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        actor_principal_ref: &str,
+        lease_expires_at: DateTime<Utc>,
+        review_due_at: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) -> Result<Option<TraceSubmissionRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let updated = conn
+            .execute(
+                "UPDATE trace_submissions
+                 SET review_assigned_to_principal_ref = ?3,
+                     review_assigned_at = ?6,
+                     review_lease_expires_at = ?4,
+                     review_due_at = ?5,
+                     updated_at = ?6
+                 WHERE tenant_id = ?1
+                   AND submission_id = ?2
+                   AND status = 'quarantined'
+                   AND (
+                        review_lease_expires_at IS NULL
+                        OR review_lease_expires_at <= ?6
+                        OR review_assigned_to_principal_ref = ?3
+                   )",
+                libsql::params![
+                    tenant_id,
+                    submission_id.to_string(),
+                    actor_principal_ref,
+                    fmt_ts(&lease_expires_at),
+                    fmt_opt_ts(&review_due_at),
+                    fmt_ts(&now),
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        if updated == 0 {
+            return Ok(None);
+        }
+        self.get_trace_submission(tenant_id, submission_id).await
+    }
+
+    async fn release_trace_review_lease(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        actor_principal_ref: &str,
+    ) -> Result<Option<TraceSubmissionRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let updated = conn
+            .execute(
+                "UPDATE trace_submissions
+                 SET review_assigned_to_principal_ref = NULL,
+                     review_assigned_at = NULL,
+                     review_lease_expires_at = NULL,
+                     review_due_at = NULL,
+                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE tenant_id = ?1
+                   AND submission_id = ?2
+                   AND status = 'quarantined'
+                   AND review_assigned_to_principal_ref = ?3",
+                libsql::params![tenant_id, submission_id.to_string(), actor_principal_ref],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        if updated == 0 {
+            return Ok(None);
+        }
+        self.get_trace_submission(tenant_id, submission_id).await
     }
 
     async fn append_trace_object_ref(
