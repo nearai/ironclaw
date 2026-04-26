@@ -1500,13 +1500,14 @@ async fn submission_status_handler(
         .iter()
         .map(|record| (record.submission_id, record))
         .collect::<BTreeMap<_, _>>();
+    let status_credit_events =
+        read_contributor_status_credit_events(state.as_ref(), &tenant, &credit_view.records)
+            .await
+            .map_err(internal_error)?;
     let mut statuses = Vec::new();
     for submission_id in body.submission_ids {
         if let Some(record) = visible_by_submission.get(&submission_id) {
-            statuses.push(submission_status_from_record(
-                record,
-                &credit_view.credit_events,
-            ));
+            statuses.push(submission_status_from_record(record, &status_credit_events));
         }
     }
 
@@ -4403,6 +4404,20 @@ fn eligible_credit_events_for_records(
         .collect()
 }
 
+fn credit_events_for_records(
+    records: &[TraceCommonsSubmissionRecord],
+    events: Vec<TraceCommonsCreditLedgerRecord>,
+) -> Vec<TraceCommonsCreditLedgerRecord> {
+    let visible_submissions = records
+        .iter()
+        .map(|record| record.submission_id)
+        .collect::<BTreeSet<_>>();
+    events
+        .into_iter()
+        .filter(|event| visible_submissions.contains(&event.submission_id))
+        .collect()
+}
+
 #[derive(Debug)]
 struct TraceContributorCreditView {
     records: Vec<TraceCommonsSubmissionRecord>,
@@ -4699,6 +4714,44 @@ async fn read_contributor_credit_view_from_db(
         .filter_map(trace_commons_record_from_storage_submission)
         .collect::<anyhow::Result<Vec<_>>>()?;
     let records = visible_submission_records(tenant, records);
+    let credit_events = eligible_credit_events_for_records(
+        &records,
+        read_contributor_credit_events_from_db(state, tenant, &records).await?,
+    );
+    Ok(TraceContributorCreditView {
+        records,
+        credit_events,
+    })
+}
+
+async fn read_contributor_status_credit_events(
+    state: &AppState,
+    tenant: &TenantAuth,
+    records: &[TraceCommonsSubmissionRecord],
+) -> anyhow::Result<Vec<TraceCommonsCreditLedgerRecord>> {
+    if records.is_empty() {
+        return Ok(Vec::new());
+    }
+    let credit_events = if state.db_contributor_reads {
+        read_contributor_credit_events_from_db(state, tenant, records).await?
+    } else {
+        visible_credit_events(
+            tenant,
+            read_all_credit_events(&state.root, &tenant.tenant_id)?,
+        )
+    };
+    Ok(credit_events_for_records(records, credit_events))
+}
+
+async fn read_contributor_credit_events_from_db(
+    state: &AppState,
+    tenant: &TenantAuth,
+    records: &[TraceCommonsSubmissionRecord],
+) -> anyhow::Result<Vec<TraceCommonsCreditLedgerRecord>> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .context("TRACE_COMMONS_DB_CONTRIBUTOR_READS is enabled without a DB mirror")?;
     let owner_by_submission = records
         .iter()
         .map(|record| (record.submission_id, record.auth_principal_ref.clone()))
@@ -4719,12 +4772,7 @@ async fn read_contributor_credit_view_from_db(
             credit_events.push(event);
         }
     }
-    let credit_events =
-        eligible_credit_events_for_records(&records, visible_credit_events(tenant, credit_events));
-    Ok(TraceContributorCreditView {
-        records,
-        credit_events,
-    })
+    Ok(visible_credit_events(tenant, credit_events))
 }
 
 async fn read_audit_events(
@@ -5167,7 +5215,7 @@ fn submission_status_from_record(
         0.0
     };
     let base_final = record.credit_points_final.unwrap_or(0.0);
-    let credit_points_total = if delayed_events.is_empty() {
+    let credit_points_total = if delayed_events.is_empty() || record.is_terminal() {
         None
     } else {
         Some(base_final + ledger_points)
@@ -25317,6 +25365,15 @@ mod tests {
                 .explanation
                 .iter()
                 .any(|explanation| explanation.contains("Revoked"))
+        );
+        assert!(
+            statuses_after_revoke[0]
+                .delayed_credit_explanations
+                .iter()
+                .any(|explanation| {
+                    explanation.contains("retained for audit")
+                        && explanation.contains("excluded because the trace is revoked")
+                })
         );
     }
 
