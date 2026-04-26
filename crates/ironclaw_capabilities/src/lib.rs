@@ -14,7 +14,7 @@ use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher,
     CapabilityId, Decision, DenyReason, DispatchError, ExecutionContext, HostApiError,
-    InvocationFingerprint, InvocationId, ProcessId, ResourceEstimate, ResourceScope,
+    InvocationFingerprint, InvocationId, Obligation, ProcessId, ResourceEstimate, ResourceScope,
 };
 use ironclaw_processes::{
     ProcessError, ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult,
@@ -76,6 +76,11 @@ pub enum CapabilityInvocationError {
     AuthorizationDenied {
         capability: CapabilityId,
         reason: DenyReason,
+    },
+    #[error("capability {capability} returned unsupported authorization obligations")]
+    UnsupportedObligations {
+        capability: CapabilityId,
+        obligations: Vec<Obligation>,
     },
     #[error("capability {capability} invocation requires approval")]
     AuthorizationRequiresApproval { capability: CapabilityId },
@@ -326,7 +331,18 @@ where
             .authorize_dispatch(&request.context, descriptor, &request.estimate)
             .await
         {
-            Decision::Allow { .. } => {}
+            Decision::Allow { obligations } => {
+                if let Err(error) =
+                    ensure_no_unsupported_obligations(request.capability_id.clone(), obligations)
+                {
+                    if let Some(run_state) = self.run_state {
+                        run_state
+                            .fail(&scope, invocation_id, "UnsupportedObligations".to_string())
+                            .await?;
+                    }
+                    return Err(error);
+                }
+            }
             Decision::Deny { reason } => {
                 if let Some(run_state) = self.run_state {
                     run_state
@@ -471,7 +487,18 @@ where
             .authorize_spawn(&request.context, descriptor, &request.estimate)
             .await
         {
-            Decision::Allow { .. } => {}
+            Decision::Allow { obligations } => {
+                if let Err(error) =
+                    ensure_no_unsupported_obligations(request.capability_id.clone(), obligations)
+                {
+                    if let Some(run_state) = self.run_state {
+                        run_state
+                            .fail(&scope, invocation_id, "UnsupportedObligations".to_string())
+                            .await?;
+                    }
+                    return Err(error);
+                }
+            }
             Decision::Deny { reason } => {
                 if let Some(run_state) = self.run_state {
                     run_state
@@ -658,28 +685,22 @@ where
                 capability: request.capability_id,
             });
         };
-        let claimed_lease = match capability_leases
-            .claim(&scope, lease.grant.id, &invocation_fingerprint)
-            .await
-        {
-            Ok(lease) => lease,
-            Err(error) => {
-                fail_run(run_state, &scope, invocation_id, "ApprovalLeaseClaim").await?;
-                return Err(CapabilityInvocationError::Lease(Box::new(error)));
-            }
-        };
         let mut authorized_context = request.context.clone();
-        authorized_context
-            .grants
-            .grants
-            .push(claimed_lease.grant.clone());
+        authorized_context.grants.grants.push(lease.grant.clone());
 
         match self
             .authorizer
             .authorize_dispatch(&authorized_context, descriptor, &request.estimate)
             .await
         {
-            Decision::Allow { .. } => {}
+            Decision::Allow { obligations } => {
+                if let Err(error) =
+                    ensure_no_unsupported_obligations(request.capability_id.clone(), obligations)
+                {
+                    fail_run(run_state, &scope, invocation_id, "UnsupportedObligations").await?;
+                    return Err(error);
+                }
+            }
             Decision::Deny { reason } => {
                 fail_run(run_state, &scope, invocation_id, "AuthorizationDenied").await?;
                 return Err(CapabilityInvocationError::AuthorizationDenied {
@@ -700,6 +721,17 @@ where
                 });
             }
         }
+
+        let claimed_lease = match capability_leases
+            .claim(&scope, lease.grant.id, &invocation_fingerprint)
+            .await
+        {
+            Ok(lease) => lease,
+            Err(error) => {
+                fail_run(run_state, &scope, invocation_id, "ApprovalLeaseClaim").await?;
+                return Err(CapabilityInvocationError::Lease(Box::new(error)));
+            }
+        };
 
         let dispatch = match self
             .dispatcher
@@ -729,6 +761,20 @@ where
 
         Ok(CapabilityInvocationResult { dispatch })
     }
+}
+
+fn ensure_no_unsupported_obligations(
+    capability: CapabilityId,
+    obligations: Vec<Obligation>,
+) -> Result<(), CapabilityInvocationError> {
+    if obligations.is_empty() {
+        return Ok(());
+    }
+
+    Err(CapabilityInvocationError::UnsupportedObligations {
+        capability,
+        obligations,
+    })
 }
 
 fn dispatch_error_kind(error: &DispatchError) -> String {

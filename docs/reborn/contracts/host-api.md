@@ -847,6 +847,7 @@ Rules:
 
 - most restrictive decision wins: `Deny > RequireApproval > Allow`
 - an action is not complete until all `Allow` obligations are satisfied
+- host services that do not yet implement obligation handlers must fail closed on non-empty obligations instead of silently ignoring them
 - `Allow` without `AuditBefore/AuditAfter` is invalid for external side effects
 - `Allow` without `ReserveResources` is invalid for costed/quota-limited work
 

@@ -90,6 +90,33 @@ async fn capability_host_authorized_dispatch_reaches_dispatcher() {
 }
 
 #[tokio::test]
+async fn capability_host_rejects_allowed_dispatch_with_unsupported_obligations_before_dispatch() {
+    let (_fs, package) = wasm_package_with_module(json_echo_module());
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    let dispatcher = RecordingDispatcher::default();
+    let authorizer = ObligatingAuthorizer;
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer);
+    let context = execution_context(CapabilitySet::default());
+
+    let err = host
+        .invoke_json(CapabilityInvocationRequest {
+            context,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: ResourceEstimate::default(),
+            input: json!({"message": "must not dispatch"}),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::UnsupportedObligations { .. }
+    ));
+    assert!(!dispatcher.has_request());
+}
+
+#[tokio::test]
 async fn capability_host_depends_on_dispatch_interface_not_concrete_dispatcher() {
     let (_fs, package) = wasm_package_with_module(json_echo_module());
     let mut registry = ExtensionRegistry::new();
@@ -177,6 +204,10 @@ impl RecordingDispatcher {
     fn take_request(&self) -> CapabilityDispatchRequest {
         self.request.lock().unwrap().take().unwrap()
     }
+
+    fn has_request(&self) -> bool {
+        self.request.lock().unwrap().is_some()
+    }
 }
 
 #[async_trait]
@@ -200,6 +231,22 @@ impl CapabilityDispatcher for RecordingDispatcher {
                 actual: Some(ResourceUsage::default()),
             },
         })
+    }
+}
+
+struct ObligatingAuthorizer;
+
+#[async_trait]
+impl CapabilityDispatchAuthorizer for ObligatingAuthorizer {
+    async fn authorize_dispatch(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+    ) -> Decision {
+        Decision::Allow {
+            obligations: vec![Obligation::AuditBefore],
+        }
     }
 }
 
