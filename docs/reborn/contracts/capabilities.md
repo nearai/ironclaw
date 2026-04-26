@@ -87,7 +87,7 @@ It does not own process lifecycle or process-result mechanics after start; those
 
 Dispatch failures are reported as sanitized error-kind strings derived from `DispatchError`/`RuntimeDispatchErrorKind`; `CapabilityInvocationError` does not expose boxed runtime/backend error details.
 
-Authorization obligations are satisfied through a host-provided `CapabilityObligationHandler` seam. `CapabilityHost` calls the handler after `Decision::Allow { obligations }` and before dispatch, process start, or approval lease claim. If no handler is configured, if the handler reports unsupported obligations, or if the handler fails, the invocation fails closed before downstream side effects. Handler failures use the stable `CapabilityObligationFailureKind` categories and must remain sanitized metadata, not raw input, host paths, secret material, runtime output, or detailed backend errors. The concrete `ironclaw_host_runtime::BuiltinObligationHandler` currently supports metadata-only `AuditBefore` and `ApplyNetworkPolicy` preflight; when composed through `HostRuntimeServices`, accepted network policies are handed to the WASM runtime adapter and can be enforced by `ironclaw_network::HardenedHttpEgressClient` for actual host-mediated WASM HTTP imports. Runtime/input/output plumbing obligations still fail closed. This prevents authorizers from attaching requirements such as audit, output limits, network policy, secret injection, or resource reservations that callers silently ignore.
+Authorization obligations are satisfied through a host-provided `CapabilityObligationHandler` seam. `CapabilityHost` calls the handler after `Decision::Allow { obligations }` and before dispatch, process start, or approval lease claim. If no handler is configured, if the handler reports unsupported obligations, or if the handler fails, the invocation fails closed before downstream side effects. Handler failures use the stable `CapabilityObligationFailureKind` categories and must remain sanitized metadata, not raw input, host paths, secret material, runtime output, or detailed backend errors. The concrete `ironclaw_host_runtime::BuiltinObligationHandler` currently supports metadata-only `AuditBefore` and `ApplyNetworkPolicy` preflight; when composed through `HostRuntimeServices`, accepted network policies are handed to the WASM runtime adapter and can be enforced by `ironclaw_network::HardenedHttpEgressClient` for actual host-mediated WASM HTTP imports. Host runtime may also inject already-resolved HTTP credentials in that hardened WASM egress path after pre-injection leak scanning, but `InjectSecretOnce` obligations and secret lease consumption still fail closed. Other runtime/input/output plumbing obligations still fail closed. This prevents authorizers from attaching requirements such as audit, output limits, network policy, secret injection, or resource reservations that callers silently ignore.
 
 ---
 
@@ -186,7 +186,8 @@ This slice does not implement:
 - generalized streaming/binary process output references beyond the current filesystem JSON output path
 - streaming output APIs
 - built-in obligation semantics inside `ironclaw_capabilities`; concrete handlers live outside this crate
-- runtime/input/output plumbing for secret injection, non-WASM network I/O policy enforcement, audit-after, output redaction, or output limiting
+- `InjectSecretOnce` obligation handling and secret lease consumption; only explicitly configured, already-resolved runtime HTTP credentials can be injected in the WASM hardened-egress adapter
+- runtime/input/output plumbing for non-WASM network I/O policy enforcement, audit-after, output redaction, or output limiting
 - transcript/job history
 
 Those belong to later capability-host/run-state/auth slices.

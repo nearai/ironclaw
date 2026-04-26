@@ -1,7 +1,7 @@
 # IronClaw Reborn secrets service contract
 
 **Date:** 2026-04-26
-**Status:** V1 service-boundary slice
+**Status:** V1 service-boundary + credential mapping slice
 **Crate:** `crates/ironclaw_secrets`
 **Depends on:** `docs/reborn/contracts/host-api.md`
 
@@ -21,7 +21,7 @@ ResourceScope + SecretHandle
   -> SecretMaterial exactly once
 ```
 
-The crate owns storage mechanics and one-shot lease state. It does not decide authorization, run approval flows, inject secrets into runtime requests, contact networks, emit audit events, or execute product workflows.
+The crate owns storage mechanics, one-shot lease state, and metadata-only credential mapping shapes. It does not decide authorization, run approval flows, inject secrets into runtime requests, contact networks, emit audit events, or execute product workflows.
 
 ---
 
@@ -38,18 +38,20 @@ SecretLease
 SecretStoreError
 SecretStore
 InMemorySecretStore
+CredentialLocation
+CredentialMapping
 ```
 
-`SecretMaterial` is backed by `secrecy::SecretString`, so access to raw values is explicit through `ExposeSecret`. Metadata, lease records, and errors never contain raw values.
+`SecretMaterial` is backed by `secrecy::SecretString`, so access to raw values is explicit through `ExposeSecret`. Metadata, lease records, credential mappings, and errors never contain raw values.
 
 Ownership remains:
 
 ```text
 host_api       -> opaque SecretHandle and Action::UseSecret shapes
-secrets        -> scoped storage, metadata, and one-shot leases
+secrets        -> scoped storage, metadata, one-shot leases, and credential mapping metadata
 authorization  -> whether a caller may use a SecretHandle
 capabilities   -> caller-facing workflow; currently fails closed on InjectSecretOnce obligations
-host_runtime   -> future composition of secret services into runtime adapters/obligation handlers
+host_runtime   -> composition of already-resolved credential material into hardened runtime egress; future secret lease consumption in obligation handlers
 runtimes        -> consume injected values only after host-side authorization and lease handling
 ```
 
@@ -68,7 +70,7 @@ Rules:
 - consumed leases cannot be consumed again
 - revoked leases cannot be consumed
 
-This is the minimum shape needed before wiring secret injection into obligation handling.
+This is the minimum shape needed before wiring secret lease consumption into obligation handling.
 
 ---
 
@@ -83,7 +85,18 @@ let lease = secrets.lease_once(&scope, &handle).await?;
 let material = secrets.consume(&scope, lease.id).await?;
 ```
 
-`metadata` and `lease` are safe to log only as metadata; they do not include secret values. `material` is the only raw-value carrier and should stay inside the narrow injection path that requested it.
+`metadata`, `lease`, and `CredentialMapping` are safe to log only as metadata; they do not include secret values. `material` is the only raw-value carrier and should stay inside the narrow injection path that requested it.
+
+Credential mappings describe where an already-authorized secret should be placed, without carrying material:
+
+```rust
+let mapping = CredentialMapping::bearer(
+    SecretHandle::new("github_token")?,
+    "api.github.com",
+);
+```
+
+Runtime composition must obtain material through explicit scoped secret access before creating an injection-time value such as `RuntimeHttpCredential`; this crate does not inject into requests itself.
 
 ---
 
@@ -113,4 +126,5 @@ The crate tests cover:
 - one-shot leases consume exactly once
 - same-handle secrets are tenant/user/project isolated
 - missing secrets fail without creating leases
+- credential mapping constructors carry handles and host patterns but no secret material
 - crate boundary remains low-level and does not depend on workflow/runtime/observability crates
