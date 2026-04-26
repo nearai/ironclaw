@@ -5,10 +5,16 @@ edition = "2024"
 publish = false
 
 [dependencies]
+aes-gcm = "0.10"
 async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+hkdf = "0.12"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
 thiserror = "2"
+tokio = { version = "1", features = ["sync"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]

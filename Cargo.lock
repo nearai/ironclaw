@@ -4274,9 +4274,14 @@ dependencies = [
 name = "ironclaw_secrets"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "async-trait",
+ "chrono",
+ "hkdf",
  "ironclaw_host_api",
  "secrecy",
+ "serde",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "uuid",

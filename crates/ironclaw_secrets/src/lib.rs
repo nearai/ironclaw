@@ -6,13 +6,48 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
+use aes_gcm::{
+    Aes256Gcm, KeyInit, Nonce,
+    aead::{Aead, AeadCore, OsRng, rand_core::RngCore},
+};
 use async_trait::async_trait;
-use ironclaw_host_api::{ProjectId, ResourceScope, SecretHandle, TenantId, UserId};
+use chrono::Utc;
+use hkdf::Hkdf;
+use ironclaw_host_api::{ProjectId, ResourceScope, SecretHandle, TenantId, Timestamp, UserId};
 pub use secrecy::{ExposeSecret, SecretString as SecretMaterial};
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use thiserror::Error;
 use uuid::Uuid;
+
+const SECRET_KEY_SIZE: usize = 32;
+const SECRET_NONCE_SIZE: usize = 12;
+const SECRET_SALT_SIZE: usize = 32;
+const SECRET_TAG_SIZE: usize = 16;
+
+/// Opaque identifier for a stored secret record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SecretId(Uuid);
+
+impl SecretId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for SecretId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for SecretId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
 
 /// Opaque identifier for a one-shot secret lease.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -37,10 +72,17 @@ impl fmt::Display for SecretLeaseId {
 }
 
 /// Redacted metadata for a stored secret.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretMetadata {
+    pub id: SecretId,
     pub scope: ResourceScope,
     pub handle: SecretHandle,
+    pub provider: Option<String>,
+    pub expires_at: Option<Timestamp>,
+    pub last_used_at: Option<Timestamp>,
+    pub usage_count: u64,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 /// Lease lifecycle for one secret access.
@@ -61,7 +103,7 @@ pub struct SecretLease {
 }
 
 /// Where a credential should be injected into an outbound HTTP request.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CredentialLocation {
     AuthorizationBearer,
     AuthorizationBasic {
@@ -83,7 +125,7 @@ pub enum CredentialLocation {
 ///
 /// This carries no secret material. Runtime-specific injection is owned by the
 /// caller/composition layer after it has explicitly obtained material.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialMapping {
     pub handle: SecretHandle,
     pub location: CredentialLocation,
@@ -118,9 +160,256 @@ impl CredentialMapping {
     }
 }
 
+/// Cryptographic operations for encrypted secret storage.
+///
+/// Uses AES-256-GCM with per-secret HKDF-SHA256 key derivation. The master key
+/// is held in [`SecretMaterial`] and never appears in debug output.
+#[derive(Clone)]
+pub struct SecretsCrypto {
+    master_key: SecretMaterial,
+}
+
+impl SecretsCrypto {
+    pub fn new(master_key: SecretMaterial) -> Result<Self, SecretStoreError> {
+        if master_key.expose_secret().len() < SECRET_KEY_SIZE {
+            return Err(SecretStoreError::InvalidMasterKey);
+        }
+        Ok(Self { master_key })
+    }
+
+    pub fn generate_salt() -> Vec<u8> {
+        let mut salt = vec![0u8; SECRET_SALT_SIZE];
+        OsRng.fill_bytes(&mut salt);
+        salt
+    }
+
+    pub fn encrypt(
+        &self,
+        material: &SecretMaterial,
+    ) -> Result<(Vec<u8>, Vec<u8>), SecretStoreError> {
+        let salt = Self::generate_salt();
+        let derived_key = self.derive_key(&salt)?;
+        let cipher = Aes256Gcm::new_from_slice(&derived_key)
+            .map_err(|_| SecretStoreError::EncryptionFailed)?;
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let ciphertext = cipher
+            .encrypt(&nonce, material.expose_secret().as_bytes())
+            .map_err(|_| SecretStoreError::EncryptionFailed)?;
+
+        let mut encrypted = Vec::with_capacity(SECRET_NONCE_SIZE + ciphertext.len());
+        encrypted.extend_from_slice(&nonce);
+        encrypted.extend_from_slice(&ciphertext);
+        Ok((encrypted, salt))
+    }
+
+    pub fn decrypt(
+        &self,
+        encrypted_value: &[u8],
+        key_salt: &[u8],
+    ) -> Result<SecretMaterial, SecretStoreError> {
+        if encrypted_value.len() < SECRET_NONCE_SIZE + SECRET_TAG_SIZE {
+            return Err(SecretStoreError::DecryptionFailed);
+        }
+
+        let derived_key = self.derive_key(key_salt)?;
+        let cipher = Aes256Gcm::new_from_slice(&derived_key)
+            .map_err(|_| SecretStoreError::DecryptionFailed)?;
+        let (nonce_bytes, ciphertext) = encrypted_value.split_at(SECRET_NONCE_SIZE);
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|_| SecretStoreError::DecryptionFailed)?;
+        let plaintext = String::from_utf8(plaintext).map_err(|_| SecretStoreError::InvalidUtf8)?;
+        Ok(SecretMaterial::from(plaintext))
+    }
+
+    fn derive_key(&self, salt: &[u8]) -> Result<[u8; SECRET_KEY_SIZE], SecretStoreError> {
+        let hk = Hkdf::<Sha256>::new(Some(salt), self.master_key.expose_secret().as_bytes());
+        let mut derived = [0u8; SECRET_KEY_SIZE];
+        hk.expand(b"ironclaw-reborn-secrets-v1", &mut derived)
+            .map_err(|_| SecretStoreError::EncryptionFailed)?;
+        Ok(derived)
+    }
+}
+
+impl fmt::Debug for SecretsCrypto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SecretsCrypto")
+            .field("master_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Encrypted durable-row shape. Debug output redacts ciphertext and salt.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct EncryptedSecretRecord {
+    pub metadata: SecretMetadata,
+    pub encrypted_value: Vec<u8>,
+    pub key_salt: Vec<u8>,
+}
+
+impl fmt::Debug for EncryptedSecretRecord {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EncryptedSecretRecord")
+            .field("metadata", &self.metadata)
+            .field("encrypted_value", &"[REDACTED]")
+            .field("key_salt", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Persistence boundary for encrypted secret rows.
+///
+/// Concrete PostgreSQL/libSQL/filesystem adapters can implement this trait
+/// without moving database, filesystem, authorization, or runtime dependencies
+/// into this crate.
+#[async_trait]
+pub trait EncryptedSecretRepository: Send + Sync {
+    async fn upsert(
+        &self,
+        record: EncryptedSecretRecord,
+    ) -> Result<EncryptedSecretRecord, SecretStoreError>;
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<Option<EncryptedSecretRecord>, SecretStoreError>;
+
+    async fn list(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<EncryptedSecretRecord>, SecretStoreError>;
+
+    async fn delete(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<bool, SecretStoreError>;
+
+    async fn any_exist(&self) -> Result<bool, SecretStoreError>;
+
+    async fn record_usage(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+        used_at: Timestamp,
+    ) -> Result<EncryptedSecretRecord, SecretStoreError>;
+}
+
+/// In-memory encrypted row repository for tests and local composition demos.
+#[derive(Debug, Default)]
+pub struct InMemoryEncryptedSecretRepository {
+    records: Mutex<HashMap<SecretKey, EncryptedSecretRecord>>,
+}
+
+impl InMemoryEncryptedSecretRepository {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn lock_records(
+        &self,
+    ) -> Result<MutexGuard<'_, HashMap<SecretKey, EncryptedSecretRecord>>, SecretStoreError> {
+        self.records
+            .lock()
+            .map_err(|error| SecretStoreError::StoreUnavailable {
+                reason: error.to_string(),
+            })
+    }
+}
+
+#[async_trait]
+impl EncryptedSecretRepository for InMemoryEncryptedSecretRepository {
+    async fn upsert(
+        &self,
+        mut record: EncryptedSecretRecord,
+    ) -> Result<EncryptedSecretRecord, SecretStoreError> {
+        let key = SecretKey::new(&record.metadata.scope, &record.metadata.handle);
+        if let Some(existing) = self.lock_records()?.get(&key) {
+            record.metadata.id = existing.metadata.id;
+            record.metadata.created_at = existing.metadata.created_at;
+            record.metadata.usage_count = existing.metadata.usage_count;
+            record.metadata.last_used_at = existing.metadata.last_used_at;
+        }
+        self.lock_records()?.insert(key, record.clone());
+        Ok(record)
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<Option<EncryptedSecretRecord>, SecretStoreError> {
+        Ok(self
+            .lock_records()?
+            .get(&SecretKey::new(scope, handle))
+            .cloned())
+    }
+
+    async fn list(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<EncryptedSecretRecord>, SecretStoreError> {
+        Ok(self
+            .lock_records()?
+            .iter()
+            .filter(|(key, _)| key.matches_scope(scope))
+            .map(|(_, record)| record.clone())
+            .collect())
+    }
+
+    async fn delete(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<bool, SecretStoreError> {
+        Ok(self
+            .lock_records()?
+            .remove(&SecretKey::new(scope, handle))
+            .is_some())
+    }
+
+    async fn any_exist(&self) -> Result<bool, SecretStoreError> {
+        Ok(!self.lock_records()?.is_empty())
+    }
+
+    async fn record_usage(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+        used_at: Timestamp,
+    ) -> Result<EncryptedSecretRecord, SecretStoreError> {
+        let mut records = self.lock_records()?;
+        let key = SecretKey::new(scope, handle);
+        let record = records
+            .get_mut(&key)
+            .ok_or_else(|| SecretStoreError::UnknownSecret {
+                scope: Box::new(scope.clone()),
+                handle: handle.clone(),
+            })?;
+        record.metadata.usage_count += 1;
+        record.metadata.last_used_at = Some(used_at);
+        record.metadata.updated_at = used_at;
+        Ok(record.clone())
+    }
+}
+
 /// Secret service failures. Variants intentionally avoid secret material.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SecretStoreError {
+    #[error("invalid secrets master key")]
+    InvalidMasterKey,
+    #[error("secret encryption failed")]
+    EncryptionFailed,
+    #[error("secret decryption failed")]
+    DecryptionFailed,
+    #[error("secret value is not valid UTF-8")]
+    InvalidUtf8,
+    #[error("secret has expired")]
+    SecretExpired { handle: SecretHandle },
     #[error("unknown secret {handle} for tenant/user scope")]
     UnknownSecret {
         scope: Box<ResourceScope>,
@@ -154,6 +443,10 @@ impl SecretStoreError {
 
     pub fn is_revoked(&self) -> bool {
         matches!(self, Self::LeaseRevoked { .. })
+    }
+
+    pub fn is_decryption_failed(&self) -> bool {
+        matches!(self, Self::DecryptionFailed)
     }
 }
 
@@ -203,6 +496,192 @@ pub trait SecretStore: Send + Sync {
     ) -> Result<Vec<SecretLease>, SecretStoreError>;
 }
 
+/// Encrypted secret store over a caller-provided encrypted-row repository.
+pub struct EncryptedSecretStore<R>
+where
+    R: EncryptedSecretRepository,
+{
+    repository: Arc<R>,
+    crypto: SecretsCrypto,
+    leases: tokio::sync::Mutex<HashMap<SecretLeaseKey, SecretLease>>,
+}
+
+impl<R> EncryptedSecretStore<R>
+where
+    R: EncryptedSecretRepository,
+{
+    pub fn new(repository: Arc<R>, crypto: SecretsCrypto) -> Self {
+        Self {
+            repository,
+            crypto,
+            leases: tokio::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn repository(&self) -> &Arc<R> {
+        &self.repository
+    }
+}
+
+#[async_trait]
+impl<R> SecretStore for EncryptedSecretStore<R>
+where
+    R: EncryptedSecretRepository,
+{
+    async fn put(
+        &self,
+        scope: ResourceScope,
+        handle: SecretHandle,
+        material: SecretMaterial,
+    ) -> Result<SecretMetadata, SecretStoreError> {
+        let now = Utc::now();
+        let metadata = SecretMetadata {
+            id: SecretId::new(),
+            scope: scope.clone(),
+            handle: handle.clone(),
+            provider: None,
+            expires_at: None,
+            last_used_at: None,
+            usage_count: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        let (encrypted_value, key_salt) = self.crypto.encrypt(&material)?;
+        let record = EncryptedSecretRecord {
+            metadata,
+            encrypted_value,
+            key_salt,
+        };
+        Ok(self.repository.upsert(record).await?.metadata)
+    }
+
+    async fn metadata(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<Option<SecretMetadata>, SecretStoreError> {
+        Ok(self
+            .repository
+            .get(scope, handle)
+            .await?
+            .map(|record| record.metadata))
+    }
+
+    async fn lease_once(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<SecretLease, SecretStoreError> {
+        let Some(record) = self.repository.get(scope, handle).await? else {
+            return Err(SecretStoreError::UnknownSecret {
+                scope: Box::new(scope.clone()),
+                handle: handle.clone(),
+            });
+        };
+        if record
+            .metadata
+            .expires_at
+            .is_some_and(|expires_at| expires_at <= Utc::now())
+        {
+            return Err(SecretStoreError::SecretExpired {
+                handle: handle.clone(),
+            });
+        }
+        let lease = SecretLease {
+            id: SecretLeaseId::new(),
+            scope: scope.clone(),
+            handle: handle.clone(),
+            status: SecretLeaseStatus::Active,
+        };
+        self.leases
+            .lock()
+            .await
+            .insert(SecretLeaseKey::new(scope, lease.id), lease.clone());
+        Ok(lease)
+    }
+
+    async fn consume(
+        &self,
+        scope: &ResourceScope,
+        lease_id: SecretLeaseId,
+    ) -> Result<SecretMaterial, SecretStoreError> {
+        let mut leases = self.leases.lock().await;
+        let key = SecretLeaseKey::new(scope, lease_id);
+        let lease = leases
+            .get_mut(&key)
+            .ok_or_else(|| SecretStoreError::UnknownLease {
+                scope: Box::new(scope.clone()),
+                lease_id,
+            })?;
+        match lease.status {
+            SecretLeaseStatus::Active => {}
+            SecretLeaseStatus::Consumed => {
+                return Err(SecretStoreError::LeaseConsumed { lease_id });
+            }
+            SecretLeaseStatus::Revoked => return Err(SecretStoreError::LeaseRevoked { lease_id }),
+        }
+
+        let record = self
+            .repository
+            .get(scope, &lease.handle)
+            .await?
+            .ok_or_else(|| SecretStoreError::UnknownSecret {
+                scope: Box::new(scope.clone()),
+                handle: lease.handle.clone(),
+            })?;
+        if record
+            .metadata
+            .expires_at
+            .is_some_and(|expires_at| expires_at <= Utc::now())
+        {
+            return Err(SecretStoreError::SecretExpired {
+                handle: lease.handle.clone(),
+            });
+        }
+        let material = self
+            .crypto
+            .decrypt(&record.encrypted_value, &record.key_salt)?;
+        self.repository
+            .record_usage(scope, &lease.handle, Utc::now())
+            .await?;
+        lease.status = SecretLeaseStatus::Consumed;
+        Ok(material)
+    }
+
+    async fn revoke(
+        &self,
+        scope: &ResourceScope,
+        lease_id: SecretLeaseId,
+    ) -> Result<SecretLease, SecretStoreError> {
+        let mut leases = self.leases.lock().await;
+        let key = SecretLeaseKey::new(scope, lease_id);
+        let lease = leases
+            .get_mut(&key)
+            .ok_or_else(|| SecretStoreError::UnknownLease {
+                scope: Box::new(scope.clone()),
+                lease_id,
+            })?;
+        if lease.status == SecretLeaseStatus::Active {
+            lease.status = SecretLeaseStatus::Revoked;
+        }
+        Ok(lease.clone())
+    }
+
+    async fn leases_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<SecretLease>, SecretStoreError> {
+        Ok(self
+            .leases
+            .lock()
+            .await
+            .iter()
+            .filter(|(key, _)| key.matches_scope(scope))
+            .map(|(_, lease)| lease.clone())
+            .collect())
+    }
+}
+
 /// In-memory secret store for contract tests and non-durable demos.
 #[derive(Debug, Default)]
 pub struct InMemorySecretStore {
@@ -245,6 +724,12 @@ impl SecretKey {
             project_id: scope.project_id.clone(),
             handle: handle.clone(),
         }
+    }
+
+    fn matches_scope(&self, scope: &ResourceScope) -> bool {
+        self.tenant_id == scope.tenant_id
+            && self.user_id == scope.user_id
+            && self.project_id == scope.project_id
     }
 }
 
@@ -293,9 +778,17 @@ impl SecretStore for InMemorySecretStore {
         handle: SecretHandle,
         material: SecretMaterial,
     ) -> Result<SecretMetadata, SecretStoreError> {
+        let now = Utc::now();
         let metadata = SecretMetadata {
+            id: SecretId::new(),
             scope: scope.clone(),
             handle: handle.clone(),
+            provider: None,
+            expires_at: None,
+            last_used_at: None,
+            usage_count: 0,
+            created_at: now,
+            updated_at: now,
         };
         let record = SecretRecord {
             metadata: metadata.clone(),
