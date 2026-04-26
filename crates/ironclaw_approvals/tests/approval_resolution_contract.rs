@@ -1,7 +1,12 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use ironclaw_approvals::*;
 use ironclaw_authorization::*;
-use ironclaw_events::{EventError, EventSink, InMemoryEventSink, RuntimeEvent, RuntimeEventKind};
+use ironclaw_events::{
+    EventError, EventSink, InMemoryEventSink, JsonlEventSink, RuntimeEvent, RuntimeEventKind,
+};
+use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_run_state::*;
 
@@ -250,6 +255,85 @@ async fn denying_pending_dispatch_request_emits_redacted_approval_audit_event() 
     assert_eq!(emitted[0].process_id, None);
     assert_eq!(emitted[0].output_bytes, None);
     assert_eq!(emitted[0].error_kind, None);
+}
+
+#[tokio::test]
+async fn approval_audit_events_persist_to_jsonl_without_sensitive_approval_details() {
+    let storage = tempfile::tempdir().unwrap().keep();
+    let mut fs = LocalFilesystem::new();
+    fs.mount_local(
+        VirtualPath::new("/engine").unwrap(),
+        HostPath::from_path_buf(storage.clone()),
+    )
+    .unwrap();
+    let event_path = VirtualPath::new("/engine/events/approval-audit.jsonl").unwrap();
+    let events = JsonlEventSink::new(Arc::new(fs), event_path.clone());
+    let approvals = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let resolver = ApprovalResolver::new(&approvals, &leases).with_event_sink(&events);
+    let invocation_id = InvocationId::new();
+    let capability = CapabilityId::new("echo.say").unwrap();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let mut approval = approval_request(invocation_id, capability.clone());
+    approval.reason = "operator reason with /tmp/secret-host-path and token=redact-me".to_string();
+    approval.invocation_fingerprint = Some(
+        InvocationFingerprint::for_dispatch(
+            &scope,
+            &capability,
+            &ResourceEstimate::default(),
+            &serde_json::json!({"message": "raw-replay-secret"}),
+        )
+        .unwrap(),
+    );
+    let request_id = approval.id;
+    let fingerprint = approval
+        .invocation_fingerprint
+        .as_ref()
+        .unwrap()
+        .as_str()
+        .to_string();
+    approvals
+        .save_pending(scope.clone(), approval)
+        .await
+        .unwrap();
+
+    let lease = resolver
+        .approve_dispatch(
+            &scope,
+            request_id,
+            LeaseApproval {
+                issued_by: Principal::User(scope.user_id.clone()),
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                expires_at: None,
+                max_invocations: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+
+    let persisted = events.read_events().await.unwrap();
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].kind, RuntimeEventKind::ApprovalApproved);
+    assert_eq!(persisted[0].scope, scope);
+    assert_eq!(persisted[0].capability_id, capability);
+    assert_eq!(persisted[0].approval_request_id, Some(request_id));
+    assert_eq!(persisted[0].provider, None);
+    assert_eq!(persisted[0].runtime, None);
+    assert_eq!(persisted[0].process_id, None);
+    assert_eq!(persisted[0].output_bytes, None);
+    assert_eq!(persisted[0].error_kind, None);
+
+    let bytes = events.filesystem().read_file(&event_path).await.unwrap();
+    let text = String::from_utf8(bytes).unwrap();
+    assert!(text.contains("approval_approved"));
+    assert!(text.contains(request_id.to_string().as_str()));
+    assert!(text.contains("echo.say"));
+    assert!(!text.contains(storage.to_string_lossy().as_ref()));
+    assert!(!text.contains("secret-host-path"));
+    assert!(!text.contains("redact-me"));
+    assert!(!text.contains("raw-replay-secret"));
+    assert!(!text.contains(fingerprint.as_str()));
+    assert!(!text.contains(lease.grant.id.to_string().as_str()));
 }
 
 #[tokio::test]

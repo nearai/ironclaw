@@ -200,7 +200,7 @@ approve_dispatch success -> approval_approved
 deny success             -> approval_denied
 ```
 
-The events carry only `ResourceScope`, `CapabilityId`, and `ApprovalRequestId`. They do not include approval reasons, replay input, invocation fingerprints, lease contents, raw host paths, or secret values. Event sink failures are ignored and must not change approval resolution outcomes.
+The events carry only `ResourceScope`, `CapabilityId`, and `ApprovalRequestId`. They do not include approval reasons, replay input, invocation fingerprints, lease IDs, lease contents, raw host paths, or secret values. The same redaction contract applies when events are persisted through `JsonlEventSink` at a host-selected virtual path such as `/engine/events/approval-audit.jsonl`. Event sink failures are ignored and must not change approval resolution outcomes.
 
 ---
 
