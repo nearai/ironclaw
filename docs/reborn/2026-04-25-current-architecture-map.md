@@ -96,7 +96,7 @@ Reborn has one host core with many adapters and runtime ports. It should not gro
 |       v                                                            |   |
 |  +-------------------+                                             |   |
 |  | RuntimeDispatcher | <-------------------------------------------+   |
-|  | authorized lane   |                                                 |
+|  | authorized adapter|                                                 |
 |  | router only       |                                                 |
 |  | [exists]          |                                                 |
 |  +----+--------+-----+                                                 |
@@ -105,8 +105,8 @@ Reborn has one host core with many adapters and runtime ports. It should not gro
         |        |
         v        v
 +--------------+ +---------------+ +---------------+ +------------------+
-| WASM runtime | | Script runner | | MCP adapter   | | FirstParty/System|
-| lane         | | lane          | | lane          | | runtime lanes    |
+| WASM adapter | | Script adapter| | MCP adapter   | | FirstParty/System|
+| -> runtime   | | -> runtime    | | -> runtime    | | runtime adapters |
 | [exists]     | | [exists]      | | [exists]      | | [not yet exec]   |
 +--------------+ +---------------+ +---------------+ +------------------+
         ^                ^                 ^
@@ -158,11 +158,11 @@ caller / first-party service / future turn service
 ```text
 already-authorized CapabilityDispatchRequest
   -> runtime-kind selection
-  -> configured runtime backend
+  -> registered RuntimeAdapter backend
   -> normalized CapabilityDispatchResult
 ```
 
-The dispatcher does not own authorization, approval semantics, extension discovery, run-state, product workflows, prompt assembly, or transport behavior.
+The dispatcher does not own authorization, approval semantics, extension discovery, run-state, product workflows, prompt assembly, transport behavior, or concrete WASM/Script/MCP runtime execution. Concrete runtime crates are adapted outside the dispatcher boundary.
 
 ---
 
@@ -191,7 +191,7 @@ Implemented/current pieces:
 - `ProcessHost` exists as the current host-facing `status`, `kill`, `await_process`, `subscribe`, `result`, `output`, and `await_result` API over scoped process current state/results; when wired to `ProcessCancellationRegistry`, scoped kill also signals cooperative executor cancellation.
 - `ProcessServices` exists as convenience composition so `ProcessHost` and `BackgroundProcessManager` share the same process store, result store, and cancellation registry.
 - `CapabilityHost::with_process_services(...)` exists as convenience spawn wiring that derives the process manager from that shared services bundle without absorbing process lifecycle/result APIs.
-- `HostRuntimeServices` exists as a composition-only helper that builds `RuntimeDispatcher`, `CapabilityHost`, `ApprovalResolver`, and `ProcessHost` handles from shared registry/filesystem/governor/authorizer/runtime/process/approval services.
+- `HostRuntimeServices` exists as a composition-only helper that builds `RuntimeDispatcher`, concrete runtime adapter wrappers, `CapabilityHost`, `ApprovalResolver`, and `ProcessHost` handles from shared registry/filesystem/governor/authorizer/runtime/process/approval services.
 - Process lifecycle events exist through `EventingProcessStore` and runtime `EventSink`; approval-resolution audit exists through optional `ApprovalResolver` `AuditSink` wiring and typed `AuditEnvelope::approval_resolved(...)` records.
 - Process resource reservation ownership exists through `ResourceManagedProcessStore`; public process starts cannot forge reserved handles, and runtime-backed process dispatch suppresses duplicate reservation through the process-dispatch adapter.
 
@@ -222,13 +222,13 @@ The current implemented or contract-backed Reborn stack includes these slices:
 | Architecture guardrails | `[exists/partial]` `ironclaw_architecture` test crate walks `cargo metadata` and enforces central Reborn dependency-boundary rules; per-crate guardrail files document local invariants |
 | Approvals/resume | `[exists/partial]` pending approval records, invocation fingerprints, approval resolver, fail-closed approval+lease persistence ordering/rollback, metadata-only `AuditEnvelope::approval_resolved(...)` audit records with JSONL persistence coverage, in-memory and async filesystem-backed exact-invocation leases, `resume_json` replay checks |
 | Run-state | `[exists]` `Running`, `BlockedApproval`, `BlockedAuth`, `Completed`, `Failed` current-state stores with tenant/user partitioning |
-| Dispatcher | `[exists]` implementation of the neutral `ironclaw_host_api` dispatch port for already-authorized requests to WASM, Script, and MCP lanes; `FirstParty`/`System` recognized but unsupported; event sink failures are best-effort and runtime failures are redacted to stable kinds |
+| Dispatcher | `[exists]` implementation of the neutral `ironclaw_host_api` dispatch port for already-authorized requests to registered runtime adapters; no normal dependencies on concrete WASM/Script/MCP runtime crates; missing adapters fail closed before reservation; event sink failures are best-effort and runtime failures are redacted to stable kinds |
 | Runtime events and audit | `[partial]` runtime/process `RuntimeEvent` vocabulary with `EventSink`, separate control-plane `AuditEnvelope` records with `AuditSink`, in-memory/JSONL sinks, tenant/user-scoped JSONL path helpers, and hardened read-error semantics; sink failures are ignored by dispatcher/resolver so observability outages do not alter runtime or control-plane outcomes |
-| WASM lane | `[exists]` configured `WasmRuntime` dispatch path in the live vertical slice |
-| Script lane | `[exists]` `ScriptExecutor` path with semantic manifest runner profiles, in-process demo backend, and optional legacy Docker backend support |
-| MCP lane | `[exists]` adapter/executor contract path in the live vertical slice; not a full MCP lifecycle product yet |
+| WASM lane | `[exists]` `WasmRuntimeAdapter` composition in `ironclaw_host_runtime` delegates to configured `WasmRuntime` |
+| Script lane | `[exists]` `ScriptRuntimeAdapter` composition in `ironclaw_host_runtime` delegates to `ScriptExecutor` with semantic manifest runner profiles, in-process demo backend, and optional legacy Docker backend support |
+| MCP lane | `[exists]` `McpRuntimeAdapter` composition in `ironclaw_host_runtime` delegates to `McpExecutor`; not a full MCP lifecycle product yet |
 | Process persistence | `[exists]` process store/manager records, scoped process result records with inline JSON or filesystem output refs, `ProcessServices` wiring, host-facing `ProcessHost` status/kill/await/subscribe/result/output APIs, cooperative cancellation tokens, background completion/failure transition protection, lifecycle events, and resource reservation ownership/cleanup |
-| Live vertical slice | `[exists]` runnable demo through discovery -> registry -> `CapabilityHost` -> authorization -> dispatcher -> WASM/Script/MCP -> resources/events; host-runtime composition helper now covers the shared service wiring shape and has non-Docker in-memory and filesystem-backed `ironclaw_host_runtime` live examples |
+| Live vertical slice | `[exists]` runnable demos through discovery -> registry -> dispatcher adapters -> resources/events and through `CapabilityHost` -> authorization -> host-runtime-composed dispatcher adapters -> process services; host-runtime composition helper covers shared service wiring and has non-Docker in-memory and filesystem-backed live examples |
 
 ---
 
@@ -244,7 +244,7 @@ These are explicit gaps, not architecture contradictions:
 | Process product APIs | Process records, scoped status/kill/await/subscribe/result/output APIs, cooperative cancellation tokens, result records with filesystem JSON output refs, lifecycle events, and resource cleanup ownership exist as service slices; generalized artifact refs for streaming/binary outputs, output streams, forced abort handles, richer scoped read/projection APIs, durable subscription cursors, and event fanout are not complete. |
 | Durable leases | Async filesystem-backed exact-invocation lease persistence now covers issue, claim, consume, revoke, reload, tenant/user/invocation isolation, and fail-closed approval+lease coordination without nested async `block_on`; single-store ACID transactions, full audit retention policy, and reusable approval scopes are not complete. |
 | User-facing scoped event API | Runtime/process events, approval audit records, tenant/user-scoped JSONL helpers, and JSONL/in-memory sinks exist, but scoped SSE/WebSocket/reconnect APIs and projection reducers are not productized. |
-| FirstParty/System runtime execution | `RuntimeKind::FirstParty` and `RuntimeKind::System` are recognized host API/runtime markers, but dispatch returns unsupported until trusted host service adapters land. |
+| FirstParty/System runtime execution | `RuntimeKind::FirstParty` and `RuntimeKind::System` are recognized host API/runtime markers, but no trusted host service adapters are registered yet. |
 | Full MCP server lifecycle | MCP is a current adapter lane, not yet a complete product lifecycle for server install/start/auth/restart/monitoring. |
 | Auth-blocked resume product path | `BlockedAuth` is reserved in run-state; full OAuth/token prompt, secret lease, callback, and retry-after-auth workflow remains to be implemented. |
 
