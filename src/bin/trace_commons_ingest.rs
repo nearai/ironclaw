@@ -891,6 +891,7 @@ async fn submit_trace_handler(
         credit_points_pending: envelope.value.credit_points_pending,
         credit_points_final: envelope.value.credit_points_final,
         consent_scopes: envelope.consent.scopes.clone(),
+        allowed_uses: envelope.trace_card.allowed_uses.clone(),
         redaction_counts: envelope.privacy.redaction_counts.clone(),
         received_at,
         retention_policy_id: retention_policy.name,
@@ -1645,6 +1646,14 @@ async fn dataset_replay_handler(
         query.privacy_risk,
         consent_scope,
     )?;
+    let tenant_policy = tenant_export_policy_for_request(
+        state.as_ref(),
+        &tenant,
+        "replay dataset",
+        consent_scope,
+        TraceAllowedUse::Evaluation,
+    )
+    .await?;
     let purpose =
         normalized_export_purpose(query.purpose.as_deref(), "trace_commons_replay_dataset");
     let TraceCommonsMetadataView { records, derived } =
@@ -1666,6 +1675,13 @@ async fn dataset_replay_handler(
                 .is_none_or(|risk| record.privacy_risk == risk)
         })
         .filter(|record| consent_scope.is_none_or(|scope| record.consent_scopes.contains(&scope)))
+        .filter(|record| {
+            record_matches_export_policy_abac(
+                record,
+                tenant_policy.as_ref(),
+                TraceAllowedUse::Evaluation,
+            )
+        })
         .filter(TraceCommonsSubmissionRecord::is_export_eligible)
         .take(limit)
     {
@@ -1826,6 +1842,14 @@ async fn run_benchmark_conversion(
         body.privacy_risk,
         consent_scope,
     )?;
+    let tenant_policy = tenant_export_policy_for_request(
+        state,
+        tenant,
+        "benchmark conversion",
+        consent_scope,
+        TraceAllowedUse::BenchmarkGeneration,
+    )
+    .await?;
     let purpose = normalized_export_purpose(
         body.purpose.as_deref(),
         "trace_commons_benchmark_candidate_conversion",
@@ -1842,6 +1866,13 @@ async fn run_benchmark_conversion(
                 .is_none_or(|risk| record.privacy_risk == risk)
         })
         .filter(|record| consent_scope.is_none_or(|scope| record.consent_scopes.contains(&scope)))
+        .filter(|record| {
+            record_matches_export_policy_abac(
+                record,
+                tenant_policy.as_ref(),
+                TraceAllowedUse::BenchmarkGeneration,
+            )
+        })
         .map(|record| (record.submission_id, record))
         .collect::<BTreeMap<_, _>>();
     let limit = body.limit.unwrap_or(100).clamp(1, 500);
@@ -2027,6 +2058,14 @@ async fn ranker_training_candidates_handler(
         query.privacy_risk,
         consent_scope,
     )?;
+    let tenant_policy = tenant_export_policy_for_request(
+        state.as_ref(),
+        &tenant,
+        "ranker training candidates",
+        consent_scope,
+        TraceAllowedUse::RankingModelTraining,
+    )
+    .await?;
     let mut candidate_query = query;
     candidate_query.limit = Some(candidate_query.limit.unwrap_or(100).clamp(1, 500));
     let candidates = collect_ranker_training_candidates(
@@ -2034,6 +2073,7 @@ async fn ranker_training_candidates_handler(
         &tenant,
         &candidate_query,
         consent_scope,
+        tenant_policy.as_ref(),
     )
     .await
     .map_err(internal_error)?;
@@ -2174,13 +2214,26 @@ async fn ranker_training_pairs_handler(
         query.privacy_risk,
         consent_scope,
     )?;
+    let tenant_policy = tenant_export_policy_for_request(
+        state.as_ref(),
+        &tenant,
+        "ranker training pairs",
+        consent_scope,
+        TraceAllowedUse::RankingModelTraining,
+    )
+    .await?;
     let mut pair_query = query;
     let pair_limit = pair_query.limit.unwrap_or(100).clamp(1, 500);
     pair_query.limit = Some(pair_limit.saturating_add(1));
-    let candidates =
-        collect_ranker_training_candidates(state.as_ref(), &tenant, &pair_query, consent_scope)
-            .await
-            .map_err(internal_error)?;
+    let candidates = collect_ranker_training_candidates(
+        state.as_ref(),
+        &tenant,
+        &pair_query,
+        consent_scope,
+        tenant_policy.as_ref(),
+    )
+    .await
+    .map_err(internal_error)?;
     let pairs = build_ranker_training_pairs(&candidates, pair_limit);
     let source_submission_ids = ranker_pair_source_submission_ids(&pairs);
     let source_object_refs = revalidate_db_export_sources(
@@ -2609,6 +2662,7 @@ async fn collect_ranker_training_candidates(
     tenant: &TenantAuth,
     query: &RankerTrainingExportQuery,
     consent_scope: Option<ConsentScope>,
+    tenant_policy: Option<&TenantSubmissionPolicy>,
 ) -> anyhow::Result<Vec<TraceRankerTrainingCandidate>> {
     let TraceCommonsMetadataView { records, derived } =
         read_reviewer_metadata_view(state, tenant).await?;
@@ -2629,6 +2683,13 @@ async fn collect_ranker_training_candidates(
                 .is_none_or(|risk| record.privacy_risk == risk)
         })
         .filter(|record| ranker_consent_matches(&record.consent_scopes, consent_scope))
+        .filter(|record| {
+            record_matches_export_policy_abac(
+                record,
+                tenant_policy,
+                TraceAllowedUse::RankingModelTraining,
+            )
+        })
         .filter_map(|record| {
             derived_by_submission
                 .get(&record.submission_id)
@@ -3028,6 +3089,101 @@ fn enforce_tenant_submission_policy(
     }
 
     Ok(())
+}
+
+async fn tenant_export_policy_for_request(
+    state: &AppState,
+    tenant: &TenantAuth,
+    surface: &str,
+    requested_scope: Option<ConsentScope>,
+    required_use: TraceAllowedUse,
+) -> ApiResult<Option<TenantSubmissionPolicy>> {
+    let policy = tenant_submission_policy_for_request(state, tenant).await?;
+    enforce_tenant_export_policy(
+        tenant,
+        surface,
+        policy.as_ref(),
+        state.require_tenant_submission_policy,
+        requested_scope,
+        required_use,
+    )?;
+    Ok(policy)
+}
+
+fn enforce_tenant_export_policy(
+    tenant: &TenantAuth,
+    surface: &str,
+    policy: Option<&TenantSubmissionPolicy>,
+    require_policy: bool,
+    requested_scope: Option<ConsentScope>,
+    required_use: TraceAllowedUse,
+) -> ApiResult<()> {
+    let Some(policy) = policy else {
+        if require_policy {
+            tracing::warn!(
+                tenant_id = %tenant.tenant_id,
+                surface,
+                "Trace Commons tenant policy rejected export without tenant policy"
+            );
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "trace export tenant does not have a contribution policy",
+            ));
+        }
+        return Ok(());
+    };
+
+    if let Some(scope) = requested_scope
+        && !policy.allowed_consent_scopes.is_empty()
+        && !policy.allowed_consent_scopes.contains(&scope)
+    {
+        tracing::warn!(
+            tenant_id = %tenant.tenant_id,
+            surface,
+            ?scope,
+            "Trace Commons tenant policy rejected export consent scope"
+        );
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "trace export consent scope is not allowed for this tenant",
+        ));
+    }
+
+    if !policy.allowed_uses.is_empty() && !policy.allowed_uses.contains(&required_use) {
+        tracing::warn!(
+            tenant_id = %tenant.tenant_id,
+            surface,
+            ?required_use,
+            "Trace Commons tenant policy rejected export allowed use"
+        );
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "trace export use is not allowed for this tenant",
+        ));
+    }
+
+    Ok(())
+}
+
+fn record_matches_export_policy_abac(
+    record: &TraceCommonsSubmissionRecord,
+    policy: Option<&TenantSubmissionPolicy>,
+    required_use: TraceAllowedUse,
+) -> bool {
+    let Some(policy) = policy else {
+        return true;
+    };
+
+    if !policy.allowed_consent_scopes.is_empty()
+        && !record
+            .consent_scopes
+            .iter()
+            .any(|scope| policy.allowed_consent_scopes.contains(scope))
+    {
+        return false;
+    }
+
+    policy.allowed_uses.is_empty() || record.allowed_uses.contains(&required_use)
 }
 
 fn authenticate(state: &AppState, headers: &HeaderMap) -> ApiResult<TenantAuth> {
@@ -3533,6 +3689,11 @@ fn trace_commons_record_from_storage_submission(
                 .consent_scopes
                 .iter()
                 .map(|scope| storage_string_as(scope, "consent_scope"))
+                .collect::<anyhow::Result<Vec<_>>>()?,
+            allowed_uses: record
+                .allowed_uses
+                .iter()
+                .map(|allowed_use| storage_string_as(allowed_use, "allowed_use"))
                 .collect::<anyhow::Result<Vec<_>>>()?,
             redaction_counts: record.redaction_counts,
             received_at: record.received_at,
@@ -7956,6 +8117,8 @@ struct TraceCommonsSubmissionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     credit_points_final: Option<f32>,
     consent_scopes: Vec<ConsentScope>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    allowed_uses: Vec<TraceAllowedUse>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     redaction_counts: BTreeMap<String, u32>,
     received_at: DateTime<Utc>,
@@ -10516,6 +10679,283 @@ mod tests {
                 .await
                 .expect("other tenant policy reads")
                 .is_none()
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn db_backed_tenant_policy_controls_export_surfaces() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-export-policy-abac.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db_tenant_policy_reads(
+            temp.path().to_path_buf(),
+            db.clone() as Arc<dyn Database>,
+            true,
+        );
+
+        let Json(policy) = put_tenant_policy_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceTenantPolicyRequest {
+                policy_version: "export-policy-v1".to_string(),
+                allowed_consent_scopes: vec![ConsentScope::BenchmarkOnly],
+                allowed_uses: vec![TraceAllowedUse::BenchmarkGeneration],
+            }),
+        )
+        .await
+        .expect("admin can write benchmark-only export policy");
+        assert_eq!(policy.allowed_uses, vec!["benchmark_generation"]);
+
+        let mut source = sample_envelope().await;
+        make_metadata_only_low_risk(&mut source);
+        source.consent.scopes = vec![ConsentScope::BenchmarkOnly];
+        source.trace_card.consent_scope = ConsentScope::BenchmarkOnly;
+        source.trace_card.allowed_uses = vec![TraceAllowedUse::BenchmarkGeneration];
+        let submission_id = source.submission_id;
+        let Json(receipt) =
+            submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(source))
+                .await
+                .expect("benchmark-only source can submit under tenant policy");
+        assert_eq!(receipt.status, "accepted");
+
+        let Json(benchmark) = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("abac_benchmark_allowed".to_string()),
+                consent_scope: Some("benchmark-only".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("benchmark export is allowed by tenant policy");
+        assert_eq!(benchmark.item_count, 1);
+        assert_eq!(benchmark.source_submission_ids, vec![submission_id]);
+
+        let replay_error = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("abac_replay_denied".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: Some("benchmark-only".to_string()),
+            }),
+        )
+        .await
+        .expect_err("replay export requires evaluation use");
+        assert_eq!(replay_error.0, StatusCode::FORBIDDEN);
+
+        let candidates_error = ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("abac_ranker_candidates_denied".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect_err("ranker candidates require ranking use and consent");
+        assert_eq!(candidates_error.0, StatusCode::FORBIDDEN);
+
+        let pairs_error = ranker_training_pairs_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("abac_ranker_pairs_denied".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect_err("ranker pairs require ranking use and consent");
+        assert_eq!(pairs_error.0, StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn export_policy_filters_sources_without_required_allowed_use() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-export-source-policy-abac.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let submit_state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut source = sample_envelope().await;
+        make_metadata_only_low_risk(&mut source);
+        source.consent.scopes = vec![ConsentScope::RankingTraining];
+        source.trace_card.consent_scope = ConsentScope::RankingTraining;
+        source.trace_card.allowed_uses = vec![TraceAllowedUse::Evaluation];
+        let submission_id = source.submission_id;
+        let _ = submit_trace_handler(State(submit_state), auth_headers("token-a"), Json(source))
+            .await
+            .expect("pre-policy source can submit");
+
+        db.upsert_trace_tenant_policy(StorageTraceTenantPolicyWrite {
+            tenant_id: "tenant-a".to_string(),
+            policy_version: "ranking-export-policy-v1".to_string(),
+            allowed_consent_scopes: vec!["ranking_training".to_string()],
+            allowed_uses: vec!["ranking_model_training".to_string()],
+            updated_by_principal_ref: principal_storage_ref("admin-token-a"),
+        })
+        .await
+        .expect("ranking tenant policy writes");
+        let export_state = test_state_with_db_tenant_policy_reads(
+            temp.path().to_path_buf(),
+            db.clone() as Arc<dyn Database>,
+            true,
+        );
+
+        let Json(candidates) = ranker_training_candidates_handler(
+            State(export_state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("source_abac_ranker_candidates".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect("ranker export request is policy-allowed");
+        assert_eq!(candidates.item_count, 0);
+        assert!(
+            candidates
+                .candidates
+                .iter()
+                .all(|candidate| candidate.submission_id != submission_id)
+        );
+
+        let Json(pairs) = ranker_training_pairs_handler(
+            State(export_state),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("source_abac_ranker_pairs".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect("ranker pair request is policy-allowed");
+        assert_eq!(pairs.item_count, 0);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn required_tenant_policy_blocks_exports_without_policy_row() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-export-missing-policy.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db_tenant_policy_reads(
+            temp.path().to_path_buf(),
+            db.clone() as Arc<dyn Database>,
+            true,
+        );
+
+        let replay_error = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("missing_policy_replay".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: Some("debugging-evaluation".to_string()),
+            }),
+        )
+        .await
+        .expect_err("required tenant policy blocks replay export");
+        assert_eq!(replay_error.0, StatusCode::FORBIDDEN);
+
+        let benchmark_error = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("missing_policy_benchmark".to_string()),
+                consent_scope: Some("benchmark-only".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect_err("required tenant policy blocks benchmark export");
+        assert_eq!(benchmark_error.0, StatusCode::FORBIDDEN);
+
+        let candidates_error = ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("missing_policy_ranker_candidates".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect_err("required tenant policy blocks ranker candidate export");
+        assert_eq!(candidates_error.0, StatusCode::FORBIDDEN);
+
+        let pairs_error = ranker_training_pairs_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("missing_policy_ranker_pairs".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect_err("required tenant policy blocks ranker pair export");
+        assert_eq!(pairs_error.0, StatusCode::FORBIDDEN);
+
+        assert!(
+            db.list_trace_export_manifests("tenant-a")
+                .await
+                .expect("export manifests read")
+                .is_empty()
         );
     }
 
@@ -15300,7 +15740,7 @@ mod tests {
             schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION.to_string(),
             consent_policy_version: "2026-04-24".to_string(),
             consent_scopes: vec!["ranking_training".to_string()],
-            allowed_uses: vec!["ranking_training".to_string()],
+            allowed_uses: vec!["ranking_model_training".to_string()],
             retention_policy_id: "private_corpus_revocable".to_string(),
             status: StorageTraceCorpusStatus::Accepted,
             privacy_risk: "low".to_string(),
@@ -15356,7 +15796,7 @@ mod tests {
             schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION.to_string(),
             consent_policy_version: "2026-04-24".to_string(),
             consent_scopes: vec!["debugging_evaluation".to_string()],
-            allowed_uses: vec!["debugging_evaluation".to_string()],
+            allowed_uses: vec!["debugging".to_string()],
             retention_policy_id: "private_corpus_revocable".to_string(),
             status: StorageTraceCorpusStatus::Quarantined,
             privacy_risk: "medium".to_string(),
