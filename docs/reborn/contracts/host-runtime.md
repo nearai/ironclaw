@@ -49,7 +49,7 @@ ProcessHost<'_>
 ApprovalResolver<'_, dyn ApprovalRequestStore, dyn CapabilityLeaseStore>
 ```
 
-It may hold shared `Arc` handles to configured services, runtime backends, observability sinks, and an optional capability-obligation handler. It adapts concrete runtime crates into `ironclaw_dispatcher::RuntimeAdapter` implementations when building `RuntimeDispatcher`.
+It may hold shared `Arc` handles to configured services, runtime backends, observability sinks, and an optional capability-obligation handler. It adapts concrete runtime crates into `ironclaw_dispatcher::RuntimeAdapter` implementations when building `RuntimeDispatcher`, and it provides a small `BuiltinObligationHandler` for metadata-only obligations.
 
 It must not:
 
@@ -57,7 +57,7 @@ It must not:
 - execute runtime lanes directly outside adapter wrappers
 - own process state transitions or cancellation semantics
 - own approval resolution or lease semantics; `approval_resolver()` only wires `ironclaw_approvals::ApprovalResolver`
-- own obligation semantics; `with_obligation_handler(...)` only passes a shared `CapabilityObligationHandler` through to `CapabilityHost`
+- own runtime/input/output obligation semantics; `with_obligation_handler(...)` passes a shared `CapabilityObligationHandler` through to `CapabilityHost`, and `BuiltinObligationHandler` is limited to metadata-only audit-before and network-policy preflight
 - expose process lifecycle APIs through `CapabilityHost`
 - turn process subscriptions into a message bus
 - weaken tenant/user scoped persistence boundaries
@@ -93,7 +93,10 @@ let services = HostRuntimeServices::new(
 .with_script_runtime(script_runtime)
 .with_event_sink(event_sink)
 .with_audit_sink(audit_sink)
-.with_obligation_handler(obligation_handler);
+.with_builtin_obligation_handler();
+
+// Or provide a custom handler:
+let services = services.with_obligation_handler(obligation_handler);
 
 let dispatcher = services.runtime_dispatcher_arc();
 let capability_host = services.capability_host_for_runtime_dispatcher(&dispatcher);
@@ -131,7 +134,7 @@ ProcessHost status/kill/result/output
 
 `approval_resolver()` uses the same `ApprovalRequestStore`, `CapabilityLeaseStore`, and optional `AuditSink` handles configured for `CapabilityHost::resume_json(...)`. This prevents accidental split wiring where one component approves a request into one lease store while resume checks another, or where approval audit disappears because the resolver was not wired to the shared audit sink.
 
-If configured, the shared `CapabilityObligationHandler` is passed into each `CapabilityHost` built by this helper. `HostRuntimeServices` does not inspect or satisfy obligations itself; unsupported or failed handler outcomes remain fail-closed inside `CapabilityHost` before dispatch, process start, or approval lease claim.
+If configured, the shared `CapabilityObligationHandler` is passed into each `CapabilityHost` built by this helper. `HostRuntimeServices::with_builtin_obligation_handler()` installs the metadata-only built-in handler. It supports `AuditBefore` by emitting a redacted `AuditStage::Before` audit envelope through the configured `AuditSink`, and supports `ApplyNetworkPolicy` by validating policy metadata without performing HTTP I/O, DNS resolution, credential injection, or egress reservation. `InjectSecretOnce`, `AuditAfter`, `RedactOutput`, `EnforceOutputLimit`, resource reservation, and scoped-mount obligations remain unsupported and fail closed until their required runtime/input/output plumbing exists. Unsupported or failed handler outcomes remain fail-closed inside `CapabilityHost` before dispatch, process start, or approval lease claim.
 
 This also prevents accidental split wiring where one component starts a process and another reads results or signals cancellation from a different store/registry.
 

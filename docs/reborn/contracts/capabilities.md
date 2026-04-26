@@ -87,7 +87,7 @@ It does not own process lifecycle or process-result mechanics after start; those
 
 Dispatch failures are reported through sanitized host-safe dispatch error kinds; `CapabilityInvocationError` does not expose boxed runtime/backend error details.
 
-Authorization obligations are satisfied through a host-provided `CapabilityObligationHandler` seam. `CapabilityHost` calls the handler after `Decision::Allow { obligations }` and before dispatch, process start, or approval lease claim. If no handler is configured, if the handler reports unsupported obligations, or if the handler fails, the invocation fails closed before downstream side effects. Handler failures use the stable `CapabilityObligationFailureKind` categories and must remain sanitized metadata, not raw input, host paths, secret material, runtime output, or detailed backend errors. This prevents authorizers from attaching requirements such as audit, output limits, network policy, secret injection, or resource reservations that callers silently ignore.
+Authorization obligations are satisfied through a host-provided `CapabilityObligationHandler` seam. `CapabilityHost` calls the handler after `Decision::Allow { obligations }` and before dispatch, process start, or approval lease claim. If no handler is configured, if the handler reports unsupported obligations, or if the handler fails, the invocation fails closed before downstream side effects. Handler failures use the stable `CapabilityObligationFailureKind` categories and must remain sanitized metadata, not raw input, host paths, secret material, runtime output, or detailed backend errors. The concrete `ironclaw_host_runtime::BuiltinObligationHandler` currently supports metadata-only `AuditBefore` and `ApplyNetworkPolicy` preflight; runtime/input/output plumbing obligations still fail closed. This prevents authorizers from attaching requirements such as audit, output limits, network policy, secret injection, or resource reservations that callers silently ignore.
 
 ---
 
@@ -185,7 +185,8 @@ This slice does not implement:
 - process output/result APIs inside `CapabilityHost`; result lookup and output resolution live in `ironclaw_processes`
 - generalized streaming/binary process output references beyond the current filesystem JSON output path
 - streaming output APIs
-- built-in obligation semantics for secrets, network I/O, audit emission, output redaction, or output limiting; this slice only exposes the fail-closed handler seam
+- built-in obligation semantics inside `ironclaw_capabilities`; concrete handlers live outside this crate
+- runtime/input/output plumbing for secret injection, network I/O, audit-after, output redaction, or output limiting
 - transcript/job history
 
 Those belong to later capability-host/run-state/auth slices.

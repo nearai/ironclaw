@@ -4,12 +4,17 @@
 //! together without moving authorization, dispatch, process lifecycle, approval,
 //! or run-state responsibilities out of their owning crates.
 
-use std::sync::Arc;
+use std::{net::IpAddr, sync::Arc};
 
 use async_trait::async_trait;
+use chrono::Utc;
 use ironclaw_approvals::ApprovalResolver;
 use ironclaw_authorization::{CapabilityDispatchAuthorizer, CapabilityLeaseStore};
-use ironclaw_capabilities::{CapabilityHost, CapabilityObligationHandler, DispatchProcessExecutor};
+use ironclaw_capabilities::{
+    CapabilityHost, CapabilityObligationError, CapabilityObligationFailureKind,
+    CapabilityObligationHandler, CapabilityObligationPhase, CapabilityObligationRequest,
+    DispatchProcessExecutor,
+};
 use ironclaw_dispatcher::{
     DispatchError, RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
 };
@@ -17,10 +22,12 @@ use ironclaw_events::{AuditSink, EventSink};
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
+    ActionResultSummary, ActionSummary, AuditEnvelope, AuditEventId, AuditStage,
     CapabilityDispatchError, CapabilityDispatchFailureKind, CapabilityDispatcher, CapabilityId,
-    ExtensionId, RuntimeKind,
+    DecisionSummary, EffectKind, ExtensionId, NetworkPolicy, Obligation, RuntimeKind,
 };
 use ironclaw_mcp::{McpExecutionRequest, McpExecutor, McpInvocation};
+use ironclaw_network::is_private_or_loopback_ip;
 use ironclaw_processes::{
     ProcessExecutor, ProcessHost, ProcessResultStore, ProcessServices, ProcessStore,
 };
@@ -216,6 +223,200 @@ where
     }
 }
 
+/// Built-in metadata-only obligation handler for the current host-runtime slice.
+///
+/// Supported obligations:
+///
+/// - `AuditBefore`: emits one metadata-only audit record and fails closed if no
+///   audit sink is configured or emission fails.
+/// - `ApplyNetworkPolicy`: validates policy metadata without performing I/O.
+///
+/// Runtime/input/output plumbing obligations remain unsupported and fail closed.
+#[derive(Clone, Default)]
+pub struct BuiltinObligationHandler {
+    audit_sink: Option<Arc<dyn AuditSink>>,
+}
+
+impl BuiltinObligationHandler {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_audit_sink<T>(mut self, sink: Arc<T>) -> Self
+    where
+        T: AuditSink + 'static,
+    {
+        let sink: Arc<dyn AuditSink> = sink;
+        self.audit_sink = Some(sink);
+        self
+    }
+
+    pub fn with_audit_sink_dyn(mut self, sink: Arc<dyn AuditSink>) -> Self {
+        self.audit_sink = Some(sink);
+        self
+    }
+
+    async fn emit_audit_before(
+        &self,
+        request: &CapabilityObligationRequest<'_>,
+    ) -> Result<(), CapabilityObligationError> {
+        let Some(audit_sink) = &self.audit_sink else {
+            return Err(CapabilityObligationError::Failed {
+                kind: CapabilityObligationFailureKind::Audit,
+            });
+        };
+
+        audit_sink
+            .emit_audit(audit_before_record(request))
+            .await
+            .map_err(|_| CapabilityObligationError::Failed {
+                kind: CapabilityObligationFailureKind::Audit,
+            })
+    }
+}
+
+#[async_trait]
+impl CapabilityObligationHandler for BuiltinObligationHandler {
+    async fn satisfy(
+        &self,
+        request: CapabilityObligationRequest<'_>,
+    ) -> Result<(), CapabilityObligationError> {
+        let unsupported = unsupported_obligations(request.obligations);
+        if !unsupported.is_empty() {
+            return Err(CapabilityObligationError::Unsupported {
+                obligations: unsupported,
+            });
+        }
+
+        for obligation in request.obligations {
+            if let Obligation::ApplyNetworkPolicy { policy } = obligation {
+                validate_network_policy_metadata(policy)?;
+            }
+        }
+
+        if request
+            .obligations
+            .iter()
+            .any(|obligation| matches!(obligation, Obligation::AuditBefore))
+        {
+            self.emit_audit_before(&request).await?;
+        }
+
+        Ok(())
+    }
+}
+
+fn unsupported_obligations(obligations: &[Obligation]) -> Vec<Obligation> {
+    obligations
+        .iter()
+        .filter(|obligation| {
+            !matches!(
+                obligation,
+                Obligation::AuditBefore | Obligation::ApplyNetworkPolicy { .. }
+            )
+        })
+        .cloned()
+        .collect()
+}
+
+fn validate_network_policy_metadata(
+    policy: &NetworkPolicy,
+) -> Result<(), CapabilityObligationError> {
+    if policy.allowed_targets.is_empty() {
+        return Err(network_obligation_failed());
+    }
+
+    if policy.deny_private_ip_ranges {
+        for target in &policy.allowed_targets {
+            let host = target
+                .host_pattern()
+                .strip_prefix("*.")
+                .unwrap_or(target.host_pattern());
+            if let Ok(ip) = host.parse::<IpAddr>()
+                && is_private_or_loopback_ip(ip)
+            {
+                return Err(network_obligation_failed());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn network_obligation_failed() -> CapabilityObligationError {
+    CapabilityObligationError::Failed {
+        kind: CapabilityObligationFailureKind::Network,
+    }
+}
+
+fn audit_before_record(request: &CapabilityObligationRequest<'_>) -> AuditEnvelope {
+    AuditEnvelope {
+        event_id: AuditEventId::new(),
+        correlation_id: request.context.correlation_id,
+        stage: AuditStage::Before,
+        timestamp: Utc::now(),
+        tenant_id: request.context.tenant_id.clone(),
+        user_id: request.context.user_id.clone(),
+        project_id: request.context.project_id.clone(),
+        mission_id: request.context.mission_id.clone(),
+        thread_id: request.context.thread_id.clone(),
+        invocation_id: request.context.invocation_id,
+        process_id: request.context.process_id,
+        approval_request_id: None,
+        extension_id: Some(request.context.extension_id.clone()),
+        action: ActionSummary {
+            kind: capability_action_kind(request.phase).to_string(),
+            target: Some(request.capability_id.as_str().to_string()),
+            effects: capability_action_effects(request.phase),
+        },
+        decision: DecisionSummary {
+            kind: "obligation_satisfied".to_string(),
+            reason: None,
+            actor: None,
+        },
+        result: Some(ActionResultSummary {
+            success: true,
+            status: Some(obligation_status(request.obligations)),
+            output_bytes: None,
+        }),
+    }
+}
+
+fn capability_action_kind(phase: CapabilityObligationPhase) -> &'static str {
+    match phase {
+        CapabilityObligationPhase::Invoke => "capability_invoke",
+        CapabilityObligationPhase::Resume => "capability_resume",
+        CapabilityObligationPhase::Spawn => "capability_spawn",
+    }
+}
+
+fn capability_action_effects(phase: CapabilityObligationPhase) -> Vec<EffectKind> {
+    match phase {
+        CapabilityObligationPhase::Invoke | CapabilityObligationPhase::Resume => {
+            vec![EffectKind::DispatchCapability]
+        }
+        CapabilityObligationPhase::Spawn => {
+            vec![EffectKind::DispatchCapability, EffectKind::SpawnProcess]
+        }
+    }
+}
+
+fn obligation_status(obligations: &[Obligation]) -> String {
+    obligations
+        .iter()
+        .filter_map(obligation_label)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn obligation_label(obligation: &Obligation) -> Option<&'static str> {
+    match obligation {
+        Obligation::AuditBefore => Some("audit_before"),
+        Obligation::ApplyNetworkPolicy { .. } => Some("apply_network_policy"),
+        _ => None,
+    }
+}
+
 /// Composition root for the Reborn host/runtime vertical slice.
 ///
 /// `HostRuntimeServices` owns shared service handles and can build the narrow
@@ -379,6 +580,16 @@ where
     {
         let handler: Arc<dyn CapabilityObligationHandler> = handler;
         self.obligation_handler = Some(handler);
+        self
+    }
+
+    pub fn with_builtin_obligation_handler(mut self) -> Self {
+        let handler = if let Some(audit_sink) = &self.audit_sink {
+            BuiltinObligationHandler::new().with_audit_sink_dyn(Arc::clone(audit_sink))
+        } else {
+            BuiltinObligationHandler::new()
+        };
+        self.obligation_handler = Some(Arc::new(handler));
         self
     }
 
