@@ -73,6 +73,8 @@ const TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW";
 const TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT";
+const TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS: &str =
+    "TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS";
 const TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN: &str =
     "TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN";
 const TRACE_BACKFILL_FAILURE_DETAIL_LIMIT: usize = 20;
@@ -111,6 +113,7 @@ struct AppState {
     require_db_mirror_writes: bool,
     require_derived_export_object_refs: bool,
     object_primary_submit_review: bool,
+    object_primary_derived_exports: bool,
     require_db_reconciliation_clean: bool,
     require_export_guardrails: bool,
     artifact_store: Option<ConfiguredTraceArtifactStore>,
@@ -381,6 +384,8 @@ impl AppState {
         let artifact_store = trace_artifact_store_from_env(&root)?;
         let object_primary_submit_review = env_truthy(TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW);
         let object_primary_replay_export = env_truthy(TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT);
+        let object_primary_derived_exports =
+            env_truthy(TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS);
         validate_object_primary_submit_review_config(
             object_primary_submit_review,
             db_mirror.is_some(),
@@ -401,6 +406,17 @@ impl AppState {
                 .as_ref()
                 .map(ConfiguredTraceArtifactStore::object_store_name),
         )?;
+        validate_object_primary_derived_exports_config(
+            object_primary_derived_exports,
+            db_mirror.is_some(),
+            require_db_mirror_writes,
+            db_reviewer_reads,
+            require_derived_export_object_refs,
+            require_export_guardrails,
+            artifact_store
+                .as_ref()
+                .map(ConfiguredTraceArtifactStore::object_store_name),
+        )?;
         Ok(Self {
             root,
             tokens: Arc::new(tokens),
@@ -417,6 +433,7 @@ impl AppState {
             require_db_mirror_writes,
             require_derived_export_object_refs,
             object_primary_submit_review,
+            object_primary_derived_exports,
             require_db_reconciliation_clean,
             require_export_guardrails,
             artifact_store,
@@ -488,6 +505,45 @@ fn validate_object_primary_replay_export_config(
     anyhow::ensure!(
         artifact_store_name == Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE),
         "{TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT} requires TRACE_COMMONS_OBJECT_STORE=local_service"
+    );
+    Ok(())
+}
+
+fn validate_object_primary_derived_exports_config(
+    enabled: bool,
+    db_mirror_configured: bool,
+    require_db_mirror_writes: bool,
+    db_reviewer_reads: bool,
+    require_derived_export_object_refs: bool,
+    require_export_guardrails: bool,
+    artifact_store_name: Option<&str>,
+) -> anyhow::Result<()> {
+    if !enabled {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        db_mirror_configured,
+        "{TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS} requires TRACE_COMMONS_DB_DUAL_WRITE"
+    );
+    anyhow::ensure!(
+        require_db_mirror_writes,
+        "{TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS} requires TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES"
+    );
+    anyhow::ensure!(
+        db_reviewer_reads,
+        "{TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS} requires TRACE_COMMONS_DB_REVIEWER_READS"
+    );
+    anyhow::ensure!(
+        require_derived_export_object_refs,
+        "{TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS} requires TRACE_COMMONS_DERIVED_EXPORT_REQUIRE_OBJECT_REFS"
+    );
+    anyhow::ensure!(
+        require_export_guardrails,
+        "{TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS} requires TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS"
+    );
+    anyhow::ensure!(
+        artifact_store_name == Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE),
+        "{TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS} requires TRACE_COMMONS_OBJECT_STORE=local_service"
     );
     Ok(())
 }
@@ -2049,7 +2105,10 @@ async fn run_benchmark_conversion(
         item_count: candidates.len(),
         candidates,
     };
-    write_benchmark_artifact(&state.root, &tenant.tenant_id, &artifact).map_err(internal_error)?;
+    if !state.object_primary_derived_exports {
+        write_benchmark_artifact(&state.root, &tenant.tenant_id, &artifact)
+            .map_err(internal_error)?;
+    }
     let provenance = TraceExportProvenanceManifest::new(
         &tenant.tenant_id,
         conversion_id,
@@ -2059,11 +2118,13 @@ async fn run_benchmark_conversion(
         artifact.source_submission_ids.clone(),
         artifact.source_submission_ids_hash.clone(),
     );
-    write_export_provenance(
-        &benchmark_provenance_path(&state.root, &tenant.tenant_id, conversion_id),
-        &provenance,
-    )
-    .map_err(internal_error)?;
+    if !state.object_primary_derived_exports {
+        write_export_provenance(
+            &benchmark_provenance_path(&state.root, &tenant.tenant_id, conversion_id),
+            &provenance,
+        )
+        .map_err(internal_error)?;
+    }
     let artifact_object_ref_material = if state.db_mirror.is_some() {
         Some(
             trace_export_artifact_object_ref_material(
@@ -2227,11 +2288,13 @@ async fn ranker_training_candidates_handler(
         source_submission_ids,
         source_item_list_hash.clone(),
     );
-    write_export_provenance(
-        &ranker_provenance_path(&state.root, &tenant.tenant_id, export_id),
-        &provenance,
-    )
-    .map_err(internal_error)?;
+    if !state.object_primary_derived_exports {
+        write_export_provenance(
+            &ranker_provenance_path(&state.root, &tenant.tenant_id, export_id),
+            &provenance,
+        )
+        .map_err(internal_error)?;
+    }
     let artifact_object_ref_material = if state.db_mirror.is_some() {
         Some(
             trace_export_artifact_object_ref_material(
@@ -2381,11 +2444,13 @@ async fn ranker_training_pairs_handler(
         source_submission_ids,
         source_item_list_hash.clone(),
     );
-    write_export_provenance(
-        &ranker_provenance_path(&state.root, &tenant.tenant_id, export_id),
-        &provenance,
-    )
-    .map_err(internal_error)?;
+    if !state.object_primary_derived_exports {
+        write_export_provenance(
+            &ranker_provenance_path(&state.root, &tenant.tenant_id, export_id),
+            &provenance,
+        )
+        .map_err(internal_error)?;
+    }
     let artifact_object_ref_material = if state.db_mirror.is_some() {
         Some(
             trace_export_artifact_object_ref_material(
@@ -10435,6 +10500,7 @@ mod tests {
             require_db_mirror_writes: false,
             require_derived_export_object_refs: false,
             object_primary_submit_review: false,
+            object_primary_derived_exports: false,
             require_db_reconciliation_clean: false,
             require_export_guardrails: false,
             artifact_store: None,
@@ -10756,6 +10822,7 @@ mod tests {
             require_db_mirror_writes,
             require_derived_export_object_refs,
             object_primary_submit_review: false,
+            object_primary_derived_exports: false,
             require_db_reconciliation_clean: false,
             require_export_guardrails,
             artifact_store,
@@ -10776,6 +10843,42 @@ mod tests {
         artifact_store: ConfiguredTraceArtifactStore,
     ) -> Arc<AppState> {
         test_state_with_object_primary_submit_review_options(root, db_mirror, artifact_store, true)
+    }
+
+    fn test_state_with_object_primary_derived_exports(
+        root: PathBuf,
+        db_mirror: Arc<dyn Database>,
+        artifact_store: ConfiguredTraceArtifactStore,
+    ) -> Arc<AppState> {
+        let mut tokens = BTreeMap::new();
+        insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Contributor);
+        insert_token(
+            &mut tokens,
+            "tenant-a",
+            "review-token-a",
+            TokenRole::Reviewer,
+        );
+        Arc::new(AppState {
+            root,
+            tokens: Arc::new(tokens),
+            tenant_policies: Arc::new(BTreeMap::new()),
+            require_tenant_submission_policy: false,
+            db_mirror: Some(db_mirror),
+            db_contributor_reads: false,
+            db_reviewer_reads: true,
+            db_reviewer_require_object_refs: false,
+            db_replay_export_reads: false,
+            db_replay_export_require_object_refs: false,
+            db_audit_reads: false,
+            db_tenant_policy_reads: false,
+            require_db_mirror_writes: true,
+            require_derived_export_object_refs: true,
+            object_primary_submit_review: false,
+            object_primary_derived_exports: true,
+            require_db_reconciliation_clean: false,
+            require_export_guardrails: true,
+            artifact_store: Some(artifact_store),
+        })
     }
 
     fn test_state_with_object_primary_submit_review_options(
@@ -10808,6 +10911,7 @@ mod tests {
             require_db_mirror_writes: true,
             require_derived_export_object_refs: false,
             object_primary_submit_review: true,
+            object_primary_derived_exports: false,
             require_db_reconciliation_clean: false,
             require_export_guardrails: false,
             artifact_store: Some(artifact_store),
@@ -10842,6 +10946,7 @@ mod tests {
             require_db_mirror_writes: false,
             require_derived_export_object_refs: false,
             object_primary_submit_review: false,
+            object_primary_derived_exports: false,
             require_db_reconciliation_clean: true,
             require_export_guardrails: false,
             artifact_store: None,
@@ -11210,6 +11315,111 @@ mod tests {
                 artifact_store_name,
             )
             .expect_err("incomplete object-primary replay config must fail");
+            assert!(
+                error.to_string().contains(expected),
+                "expected {expected} in {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn object_primary_derived_exports_validates_production_guards() {
+        validate_object_primary_derived_exports_config(
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE),
+        )
+        .expect("complete derived export guard config is valid");
+
+        let cases = [
+            (
+                false,
+                true,
+                true,
+                true,
+                true,
+                Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE),
+                "TRACE_COMMONS_DB_DUAL_WRITE",
+            ),
+            (
+                true,
+                false,
+                true,
+                true,
+                true,
+                Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE),
+                "TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES",
+            ),
+            (
+                true,
+                true,
+                false,
+                true,
+                true,
+                Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE),
+                "TRACE_COMMONS_DB_REVIEWER_READS",
+            ),
+            (
+                true,
+                true,
+                true,
+                false,
+                true,
+                Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE),
+                "TRACE_COMMONS_DERIVED_EXPORT_REQUIRE_OBJECT_REFS",
+            ),
+            (
+                true,
+                true,
+                true,
+                true,
+                false,
+                Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE),
+                "TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS",
+            ),
+            (
+                true,
+                true,
+                true,
+                true,
+                true,
+                None,
+                "TRACE_COMMONS_OBJECT_STORE",
+            ),
+            (
+                true,
+                true,
+                true,
+                true,
+                true,
+                Some(TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE),
+                "TRACE_COMMONS_OBJECT_STORE",
+            ),
+        ];
+        for (
+            db_mirror_configured,
+            require_db_mirror_writes,
+            db_reviewer_reads,
+            require_derived_export_object_refs,
+            require_export_guardrails,
+            artifact_store_name,
+            expected,
+        ) in cases
+        {
+            let error = validate_object_primary_derived_exports_config(
+                true,
+                db_mirror_configured,
+                require_db_mirror_writes,
+                db_reviewer_reads,
+                require_derived_export_object_refs,
+                require_export_guardrails,
+                artifact_store_name,
+            )
+            .expect_err("incomplete object-primary derived export config must fail");
             assert!(
                 error.to_string().contains(expected),
                 "expected {expected} in {error}"
@@ -18930,6 +19140,226 @@ mod tests {
             )
             .expect("ranker provenance reads from service-local object store");
         assert_eq!(provenance.export_id, ranker.export_id);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn object_primary_derived_exports_skip_plaintext_files_and_keep_db_object_refs() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_root = temp.path().join("service-object-store");
+        let artifact_store = test_artifact_store(&artifact_root);
+        let configured_store = ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            artifact_store,
+        );
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp
+            .path()
+            .join("trace-object-primary-derived-exports.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_object_primary_derived_exports(
+            temp.path().to_path_buf(),
+            db.clone() as Arc<dyn Database>,
+            configured_store.clone(),
+        );
+        let mut first_source = sample_envelope().await;
+        make_metadata_only_low_risk(&mut first_source);
+        first_source.consent.scopes = vec![
+            ConsentScope::DebuggingEvaluation,
+            ConsentScope::RankingTraining,
+        ];
+        let first_submission_id = first_source.submission_id;
+        let mut second_source = sample_envelope().await;
+        make_metadata_only_low_risk(&mut second_source);
+        second_source.consent.scopes = vec![ConsentScope::RankingTraining];
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(first_source),
+        )
+        .await
+        .expect("first source submission succeeds");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(second_source),
+        )
+        .await
+        .expect("second source submission succeeds");
+
+        let Json(benchmark) = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("object_primary_benchmark".to_string()),
+                consent_scope: Some("debugging-evaluation".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("object-primary benchmark conversion succeeds");
+        assert_eq!(benchmark.item_count, 1);
+        assert!(
+            !benchmark_artifact_path(temp.path(), "tenant-a", benchmark.conversion_id).exists()
+        );
+        assert!(
+            !benchmark_provenance_path(temp.path(), "tenant-a", benchmark.conversion_id).exists()
+        );
+        let benchmark_items = db
+            .list_trace_export_manifest_items("tenant-a", benchmark.conversion_id)
+            .await
+            .expect("benchmark manifest items read");
+        let benchmark_object_ref_id = benchmark_items[0]
+            .object_ref_id
+            .expect("benchmark item has object ref");
+        let benchmark_object_ref = db
+            .list_trace_object_refs("tenant-a", first_submission_id)
+            .await
+            .expect("benchmark object refs read")
+            .into_iter()
+            .find(|object_ref| object_ref.object_ref_id == benchmark_object_ref_id)
+            .expect("benchmark artifact object ref exists");
+        assert_eq!(
+            benchmark_object_ref.object_store,
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+        );
+        let stored_benchmark: TraceBenchmarkConversionArtifact = configured_store
+            .get_json_by_object_key(
+                &tenant_storage_ref("tenant-a"),
+                TraceArtifactKind::BenchmarkConversion,
+                &benchmark_object_ref.object_key,
+                &benchmark_object_ref.content_sha256,
+            )
+            .expect("benchmark artifact reads from object store");
+        assert_eq!(stored_benchmark.conversion_id, benchmark.conversion_id);
+
+        let Json(ranker_candidates) = ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("object_primary_ranker_candidates".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect("object-primary ranker candidate export succeeds");
+        assert_eq!(ranker_candidates.item_count, 2);
+        assert!(
+            !ranker_provenance_path(temp.path(), "tenant-a", ranker_candidates.export_id).exists()
+        );
+        let candidate_items = db
+            .list_trace_export_manifest_items("tenant-a", ranker_candidates.export_id)
+            .await
+            .expect("ranker candidate manifest items read");
+        let candidate_object_ref_id = candidate_items
+            .iter()
+            .find(|item| item.submission_id == first_submission_id)
+            .and_then(|item| item.object_ref_id)
+            .expect("ranker candidate item has object ref");
+        let candidate_object_ref = db
+            .list_trace_object_refs("tenant-a", first_submission_id)
+            .await
+            .expect("ranker candidate object refs read")
+            .into_iter()
+            .find(|object_ref| object_ref.object_ref_id == candidate_object_ref_id)
+            .expect("ranker candidate export object ref exists");
+        let candidate_provenance: TraceExportProvenanceManifest = configured_store
+            .get_json_by_object_key(
+                &tenant_storage_ref("tenant-a"),
+                TraceArtifactKind::RankerTrainingExport,
+                &candidate_object_ref.object_key,
+                &candidate_object_ref.content_sha256,
+            )
+            .expect("ranker candidate provenance reads from object store");
+        assert_eq!(candidate_provenance.export_id, ranker_candidates.export_id);
+
+        let Json(ranker_pairs) = ranker_training_pairs_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("object_primary_ranker_pairs".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect("object-primary ranker pair export succeeds");
+        assert_eq!(ranker_pairs.item_count, 1);
+        assert!(!ranker_provenance_path(temp.path(), "tenant-a", ranker_pairs.export_id).exists());
+        let pair_items = db
+            .list_trace_export_manifest_items("tenant-a", ranker_pairs.export_id)
+            .await
+            .expect("ranker pair manifest items read");
+        let pair_object_ref_id = pair_items
+            .iter()
+            .find(|item| item.submission_id == first_submission_id)
+            .and_then(|item| item.object_ref_id)
+            .expect("ranker pair item has object ref");
+        let pair_object_ref = db
+            .list_trace_object_refs("tenant-a", first_submission_id)
+            .await
+            .expect("ranker pair object refs read")
+            .into_iter()
+            .find(|object_ref| object_ref.object_ref_id == pair_object_ref_id)
+            .expect("ranker pair export object ref exists");
+        let pair_provenance: TraceExportProvenanceManifest = configured_store
+            .get_json_by_object_key(
+                &tenant_storage_ref("tenant-a"),
+                TraceArtifactKind::RankerTrainingExport,
+                &pair_object_ref.object_key,
+                &pair_object_ref.content_sha256,
+            )
+            .expect("ranker pair provenance reads from object store");
+        assert_eq!(pair_provenance.export_id, ranker_pairs.export_id);
+
+        let Json(filtered_records) = list_traces_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(TraceListQuery {
+                status: None,
+                limit: Some(10),
+                purpose: Some("object_primary_ranker_candidates".to_string()),
+                coverage_tag: None,
+                tool: None,
+                privacy_risk: None,
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("DB-backed purpose filter sees object-primary provenance");
+        assert_eq!(filtered_records.len(), 2);
+
+        revoke_trace_handler(
+            State(state),
+            auth_headers("token-a"),
+            AxumPath(first_submission_id),
+        )
+        .await
+        .expect("revocation invalidates DB manifest metadata");
+        let invalidated_manifest_count = db
+            .list_trace_export_manifests("tenant-a")
+            .await
+            .expect("manifest metadata reads")
+            .into_iter()
+            .filter(|manifest| manifest.invalidated_at.is_some())
+            .count();
+        assert_eq!(invalidated_manifest_count, 3);
     }
 
     #[cfg(feature = "libsql")]
