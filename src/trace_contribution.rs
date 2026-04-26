@@ -4087,6 +4087,8 @@ fn apply_remote_trace_submission_statuses_for_scope_unlocked(
         let mut explanation = update.explanation.clone();
         explanation.extend(update.delayed_credit_explanations.clone());
         let credit_changed = (old_effective_credit - new_effective_credit).abs() > f32::EPSILON;
+        let explanation_changed =
+            !explanation.is_empty() && record.credit_explanation != explanation;
 
         let status_changed = record.server_status.as_deref() != Some(update.status.as_str());
 
@@ -4106,7 +4108,7 @@ fn apply_remote_trace_submission_statuses_for_scope_unlocked(
             record.status = LocalTraceSubmissionStatus::Purged;
         }
 
-        if status_changed || credit_changed {
+        if status_changed || credit_changed || explanation_changed {
             record.last_credit_notice_at = None;
             let sync_reason = if update.credit_points_ledger.abs() > f32::EPSILON {
                 format!(
@@ -5664,6 +5666,63 @@ mod tests {
 
         let records = read_local_trace_records_for_scope(Some(&scope)).expect("records read");
         assert!(records[0].last_credit_notice_at.is_some());
+    }
+
+    #[test]
+    fn delayed_credit_explanation_change_resets_notice_without_net_credit_delta() {
+        let scope = format!("trace-credit-explanation-test-{}", Uuid::new_v4());
+        let submission_id = Uuid::new_v4();
+        let trace_id = Uuid::new_v4();
+        write_local_trace_records_for_scope(
+            Some(&scope),
+            &[LocalTraceSubmissionRecord {
+                submission_id,
+                trace_id,
+                endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                status: LocalTraceSubmissionStatus::Submitted,
+                server_status: Some("accepted".to_string()),
+                submitted_at: Some(Utc::now()),
+                revoked_at: None,
+                privacy_risk: "low".to_string(),
+                redaction_counts: BTreeMap::new(),
+                credit_points_pending: 1.0,
+                credit_points_final: Some(2.0),
+                credit_explanation: vec!["Previous credit explanation.".to_string()],
+                credit_events: Vec::new(),
+                last_credit_notice_at: Some(Utc::now()),
+            }],
+        )
+        .expect("local record writes");
+
+        let changed = apply_remote_trace_submission_statuses_for_scope(
+            Some(&scope),
+            &[TraceSubmissionStatusUpdate {
+                submission_id,
+                trace_id,
+                status: "accepted".to_string(),
+                credit_points_pending: 1.0,
+                credit_points_final: Some(2.0),
+                credit_points_ledger: 1.0,
+                credit_points_total: Some(2.0),
+                explanation: vec!["Accepted after privacy checks.".to_string()],
+                delayed_credit_explanations: vec![
+                    "Process evaluation utility credited without changing total.".to_string(),
+                ],
+            }],
+        )
+        .expect("status sync applies");
+        assert_eq!(changed, 1);
+
+        let records = read_local_trace_records_for_scope(Some(&scope)).expect("records read");
+        assert!(records[0].last_credit_notice_at.is_none());
+        assert_eq!(records[0].credit_events.len(), 1);
+        assert_eq!(records[0].credit_events[0].points_delta, 0.0);
+        assert!(
+            records[0]
+                .credit_explanation
+                .iter()
+                .any(|explanation| { explanation.contains("Process evaluation utility credited") })
+        );
     }
 
     #[test]
