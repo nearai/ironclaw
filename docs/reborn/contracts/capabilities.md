@@ -39,9 +39,10 @@ This service is the middle communication layer between authorization, dispatch, 
 6. call CapabilityDispatchAuthorizer
 7. if denied, mark `Failed` and return a typed invocation error before dispatch/resource reservation
 8. if approval is required, require coherent run-state/approval-store wiring, attach/validate the invocation fingerprint, save a tenant/user-scoped pending approval request, mark `BlockedApproval`, and return a typed approval-required error
-9. if allowed, call CapabilityDispatcher with context.resource_scope
-10. mark `Completed` or `Failed` after dispatch
-11. return the normalized dispatch result
+9. if allowed with no unsupported obligations, call CapabilityDispatcher with context.resource_scope
+10. if allowed with unsupported obligations, mark `Failed` and return before dispatch
+11. mark `Completed` or `Failed` after dispatch
+12. return the normalized dispatch result
 ```
 
 `CapabilityHost::resume_json` owns the approved-resume workflow:
@@ -53,10 +54,12 @@ This service is the middle communication layer between authorization, dispatch, 
 4. load the approval record and require status Approved
 5. recompute InvocationFingerprint and compare it to the approved request fingerprint
 6. find an unexpired active lease for the same tenant/user/invocation, capability, and fingerprint
-7. claim the matching lease before runtime dispatch so concurrent resumes cannot dispatch with the same one-shot lease
-8. call CapabilityDispatchAuthorizer with the claimed lease grant as request-local authority, then CapabilityDispatcher
-9. consume the claimed lease after successful dispatch
-10. mark Completed or Failed
+7. call CapabilityDispatchAuthorizer with the matching lease grant as request-local authority
+8. if allowed with unsupported obligations, mark `Failed` and return before claiming the lease or dispatching
+9. claim the matching lease before runtime dispatch so concurrent resumes cannot dispatch with the same one-shot lease
+10. call CapabilityDispatcher
+11. consume the claimed lease after successful dispatch
+12. mark Completed or Failed
 ```
 
 `CapabilityHost::spawn_json` owns the capability-backed process start workflow:
@@ -67,9 +70,10 @@ This service is the middle communication layer between authorization, dispatch, 
 3. if configured, mark invocation `Running` in `RunStateStore`
 4. lookup CapabilityDescriptor in ExtensionRegistry
 5. call CapabilityDispatchAuthorizer::authorize_spawn, requiring `SpawnProcess` plus descriptor effects
-6. if allowed, ask ProcessManager to create a tenant/user-scoped ProcessRecord and optionally launch background execution
-7. mark the start invocation Completed or Failed
-8. return the ProcessRecord with ProcessId, scope, extension_id, capability_id, runtime, grants, mounts, and status
+6. if allowed with no unsupported obligations, ask ProcessManager to create a tenant/user-scoped ProcessRecord and optionally launch background execution
+7. if allowed with unsupported obligations, mark `Failed` and return before process creation
+8. mark the start invocation Completed or Failed
+9. return the ProcessRecord with ProcessId, scope, extension_id, capability_id, runtime, grants, mounts, and status
 ```
 
 Spawn is capability-targeted. It does not start raw host processes or extension-level workers without a declared capability identity.
@@ -77,6 +81,10 @@ Spawn is capability-targeted. It does not start raw host processes or extension-
 It does not implement grant matching itself; that belongs to `ironclaw_authorization`.
 It does not select WASM/Script/MCP for dispatch; that belongs to a concrete implementation such as `ironclaw_dispatcher` behind the neutral `ironclaw_host_api::CapabilityDispatcher` port. The `DispatchProcessExecutor` adapter can run spawned process input through that same dispatch interface from a background process manager and verifies the returned provider/runtime still match the process record.
 It does not own process lifecycle or process-result mechanics after start; those belong to `ironclaw_processes` behind `ProcessManager`/`ProcessStore`/`ProcessResultStore`. Applications can use `ProcessServices` to compose those process pieces consistently before handing a `ProcessManager` to `CapabilityHost`.
+
+Dispatch failures are reported through sanitized host-safe dispatch error kinds; `CapabilityInvocationError` does not expose boxed runtime/backend error details.
+
+Authorization obligations are recognized but not yet fulfilled by `CapabilityHost`. Until obligation handlers land, any non-empty `Decision::Allow { obligations }` fails closed with `UnsupportedObligations` before dispatch, process start, or approval lease claim. This prevents authorizers from attaching requirements such as audit, output limits, network policy, secret injection, or resource reservations that callers silently ignore.
 
 ---
 
@@ -173,7 +181,7 @@ This slice does not implement:
 - process output/result APIs inside `CapabilityHost`; result lookup and output resolution live in `ironclaw_processes`
 - generalized streaming/binary process output references beyond the current filesystem JSON output path
 - streaming output APIs
-- obligation application beyond returning allowed/denied
+- obligation fulfillment beyond fail-closed rejection of non-empty allowed obligations
 - transcript/job history
 
 Those belong to later capability-host/run-state/auth slices.

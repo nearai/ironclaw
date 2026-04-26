@@ -337,6 +337,87 @@ async fn capability_host_resumes_approved_invocation_and_consumes_lease() {
 }
 
 #[tokio::test]
+async fn capability_host_rejects_resume_with_unsupported_obligations_before_claim_or_dispatch() {
+    let (fs, package) = wasm_package_with_module(json_echo_module());
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    let wasm_runtime = WasmRuntime::for_testing().unwrap();
+    let governor = InMemoryResourceGovernor::new();
+    let dispatcher =
+        RuntimeDispatcher::new(&registry, &fs, &governor).with_wasm_runtime(&wasm_runtime);
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate {
+        concurrency_slots: Some(1),
+        output_bytes: Some(10_000),
+        ..ResourceEstimate::default()
+    };
+    let input = json!({"message": "approved but unsupported obligations"});
+
+    block_host
+        .invoke_json(CapabilityInvocationRequest {
+            context: context.clone(),
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+        })
+        .await
+        .unwrap_err();
+    let blocked = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    let approval_request_id = blocked.approval_request_id.unwrap();
+    let lease = ApprovalResolver::new(&approval_requests, &leases)
+        .approve_dispatch(
+            &scope,
+            approval_request_id,
+            LeaseApproval {
+                issued_by: Principal::User(scope.user_id.clone()),
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                expires_at: None,
+                max_invocations: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+    let resume_host = CapabilityHost::new(&registry, &dispatcher, &ObligatingResumeAuthorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+
+    let err = resume_host
+        .resume_json(CapabilityResumeRequest {
+            context,
+            approval_request_id,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate,
+            input,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::UnsupportedObligations { .. }
+    ));
+    assert_eq!(
+        leases.get(&scope, lease.grant.id).await.unwrap().status,
+        CapabilityLeaseStatus::Active
+    );
+    let record = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(record.status, RunStatus::Failed);
+    assert_eq!(
+        record.error_kind.as_ref().map(|kind| kind.as_str()),
+        Some("UnsupportedObligations")
+    );
+}
+
+#[tokio::test]
 async fn capability_host_rejects_resume_when_input_fingerprint_differs() {
     let (fs, package) = wasm_package_with_module(json_echo_module());
     let mut registry = ExtensionRegistry::new();
@@ -905,6 +986,22 @@ impl CapabilityDispatchAuthorizer for ApprovalAuthorizer {
                 reason: "test approval".to_string(),
                 reusable_scope: None,
             },
+        }
+    }
+}
+
+struct ObligatingResumeAuthorizer;
+
+#[async_trait]
+impl CapabilityDispatchAuthorizer for ObligatingResumeAuthorizer {
+    async fn authorize_dispatch(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+    ) -> Decision {
+        Decision::Allow {
+            obligations: vec![Obligation::AuditBefore],
         }
     }
 }

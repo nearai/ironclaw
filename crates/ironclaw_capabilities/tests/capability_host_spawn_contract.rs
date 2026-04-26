@@ -114,6 +114,40 @@ async fn capability_host_passes_spawn_input_to_process_manager_without_storing_i
 }
 
 #[tokio::test]
+async fn capability_host_rejects_allowed_spawn_with_unsupported_obligations_before_process_start() {
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(package_from_manifest(WASM_MANIFEST))
+        .unwrap();
+    let dispatcher = NoopDispatcher;
+    let authorizer = ObligatingSpawnAuthorizer;
+    let processes = InMemoryProcessStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let host =
+        CapabilityHost::new(&registry, &dispatcher, &authorizer).with_process_manager(&processes);
+
+    let err = host
+        .spawn_json(CapabilitySpawnRequest {
+            context,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: ResourceEstimate::default(),
+            input: json!({"message": "must not start"}),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::UnsupportedObligations { .. }
+    ));
+    assert_eq!(
+        processes.records_for_scope(&scope).await.unwrap(),
+        Vec::new()
+    );
+}
+
+#[tokio::test]
 async fn capability_host_denies_spawn_without_spawn_process_effect() {
     let mut registry = ExtensionRegistry::new();
     registry
@@ -591,6 +625,33 @@ async fn capability_host_spawn_requires_process_manager() {
         err,
         CapabilityInvocationError::ProcessManagerMissing { .. }
     ));
+}
+
+struct ObligatingSpawnAuthorizer;
+
+#[async_trait]
+impl CapabilityDispatchAuthorizer for ObligatingSpawnAuthorizer {
+    async fn authorize_dispatch(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+    ) -> Decision {
+        Decision::Deny {
+            reason: DenyReason::MissingGrant,
+        }
+    }
+
+    async fn authorize_spawn(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+    ) -> Decision {
+        Decision::Allow {
+            obligations: vec![Obligation::AuditBefore],
+        }
+    }
 }
 
 #[derive(Default)]
