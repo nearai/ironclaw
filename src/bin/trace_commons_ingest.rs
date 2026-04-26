@@ -113,6 +113,7 @@ struct AppState {
     require_db_mirror_writes: bool,
     require_derived_export_object_refs: bool,
     object_primary_submit_review: bool,
+    object_primary_replay_export: bool,
     object_primary_derived_exports: bool,
     require_db_reconciliation_clean: bool,
     require_export_guardrails: bool,
@@ -433,6 +434,7 @@ impl AppState {
             require_db_mirror_writes,
             require_derived_export_object_refs,
             object_primary_submit_review,
+            object_primary_replay_export,
             object_primary_derived_exports,
             require_db_reconciliation_clean,
             require_export_guardrails,
@@ -703,6 +705,7 @@ fn app(state: Arc<AppState>) -> Router {
                 .post(put_tenant_policy_handler)
                 .put(put_tenant_policy_handler),
         )
+        .route("/v1/admin/config-status", get(config_status_handler))
         .route("/v1/admin/maintenance", post(maintenance_handler))
         .route(
             "/v1/workers/retention-maintenance",
@@ -826,6 +829,75 @@ struct TraceTenantPolicyResponse {
     updated_by_principal_ref: String,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceCommonsConfigStatusResponse {
+    schema_version: &'static str,
+    db_mirror_configured: bool,
+    db_contributor_reads: bool,
+    db_reviewer_reads: bool,
+    db_reviewer_require_object_refs: bool,
+    db_replay_export_reads: bool,
+    db_replay_export_require_object_refs: bool,
+    db_audit_reads: bool,
+    db_tenant_policy_reads: bool,
+    require_tenant_submission_policy: bool,
+    require_db_mirror_writes: bool,
+    require_derived_export_object_refs: bool,
+    object_primary_submit_review: bool,
+    object_primary_replay_export: bool,
+    object_primary_derived_exports: bool,
+    require_db_reconciliation_clean: bool,
+    require_export_guardrails: bool,
+    artifact_store_configured: bool,
+    artifact_object_store: Option<String>,
+}
+
+fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigStatusResponse {
+    TraceCommonsConfigStatusResponse {
+        schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION,
+        db_mirror_configured: state.db_mirror.is_some(),
+        db_contributor_reads: state.db_contributor_reads,
+        db_reviewer_reads: state.db_reviewer_reads,
+        db_reviewer_require_object_refs: state.db_reviewer_require_object_refs,
+        db_replay_export_reads: state.db_replay_export_reads,
+        db_replay_export_require_object_refs: state.db_replay_export_require_object_refs,
+        db_audit_reads: state.db_audit_reads,
+        db_tenant_policy_reads: state.db_tenant_policy_reads,
+        require_tenant_submission_policy: state.require_tenant_submission_policy,
+        require_db_mirror_writes: state.require_db_mirror_writes,
+        require_derived_export_object_refs: state.require_derived_export_object_refs,
+        object_primary_submit_review: state.object_primary_submit_review,
+        object_primary_replay_export: state.object_primary_replay_export,
+        object_primary_derived_exports: state.object_primary_derived_exports,
+        require_db_reconciliation_clean: state.require_db_reconciliation_clean,
+        require_export_guardrails: state.require_export_guardrails,
+        artifact_store_configured: state.artifact_store.is_some(),
+        artifact_object_store: state
+            .artifact_store
+            .as_ref()
+            .map(|store| store.object_store_name().to_string()),
+    }
+}
+
+async fn config_status_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<TraceCommonsConfigStatusResponse>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_admin(&tenant)?;
+    let response = trace_commons_config_status_response(state.as_ref());
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::read(&tenant, "config_status", 1),
+        StorageTraceAuditAction::Read,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(response))
 }
 
 async fn get_tenant_policy_handler(
@@ -10500,6 +10572,7 @@ mod tests {
             require_db_mirror_writes: false,
             require_derived_export_object_refs: false,
             object_primary_submit_review: false,
+            object_primary_replay_export: false,
             object_primary_derived_exports: false,
             require_db_reconciliation_clean: false,
             require_export_guardrails: false,
@@ -10822,6 +10895,7 @@ mod tests {
             require_db_mirror_writes,
             require_derived_export_object_refs,
             object_primary_submit_review: false,
+            object_primary_replay_export: false,
             object_primary_derived_exports: false,
             require_db_reconciliation_clean: false,
             require_export_guardrails,
@@ -10874,6 +10948,7 @@ mod tests {
             require_db_mirror_writes: true,
             require_derived_export_object_refs: true,
             object_primary_submit_review: false,
+            object_primary_replay_export: false,
             object_primary_derived_exports: true,
             require_db_reconciliation_clean: false,
             require_export_guardrails: true,
@@ -10911,6 +10986,7 @@ mod tests {
             require_db_mirror_writes: true,
             require_derived_export_object_refs: false,
             object_primary_submit_review: true,
+            object_primary_replay_export: db_replay_export_reads,
             object_primary_derived_exports: false,
             require_db_reconciliation_clean: false,
             require_export_guardrails: false,
@@ -10946,6 +11022,7 @@ mod tests {
             require_db_mirror_writes: false,
             require_derived_export_object_refs: false,
             object_primary_submit_review: false,
+            object_primary_replay_export: false,
             object_primary_derived_exports: false,
             require_db_reconciliation_clean: true,
             require_export_guardrails: false,
@@ -11539,6 +11616,101 @@ mod tests {
                 .await
                 .expect("tenant with policy can submit");
         assert_eq!(receipt.status, "quarantined");
+    }
+
+    #[tokio::test]
+    async fn admin_config_status_route_returns_safe_projection() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_store = ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            test_artifact_store(temp.path()),
+        );
+        let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            None,
+            Some(artifact_store),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            true,
+            true,
+        );
+
+        let contributor_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/config-status")
+                    .header(AUTHORIZATION, "Bearer token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("contributor response");
+        assert_eq!(contributor_response.status(), StatusCode::FORBIDDEN);
+
+        let admin_response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/config-status")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("admin response");
+        assert_eq!(admin_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(admin_response.into_body(), 4096)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("status json parses");
+        assert_eq!(
+            value["schema_version"],
+            serde_json::json!(TRACE_CONTRIBUTION_SCHEMA_VERSION)
+        );
+        assert_eq!(value["db_mirror_configured"], serde_json::json!(false));
+        assert_eq!(
+            value["require_tenant_submission_policy"],
+            serde_json::json!(true)
+        );
+        assert_eq!(value["require_export_guardrails"], serde_json::json!(true));
+        assert_eq!(
+            value["artifact_object_store"],
+            serde_json::json!(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE)
+        );
+        let object = value.as_object().expect("status response is object");
+        for forbidden_key in [
+            "root",
+            "tokens",
+            "tenant_policies",
+            "artifact_store_root",
+            "bearer_token",
+            "principal_ref",
+        ] {
+            assert!(
+                !object.contains_key(forbidden_key),
+                "config status leaked {forbidden_key}"
+            );
+        }
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains(temp.path().to_string_lossy().as_ref()));
+        assert!(!body_text.contains("admin-token-a"));
+        assert!(!body_text.contains("token-a"));
+
+        let file_audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("file audit events read");
+        assert!(file_audit_events.iter().any(|event| {
+            event.kind == "read"
+                && event.reason.as_deref() == Some("surface=config_status;item_count=1")
+        }));
     }
 
     #[cfg(feature = "libsql")]

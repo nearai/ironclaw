@@ -15,6 +15,7 @@ This branch now contains the first production-storage bridge:
 - Tenant-policy export ABAC for replay, benchmark, and ranker exports using existing allowed consent scopes and allowed uses.
 - Optional fail-closed benchmark/ranker source object-ref validation behind `TRACE_COMMONS_DERIVED_EXPORT_REQUIRE_OBJECT_REFS=true`.
 - Admin-token tenant policy management through `/v1/admin/tenant-policy`, with hash-chained file audit events and safe DB audit metadata for policy version, allow-list counts, and the policy projection hash.
+- Admin-token config inspection through `/v1/admin/config-status`, returning only safe schema, DB cutover, object-primary, guardrail, and object-store-provider status fields with a read audit event.
 - Optional encrypted local artifact storage behind `TRACE_COMMONS_ARTIFACT_KEY_HEX`, with `TRACE_COMMONS_OBJECT_STORE=local_service` selecting the service-owned local encrypted backend used for production-shaped object refs.
 - Optional object-primary submit/review mode behind `TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW=true`, which requires the DB/object-ref cutover guards and skips plaintext submitted/reviewed envelope body files while retaining compatibility metadata, derived records, and file audit rows.
 - Optional object-primary replay export mode behind `TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT=true`, which requires DB replay selection, required replay object refs, required DB mirror writes, and the service-local encrypted object store.

@@ -541,6 +541,17 @@ pub enum TracesCommand {
         json: bool,
     },
 
+    /// Show safe non-secret Trace Commons config cutover/status booleans
+    ConfigStatus {
+        /// Trace Commons ingestion base URL or /v1/traces URL
+        #[arg(long)]
+        endpoint: String,
+
+        /// Environment variable containing an admin bearer token
+        #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
+        bearer_token_env: String,
+    },
+
     /// Read the DB-backed tenant contribution policy
     TenantPolicyGet {
         /// Trace Commons ingestion base URL or /v1/traces URL
@@ -1210,6 +1221,10 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
             bearer_token_env,
             json,
         } => trace_commons_replay_export_manifests(&endpoint, &bearer_token_env, json).await,
+        TracesCommand::ConfigStatus {
+            endpoint,
+            bearer_token_env,
+        } => trace_commons_config_status(&endpoint, &bearer_token_env).await,
         TracesCommand::TenantPolicyGet {
             endpoint,
             bearer_token_env,
@@ -2296,6 +2311,19 @@ async fn trace_commons_tenant_policy_get(
     )
     .await?;
     print_trace_commons_tenant_policy_response(response, json)
+}
+
+async fn trace_commons_config_status(endpoint: &str, bearer_token_env: &str) -> anyhow::Result<()> {
+    let response = trace_commons_api_request(
+        Method::GET,
+        endpoint,
+        "/v1/admin/config-status",
+        &[],
+        Some(bearer_token_env),
+        None,
+    )
+    .await?;
+    print_trace_commons_json(&response)
 }
 
 async fn trace_commons_tenant_policy_set(
@@ -3931,6 +3959,31 @@ mod tests {
     }
 
     #[test]
+    fn config_status_parses_through_cli() {
+        let cli = Cli::try_parse_from([
+            "ironclaw",
+            "traces",
+            "config-status",
+            "--endpoint",
+            "https://trace.example/internal",
+            "--bearer-token-env",
+            "TRACE_COMMONS_ADMIN_TOKEN",
+        ])
+        .expect("config-status should parse");
+
+        let Some(Command::Traces(TracesCommand::ConfigStatus {
+            endpoint,
+            bearer_token_env,
+        })) = cli.command
+        else {
+            panic!("expected traces config-status command");
+        };
+
+        assert_eq!(endpoint, "https://trace.example/internal");
+        assert_eq!(bearer_token_env, "TRACE_COMMONS_ADMIN_TOKEN");
+    }
+
+    #[test]
     fn tenant_policy_set_parses_through_cli() {
         let cli = Cli::try_parse_from([
             "ironclaw",
@@ -3984,6 +4037,18 @@ mod tests {
         .expect("url builds");
 
         assert_eq!(url, "https://trace.example/internal/v1/admin/tenant-policy");
+    }
+
+    #[test]
+    fn config_status_uses_ingest_endpoint() {
+        let url = trace_commons_api_url(
+            "https://trace.example/internal/v1/traces",
+            "/v1/admin/config-status",
+            &[],
+        )
+        .expect("url builds");
+
+        assert_eq!(url, "https://trace.example/internal/v1/admin/config-status");
     }
 
     #[test]
