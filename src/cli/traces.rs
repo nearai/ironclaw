@@ -450,6 +450,10 @@ pub enum TracesCommand {
         #[arg(long)]
         endpoint: String,
 
+        /// Explicit export purpose for services that enforce ranker manifests
+        #[arg(long)]
+        purpose: Option<String>,
+
         /// Filter by consent scope
         #[arg(long, value_enum)]
         consent_scope: Option<TraceScopeArg>,
@@ -484,6 +488,10 @@ pub enum TracesCommand {
         /// Trace Commons ingestion base URL or /v1/traces URL
         #[arg(long)]
         endpoint: String,
+
+        /// Explicit export purpose for services that enforce ranker manifests
+        #[arg(long)]
+        purpose: Option<String>,
 
         /// Filter by consent scope
         #[arg(long, value_enum)]
@@ -969,6 +977,7 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
         } => trace_commons_replay_export_manifests(&endpoint, &bearer_token_env, json).await,
         TracesCommand::RankerTrainingCandidates {
             endpoint,
+            purpose,
             consent_scope,
             status,
             privacy_risk,
@@ -980,6 +989,7 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
             trace_commons_ranker_training_export(TraceCommonsRankerTrainingExportOptions {
                 endpoint: &endpoint,
                 bearer_token_env: &bearer_token_env,
+                purpose,
                 consent_scope,
                 status,
                 privacy_risk,
@@ -994,6 +1004,7 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
         }
         TracesCommand::RankerTrainingPairs {
             endpoint,
+            purpose,
             consent_scope,
             status,
             privacy_risk,
@@ -1005,6 +1016,7 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
             trace_commons_ranker_training_export(TraceCommonsRankerTrainingExportOptions {
                 endpoint: &endpoint,
                 bearer_token_env: &bearer_token_env,
+                purpose,
                 consent_scope,
                 status,
                 privacy_risk,
@@ -1885,6 +1897,7 @@ async fn trace_commons_replay_export_manifests(
 struct TraceCommonsRankerTrainingExportOptions<'a> {
     endpoint: &'a str,
     bearer_token_env: &'a str,
+    purpose: Option<String>,
     consent_scope: Option<TraceScopeArg>,
     status: Option<TraceCorpusStatusArg>,
     privacy_risk: Option<TracePrivacyRiskArg>,
@@ -1902,6 +1915,10 @@ async fn trace_commons_ranker_training_export(
     let mut query = Vec::new();
     if let Some(limit) = options.limit {
         query.push(("limit", limit.to_string()));
+    }
+    if let Some(purpose) = options.purpose {
+        require_non_empty_purpose(&purpose)?;
+        query.push(("purpose", purpose));
     }
     if let Some(consent_scope) = options.consent_scope {
         query.push(("consent_scope", consent_scope.to_string()));
@@ -1947,6 +1964,7 @@ async fn trace_commons_ranker_training_export(
             if let Some(value) = response.json.as_ref() {
                 print_optional_json_field("  export id", value, "export_id");
                 print_optional_json_field("  audit event id", value, "audit_event_id");
+                print_optional_json_field("  purpose", value, "purpose");
                 print_optional_json_field("  item count", value, "item_count");
             }
         }
@@ -3351,6 +3369,49 @@ mod tests {
             url,
             "https://trace.example/internal/v1/ranker/training-candidates?consent_scope=ranking-training&status=accepted"
         );
+    }
+
+    #[test]
+    fn ranker_training_candidates_purpose_flag_parses_through_cli() {
+        let cli = Cli::try_parse_from([
+            "ironclaw",
+            "traces",
+            "ranker-training-candidates",
+            "--endpoint",
+            "https://trace.example/internal",
+            "--purpose",
+            "nightly-ranker-candidates",
+        ])
+        .expect("ranker candidates --purpose should parse");
+
+        let Some(Command::Traces(TracesCommand::RankerTrainingCandidates { purpose, .. })) =
+            cli.command
+        else {
+            panic!("expected traces ranker-training-candidates command");
+        };
+
+        assert_eq!(purpose.as_deref(), Some("nightly-ranker-candidates"));
+    }
+
+    #[test]
+    fn ranker_training_pairs_purpose_flag_parses_through_cli() {
+        let cli = Cli::try_parse_from([
+            "ironclaw",
+            "traces",
+            "ranker-training-pairs",
+            "--endpoint",
+            "https://trace.example/internal",
+            "--purpose",
+            "nightly-ranker-pairs",
+        ])
+        .expect("ranker pairs --purpose should parse");
+
+        let Some(Command::Traces(TracesCommand::RankerTrainingPairs { purpose, .. })) = cli.command
+        else {
+            panic!("expected traces ranker-training-pairs command");
+        };
+
+        assert_eq!(purpose.as_deref(), Some("nightly-ranker-pairs"));
     }
 
     #[test]
