@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use clap::{Subcommand, ValueEnum};
+use clap::{Args, Subcommand, ValueEnum};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -319,6 +319,9 @@ pub enum TracesCommand {
         #[arg(long)]
         json: bool,
     },
+
+    /// Submit process-evaluation metadata through the worker route
+    ProcessEvaluationSubmit(ProcessEvaluationSubmitArgs),
 
     /// Show central Trace Commons analytics summary
     AnalyticsSummary {
@@ -847,6 +850,65 @@ pub enum TracesCommand {
     },
 }
 
+#[derive(Args, Debug, Clone)]
+pub struct ProcessEvaluationSubmitArgs {
+    /// Trace Commons ingestion base URL or /v1/traces URL
+    #[arg(long)]
+    endpoint: String,
+
+    /// Submission ID to attach process-evaluation metadata to
+    #[arg(long)]
+    submission_id: Uuid,
+
+    /// Non-empty operator reason for the process-evaluation submission
+    #[arg(long)]
+    reason: String,
+
+    /// Optional evaluator name
+    #[arg(long)]
+    evaluator_name: Option<String>,
+
+    /// Evaluator version
+    #[arg(long)]
+    evaluator_version: String,
+
+    /// Process-evaluation labels; repeat for multiple labels
+    #[arg(long = "label")]
+    labels: Vec<String>,
+
+    /// Rating for tool selection quality
+    #[arg(long, value_parser = parse_process_evaluation_rating)]
+    tool_selection: Option<TraceProcessEvaluationRatingArg>,
+
+    /// Rating for tool argument quality
+    #[arg(long, value_parser = parse_process_evaluation_rating)]
+    tool_argument_quality: Option<TraceProcessEvaluationRatingArg>,
+
+    /// Rating for tool ordering
+    #[arg(long, value_parser = parse_process_evaluation_rating)]
+    tool_ordering: Option<TraceProcessEvaluationRatingArg>,
+
+    /// Rating for verification quality
+    #[arg(long, value_parser = parse_process_evaluation_rating)]
+    verification: Option<TraceProcessEvaluationRatingArg>,
+
+    /// Rating for side-effect safety
+    #[arg(long, value_parser = parse_process_evaluation_rating)]
+    side_effect_safety: Option<TraceProcessEvaluationRatingArg>,
+
+    /// Overall process-evaluation score from 0.0 to 1.0
+    #[arg(long)]
+    overall_score: Option<f32>,
+
+    /// Environment variable containing a process-evaluation-worker bearer token
+    #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
+    bearer_token_env: String,
+
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
+}
+
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceScopeArg {
     DebuggingEvaluation,
@@ -1006,6 +1068,41 @@ impl std::fmt::Display for TraceUtilityCreditEventTypeArg {
             Self::RegressionCatch => "regression_catch",
             Self::TrainingUtility => "training_utility",
             Self::RankingUtility => "ranking_utility",
+        };
+        write!(f, "{value}")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceProcessEvaluationRatingArg {
+    Pass,
+    Partial,
+    Fail,
+    NotApplicable,
+    Unknown,
+}
+
+fn parse_process_evaluation_rating(value: &str) -> Result<TraceProcessEvaluationRatingArg, String> {
+    match value {
+        "pass" => Ok(TraceProcessEvaluationRatingArg::Pass),
+        "partial" => Ok(TraceProcessEvaluationRatingArg::Partial),
+        "fail" => Ok(TraceProcessEvaluationRatingArg::Fail),
+        "not_applicable" => Ok(TraceProcessEvaluationRatingArg::NotApplicable),
+        "unknown" => Ok(TraceProcessEvaluationRatingArg::Unknown),
+        _ => Err(format!(
+            "invalid process evaluation rating {value:?}; expected pass, partial, fail, not_applicable, or unknown"
+        )),
+    }
+}
+
+impl std::fmt::Display for TraceProcessEvaluationRatingArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::Pass => "pass",
+            Self::Partial => "partial",
+            Self::Fail => "fail",
+            Self::NotApplicable => "not_applicable",
+            Self::Unknown => "unknown",
         };
         write!(f, "{value}")
     }
@@ -1251,6 +1348,25 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
                 external_ref,
                 submission_ids,
                 json,
+            })
+            .await
+        }
+        TracesCommand::ProcessEvaluationSubmit(args) => {
+            trace_commons_process_evaluation_submit(TraceCommonsProcessEvaluationSubmitOptions {
+                endpoint: &args.endpoint,
+                bearer_token_env: &args.bearer_token_env,
+                submission_id: args.submission_id,
+                reason: args.reason,
+                evaluator_name: args.evaluator_name,
+                evaluator_version: args.evaluator_version,
+                labels: args.labels,
+                tool_selection: args.tool_selection,
+                tool_argument_quality: args.tool_argument_quality,
+                tool_ordering: args.tool_ordering,
+                verification: args.verification,
+                side_effect_safety: args.side_effect_safety,
+                overall_score: args.overall_score,
+                json: args.json,
             })
             .await
         }
@@ -2131,6 +2247,137 @@ fn trace_commons_worker_utility_credit_body(
         "external_ref": external_ref,
         "submission_ids": submission_ids,
     })
+}
+
+struct TraceCommonsProcessEvaluationSubmitOptions<'a> {
+    endpoint: &'a str,
+    bearer_token_env: &'a str,
+    submission_id: Uuid,
+    reason: String,
+    evaluator_name: Option<String>,
+    evaluator_version: String,
+    labels: Vec<String>,
+    tool_selection: Option<TraceProcessEvaluationRatingArg>,
+    tool_argument_quality: Option<TraceProcessEvaluationRatingArg>,
+    tool_ordering: Option<TraceProcessEvaluationRatingArg>,
+    verification: Option<TraceProcessEvaluationRatingArg>,
+    side_effect_safety: Option<TraceProcessEvaluationRatingArg>,
+    overall_score: Option<f32>,
+    json: bool,
+}
+
+async fn trace_commons_process_evaluation_submit(
+    options: TraceCommonsProcessEvaluationSubmitOptions<'_>,
+) -> anyhow::Result<()> {
+    let body = trace_commons_process_evaluation_body(
+        options.submission_id,
+        options.reason,
+        options.evaluator_name,
+        options.evaluator_version,
+        options.labels,
+        options.tool_selection,
+        options.tool_argument_quality,
+        options.tool_ordering,
+        options.verification,
+        options.side_effect_safety,
+        options.overall_score,
+    )?;
+
+    let response = trace_commons_api_request(
+        Method::POST,
+        options.endpoint,
+        "/v1/workers/process-evaluation",
+        &[],
+        Some(options.bearer_token_env),
+        Some(body),
+    )
+    .await?;
+    if options.json {
+        print_trace_commons_json(&response)?;
+        return Ok(());
+    }
+
+    println!(
+        "Trace Commons process evaluation submitted for {}.",
+        options.submission_id
+    );
+    if let Some(value) = response.json.as_ref() {
+        print_optional_json_field("  tenant", value, "tenant_id");
+        print_optional_json_field("  tenant storage ref", value, "tenant_storage_ref");
+        print_optional_json_field("  trace id", value, "trace_id");
+        print_optional_json_field("  status", value, "status");
+        print_optional_json_field("  process eval value", value, "process_eval_value");
+        print_optional_json_field("  review scorecard", value, "review_scorecard");
+        print_optional_json_field("  output object ref", value, "output_object_ref_id");
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn trace_commons_process_evaluation_body(
+    submission_id: Uuid,
+    reason: String,
+    evaluator_name: Option<String>,
+    evaluator_version: String,
+    labels: Vec<String>,
+    tool_selection: Option<TraceProcessEvaluationRatingArg>,
+    tool_argument_quality: Option<TraceProcessEvaluationRatingArg>,
+    tool_ordering: Option<TraceProcessEvaluationRatingArg>,
+    verification: Option<TraceProcessEvaluationRatingArg>,
+    side_effect_safety: Option<TraceProcessEvaluationRatingArg>,
+    overall_score: Option<f32>,
+) -> anyhow::Result<serde_json::Value> {
+    require_non_empty_reason(&reason)?;
+    if evaluator_version.trim().is_empty() {
+        anyhow::bail!("--evaluator-version must not be empty");
+    }
+    if let Some(overall_score) = overall_score
+        && !(0.0..=1.0).contains(&overall_score)
+    {
+        anyhow::bail!("--overall-score must be between 0.0 and 1.0");
+    }
+
+    let mut process_evaluation = serde_json::json!({
+        "evaluator_version": evaluator_version.trim(),
+        "labels": labels
+            .into_iter()
+            .map(|label| label.trim().to_string())
+            .filter(|label| !label.is_empty())
+            .collect::<Vec<_>>(),
+    });
+    if let Some(evaluator_name) = evaluator_name
+        && !evaluator_name.trim().is_empty()
+    {
+        process_evaluation["evaluator_name"] =
+            serde_json::Value::String(evaluator_name.trim().to_string());
+    }
+    if let Some(tool_selection) = tool_selection {
+        process_evaluation["tool_selection"] =
+            serde_json::Value::String(tool_selection.to_string());
+    }
+    if let Some(tool_argument_quality) = tool_argument_quality {
+        process_evaluation["tool_argument_quality"] =
+            serde_json::Value::String(tool_argument_quality.to_string());
+    }
+    if let Some(tool_ordering) = tool_ordering {
+        process_evaluation["tool_ordering"] = serde_json::Value::String(tool_ordering.to_string());
+    }
+    if let Some(verification) = verification {
+        process_evaluation["verification"] = serde_json::Value::String(verification.to_string());
+    }
+    if let Some(side_effect_safety) = side_effect_safety {
+        process_evaluation["side_effect_safety"] =
+            serde_json::Value::String(side_effect_safety.to_string());
+    }
+    if let Some(overall_score) = overall_score {
+        process_evaluation["overall_score"] = serde_json::json!(overall_score);
+    }
+
+    Ok(serde_json::json!({
+        "submission_id": submission_id,
+        "process_evaluation": process_evaluation,
+        "reason": reason.trim(),
+    }))
 }
 
 async fn trace_commons_analytics_summary(
@@ -3232,6 +3479,13 @@ fn optional_usize_query(key: &'static str, value: Option<usize>) -> Vec<(&'stati
 fn require_non_empty_purpose(purpose: &str) -> anyhow::Result<()> {
     if purpose.trim().is_empty() {
         anyhow::bail!("--purpose must not be empty");
+    }
+    Ok(())
+}
+
+fn require_non_empty_reason(reason: &str) -> anyhow::Result<()> {
+    if reason.trim().is_empty() {
+        anyhow::bail!("--reason must not be empty");
     }
     Ok(())
 }
@@ -4856,6 +5110,204 @@ mod tests {
         assert_eq!(
             url,
             "https://trace.example/internal/v1/workers/utility-credit"
+        );
+    }
+
+    #[test]
+    fn process_evaluation_submit_parses_through_cli() {
+        let submission_id =
+            Uuid::parse_str("018f2b7b-0c11-72fd-95c4-1f9f98feac01").expect("valid uuid");
+        let cli = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                Cli::try_parse_from([
+                    "ironclaw",
+                    "traces",
+                    "process-evaluation-submit",
+                    "--endpoint",
+                    "https://trace.example/internal",
+                    "--submission-id",
+                    "018f2b7b-0c11-72fd-95c4-1f9f98feac01",
+                    "--reason",
+                    "nightly evaluator pass",
+                    "--evaluator-name",
+                    "process-quality",
+                    "--evaluator-version",
+                    "2026-04-26.1",
+                    "--label",
+                    "proper_verification",
+                    "--label",
+                    "safe_tool_ordering",
+                    "--tool-selection",
+                    "pass",
+                    "--tool-argument-quality",
+                    "partial",
+                    "--tool-ordering",
+                    "not_applicable",
+                    "--verification",
+                    "fail",
+                    "--side-effect-safety",
+                    "unknown",
+                    "--overall-score",
+                    "0.75",
+                    "--bearer-token-env",
+                    "TRACE_COMMONS_PROCESS_EVALUATION_WORKER_TOKEN",
+                    "--json",
+                ])
+            })
+            .expect("parser thread should spawn")
+            .join()
+            .expect("parser thread should not panic")
+            .expect("process-evaluation-submit should parse");
+
+        let Some(Command::Traces(TracesCommand::ProcessEvaluationSubmit(args))) = cli.command
+        else {
+            panic!("expected traces process-evaluation-submit command");
+        };
+
+        assert_eq!(args.endpoint, "https://trace.example/internal");
+        assert_eq!(args.submission_id, submission_id);
+        assert_eq!(args.reason, "nightly evaluator pass");
+        assert_eq!(args.evaluator_name.as_deref(), Some("process-quality"));
+        assert_eq!(args.evaluator_version, "2026-04-26.1");
+        assert_eq!(
+            args.labels,
+            vec!["proper_verification", "safe_tool_ordering"]
+        );
+        assert_eq!(
+            args.tool_selection,
+            Some(TraceProcessEvaluationRatingArg::Pass)
+        );
+        assert_eq!(
+            args.tool_argument_quality,
+            Some(TraceProcessEvaluationRatingArg::Partial)
+        );
+        assert_eq!(
+            args.tool_ordering,
+            Some(TraceProcessEvaluationRatingArg::NotApplicable)
+        );
+        assert_eq!(
+            args.verification,
+            Some(TraceProcessEvaluationRatingArg::Fail)
+        );
+        assert_eq!(
+            args.side_effect_safety,
+            Some(TraceProcessEvaluationRatingArg::Unknown)
+        );
+        assert_eq!(args.overall_score, Some(0.75));
+        assert_eq!(
+            args.bearer_token_env,
+            "TRACE_COMMONS_PROCESS_EVALUATION_WORKER_TOKEN"
+        );
+        assert!(args.json);
+    }
+
+    #[test]
+    fn process_evaluation_body_uses_expected_shape() {
+        let submission_id =
+            Uuid::parse_str("018f2b7b-0c11-72fd-95c4-1f9f98feac01").expect("valid uuid");
+        let body = trace_commons_process_evaluation_body(
+            submission_id,
+            " nightly evaluator pass ".to_string(),
+            Some(" process-quality ".to_string()),
+            " 2026-04-26.1 ".to_string(),
+            vec![
+                "proper_verification".to_string(),
+                " ".to_string(),
+                "safe_tool_ordering".to_string(),
+            ],
+            Some(TraceProcessEvaluationRatingArg::Pass),
+            Some(TraceProcessEvaluationRatingArg::Partial),
+            Some(TraceProcessEvaluationRatingArg::NotApplicable),
+            Some(TraceProcessEvaluationRatingArg::Fail),
+            Some(TraceProcessEvaluationRatingArg::Unknown),
+            Some(0.75),
+        )
+        .expect("body builds");
+
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "submission_id": "018f2b7b-0c11-72fd-95c4-1f9f98feac01",
+                "process_evaluation": {
+                    "evaluator_name": "process-quality",
+                    "evaluator_version": "2026-04-26.1",
+                    "labels": ["proper_verification", "safe_tool_ordering"],
+                    "tool_selection": "pass",
+                    "tool_argument_quality": "partial",
+                    "tool_ordering": "not_applicable",
+                    "verification": "fail",
+                    "side_effect_safety": "unknown",
+                    "overall_score": 0.75
+                },
+                "reason": "nightly evaluator pass"
+            })
+        );
+    }
+
+    #[test]
+    fn process_evaluation_body_rejects_empty_reason_version_and_invalid_score() {
+        let submission_id =
+            Uuid::parse_str("018f2b7b-0c11-72fd-95c4-1f9f98feac01").expect("valid uuid");
+
+        let empty_reason = trace_commons_process_evaluation_body(
+            submission_id,
+            " ".to_string(),
+            None,
+            "2026-04-26.1".to_string(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(empty_reason.is_err());
+
+        let empty_version = trace_commons_process_evaluation_body(
+            submission_id,
+            "operator reason".to_string(),
+            None,
+            " ".to_string(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(empty_version.is_err());
+
+        let invalid_score = trace_commons_process_evaluation_body(
+            submission_id,
+            "operator reason".to_string(),
+            None,
+            "2026-04-26.1".to_string(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(1.25),
+        );
+        assert!(invalid_score.is_err());
+    }
+
+    #[test]
+    fn process_evaluation_submit_uses_dedicated_route() {
+        let url = trace_commons_api_url(
+            "https://trace.example/internal/v1/traces",
+            "/v1/workers/process-evaluation",
+            &[],
+        )
+        .expect("url builds");
+
+        assert_eq!(
+            url,
+            "https://trace.example/internal/v1/workers/process-evaluation"
         );
     }
 

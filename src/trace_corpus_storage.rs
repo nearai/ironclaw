@@ -70,6 +70,7 @@ pub enum TraceWorkerKind {
     Embedding,
     Ranking,
     BenchmarkConversion,
+    ProcessEvaluation,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -85,6 +86,7 @@ pub enum TraceAuditAction {
     Purge,
     VectorIndex,
     BenchmarkConvert,
+    ProcessEvaluate,
     PolicyUpdate,
 }
 

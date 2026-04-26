@@ -109,7 +109,7 @@ CREATE TABLE trace_access_grants (
     grant_id UUID PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
     principal_ref TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('contributor', 'reviewer', 'admin', 'export_worker', 'retention_worker', 'vector_worker', 'benchmark_worker')),
+    role TEXT NOT NULL CHECK (role IN ('contributor', 'reviewer', 'admin', 'export_worker', 'retention_worker', 'vector_worker', 'benchmark_worker', 'process_eval_worker')),
     allowed_scopes TEXT[] NOT NULL DEFAULT '{}',
     allowed_uses TEXT[] NOT NULL DEFAULT '{}',
     expires_at TIMESTAMPTZ,
@@ -187,7 +187,7 @@ CREATE TABLE trace_derived_records (
     submission_id UUID NOT NULL,
     trace_id UUID NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('current', 'invalidated', 'superseded', 'revoked', 'expired')),
-    worker_kind TEXT NOT NULL CHECK (worker_kind IN ('server_rescrub', 'summary', 'duplicate_precheck', 'embedding', 'ranking', 'benchmark_conversion')),
+    worker_kind TEXT NOT NULL CHECK (worker_kind IN ('server_rescrub', 'summary', 'duplicate_precheck', 'embedding', 'ranking', 'benchmark_conversion', 'process_evaluation')),
     worker_version TEXT NOT NULL,
     input_object_ref_id UUID,
     input_hash TEXT NOT NULL,
@@ -249,7 +249,7 @@ CREATE TABLE trace_audit_events (
     submission_id UUID,
     object_ref_id UUID,
     export_manifest_id UUID,
-    action TEXT NOT NULL CHECK (action IN ('submit', 'read', 'review', 'credit_mutate', 'revoke', 'export', 'retain', 'purge', 'vector_index', 'benchmark_convert')),
+    action TEXT NOT NULL CHECK (action IN ('submit', 'read', 'review', 'credit_mutate', 'revoke', 'export', 'retain', 'purge', 'vector_index', 'benchmark_convert', 'process_evaluate')),
     reason TEXT,
     request_id TEXT,
     decision_inputs_hash TEXT,
@@ -432,7 +432,7 @@ CREATE TABLE IF NOT EXISTS trace_access_grants (
     grant_id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
     principal_ref TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('contributor', 'reviewer', 'admin', 'export_worker', 'retention_worker', 'vector_worker', 'benchmark_worker')),
+    role TEXT NOT NULL CHECK (role IN ('contributor', 'reviewer', 'admin', 'export_worker', 'retention_worker', 'vector_worker', 'benchmark_worker', 'process_eval_worker')),
     allowed_scopes TEXT NOT NULL DEFAULT '[]',
     allowed_uses TEXT NOT NULL DEFAULT '[]',
     expires_at TEXT,
@@ -510,7 +510,7 @@ CREATE TABLE IF NOT EXISTS trace_derived_records (
     submission_id TEXT NOT NULL,
     trace_id TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('current', 'invalidated', 'superseded', 'revoked', 'expired')),
-    worker_kind TEXT NOT NULL CHECK (worker_kind IN ('server_rescrub', 'summary', 'duplicate_precheck', 'embedding', 'ranking', 'benchmark_conversion')),
+    worker_kind TEXT NOT NULL CHECK (worker_kind IN ('server_rescrub', 'summary', 'duplicate_precheck', 'embedding', 'ranking', 'benchmark_conversion', 'process_evaluation')),
     worker_version TEXT NOT NULL,
     input_object_ref_id TEXT,
     input_hash TEXT NOT NULL,
@@ -572,7 +572,7 @@ CREATE TABLE IF NOT EXISTS trace_audit_events (
     submission_id TEXT,
     object_ref_id TEXT,
     export_manifest_id TEXT,
-    action TEXT NOT NULL CHECK (action IN ('submit', 'read', 'review', 'credit_mutate', 'revoke', 'export', 'retain', 'purge', 'vector_index', 'benchmark_convert')),
+    action TEXT NOT NULL CHECK (action IN ('submit', 'read', 'review', 'credit_mutate', 'revoke', 'export', 'retain', 'purge', 'vector_index', 'benchmark_convert', 'process_evaluate')),
     reason TEXT,
     request_id TEXT,
     decision_inputs_hash TEXT,
@@ -797,7 +797,7 @@ The names below are intentionally close to the MVP concepts, but are not propose
 | `grant_id` | Stable grant id. |
 | `tenant_id` | Tenant boundary. |
 | `principal_ref` | Hash or external subject id from AuthN. |
-| `role` | `contributor`, `reviewer`, `admin`, `export_worker`, `retention_worker`, `vector_worker`, `benchmark_worker`. |
+| `role` | `contributor`, `reviewer`, `admin`, `export_worker`, `retention_worker`, `vector_worker`, `benchmark_worker`, `process_eval_worker`. |
 | `allowed_scopes` | Consent scopes or ABAC scope list. |
 | `allowed_uses` | Debugging, evaluation, benchmark, ranking, training, analytics. |
 | `expires_at` | Optional expiry for short-lived grants. |
@@ -808,8 +808,10 @@ Access grants authorize service operations. Envelope contributor fields remain a
 In the current ingest service, `export_worker` is limited to replay/ranker export surfaces,
 `benchmark_worker` is limited to benchmark conversion, `retention_worker` is limited to
 retention/cache cleanup maintenance, and `vector_worker` is limited to vector-index
-maintenance. These worker roles are intentionally not treated as reviewers for generic
-trace listing, audit reads, policy administration, review decisions, or credit mutation.
+maintenance. `process_eval_worker` is limited to writing bounded process-evaluation
+metadata for accepted submissions. These worker roles are intentionally not treated as
+reviewers for generic trace listing, audit reads, policy administration, review decisions,
+or credit mutation.
 
 ### Submissions
 
@@ -871,7 +873,7 @@ Object keys must not reveal raw user ids, local paths, prompt content, or secret
 | `derived_id` | Stable derived record id. |
 | `tenant_id`, `submission_id`, `trace_id` | Source linkage. |
 | `status` | Mirrors source eligibility: `current`, `invalidated`, `superseded`, `revoked`, `expired`. |
-| `worker_kind` | `server_rescrub`, `summary`, `duplicate_precheck`, `embedding`, `ranking`, `benchmark_conversion`. |
+| `worker_kind` | `server_rescrub`, `summary`, `duplicate_precheck`, `embedding`, `ranking`, `benchmark_conversion`, `process_evaluation`. |
 | `worker_version` | Version of producing code/model/policy. |
 | `input_object_ref_id` | Exact input artifact, resolved only through `(tenant_id, submission_id, object_ref_id)`. |
 | `input_hash` | Hash of input projection. |
@@ -883,7 +885,12 @@ Object keys must not reveal raw user ids, local paths, prompt content, or secret
 | `tool_sequence`, `tool_categories`, `coverage_tags` | Queryable arrays or join tables. |
 | `duplicate_score`, `novelty_score`, `cluster_id` | Utility metadata. |
 
-Derived rows are versioned rather than overwritten. Consumers should require `status = current` and a non-revoked source submission.
+Process-evaluation derived rows should use `worker_kind = process_evaluation`, store the
+evaluator version in `worker_version`, keep label and rubric output in bounded metadata or
+an optional `worker_intermediate` object ref, and expose only safe aggregate values such as
+tool-selection, argument-quality, ordering, verification, side-effect-safety ratings, and
+overall score. Derived rows are versioned rather than overwritten. Consumers should require
+`status = current` and a non-revoked source submission.
 
 ### Vector Index Metadata
 

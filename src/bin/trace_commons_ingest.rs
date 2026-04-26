@@ -20,10 +20,11 @@ use ironclaw::trace_artifact_store::{
     EncryptedTraceArtifactReceipt, LocalEncryptedTraceArtifactStore, TraceArtifactKind,
 };
 use ironclaw::trace_contribution::{
-    ConsentScope, EmbeddingAnalysisMetadata, ResidualPiiRisk, TRACE_CONTRIBUTION_SCHEMA_VERSION,
-    TraceAllowedUse, TraceContributionEnvelope, TraceSubmissionReceipt,
-    TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate, apply_credit_estimate_to_envelope,
-    canonical_summary_for_embedding, rescrub_trace_envelope, retention_policy_for_trace,
+    ConsentScope, EmbeddingAnalysisMetadata, ProcessEvalRating, ProcessEvaluationLabels,
+    ResidualPiiRisk, TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceAllowedUse, TraceContributionEnvelope,
+    TraceSubmissionReceipt, TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate,
+    TraceValueScorecard, apply_credit_estimate_to_envelope, canonical_summary_for_embedding,
+    rescrub_trace_envelope, retention_policy_for_trace,
 };
 use ironclaw::trace_corpus_storage::{
     TraceArtifactInvalidationCounts as StorageTraceArtifactInvalidationCounts,
@@ -290,6 +291,7 @@ enum TokenRole {
     VectorWorker,
     BenchmarkWorker,
     UtilityWorker,
+    ProcessEvalWorker,
 }
 
 impl TokenRole {
@@ -303,6 +305,10 @@ impl TokenRole {
             "vector_worker" | "vector-worker" => Ok(Self::VectorWorker),
             "benchmark_worker" | "benchmark-worker" => Ok(Self::BenchmarkWorker),
             "utility_worker" | "utility-worker" => Ok(Self::UtilityWorker),
+            "process_eval_worker"
+            | "process-eval-worker"
+            | "process_evaluation_worker"
+            | "process-evaluation-worker" => Ok(Self::ProcessEvalWorker),
             other => anyhow::bail!("unknown Trace Commons token role: {other}"),
         }
     }
@@ -333,6 +339,7 @@ impl TokenRole {
             Self::VectorWorker => "vector_worker",
             Self::BenchmarkWorker => "benchmark_worker",
             Self::UtilityWorker => "utility_worker",
+            Self::ProcessEvalWorker => "process_eval_worker",
         }
     }
 }
@@ -754,6 +761,10 @@ fn app(state: Arc<AppState>) -> Router {
         )
         .route("/v1/workers/vector-index", post(vector_index_handler))
         .route("/v1/workers/utility-credit", post(utility_credit_handler))
+        .route(
+            "/v1/workers/process-evaluation",
+            post(process_evaluation_worker_handler),
+        )
         .route("/v1/audit/events", get(audit_events_handler))
         .with_state(state)
         .layer(DefaultBodyLimit::max(MAX_INGEST_BODY_BYTES))
@@ -1735,6 +1746,27 @@ struct TraceUtilityCreditJobResponse {
     skipped_existing_count: usize,
 }
 
+#[derive(Debug, Deserialize)]
+struct TraceProcessEvaluationJobRequest {
+    submission_id: Uuid,
+    process_evaluation: ProcessEvaluationLabels,
+    reason: String,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceProcessEvaluationJobResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    submission_id: Uuid,
+    trace_id: Uuid,
+    status: TraceCorpusStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    process_eval_value: Option<f32>,
+    review_scorecard: TraceValueScorecard,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    output_object_ref_id: Option<Uuid>,
+}
+
 async fn append_credit_event_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1930,6 +1962,110 @@ async fn utility_credit_handler(
         requested_count: unique_submission_ids.len(),
         appended_count: counts.appended,
         skipped_existing_count: counts.skipped_existing,
+    }))
+}
+
+async fn process_evaluation_worker_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceProcessEvaluationJobRequest>,
+) -> ApiResult<Json<TraceProcessEvaluationJobResponse>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_process_evaluation_operator(&tenant)?;
+    let reason = body.reason.trim().to_string();
+    if reason.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "process evaluation jobs require a non-empty reason",
+        ));
+    }
+    if body.process_evaluation.evaluator_version.trim().is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "process evaluation jobs require a non-empty evaluator_version",
+        ));
+    }
+    if let Some(score) = body.process_evaluation.overall_score
+        && (!score.is_finite() || !(0.0..=1.0).contains(&score))
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "process evaluation overall_score must be finite and between 0.0 and 1.0",
+        ));
+    }
+
+    let mut record = read_utility_submission_record(state.as_ref(), &tenant, body.submission_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "trace submission not found"))?;
+    if record.status != TraceCorpusStatus::Accepted {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "process evaluation jobs can only label accepted trace submissions",
+        ));
+    }
+
+    let TraceEnvelopeBodyRead {
+        envelope: mut envelope_before,
+        object_ref_id: input_object_ref_id,
+    } = read_envelope_for_process_evaluation(state.as_ref(), &tenant, &record, Some(&reason))
+        .await
+        .map_err(internal_error)?;
+    let input_hash = envelope_plaintext_hash(&envelope_before).map_err(internal_error)?;
+    envelope_before.process_evaluation = Some(body.process_evaluation);
+    apply_credit_estimate_to_envelope(&mut envelope_before);
+    let process_eval_value = envelope_before.value_card.scorecard.process_eval_value;
+    let stored = store_envelope(&state, &tenant.tenant_id, record.status, &envelope_before)
+        .map_err(internal_error)?;
+    record.object_key = stored.object_key;
+    record.artifact_receipt = stored.artifact_receipt;
+    if submission_metadata_path(&state.root, &tenant.tenant_id, record.submission_id).exists() {
+        write_submission_record(&state.root, &record).map_err(internal_error)?;
+    }
+
+    if let Some(mut derived) =
+        read_derived_record(&state.root, &tenant.tenant_id, record.submission_id)
+            .map_err(internal_error)?
+    {
+        derived.coverage_tags = coverage_tags_for_envelope(&envelope_before);
+        write_derived_record(&state.root, &derived).map_err(internal_error)?;
+    }
+
+    let output_object_ref_id = mirror_process_evaluation_to_db(
+        state.as_ref(),
+        &tenant,
+        &record,
+        &envelope_before,
+        input_object_ref_id,
+        &input_hash,
+    )
+    .await
+    .map_err(internal_error)?;
+
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::process_evaluation(
+            &tenant,
+            record.submission_id,
+            envelope_before.value_card.scorecard.process_eval_value,
+            Some(&reason),
+        ),
+        StorageTraceAuditAction::ProcessEvaluate,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await
+    .map_err(internal_error)?;
+
+    Ok(Json(TraceProcessEvaluationJobResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        submission_id: record.submission_id,
+        trace_id: record.trace_id,
+        status: record.status,
+        process_eval_value,
+        review_scorecard: envelope_before.value_card.scorecard,
+        output_object_ref_id,
     }))
 }
 
@@ -4046,6 +4182,17 @@ fn require_utility_operator(auth: &TenantAuth) -> ApiResult<()> {
     }
 }
 
+fn require_process_evaluation_operator(auth: &TenantAuth) -> ApiResult<()> {
+    if auth.role.can_review() || auth.role == TokenRole::ProcessEvalWorker {
+        Ok(())
+    } else {
+        Err(api_error(
+            StatusCode::FORBIDDEN,
+            "reviewer, admin, or process evaluation worker token required",
+        ))
+    }
+}
+
 fn require_maintenance_operator(
     auth: &TenantAuth,
     request: &TraceMaintenanceRequest,
@@ -4641,6 +4788,7 @@ fn storage_audit_action_kind(action: StorageTraceAuditAction) -> &'static str {
         StorageTraceAuditAction::Purge => "purge",
         StorageTraceAuditAction::VectorIndex => "vector_index",
         StorageTraceAuditAction::BenchmarkConvert => "benchmark_conversion",
+        StorageTraceAuditAction::ProcessEvaluate => "process_evaluation",
         StorageTraceAuditAction::PolicyUpdate => "tenant_policy_update",
     }
 }
@@ -5002,6 +5150,12 @@ fn trace_object_ref_write_from_record(
         },
         content_sha256,
     ))
+}
+
+fn envelope_plaintext_hash(envelope: &TraceContributionEnvelope) -> anyhow::Result<String> {
+    let envelope_json = serde_json::to_string_pretty(envelope)
+        .context("failed to serialize trace envelope for hashing")?;
+    Ok(sha256_prefixed(&envelope_json))
 }
 
 fn trace_export_artifact_object_ref_material<T: Serialize>(
@@ -5738,6 +5892,110 @@ async fn mirror_review_decision_to_db(
     Ok(())
 }
 
+async fn mirror_process_evaluation_to_db(
+    state: &AppState,
+    _tenant: &TenantAuth,
+    record: &TraceCommonsSubmissionRecord,
+    envelope: &TraceContributionEnvelope,
+    input_object_ref_id: Option<Uuid>,
+    input_hash: &str,
+) -> anyhow::Result<Option<Uuid>> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(None);
+    };
+    db.upsert_trace_submission(storage_submission_write_from_record(
+        record,
+        envelope,
+        envelope
+            .embedding_analysis
+            .as_ref()
+            .map(|analysis| analysis.canonical_summary_hash.clone()),
+    )?)
+    .await
+    .context("failed to mirror process-evaluated trace submission metadata")?;
+    let (object_ref, output_hash) = trace_object_ref_write_from_record(
+        state,
+        "process-evaluated-envelope",
+        StorageTraceObjectArtifactKind::SubmittedEnvelope,
+        record,
+        envelope,
+    )?;
+    let output_object_ref_id = object_ref.object_ref_id;
+    db.append_trace_object_ref(object_ref)
+        .await
+        .context("failed to mirror process-evaluated trace object ref")?;
+    db.append_trace_derived_record(StorageTraceDerivedRecordWrite {
+        derived_id: deterministic_trace_uuid("process-evaluation", record),
+        tenant_id: record.tenant_id.clone(),
+        submission_id: record.submission_id,
+        trace_id: record.trace_id,
+        status: storage_derived_status(record.status),
+        worker_kind: StorageTraceWorkerKind::ProcessEvaluation,
+        worker_version: envelope
+            .process_evaluation
+            .as_ref()
+            .map(|labels| labels.evaluator_version.trim())
+            .filter(|version| !version.is_empty())
+            .unwrap_or("process-evaluation-worker-v1")
+            .to_string(),
+        input_object_ref: input_object_ref_id.map(|object_ref_id| {
+            ironclaw::trace_corpus_storage::TenantScopedTraceObjectRef {
+                tenant_id: record.tenant_id.clone(),
+                submission_id: record.submission_id,
+                object_ref_id,
+            }
+        }),
+        input_hash: input_hash.to_string(),
+        output_object_ref: Some(ironclaw::trace_corpus_storage::TenantScopedTraceObjectRef {
+            tenant_id: record.tenant_id.clone(),
+            submission_id: record.submission_id,
+            object_ref_id: output_object_ref_id,
+        }),
+        canonical_summary: Some(canonical_summary_for_embedding(envelope)),
+        canonical_summary_hash: Some(
+            envelope
+                .embedding_analysis
+                .as_ref()
+                .map(|analysis| analysis.canonical_summary_hash.clone())
+                .unwrap_or_else(|| sha256_prefixed(&canonical_summary_for_embedding(envelope))),
+        ),
+        summary_model: "process-evaluation-labels-v1".to_string(),
+        task_success: Some(format!("{:?}", envelope.outcome.task_success)),
+        privacy_risk: Some(serde_storage_string(&record.privacy_risk)?),
+        event_count: Some(envelope.events.len().min(i32::MAX as usize) as i32),
+        tool_sequence: envelope.replay.required_tools.clone(),
+        tool_categories: envelope
+            .events
+            .iter()
+            .filter_map(|event| event.tool_category.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+        coverage_tags: coverage_tags_for_envelope(envelope),
+        duplicate_score: envelope
+            .embedding_analysis
+            .as_ref()
+            .and_then(|analysis| analysis.duplicate_score),
+        novelty_score: envelope
+            .embedding_analysis
+            .as_ref()
+            .and_then(|analysis| analysis.novelty_score),
+        cluster_id: envelope.embedding_analysis.as_ref().and_then(|analysis| {
+            analysis
+                .cluster_id
+                .clone()
+                .or_else(|| analysis.nearest_cluster_id.clone())
+        }),
+    })
+    .await
+    .with_context(|| {
+        format!(
+            "failed to mirror process evaluation derived metadata for output hash {output_hash}"
+        )
+    })?;
+    Ok(Some(output_object_ref_id))
+}
+
 async fn mirror_credit_event_to_db(
     state: &AppState,
     event: &TraceCommonsCreditLedgerRecord,
@@ -6344,6 +6602,58 @@ async fn read_envelope_for_review_decision(
     Ok(body_read)
 }
 
+async fn read_envelope_for_process_evaluation(
+    state: &AppState,
+    tenant: &TenantAuth,
+    record: &TraceCommonsSubmissionRecord,
+    purpose: Option<&str>,
+) -> anyhow::Result<TraceEnvelopeBodyRead> {
+    anyhow::ensure!(
+        tenant.role.can_review() || tenant.role == TokenRole::ProcessEvalWorker,
+        "trace process evaluation body read requires reviewer, admin, or process evaluation worker role"
+    );
+    anyhow::ensure!(
+        record.tenant_id == tenant.tenant_id,
+        "trace process evaluation body read tenant mismatch"
+    );
+    anyhow::ensure!(
+        record.status == TraceCorpusStatus::Accepted,
+        "trace process evaluation source is not accepted"
+    );
+    let body_read = if state.db_reviewer_reads {
+        if let Some(envelope) =
+            read_envelope_from_active_db_object_ref(state, &tenant.tenant_id, record.submission_id)
+                .await?
+        {
+            envelope
+        } else {
+            anyhow::ensure!(
+                !state.db_reviewer_require_object_refs,
+                "missing active submitted envelope object ref for process evaluation"
+            );
+            TraceEnvelopeBodyRead {
+                envelope: read_envelope_by_record(state, record)?,
+                object_ref_id: None,
+            }
+        }
+    } else {
+        TraceEnvelopeBodyRead {
+            envelope: read_envelope_by_record(state, record)?,
+            object_ref_id: None,
+        }
+    };
+    append_trace_content_read_audit(
+        state,
+        tenant,
+        record.submission_id,
+        body_read.object_ref_id,
+        "process_evaluation_worker",
+        purpose,
+    )
+    .await?;
+    Ok(body_read)
+}
+
 async fn read_envelope_body_for_review_decision(
     state: &AppState,
     tenant: &TenantAuth,
@@ -6818,7 +7128,69 @@ fn coverage_tags_for_envelope(envelope: &TraceContributionEnvelope) -> Vec<Strin
     for failure_mode in &envelope.outcome.failure_modes {
         tags.insert(format!("failure:{failure_mode:?}").to_ascii_lowercase());
     }
+    if let Some(process_evaluation) = &envelope.process_evaluation {
+        for label in &process_evaluation.labels {
+            tags.insert(format!("process_label:{label:?}").to_ascii_lowercase());
+        }
+        insert_process_eval_rating_tag(
+            &mut tags,
+            "tool_selection",
+            process_evaluation.tool_selection,
+        );
+        insert_process_eval_rating_tag(
+            &mut tags,
+            "tool_argument_quality",
+            process_evaluation.tool_argument_quality,
+        );
+        insert_process_eval_rating_tag(
+            &mut tags,
+            "tool_ordering",
+            process_evaluation.tool_ordering,
+        );
+        insert_process_eval_rating_tag(&mut tags, "verification", process_evaluation.verification);
+        insert_process_eval_rating_tag(
+            &mut tags,
+            "side_effect_safety",
+            process_evaluation.side_effect_safety,
+        );
+        if let Some(score) = process_evaluation.overall_score {
+            let bucket = if score >= 0.8 {
+                "high"
+            } else if score >= 0.5 {
+                "medium"
+            } else {
+                "low"
+            };
+            tags.insert(format!("process_eval:{bucket}"));
+        }
+    }
+    if let Some(training_dynamics) = &envelope.training_dynamics
+        && let Some(bucket) = training_dynamics.cartography_bucket
+    {
+        tags.insert(format!("cartography:{bucket:?}").to_ascii_lowercase());
+    }
+    if let Some(hindsight) = &envelope.hindsight {
+        if hindsight.benchmark_candidate {
+            tags.insert("hindsight:benchmark_candidate".to_string());
+        }
+        if hindsight.relabeled_training_candidate {
+            tags.insert("hindsight:relabeled_training_candidate".to_string());
+        }
+        if let Some(failure_type) = &hindsight.failure_type {
+            tags.insert(format!("hindsight_failure:{failure_type:?}").to_ascii_lowercase());
+        }
+    }
     tags.into_iter().collect()
+}
+
+fn insert_process_eval_rating_tag(
+    tags: &mut BTreeSet<String>,
+    axis: &str,
+    rating: Option<ProcessEvalRating>,
+) {
+    if let Some(rating) = rating {
+        tags.insert(format!("process_{axis}:{rating:?}").to_ascii_lowercase());
+    }
 }
 
 fn write_derived_record(root: &Path, record: &TraceCommonsDerivedRecord) -> anyhow::Result<()> {
@@ -8323,6 +8695,7 @@ fn audit_backfill_storage_projection(
         "benchmark_conversion" | "benchmark_lifecycle_update" => {
             StorageTraceAuditAction::BenchmarkConvert
         }
+        "process_evaluation" => StorageTraceAuditAction::ProcessEvaluate,
         "tenant_policy_update" => StorageTraceAuditAction::PolicyUpdate,
         _ => StorageTraceAuditAction::Read,
     };
@@ -8426,6 +8799,7 @@ async fn index_vector_metadata_from_db(
     let eligible = derived_records
         .iter()
         .filter(|record| record.status == StorageTraceDerivedStatus::Current)
+        .filter(|record| record.worker_kind == StorageTraceWorkerKind::DuplicatePrecheck)
         .filter(|record| accepted_submission_ids.contains(&record.submission_id))
         .filter(|record| record.canonical_summary_hash.is_some())
         .collect::<Vec<_>>();
@@ -8941,6 +9315,7 @@ async fn reconcile_db_mirror(
     let eligible_canonical_vector_keys = db_derived
         .iter()
         .filter(|record| record.status == StorageTraceDerivedStatus::Current)
+        .filter(|record| record.worker_kind == StorageTraceWorkerKind::DuplicatePrecheck)
         .filter(|record| accepted_submission_ids.contains(&record.submission_id))
         .filter_map(|record| {
             record
@@ -11532,6 +11907,38 @@ impl TraceCommonsAuditEvent {
         }
     }
 
+    fn process_evaluation(
+        auth: &TenantAuth,
+        submission_id: Uuid,
+        process_eval_value: Option<f32>,
+        reason: Option<&str>,
+    ) -> Self {
+        let mut audit_reason = "surface=process_evaluation_worker".to_string();
+        if let Some(score) = process_eval_value {
+            audit_reason.push_str(&format!(";process_eval_value={score:.4}"));
+        }
+        if let Some(reason) = reason.map(str::trim).filter(|reason| !reason.is_empty()) {
+            audit_reason.push_str(";reason=");
+            audit_reason.push_str(reason);
+        }
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id,
+            kind: "process_evaluation".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: Some(audit_reason),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
     fn credit_mutation(
         auth: &TenantAuth,
         submission_id: Uuid,
@@ -12328,6 +12735,12 @@ mod tests {
             "utility-worker-token-a",
             TokenRole::UtilityWorker,
         );
+        insert_token(
+            &mut tokens,
+            "tenant-a",
+            "process-eval-worker-token-a",
+            TokenRole::ProcessEvalWorker,
+        );
         insert_token(&mut tokens, "tenant-b", "token-b", TokenRole::Contributor);
         insert_token(
             &mut tokens,
@@ -12570,6 +12983,16 @@ mod tests {
             ),
             ("utility_worker", TokenRole::UtilityWorker, "utility_worker"),
             ("utility-worker", TokenRole::UtilityWorker, "utility_worker"),
+            (
+                "process_eval_worker",
+                TokenRole::ProcessEvalWorker,
+                "process_eval_worker",
+            ),
+            (
+                "process-evaluation-worker",
+                TokenRole::ProcessEvalWorker,
+                "process_eval_worker",
+            ),
         ];
 
         for (raw, expected, storage_name) in cases {
@@ -14098,6 +14521,54 @@ mod tests {
         .await
         .expect_err("utility worker cannot make review decisions");
         assert_eq!(utility_review_error.0, StatusCode::FORBIDDEN);
+
+        let Json(process_eval) = process_evaluation_worker_handler(
+            State(state.clone()),
+            auth_headers("process-eval-worker-token-a"),
+            Json(TraceProcessEvaluationJobRequest {
+                submission_id,
+                process_evaluation: ProcessEvaluationLabels {
+                    evaluator_version: "worker-scope-judge-v1".to_string(),
+                    labels: vec![
+                        ironclaw::trace_contribution::ProcessEvaluatorLabel::ProperVerification,
+                    ],
+                    verification: Some(ProcessEvalRating::Pass),
+                    overall_score: Some(0.8),
+                    ..ProcessEvaluationLabels::default()
+                },
+                reason: "process worker scope check".to_string(),
+            }),
+        )
+        .await
+        .expect("process evaluation worker can label accepted traces");
+        assert_eq!(process_eval.process_eval_value, Some(0.8));
+        let db_derived = db
+            .list_trace_derived_records("tenant-a")
+            .await
+            .expect("derived records read");
+        assert!(db_derived.iter().any(|record| {
+            record.submission_id == submission_id
+                && record.worker_kind == StorageTraceWorkerKind::ProcessEvaluation
+                && record.output_object_ref.as_ref().is_some_and(|object_ref| {
+                    Some(object_ref.object_ref_id) == process_eval.output_object_ref_id
+                })
+        }));
+
+        let export_process_eval_error = process_evaluation_worker_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            Json(TraceProcessEvaluationJobRequest {
+                submission_id,
+                process_evaluation: ProcessEvaluationLabels {
+                    evaluator_version: "denied".to_string(),
+                    ..ProcessEvaluationLabels::default()
+                },
+                reason: "export workers cannot process-evaluate".to_string(),
+            }),
+        )
+        .await
+        .expect_err("export worker cannot use process evaluation route");
+        assert_eq!(export_process_eval_error.0, StatusCode::FORBIDDEN);
 
         let export_audit_error = audit_events_handler(
             State(state.clone()),
@@ -16013,6 +16484,110 @@ mod tests {
             queue[1].review_escalation_state,
             TraceReviewEscalationState::Fresh
         );
+    }
+
+    #[tokio::test]
+    async fn process_evaluation_worker_attaches_labels_to_accepted_trace() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("accepted submission succeeds");
+
+        let empty_version_error = process_evaluation_worker_handler(
+            State(state.clone()),
+            auth_headers("process-eval-worker-token-a"),
+            Json(TraceProcessEvaluationJobRequest {
+                submission_id,
+                process_evaluation: ProcessEvaluationLabels {
+                    evaluator_version: " ".to_string(),
+                    ..ProcessEvaluationLabels::default()
+                },
+                reason: "missing evaluator version".to_string(),
+            }),
+        )
+        .await
+        .expect_err("process evaluation worker requires evaluator version");
+        assert_eq!(empty_version_error.0, StatusCode::BAD_REQUEST);
+
+        let Json(response) = process_evaluation_worker_handler(
+            State(state.clone()),
+            auth_headers("process-eval-worker-token-a"),
+            Json(TraceProcessEvaluationJobRequest {
+                submission_id,
+                process_evaluation: ProcessEvaluationLabels {
+                    evaluator_name: Some("trajectory-judge".to_string()),
+                    evaluator_version: "judge-v1".to_string(),
+                    labels: vec![
+                        ironclaw::trace_contribution::ProcessEvaluatorLabel::CorrectToolSelection,
+                        ironclaw::trace_contribution::ProcessEvaluatorLabel::ProperVerification,
+                    ],
+                    tool_selection: Some(ProcessEvalRating::Pass),
+                    verification: Some(ProcessEvalRating::Pass),
+                    overall_score: Some(0.91),
+                    ..ProcessEvaluationLabels::default()
+                },
+                reason: "offline trajectory evaluator".to_string(),
+            }),
+        )
+        .await
+        .expect("process evaluation worker can label accepted trace");
+        assert_eq!(response.submission_id, submission_id);
+        assert_eq!(response.status, TraceCorpusStatus::Accepted);
+        assert_eq!(response.process_eval_value, Some(0.91));
+        assert_eq!(response.review_scorecard.process_eval_value, Some(0.91));
+
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let stored = read_envelope_by_record(state.as_ref(), &record).expect("envelope reads");
+        let labels = stored
+            .process_evaluation
+            .expect("process evaluation labels stored");
+        assert_eq!(labels.evaluator_version, "judge-v1");
+        assert_eq!(labels.overall_score, Some(0.91));
+
+        let derived = read_derived_record(temp.path(), "tenant-a", submission_id)
+            .expect("derived reads")
+            .expect("derived exists");
+        assert!(
+            derived
+                .coverage_tags
+                .iter()
+                .any(|tag| tag == "process_eval:high")
+        );
+        assert!(
+            derived
+                .coverage_tags
+                .iter()
+                .any(|tag| tag == "process_verification:pass")
+        );
+
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "trace_content_read"
+                && event.submission_id == submission_id
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("surface=process_evaluation_worker"))
+        }));
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "process_evaluation"
+                && event.submission_id == submission_id
+                && event.reason.as_deref().is_some_and(|reason| {
+                    reason.contains("process_eval_value=0.9100")
+                        && reason.contains("offline trajectory evaluator")
+                })
+        }));
     }
 
     #[tokio::test]

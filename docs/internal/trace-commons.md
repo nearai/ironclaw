@@ -62,7 +62,9 @@ cargo run --bin trace_commons_ingest
 Token entries may use `tenant_id:token` for contributor access or
 `tenant_id:role:token` for scoped roles. The ingest service recognizes
 `contributor`, `reviewer`, `admin`, `export_worker`, `retention_worker`,
-`vector_worker`, `benchmark_worker`, and `utility_worker`. Worker roles do not inherit reviewer
+`vector_worker`, `benchmark_worker`, `utility_worker`, and
+`process_eval_worker` (also accepted as `process_evaluation_worker` for token
+configuration). Worker roles do not inherit reviewer
 visibility: export workers can build replay/ranker exports, benchmark workers
 can run benchmark conversion through either the reviewer-compatible conversion
 route or a dedicated worker route, retention workers can run the dedicated
@@ -71,6 +73,19 @@ run the dedicated vector-index worker route or vector-index maintenance. Utility
 credit workers can append idempotent delayed utility credit through their
 dedicated route for accepted traces only, without access to reviewer bonus,
 abuse penalty, review queues, audit logs, or tenant policy administration.
+Process-evaluation workers can submit bounded process quality metadata through
+`POST /v1/workers/process-evaluation` using the CLI helper:
+
+```bash
+ironclaw traces process-evaluation-submit \
+  --endpoint https://trace-ingest.internal/v1/traces \
+  --submission-id 018f2b7b-0c11-72fd-95c4-1f9f98feac01 \
+  --reason "nightly evaluator pass" \
+  --evaluator-version process-eval-2026-04-26 \
+  --label proper_verification \
+  --tool-selection pass \
+  --verification partial
+```
 
 Internal deployments can also add a fail-closed tenant submission policy. When
 `TRACE_COMMONS_TENANT_POLICIES` contains an entry for the authenticated tenant,
