@@ -280,6 +280,7 @@ struct TenantAuth {
     tenant_id: String,
     role: TokenRole,
     principal_ref: String,
+    expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -801,33 +802,96 @@ fn default_data_dir() -> PathBuf {
 fn parse_tenant_tokens_from_env() -> anyhow::Result<BTreeMap<String, TenantAuth>> {
     let mut tokens = BTreeMap::new();
     if let Ok(configured) = std::env::var("TRACE_COMMONS_TENANT_TOKENS") {
-        for pair in configured.split(',') {
-            let pair = pair.trim();
-            if pair.is_empty() {
-                continue;
+        tokens.extend(parse_tenant_tokens(&configured)?);
+    }
+
+    if let Ok(token) = std::env::var("TRACE_COMMONS_INGEST_TOKEN") {
+        let (token, expires_at) = parse_token_secret_and_expiry(&token)?;
+        insert_token_with_expiry(
+            &mut tokens,
+            "default",
+            &token,
+            TokenRole::Contributor,
+            expires_at,
+        );
+    }
+
+    Ok(tokens)
+}
+
+fn parse_tenant_tokens(configured: &str) -> anyhow::Result<BTreeMap<String, TenantAuth>> {
+    let mut tokens = BTreeMap::new();
+    parse_tenant_token_entries(configured, &mut tokens)?;
+    Ok(tokens)
+}
+
+fn parse_tenant_token_entries(
+    configured: &str,
+    tokens: &mut BTreeMap<String, TenantAuth>,
+) -> anyhow::Result<()> {
+    for pair in configured.split(',') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        let Some((tenant_id, auth_spec)) = pair.split_once(':') else {
+            anyhow::bail!(
+                "TRACE_COMMONS_TENANT_TOKENS entries must use tenant_id:token or tenant_id:role:token syntax"
+            );
+        };
+
+        let auth_spec = auth_spec.trim();
+        let (role, token_spec) = match auth_spec.split_once(':') {
+            Some((maybe_role, token_spec)) if !maybe_role.contains(';') => {
+                (TokenRole::parse(maybe_role)?, token_spec)
             }
-            let parts = pair.split(':').collect::<Vec<_>>();
-            match parts.as_slice() {
-                [tenant_id, token] => {
-                    insert_token(&mut tokens, tenant_id, token, TokenRole::Contributor);
-                }
-                [tenant_id, role, token] => {
-                    insert_token(&mut tokens, tenant_id, token, TokenRole::parse(role)?);
-                }
-                _ => {
+            _ => (TokenRole::Contributor, auth_spec),
+        };
+        let (token, expires_at) = parse_token_secret_and_expiry(token_spec)?;
+        insert_token_with_expiry(tokens, tenant_id, &token, role, expires_at);
+    }
+    Ok(())
+}
+
+fn parse_token_secret_and_expiry(raw: &str) -> anyhow::Result<(String, Option<DateTime<Utc>>)> {
+    let mut parts = raw.split(';');
+    let token = parts.next().unwrap_or_default().trim();
+    if token.is_empty() {
+        anyhow::bail!("TRACE_COMMONS_TENANT_TOKENS entries must include a non-empty token");
+    }
+
+    let mut expires_at = None;
+    for attribute in parts {
+        let attribute = attribute.trim();
+        if attribute.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = attribute.split_once('=') else {
+            anyhow::bail!("TRACE_COMMONS_TENANT_TOKENS token attributes must use key=value syntax");
+        };
+        let key = key.trim();
+        let value = value.trim();
+        match key {
+            "expires" | "expires_at" => {
+                if expires_at.is_some() {
                     anyhow::bail!(
-                        "TRACE_COMMONS_TENANT_TOKENS entries must use tenant_id:token or tenant_id:role:token syntax"
+                        "TRACE_COMMONS_TENANT_TOKENS token expiry must be configured at most once"
                     );
                 }
+                let parsed = DateTime::parse_from_rfc3339(value)
+                    .context(
+                        "TRACE_COMMONS_TENANT_TOKENS expires_at attributes must be RFC3339 timestamps",
+                    )?
+                    .with_timezone(&Utc);
+                expires_at = Some(parsed);
+            }
+            other => {
+                anyhow::bail!("unknown TRACE_COMMONS_TENANT_TOKENS token attribute: {other}");
             }
         }
     }
 
-    if let Ok(token) = std::env::var("TRACE_COMMONS_INGEST_TOKEN") {
-        insert_token(&mut tokens, "default", &token, TokenRole::Contributor);
-    }
-
-    Ok(tokens)
+    Ok((token.to_string(), expires_at))
 }
 
 fn parse_tenant_submission_policies_from_env()
@@ -949,11 +1013,22 @@ fn validate_retention_policy_id(policy_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn insert_token(
     tokens: &mut BTreeMap<String, TenantAuth>,
     tenant_id: &str,
     token: &str,
     role: TokenRole,
+) {
+    insert_token_with_expiry(tokens, tenant_id, token, role, None);
+}
+
+fn insert_token_with_expiry(
+    tokens: &mut BTreeMap<String, TenantAuth>,
+    tenant_id: &str,
+    token: &str,
+    role: TokenRole,
+    expires_at: Option<DateTime<Utc>>,
 ) {
     let tenant_id = tenant_id.trim();
     let token = token.trim();
@@ -966,6 +1041,7 @@ fn insert_token(
             tenant_id: tenant_id.to_string(),
             role,
             principal_ref: principal_storage_ref(token),
+            expires_at,
         },
     );
 }
@@ -4906,11 +4982,18 @@ fn authenticate(state: &AppState, headers: &HeaderMap) -> ApiResult<TenantAuth> 
         .strip_prefix("Bearer ")
         .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "missing bearer token"))?
         .trim();
-    state
+    let auth = state
         .tokens
         .get(token)
         .cloned()
-        .ok_or_else(|| api_error(StatusCode::FORBIDDEN, "unknown tenant token"))
+        .ok_or_else(|| api_error(StatusCode::FORBIDDEN, "unknown tenant token"))?;
+    if auth
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= Utc::now())
+    {
+        return Err(api_error(StatusCode::FORBIDDEN, "expired tenant token"));
+    }
+    Ok(auth)
 }
 
 fn require_reviewer(auth: &TenantAuth) -> ApiResult<()> {
@@ -14044,6 +14127,15 @@ mod tests {
         state
     }
 
+    fn test_state_with_tokens(
+        root: PathBuf,
+        tokens: BTreeMap<String, TenantAuth>,
+    ) -> Arc<AppState> {
+        let mut state = test_state(root);
+        Arc::make_mut(&mut state).tokens = Arc::new(tokens);
+        state
+    }
+
     fn test_state_with_required_db_mirror_writes(
         root: PathBuf,
         db_mirror: Option<Arc<dyn Database>>,
@@ -14435,6 +14527,7 @@ mod tests {
             tenant_id: tenant_id.to_string(),
             role: TokenRole::Reviewer,
             principal_ref: principal_storage_ref("review-token"),
+            expires_at: None,
         }
     }
 
@@ -14817,6 +14910,56 @@ mod tests {
                 .allowed_uses
                 .contains(&TraceAllowedUse::AggregateAnalytics)
         );
+    }
+
+    #[test]
+    fn parses_expiring_tenant_tokens_with_rfc3339_colons() {
+        let tokens = parse_tenant_tokens(
+            "tenant-a:dev-token-a;expires_at=2099-04-27T00:00:00Z,\
+             tenant-b:reviewer:review-token-b;expires=2099-04-27T01:02:03+00:00",
+        )
+        .expect("tokens parse");
+
+        let contributor = tokens.get("dev-token-a").expect("contributor token");
+        assert_eq!(contributor.tenant_id, "tenant-a");
+        assert_eq!(contributor.role, TokenRole::Contributor);
+        assert_eq!(
+            contributor.principal_ref,
+            principal_storage_ref("dev-token-a")
+        );
+        assert_eq!(
+            contributor.expires_at,
+            Some(
+                DateTime::parse_from_rfc3339("2099-04-27T00:00:00Z")
+                    .expect("timestamp parses")
+                    .with_timezone(&Utc)
+            )
+        );
+
+        let reviewer = tokens.get("review-token-b").expect("reviewer token");
+        assert_eq!(reviewer.tenant_id, "tenant-b");
+        assert_eq!(reviewer.role, TokenRole::Reviewer);
+        assert_eq!(
+            reviewer.expires_at,
+            Some(
+                DateTime::parse_from_rfc3339("2099-04-27T01:02:03+00:00")
+                    .expect("timestamp parses")
+                    .with_timezone(&Utc)
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_tenant_token_attributes() {
+        let error = parse_tenant_tokens("tenant-a:dev-token-a;scope=wide")
+            .expect_err("unknown token attribute should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("unknown TRACE_COMMONS_TENANT_TOKENS token attribute")
+        );
+        assert!(!error.to_string().contains("dev-token-a"));
     }
 
     #[test]
@@ -23006,6 +23149,7 @@ mod tests {
             tenant_id: "tenant-a".to_string(),
             role: TokenRole::RetentionWorker,
             principal_ref: "test-retention-worker".to_string(),
+            expires_at: None,
         };
         let retention_job_id = Uuid::new_v4();
 
@@ -27709,5 +27853,50 @@ mod tests {
             .expect_err("unknown token is rejected");
 
         assert_eq!(error.0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn rejects_expired_tenant_token_through_submit_handler() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut tokens = BTreeMap::new();
+        insert_token_with_expiry(
+            &mut tokens,
+            "tenant-a",
+            "expired-token-a",
+            TokenRole::Contributor,
+            Some(Utc::now() - Duration::minutes(1)),
+        );
+        let state = test_state_with_tokens(temp.path().to_path_buf(), tokens);
+        let envelope = sample_envelope().await;
+
+        let error = submit_trace_handler(
+            State(state),
+            auth_headers("expired-token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect_err("expired token is rejected");
+
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert_eq!(error.1.0.error, "expired tenant token");
+    }
+
+    #[tokio::test]
+    async fn accepts_unexpired_tenant_token_through_submit_handler() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut tokens = BTreeMap::new();
+        insert_token_with_expiry(
+            &mut tokens,
+            "tenant-a",
+            "fresh-token-a",
+            TokenRole::Contributor,
+            Some(Utc::now() + Duration::minutes(5)),
+        );
+        let state = test_state_with_tokens(temp.path().to_path_buf(), tokens);
+        let envelope = sample_envelope().await;
+
+        let _ = submit_trace_handler(State(state), auth_headers("fresh-token-a"), Json(envelope))
+            .await
+            .expect("unexpired token is accepted");
     }
 }
