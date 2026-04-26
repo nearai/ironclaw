@@ -415,6 +415,444 @@ impl RootFilesystem for MemoryDocumentFilesystem {
     }
 }
 
+/// libSQL repository adapter for the existing `memory_documents` table shape.
+#[cfg(feature = "libsql")]
+pub struct LibSqlMemoryDocumentRepository {
+    db: Arc<libsql::Database>,
+}
+
+#[cfg(feature = "libsql")]
+impl LibSqlMemoryDocumentRepository {
+    pub fn new(db: Arc<libsql::Database>) -> Self {
+        Self { db }
+    }
+
+    pub async fn run_migrations(&self) -> Result<(), FilesystemError> {
+        let conn = self
+            .connect(valid_memory_path(), FilesystemOperation::CreateDirAll)
+            .await?;
+        conn.execute_batch(LIBSQL_MEMORY_DOCUMENTS_SCHEMA)
+            .await
+            .map_err(|error| {
+                memory_error(
+                    valid_memory_path(),
+                    FilesystemOperation::CreateDirAll,
+                    error.to_string(),
+                )
+            })?;
+        Ok(())
+    }
+
+    async fn connect(
+        &self,
+        path: VirtualPath,
+        operation: FilesystemOperation,
+    ) -> Result<libsql::Connection, FilesystemError> {
+        let conn = self
+            .db
+            .connect()
+            .map_err(|error| memory_error(path.clone(), operation, error.to_string()))?;
+        conn.query("PRAGMA busy_timeout = 5000", ())
+            .await
+            .map_err(|error| memory_error(path, operation, error.to_string()))?;
+        Ok(conn)
+    }
+}
+
+#[cfg(feature = "libsql")]
+#[async_trait]
+impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
+    async fn read_document(
+        &self,
+        path: &MemoryDocumentPath,
+    ) -> Result<Option<Vec<u8>>, FilesystemError> {
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let conn = self
+            .connect(virtual_path.clone(), FilesystemOperation::ReadFile)
+            .await?;
+        let owner_key = scoped_memory_owner_key(path.scope());
+        let db_path = db_path_for_memory_document(path);
+        let mut rows = conn
+            .query(
+                "SELECT content FROM memory_documents WHERE user_id = ?1 AND agent_id IS NULL AND path = ?2",
+                libsql::params![owner_key, db_path],
+            )
+            .await
+            .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::ReadFile, error.to_string()))?;
+        let Some(row) = rows.next().await.map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::ReadFile,
+                error.to_string(),
+            )
+        })?
+        else {
+            return Ok(None);
+        };
+        let content: String = row.get(0).map_err(|error| {
+            memory_error(
+                virtual_path,
+                FilesystemOperation::ReadFile,
+                error.to_string(),
+            )
+        })?;
+        Ok(Some(content.into_bytes()))
+    }
+
+    async fn write_document(
+        &self,
+        path: &MemoryDocumentPath,
+        bytes: &[u8],
+    ) -> Result<(), FilesystemError> {
+        let content = std::str::from_utf8(bytes).map_err(|_| {
+            memory_error(
+                path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+                FilesystemOperation::WriteFile,
+                "memory document content must be UTF-8",
+            )
+        })?;
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let conn = self
+            .connect(virtual_path.clone(), FilesystemOperation::WriteFile)
+            .await?;
+        let owner_key = scoped_memory_owner_key(path.scope());
+        let db_path = db_path_for_memory_document(path);
+        let mut rows = conn
+            .query(
+                "SELECT id FROM memory_documents WHERE user_id = ?1 AND agent_id IS NULL AND path = ?2",
+                libsql::params![owner_key.as_str(), db_path.as_str()],
+            )
+            .await
+            .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?;
+        if rows
+            .next()
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
+                )
+            })?
+            .is_some()
+        {
+            conn.execute(
+                "UPDATE memory_documents SET content = ?3, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE user_id = ?1 AND agent_id IS NULL AND path = ?2",
+                libsql::params![owner_key, db_path, content],
+            )
+            .await
+            .map_err(|error| memory_error(virtual_path, FilesystemOperation::WriteFile, error.to_string()))?;
+        } else {
+            conn.execute(
+                r#"
+                INSERT INTO memory_documents (id, user_id, agent_id, path, content, metadata)
+                VALUES (?1, ?2, NULL, ?3, ?4, '{}')
+                "#,
+                libsql::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    owner_key,
+                    db_path,
+                    content
+                ],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path,
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    async fn list_documents(
+        &self,
+        scope: &MemoryDocumentScope,
+    ) -> Result<Vec<MemoryDocumentPath>, FilesystemError> {
+        let virtual_path = scope
+            .virtual_prefix()
+            .unwrap_or_else(|_| valid_memory_path());
+        let conn = self
+            .connect(virtual_path.clone(), FilesystemOperation::ListDir)
+            .await?;
+        let owner_key = scoped_memory_owner_key(scope);
+        let mut documents = Vec::new();
+        if let Some(project_id) = scope.project_id() {
+            let prefix = format!("projects/{project_id}/");
+            let mut rows = conn
+                .query(
+                    "SELECT path FROM memory_documents WHERE user_id = ?1 AND agent_id IS NULL AND path LIKE ?2 ORDER BY path",
+                    libsql::params![owner_key, format!("{prefix}%")],
+                )
+                .await
+                .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::ListDir, error.to_string()))?;
+            while let Some(row) = rows.next().await.map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::ListDir,
+                    error.to_string(),
+                )
+            })? {
+                let db_path: String = row.get(0).map_err(|error| {
+                    memory_error(
+                        virtual_path.clone(),
+                        FilesystemOperation::ListDir,
+                        error.to_string(),
+                    )
+                })?;
+                if let Some(memory_path) = memory_document_from_db_path(scope, &db_path) {
+                    documents.push(memory_path);
+                }
+            }
+        } else {
+            let mut rows = conn
+                .query(
+                    "SELECT path FROM memory_documents WHERE user_id = ?1 AND agent_id IS NULL AND path NOT LIKE 'projects/%' ORDER BY path",
+                    libsql::params![owner_key],
+                )
+                .await
+                .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::ListDir, error.to_string()))?;
+            while let Some(row) = rows.next().await.map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::ListDir,
+                    error.to_string(),
+                )
+            })? {
+                let db_path: String = row.get(0).map_err(|error| {
+                    memory_error(
+                        virtual_path.clone(),
+                        FilesystemOperation::ListDir,
+                        error.to_string(),
+                    )
+                })?;
+                if let Some(memory_path) = memory_document_from_db_path(scope, &db_path) {
+                    documents.push(memory_path);
+                }
+            }
+        }
+        Ok(documents)
+    }
+}
+
+#[cfg(feature = "libsql")]
+const LIBSQL_MEMORY_DOCUMENTS_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS memory_documents (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    agent_id TEXT,
+    path TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    metadata TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_memory_documents_user ON memory_documents(user_id);
+CREATE INDEX IF NOT EXISTS idx_memory_documents_path ON memory_documents(user_id, path);
+"#;
+
+/// PostgreSQL repository adapter for the existing `memory_documents` table shape.
+#[cfg(feature = "postgres")]
+pub struct PostgresMemoryDocumentRepository {
+    pool: deadpool_postgres::Pool,
+}
+
+#[cfg(feature = "postgres")]
+impl PostgresMemoryDocumentRepository {
+    pub fn new(pool: deadpool_postgres::Pool) -> Self {
+        Self { pool }
+    }
+
+    pub async fn run_migrations(&self) -> Result<(), FilesystemError> {
+        let client = self
+            .client(valid_memory_path(), FilesystemOperation::CreateDirAll)
+            .await?;
+        client
+            .batch_execute(POSTGRES_MEMORY_DOCUMENTS_SCHEMA)
+            .await
+            .map_err(|error| {
+                memory_error(
+                    valid_memory_path(),
+                    FilesystemOperation::CreateDirAll,
+                    error.to_string(),
+                )
+            })?;
+        Ok(())
+    }
+
+    async fn client(
+        &self,
+        path: VirtualPath,
+        operation: FilesystemOperation,
+    ) -> Result<deadpool_postgres::Object, FilesystemError> {
+        self.pool
+            .get()
+            .await
+            .map_err(|error| memory_error(path, operation, error.to_string()))
+    }
+}
+
+#[cfg(feature = "postgres")]
+#[async_trait]
+impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
+    async fn read_document(
+        &self,
+        path: &MemoryDocumentPath,
+    ) -> Result<Option<Vec<u8>>, FilesystemError> {
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let client = self
+            .client(virtual_path.clone(), FilesystemOperation::ReadFile)
+            .await?;
+        let owner_key = scoped_memory_owner_key(path.scope());
+        let db_path = db_path_for_memory_document(path);
+        let row = client
+            .query_opt(
+                "SELECT content FROM memory_documents WHERE user_id = $1 AND agent_id IS NULL AND path = $2",
+                &[&owner_key, &db_path],
+            )
+            .await
+            .map_err(|error| memory_error(virtual_path, FilesystemOperation::ReadFile, error.to_string()))?;
+        Ok(row.map(|row| {
+            let content: String = row.get("content");
+            content.into_bytes()
+        }))
+    }
+
+    async fn write_document(
+        &self,
+        path: &MemoryDocumentPath,
+        bytes: &[u8],
+    ) -> Result<(), FilesystemError> {
+        let content = std::str::from_utf8(bytes).map_err(|_| {
+            memory_error(
+                path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+                FilesystemOperation::WriteFile,
+                "memory document content must be UTF-8",
+            )
+        })?;
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let client = self
+            .client(virtual_path.clone(), FilesystemOperation::WriteFile)
+            .await?;
+        let owner_key = scoped_memory_owner_key(path.scope());
+        let db_path = db_path_for_memory_document(path);
+        let updated = client
+            .execute(
+                "UPDATE memory_documents SET content = $3, updated_at = NOW() WHERE user_id = $1 AND agent_id IS NULL AND path = $2",
+                &[&owner_key, &db_path, &content],
+            )
+            .await
+            .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?;
+        if updated == 0 {
+            client
+                .execute(
+                    r#"
+                    INSERT INTO memory_documents (user_id, agent_id, path, content, metadata)
+                    VALUES ($1, NULL, $2, $3, '{}'::jsonb)
+                    "#,
+                    &[&owner_key, &db_path, &content],
+                )
+                .await
+                .map_err(|error| {
+                    memory_error(
+                        virtual_path,
+                        FilesystemOperation::WriteFile,
+                        error.to_string(),
+                    )
+                })?;
+        }
+        Ok(())
+    }
+
+    async fn list_documents(
+        &self,
+        scope: &MemoryDocumentScope,
+    ) -> Result<Vec<MemoryDocumentPath>, FilesystemError> {
+        let virtual_path = scope
+            .virtual_prefix()
+            .unwrap_or_else(|_| valid_memory_path());
+        let client = self
+            .client(virtual_path.clone(), FilesystemOperation::ListDir)
+            .await?;
+        let owner_key = scoped_memory_owner_key(scope);
+        let rows = if let Some(project_id) = scope.project_id() {
+            let prefix = format!("projects/{project_id}/");
+            client
+                .query(
+                    "SELECT path FROM memory_documents WHERE user_id = $1 AND agent_id IS NULL AND path LIKE $2 ORDER BY path",
+                    &[&owner_key, &format!("{prefix}%")],
+                )
+                .await
+        } else {
+            client
+                .query(
+                    "SELECT path FROM memory_documents WHERE user_id = $1 AND agent_id IS NULL AND path NOT LIKE 'projects/%' ORDER BY path",
+                    &[&owner_key],
+                )
+                .await
+        }
+        .map_err(|error| memory_error(virtual_path, FilesystemOperation::ListDir, error.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                let db_path: String = row.get("path");
+                memory_document_from_db_path(scope, &db_path)
+            })
+            .collect())
+    }
+}
+
+#[cfg(feature = "postgres")]
+const POSTGRES_MEMORY_DOCUMENTS_SCHEMA: &str = r#"
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE TABLE IF NOT EXISTS memory_documents (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id TEXT NOT NULL,
+    agent_id UUID,
+    path TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    metadata JSONB NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_memory_documents_user ON memory_documents(user_id);
+CREATE INDEX IF NOT EXISTS idx_memory_documents_path ON memory_documents(user_id, path);
+"#;
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn scoped_memory_owner_key(scope: &MemoryDocumentScope) -> String {
+    format!("tenant:{}:user:{}", scope.tenant_id(), scope.user_id())
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn db_path_for_memory_document(path: &MemoryDocumentPath) -> String {
+    match path.project_id() {
+        Some(project_id) => format!("projects/{project_id}/{}", path.relative_path()),
+        None => path.relative_path().to_string(),
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn memory_document_from_db_path(
+    scope: &MemoryDocumentScope,
+    db_path: &str,
+) -> Option<MemoryDocumentPath> {
+    let relative_path = match scope.project_id() {
+        Some(project_id) => db_path.strip_prefix(&format!("projects/{project_id}/"))?,
+        None if db_path.starts_with("projects/") => return None,
+        None => db_path,
+    };
+    validated_memory_relative_path(relative_path.to_string())
+        .ok()
+        .map(|relative_path| MemoryDocumentPath {
+            scope: scope.clone(),
+            relative_path,
+        })
+}
+
 fn memory_direct_children(
     parent: &VirtualPath,
     prefix: Option<&str>,

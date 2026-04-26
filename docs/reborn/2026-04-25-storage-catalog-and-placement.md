@@ -168,14 +168,23 @@ MemoryDocumentPath
 MemoryDocumentRepository
 MemoryDocumentIndexer
 InMemoryMemoryDocumentRepository
+LibSqlMemoryDocumentRepository
+PostgresMemoryDocumentRepository
 ```
 
 `ironclaw_filesystem` remains generic. `ironclaw_memory` owns memory-specific path grammar, scope parsing, repository delegation, directory inference, and write-after-persist index hook invocation.
 
-Production repository adapters should map this seam onto memory-oriented tables/services:
+The PostgreSQL/libSQL repository adapters map file-shaped memory documents into the existing `memory_documents` table shape. The adapter stores scoped owner identity in the `user_id` column and maps project-scoped documents under `projects/{project_id}/...` so the backend remains compatible with the current document table model.
+
+The current repository adapters intentionally touch only document rows:
 
 ```text
 memory_documents
+```
+
+These remain owned by later memory service/indexer wiring:
+
+```text
 memory_chunks
 memory_document_versions
 embedding/search index tables

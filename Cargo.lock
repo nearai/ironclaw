@@ -4201,9 +4201,14 @@ name = "ironclaw_memory"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "deadpool-postgres",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "libsql",
+ "tempfile",
  "tokio",
+ "tokio-postgres",
+ "uuid",
 ]
 
 [[package]]
