@@ -1193,6 +1193,8 @@ const MAX_DELAYED_CREDIT_POINTS_DELTA: f32 = 100.0;
 const BENCHMARK_CONVERSION_CREDIT_POINTS_DELTA: f32 = 2.0;
 const RANKER_TRAINING_CANDIDATE_CREDIT_POINTS_DELTA: f32 = 0.5;
 const RANKER_TRAINING_PAIR_CREDIT_POINTS_DELTA: f32 = 0.75;
+const RANKER_TRAINING_CANDIDATES_EXPORT_PURPOSE_CODE: &str = "ranker_training_candidates_export";
+const RANKER_TRAINING_PAIRS_EXPORT_PURPOSE_CODE: &str = "ranker_training_pairs_export";
 
 impl TraceCreditLedgerEventType {
     fn requires_external_ref(self) -> bool {
@@ -1866,6 +1868,8 @@ async fn run_benchmark_conversion(
 struct RankerTrainingExportQuery {
     limit: Option<usize>,
     #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
     status: Option<TraceCorpusStatus>,
     #[serde(default)]
     consent_scope: Option<String>,
@@ -1881,8 +1885,13 @@ async fn ranker_training_candidates_handler(
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_exporter(&tenant)?;
     let consent_scope = parse_ranker_consent_scope_filter(query.consent_scope.as_deref())?;
+    let purpose = normalized_export_purpose(
+        query.purpose.as_deref(),
+        "ranker_training_candidates_export",
+    );
     enforce_ranker_export_guardrails(
         state.as_ref(),
+        query.purpose.as_deref(),
         query.status,
         query.privacy_risk,
         consent_scope,
@@ -1907,7 +1916,7 @@ async fn ranker_training_candidates_handler(
     let audit_event = TraceCommonsAuditEvent::ranker_training_export(
         &tenant,
         export_id,
-        "ranker_training_candidates_export",
+        purpose.as_str(),
         candidates.len(),
         source_item_list_hash.clone(),
     );
@@ -1917,7 +1926,7 @@ async fn ranker_training_candidates_handler(
         export_id,
         audit_event_id,
         TraceExportProvenanceKind::RankerTrainingCandidates,
-        "ranker_training_candidates_export".to_string(),
+        purpose.clone(),
         source_submission_ids,
         source_item_list_hash.clone(),
     );
@@ -1962,7 +1971,7 @@ async fn ranker_training_candidates_handler(
         StorageTraceAuditAction::Export,
         StorageTraceAuditSafeMetadata::Export {
             artifact_kind: StorageTraceObjectArtifactKind::ExportArtifact,
-            purpose_code: Some("ranker_training_candidates_export".to_string()),
+            purpose_code: Some(purpose.clone()),
             item_count: candidates.len().min(u32::MAX as usize) as u32,
         },
     )
@@ -1989,6 +1998,7 @@ async fn ranker_training_candidates_handler(
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         export_id,
         audit_event_id,
+        purpose,
         generated_at: Utc::now(),
         item_count: candidates.len(),
         source_item_list_hash,
@@ -2004,8 +2014,11 @@ async fn ranker_training_pairs_handler(
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_exporter(&tenant)?;
     let consent_scope = parse_ranker_consent_scope_filter(query.consent_scope.as_deref())?;
+    let purpose =
+        normalized_export_purpose(query.purpose.as_deref(), "ranker_training_pairs_export");
     enforce_ranker_export_guardrails(
         state.as_ref(),
+        query.purpose.as_deref(),
         query.status,
         query.privacy_risk,
         consent_scope,
@@ -2023,7 +2036,7 @@ async fn ranker_training_pairs_handler(
     let audit_event = TraceCommonsAuditEvent::ranker_training_export(
         &tenant,
         export_id,
-        "ranker_training_pairs_export",
+        purpose.as_str(),
         pairs.len(),
         source_item_list_hash.clone(),
     );
@@ -2034,7 +2047,7 @@ async fn ranker_training_pairs_handler(
         export_id,
         audit_event_id,
         TraceExportProvenanceKind::RankerTrainingPairs,
-        "ranker_training_pairs_export".to_string(),
+        purpose.clone(),
         source_submission_ids,
         source_item_list_hash.clone(),
     );
@@ -2079,7 +2092,7 @@ async fn ranker_training_pairs_handler(
         StorageTraceAuditAction::Export,
         StorageTraceAuditSafeMetadata::Export {
             artifact_kind: StorageTraceObjectArtifactKind::ExportArtifact,
-            purpose_code: Some("ranker_training_pairs_export".to_string()),
+            purpose_code: Some(purpose.clone()),
             item_count: pairs.len().min(u32::MAX as usize) as u32,
         },
     )
@@ -2113,6 +2126,7 @@ async fn ranker_training_pairs_handler(
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         export_id,
         audit_event_id,
+        purpose,
         generated_at: Utc::now(),
         item_count: pairs.len(),
         source_item_list_hash,
@@ -2558,6 +2572,7 @@ fn enforce_dataset_export_guardrails(
 
 fn enforce_ranker_export_guardrails(
     state: &AppState,
+    purpose: Option<&str>,
     status: Option<TraceCorpusStatus>,
     privacy_risk: Option<ResidualPiiRisk>,
     consent_scope: Option<ConsentScope>,
@@ -2566,6 +2581,16 @@ fn enforce_ranker_export_guardrails(
         return Ok(());
     }
 
+    if purpose
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .is_none()
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ranker training export requires an explicit purpose",
+        ));
+    }
     if status != Some(TraceCorpusStatus::Accepted) {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
@@ -3025,7 +3050,7 @@ async fn trace_list_purpose_submission_ids(
             .filter(|manifest| {
                 manifest.deleted_at.is_none()
                     && manifest.invalidated_at.is_none()
-                    && manifest.purpose_code.as_deref() == Some(purpose)
+                    && storage_manifest_purpose_matches(manifest.purpose_code.as_deref(), purpose)
             })
             .flat_map(|manifest| manifest.source_submission_ids)
             .collect::<BTreeSet<_>>();
@@ -4603,7 +4628,7 @@ async fn upsert_provenance_manifest_to_db(
         tenant_id: provenance.tenant_id.clone(),
         export_manifest_id: provenance.export_id,
         artifact_kind,
-        purpose_code: Some(provenance.purpose.clone()),
+        purpose_code: Some(provenance_storage_purpose_code(provenance)),
         audit_event_id: Some(provenance.audit_event_id),
         source_submission_ids: provenance.source_submission_ids.clone(),
         source_submission_ids_hash: provenance.source_submission_ids_hash.clone(),
@@ -4613,6 +4638,55 @@ async fn upsert_provenance_manifest_to_db(
     .await
     .context("failed to mirror export provenance manifest metadata")?;
     Ok(())
+}
+
+fn provenance_storage_purpose_code(provenance: &TraceExportProvenanceManifest) -> String {
+    match provenance.export_kind {
+        TraceExportProvenanceKind::BenchmarkConversion => provenance.purpose.clone(),
+        TraceExportProvenanceKind::RankerTrainingCandidates => ranker_storage_purpose_code(
+            RANKER_TRAINING_CANDIDATES_EXPORT_PURPOSE_CODE,
+            &provenance.purpose,
+        ),
+        TraceExportProvenanceKind::RankerTrainingPairs => ranker_storage_purpose_code(
+            RANKER_TRAINING_PAIRS_EXPORT_PURPOSE_CODE,
+            &provenance.purpose,
+        ),
+    }
+}
+
+fn ranker_storage_purpose_code(export_kind_code: &str, purpose: &str) -> String {
+    let purpose = purpose.trim();
+    if purpose == export_kind_code {
+        export_kind_code.to_string()
+    } else {
+        format!("{export_kind_code}:{purpose}")
+    }
+}
+
+fn is_ranker_training_purpose_code(purpose_code: &str) -> bool {
+    purpose_code == RANKER_TRAINING_CANDIDATES_EXPORT_PURPOSE_CODE
+        || purpose_code == RANKER_TRAINING_PAIRS_EXPORT_PURPOSE_CODE
+        || purpose_code
+            .strip_prefix(RANKER_TRAINING_CANDIDATES_EXPORT_PURPOSE_CODE)
+            .is_some_and(|suffix| suffix.starts_with(':'))
+        || purpose_code
+            .strip_prefix(RANKER_TRAINING_PAIRS_EXPORT_PURPOSE_CODE)
+            .is_some_and(|suffix| suffix.starts_with(':'))
+}
+
+fn storage_manifest_purpose_matches(purpose_code: Option<&str>, requested_purpose: &str) -> bool {
+    let Some(purpose_code) = purpose_code else {
+        return false;
+    };
+    purpose_code == requested_purpose
+        || purpose_code
+            .strip_prefix(RANKER_TRAINING_CANDIDATES_EXPORT_PURPOSE_CODE)
+            .and_then(|suffix| suffix.strip_prefix(':'))
+            .is_some_and(|purpose| purpose == requested_purpose)
+        || purpose_code
+            .strip_prefix(RANKER_TRAINING_PAIRS_EXPORT_PURPOSE_CODE)
+            .and_then(|suffix| suffix.strip_prefix(':'))
+            .is_some_and(|purpose| purpose == requested_purpose)
 }
 
 fn storage_submission_write_from_record(
@@ -7031,10 +7105,10 @@ async fn reconcile_db_mirror(
 
 fn is_ranker_training_storage_manifest(record: &StorageTraceExportManifestRecord) -> bool {
     record.artifact_kind == StorageTraceObjectArtifactKind::ExportArtifact
-        && matches!(
-            record.purpose_code.as_deref(),
-            Some("ranker_training_candidates_export" | "ranker_training_pairs_export")
-        )
+        && record
+            .purpose_code
+            .as_deref()
+            .is_some_and(is_ranker_training_purpose_code)
 }
 
 fn is_replay_dataset_storage_manifest(record: &StorageTraceExportManifestRecord) -> bool {
@@ -7671,10 +7745,10 @@ impl TraceExportManifestSummary {
 
     fn is_replay_dataset_manifest(&self) -> bool {
         self.artifact_kind == StorageTraceObjectArtifactKind::ExportArtifact
-            && !matches!(
-                self.purpose_code.as_deref(),
-                Some("ranker_training_candidates_export" | "ranker_training_pairs_export")
-            )
+            && !self
+                .purpose_code
+                .as_deref()
+                .is_some_and(is_ranker_training_purpose_code)
     }
 }
 
@@ -7932,6 +8006,7 @@ struct TraceRankerTrainingCandidateExport {
     tenant_storage_ref: String,
     export_id: Uuid,
     audit_event_id: Uuid,
+    purpose: String,
     generated_at: DateTime<Utc>,
     item_count: usize,
     source_item_list_hash: String,
@@ -7944,6 +8019,7 @@ struct TraceRankerTrainingPairExport {
     tenant_storage_ref: String,
     export_id: Uuid,
     audit_event_id: Uuid,
+    purpose: String,
     generated_at: DateTime<Utc>,
     item_count: usize,
     source_item_list_hash: String,
@@ -9931,6 +10007,7 @@ mod tests {
             auth_headers("export-worker-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                purpose: Some("worker_ranker_candidates".to_string()),
                 status: Some(TraceCorpusStatus::Accepted),
                 consent_scope: Some("ranking_training".to_string()),
                 privacy_risk: Some(ResidualPiiRisk::Low),
@@ -11134,6 +11211,7 @@ mod tests {
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                purpose: None,
                 status: None,
                 consent_scope: None,
                 privacy_risk: None,
@@ -11143,11 +11221,42 @@ mod tests {
         .expect_err("guarded ranker export requires explicit filters");
         assert_eq!(ranker_error.0, StatusCode::BAD_REQUEST);
 
+        let ranker_missing_purpose = ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: None,
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking_training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect_err("guarded ranker export requires an explicit purpose");
+        assert_eq!(ranker_missing_purpose.0, StatusCode::BAD_REQUEST);
+
+        let ranker_pair_missing_purpose = ranker_training_pairs_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: None,
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("model_training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect_err("guarded ranker pair export requires an explicit purpose");
+        assert_eq!(ranker_pair_missing_purpose.0, StatusCode::BAD_REQUEST);
+
         let Json(candidates) = ranker_training_candidates_handler(
             State(state.clone()),
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                purpose: Some("guarded_ranker_candidates".to_string()),
                 status: Some(TraceCorpusStatus::Accepted),
                 consent_scope: Some("ranking_training".to_string()),
                 privacy_risk: Some(ResidualPiiRisk::Low),
@@ -11156,12 +11265,14 @@ mod tests {
         .await
         .expect("fully filtered ranker candidates export is allowed");
         assert_eq!(candidates.item_count, 0);
+        assert_eq!(candidates.purpose, "guarded_ranker_candidates");
 
         let Json(pairs) = ranker_training_pairs_handler(
             State(state),
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                purpose: Some("guarded_ranker_pairs".to_string()),
                 status: Some(TraceCorpusStatus::Accepted),
                 consent_scope: Some("model_training".to_string()),
                 privacy_risk: Some(ResidualPiiRisk::Low),
@@ -11170,6 +11281,7 @@ mod tests {
         .await
         .expect("fully filtered ranker pairs export is allowed");
         assert_eq!(pairs.item_count, 0);
+        assert_eq!(pairs.purpose, "guarded_ranker_pairs");
     }
 
     #[tokio::test]
@@ -11436,6 +11548,7 @@ mod tests {
             auth_headers("token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                purpose: None,
                 status: None,
                 consent_scope: None,
                 privacy_risk: None,
@@ -11450,6 +11563,7 @@ mod tests {
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                purpose: Some("ranker_candidates_tenant_scope".to_string()),
                 status: None,
                 consent_scope: Some("ranking-training".to_string()),
                 privacy_risk: None,
@@ -11526,6 +11640,7 @@ mod tests {
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                purpose: Some("ranker_candidates_tenant_scope".to_string()),
                 status: None,
                 consent_scope: Some("ranking-training".to_string()),
                 privacy_risk: None,
@@ -11549,6 +11664,7 @@ mod tests {
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                purpose: Some("ranker_pairs_tenant_scope".to_string()),
                 status: None,
                 consent_scope: Some("ranking-training".to_string()),
                 privacy_risk: None,
@@ -11594,6 +11710,7 @@ mod tests {
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                purpose: Some("ranker_pairs_tenant_scope".to_string()),
                 status: None,
                 consent_scope: Some("ranking-training".to_string()),
                 privacy_risk: None,
@@ -11617,6 +11734,7 @@ mod tests {
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(1),
+                purpose: Some("ranker_pairs_limited".to_string()),
                 status: None,
                 consent_scope: Some("ranking-training".to_string()),
                 privacy_risk: None,
@@ -11631,6 +11749,7 @@ mod tests {
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                purpose: None,
                 status: None,
                 consent_scope: Some("debugging-evaluation".to_string()),
                 privacy_risk: None,
@@ -11675,6 +11794,7 @@ mod tests {
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                purpose: Some("ranker_provenance_candidates".to_string()),
                 status: None,
                 consent_scope: Some("ranking-training".to_string()),
                 privacy_risk: None,
@@ -11687,6 +11807,7 @@ mod tests {
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                purpose: Some("ranker_provenance_pairs".to_string()),
                 status: None,
                 consent_scope: Some("ranking-training".to_string()),
                 privacy_risk: None,
@@ -11694,6 +11815,34 @@ mod tests {
         )
         .await
         .expect("ranker pairs export succeeds");
+        assert_eq!(candidates.purpose, "ranker_provenance_candidates");
+        assert_eq!(pairs.purpose, "ranker_provenance_pairs");
+        let Json(ranker_purpose_records) = list_traces_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(TraceListQuery {
+                status: None,
+                limit: Some(10),
+                purpose: Some("ranker_provenance_candidates".to_string()),
+                coverage_tag: None,
+                tool: None,
+                privacy_risk: None,
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("trace list filters by ranker export purpose");
+        assert_eq!(ranker_purpose_records.len(), 2);
+        assert!(
+            ranker_purpose_records
+                .iter()
+                .any(|record| record.submission_id == preferred_id)
+        );
+        assert!(
+            ranker_purpose_records
+                .iter()
+                .any(|record| record.submission_id == rejected_id)
+        );
 
         let candidate_provenance_path = temp
             .path()
@@ -11718,6 +11867,10 @@ mod tests {
             candidate_provenance["source_submission_ids_hash"],
             candidates.source_item_list_hash
         );
+        assert_eq!(
+            candidate_provenance["purpose"],
+            "ranker_provenance_candidates"
+        );
         assert!(
             candidate_provenance["source_submission_ids"]
                 .as_array()
@@ -11734,6 +11887,7 @@ mod tests {
             pair_provenance["source_submission_ids_hash"],
             pairs.source_item_list_hash
         );
+        assert_eq!(pair_provenance["purpose"], "ranker_provenance_pairs");
         assert_eq!(pair_provenance["export_kind"], "ranker_training_pairs");
         assert!(
             pair_provenance["source_submission_ids"]
@@ -14189,6 +14343,7 @@ mod tests {
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                purpose: Some("db_metadata_ranker".to_string()),
                 status: None,
                 consent_scope: Some("ranking-training".to_string()),
                 privacy_risk: Some(ResidualPiiRisk::Low),
@@ -15097,6 +15252,7 @@ mod tests {
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                purpose: Some("manifest_listing_ranker".to_string()),
                 status: None,
                 consent_scope: Some("ranking-training".to_string()),
                 privacy_risk: Some(ResidualPiiRisk::Low),
@@ -15111,6 +15267,7 @@ mod tests {
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                purpose: Some("manifest_listing_ranker_pairs".to_string()),
                 status: None,
                 consent_scope: Some("ranking-training".to_string()),
                 privacy_risk: Some(ResidualPiiRisk::Low),
@@ -15356,6 +15513,7 @@ mod tests {
             auth_headers("review-token-a"),
             Query(RankerTrainingExportQuery {
                 limit: Some(10),
+                purpose: Some("service_local_ranker".to_string()),
                 status: Some(TraceCorpusStatus::Accepted),
                 consent_scope: Some("ranking-training".to_string()),
                 privacy_risk: Some(ResidualPiiRisk::Low),
