@@ -96,6 +96,7 @@ const TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: &str =
 const DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: usize = 500;
 const TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT: &str = "TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT";
 const TRACE_COMMONS_SIGNED_TOKEN_SECRET: &str = "TRACE_COMMONS_SIGNED_TOKEN_SECRET";
+const TRACE_COMMONS_SIGNED_TOKEN_SECRETS: &str = "TRACE_COMMONS_SIGNED_TOKEN_SECRETS";
 const TRACE_COMMONS_SIGNED_TOKEN_ISSUER: &str = "TRACE_COMMONS_SIGNED_TOKEN_ISSUER";
 const TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE: &str = "TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE";
 const TRACE_COMMONS_SIGNED_TOKEN_REVOKED_JTIS: &str = "TRACE_COMMONS_SIGNED_TOKEN_REVOKED_JTIS";
@@ -311,7 +312,8 @@ impl TraceAuthMethod {
 
 #[derive(Clone)]
 struct TraceCommonsSignedTokenVerifier {
-    secret: SecretString,
+    default_secret: Option<SecretString>,
+    keyed_secrets: BTreeMap<String, SecretString>,
     issuer: Option<String>,
     audience: Option<String>,
     revoked_jtis: BTreeSet<String>,
@@ -949,25 +951,64 @@ fn parse_token_secret_and_expiry(raw: &str) -> anyhow::Result<(String, Option<Da
 
 fn trace_commons_signed_token_verifier_from_env()
 -> anyhow::Result<Option<TraceCommonsSignedTokenVerifier>> {
-    let secret = match std::env::var(TRACE_COMMONS_SIGNED_TOKEN_SECRET) {
-        Ok(secret) => secret,
-        Err(std::env::VarError::NotPresent) => return Ok(None),
+    let default_secret = match std::env::var(TRACE_COMMONS_SIGNED_TOKEN_SECRET) {
+        Ok(secret) => {
+            let secret = secret.trim();
+            if secret.is_empty() {
+                anyhow::bail!("{TRACE_COMMONS_SIGNED_TOKEN_SECRET} must not be empty");
+            }
+            Some(SecretString::from(secret.to_string()))
+        }
+        Err(std::env::VarError::NotPresent) => None,
         Err(error) => {
             return Err(error)
                 .with_context(|| format!("failed to read {TRACE_COMMONS_SIGNED_TOKEN_SECRET}"));
         }
     };
-    if secret.trim().is_empty() {
-        anyhow::bail!("{TRACE_COMMONS_SIGNED_TOKEN_SECRET} must not be empty");
+    let keyed_secrets = parse_signed_token_keyed_secrets_from_env()?;
+
+    if default_secret.is_none() && keyed_secrets.is_empty() {
+        return Ok(None);
     }
-    let secret = secret.trim().to_string();
 
     Ok(Some(TraceCommonsSignedTokenVerifier {
-        secret: SecretString::from(secret),
+        default_secret,
+        keyed_secrets,
         issuer: optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_ISSUER)?,
         audience: optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE)?,
         revoked_jtis: parse_signed_token_revoked_jtis_from_env()?,
     }))
+}
+
+fn parse_signed_token_keyed_secrets_from_env() -> anyhow::Result<BTreeMap<String, SecretString>> {
+    let configured = match std::env::var(TRACE_COMMONS_SIGNED_TOKEN_SECRETS) {
+        Ok(configured) => configured,
+        Err(std::env::VarError::NotPresent) => return Ok(BTreeMap::new()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read {TRACE_COMMONS_SIGNED_TOKEN_SECRETS}"));
+        }
+    };
+    let mut secrets = BTreeMap::new();
+    for entry in configured.split(',').map(str::trim) {
+        if entry.is_empty() {
+            continue;
+        }
+        let Some((kid, secret)) = entry.split_once(':') else {
+            anyhow::bail!(
+                "{TRACE_COMMONS_SIGNED_TOKEN_SECRETS} entries must use kid:secret syntax"
+            );
+        };
+        let kid = kid.trim();
+        let secret = secret.trim();
+        if kid.is_empty() || secret.is_empty() {
+            anyhow::bail!(
+                "{TRACE_COMMONS_SIGNED_TOKEN_SECRETS} entries must include non-empty kid and secret"
+            );
+        }
+        secrets.insert(kid.to_string(), SecretString::from(secret.to_string()));
+    }
+    Ok(secrets)
 }
 
 fn parse_signed_token_revoked_jtis_from_env() -> anyhow::Result<BTreeSet<String>> {
@@ -1001,6 +1042,14 @@ fn optional_trimmed_env(name: &'static str) -> anyhow::Result<Option<String>> {
 
 impl TraceCommonsSignedTokenVerifier {
     fn authenticate(&self, token: &str) -> ApiResult<TenantAuth> {
+        let header = jsonwebtoken::decode_header(token)
+            .map_err(|_| api_error(StatusCode::FORBIDDEN, "invalid signed tenant token"))?;
+        let Some(secret) = self.secret_for_kid(header.kid.as_deref()) else {
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "invalid signed tenant token",
+            ));
+        };
         let mut validation = Validation::new(Algorithm::HS256);
         validation.validate_nbf = true;
         let mut required_claims = vec!["exp".to_string(), "tenant_id".to_string()];
@@ -1018,7 +1067,7 @@ impl TraceCommonsSignedTokenVerifier {
 
         let token_data = jsonwebtoken::decode::<TraceCommonsSignedTokenClaims>(
             token,
-            &DecodingKey::from_secret(self.secret.expose_secret().as_bytes()),
+            &DecodingKey::from_secret(secret.expose_secret().as_bytes()),
             &validation,
         )
         .map_err(|error| {
@@ -1044,6 +1093,17 @@ impl TraceCommonsSignedTokenVerifier {
         }
 
         signed_token_claims_to_auth(claims)
+    }
+
+    fn secret_for_kid(&self, kid: Option<&str>) -> Option<&SecretString> {
+        match kid.map(str::trim).filter(|kid| !kid.is_empty()) {
+            Some(kid) => self.keyed_secrets.get(kid),
+            None => self.default_secret.as_ref(),
+        }
+    }
+
+    fn configured_key_count(&self) -> usize {
+        usize::from(self.default_secret.is_some()) + self.keyed_secrets.len()
     }
 }
 
@@ -1274,6 +1334,7 @@ struct TraceCommonsConfigStatusResponse {
     schema_version: &'static str,
     db_mirror_configured: bool,
     signed_token_auth_enabled: bool,
+    signed_token_key_count: usize,
     signed_token_issuer_configured: bool,
     signed_token_audience_configured: bool,
     signed_token_revoked_jti_count: usize,
@@ -1305,6 +1366,10 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION,
         db_mirror_configured: state.db_mirror.is_some(),
         signed_token_auth_enabled: state.signed_token_verifier.is_some(),
+        signed_token_key_count: state
+            .signed_token_verifier
+            .as_ref()
+            .map_or(0, TraceCommonsSignedTokenVerifier::configured_key_count),
         signed_token_issuer_configured: state
             .signed_token_verifier
             .as_ref()
@@ -14410,7 +14475,8 @@ mod tests {
     ) -> Arc<AppState> {
         let mut state = test_state_with_tokens(root, BTreeMap::new());
         Arc::make_mut(&mut state).signed_token_verifier = Some(TraceCommonsSignedTokenVerifier {
-            secret: SecretString::from(secret.to_string()),
+            default_secret: Some(SecretString::from(secret.to_string())),
+            keyed_secrets: BTreeMap::new(),
             issuer: issuer.map(str::to_string),
             audience: audience.map(str::to_string),
             revoked_jtis: BTreeSet::new(),
@@ -14419,8 +14485,18 @@ mod tests {
     }
 
     fn signed_tenant_token(secret: &str, claims: serde_json::Value) -> String {
+        signed_tenant_token_with_kid(secret, None, claims)
+    }
+
+    fn signed_tenant_token_with_kid(
+        secret: &str,
+        kid: Option<&str>,
+        claims: serde_json::Value,
+    ) -> String {
+        let mut header = jsonwebtoken::Header::new(Algorithm::HS256);
+        header.kid = kid.map(str::to_string);
         jsonwebtoken::encode(
-            &jsonwebtoken::Header::new(Algorithm::HS256),
+            &header,
             &claims,
             &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
         )
@@ -15785,7 +15861,13 @@ mod tests {
             true,
         );
         Arc::make_mut(&mut state).signed_token_verifier = Some(TraceCommonsSignedTokenVerifier {
-            secret: SecretString::from("config-status-signed-secret".to_string()),
+            default_secret: Some(SecretString::from(
+                "config-status-signed-secret".to_string(),
+            )),
+            keyed_secrets: BTreeMap::from([(
+                "config-key-1".to_string(),
+                SecretString::from("config-status-keyed-secret".to_string()),
+            )]),
             issuer: Some("config-status-issuer".to_string()),
             audience: Some("config-status-audience".to_string()),
             revoked_jtis: BTreeSet::from(["revoked-config-jti".to_string()]),
@@ -15826,6 +15908,7 @@ mod tests {
         );
         assert_eq!(value["db_mirror_configured"], serde_json::json!(false));
         assert_eq!(value["signed_token_auth_enabled"], serde_json::json!(true));
+        assert_eq!(value["signed_token_key_count"], serde_json::json!(2));
         assert_eq!(
             value["signed_token_issuer_configured"],
             serde_json::json!(true)
@@ -15867,6 +15950,8 @@ mod tests {
             "bearer_token",
             "principal_ref",
             "signed_token_secret",
+            "signed_token_secrets",
+            "signed_token_key_ids",
             "signed_token_issuer",
             "signed_token_audience",
             "signed_token_revoked_jtis",
@@ -15881,6 +15966,8 @@ mod tests {
         assert!(!body_text.contains("admin-token-a"));
         assert!(!body_text.contains("token-a"));
         assert!(!body_text.contains("config-status-signed-secret"));
+        assert!(!body_text.contains("config-status-keyed-secret"));
+        assert!(!body_text.contains("config-key-1"));
         assert!(!body_text.contains("config-status-issuer"));
         assert!(!body_text.contains("config-status-audience"));
         assert!(!body_text.contains("revoked-config-jti"));
@@ -28288,6 +28375,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accepts_keyed_signed_tenant_token_for_rotation() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state_with_signed_token_verifier(
+            temp.path().to_path_buf(),
+            "fallback-secret",
+            None,
+            None,
+        );
+        Arc::make_mut(&mut state)
+            .signed_token_verifier
+            .as_mut()
+            .expect("verifier exists")
+            .keyed_secrets
+            .insert(
+                "trace-key-1".to_string(),
+                SecretString::from("rotated-secret".to_string()),
+            );
+        let token = signed_tenant_token_with_kid(
+            "rotated-secret",
+            Some("trace-key-1"),
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "contributor",
+                "sub": "actor-rotated",
+                "exp": (Utc::now() + Duration::minutes(5)).timestamp()
+            }),
+        );
+        let envelope = sample_envelope().await;
+
+        let _ = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+            .await
+            .expect("keyed signed tenant token is accepted");
+    }
+
+    #[tokio::test]
     async fn rejects_expired_signed_tenant_token_through_submit_handler() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state_with_signed_token_verifier(
@@ -28381,5 +28503,34 @@ mod tests {
 
         assert_eq!(error.0, StatusCode::FORBIDDEN);
         assert_eq!(error.1.0.error, "revoked signed tenant token");
+    }
+
+    #[tokio::test]
+    async fn rejects_unknown_signed_tenant_token_kid() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state_with_signed_token_verifier(
+            temp.path().to_path_buf(),
+            "fallback-secret",
+            None,
+            None,
+        );
+        let token = signed_tenant_token_with_kid(
+            "rotated-secret",
+            Some("unknown-key"),
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "contributor",
+                "sub": "actor-rotated",
+                "exp": (Utc::now() + Duration::minutes(5)).timestamp()
+            }),
+        );
+        let envelope = sample_envelope().await;
+
+        let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+            .await
+            .expect_err("unknown signed token kid is rejected");
+
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert_eq!(error.1.0.error, "invalid signed tenant token");
     }
 }
