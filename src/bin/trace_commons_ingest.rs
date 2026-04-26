@@ -287,6 +287,8 @@ struct TenantAuth {
     role: TokenRole,
     principal_ref: String,
     expires_at: Option<DateTime<Utc>>,
+    allowed_consent_scopes: BTreeSet<ConsentScope>,
+    allowed_uses: BTreeSet<TraceAllowedUse>,
 }
 
 #[derive(Clone)]
@@ -305,6 +307,10 @@ struct TraceCommonsSignedTokenClaims {
     principal_ref: Option<String>,
     #[serde(default)]
     sub: Option<String>,
+    #[serde(default)]
+    allowed_consent_scopes: BTreeSet<ConsentScope>,
+    #[serde(default)]
+    allowed_uses: BTreeSet<TraceAllowedUse>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1020,6 +1026,8 @@ fn signed_token_claims_to_auth(claims: TraceCommonsSignedTokenClaims) -> ApiResu
         role,
         principal_ref: principal_storage_ref(&format!("signed:{tenant_id}:{actor_ref}")),
         expires_at: None,
+        allowed_consent_scopes: claims.allowed_consent_scopes,
+        allowed_uses: claims.allowed_uses,
     })
 }
 
@@ -1171,6 +1179,8 @@ fn insert_token_with_expiry(
             role,
             principal_ref: principal_storage_ref(token),
             expires_at,
+            allowed_consent_scopes: BTreeSet::new(),
+            allowed_uses: BTreeSet::new(),
         },
     );
 }
@@ -1478,6 +1488,7 @@ async fn submit_trace_handler(
     }
 
     let tenant_policy = tenant_submission_policy_for_request(state.as_ref(), &tenant).await?;
+    enforce_signed_claim_submission_restrictions(&tenant, &envelope)?;
     enforce_tenant_submission_policy(
         &tenant,
         &envelope,
@@ -4744,6 +4755,62 @@ where
                 .with_context(|| format!("failed to parse trace tenant policy {label} value"))
         })
         .collect()
+}
+
+fn enforce_signed_claim_submission_restrictions(
+    tenant: &TenantAuth,
+    envelope: &TraceContributionEnvelope,
+) -> ApiResult<()> {
+    if !tenant.allowed_consent_scopes.is_empty() {
+        let mut requested_scopes = envelope
+            .consent
+            .scopes
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        requested_scopes.insert(envelope.trace_card.consent_scope);
+        if let Some(scope) = requested_scopes
+            .iter()
+            .find(|scope| !tenant.allowed_consent_scopes.contains(scope))
+        {
+            tracing::warn!(
+                tenant_id = %tenant.tenant_id,
+                ?scope,
+                "Trace Commons signed token rejected disallowed consent scope"
+            );
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "signed tenant token does not allow this trace contribution consent scope",
+            ));
+        }
+    }
+
+    if !tenant.allowed_uses.is_empty() {
+        if envelope.trace_card.allowed_uses.is_empty() {
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "signed tenant token requires trace contribution allowed uses",
+            ));
+        }
+        if let Some(allowed_use) = envelope
+            .trace_card
+            .allowed_uses
+            .iter()
+            .find(|allowed_use| !tenant.allowed_uses.contains(allowed_use))
+        {
+            tracing::warn!(
+                tenant_id = %tenant.tenant_id,
+                ?allowed_use,
+                "Trace Commons signed token rejected disallowed allowed use"
+            );
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "signed tenant token does not allow this trace contribution allowed use",
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn enforce_tenant_submission_policy(
@@ -14699,6 +14766,8 @@ mod tests {
             role: TokenRole::Reviewer,
             principal_ref: principal_storage_ref("review-token"),
             expires_at: None,
+            allowed_consent_scopes: BTreeSet::new(),
+            allowed_uses: BTreeSet::new(),
         }
     }
 
@@ -23342,6 +23411,8 @@ mod tests {
             role: TokenRole::RetentionWorker,
             principal_ref: "test-retention-worker".to_string(),
             expires_at: None,
+            allowed_consent_scopes: BTreeSet::new(),
+            allowed_uses: BTreeSet::new(),
         };
         let retention_job_id = Uuid::new_v4();
 
@@ -28107,6 +28178,8 @@ mod tests {
                 "tenant_id": "tenant-b",
                 "role": "contributor",
                 "sub": "actor-123",
+                "allowed_consent_scopes": ["debugging_evaluation"],
+                "allowed_uses": ["debugging", "evaluation", "aggregate_analytics"],
                 "iss": "ironclaw-trace-issuer",
                 "aud": "trace-commons-ingest",
                 "exp": (Utc::now() + Duration::minutes(5)).timestamp()
@@ -28160,5 +28233,38 @@ mod tests {
 
         assert_eq!(error.0, StatusCode::FORBIDDEN);
         assert_eq!(error.1.0.error, "expired signed tenant token");
+    }
+
+    #[tokio::test]
+    async fn rejects_signed_tenant_token_disallowed_submission_use() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state_with_signed_token_verifier(
+            temp.path().to_path_buf(),
+            "signed-secret",
+            None,
+            None,
+        );
+        let token = signed_tenant_token(
+            "signed-secret",
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "contributor",
+                "sub": "actor-123",
+                "allowed_consent_scopes": ["debugging_evaluation"],
+                "allowed_uses": ["benchmark_generation"],
+                "exp": (Utc::now() + Duration::minutes(5)).timestamp()
+            }),
+        );
+        let envelope = sample_envelope().await;
+
+        let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+            .await
+            .expect_err("signed token use restriction is rejected");
+
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            error.1.0.error,
+            "signed tenant token does not allow this trace contribution allowed use"
+        );
     }
 }
