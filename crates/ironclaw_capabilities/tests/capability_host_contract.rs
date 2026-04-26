@@ -49,6 +49,44 @@ async fn capability_host_denies_missing_grant_before_dispatch_or_reservation() {
 }
 
 #[tokio::test]
+async fn capability_host_validates_context_before_authorizer_can_allow_dispatch() {
+    let (fs, package) = wasm_package_with_module(json_echo_module());
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    let wasm_runtime = WasmRuntime::for_testing().unwrap();
+    let governor = InMemoryResourceGovernor::new();
+    let dispatcher =
+        RuntimeDispatcher::new(&registry, &fs, &governor).with_wasm_runtime(&wasm_runtime);
+    let permissive_authorizer = AllowingAuthorizer;
+    let host = CapabilityHost::new(&registry, &dispatcher, &permissive_authorizer);
+    let mut context = execution_context(CapabilitySet::default());
+    let account = ResourceAccount::tenant(context.resource_scope.tenant_id.clone());
+    context.resource_scope.tenant_id = TenantId::new("other-tenant").unwrap();
+
+    let err = host
+        .invoke_json(CapabilityInvocationRequest {
+            context,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: ResourceEstimate {
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+            input: json!({"message": "must not dispatch"}),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::AuthorizationDenied {
+            reason: DenyReason::InternalInvariantViolation,
+            ..
+        }
+    ));
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+}
+
+#[tokio::test]
 async fn capability_host_authorized_dispatch_reaches_dispatcher() {
     let (fs, package) = wasm_package_with_module(json_echo_module());
     let mut registry = ExtensionRegistry::new();
@@ -127,6 +165,21 @@ async fn capability_host_routes_mcp_through_same_authorized_path() {
 
     assert_eq!(result.dispatch.runtime, RuntimeKind::Mcp);
     assert_eq!(result.dispatch.output, json!({"query": "ironclaw"}));
+}
+
+struct AllowingAuthorizer;
+
+impl CapabilityDispatchAuthorizer for AllowingAuthorizer {
+    fn authorize_dispatch(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+    ) -> Decision {
+        Decision::Allow {
+            obligations: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone)]

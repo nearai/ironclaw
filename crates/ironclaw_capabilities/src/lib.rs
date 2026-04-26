@@ -84,6 +84,13 @@ where
         &self,
         request: CapabilityInvocationRequest,
     ) -> Result<CapabilityInvocationResult, CapabilityInvocationError> {
+        if request.context.validate().is_err() {
+            return Err(CapabilityInvocationError::AuthorizationDenied {
+                capability: request.capability_id,
+                reason: DenyReason::InternalInvariantViolation,
+            });
+        }
+
         let descriptor = self
             .registry
             .get_capability(&request.capability_id)
