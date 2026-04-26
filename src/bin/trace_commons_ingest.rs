@@ -285,6 +285,7 @@ enum TokenRole {
     RetentionWorker,
     VectorWorker,
     BenchmarkWorker,
+    UtilityWorker,
 }
 
 impl TokenRole {
@@ -297,6 +298,7 @@ impl TokenRole {
             "retention_worker" | "retention-worker" => Ok(Self::RetentionWorker),
             "vector_worker" | "vector-worker" => Ok(Self::VectorWorker),
             "benchmark_worker" | "benchmark-worker" => Ok(Self::BenchmarkWorker),
+            "utility_worker" | "utility-worker" => Ok(Self::UtilityWorker),
             other => anyhow::bail!("unknown Trace Commons token role: {other}"),
         }
     }
@@ -326,6 +328,7 @@ impl TokenRole {
             Self::RetentionWorker => "retention_worker",
             Self::VectorWorker => "vector_worker",
             Self::BenchmarkWorker => "benchmark_worker",
+            Self::UtilityWorker => "utility_worker",
         }
     }
 }
@@ -746,6 +749,7 @@ fn app(state: Arc<AppState>) -> Router {
             post(retention_maintenance_handler),
         )
         .route("/v1/workers/vector-index", post(vector_index_handler))
+        .route("/v1/workers/utility-credit", post(utility_credit_handler))
         .route("/v1/audit/events", get(audit_events_handler))
         .with_state(state)
         .layer(DefaultBodyLimit::max(MAX_INGEST_BODY_BYTES))
@@ -1677,6 +1681,45 @@ impl TraceCreditLedgerEventType {
                 | Self::RankingUtility
         )
     }
+
+    fn is_utility_job_type(self) -> bool {
+        matches!(
+            self,
+            Self::RegressionCatch | Self::TrainingUtility | Self::RankingUtility
+        )
+    }
+
+    fn utility_idempotency_label(self) -> &'static str {
+        match self {
+            Self::RegressionCatch => "utility-regression-credit",
+            Self::TrainingUtility => "utility-training-credit",
+            Self::RankingUtility => "utility-ranking-credit",
+            Self::BenchmarkConversion => "utility-benchmark-credit",
+            Self::ReviewerBonus => "utility-reviewer-bonus",
+            Self::AbusePenalty => "utility-abuse-penalty",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceUtilityCreditJobRequest {
+    event_type: TraceCreditLedgerEventType,
+    credit_points_delta: f32,
+    reason: String,
+    external_ref: String,
+    submission_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceUtilityCreditJobResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    event_type: TraceCreditLedgerEventType,
+    credit_points_delta: f32,
+    external_ref: String,
+    requested_count: usize,
+    appended_count: usize,
+    skipped_existing_count: usize,
 }
 
 async fn append_credit_event_handler(
@@ -1778,6 +1821,105 @@ async fn append_credit_event_handler(
     Ok(Json(event))
 }
 
+async fn utility_credit_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceUtilityCreditJobRequest>,
+) -> ApiResult<Json<TraceUtilityCreditJobResponse>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_utility_operator(&tenant)?;
+    if !body.event_type.is_utility_job_type() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "utility credit jobs support regression_catch, training_utility, or ranking_utility",
+        ));
+    }
+    if !body.credit_points_delta.is_finite() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "credit_points_delta must be finite",
+        ));
+    }
+    if body.credit_points_delta.abs() > MAX_DELAYED_CREDIT_POINTS_DELTA {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "credit_points_delta exceeds the delayed credit policy limit",
+        ));
+    }
+    let reason = body.reason.trim().to_string();
+    if reason.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "utility credit jobs require a non-empty reason",
+        ));
+    }
+    let external_ref = body.external_ref.trim().to_string();
+    if external_ref.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "utility credit jobs require a non-empty external_ref",
+        ));
+    }
+    if body.submission_ids.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "utility credit jobs require at least one submission_id",
+        ));
+    }
+    let unique_submission_ids = body
+        .submission_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut sources = Vec::with_capacity(unique_submission_ids.len());
+    for submission_id in &unique_submission_ids {
+        let submission = read_utility_submission_record(state.as_ref(), &tenant, *submission_id)
+            .await
+            .map_err(internal_error)?
+            .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "trace submission not found"))?;
+        if submission.status != TraceCorpusStatus::Accepted {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "utility credit jobs can only credit accepted trace submissions",
+            ));
+        }
+        sources.push(AutomaticUtilityCreditSource {
+            submission_id: submission.submission_id,
+            trace_id: submission.trace_id,
+            auth_principal_ref: submission.auth_principal_ref,
+        });
+    }
+
+    let counts = append_automatic_utility_credit_events_once_with_counts(
+        state.as_ref(),
+        &tenant,
+        AutomaticUtilityCreditConfig {
+            idempotency_label: body.event_type.utility_idempotency_label(),
+            idempotency_ref: Some(external_ref.clone()),
+            event_type: body.event_type,
+            credit_points_delta: body.credit_points_delta,
+            reason,
+            external_ref: external_ref.clone(),
+        },
+        sources,
+    )
+    .await
+    .map_err(internal_error)?;
+
+    Ok(Json(TraceUtilityCreditJobResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        event_type: body.event_type,
+        credit_points_delta: body.credit_points_delta,
+        external_ref,
+        requested_count: unique_submission_ids.len(),
+        appended_count: counts.appended,
+        skipped_existing_count: counts.skipped_existing,
+    }))
+}
+
 struct AutomaticUtilityCreditSource {
     submission_id: Uuid,
     trace_id: Uuid,
@@ -1804,10 +1946,17 @@ impl AutomaticUtilityCreditSource {
 
 struct AutomaticUtilityCreditConfig {
     idempotency_label: &'static str,
+    idempotency_ref: Option<String>,
     event_type: TraceCreditLedgerEventType,
     credit_points_delta: f32,
     reason: String,
     external_ref: String,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct AutomaticUtilityCreditAppendCounts {
+    appended: usize,
+    skipped_existing: usize,
 }
 
 async fn append_automatic_utility_credit_events_once(
@@ -1816,18 +1965,41 @@ async fn append_automatic_utility_credit_events_once(
     config: AutomaticUtilityCreditConfig,
     sources: impl IntoIterator<Item = AutomaticUtilityCreditSource>,
 ) -> anyhow::Result<usize> {
+    Ok(
+        append_automatic_utility_credit_events_once_with_counts(state, tenant, config, sources)
+            .await?
+            .appended,
+    )
+}
+
+async fn append_automatic_utility_credit_events_once_with_counts(
+    state: &AppState,
+    tenant: &TenantAuth,
+    config: AutomaticUtilityCreditConfig,
+    sources: impl IntoIterator<Item = AutomaticUtilityCreditSource>,
+) -> anyhow::Result<AutomaticUtilityCreditAppendCounts> {
     let mut existing_event_ids = read_all_credit_events(&state.root, &tenant.tenant_id)?
         .into_iter()
         .map(|event| event.event_id)
         .collect::<BTreeSet<_>>();
-    let mut appended = 0usize;
+    let mut counts = AutomaticUtilityCreditAppendCounts::default();
     for source in sources {
-        let event_id = deterministic_trace_uuid_for(
-            config.idempotency_label,
-            &tenant.tenant_id,
-            source.submission_id,
-        );
+        let event_id = if let Some(idempotency_ref) = config.idempotency_ref.as_ref() {
+            deterministic_trace_uuid_for_external_ref(
+                config.idempotency_label,
+                &tenant.tenant_id,
+                source.submission_id,
+                idempotency_ref,
+            )
+        } else {
+            deterministic_trace_uuid_for(
+                config.idempotency_label,
+                &tenant.tenant_id,
+                source.submission_id,
+            )
+        };
         if existing_event_ids.contains(&event_id) {
+            counts.skipped_existing += 1;
             continue;
         }
         let event = TraceCommonsCreditLedgerRecord {
@@ -1870,9 +2042,9 @@ async fn append_automatic_utility_credit_events_once(
         )
         .await?;
         existing_event_ids.insert(event_id);
-        appended += 1;
+        counts.appended += 1;
     }
-    Ok(appended)
+    Ok(counts)
 }
 
 async fn review_decision_handler(
@@ -2434,6 +2606,7 @@ async fn run_benchmark_conversion(
         tenant,
         AutomaticUtilityCreditConfig {
             idempotency_label: "benchmark-conversion-credit",
+            idempotency_ref: None,
             event_type: TraceCreditLedgerEventType::BenchmarkConversion,
             credit_points_delta: BENCHMARK_CONVERSION_CREDIT_POINTS_DELTA,
             reason: format!(
@@ -2682,6 +2855,7 @@ async fn ranker_training_candidates_handler(
         &tenant,
         AutomaticUtilityCreditConfig {
             idempotency_label: "ranker-training-candidate-credit",
+            idempotency_ref: None,
             event_type: TraceCreditLedgerEventType::TrainingUtility,
             credit_points_delta: RANKER_TRAINING_CANDIDATE_CREDIT_POINTS_DELTA,
             reason: format!("Exported as ranker training candidate {}.", export_id),
@@ -2847,6 +3021,7 @@ async fn ranker_training_pairs_handler(
         &tenant,
         AutomaticUtilityCreditConfig {
             idempotency_label: "ranker-training-pair-credit",
+            idempotency_ref: None,
             event_type: TraceCreditLedgerEventType::RankingUtility,
             credit_points_delta: RANKER_TRAINING_PAIR_CREDIT_POINTS_DELTA,
             reason: format!("Exported as ranker training pair {}.", export_id),
@@ -3838,6 +4013,17 @@ fn require_retention_operator(auth: &TenantAuth) -> ApiResult<()> {
     }
 }
 
+fn require_utility_operator(auth: &TenantAuth) -> ApiResult<()> {
+    if auth.role.can_review() || auth.role == TokenRole::UtilityWorker {
+        Ok(())
+    } else {
+        Err(api_error(
+            StatusCode::FORBIDDEN,
+            "reviewer, admin, or utility worker token required",
+        ))
+    }
+}
+
 fn require_maintenance_operator(
     auth: &TenantAuth,
     request: &TraceMaintenanceRequest,
@@ -3972,6 +4158,32 @@ async fn read_reviewer_submission_record(
         return Ok(None);
     }
     Ok(Some(record))
+}
+
+async fn read_utility_submission_record(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_id: Uuid,
+) -> anyhow::Result<Option<TraceCommonsSubmissionRecord>> {
+    if state.db_reviewer_reads {
+        let db = state
+            .db_mirror
+            .as_ref()
+            .context("TRACE_COMMONS_DB_REVIEWER_READS is enabled without a DB mirror")?;
+        let Some(storage_record) = db
+            .get_trace_submission(&tenant.tenant_id, submission_id)
+            .await
+            .context("failed to read Trace Commons utility submission from DB mirror")?
+        else {
+            return Ok(None);
+        };
+        let Some(record) = trace_commons_record_from_storage_submission(storage_record) else {
+            return Ok(None);
+        };
+        return Ok(Some(record?));
+    }
+
+    read_submission_record(&state.root, &tenant.tenant_id, submission_id)
 }
 
 async fn read_review_decision_record(
@@ -5444,7 +5656,7 @@ async fn mirror_credit_event_to_db(
             .unwrap_or_else(|| "delayed credit event".to_string()),
         external_ref: event.external_ref.clone(),
         actor_principal_ref: event.actor_principal_ref.clone(),
-        actor_role: format!("{:?}", event.actor_role).to_ascii_lowercase(),
+        actor_role: event.actor_role.storage_name().to_string(),
         settlement_state: StorageTraceCreditSettlementState::Final,
     })
     .await
@@ -5836,6 +6048,19 @@ fn deterministic_trace_uuid_for(label: &str, tenant_id: &str, submission_id: Uui
     let input = format!(
         "ironclaw.trace_commons.{label}:{}:{}",
         tenant_id, submission_id
+    );
+    Uuid::new_v5(&Uuid::NAMESPACE_URL, input.as_bytes())
+}
+
+fn deterministic_trace_uuid_for_external_ref(
+    label: &str,
+    tenant_id: &str,
+    submission_id: Uuid,
+    external_ref: &str,
+) -> Uuid {
+    let input = format!(
+        "ironclaw.trace_commons.{label}:{}:{}:{}",
+        tenant_id, submission_id, external_ref
     );
     Uuid::new_v5(&Uuid::NAMESPACE_URL, input.as_bytes())
 }
@@ -11716,6 +11941,12 @@ mod tests {
             "benchmark-worker-token-a",
             TokenRole::BenchmarkWorker,
         );
+        insert_token(
+            &mut tokens,
+            "tenant-a",
+            "utility-worker-token-a",
+            TokenRole::UtilityWorker,
+        );
         insert_token(&mut tokens, "tenant-b", "token-b", TokenRole::Contributor);
         insert_token(
             &mut tokens,
@@ -11956,6 +12187,8 @@ mod tests {
                 TokenRole::BenchmarkWorker,
                 "benchmark_worker",
             ),
+            ("utility_worker", TokenRole::UtilityWorker, "utility_worker"),
+            ("utility-worker", TokenRole::UtilityWorker, "utility_worker"),
         ];
 
         for (raw, expected, storage_name) in cases {
@@ -13315,6 +13548,51 @@ mod tests {
         .expect("export worker can build ranker candidates");
         assert_eq!(ranker_candidates.item_count, 1);
 
+        let utility_export_error = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("utility_worker_replay_denied".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect_err("utility worker cannot build replay exports");
+        assert_eq!(utility_export_error.0, StatusCode::FORBIDDEN);
+
+        let export_utility_error = utility_credit_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            Json(TraceUtilityCreditJobRequest {
+                event_type: TraceCreditLedgerEventType::RegressionCatch,
+                credit_points_delta: 2.0,
+                reason: "export workers cannot mutate utility credit".to_string(),
+                external_ref: "regression-job:export-worker-denied".to_string(),
+                submission_ids: vec![submission_id],
+            }),
+        )
+        .await
+        .expect_err("export worker cannot use utility credit route");
+        assert_eq!(export_utility_error.0, StatusCode::FORBIDDEN);
+
+        let Json(utility_credit) = utility_credit_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceUtilityCreditJobRequest {
+                event_type: TraceCreditLedgerEventType::RegressionCatch,
+                credit_points_delta: 2.0,
+                reason: "utility worker regression catch".to_string(),
+                external_ref: "regression-job:worker-scope".to_string(),
+                submission_ids: vec![submission_id],
+            }),
+        )
+        .await
+        .expect("utility worker can append regression utility credit");
+        assert_eq!(utility_credit.appended_count, 1);
+
         let export_review_error = review_decision_handler(
             State(state.clone()),
             auth_headers("export-worker-token-a"),
@@ -13328,6 +13606,20 @@ mod tests {
         .await
         .expect_err("export worker cannot make review decisions");
         assert_eq!(export_review_error.0, StatusCode::FORBIDDEN);
+
+        let utility_review_error = review_decision_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Reject,
+                reason: Some("utility workers cannot review".to_string()),
+                credit_points_pending: None,
+            }),
+        )
+        .await
+        .expect_err("utility worker cannot make review decisions");
+        assert_eq!(utility_review_error.0, StatusCode::FORBIDDEN);
 
         let export_audit_error = audit_events_handler(
             State(state.clone()),
@@ -14488,6 +14780,97 @@ mod tests {
             }),
             "DB-backed contributor credit events should round-trip ranking utility"
         );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn utility_credit_worker_appends_idempotent_credit_for_accepted_traces() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-utility-credit-worker.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db_contributor_reads(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let request = TraceUtilityCreditJobRequest {
+            event_type: TraceCreditLedgerEventType::TrainingUtility,
+            credit_points_delta: 1.5,
+            reason: "offline model utility job selected this trace".to_string(),
+            external_ref: "training-job:2026-04-utility".to_string(),
+            submission_ids: vec![submission_id],
+        };
+
+        let Json(appended) = utility_credit_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(request),
+        )
+        .await
+        .expect("utility worker can append training utility credit");
+        assert_eq!(appended.requested_count, 1);
+        assert_eq!(appended.appended_count, 1);
+        assert_eq!(appended.skipped_existing_count, 0);
+        assert_eq!(
+            appended.event_type,
+            TraceCreditLedgerEventType::TrainingUtility
+        );
+
+        let Json(retry) = utility_credit_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceUtilityCreditJobRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.5,
+                reason: "offline model utility job selected this trace".to_string(),
+                external_ref: "training-job:2026-04-utility".to_string(),
+                submission_ids: vec![submission_id],
+            }),
+        )
+        .await
+        .expect("utility worker retry is idempotent");
+        assert_eq!(retry.appended_count, 0);
+        assert_eq!(retry.skipped_existing_count, 1);
+
+        let db_credit_events = db
+            .list_trace_credit_events("tenant-a")
+            .await
+            .expect("DB credit events read");
+        let utility_events = db_credit_events
+            .iter()
+            .filter(|event| {
+                event.submission_id == submission_id
+                    && event.event_type == StorageTraceCreditEventType::TrainingUtility
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(utility_events.len(), 1);
+
+        let Json(events) = credit_events_handler(State(state), auth_headers("token-a"))
+            .await
+            .expect("contributor can see utility credit event");
+        assert!(events.iter().any(|event| {
+            event.submission_id == submission_id
+                && event.event_type == TraceCreditLedgerEventType::TrainingUtility
+                && (event.credit_points_delta - 1.5).abs() < f32::EPSILON
+        }));
     }
 
     #[cfg(feature = "libsql")]

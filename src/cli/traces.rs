@@ -285,6 +285,41 @@ pub enum TracesCommand {
         json: bool,
     },
 
+    /// Append idempotent delayed utility credit through the worker route
+    WorkerUtilityCredit {
+        /// Trace Commons ingestion base URL or /v1/traces URL
+        #[arg(long)]
+        endpoint: String,
+
+        /// Utility credit event type
+        #[arg(long, value_enum)]
+        event_type: TraceUtilityCreditEventTypeArg,
+
+        /// Credit point delta
+        #[arg(long)]
+        credit_points_delta: f32,
+
+        /// Explanation for the worker credit ledger
+        #[arg(long)]
+        reason: String,
+
+        /// Benchmark/job/external reference used for idempotency
+        #[arg(long)]
+        external_ref: String,
+
+        /// Accepted submission IDs receiving delayed utility credit
+        #[arg(value_name = "SUBMISSION_ID", num_args = 1..)]
+        submission_ids: Vec<Uuid>,
+
+        /// Environment variable containing a utility-credit-worker bearer token
+        #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
+        bearer_token_env: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Show central Trace Commons analytics summary
     AnalyticsSummary {
         /// Trace Commons ingestion base URL or /v1/traces URL
@@ -959,6 +994,24 @@ impl std::fmt::Display for TraceCreditEventTypeArg {
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceUtilityCreditEventTypeArg {
+    RegressionCatch,
+    TrainingUtility,
+    RankingUtility,
+}
+
+impl std::fmt::Display for TraceUtilityCreditEventTypeArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::RegressionCatch => "regression_catch",
+            Self::TrainingUtility => "training_utility",
+            Self::RankingUtility => "ranking_utility",
+        };
+        write!(f, "{value}")
+    }
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceBenchmarkRegistryStatusArg {
     Candidate,
     Published,
@@ -1175,6 +1228,28 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
                 credit_points_delta,
                 reason,
                 external_ref,
+                json,
+            })
+            .await
+        }
+        TracesCommand::WorkerUtilityCredit {
+            endpoint,
+            event_type,
+            credit_points_delta,
+            reason,
+            external_ref,
+            submission_ids,
+            bearer_token_env,
+            json,
+        } => {
+            trace_commons_worker_utility_credit(TraceCommonsWorkerUtilityCreditOptions {
+                endpoint: &endpoint,
+                bearer_token_env: &bearer_token_env,
+                event_type,
+                credit_points_delta,
+                reason,
+                external_ref,
+                submission_ids,
                 json,
             })
             .await
@@ -1990,6 +2065,66 @@ async fn trace_commons_append_credit_event(
         print_optional_json_field("  reason", value, "reason");
     }
     Ok(())
+}
+
+struct TraceCommonsWorkerUtilityCreditOptions<'a> {
+    endpoint: &'a str,
+    bearer_token_env: &'a str,
+    event_type: TraceUtilityCreditEventTypeArg,
+    credit_points_delta: f32,
+    reason: String,
+    external_ref: String,
+    submission_ids: Vec<Uuid>,
+    json: bool,
+}
+
+async fn trace_commons_worker_utility_credit(
+    options: TraceCommonsWorkerUtilityCreditOptions<'_>,
+) -> anyhow::Result<()> {
+    let body = trace_commons_worker_utility_credit_body(
+        options.event_type,
+        options.credit_points_delta,
+        options.reason,
+        options.external_ref,
+        options.submission_ids,
+    );
+
+    let response = trace_commons_api_request(
+        Method::POST,
+        options.endpoint,
+        "/v1/workers/utility-credit",
+        &[],
+        Some(options.bearer_token_env),
+        Some(body),
+    )
+    .await?;
+    if options.json {
+        print_trace_commons_json(&response)?;
+        return Ok(());
+    }
+
+    println!("Trace Commons utility credit worker complete.");
+    if let Some(value) = response.json.as_ref() {
+        print_optional_json_field("  appended", value, "appended_count");
+        print_optional_json_field("  skipped existing", value, "skipped_existing_count");
+    }
+    Ok(())
+}
+
+fn trace_commons_worker_utility_credit_body(
+    event_type: TraceUtilityCreditEventTypeArg,
+    credit_points_delta: f32,
+    reason: String,
+    external_ref: String,
+    submission_ids: Vec<Uuid>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "event_type": event_type.to_string(),
+        "credit_points_delta": credit_points_delta,
+        "reason": reason,
+        "external_ref": external_ref,
+        "submission_ids": submission_ids,
+    })
 }
 
 async fn trace_commons_analytics_summary(
@@ -4617,6 +4752,105 @@ mod tests {
             panic!("expected traces worker-vector-index command");
         };
         assert_eq!(purpose.as_deref(), Some("vector-worker"));
+
+        let utility_submission_id =
+            Uuid::parse_str("018f2b7b-0c11-72fd-95c4-1f9f98feac01").expect("valid uuid");
+        let utility = Cli::try_parse_from([
+            "ironclaw",
+            "traces",
+            "worker-utility-credit",
+            "--endpoint",
+            "https://trace.example/internal",
+            "--event-type",
+            "ranking-utility",
+            "--credit-points-delta",
+            "1.25",
+            "--reason",
+            "ranking eval utility",
+            "--external-ref",
+            "ranker:nightly-42",
+            "018f2b7b-0c11-72fd-95c4-1f9f98feac01",
+        ])
+        .expect("worker-utility-credit should parse");
+        let Some(Command::Traces(TracesCommand::WorkerUtilityCredit {
+            event_type,
+            credit_points_delta,
+            external_ref,
+            submission_ids,
+            ..
+        })) = utility.command
+        else {
+            panic!("expected traces worker-utility-credit command");
+        };
+        assert_eq!(event_type, TraceUtilityCreditEventTypeArg::RankingUtility);
+        assert_eq!(credit_points_delta, 1.25);
+        assert_eq!(external_ref, "ranker:nightly-42");
+        assert_eq!(submission_ids, vec![utility_submission_id]);
+    }
+
+    #[test]
+    fn worker_utility_credit_rejects_reviewer_and_abuse_events() {
+        for event_type in ["reviewer-bonus", "abuse-penalty"] {
+            let parsed = Cli::try_parse_from([
+                "ironclaw",
+                "traces",
+                "worker-utility-credit",
+                "--endpoint",
+                "https://trace.example/internal",
+                "--event-type",
+                event_type,
+                "--credit-points-delta",
+                "1.0",
+                "--reason",
+                "not a utility event",
+                "--external-ref",
+                "job:bad",
+                "018f2b7b-0c11-72fd-95c4-1f9f98feac01",
+            ]);
+            assert!(parsed.is_err(), "{event_type} should not parse");
+        }
+    }
+
+    #[test]
+    fn worker_utility_credit_body_uses_narrow_fields() {
+        let first = Uuid::parse_str("018f2b7b-0c11-72fd-95c4-1f9f98feac01").expect("valid uuid");
+        let second = Uuid::parse_str("018f2b7b-0c11-72fd-95c4-1f9f98feac02").expect("valid uuid");
+        let body = trace_commons_worker_utility_credit_body(
+            TraceUtilityCreditEventTypeArg::TrainingUtility,
+            2.0,
+            "offline training utility".to_string(),
+            "training:batch-7".to_string(),
+            vec![first, second],
+        );
+
+        assert_eq!(body["event_type"], "training_utility");
+        assert_eq!(body["credit_points_delta"], 2.0);
+        assert_eq!(body["reason"], "offline training utility");
+        assert_eq!(body["external_ref"], "training:batch-7");
+        assert_eq!(
+            body["submission_ids"],
+            serde_json::json!([
+                "018f2b7b-0c11-72fd-95c4-1f9f98feac01",
+                "018f2b7b-0c11-72fd-95c4-1f9f98feac02"
+            ])
+        );
+        assert!(body.get("reviewer_bonus").is_none());
+        assert!(body.get("abuse_penalty").is_none());
+    }
+
+    #[test]
+    fn worker_utility_credit_uses_dedicated_route() {
+        let url = trace_commons_api_url(
+            "https://trace.example/internal/v1/traces",
+            "/v1/workers/utility-credit",
+            &[],
+        )
+        .expect("url builds");
+
+        assert_eq!(
+            url,
+            "https://trace.example/internal/v1/workers/utility-credit"
+        );
     }
 
     #[test]
