@@ -34,6 +34,7 @@ pub enum TraceArtifactKind {
     ReplayDatasetExport,
     BenchmarkConversion,
     RankerTrainingExport,
+    VectorPayload,
     AuditSnapshot,
     Other,
 }
@@ -46,6 +47,7 @@ impl TraceArtifactKind {
             Self::ReplayDatasetExport => "replay_dataset_export",
             Self::BenchmarkConversion => "benchmark_conversion",
             Self::RankerTrainingExport => "ranker_training_export",
+            Self::VectorPayload => "vector_payload",
             Self::AuditSnapshot => "audit_snapshot",
             Self::Other => "other",
         }

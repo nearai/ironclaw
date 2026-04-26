@@ -4860,6 +4860,38 @@ struct TraceExportArtifactObjectRefMaterial {
     size_bytes: i64,
 }
 
+const TRACE_VECTOR_PAYLOAD_SCHEMA_VERSION: &str = "ironclaw.trace_commons.vector_payload.v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceVectorPayloadArtifact {
+    artifact_schema_version: String,
+    tenant_id: String,
+    tenant_storage_ref: String,
+    submission_id: Uuid,
+    trace_id: Uuid,
+    derived_id: Uuid,
+    vector_entry_id: Uuid,
+    source_projection: StorageTraceVectorEntrySourceProjection,
+    source_hash: String,
+    vector_store: String,
+    embedding_model: String,
+    embedding_dimension: i32,
+    embedding_version: String,
+    canonical_summary: Option<String>,
+    canonical_summary_hash: Option<String>,
+    summary_model: String,
+    worker_kind: StorageTraceWorkerKind,
+    worker_version: String,
+    tool_sequence: Vec<String>,
+    tool_categories: Vec<String>,
+    coverage_tags: Vec<String>,
+    nearest_trace_ids: Vec<String>,
+    cluster_id: Option<String>,
+    duplicate_score: Option<f32>,
+    novelty_score: Option<f32>,
+    indexed_at: DateTime<Utc>,
+}
+
 fn store_envelope(
     state: &AppState,
     tenant_id: &str,
@@ -5039,6 +5071,44 @@ fn trace_export_artifact_object_ref_write(
     }
 }
 
+fn trace_vector_payload_object_ref_write(
+    state: &AppState,
+    tenant_id: &str,
+    submission_id: Uuid,
+    vector_entry_id: Uuid,
+    payload: &TraceVectorPayloadArtifact,
+) -> anyhow::Result<Option<StorageTraceObjectRefWrite>> {
+    let Some(store) = state.artifact_store.as_ref() else {
+        return Ok(None);
+    };
+    let json = serde_json::to_string_pretty(payload)
+        .context("failed to serialize trace vector payload artifact for object ref")?;
+    let tenant_ref = tenant_storage_ref(tenant_id);
+    let receipt = store.put_json(
+        &tenant_ref,
+        TraceArtifactKind::VectorPayload,
+        &vector_entry_id.to_string(),
+        payload,
+    )?;
+    Ok(Some(StorageTraceObjectRefWrite {
+        object_ref_id: deterministic_trace_vector_payload_object_ref_uuid(
+            tenant_id,
+            submission_id,
+            vector_entry_id,
+        ),
+        tenant_id: tenant_id.to_string(),
+        submission_id,
+        artifact_kind: StorageTraceObjectArtifactKind::WorkerIntermediate,
+        object_store: store.object_store_name().to_string(),
+        object_key: receipt.object_key,
+        content_sha256: format!("sha256:{}", receipt.ciphertext_sha256),
+        encryption_key_ref: format!("tenant:{tenant_ref}"),
+        size_bytes: i64::try_from(json.len()).unwrap_or(i64::MAX),
+        compression: None,
+        created_by_job_id: Some(vector_entry_id),
+    }))
+}
+
 fn deterministic_trace_export_object_ref_uuid(
     tenant_id: &str,
     export_id: Uuid,
@@ -5047,6 +5117,17 @@ fn deterministic_trace_export_object_ref_uuid(
 ) -> Uuid {
     let input = format!(
         "ironclaw.trace_commons.export_artifact_object_ref:{tenant_id}:{export_id}:{submission_id}:{artifact_kind:?}"
+    );
+    Uuid::new_v5(&Uuid::NAMESPACE_URL, input.as_bytes())
+}
+
+fn deterministic_trace_vector_payload_object_ref_uuid(
+    tenant_id: &str,
+    submission_id: Uuid,
+    vector_entry_id: Uuid,
+) -> Uuid {
+    let input = format!(
+        "ironclaw.trace_commons.vector_payload_object_ref:{tenant_id}:{submission_id}:{vector_entry_id}"
     );
     Uuid::new_v5(&Uuid::NAMESPACE_URL, input.as_bytes())
 }
@@ -8255,31 +8336,77 @@ async fn index_vector_metadata_from_db(
         } else {
             0.1
         };
+        let indexed_at = Utc::now();
+        let vector_store = "trace_commons_metadata_precheck".to_string();
+        let embedding_model = "canonical-summary-hash-v1".to_string();
+        let embedding_dimension = 1;
+        let embedding_version = "trace_commons_vector_metadata_v1".to_string();
+        let source_projection = StorageTraceVectorEntrySourceProjection::CanonicalSummary;
+        let cluster_id = record
+            .cluster_id
+            .clone()
+            .or_else(|| Some(format!("summary:{}", hash_fragment(&source_hash, 16))));
         db.upsert_trace_vector_entry(StorageTraceVectorEntryWrite {
             tenant_id: tenant.tenant_id.clone(),
             submission_id: record.submission_id,
             derived_id: record.derived_id,
             vector_entry_id,
-            vector_store: "trace_commons_metadata_precheck".to_string(),
-            embedding_model: "canonical-summary-hash-v1".to_string(),
-            embedding_dimension: 1,
-            embedding_version: "trace_commons_vector_metadata_v1".to_string(),
-            source_projection: StorageTraceVectorEntrySourceProjection::CanonicalSummary,
+            vector_store: vector_store.clone(),
+            embedding_model: embedding_model.clone(),
+            embedding_dimension,
+            embedding_version: embedding_version.clone(),
+            source_projection,
             source_hash: source_hash.clone(),
             status: StorageTraceVectorEntryStatus::Active,
-            nearest_trace_ids,
-            cluster_id: record
-                .cluster_id
-                .clone()
-                .or_else(|| Some(format!("summary:{}", hash_fragment(&source_hash, 16)))),
+            nearest_trace_ids: nearest_trace_ids.clone(),
+            cluster_id: cluster_id.clone(),
             duplicate_score: Some(duplicate_score),
             novelty_score: Some(novelty_score),
-            indexed_at: Some(Utc::now()),
+            indexed_at: Some(indexed_at),
             invalidated_at: None,
             deleted_at: None,
         })
         .await
         .context("failed to upsert trace vector entry")?;
+        let payload = TraceVectorPayloadArtifact {
+            artifact_schema_version: TRACE_VECTOR_PAYLOAD_SCHEMA_VERSION.to_string(),
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            submission_id: record.submission_id,
+            trace_id: record.trace_id,
+            derived_id: record.derived_id,
+            vector_entry_id,
+            source_projection,
+            source_hash: source_hash.clone(),
+            vector_store,
+            embedding_model,
+            embedding_dimension,
+            embedding_version,
+            canonical_summary: record.canonical_summary.clone(),
+            canonical_summary_hash: record.canonical_summary_hash.clone(),
+            summary_model: record.summary_model.clone(),
+            worker_kind: record.worker_kind,
+            worker_version: record.worker_version.clone(),
+            tool_sequence: record.tool_sequence.clone(),
+            tool_categories: record.tool_categories.clone(),
+            coverage_tags: record.coverage_tags.clone(),
+            nearest_trace_ids,
+            cluster_id,
+            duplicate_score: Some(duplicate_score),
+            novelty_score: Some(novelty_score),
+            indexed_at,
+        };
+        if let Some(object_ref) = trace_vector_payload_object_ref_write(
+            state,
+            &tenant.tenant_id,
+            record.submission_id,
+            vector_entry_id,
+            &payload,
+        )? {
+            db.append_trace_object_ref(object_ref)
+                .await
+                .context("failed to mirror trace vector payload object ref")?;
+        }
         append_trace_content_read_audit(
             state,
             tenant,
@@ -18572,6 +18699,133 @@ mod tests {
         .await
         .expect("backfill can be rerun after repairing file-only revoke audit");
         assert_eq!(third_response.db_mirror_backfilled, 0);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn vector_index_writes_service_local_worker_intermediate_payload_object_ref() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_root = temp.path().join("service-object-store");
+        let artifact_store = test_artifact_store(&artifact_root);
+        let configured_store = ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            artifact_store,
+        );
+        let artifact_reader = configured_store.clone();
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-vector-payload.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+            Some(configured_store),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission dual-writes with service-local object refs");
+
+        let Json(response) = vector_index_handler(
+            State(state),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceVectorIndexRequest {
+                purpose: Some("vector_payload_object_ref".to_string()),
+                dry_run: false,
+            }),
+        )
+        .await
+        .expect("vector indexing succeeds");
+        assert_eq!(response.vector_entries_indexed, 1);
+
+        let vector_entries = db
+            .list_trace_vector_entries("tenant-a")
+            .await
+            .expect("vector entries read");
+        assert_eq!(vector_entries.len(), 1);
+        let vector_entry = &vector_entries[0];
+        assert_eq!(vector_entry.submission_id, submission_id);
+        assert_eq!(vector_entry.status, StorageTraceVectorEntryStatus::Active);
+
+        let object_ref = db
+            .get_latest_active_trace_object_ref(
+                "tenant-a",
+                submission_id,
+                StorageTraceObjectArtifactKind::WorkerIntermediate,
+            )
+            .await
+            .expect("worker intermediate object ref reads")
+            .expect("vector payload worker intermediate object ref exists");
+        assert_eq!(
+            object_ref.object_store,
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+        );
+        assert_eq!(
+            object_ref.created_by_job_id,
+            Some(vector_entry.vector_entry_id)
+        );
+
+        let payload: TraceVectorPayloadArtifact = artifact_reader
+            .get_json_by_object_key(
+                &tenant_storage_ref("tenant-a"),
+                TraceArtifactKind::VectorPayload,
+                &object_ref.object_key,
+                &object_ref.content_sha256,
+            )
+            .expect("vector payload artifact reads");
+        assert_eq!(
+            payload.artifact_schema_version,
+            TRACE_VECTOR_PAYLOAD_SCHEMA_VERSION
+        );
+        assert_eq!(payload.tenant_id, "tenant-a");
+        assert_eq!(payload.submission_id, submission_id);
+        assert_eq!(payload.derived_id, vector_entry.derived_id);
+        assert_eq!(payload.vector_entry_id, vector_entry.vector_entry_id);
+        assert_eq!(payload.source_hash, vector_entry.source_hash);
+        assert_eq!(payload.embedding_version, vector_entry.embedding_version);
+        assert_eq!(
+            payload.source_projection,
+            StorageTraceVectorEntrySourceProjection::CanonicalSummary
+        );
+
+        artifact_reader
+            .get_json_by_object_key::<TraceVectorPayloadArtifact>(
+                &tenant_storage_ref("tenant-b"),
+                TraceArtifactKind::VectorPayload,
+                &object_ref.object_key,
+                &object_ref.content_sha256,
+            )
+            .expect_err("vector payload refuses the wrong tenant");
+        artifact_reader
+            .get_json_by_object_key::<TraceVectorPayloadArtifact>(
+                &tenant_storage_ref("tenant-a"),
+                TraceArtifactKind::VectorPayload,
+                &object_ref.object_key,
+                "sha256:0000",
+            )
+            .expect_err("vector payload refuses the wrong hash");
     }
 
     #[cfg(feature = "libsql")]
