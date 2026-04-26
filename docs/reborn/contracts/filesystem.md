@@ -296,14 +296,17 @@ Rules:
 V1 backend types:
 
 ```text
-LocalFsBackend
-MemoryFsBackend for tests
+LocalFilesystem
+PostgresRootFilesystem   // feature = "postgres"
+LibSqlRootFilesystem     // feature = "libsql"
+Memory/test backends as needed
 ```
+
+The PostgreSQL/libSQL backends store file contents by canonical `VirtualPath` in `root_filesystem_entries`; directories are inferred from path prefixes. They are intentionally database-backed `RootFilesystem` implementations, not secret-specific repositories, so higher-level services such as secrets, process outputs, JSONL logs, or artifacts can persist through the same virtual-path boundary. `write_file` upserts file bytes, `read_file` requires an exact file row, `stat` reports exact files or inferred directories, and `list_dir` returns direct children sorted by name with virtual paths only.
 
 Future backend types:
 
 ```text
-DbBackend
 ObjectStoreBackend
 RemoteFilesystemBackend
 ```
@@ -380,6 +383,8 @@ Add tests through the caller-facing filesystem APIs, not only helper functions:
 - path traversal in scoped path is rejected before backend access
 - local backend denies symlink escape
 - local backend does not leak raw host path in display error
+- PostgreSQL/libSQL backends implement `RootFilesystem` without depending on product/runtime/workflow crates
+- libSQL backend reads, writes, stats, overwrites, lists direct children, infers directories, and returns virtual-path-only missing-file errors
 - `/tmp` mount can be created per invocation and cleaned up
 - `/artifacts` writes are captured under approved virtual path only
 
