@@ -202,7 +202,11 @@ where
         if transport == "stdio" {
             usage.process_count = usage.process_count.max(1);
         }
-        let receipt = governor.reconcile(reservation.id, usage.clone())?;
+        let receipt = governor
+            .reconcile(reservation.id, usage.clone())
+            .map_err(|error| {
+                release_after_failure(governor, reservation.id, McpError::from(error))
+            })?;
         Ok(McpExecutionResult {
             result: McpCapabilityResult {
                 output: output.output,

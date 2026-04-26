@@ -200,6 +200,41 @@ async fn mcp_runtime_rejects_non_mcp_or_undeclared_capability_before_reserving()
 }
 
 #[tokio::test]
+async fn mcp_runtime_releases_reservation_when_reconcile_fails_after_successful_call() {
+    let package = package_from_manifest(MCP_MANIFEST);
+    let client = RecordingMcpClient::new(Ok(McpClientOutput::json(json!({"ok": true}))));
+    let runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client);
+    let governor = ReconcileFailingGovernor::default();
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+
+    let err = runtime
+        .execute_extension_json(
+            &governor,
+            McpExecutionRequest {
+                package: &package,
+                capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
+                scope,
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    output_bytes: Some(10_000),
+                    ..ResourceEstimate::default()
+                },
+                invocation: McpInvocation { input: json!({}) },
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, McpError::Resource(_)));
+    assert_eq!(
+        governor.inner.reserved_for(&account),
+        ResourceTally::default()
+    );
+    assert_eq!(governor.inner.usage_for(&account), ResourceTally::default());
+}
+
+#[tokio::test]
 async fn mcp_runtime_enforces_output_limit_and_releases_reservation() {
     let package = package_from_manifest(MCP_MANIFEST);
     let client = RecordingMcpClient::new(Ok(McpClientOutput::json(json!({
@@ -236,6 +271,55 @@ async fn mcp_runtime_enforces_output_limit_and_releases_reservation() {
     assert!(matches!(err, McpError::OutputLimitExceeded { .. }));
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert_eq!(governor.usage_for(&account), ResourceTally::default());
+}
+
+#[derive(Default)]
+struct ReconcileFailingGovernor {
+    inner: InMemoryResourceGovernor,
+}
+
+impl ResourceGovernor for ReconcileFailingGovernor {
+    fn set_limit(&self, account: ResourceAccount, limits: ResourceLimits) {
+        self.inner.set_limit(account, limits);
+    }
+
+    fn try_set_limit(
+        &self,
+        account: ResourceAccount,
+        limits: ResourceLimits,
+    ) -> Result<(), ResourceError> {
+        self.inner.try_set_limit(account, limits)
+    }
+
+    fn reserve(
+        &self,
+        scope: ResourceScope,
+        estimate: ResourceEstimate,
+    ) -> Result<ResourceReservation, ResourceError> {
+        self.inner.reserve(scope, estimate)
+    }
+
+    fn active_reservation(
+        &self,
+        reservation_id: ResourceReservationId,
+    ) -> Result<ActiveResourceReservation, ResourceError> {
+        self.inner.active_reservation(reservation_id)
+    }
+
+    fn reconcile(
+        &self,
+        reservation_id: ResourceReservationId,
+        _actual: ResourceUsage,
+    ) -> Result<ResourceReceipt, ResourceError> {
+        Err(ResourceError::UnknownReservation { id: reservation_id })
+    }
+
+    fn release(
+        &self,
+        reservation_id: ResourceReservationId,
+    ) -> Result<ResourceReceipt, ResourceError> {
+        self.inner.release(reservation_id)
+    }
 }
 
 #[derive(Clone)]

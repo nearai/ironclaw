@@ -363,7 +363,7 @@ where
                         Some(RuntimeKind::Mcp),
                         &error,
                     )
-                    .await?;
+                    .await;
                     return Err(error);
                 };
                 self.emit_event(RuntimeEvent::runtime_selected(
@@ -372,7 +372,7 @@ where
                     descriptor.provider.clone(),
                     RuntimeKind::Mcp,
                 ))
-                .await?;
+                .await;
 
                 let execution = match mcp_runtime
                     .execute_extension_json(
@@ -399,7 +399,7 @@ where
                             Some(RuntimeKind::Mcp),
                             &error,
                         )
-                        .await?;
+                        .await;
                         return Err(error);
                     }
                 };
@@ -411,7 +411,7 @@ where
                     RuntimeKind::Mcp,
                     output_bytes,
                 ))
-                .await?;
+                .await;
 
                 Ok(CapabilityDispatchResult {
                     capability_id,
