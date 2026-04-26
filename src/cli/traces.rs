@@ -190,6 +190,10 @@ pub enum TracesCommand {
         #[arg(long)]
         endpoint: String,
 
+        /// Filter by review lease state
+        #[arg(long, value_enum)]
+        lease_filter: Option<TraceReviewLeaseFilterArg>,
+
         /// Environment variable containing a reviewer/admin bearer token
         #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
         bearer_token_env: String,
@@ -212,6 +216,10 @@ pub enum TracesCommand {
         /// Filter by residual privacy risk
         #[arg(long, value_enum)]
         privacy_risk: Option<TracePrivacyRiskArg>,
+
+        /// Filter by review lease state
+        #[arg(long, value_enum)]
+        lease_filter: Option<TraceReviewLeaseFilterArg>,
 
         /// Environment variable containing a reviewer/admin bearer token
         #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
@@ -1140,6 +1148,28 @@ impl std::fmt::Display for TraceReviewDecisionArg {
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceReviewLeaseFilterArg {
+    All,
+    Mine,
+    Available,
+    Active,
+    Expired,
+}
+
+impl std::fmt::Display for TraceReviewLeaseFilterArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::All => "all",
+            Self::Mine => "mine",
+            Self::Available => "available",
+            Self::Active => "active",
+            Self::Expired => "expired",
+        };
+        write!(f, "{value}")
+    }
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceCreditEventTypeArg {
     BenchmarkConversion,
     RegressionCatch,
@@ -1443,13 +1473,15 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
         }
         TracesCommand::QuarantineList {
             endpoint,
+            lease_filter,
             bearer_token_env,
             json,
-        } => trace_commons_quarantine_list(&endpoint, &bearer_token_env, json).await,
+        } => trace_commons_quarantine_list(&endpoint, &bearer_token_env, lease_filter, json).await,
         TracesCommand::ActiveLearningReviewQueue {
             endpoint,
             limit,
             privacy_risk,
+            lease_filter,
             bearer_token_env,
             json,
         } => {
@@ -1458,6 +1490,7 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
                 &bearer_token_env,
                 limit,
                 privacy_risk,
+                lease_filter,
                 json,
             )
             .await
@@ -2266,13 +2299,18 @@ async fn trace_commons_ingest_health(endpoint: &str, json: bool) -> anyhow::Resu
 async fn trace_commons_quarantine_list(
     endpoint: &str,
     bearer_token_env: &str,
+    lease_filter: Option<TraceReviewLeaseFilterArg>,
     json: bool,
 ) -> anyhow::Result<()> {
+    let mut query = Vec::new();
+    if let Some(lease_filter) = lease_filter {
+        query.push(("lease_filter", lease_filter.to_string()));
+    }
     let response = trace_commons_api_request(
         Method::GET,
         endpoint,
         "/v1/review/quarantine",
-        &[],
+        &query,
         Some(bearer_token_env),
         None,
     )
@@ -2306,11 +2344,15 @@ async fn trace_commons_active_learning_review_queue(
     bearer_token_env: &str,
     limit: Option<usize>,
     privacy_risk: Option<TracePrivacyRiskArg>,
+    lease_filter: Option<TraceReviewLeaseFilterArg>,
     json: bool,
 ) -> anyhow::Result<()> {
     let mut query = optional_usize_query("limit", limit);
     if let Some(privacy_risk) = privacy_risk {
         query.push(("privacy_risk", privacy_risk.to_string()));
+    }
+    if let Some(lease_filter) = lease_filter {
+        query.push(("lease_filter", lease_filter.to_string()));
     }
     let Some(response) = trace_commons_optional_api_request(
         Method::GET,
@@ -5346,18 +5388,40 @@ mod tests {
     }
 
     #[test]
-    fn active_learning_review_queue_uses_ingest_endpoint() {
+    fn active_learning_review_queue_uses_lease_filter_query() {
         let url = trace_commons_api_url(
             "https://trace.example/internal/v1/traces",
             "/v1/review/active-learning",
-            &[("limit", "25".to_string())],
+            &[
+                ("limit", "25".to_string()),
+                ("lease_filter", "available".to_string()),
+            ],
         )
         .expect("url builds");
 
         assert_eq!(
             url,
-            "https://trace.example/internal/v1/review/active-learning?limit=25"
+            "https://trace.example/internal/v1/review/active-learning?limit=25&lease_filter=available"
         );
+    }
+
+    #[test]
+    fn quarantine_list_lease_filter_parses_through_cli() {
+        let cli = parse_cli([
+            "ironclaw",
+            "traces",
+            "quarantine-list",
+            "--endpoint",
+            "https://trace.example/v1/traces",
+            "--lease-filter",
+            "mine",
+        ]);
+
+        let TracesCommand::QuarantineList { lease_filter, .. } = unwrap_traces_command(cli) else {
+            panic!("expected traces quarantine-list command");
+        };
+
+        assert_eq!(lease_filter, Some(TraceReviewLeaseFilterArg::Mine));
     }
 
     #[test]

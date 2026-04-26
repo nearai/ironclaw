@@ -1649,9 +1649,49 @@ async fn list_traces_handler(
     Ok(Json(items))
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct ReviewQueueQuery {
+    #[serde(default)]
+    lease_filter: TraceReviewLeaseFilter,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+enum TraceReviewLeaseFilter {
+    #[default]
+    All,
+    Mine,
+    Available,
+    Active,
+    Expired,
+}
+
+fn trace_review_lease_filter_matches(
+    record: &TraceCommonsSubmissionRecord,
+    principal_ref: &str,
+    now: DateTime<Utc>,
+    filter: TraceReviewLeaseFilter,
+) -> bool {
+    let assigned_to = record.review_assigned_to_principal_ref.as_deref();
+    let is_assigned = assigned_to.is_some();
+    let is_mine = assigned_to == Some(principal_ref);
+    let is_expired = record
+        .review_lease_expires_at
+        .is_some_and(|expires_at| expires_at <= now);
+    let is_active = is_assigned && !is_expired;
+    match filter {
+        TraceReviewLeaseFilter::All => true,
+        TraceReviewLeaseFilter::Mine => is_mine,
+        TraceReviewLeaseFilter::Available => !is_assigned || is_expired,
+        TraceReviewLeaseFilter::Active => is_active,
+        TraceReviewLeaseFilter::Expired => is_assigned && is_expired,
+    }
+}
+
 async fn review_quarantine_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(query): Query<ReviewQueueQuery>,
 ) -> ApiResult<Json<Vec<TraceReviewQueueItem>>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_reviewer(&tenant)?;
@@ -1667,6 +1707,14 @@ async fn review_quarantine_handler(
     let mut queue = records
         .into_iter()
         .filter(|record| record.status == TraceCorpusStatus::Quarantined)
+        .filter(|record| {
+            trace_review_lease_filter_matches(
+                record,
+                &tenant.principal_ref,
+                now,
+                query.lease_filter,
+            )
+        })
         .map(|record| TraceReviewQueueItem::from_record(record, &derived_by_submission, now))
         .collect::<Vec<_>>();
     queue.sort_by(|left, right| {
@@ -3782,6 +3830,8 @@ struct ActiveLearningQueueQuery {
     limit: Option<usize>,
     #[serde(default)]
     privacy_risk: Option<ResidualPiiRisk>,
+    #[serde(default)]
+    lease_filter: TraceReviewLeaseFilter,
 }
 
 async fn active_learning_review_queue_handler(
@@ -3814,6 +3864,14 @@ async fn active_learning_review_queue_handler(
             query
                 .privacy_risk
                 .is_none_or(|risk| record.privacy_risk == risk)
+        })
+        .filter(|record| {
+            trace_review_lease_filter_matches(
+                record,
+                &tenant.principal_ref,
+                now,
+                query.lease_filter,
+            )
         })
         .map(|record| {
             let submission_id = record.submission_id;
@@ -17720,16 +17778,22 @@ mod tests {
         .await
         .expect("submission succeeds");
 
-        let contributor_error =
-            review_quarantine_handler(State(state.clone()), auth_headers("token-a"))
-                .await
-                .expect_err("contributor cannot review");
+        let contributor_error = review_quarantine_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Query(ReviewQueueQuery::default()),
+        )
+        .await
+        .expect_err("contributor cannot review");
         assert_eq!(contributor_error.0, StatusCode::FORBIDDEN);
 
-        let Json(queue) =
-            review_quarantine_handler(State(state.clone()), auth_headers("review-token-a"))
-                .await
-                .expect("review queue loads");
+        let Json(queue) = review_quarantine_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(ReviewQueueQuery::default()),
+        )
+        .await
+        .expect("review queue loads");
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].submission_id, submission_id);
 
@@ -17948,16 +18012,39 @@ mod tests {
             Some(due_at.timestamp_millis())
         );
 
-        let Json(queue) =
-            review_quarantine_handler(State(state.clone()), auth_headers("review-token-a"))
-                .await
-                .expect("quarantine queue loads");
+        let Json(queue) = review_quarantine_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(ReviewQueueQuery::default()),
+        )
+        .await
+        .expect("quarantine queue loads");
         assert_eq!(queue.len(), 1);
         let reviewer_principal_ref = principal_storage_ref("review-token-a");
         assert_eq!(
             queue[0].review_assigned_to_principal_ref.as_deref(),
             Some(reviewer_principal_ref.as_str())
         );
+        let Json(mine_queue) = review_quarantine_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(ReviewQueueQuery {
+                lease_filter: TraceReviewLeaseFilter::Mine,
+            }),
+        )
+        .await
+        .expect("reviewer can filter quarantine queue to own lease");
+        assert_eq!(mine_queue.len(), 1);
+        let Json(available_queue) = review_quarantine_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(ReviewQueueQuery {
+                lease_filter: TraceReviewLeaseFilter::Available,
+            }),
+        )
+        .await
+        .expect("claimed active lease is not available");
+        assert!(available_queue.is_empty());
 
         let Json(released) = release_review_lease_handler(
             State(state.clone()),
@@ -17968,6 +18055,16 @@ mod tests {
         .expect("lease owner can release lease");
         assert!(released.review_assigned_to_principal_ref.is_none());
         assert!(released.review_lease_expires_at.is_none());
+        let Json(available_queue) = review_quarantine_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(ReviewQueueQuery {
+                lease_filter: TraceReviewLeaseFilter::Available,
+            }),
+        )
+        .await
+        .expect("released lease is available");
+        assert_eq!(available_queue.len(), 1);
         let lease_audits = db
             .list_trace_audit_events("tenant-a")
             .await
@@ -18193,9 +18290,13 @@ mod tests {
         fresh_record.received_at = now - Duration::hours(1);
         write_submission_record(temp.path(), &fresh_record).expect("fresh record writes");
 
-        let Json(queue) = review_quarantine_handler(State(state), auth_headers("review-token-a"))
-            .await
-            .expect("quarantine queue loads");
+        let Json(queue) = review_quarantine_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Query(ReviewQueueQuery::default()),
+        )
+        .await
+        .expect("quarantine queue loads");
         assert_eq!(queue.len(), 2);
         assert_eq!(queue[0].submission_id, urgent_id);
         assert_eq!(
@@ -20288,6 +20389,7 @@ mod tests {
             Query(ActiveLearningQueueQuery {
                 limit: Some(10),
                 privacy_risk: None,
+                lease_filter: TraceReviewLeaseFilter::All,
             }),
         )
         .await
@@ -20337,6 +20439,7 @@ mod tests {
             Query(ActiveLearningQueueQuery {
                 limit: Some(0),
                 privacy_risk: None,
+                lease_filter: TraceReviewLeaseFilter::All,
             }),
         )
         .await
@@ -20349,6 +20452,7 @@ mod tests {
             Query(ActiveLearningQueueQuery {
                 limit: Some(usize::MAX),
                 privacy_risk: None,
+                lease_filter: TraceReviewLeaseFilter::All,
             }),
         )
         .await
@@ -23883,10 +23987,13 @@ mod tests {
         assert_eq!(list[0].submission_id, accepted_id);
         assert_eq!(list[0].redaction_counts.get("secret"), Some(&1));
 
-        let Json(queue) =
-            review_quarantine_handler(State(state.clone()), auth_headers("review-token-a"))
-                .await
-                .expect("quarantine queue can read DB mirror");
+        let Json(queue) = review_quarantine_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(ReviewQueueQuery::default()),
+        )
+        .await
+        .expect("quarantine queue can read DB mirror");
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].submission_id, quarantined_id);
         assert_eq!(queue[0].redaction_counts.get("private_email"), Some(&2));
@@ -25851,10 +25958,13 @@ mod tests {
         .await
         .expect("trace list read mirrors audit event");
         assert_eq!(list.len(), 1);
-        let Json(quarantine) =
-            review_quarantine_handler(State(audit_state.clone()), auth_headers("review-token-a"))
-                .await
-                .expect("quarantine read mirrors audit event");
+        let Json(quarantine) = review_quarantine_handler(
+            State(audit_state.clone()),
+            auth_headers("review-token-a"),
+            Query(ReviewQueueQuery::default()),
+        )
+        .await
+        .expect("quarantine read mirrors audit event");
         assert!(quarantine.is_empty());
         let Json(active_learning) = active_learning_review_queue_handler(
             State(audit_state.clone()),
@@ -25862,6 +25972,7 @@ mod tests {
             Query(ActiveLearningQueueQuery {
                 limit: Some(10),
                 privacy_risk: None,
+                lease_filter: TraceReviewLeaseFilter::All,
             }),
         )
         .await

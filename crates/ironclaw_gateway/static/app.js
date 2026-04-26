@@ -7477,6 +7477,7 @@ function traceOperatorPanel(baseUrl) {
   var creditKinds = ['benchmark_conversion', 'regression_catch', 'training_utility', 'ranking_utility', 'reviewer_bonus', 'abuse_penalty'];
   var statuses = ['accepted', 'quarantined', 'rejected', 'revoked', 'expired', 'purged'];
   var risks = ['low', 'medium', 'high'];
+  var leaseFilters = ['all', 'mine', 'available', 'active', 'expired'];
   return '<div class="settings-group trace-operator-section">'
     + '<div class="settings-group-title">Internal Reviewer / Operator</div>'
     + '<div class="trace-private-notice"><strong>Private tool.</strong> Calls go directly from this browser to the configured ingest service. Bearer tokens are kept only in this page session and are never saved by the UI.</div>'
@@ -7517,6 +7518,9 @@ function traceOperatorPanel(baseUrl) {
     + '<select class="settings-select" id="trace-operator-risk"><option value="">any risk</option>' + risks.map(function(risk) {
       return '<option value="' + risk + '">' + risk + '</option>';
     }).join('') + '</select>'
+    + '<select class="settings-select" id="trace-operator-lease-filter">' + leaseFilters.map(function(filter) {
+      return '<option value="' + filter + '">' + filter.replace(/_/g, ' ') + ' leases</option>';
+    }).join('') + '</select>'
     + '<input class="settings-input" type="text" id="trace-operator-tool" placeholder="tool">'
     + '<input class="settings-input" type="text" id="trace-operator-coverage" placeholder="coverage tag">'
     + '</div></div>'
@@ -7527,6 +7531,7 @@ function traceOperatorPanel(baseUrl) {
     + '<button class="btn-secondary" data-action="trace-operator-config-status">Config Status</button>'
     + '<button class="btn-secondary" data-action="trace-operator-list">Trace List</button>'
     + '<button class="btn-secondary" data-action="trace-operator-quarantine">Quarantine</button>'
+    + '<button class="btn-secondary" data-action="trace-operator-active-learning">Active Learning</button>'
     + '<button class="btn-secondary" data-action="trace-operator-revoke">Central Revoke</button>'
     + '<button class="btn-secondary" data-action="trace-operator-propagate">Revocation Propagation</button>'
     + '<button class="btn-secondary" data-action="trace-operator-lease-claim">Claim Lease</button>'
@@ -7563,6 +7568,7 @@ function traceOperatorInputs() {
     externalRef: ((document.getElementById('trace-operator-external-ref') || {}).value || '').trim(),
     status: ((document.getElementById('trace-operator-status') || {}).value || '').trim(),
     risk: ((document.getElementById('trace-operator-risk') || {}).value || '').trim(),
+    leaseFilter: ((document.getElementById('trace-operator-lease-filter') || {}).value || 'all').trim(),
     tool: ((document.getElementById('trace-operator-tool') || {}).value || '').trim(),
     coverageTag: ((document.getElementById('trace-operator-coverage') || {}).value || '').trim(),
     limit: isNaN(limit) ? 25 : Math.max(1, Math.min(500, limit)),
@@ -7613,7 +7619,14 @@ function traceOperatorRequest(action, input) {
     tool: input.tool,
     coverage_tag: input.coverageTag,
   });
-  else if (action === 'quarantine') path = '/v1/review/quarantine';
+  else if (action === 'quarantine') path = '/v1/review/quarantine?' + traceQueryString({
+    lease_filter: input.leaseFilter,
+  });
+  else if (action === 'active-learning') path = '/v1/review/active-learning?' + traceQueryString({
+    limit: input.limit,
+    privacy_risk: input.risk,
+    lease_filter: input.leaseFilter,
+  });
   else if (action === 'replay') path = '/v1/datasets/replay?limit=' + encodeURIComponent(input.limit);
   else if (action === 'replay-manifests') path = '/v1/datasets/replay/manifests?limit=' + encodeURIComponent(input.limit);
   else if (action === 'audit') path = '/v1/audit/events?limit=' + encodeURIComponent(input.limit);
