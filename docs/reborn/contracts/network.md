@@ -46,8 +46,8 @@ host_api       -> NetworkPolicy, NetworkTarget, NetworkMethod shapes
 network        -> scoped policy evaluation and metadata-only permits
 authorization  -> whether a caller has a grant with network authority
 capabilities   -> caller-facing workflow and fail-closed obligation handler seam
-host_runtime   -> metadata-only ApplyNetworkPolicy obligation preflight plus future composition of network enforcers into runtime adapters
-runtimes        -> perform I/O only after host-side authorization and network permit handling
+host_runtime   -> ApplyNetworkPolicy obligation preflight and WASM host-HTTP policy handoff
+runtimes        -> perform I/O only after host-side authorization and network policy/permit handling
 ```
 
 ---
@@ -64,7 +64,7 @@ V1 semantics intentionally mirror the current WASM network import policy checks 
 - `deny_private_ip_ranges` blocks literal private, loopback, link-local, documentation, broadcast, multicast, unspecified, carrier-grade NAT, and unique-local IP targets
 - `max_egress_bytes` denies requests whose estimated bytes exceed the configured limit
 
-DNS/IP resolution safeguards against rebinding remain future work for the actual network execution/proxy boundary. This crate currently checks literal IP targets only.
+DNS/IP resolution safeguards against rebinding remain future work for the actual network execution/proxy boundary. This crate currently checks literal IP targets only. `ironclaw_host_runtime` can hand an accepted `ApplyNetworkPolicy` obligation to the WASM runtime adapter, where `WasmPolicyHttpClient` enforces the same target/body limits before calling a configured host HTTP client.
 
 ---
 
@@ -93,7 +93,7 @@ This slice does not implement:
 - HTTP client/proxy execution
 - DNS resolution or DNS-rebinding protection
 - resource reservation for network egress
-- full runtime enforcement of `ApplyNetworkPolicy` beyond current metadata preflight
+- runtime enforcement of `ApplyNetworkPolicy` for non-WASM lanes
 - credential or secret injection
 - durable audit/event emission
 - per-method policy matrices

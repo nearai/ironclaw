@@ -4174,7 +4174,9 @@ dependencies = [
  "ironclaw_scripts",
  "ironclaw_wasm",
  "serde_json",
+ "tempfile",
  "tokio",
+ "wat",
 ]
 
 [[package]]

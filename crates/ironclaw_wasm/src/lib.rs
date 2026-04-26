@@ -681,6 +681,65 @@ impl WasmRuntime {
         Ok(WasmExecutionResult { result, receipt })
     }
 
+    /// Execute a WASM extension capability with host-mediated network imports.
+    pub async fn execute_extension_json_with_network<F, G>(
+        &self,
+        fs: &F,
+        governor: &G,
+        request: WasmExecutionRequest<'_>,
+        http: Arc<dyn WasmHostHttp>,
+    ) -> Result<WasmExecutionResult, WasmError>
+    where
+        F: RootFilesystem,
+        G: ResourceGovernor,
+    {
+        let reservation = governor
+            .reserve(request.scope, request.estimate)
+            .map_err(|error| WasmError::Resource(Box::new(error)))?;
+
+        let active_reservation = match governor.active_reservation(reservation.id) {
+            Ok(active) => active,
+            Err(error) => {
+                return Err(release_after_failure(
+                    governor,
+                    reservation.id,
+                    WasmError::Resource(Box::new(error)),
+                ));
+            }
+        };
+
+        let prepared = match self
+            .prepare_extension_capability(fs, request.package, request.capability_id)
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => return Err(release_after_failure(governor, reservation.id, error)),
+        };
+
+        let result = match self.invoke_json_with_network(
+            prepared.module.as_ref(),
+            &prepared.descriptor,
+            Some(&active_reservation),
+            request.invocation,
+            http,
+        ) {
+            Ok(result) => result,
+            Err(error) => return Err(release_after_failure(governor, reservation.id, error)),
+        };
+
+        let receipt = match governor.reconcile(reservation.id, result.usage.clone()) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                return Err(release_after_failure(
+                    governor,
+                    reservation.id,
+                    WasmError::Resource(Box::new(error)),
+                ));
+            }
+        };
+        Ok(WasmExecutionResult { result, receipt })
+    }
+
     /// Invoke a capability through the initial JSON pointer/length ABI.
     ///
     /// The guest module must export:
@@ -1549,7 +1608,12 @@ fn target_matches_pattern(target: &NetworkTarget, pattern: &NetworkTargetPattern
 
 fn host_matches_pattern(host: &str, pattern: &str) -> bool {
     if let Some(suffix) = pattern.strip_prefix("*.") {
-        host.ends_with(&format!(".{suffix}")) && host != suffix
+        let suffix_with_dot = format!(".{suffix}");
+        if !host.ends_with(&suffix_with_dot) || host == suffix {
+            return false;
+        }
+        let prefix = &host[..host.len() - suffix_with_dot.len()];
+        !prefix.is_empty() && !prefix.contains('.')
     } else {
         host == pattern
     }
@@ -1563,15 +1627,29 @@ fn is_private_or_loopback_ip(ip: IpAddr) -> bool {
                 || ip.is_link_local()
                 || ip.is_broadcast()
                 || ip.is_documentation()
+                || ip.is_multicast()
                 || ip.octets()[0] == 0
+                || is_carrier_grade_nat_v4(ip)
         }
         IpAddr::V6(ip) => {
             ip.is_loopback()
                 || ip.is_unspecified()
                 || ip.is_unique_local()
                 || ip.is_unicast_link_local()
+                || ip.is_multicast()
+                || is_documentation_v6(ip)
         }
     }
+}
+
+fn is_carrier_grade_nat_v4(ip: std::net::Ipv4Addr) -> bool {
+    let [first, second, ..] = ip.octets();
+    first == 100 && (64..=127).contains(&second)
+}
+
+fn is_documentation_v6(ip: std::net::Ipv6Addr) -> bool {
+    let segments = ip.segments();
+    segments[0] == 0x2001 && segments[1] == 0x0db8
 }
 
 fn unix_time_ms() -> u64 {

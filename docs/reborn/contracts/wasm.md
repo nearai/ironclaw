@@ -197,7 +197,7 @@ Filesystem import rules:
 - no broad WASI preopens are granted
 - missing filesystem context returns a negative guest status instead of ambient access
 
-V1 also defines a host-mediated HTTP import. This import is linked for modules that declare it, but is default-deny unless invocation uses `invoke_json_with_network` with a `WasmHostHttp` implementation. The provided `WasmPolicyHttpClient` wrapper enforces `NetworkPolicy` before delegating to the host client.
+V1 also defines a host-mediated HTTP import. This import is linked for modules that declare it, but is default-deny unless invocation uses `invoke_json_with_network` or `execute_extension_json_with_network` with a `WasmHostHttp` implementation. The provided `WasmPolicyHttpClient` wrapper enforces `NetworkPolicy` before delegating to the host client. `ironclaw_host_runtime` uses this wrapper when an accepted `ApplyNetworkPolicy` obligation is present for a WASM dispatch.
 
 ```text
 host.http_request_utf8(method, url_ptr, url_len, body_ptr, body_len, out_ptr, out_cap) -> i32 bytes_or_negative_status
@@ -389,6 +389,13 @@ impl WasmRuntime {
         governor: &G,
         request: WasmExecutionRequest<'_>,
     ) -> Result<WasmExecutionResult, WasmError>;
+    pub async fn execute_extension_json_with_network<F: RootFilesystem, G: ResourceGovernor>(
+        &self,
+        fs: &F,
+        governor: &G,
+        request: WasmExecutionRequest<'_>,
+        http: Arc<dyn WasmHostHttp>,
+    ) -> Result<WasmExecutionResult, WasmError>;
     pub fn invoke_json(
         &self,
         module: &PreparedWasmModule,
@@ -493,6 +500,7 @@ Local contract tests should prove:
 - filesystem read/list imports reject oversized outputs before copying them into guest memory
 - filesystem imports deny by default when no filesystem context is provided
 - filesystem write respects mount permissions and cannot create host-path access
+- network imports use `WasmPolicyHttpClient` when host runtime hands off an accepted `ApplyNetworkPolicy` obligation
 - unsupported host imports still fail closed during module preparation
 - network response imports pass guest/runtime output capacity to the host HTTP client
 - invocation returns actual usage suitable for resource reconciliation
@@ -505,7 +513,7 @@ Local contract tests should prove:
 Do not add in this first crate:
 
 - broad WASI filesystem access or ambient preopens
-- network host imports
+- ambient or unmediated network host imports
 - secret host imports
 - owning extension discovery
 - owning manifest parsing or registry validation

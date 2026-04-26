@@ -68,6 +68,44 @@ fn network_imports_deny_by_default_without_network_context() {
 }
 
 #[test]
+fn network_policy_wildcard_allows_one_label_only() {
+    let client = RecordingHttpClient::new(WasmHttpResponse {
+        status: 200,
+        body: r#"{"ok":true}"#.to_string(),
+    });
+    let http = WasmPolicyHttpClient::new(
+        client.clone(),
+        NetworkPolicy {
+            allowed_targets: vec![
+                NetworkTargetPattern::new(Some(NetworkScheme::Https), "*.example.test", None)
+                    .unwrap(),
+            ],
+            deny_private_ip_ranges: true,
+            max_egress_bytes: Some(1024),
+        },
+    );
+    let runtime = WasmRuntime::for_testing().unwrap();
+    let module = runtime
+        .prepare(http_spec("https://deep.api.example.test/v1/echo"))
+        .unwrap();
+    let descriptor = make_descriptor("net-demo", "net-demo.http", RuntimeKind::Wasm);
+    let reservation = sample_active_reservation();
+
+    let result = runtime
+        .invoke_json_with_network(
+            &module,
+            &descriptor,
+            Some(&reservation),
+            CapabilityInvocation { input: json!({}) },
+            Arc::new(http),
+        )
+        .unwrap();
+
+    assert_eq!(result.output, json!({"ok": false}));
+    assert!(client.requests.lock().unwrap().is_empty());
+}
+
+#[test]
 fn network_policy_denies_unlisted_host_before_client_call() {
     let client = RecordingHttpClient::new(WasmHttpResponse {
         status: 200,
@@ -125,6 +163,43 @@ fn network_policy_blocks_literal_private_ip_targets_before_client_call() {
     let runtime = WasmRuntime::for_testing().unwrap();
     let module = runtime
         .prepare(http_spec("http://127.0.0.1/admin"))
+        .unwrap();
+    let descriptor = make_descriptor("net-demo", "net-demo.http", RuntimeKind::Wasm);
+    let reservation = sample_active_reservation();
+
+    let result = runtime
+        .invoke_json_with_network(
+            &module,
+            &descriptor,
+            Some(&reservation),
+            CapabilityInvocation { input: json!({}) },
+            Arc::new(http),
+        )
+        .unwrap();
+
+    assert_eq!(result.output, json!({"ok": false}));
+    assert!(client.requests.lock().unwrap().is_empty());
+}
+
+#[test]
+fn network_policy_blocks_non_public_literal_ip_targets_before_client_call() {
+    let client = RecordingHttpClient::new(WasmHttpResponse {
+        status: 200,
+        body: r#"{"ok":true}"#.to_string(),
+    });
+    let http = WasmPolicyHttpClient::new(
+        client.clone(),
+        NetworkPolicy {
+            allowed_targets: vec![
+                NetworkTargetPattern::new(Some(NetworkScheme::Http), "100.64.0.1", None).unwrap(),
+            ],
+            deny_private_ip_ranges: true,
+            max_egress_bytes: Some(1024),
+        },
+    );
+    let runtime = WasmRuntime::for_testing().unwrap();
+    let module = runtime
+        .prepare(http_spec("http://100.64.0.1/admin"))
         .unwrap();
     let descriptor = make_descriptor("net-demo", "net-demo.http", RuntimeKind::Wasm);
     let reservation = sample_active_reservation();

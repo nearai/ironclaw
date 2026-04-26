@@ -7,7 +7,9 @@ use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::*;
-use ironclaw_host_runtime::{BuiltinObligationHandler, HostRuntimeServices};
+use ironclaw_host_runtime::{
+    BuiltinObligationHandler, HostRuntimeServices, NetworkObligationPolicyStore,
+};
 use ironclaw_processes::{
     ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor,
     ProcessServices,
@@ -57,8 +59,9 @@ async fn builtin_obligation_handler_emits_metadata_only_audit_before() {
 }
 
 #[tokio::test]
-async fn builtin_obligation_handler_accepts_metadata_only_network_policy() {
-    let handler = BuiltinObligationHandler::new();
+async fn builtin_obligation_handler_stores_network_policy_for_runtime_handoff() {
+    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
+    let handler = BuiltinObligationHandler::new().with_network_policy_store(policy_store.clone());
     let context = execution_context(CapabilitySet::default());
     let capability_id = CapabilityId::new("echo.say").unwrap();
     let estimate = ResourceEstimate::default();
@@ -76,6 +79,42 @@ async fn builtin_obligation_handler_accepts_metadata_only_network_policy() {
         })
         .await
         .unwrap();
+
+    assert!(
+        policy_store
+            .take(&context.resource_scope, &capability_id)
+            .is_some(),
+        "accepted network obligations must be handed to runtime adapters"
+    );
+}
+
+#[tokio::test]
+async fn builtin_obligation_handler_fails_closed_without_network_policy_store() {
+    let handler = BuiltinObligationHandler::new();
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = CapabilityId::new("echo.say").unwrap();
+    let estimate = ResourceEstimate::default();
+    let obligations = vec![Obligation::ApplyNetworkPolicy {
+        policy: allowed_network_policy(),
+    }];
+
+    let err = handler
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityObligationError::Failed {
+            kind: CapabilityObligationFailureKind::Network
+        }
+    ));
 }
 
 #[tokio::test]

@@ -25,4 +25,6 @@ ironclaw_wasm = { path = "../ironclaw_wasm" }
 
 [dev-dependencies]
 serde_json = "1"
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "time"] }
+wat = "1"
