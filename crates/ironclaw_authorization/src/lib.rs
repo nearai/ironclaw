@@ -10,6 +10,7 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 
+use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
@@ -21,15 +22,16 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Authorizes a capability dispatch request against an execution context.
+#[async_trait]
 pub trait CapabilityDispatchAuthorizer: Send + Sync {
-    fn authorize_dispatch(
+    async fn authorize_dispatch(
         &self,
         context: &ExecutionContext,
         descriptor: &CapabilityDescriptor,
         estimate: &ResourceEstimate,
     ) -> Decision;
 
-    fn authorize_spawn(
+    async fn authorize_spawn(
         &self,
         _context: &ExecutionContext,
         _descriptor: &CapabilityDescriptor,
@@ -51,8 +53,9 @@ impl GrantAuthorizer {
     }
 }
 
+#[async_trait]
 impl CapabilityDispatchAuthorizer for GrantAuthorizer {
-    fn authorize_dispatch(
+    async fn authorize_dispatch(
         &self,
         context: &ExecutionContext,
         descriptor: &CapabilityDescriptor,
@@ -61,7 +64,7 @@ impl CapabilityDispatchAuthorizer for GrantAuthorizer {
         authorize_from_grants(context, descriptor, context.grants.grants.iter())
     }
 
-    fn authorize_spawn(
+    async fn authorize_spawn(
         &self,
         context: &ExecutionContext,
         descriptor: &CapabilityDescriptor,
@@ -123,29 +126,35 @@ pub enum CapabilityLeaseError {
 }
 
 /// Store of active/revoked capability leases.
+#[async_trait]
 pub trait CapabilityLeaseStore: Send + Sync {
-    fn issue(&self, lease: CapabilityLease) -> Result<CapabilityLease, CapabilityLeaseError>;
-    fn revoke(
+    async fn issue(&self, lease: CapabilityLease) -> Result<CapabilityLease, CapabilityLeaseError>;
+    async fn revoke(
         &self,
         scope: &ResourceScope,
         lease_id: CapabilityGrantId,
     ) -> Result<CapabilityLease, CapabilityLeaseError>;
-    fn get(&self, scope: &ResourceScope, lease_id: CapabilityGrantId) -> Option<CapabilityLease>;
-    fn claim(
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Option<CapabilityLease>;
+    async fn claim(
         &self,
         scope: &ResourceScope,
         lease_id: CapabilityGrantId,
         invocation_fingerprint: &InvocationFingerprint,
     ) -> Result<CapabilityLease, CapabilityLeaseError>;
-    fn consume(
+    async fn consume(
         &self,
         scope: &ResourceScope,
         lease_id: CapabilityGrantId,
     ) -> Result<CapabilityLease, CapabilityLeaseError>;
-    fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease>;
-    fn active_leases_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityLease>;
-    fn active_grants_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityGrant> {
+    async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease>;
+    async fn active_leases_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityLease>;
+    async fn active_grants_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityGrant> {
         self.active_leases_for_context(context)
+            .await
             .into_iter()
             .filter(|lease| lease.invocation_fingerprint.is_none())
             .map(|lease| lease.grant)
@@ -171,8 +180,9 @@ impl InMemoryCapabilityLeaseStore {
     }
 }
 
+#[async_trait]
 impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
-    fn issue(&self, lease: CapabilityLease) -> Result<CapabilityLease, CapabilityLeaseError> {
+    async fn issue(&self, lease: CapabilityLease) -> Result<CapabilityLease, CapabilityLeaseError> {
         self.leases_guard().insert(
             CapabilityLeaseKey::new(&lease.scope, lease.grant.id),
             lease.clone(),
@@ -180,7 +190,7 @@ impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
         Ok(lease)
     }
 
-    fn revoke(
+    async fn revoke(
         &self,
         scope: &ResourceScope,
         lease_id: CapabilityGrantId,
@@ -193,13 +203,17 @@ impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
         Ok(lease.clone())
     }
 
-    fn get(&self, scope: &ResourceScope, lease_id: CapabilityGrantId) -> Option<CapabilityLease> {
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Option<CapabilityLease> {
         self.leases_guard()
             .get(&CapabilityLeaseKey::new(scope, lease_id))
             .cloned()
     }
 
-    fn claim(
+    async fn claim(
         &self,
         scope: &ResourceScope,
         lease_id: CapabilityGrantId,
@@ -215,7 +229,7 @@ impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
         Ok(lease.clone())
     }
 
-    fn consume(
+    async fn consume(
         &self,
         scope: &ResourceScope,
         lease_id: CapabilityGrantId,
@@ -240,7 +254,7 @@ impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
         Ok(lease.clone())
     }
 
-    fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease> {
+    async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease> {
         let mut leases = self
             .leases_guard()
             .values()
@@ -251,8 +265,9 @@ impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
         leases
     }
 
-    fn active_leases_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityLease> {
+    async fn active_leases_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityLease> {
         self.leases_for_scope(&context.resource_scope)
+            .await
             .into_iter()
             .filter(|lease| lease_is_authorizing(lease, context))
             .collect()
@@ -265,7 +280,7 @@ where
     F: RootFilesystem,
 {
     filesystem: &'a F,
-    lock: Mutex<()>,
+    lock: tokio::sync::Mutex<()>,
 }
 
 impl<'a, F> FilesystemCapabilityLeaseStore<'a, F>
@@ -275,17 +290,17 @@ where
     pub fn new(filesystem: &'a F) -> Self {
         Self {
             filesystem,
-            lock: Mutex::new(()),
+            lock: tokio::sync::Mutex::new(()),
         }
     }
 
-    fn read_lease(
+    async fn read_lease(
         &self,
         scope: &ResourceScope,
         lease_id: CapabilityGrantId,
     ) -> Result<Option<CapabilityLease>, CapabilityLeaseError> {
         let path = lease_path(scope, lease_id)?;
-        let bytes = match futures::executor::block_on(self.filesystem.read_file(&path)) {
+        let bytes = match self.filesystem.read_file(&path).await {
             Ok(bytes) => bytes,
             Err(error) if is_not_found(&error) => return Ok(None),
             Err(error) => return Err(lease_persistence_error(error)),
@@ -293,19 +308,21 @@ where
         deserialize(&bytes).map(Some)
     }
 
-    fn write_lease(&self, lease: &CapabilityLease) -> Result<(), CapabilityLeaseError> {
+    async fn write_lease(&self, lease: &CapabilityLease) -> Result<(), CapabilityLeaseError> {
         let path = lease_path(&lease.scope, lease.grant.id)?;
         let bytes = serialize_pretty(lease)?;
-        futures::executor::block_on(self.filesystem.write_file(&path, &bytes))
+        self.filesystem
+            .write_file(&path, &bytes)
+            .await
             .map_err(lease_persistence_error)
     }
 
-    fn list_invocation_roots(
+    async fn list_invocation_roots(
         &self,
         scope: &ResourceScope,
     ) -> Result<Vec<VirtualPath>, CapabilityLeaseError> {
         let root = lease_tenant_user_root(scope)?;
-        let entries = match futures::executor::block_on(self.filesystem.list_dir(&root)) {
+        let entries = match self.filesystem.list_dir(&root).await {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(lease_persistence_error(error)),
@@ -317,11 +334,11 @@ where
             .collect())
     }
 
-    fn list_lease_files(
+    async fn list_lease_files(
         &self,
         root: &VirtualPath,
     ) -> Result<Vec<VirtualPath>, CapabilityLeaseError> {
-        let entries = match futures::executor::block_on(self.filesystem.list_dir(root)) {
+        let entries = match self.filesystem.list_dir(root).await {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(lease_persistence_error(error)),
@@ -333,77 +350,79 @@ where
             .collect())
     }
 
-    fn read_lease_file(&self, path: &VirtualPath) -> Result<CapabilityLease, CapabilityLeaseError> {
-        let bytes = futures::executor::block_on(self.filesystem.read_file(path))
+    async fn read_lease_file(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let bytes = self
+            .filesystem
+            .read_file(path)
+            .await
             .map_err(lease_persistence_error)?;
         deserialize(&bytes)
     }
 }
 
+#[async_trait]
 impl<F> CapabilityLeaseStore for FilesystemCapabilityLeaseStore<'_, F>
 where
     F: RootFilesystem,
 {
-    fn issue(&self, lease: CapabilityLease) -> Result<CapabilityLease, CapabilityLeaseError> {
-        let _guard = self
-            .lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.write_lease(&lease)?;
+    async fn issue(&self, lease: CapabilityLease) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let _guard = self.lock.lock().await;
+        self.write_lease(&lease).await?;
         Ok(lease)
     }
 
-    fn revoke(
+    async fn revoke(
         &self,
         scope: &ResourceScope,
         lease_id: CapabilityGrantId,
     ) -> Result<CapabilityLease, CapabilityLeaseError> {
-        let _guard = self
-            .lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = self.lock.lock().await;
         let mut lease = self
-            .read_lease(scope, lease_id)?
+            .read_lease(scope, lease_id)
+            .await?
             .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
         lease.status = CapabilityLeaseStatus::Revoked;
-        self.write_lease(&lease)?;
+        self.write_lease(&lease).await?;
         Ok(lease)
     }
 
-    fn get(&self, scope: &ResourceScope, lease_id: CapabilityGrantId) -> Option<CapabilityLease> {
-        self.read_lease(scope, lease_id).ok().flatten()
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Option<CapabilityLease> {
+        self.read_lease(scope, lease_id).await.ok().flatten()
     }
 
-    fn claim(
+    async fn claim(
         &self,
         scope: &ResourceScope,
         lease_id: CapabilityGrantId,
         invocation_fingerprint: &InvocationFingerprint,
     ) -> Result<CapabilityLease, CapabilityLeaseError> {
-        let _guard = self
-            .lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = self.lock.lock().await;
         let mut lease = self
-            .read_lease(scope, lease_id)?
+            .read_lease(scope, lease_id)
+            .await?
             .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
         ensure_claimable(&lease, invocation_fingerprint)?;
         lease.status = CapabilityLeaseStatus::Claimed;
-        self.write_lease(&lease)?;
+        self.write_lease(&lease).await?;
         Ok(lease)
     }
 
-    fn consume(
+    async fn consume(
         &self,
         scope: &ResourceScope,
         lease_id: CapabilityGrantId,
     ) -> Result<CapabilityLease, CapabilityLeaseError> {
-        let _guard = self
-            .lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = self.lock.lock().await;
         let mut lease = self
-            .read_lease(scope, lease_id)?
+            .read_lease(scope, lease_id)
+            .await?
             .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
         let was_claimed = lease.status == CapabilityLeaseStatus::Claimed;
         ensure_consumable(&lease)?;
@@ -417,27 +436,36 @@ where
         } else if was_claimed {
             lease.status = CapabilityLeaseStatus::Active;
         }
-        self.write_lease(&lease)?;
+        self.write_lease(&lease).await?;
         Ok(lease)
     }
 
-    fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease> {
-        let Ok(roots) = self.list_invocation_roots(scope) else {
+    async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease> {
+        let Ok(roots) = self.list_invocation_roots(scope).await else {
             return Vec::new();
         };
-        let mut leases = roots
+        let mut leases = Vec::new();
+        for root in roots {
+            let Ok(files) = self.list_lease_files(&root).await else {
+                continue;
+            };
+            for path in files {
+                if let Ok(lease) = self.read_lease_file(&path).await {
+                    leases.push(lease);
+                }
+            }
+        }
+        let mut leases = leases
             .into_iter()
-            .filter_map(|root| self.list_lease_files(&root).ok())
-            .flatten()
-            .filter_map(|path| self.read_lease_file(&path).ok())
             .filter(|lease| same_tenant_user(&lease.scope, scope))
             .collect::<Vec<_>>();
         leases.sort_by_key(|lease| lease.grant.id.as_uuid());
         leases
     }
 
-    fn active_leases_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityLease> {
+    async fn active_leases_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityLease> {
         self.leases_for_scope(&context.resource_scope)
+            .await
             .into_iter()
             .filter(|lease| lease_is_authorizing(lease, context))
             .collect()
@@ -480,11 +508,12 @@ where
     }
 }
 
+#[async_trait]
 impl<S> CapabilityDispatchAuthorizer for LeaseBackedAuthorizer<'_, S>
 where
     S: CapabilityLeaseStore + ?Sized,
 {
-    fn authorize_dispatch(
+    async fn authorize_dispatch(
         &self,
         context: &ExecutionContext,
         descriptor: &CapabilityDescriptor,
@@ -496,7 +525,7 @@ where
             };
         }
 
-        let lease_grants = self.leases.active_grants_for_context(context);
+        let lease_grants = self.leases.active_grants_for_context(context).await;
         authorize_from_grants(
             context,
             descriptor,
@@ -504,7 +533,7 @@ where
         )
     }
 
-    fn authorize_spawn(
+    async fn authorize_spawn(
         &self,
         context: &ExecutionContext,
         descriptor: &CapabilityDescriptor,
@@ -516,7 +545,7 @@ where
             };
         }
 
-        let lease_grants = self.leases.active_grants_for_context(context);
+        let lease_grants = self.leases.active_grants_for_context(context).await;
         authorize_from_grants(
             context,
             &spawn_descriptor(descriptor),

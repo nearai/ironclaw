@@ -342,6 +342,7 @@ where
         match self
             .authorizer
             .authorize_dispatch(&request.context, descriptor, &request.estimate)
+            .await
         {
             Decision::Allow { .. } => {}
             Decision::Deny { reason } => {
@@ -486,6 +487,7 @@ where
         match self
             .authorizer
             .authorize_spawn(&request.context, descriptor, &request.estimate)
+            .await
         {
             Decision::Allow { .. } => {}
             Decision::Deny { reason } => {
@@ -666,20 +668,24 @@ where
             &request.context,
             &request.capability_id,
             &invocation_fingerprint,
-        ) else {
+        )
+        .await
+        else {
             fail_run(run_state, &scope, invocation_id, "ApprovalLeaseMissing").await?;
             return Err(CapabilityInvocationError::ApprovalLeaseMissing {
                 capability: request.capability_id,
             });
         };
-        let claimed_lease =
-            match capability_leases.claim(&scope, lease.grant.id, &invocation_fingerprint) {
-                Ok(lease) => lease,
-                Err(error) => {
-                    fail_run(run_state, &scope, invocation_id, "ApprovalLeaseClaim").await?;
-                    return Err(CapabilityInvocationError::Lease(Box::new(error)));
-                }
-            };
+        let claimed_lease = match capability_leases
+            .claim(&scope, lease.grant.id, &invocation_fingerprint)
+            .await
+        {
+            Ok(lease) => lease,
+            Err(error) => {
+                fail_run(run_state, &scope, invocation_id, "ApprovalLeaseClaim").await?;
+                return Err(CapabilityInvocationError::Lease(Box::new(error)));
+            }
+        };
         let mut authorized_context = request.context.clone();
         authorized_context
             .grants
@@ -689,6 +695,7 @@ where
         match self
             .authorizer
             .authorize_dispatch(&authorized_context, descriptor, &request.estimate)
+            .await
         {
             Decision::Allow { .. } => {}
             Decision::Deny { reason } => {
@@ -729,7 +736,10 @@ where
             }
         };
 
-        if let Err(error) = capability_leases.consume(&scope, claimed_lease.grant.id) {
+        if let Err(error) = capability_leases
+            .consume(&scope, claimed_lease.grant.id)
+            .await
+        {
             fail_run(run_state, &scope, invocation_id, "LeaseConsumption").await?;
             return Err(CapabilityInvocationError::Lease(Box::new(error)));
         }
@@ -747,6 +757,7 @@ fn matching_approval_lease(
 ) -> Option<CapabilityLease> {
     capability_leases
         .active_leases_for_context(context)
+        .await
         .into_iter()
         .find(|lease| {
             lease.scope == context.resource_scope

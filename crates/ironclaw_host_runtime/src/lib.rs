@@ -6,10 +6,11 @@
 
 use std::sync::Arc;
 
+use ironclaw_approvals::ApprovalResolver;
 use ironclaw_authorization::{CapabilityDispatchAuthorizer, CapabilityLeaseStore};
 use ironclaw_capabilities::{CapabilityHost, DispatchProcessExecutor};
 use ironclaw_dispatcher::RuntimeDispatcher;
-use ironclaw_events::EventSink;
+use ironclaw_events::{AuditSink, EventSink};
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::CapabilityDispatcher;
@@ -53,6 +54,7 @@ where
     script_runtime: Option<Arc<dyn ScriptExecutor>>,
     mcp_runtime: Option<Arc<dyn McpExecutor>>,
     event_sink: Option<Arc<dyn EventSink>>,
+    audit_sink: Option<Arc<dyn AuditSink>>,
 }
 
 impl<F, G, S, R, A> HostRuntimeServices<F, G, S, R, A>
@@ -83,6 +85,7 @@ where
             script_runtime: None,
             mcp_runtime: None,
             event_sink: None,
+            audit_sink: None,
         }
     }
 
@@ -164,6 +167,27 @@ where
         let sink: Arc<dyn EventSink> = sink;
         self.event_sink = Some(sink);
         self
+    }
+
+    pub fn with_audit_sink<T>(mut self, sink: Arc<T>) -> Self
+    where
+        T: AuditSink + 'static,
+    {
+        let sink: Arc<dyn AuditSink> = sink;
+        self.audit_sink = Some(sink);
+        self
+    }
+
+    pub fn approval_resolver(
+        &self,
+    ) -> Option<ApprovalResolver<'_, dyn ApprovalRequestStore, dyn CapabilityLeaseStore>> {
+        let approval_requests = self.approval_requests.as_deref()?;
+        let capability_leases = self.capability_leases.as_deref()?;
+        let mut resolver = ApprovalResolver::new(approval_requests, capability_leases);
+        if let Some(audit_sink) = &self.audit_sink {
+            resolver = resolver.with_audit_sink(audit_sink.as_ref());
+        }
+        Some(resolver)
     }
 
     pub fn runtime_dispatcher(&self) -> RuntimeDispatcher<'static, F, G> {

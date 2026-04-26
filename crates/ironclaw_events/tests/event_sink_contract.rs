@@ -1,7 +1,13 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
+use async_trait::async_trait;
 use ironclaw_events::*;
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+use ironclaw_filesystem::{
+    DirEntry, FileStat, FilesystemError, FilesystemOperation, LocalFilesystem, RootFilesystem,
+};
 use ironclaw_host_api::*;
 
 #[tokio::test]
@@ -86,6 +92,61 @@ async fn process_lifecycle_events_carry_process_identity_and_scope() {
 }
 
 #[tokio::test]
+async fn jsonl_event_sink_does_not_overwrite_when_existing_log_read_fails() {
+    let fs = Arc::new(ReadFailFilesystem::new());
+    let path = scoped_runtime_event_log_path(&sample_scope(), "reborn-demo.jsonl").unwrap();
+    let sink = JsonlEventSink::new(Arc::clone(&fs), path);
+
+    let err = sink
+        .emit(RuntimeEvent::dispatch_requested(
+            sample_scope(),
+            CapabilityId::new("echo.say").unwrap(),
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, EventError::Filesystem(_)));
+    assert_eq!(fs.write_count(), 0);
+}
+
+#[tokio::test]
+async fn jsonl_audit_sink_does_not_overwrite_when_existing_log_read_fails() {
+    let fs = Arc::new(ReadFailFilesystem::new());
+    let path = scoped_audit_log_path(&sample_scope(), "approval-audit.jsonl").unwrap();
+    let sink = JsonlAuditSink::new(Arc::clone(&fs), path);
+
+    let err = sink
+        .emit_audit(sample_approval_audit_envelope())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, EventError::Filesystem(_)));
+    assert_eq!(fs.write_count(), 0);
+}
+
+#[test]
+fn scoped_jsonl_paths_are_tenant_user_scoped_and_reject_traversal() {
+    let scope = sample_scope();
+
+    assert_eq!(
+        scoped_runtime_event_log_path(&scope, "reborn-demo.jsonl")
+            .unwrap()
+            .as_str(),
+        "/engine/tenants/tenant1/users/user1/events/runtime/reborn-demo.jsonl"
+    );
+    assert_eq!(
+        scoped_audit_log_path(&scope, "approval-audit.jsonl")
+            .unwrap()
+            .as_str(),
+        "/engine/tenants/tenant1/users/user1/events/audit/approval-audit.jsonl"
+    );
+    assert!(matches!(
+        scoped_audit_log_path(&scope, "../approval-audit.jsonl"),
+        Err(EventError::InvalidPath { .. })
+    ));
+}
+
+#[tokio::test]
 async fn jsonl_event_sink_persists_redacted_runtime_events_without_host_paths() {
     let storage = tempfile::tempdir().unwrap().keep();
     let mut fs = LocalFilesystem::new();
@@ -94,11 +155,12 @@ async fn jsonl_event_sink_persists_redacted_runtime_events_without_host_paths() 
         HostPath::from_path_buf(storage.clone()),
     )
     .unwrap();
-    let path = VirtualPath::new("/engine/events/reborn-demo.jsonl").unwrap();
+    let scope = sample_scope();
+    let path = scoped_runtime_event_log_path(&scope, "reborn-demo.jsonl").unwrap();
     let sink = JsonlEventSink::new(Arc::new(fs), path.clone());
 
     sink.emit(RuntimeEvent::dispatch_failed(
-        sample_scope(),
+        scope,
         CapabilityId::new("echo-script.say").unwrap(),
         Some(ExtensionId::new("echo-script").unwrap()),
         Some(RuntimeKind::Script),
@@ -120,6 +182,78 @@ async fn jsonl_event_sink_persists_redacted_runtime_events_without_host_paths() 
         events[0].error_kind.as_ref().map(|kind| kind.as_str()),
         Some("MissingRuntimeBackend")
     );
+}
+
+fn sample_approval_audit_envelope() -> AuditEnvelope {
+    let scope = sample_scope();
+    let capability = CapabilityId::new("echo.say").unwrap();
+    let request = ApprovalRequest {
+        id: ApprovalRequestId::new(),
+        correlation_id: CorrelationId::new(),
+        requested_by: Principal::Extension(ExtensionId::new("echo").unwrap()),
+        action: Box::new(Action::Dispatch {
+            capability,
+            estimated_resources: ResourceEstimate::default(),
+        }),
+        invocation_fingerprint: None,
+        reason: "redacted".to_string(),
+        reusable_scope: None,
+    };
+    AuditEnvelope::approval_resolved(
+        &scope,
+        &request,
+        Principal::User(scope.user_id.clone()),
+        "approved",
+    )
+}
+
+#[derive(Debug)]
+struct ReadFailFilesystem {
+    writes: AtomicUsize,
+}
+
+impl ReadFailFilesystem {
+    fn new() -> Self {
+        Self {
+            writes: AtomicUsize::new(0),
+        }
+    }
+
+    fn write_count(&self) -> usize {
+        self.writes.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for ReadFailFilesystem {
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        Err(FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::ReadFile,
+            reason: "permission denied".to_string(),
+        })
+    }
+
+    async fn write_file(&self, _path: &VirtualPath, _bytes: &[u8]) -> Result<(), FilesystemError> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        Err(FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::ListDir,
+            reason: "permission denied".to_string(),
+        })
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        Err(FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::Stat,
+            reason: "permission denied".to_string(),
+        })
+    }
 }
 
 fn sample_scope() -> ResourceScope {

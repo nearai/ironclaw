@@ -2,15 +2,13 @@ use ironclaw_authorization::*;
 use ironclaw_host_api::*;
 use serde_json::json;
 
-#[test]
-fn capability_access_denies_without_matching_grant() {
+#[tokio::test]
+async fn capability_access_denies_without_matching_grant() {
     let context = execution_context(CapabilitySet::default());
     let descriptor = wasm_descriptor();
-    let decision = GrantAuthorizer::new().authorize_dispatch(
-        &context,
-        &descriptor,
-        &ResourceEstimate::default(),
-    );
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch(&context, &descriptor, &ResourceEstimate::default())
+        .await;
 
     assert_eq!(
         decision,
@@ -20,8 +18,8 @@ fn capability_access_denies_without_matching_grant() {
     );
 }
 
-#[test]
-fn capability_access_allows_matching_extension_grant() {
+#[tokio::test]
+async fn capability_access_allows_matching_extension_grant() {
     let descriptor = wasm_descriptor();
     let grant = grant_for(
         descriptor.id.clone(),
@@ -32,14 +30,16 @@ fn capability_access_allows_matching_extension_grant() {
         grants: vec![grant],
     });
 
-    let decision = GrantAuthorizer::new().authorize_dispatch(
-        &context,
-        &descriptor,
-        &ResourceEstimate {
-            concurrency_slots: Some(1),
-            ..ResourceEstimate::default()
-        },
-    );
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch(
+            &context,
+            &descriptor,
+            &ResourceEstimate {
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+        )
+        .await;
 
     assert_eq!(
         decision,
@@ -49,8 +49,8 @@ fn capability_access_allows_matching_extension_grant() {
     );
 }
 
-#[test]
-fn capability_access_denies_when_grant_is_for_different_principal_or_capability() {
+#[tokio::test]
+async fn capability_access_denies_when_grant_is_for_different_principal_or_capability() {
     let descriptor = wasm_descriptor();
     let wrong_principal = grant_for(
         descriptor.id.clone(),
@@ -65,33 +65,37 @@ fn capability_access_denies_when_grant_is_for_different_principal_or_capability(
     let authorizer = GrantAuthorizer::new();
 
     assert_eq!(
-        authorizer.authorize_dispatch(
-            &execution_context(CapabilitySet {
-                grants: vec![wrong_principal]
-            }),
-            &descriptor,
-            &ResourceEstimate::default(),
-        ),
+        authorizer
+            .authorize_dispatch(
+                &execution_context(CapabilitySet {
+                    grants: vec![wrong_principal]
+                }),
+                &descriptor,
+                &ResourceEstimate::default(),
+            )
+            .await,
         Decision::Deny {
             reason: DenyReason::MissingGrant
         }
     );
     assert_eq!(
-        authorizer.authorize_dispatch(
-            &execution_context(CapabilitySet {
-                grants: vec![wrong_capability]
-            }),
-            &descriptor,
-            &ResourceEstimate::default(),
-        ),
+        authorizer
+            .authorize_dispatch(
+                &execution_context(CapabilitySet {
+                    grants: vec![wrong_capability]
+                }),
+                &descriptor,
+                &ResourceEstimate::default(),
+            )
+            .await,
         Decision::Deny {
             reason: DenyReason::MissingGrant
         }
     );
 }
 
-#[test]
-fn capability_access_denies_when_grant_does_not_cover_declared_effects() {
+#[tokio::test]
+async fn capability_access_denies_when_grant_does_not_cover_declared_effects() {
     let descriptor = CapabilityDescriptor {
         effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
         ..wasm_descriptor()
@@ -105,11 +109,9 @@ fn capability_access_denies_when_grant_does_not_cover_declared_effects() {
         grants: vec![grant],
     });
 
-    let decision = GrantAuthorizer::new().authorize_dispatch(
-        &context,
-        &descriptor,
-        &ResourceEstimate::default(),
-    );
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch(&context, &descriptor, &ResourceEstimate::default())
+        .await;
 
     assert_eq!(
         decision,
@@ -119,8 +121,8 @@ fn capability_access_denies_when_grant_does_not_cover_declared_effects() {
     );
 }
 
-#[test]
-fn spawn_access_requires_spawn_process_effect_in_addition_to_capability_effects() {
+#[tokio::test]
+async fn spawn_access_requires_spawn_process_effect_in_addition_to_capability_effects() {
     let descriptor = wasm_descriptor();
     let dispatch_only = execution_context(CapabilitySet {
         grants: vec![grant_for(
@@ -139,21 +141,25 @@ fn spawn_access_requires_spawn_process_effect_in_addition_to_capability_effects(
     let authorizer = GrantAuthorizer::new();
 
     assert_eq!(
-        authorizer.authorize_spawn(&dispatch_only, &descriptor, &ResourceEstimate::default()),
+        authorizer
+            .authorize_spawn(&dispatch_only, &descriptor, &ResourceEstimate::default())
+            .await,
         Decision::Deny {
             reason: DenyReason::PolicyDenied
         }
     );
     assert_eq!(
-        authorizer.authorize_spawn(&spawn_grant, &descriptor, &ResourceEstimate::default()),
+        authorizer
+            .authorize_spawn(&spawn_grant, &descriptor, &ResourceEstimate::default())
+            .await,
         Decision::Allow {
             obligations: vec![]
         }
     );
 }
 
-#[test]
-fn capability_access_denies_invalid_execution_context() {
+#[tokio::test]
+async fn capability_access_denies_invalid_execution_context() {
     let grant = grant_for(
         CapabilityId::new("echo.say").unwrap(),
         Principal::Extension(ExtensionId::new("caller").unwrap()),
@@ -164,11 +170,9 @@ fn capability_access_denies_invalid_execution_context() {
     });
     context.resource_scope.tenant_id = TenantId::new("wrong-tenant").unwrap();
 
-    let decision = GrantAuthorizer::new().authorize_dispatch(
-        &context,
-        &wasm_descriptor(),
-        &ResourceEstimate::default(),
-    );
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch(&context, &wasm_descriptor(), &ResourceEstimate::default())
+        .await;
 
     assert_eq!(
         decision,

@@ -2,8 +2,8 @@ use ironclaw_authorization::*;
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::*;
 
-#[test]
-fn lease_authorizer_allows_matching_active_lease_without_context_grant() {
+#[tokio::test]
+async fn lease_authorizer_allows_matching_active_lease_without_context_grant() {
     let leases = InMemoryCapabilityLeaseStore::new();
     let context = execution_context(CapabilitySet::default());
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
@@ -16,21 +16,25 @@ fn lease_authorizer_allows_matching_active_lease_without_context_grant() {
             vec![EffectKind::DispatchCapability],
         ),
     );
-    leases.issue(lease.clone()).unwrap();
+    leases.issue(lease.clone()).await.unwrap();
 
     let authorizer = LeaseBackedAuthorizer::new(&leases);
-    let decision =
-        authorizer.authorize_dispatch(&context, &descriptor, &ResourceEstimate::default());
+    let decision = authorizer
+        .authorize_dispatch(&context, &descriptor, &ResourceEstimate::default())
+        .await;
 
     assert!(matches!(decision, Decision::Allow { .. }));
     assert_eq!(
-        leases.get(&context.resource_scope, lease.grant.id).unwrap(),
+        leases
+            .get(&context.resource_scope, lease.grant.id)
+            .await
+            .unwrap(),
         lease
     );
 }
 
-#[test]
-fn fingerprinted_approval_lease_does_not_authorize_plain_dispatch() {
+#[tokio::test]
+async fn fingerprinted_approval_lease_does_not_authorize_plain_dispatch() {
     let leases = InMemoryCapabilityLeaseStore::new();
     let context = execution_context(CapabilitySet::default());
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
@@ -50,11 +54,12 @@ fn fingerprinted_approval_lease_does_not_authorize_plain_dispatch() {
         ),
     );
     lease.invocation_fingerprint = Some(fingerprint);
-    leases.issue(lease).unwrap();
+    leases.issue(lease).await.unwrap();
 
     let authorizer = LeaseBackedAuthorizer::new(&leases);
-    let decision =
-        authorizer.authorize_dispatch(&context, &descriptor, &ResourceEstimate::default());
+    let decision = authorizer
+        .authorize_dispatch(&context, &descriptor, &ResourceEstimate::default())
+        .await;
 
     assert!(matches!(
         decision,
@@ -64,8 +69,8 @@ fn fingerprinted_approval_lease_does_not_authorize_plain_dispatch() {
     ));
 }
 
-#[test]
-fn claim_marks_fingerprinted_lease_claimed_and_hides_it_from_authorizer() {
+#[tokio::test]
+async fn claim_marks_fingerprinted_lease_claimed_and_hides_it_from_authorizer() {
     let leases = InMemoryCapabilityLeaseStore::new();
     let context = execution_context(CapabilitySet::default());
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
@@ -86,16 +91,18 @@ fn claim_marks_fingerprinted_lease_claimed_and_hides_it_from_authorizer() {
     );
     lease.invocation_fingerprint = Some(fingerprint.clone());
     let lease_id = lease.grant.id;
-    leases.issue(lease).unwrap();
+    leases.issue(lease).await.unwrap();
 
     let claimed = leases
         .claim(&context.resource_scope, lease_id, &fingerprint)
+        .await
         .unwrap();
 
     assert_eq!(claimed.status, CapabilityLeaseStatus::Claimed);
     let authorizer = LeaseBackedAuthorizer::new(&leases);
-    let decision =
-        authorizer.authorize_dispatch(&context, &descriptor, &ResourceEstimate::default());
+    let decision = authorizer
+        .authorize_dispatch(&context, &descriptor, &ResourceEstimate::default())
+        .await;
     assert!(matches!(
         decision,
         Decision::Deny {
@@ -104,8 +111,8 @@ fn claim_marks_fingerprinted_lease_claimed_and_hides_it_from_authorizer() {
     ));
 }
 
-#[test]
-fn claim_rejects_fingerprint_mismatch_without_mutating_lease() {
+#[tokio::test]
+async fn claim_rejects_fingerprint_mismatch_without_mutating_lease() {
     let leases = InMemoryCapabilityLeaseStore::new();
     let context = execution_context(CapabilitySet::default());
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
@@ -133,10 +140,11 @@ fn claim_rejects_fingerprint_mismatch_without_mutating_lease() {
     );
     lease.invocation_fingerprint = Some(fingerprint);
     let lease_id = lease.grant.id;
-    leases.issue(lease).unwrap();
+    leases.issue(lease).await.unwrap();
 
     let err = leases
         .claim(&context.resource_scope, lease_id, &other_fingerprint)
+        .await
         .unwrap_err();
 
     assert!(matches!(
@@ -146,14 +154,15 @@ fn claim_rejects_fingerprint_mismatch_without_mutating_lease() {
     assert_eq!(
         leases
             .get(&context.resource_scope, lease_id)
+            .await
             .unwrap()
             .status,
         CapabilityLeaseStatus::Active
     );
 }
 
-#[test]
-fn lease_authorizer_hides_leases_across_tenant_scope() {
+#[tokio::test]
+async fn lease_authorizer_hides_leases_across_tenant_scope() {
     let leases = InMemoryCapabilityLeaseStore::new();
     let context = execution_context(CapabilitySet::default());
     let other_scope = ResourceScope {
@@ -175,11 +184,13 @@ fn lease_authorizer_hides_leases_across_tenant_scope() {
                 vec![EffectKind::DispatchCapability],
             ),
         ))
+        .await
         .unwrap();
 
     let authorizer = LeaseBackedAuthorizer::new(&leases);
-    let decision =
-        authorizer.authorize_dispatch(&context, &descriptor, &ResourceEstimate::default());
+    let decision = authorizer
+        .authorize_dispatch(&context, &descriptor, &ResourceEstimate::default())
+        .await;
 
     assert!(matches!(
         decision,
@@ -189,8 +200,8 @@ fn lease_authorizer_hides_leases_across_tenant_scope() {
     ));
 }
 
-#[test]
-fn revocation_is_scoped_to_tenant_and_user() {
+#[tokio::test]
+async fn revocation_is_scoped_to_tenant_and_user() {
     let leases = InMemoryCapabilityLeaseStore::new();
     let context = execution_context(CapabilitySet::default());
     let other_scope = ResourceScope {
@@ -211,9 +222,9 @@ fn revocation_is_scoped_to_tenant_and_user() {
         ),
     );
     let lease_id = lease.grant.id;
-    leases.issue(lease.clone()).unwrap();
+    leases.issue(lease.clone()).await.unwrap();
 
-    let err = leases.revoke(&other_scope, lease_id).unwrap_err();
+    let err = leases.revoke(&other_scope, lease_id).await.unwrap_err();
 
     assert!(matches!(
         err,
@@ -222,14 +233,15 @@ fn revocation_is_scoped_to_tenant_and_user() {
     assert_eq!(
         leases
             .get(&context.resource_scope, lease_id)
+            .await
             .unwrap()
             .status,
         CapabilityLeaseStatus::Active
     );
 }
 
-#[test]
-fn lease_authorizer_denies_invalid_context_before_grant_match() {
+#[tokio::test]
+async fn lease_authorizer_denies_invalid_context_before_grant_match() {
     let leases = InMemoryCapabilityLeaseStore::new();
     let mut context = execution_context(CapabilitySet::default());
     context.tenant_id = TenantId::new("tenant2").unwrap();
@@ -243,11 +255,13 @@ fn lease_authorizer_denies_invalid_context_before_grant_match() {
                 vec![EffectKind::DispatchCapability],
             ),
         ))
+        .await
         .unwrap();
 
     let authorizer = LeaseBackedAuthorizer::new(&leases);
-    let decision =
-        authorizer.authorize_dispatch(&context, &descriptor, &ResourceEstimate::default());
+    let decision = authorizer
+        .authorize_dispatch(&context, &descriptor, &ResourceEstimate::default())
+        .await;
 
     assert!(matches!(
         decision,
@@ -257,8 +271,8 @@ fn lease_authorizer_denies_invalid_context_before_grant_match() {
     ));
 }
 
-#[test]
-fn one_off_lease_does_not_authorize_different_invocation_in_same_tenant() {
+#[tokio::test]
+async fn one_off_lease_does_not_authorize_different_invocation_in_same_tenant() {
     let leases = InMemoryCapabilityLeaseStore::new();
     let context = execution_context(CapabilitySet::default());
     let mut next_invocation_context = execution_context(CapabilitySet::default());
@@ -277,14 +291,16 @@ fn one_off_lease_does_not_authorize_different_invocation_in_same_tenant() {
             vec![EffectKind::DispatchCapability],
         ),
     );
-    leases.issue(lease).unwrap();
+    leases.issue(lease).await.unwrap();
 
     let authorizer = LeaseBackedAuthorizer::new(&leases);
-    let decision = authorizer.authorize_dispatch(
-        &next_invocation_context,
-        &descriptor,
-        &ResourceEstimate::default(),
-    );
+    let decision = authorizer
+        .authorize_dispatch(
+            &next_invocation_context,
+            &descriptor,
+            &ResourceEstimate::default(),
+        )
+        .await;
 
     assert!(matches!(
         decision,
@@ -294,8 +310,8 @@ fn one_off_lease_does_not_authorize_different_invocation_in_same_tenant() {
     ));
 }
 
-#[test]
-fn consume_decrements_remaining_invocations_and_consumes_one_shot_lease() {
+#[tokio::test]
+async fn consume_decrements_remaining_invocations_and_consumes_one_shot_lease() {
     let leases = InMemoryCapabilityLeaseStore::new();
     let context = execution_context(CapabilitySet::default());
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
@@ -307,25 +323,31 @@ fn consume_decrements_remaining_invocations_and_consumes_one_shot_lease() {
     grant.constraints.max_invocations = Some(2);
     let lease = CapabilityLease::new(context.resource_scope.clone(), grant);
     let lease_id = lease.grant.id;
-    leases.issue(lease).unwrap();
+    leases.issue(lease).await.unwrap();
 
-    let after_first = leases.consume(&context.resource_scope, lease_id).unwrap();
+    let after_first = leases
+        .consume(&context.resource_scope, lease_id)
+        .await
+        .unwrap();
 
     assert_eq!(after_first.status, CapabilityLeaseStatus::Active);
     assert_eq!(after_first.grant.constraints.max_invocations, Some(1));
 
-    let after_second = leases.consume(&context.resource_scope, lease_id).unwrap();
+    let after_second = leases
+        .consume(&context.resource_scope, lease_id)
+        .await
+        .unwrap();
 
     assert_eq!(after_second.status, CapabilityLeaseStatus::Consumed);
     assert_eq!(after_second.grant.constraints.max_invocations, Some(0));
     assert!(matches!(
-        leases.consume(&context.resource_scope, lease_id).unwrap_err(),
+        leases.consume(&context.resource_scope, lease_id).await.unwrap_err(),
         CapabilityLeaseError::ExhaustedLease { lease_id: id } if id == lease_id
     ));
 }
 
-#[test]
-fn consumed_lease_no_longer_authorizes_dispatch() {
+#[tokio::test]
+async fn consumed_lease_no_longer_authorizes_dispatch() {
     let leases = InMemoryCapabilityLeaseStore::new();
     let context = execution_context(CapabilitySet::default());
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
@@ -337,12 +359,16 @@ fn consumed_lease_no_longer_authorizes_dispatch() {
     grant.constraints.max_invocations = Some(1);
     let lease = CapabilityLease::new(context.resource_scope.clone(), grant);
     let lease_id = lease.grant.id;
-    leases.issue(lease).unwrap();
-    leases.consume(&context.resource_scope, lease_id).unwrap();
+    leases.issue(lease).await.unwrap();
+    leases
+        .consume(&context.resource_scope, lease_id)
+        .await
+        .unwrap();
 
     let authorizer = LeaseBackedAuthorizer::new(&leases);
-    let decision =
-        authorizer.authorize_dispatch(&context, &descriptor, &ResourceEstimate::default());
+    let decision = authorizer
+        .authorize_dispatch(&context, &descriptor, &ResourceEstimate::default())
+        .await;
 
     assert!(matches!(
         decision,
@@ -352,8 +378,8 @@ fn consumed_lease_no_longer_authorizes_dispatch() {
     ));
 }
 
-#[test]
-fn expired_lease_no_longer_authorizes_or_consumes() {
+#[tokio::test]
+async fn expired_lease_no_longer_authorizes_or_consumes() {
     let leases = InMemoryCapabilityLeaseStore::new();
     let context = execution_context(CapabilitySet::default());
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
@@ -365,11 +391,12 @@ fn expired_lease_no_longer_authorizes_or_consumes() {
     grant.constraints.expires_at = Some(timestamp("2000-01-01T00:00:00Z"));
     let lease = CapabilityLease::new(context.resource_scope.clone(), grant);
     let lease_id = lease.grant.id;
-    leases.issue(lease).unwrap();
+    leases.issue(lease).await.unwrap();
 
     let authorizer = LeaseBackedAuthorizer::new(&leases);
-    let decision =
-        authorizer.authorize_dispatch(&context, &descriptor, &ResourceEstimate::default());
+    let decision = authorizer
+        .authorize_dispatch(&context, &descriptor, &ResourceEstimate::default())
+        .await;
 
     assert!(matches!(
         decision,
@@ -378,13 +405,13 @@ fn expired_lease_no_longer_authorizes_or_consumes() {
         }
     ));
     assert!(matches!(
-        leases.consume(&context.resource_scope, lease_id).unwrap_err(),
+        leases.consume(&context.resource_scope, lease_id).await.unwrap_err(),
         CapabilityLeaseError::ExpiredLease { lease_id: id } if id == lease_id
     ));
 }
 
-#[test]
-fn consume_is_scoped_to_exact_invocation() {
+#[tokio::test]
+async fn consume_is_scoped_to_exact_invocation() {
     let leases = InMemoryCapabilityLeaseStore::new();
     let context = execution_context(CapabilitySet::default());
     let mut next_invocation_scope = execution_context(CapabilitySet::default()).resource_scope;
@@ -400,10 +427,11 @@ fn consume_is_scoped_to_exact_invocation() {
     grant.constraints.max_invocations = Some(1);
     let lease = CapabilityLease::new(context.resource_scope.clone(), grant);
     let lease_id = lease.grant.id;
-    leases.issue(lease.clone()).unwrap();
+    leases.issue(lease.clone()).await.unwrap();
 
     let err = leases
         .consume(&next_invocation_scope, lease_id)
+        .await
         .unwrap_err();
 
     assert!(matches!(
@@ -413,14 +441,15 @@ fn consume_is_scoped_to_exact_invocation() {
     assert_eq!(
         leases
             .get(&context.resource_scope, lease_id)
+            .await
             .unwrap()
             .status,
         CapabilityLeaseStatus::Active
     );
 }
 
-#[test]
-fn filesystem_lease_store_persists_and_reloads_issued_leases() {
+#[tokio::test]
+async fn filesystem_lease_store_persists_and_reloads_issued_leases() {
     let fs = engine_filesystem();
     let context = execution_context(CapabilitySet::default());
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
@@ -435,18 +464,27 @@ fn filesystem_lease_store_persists_and_reloads_issued_leases() {
 
     FilesystemCapabilityLeaseStore::new(&fs)
         .issue(lease.clone())
+        .await
         .unwrap();
     let reloaded = FilesystemCapabilityLeaseStore::new(&fs);
 
-    assert_eq!(reloaded.get(&context.resource_scope, lease_id), Some(lease));
     assert_eq!(
-        reloaded.leases_for_scope(&context.resource_scope),
-        vec![reloaded.get(&context.resource_scope, lease_id).unwrap()]
+        reloaded.get(&context.resource_scope, lease_id).await,
+        Some(lease)
+    );
+    assert_eq!(
+        reloaded.leases_for_scope(&context.resource_scope).await,
+        vec![
+            reloaded
+                .get(&context.resource_scope, lease_id)
+                .await
+                .unwrap()
+        ]
     );
 }
 
-#[test]
-fn filesystem_lease_store_persists_revoke_claim_and_consume() {
+#[tokio::test]
+async fn filesystem_lease_store_persists_revoke_claim_and_consume() {
     let fs = engine_filesystem();
     let context = execution_context(CapabilitySet::default());
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
@@ -467,15 +505,17 @@ fn filesystem_lease_store_persists_revoke_claim_and_consume() {
     lease.invocation_fingerprint = Some(fingerprint.clone());
     let lease_id = lease.grant.id;
     let store = FilesystemCapabilityLeaseStore::new(&fs);
-    store.issue(lease).unwrap();
+    store.issue(lease).await.unwrap();
 
     let claimed = store
         .claim(&context.resource_scope, lease_id, &fingerprint)
+        .await
         .unwrap();
     assert_eq!(claimed.status, CapabilityLeaseStatus::Claimed);
     assert_eq!(
         FilesystemCapabilityLeaseStore::new(&fs)
             .get(&context.resource_scope, lease_id)
+            .await
             .unwrap()
             .status,
         CapabilityLeaseStatus::Claimed
@@ -483,25 +523,28 @@ fn filesystem_lease_store_persists_revoke_claim_and_consume() {
 
     let consumed = FilesystemCapabilityLeaseStore::new(&fs)
         .consume(&context.resource_scope, lease_id)
+        .await
         .unwrap();
     assert_eq!(consumed.status, CapabilityLeaseStatus::Consumed);
     assert_eq!(consumed.grant.constraints.max_invocations, Some(0));
 
     let revoked = FilesystemCapabilityLeaseStore::new(&fs)
         .revoke(&context.resource_scope, lease_id)
+        .await
         .unwrap();
     assert_eq!(revoked.status, CapabilityLeaseStatus::Revoked);
     assert_eq!(
         FilesystemCapabilityLeaseStore::new(&fs)
             .get(&context.resource_scope, lease_id)
+            .await
             .unwrap()
             .status,
         CapabilityLeaseStatus::Revoked
     );
 }
 
-#[test]
-fn filesystem_lease_store_is_tenant_user_invocation_scoped() {
+#[tokio::test]
+async fn filesystem_lease_store_is_tenant_user_invocation_scoped() {
     let fs = engine_filesystem();
     let context = execution_context(CapabilitySet::default());
     let mut other_invocation_scope = execution_context(CapabilitySet::default()).resource_scope;
@@ -519,18 +562,21 @@ fn filesystem_lease_store_is_tenant_user_invocation_scoped() {
     );
     let lease_id = lease.grant.id;
     let store = FilesystemCapabilityLeaseStore::new(&fs);
-    store.issue(lease.clone()).unwrap();
+    store.issue(lease.clone()).await.unwrap();
 
-    assert_eq!(store.get(&other_invocation_scope, lease_id), None);
+    assert_eq!(store.get(&other_invocation_scope, lease_id).await, None);
     assert!(matches!(
-        store.revoke(&other_invocation_scope, lease_id).unwrap_err(),
+        store.revoke(&other_invocation_scope, lease_id).await.unwrap_err(),
         CapabilityLeaseError::UnknownLease { lease_id: id } if id == lease_id
     ));
-    assert_eq!(store.get(&context.resource_scope, lease_id), Some(lease));
+    assert_eq!(
+        store.get(&context.resource_scope, lease_id).await,
+        Some(lease)
+    );
 }
 
-#[test]
-fn revoked_lease_no_longer_authorizes_dispatch() {
+#[tokio::test]
+async fn revoked_lease_no_longer_authorizes_dispatch() {
     let leases = InMemoryCapabilityLeaseStore::new();
     let context = execution_context(CapabilitySet::default());
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
@@ -543,12 +589,16 @@ fn revoked_lease_no_longer_authorizes_dispatch() {
         ),
     );
     let lease_id = lease.grant.id;
-    leases.issue(lease).unwrap();
-    leases.revoke(&context.resource_scope, lease_id).unwrap();
+    leases.issue(lease).await.unwrap();
+    leases
+        .revoke(&context.resource_scope, lease_id)
+        .await
+        .unwrap();
 
     let authorizer = LeaseBackedAuthorizer::new(&leases);
-    let decision =
-        authorizer.authorize_dispatch(&context, &descriptor, &ResourceEstimate::default());
+    let decision = authorizer
+        .authorize_dispatch(&context, &descriptor, &ResourceEstimate::default())
+        .await;
 
     assert!(matches!(
         decision,

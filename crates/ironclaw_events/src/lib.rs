@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, ErrorKind, ExtensionId, ProcessId, ResourceScope, RuntimeKind,
+    AuditEnvelope, CapabilityId, ErrorKind, ExtensionId, ProcessId, ResourceScope, RuntimeKind,
     Timestamp, VirtualPath,
 };
 use serde::{Deserialize, Serialize};
@@ -54,8 +54,6 @@ pub enum RuntimeEventKind {
     ProcessCompleted,
     ProcessFailed,
     ProcessKilled,
-    ApprovalApproved,
-    ApprovalDenied,
 }
 
 /// Redacted runtime event payload.
@@ -66,7 +64,6 @@ pub struct RuntimeEvent {
     pub kind: RuntimeEventKind,
     pub scope: ResourceScope,
     pub capability_id: CapabilityId,
-    pub approval_request_id: Option<ApprovalRequestId>,
     pub provider: Option<ExtensionId>,
     pub runtime: Option<RuntimeKind>,
     pub process_id: Option<ProcessId>,
@@ -80,7 +77,6 @@ impl RuntimeEvent {
             kind: RuntimeEventKind::DispatchRequested,
             scope,
             capability_id,
-            approval_request_id: None,
             provider: None,
             runtime: None,
             process_id: None,
@@ -99,7 +95,6 @@ impl RuntimeEvent {
             kind: RuntimeEventKind::RuntimeSelected,
             scope,
             capability_id,
-            approval_request_id: None,
             provider: Some(provider),
             runtime: Some(runtime),
             process_id: None,
@@ -119,7 +114,6 @@ impl RuntimeEvent {
             kind: RuntimeEventKind::DispatchSucceeded,
             scope,
             capability_id,
-            approval_request_id: None,
             provider: Some(provider),
             runtime: Some(runtime),
             process_id: None,
@@ -139,7 +133,6 @@ impl RuntimeEvent {
             kind: RuntimeEventKind::DispatchFailed,
             scope,
             capability_id,
-            approval_request_id: None,
             provider,
             runtime,
             process_id: None,
@@ -159,7 +152,6 @@ impl RuntimeEvent {
             kind: RuntimeEventKind::ProcessStarted,
             scope,
             capability_id,
-            approval_request_id: None,
             provider: Some(provider),
             runtime: Some(runtime),
             process_id: Some(process_id),
@@ -179,7 +171,6 @@ impl RuntimeEvent {
             kind: RuntimeEventKind::ProcessCompleted,
             scope,
             capability_id,
-            approval_request_id: None,
             provider: Some(provider),
             runtime: Some(runtime),
             process_id: Some(process_id),
@@ -200,7 +191,6 @@ impl RuntimeEvent {
             kind: RuntimeEventKind::ProcessFailed,
             scope,
             capability_id,
-            approval_request_id: None,
             provider: Some(provider),
             runtime: Some(runtime),
             process_id: Some(process_id),
@@ -220,46 +210,9 @@ impl RuntimeEvent {
             kind: RuntimeEventKind::ProcessKilled,
             scope,
             capability_id,
-            approval_request_id: None,
             provider: Some(provider),
             runtime: Some(runtime),
             process_id: Some(process_id),
-            output_bytes: None,
-            error_kind: None,
-        })
-    }
-
-    pub fn approval_approved(
-        scope: ResourceScope,
-        capability_id: CapabilityId,
-        approval_request_id: ApprovalRequestId,
-    ) -> Self {
-        Self::new(RuntimeEventPayload {
-            kind: RuntimeEventKind::ApprovalApproved,
-            scope,
-            capability_id,
-            approval_request_id: Some(approval_request_id),
-            provider: None,
-            runtime: None,
-            process_id: None,
-            output_bytes: None,
-            error_kind: None,
-        })
-    }
-
-    pub fn approval_denied(
-        scope: ResourceScope,
-        capability_id: CapabilityId,
-        approval_request_id: ApprovalRequestId,
-    ) -> Self {
-        Self::new(RuntimeEventPayload {
-            kind: RuntimeEventKind::ApprovalDenied,
-            scope,
-            capability_id,
-            approval_request_id: Some(approval_request_id),
-            provider: None,
-            runtime: None,
-            process_id: None,
             output_bytes: None,
             error_kind: None,
         })
@@ -272,7 +225,6 @@ impl RuntimeEvent {
             kind: payload.kind,
             scope: payload.scope,
             capability_id: payload.capability_id,
-            approval_request_id: payload.approval_request_id,
             provider: payload.provider,
             runtime: payload.runtime,
             process_id: payload.process_id,
@@ -286,7 +238,6 @@ struct RuntimeEventPayload {
     kind: RuntimeEventKind,
     scope: ResourceScope,
     capability_id: CapabilityId,
-    approval_request_id: Option<ApprovalRequestId>,
     provider: Option<ExtensionId>,
     runtime: Option<RuntimeKind>,
     process_id: Option<ProcessId>,
@@ -299,6 +250,8 @@ struct RuntimeEventPayload {
 pub enum EventError {
     #[error("event serialization failed: {reason}")]
     Serialize { reason: String },
+    #[error("invalid event log path: {reason}")]
+    InvalidPath { reason: String },
     #[error("filesystem event sink failed: {0}")]
     Filesystem(Box<FilesystemError>),
     #[error("event sink failed: {reason}")]
@@ -311,10 +264,60 @@ impl From<FilesystemError> for EventError {
     }
 }
 
+pub fn scoped_runtime_event_log_path(
+    scope: &ResourceScope,
+    file_name: &str,
+) -> Result<VirtualPath, EventError> {
+    scoped_jsonl_path(scope, "runtime", file_name)
+}
+
+pub fn scoped_audit_log_path(
+    scope: &ResourceScope,
+    file_name: &str,
+) -> Result<VirtualPath, EventError> {
+    scoped_jsonl_path(scope, "audit", file_name)
+}
+
+fn scoped_jsonl_path(
+    scope: &ResourceScope,
+    category: &str,
+    file_name: &str,
+) -> Result<VirtualPath, EventError> {
+    if !is_safe_jsonl_file_name(file_name) {
+        return Err(EventError::InvalidPath {
+            reason: "log file name must be a simple .jsonl file name".to_string(),
+        });
+    }
+    VirtualPath::new(format!(
+        "/engine/tenants/{}/users/{}/events/{}/{}",
+        scope.tenant_id.as_str(),
+        scope.user_id.as_str(),
+        category,
+        file_name
+    ))
+    .map_err(|error| EventError::InvalidPath {
+        reason: error.to_string(),
+    })
+}
+
+fn is_safe_jsonl_file_name(file_name: &str) -> bool {
+    file_name.ends_with(".jsonl")
+        && !file_name.starts_with('.')
+        && file_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
 /// Async event sink used by runtime/composition services.
 #[async_trait]
 pub trait EventSink: Send + Sync {
     async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError>;
+}
+
+/// Async audit sink used by control-plane services.
+#[async_trait]
+pub trait AuditSink: Send + Sync {
+    async fn emit_audit(&self, record: AuditEnvelope) -> Result<(), EventError>;
 }
 
 /// In-memory event sink used by tests and live demos.
@@ -345,6 +348,38 @@ impl EventSink for InMemoryEventSink {
                 reason: "in-memory event sink lock poisoned".to_string(),
             })?
             .push(event);
+        Ok(())
+    }
+}
+
+/// In-memory audit sink used by tests and live demos.
+#[derive(Debug, Clone, Default)]
+pub struct InMemoryAuditSink {
+    records: Arc<Mutex<Vec<AuditEnvelope>>>,
+}
+
+impl InMemoryAuditSink {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn records(&self) -> Vec<AuditEnvelope> {
+        self.records
+            .lock()
+            .map(|records| records.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+    }
+}
+
+#[async_trait]
+impl AuditSink for InMemoryAuditSink {
+    async fn emit_audit(&self, record: AuditEnvelope) -> Result<(), EventError> {
+        self.records
+            .lock()
+            .map_err(|_| EventError::Sink {
+                reason: "in-memory audit sink lock poisoned".to_string(),
+            })?
+            .push(record);
         Ok(())
     }
 }
@@ -380,9 +415,7 @@ where
     pub async fn read_events(&self) -> Result<Vec<RuntimeEvent>, EventError> {
         let bytes = match self.filesystem.read_file(&self.path).await {
             Ok(bytes) => bytes,
-            Err(FilesystemError::Backend { .. }) | Err(FilesystemError::MountNotFound { .. }) => {
-                return Ok(Vec::new());
-            }
+            Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(EventError::from(error)),
         };
         let text = String::from_utf8(bytes).map_err(|error| EventError::Serialize {
@@ -411,14 +444,97 @@ where
 
         let _guard = self.lock.lock().await;
 
-        let mut bytes = self
-            .filesystem
-            .read_file(&self.path)
-            .await
-            .unwrap_or_else(|_| Vec::new());
+        let mut bytes = match self.filesystem.read_file(&self.path).await {
+            Ok(bytes) => bytes,
+            Err(error) if is_not_found(&error) => Vec::new(),
+            Err(error) => return Err(EventError::from(error)),
+        };
         bytes.extend_from_slice(&line);
         bytes.push(b'\n');
         self.filesystem.write_file(&self.path, &bytes).await?;
         Ok(())
+    }
+}
+
+/// Filesystem-backed JSONL audit sink for durable control-plane audit history.
+#[derive(Debug, Clone)]
+pub struct JsonlAuditSink<F> {
+    filesystem: Arc<F>,
+    path: VirtualPath,
+    lock: Arc<AsyncMutex<()>>,
+}
+
+impl<F> JsonlAuditSink<F>
+where
+    F: RootFilesystem,
+{
+    pub fn new(filesystem: Arc<F>, path: VirtualPath) -> Self {
+        Self {
+            filesystem,
+            path,
+            lock: Arc::new(AsyncMutex::new(())),
+        }
+    }
+
+    pub fn filesystem(&self) -> Arc<F> {
+        Arc::clone(&self.filesystem)
+    }
+
+    pub fn path(&self) -> &VirtualPath {
+        &self.path
+    }
+
+    pub async fn read_records(&self) -> Result<Vec<AuditEnvelope>, EventError> {
+        let bytes = match self.filesystem.read_file(&self.path).await {
+            Ok(bytes) => bytes,
+            Err(error) if is_not_found(&error) => return Ok(Vec::new()),
+            Err(error) => return Err(EventError::from(error)),
+        };
+        let text = String::from_utf8(bytes).map_err(|error| EventError::Serialize {
+            reason: error.to_string(),
+        })?;
+        text.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                serde_json::from_str::<AuditEnvelope>(line).map_err(|error| EventError::Serialize {
+                    reason: error.to_string(),
+                })
+            })
+            .collect()
+    }
+}
+
+#[async_trait]
+impl<F> AuditSink for JsonlAuditSink<F>
+where
+    F: RootFilesystem,
+{
+    async fn emit_audit(&self, record: AuditEnvelope) -> Result<(), EventError> {
+        let line = serde_json::to_vec(&record).map_err(|error| EventError::Serialize {
+            reason: error.to_string(),
+        })?;
+
+        let _guard = self.lock.lock().await;
+
+        let mut bytes = match self.filesystem.read_file(&self.path).await {
+            Ok(bytes) => bytes,
+            Err(error) if is_not_found(&error) => Vec::new(),
+            Err(error) => return Err(EventError::from(error)),
+        };
+        bytes.extend_from_slice(&line);
+        bytes.push(b'\n');
+        self.filesystem.write_file(&self.path, &bytes).await?;
+        Ok(())
+    }
+}
+
+fn is_not_found(error: &FilesystemError) -> bool {
+    match error {
+        FilesystemError::Backend { reason, .. } => {
+            reason.contains("No such file")
+                || reason.contains("not found")
+                || reason.contains("os error 2")
+        }
+        _ => false,
     }
 }

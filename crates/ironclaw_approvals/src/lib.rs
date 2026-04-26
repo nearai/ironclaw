@@ -5,7 +5,7 @@
 //! dispatch runtime work.
 
 use ironclaw_authorization::{CapabilityLease, CapabilityLeaseError, CapabilityLeaseStore};
-use ironclaw_events::{EventSink, RuntimeEvent};
+use ironclaw_events::AuditSink;
 use ironclaw_host_api::{
     Action, CapabilityGrant, CapabilityGrantId, EffectKind, GrantConstraints, Principal,
     ResourceScope, Timestamp,
@@ -20,7 +20,7 @@ where
 {
     approvals: &'a A,
     leases: &'a L,
-    event_sink: Option<&'a dyn EventSink>,
+    audit_sink: Option<&'a dyn AuditSink>,
 }
 
 impl<'a, A, L> ApprovalResolver<'a, A, L>
@@ -32,12 +32,12 @@ where
         Self {
             approvals,
             leases,
-            event_sink: None,
+            audit_sink: None,
         }
     }
 
-    pub fn with_event_sink(mut self, event_sink: &'a dyn EventSink) -> Self {
-        self.event_sink = Some(event_sink);
+    pub fn with_audit_sink(mut self, audit_sink: &'a dyn AuditSink) -> Self {
+        self.audit_sink = Some(audit_sink);
         self
     }
 
@@ -62,6 +62,7 @@ where
             return Err(ApprovalResolutionError::UnsupportedAction);
         };
 
+        let resolved_by = approval.issued_by.clone();
         let grant = CapabilityGrant {
             id: CapabilityGrantId::new(),
             capability: capability.clone(),
@@ -79,15 +80,16 @@ where
         };
         let mut lease = CapabilityLease::new(record.scope.clone(), grant);
         lease.invocation_fingerprint = record.request.invocation_fingerprint.clone();
-        let lease = self.leases.issue(lease)?;
+        let lease = self.leases.issue(lease).await?;
         if let Err(error) = self.approvals.approve(scope, request_id).await {
-            let _ = self.leases.revoke(&lease.scope, lease.grant.id);
+            let _ = self.leases.revoke(&lease.scope, lease.grant.id).await;
             return Err(error.into());
         }
-        self.emit_best_effort(RuntimeEvent::approval_approved(
-            record.scope,
-            capability.clone(),
-            request_id,
+        self.emit_audit_best_effort(ironclaw_host_api::AuditEnvelope::approval_resolved(
+            &record.scope,
+            &record.request,
+            resolved_by,
+            "approved",
         ))
         .await;
         Ok(lease)
@@ -97,6 +99,7 @@ where
         &self,
         scope: &ResourceScope,
         request_id: ironclaw_host_api::ApprovalRequestId,
+        denial: DenyApproval,
     ) -> Result<ApprovalRecord, ApprovalResolutionError> {
         let record = self
             .approvals
@@ -110,20 +113,19 @@ where
         }
 
         let denied = self.approvals.deny(scope, request_id).await?;
-        if let Action::Dispatch { capability, .. } = denied.request.action.as_ref() {
-            self.emit_best_effort(RuntimeEvent::approval_denied(
-                denied.scope.clone(),
-                capability.clone(),
-                request_id,
-            ))
-            .await;
-        }
+        self.emit_audit_best_effort(ironclaw_host_api::AuditEnvelope::approval_resolved(
+            &denied.scope,
+            &denied.request,
+            denial.denied_by,
+            "denied",
+        ))
+        .await;
         Ok(denied)
     }
 
-    async fn emit_best_effort(&self, event: RuntimeEvent) {
-        if let Some(sink) = self.event_sink {
-            let _ = sink.emit(event).await;
+    async fn emit_audit_best_effort(&self, record: ironclaw_host_api::AuditEnvelope) {
+        if let Some(sink) = self.audit_sink {
+            let _ = sink.emit_audit(record).await;
         }
     }
 }
@@ -134,6 +136,11 @@ pub struct LeaseApproval {
     pub allowed_effects: Vec<EffectKind>,
     pub expires_at: Option<Timestamp>,
     pub max_invocations: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DenyApproval {
+    pub denied_by: Principal,
 }
 
 #[derive(Debug, Error)]
