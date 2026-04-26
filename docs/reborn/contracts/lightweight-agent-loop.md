@@ -343,7 +343,54 @@ Action-time authorization is still required even for visible capabilities.
 
 ---
 
-## 12. Relationship to QuickJS / ActionScript
+## 12. Affordance-only selection and visible-surface gating
+
+The loop should avoid hidden strategy heuristics such as:
+
+```text
+if estimated tool calls >= 5, force ActionScript
+if task mentions tests, force shell
+```
+
+Instead, the host should shape the model-visible surface before each model call. The model chooses from clear semantic affordances, and the host executes or blocks those requests through normal capability policy.
+
+```text
+visible surface = CapabilityCatalog
+  filtered by DeploymentMode
+  filtered by RuntimeProfile
+  filtered by tenant/org/user/project grants
+  filtered by auth/installation state
+  filtered by run/thread policy
+  rendered as LlmToolViews
+```
+
+If a capability is impossible or categorically disallowed for the caller/profile, it should usually be absent from the visible surface rather than exposed and denied repeatedly at call time. Examples:
+
+| Context | Hide or expose? | Reason |
+|---|---|---|
+| hosted multi-tenant session | hide `LocalHost` shell/file capabilities | provider host access is never valid |
+| local safe profile before write approval | expose write capability with ask policy | user may approve writes |
+| no GitHub extension installed | hide GitHub provider capabilities or expose install/auth capability only | avoid pointless API retries |
+| GitHub installed but token expired | expose GitHub capability as auth-blockable if auth flow can resume | model can request semantic action; host opens auth gate |
+| ActionScript disabled by tenant policy | hide `action_script.run` | no amount of retrying can make it valid |
+| Experiment sandbox unavailable due quota | expose only if resource-blocked resume is supported; otherwise hide or ask user | avoid loop churn |
+
+The visible surface is therefore a UX and reasoning aid, not an authorization shortcut. Every visible capability still receives action-time authorization because:
+
+- grants/leases may expire between prompt and call
+- parameters affect risk and approval requirements
+- resource quotas may change
+- auth may be missing or revoked
+- concurrent runs may consume shared limits
+- profile or tenant policy may change before execution
+
+The model may choose `action_script.run`, `shell.run`, or `experiment.*` when those affordances are visible. It does not choose the runtime backend. Backend selection remains host/profile owned.
+
+Use structured denial as feedback only for choices that were visible but rejected due to parameter-specific or time-varying conditions. Do not rely on denial/retry loops for static profile constraints.
+
+---
+
+## 13. Relationship to QuickJS / ActionScript
 
 QuickJS is not the parent loop. It is a capability that the lightweight loop can call when dynamic capability composition is useful.
 
@@ -368,7 +415,7 @@ Use direct capability calls for simple/static tool use. Use `experiment.*` or `s
 
 ---
 
-## 13. Relationship to runtime profiles
+## 14. Relationship to runtime profiles
 
 The same lightweight loop runs under every profile.
 
@@ -392,7 +439,7 @@ The loop only sees visible capability descriptors. The profile resolver and runt
 
 ---
 
-## 14. First-party extension posture
+## 15. First-party extension posture
 
 This loop is a first-party bundled agent-loop extension in architecture terms:
 
@@ -408,7 +455,7 @@ Generated extensions cannot create new parent-loop authority surfaces. They may 
 
 ---
 
-## 15. Minimal implementation targets
+## 16. Minimal implementation targets
 
 The first implementation should include:
 
@@ -434,7 +481,7 @@ It should not include:
 
 ---
 
-## 16. Contract tests to add later
+## 17. Contract tests to add later
 
 When implemented, add caller-level tests that drive the loop through the host facade:
 
@@ -449,4 +496,6 @@ When implemented, add caller-level tests that drive the loop through the host fa
 - steering message injects before next model call
 - follow-up message restarts after natural stop
 - capability surface version change rebuilds tool schemas before next model call
+- profile-disallowed capabilities are absent from the visible surface before model call
+- visible but parameter-denied capability returns structured denial without changing backend selection
 - local and hosted profiles run the same loop while resolving different backends

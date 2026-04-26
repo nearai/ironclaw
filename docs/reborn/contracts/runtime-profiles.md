@@ -438,6 +438,15 @@ Escalation rules:
 - profile changes during a turn require a new turn or explicit approval boundary
 - generated extensions cannot declare their own profile; they declare runtime needs, and the host chooses the backend/profile
 
+Visible-surface rules:
+
+- profile-impossible capabilities should be hidden before the model call, not exposed and denied repeatedly
+- hosted multi-tenant visible surfaces must omit `LocalHost` and provider-host filesystem affordances entirely
+- enterprise visible surfaces may include org-dedicated runner affordances only when org policy enables them
+- local visible surfaces may include `HostWorkspace`/`LocalHost` affordances according to `LocalSafe`/`LocalDev`/`LocalYolo`
+- capabilities that are possible but approval/auth/resource dependent may remain visible and block structurally at action time
+- action-time authorization is still mandatory for visible capabilities because arguments, leases, quotas, auth, and concurrent state can change
+
 ---
 
 ## 12. Non-goals
