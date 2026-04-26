@@ -1472,7 +1472,13 @@ async fn review_decision_handler(
             )
         })?
         .to_string();
-    let mut record = read_submission_record(&state.root, &tenant.tenant_id, submission_id)
+    let ReviewDecisionRecord {
+        mut record,
+        mut canonical_summary_hash,
+        file_record_available,
+        allow_file_body_fallback,
+    } = read_review_decision_record(state.as_ref(), &tenant, submission_id)
+        .await
         .map_err(internal_error)?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "trace submission not found"))?;
     if record.is_terminal() {
@@ -1481,10 +1487,15 @@ async fn review_decision_handler(
             "terminal trace submissions are not eligible for review approval",
         ));
     }
-    let mut envelope = read_envelope_for_review_decision(state.as_ref(), &tenant, &record)
-        .await
-        .map_err(internal_error)?
-        .envelope;
+    let mut envelope = read_envelope_for_review_decision(
+        state.as_ref(),
+        &tenant,
+        &record,
+        allow_file_body_fallback,
+    )
+    .await
+    .map_err(internal_error)?
+    .envelope;
 
     match body.decision {
         TraceReviewDecision::Approve => {
@@ -1529,14 +1540,15 @@ async fn review_decision_handler(
         }
     }
 
-    write_submission_record(&state.root, &record).map_err(internal_error)?;
-    let mut mirrored_derived = None;
+    if file_record_available {
+        write_submission_record(&state.root, &record).map_err(internal_error)?;
+    }
     if let Some(mut derived) = read_derived_record(&state.root, &tenant.tenant_id, submission_id)
         .map_err(internal_error)?
     {
         derived.status = record.status;
+        canonical_summary_hash = Some(derived.canonical_summary_hash.clone());
         write_derived_record(&state.root, &derived).map_err(internal_error)?;
-        mirrored_derived = Some(derived);
     }
     append_audit_event(
         &state.root,
@@ -1549,14 +1561,9 @@ async fn review_decision_handler(
         ),
     )
     .map_err(internal_error)?;
-    if let Err(error) = mirror_review_decision_to_db(
-        &state,
-        &tenant,
-        &record,
-        &envelope,
-        mirrored_derived.as_ref(),
-    )
-    .await
+    if let Err(error) =
+        mirror_review_decision_to_db(&state, &tenant, &record, &envelope, canonical_summary_hash)
+            .await
     {
         tracing::warn!(%error, %submission_id, "Trace Commons DB dual-write review mirror failed");
     }
@@ -3077,6 +3084,61 @@ struct TraceCommonsMetadataView {
     derived: Vec<TraceCommonsDerivedRecord>,
 }
 
+#[derive(Debug)]
+struct ReviewDecisionRecord {
+    record: TraceCommonsSubmissionRecord,
+    canonical_summary_hash: Option<String>,
+    file_record_available: bool,
+    allow_file_body_fallback: bool,
+}
+
+async fn read_review_decision_record(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_id: Uuid,
+) -> anyhow::Result<Option<ReviewDecisionRecord>> {
+    if state.db_reviewer_reads {
+        let db = state
+            .db_mirror
+            .as_ref()
+            .context("TRACE_COMMONS_DB_REVIEWER_READS is enabled without a DB mirror")?;
+        let Some(storage_record) = db
+            .get_trace_submission(&tenant.tenant_id, submission_id)
+            .await
+            .context("failed to read Trace Commons review submission from DB mirror")?
+        else {
+            return Ok(None);
+        };
+        if !can_access_storage_submission(tenant, &storage_record) {
+            return Ok(None);
+        }
+
+        let canonical_summary_hash = storage_record.canonical_summary_hash.clone();
+        let Some(record) = trace_commons_record_from_storage_submission(storage_record) else {
+            return Ok(None);
+        };
+        let file_record_available =
+            submission_metadata_path(&state.root, &tenant.tenant_id, submission_id).exists();
+        return Ok(Some(ReviewDecisionRecord {
+            record: record?,
+            canonical_summary_hash,
+            file_record_available,
+            allow_file_body_fallback: file_record_available,
+        }));
+    }
+
+    let Some(record) = read_submission_record(&state.root, &tenant.tenant_id, submission_id)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ReviewDecisionRecord {
+        record,
+        canonical_summary_hash: None,
+        file_record_available: true,
+        allow_file_body_fallback: true,
+    }))
+}
+
 async fn read_reviewer_metadata_view(
     state: &AppState,
     tenant: &TenantAuth,
@@ -4434,7 +4496,7 @@ async fn mirror_review_decision_to_db(
     tenant: &TenantAuth,
     record: &TraceCommonsSubmissionRecord,
     envelope: &TraceContributionEnvelope,
-    derived_record: Option<&TraceCommonsDerivedRecord>,
+    canonical_summary_hash: Option<String>,
 ) -> anyhow::Result<()> {
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
@@ -4442,7 +4504,7 @@ async fn mirror_review_decision_to_db(
     db.upsert_trace_submission(storage_submission_write_from_record(
         record,
         envelope,
-        derived_record.map(|derived| derived.canonical_summary_hash.clone()),
+        canonical_summary_hash,
     )?)
     .await
     .context("failed to mirror reviewed trace submission metadata")?;
@@ -4943,13 +5005,16 @@ fn write_submission_record(
     root: &Path,
     record: &TraceCommonsSubmissionRecord,
 ) -> anyhow::Result<()> {
-    let tenant_key = tenant_storage_key(&record.tenant_id);
-    let path = root
-        .join("tenants")
+    let path = submission_metadata_path(root, &record.tenant_id, record.submission_id);
+    write_json_file(&path, record, "trace contribution metadata")
+}
+
+fn submission_metadata_path(root: &Path, tenant_id: &str, submission_id: Uuid) -> PathBuf {
+    let tenant_key = tenant_storage_key(tenant_id);
+    root.join("tenants")
         .join(tenant_key)
         .join("metadata")
-        .join(format!("{}.json", record.submission_id));
-    write_json_file(&path, record, "trace contribution metadata")
+        .join(format!("{submission_id}.json"))
 }
 
 fn read_submission_record(
@@ -4957,12 +5022,7 @@ fn read_submission_record(
     tenant_id: &str,
     submission_id: Uuid,
 ) -> anyhow::Result<Option<TraceCommonsSubmissionRecord>> {
-    let tenant_key = tenant_storage_key(tenant_id);
-    let path = root
-        .join("tenants")
-        .join(tenant_key)
-        .join("metadata")
-        .join(format!("{submission_id}.json"));
+    let path = submission_metadata_path(root, tenant_id, submission_id);
     if !path.exists() {
         return Ok(None);
     }
@@ -5031,6 +5091,7 @@ async fn read_envelope_for_review_decision(
     state: &AppState,
     tenant: &TenantAuth,
     record: &TraceCommonsSubmissionRecord,
+    allow_file_body_fallback: bool,
 ) -> anyhow::Result<TraceEnvelopeBodyRead> {
     anyhow::ensure!(
         tenant.role.can_review(),
@@ -5040,7 +5101,9 @@ async fn read_envelope_for_review_decision(
         record.tenant_id == tenant.tenant_id,
         "trace review body read tenant mismatch"
     );
-    let body_read = read_envelope_body_for_review_decision(state, tenant, record).await?;
+    let body_read =
+        read_envelope_body_for_review_decision(state, tenant, record, allow_file_body_fallback)
+            .await?;
     append_trace_content_read_audit(
         state,
         tenant,
@@ -5057,6 +5120,7 @@ async fn read_envelope_body_for_review_decision(
     state: &AppState,
     tenant: &TenantAuth,
     record: &TraceCommonsSubmissionRecord,
+    allow_file_body_fallback: bool,
 ) -> anyhow::Result<TraceEnvelopeBodyRead> {
     if state.db_reviewer_reads
         && let Some(envelope) =
@@ -5066,7 +5130,7 @@ async fn read_envelope_body_for_review_decision(
         return Ok(envelope);
     }
     anyhow::ensure!(
-        !state.db_reviewer_require_object_refs,
+        !state.db_reviewer_require_object_refs && allow_file_body_fallback,
         "missing active submitted envelope object ref for review decision"
     );
     Ok(TraceEnvelopeBodyRead {
@@ -15082,6 +15146,122 @@ mod tests {
             event.action == StorageTraceAuditAction::Read
                 && event.submission_id == Some(submission_id)
                 && event.object_ref_id == Some(object_ref.object_ref_id)
+                && event.reason.as_deref() == Some("surface=review_decision")
+        }));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn review_decision_can_use_db_metadata_without_file_record() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-review-db-metadata.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let submit_state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let envelope = sample_envelope().await;
+        let submission_id = envelope.submission_id;
+
+        let Json(receipt) =
+            submit_trace_handler(State(submit_state), auth_headers("token-a"), Json(envelope))
+                .await
+                .expect("quarantined submission dual-writes to DB mirror");
+        assert_eq!(receipt.status, "quarantined");
+        let canonical_summary_hash = db
+            .list_trace_submissions("tenant-a")
+            .await
+            .expect("DB submissions read")
+            .into_iter()
+            .find(|record| record.submission_id == submission_id)
+            .and_then(|record| record.canonical_summary_hash)
+            .expect("DB submission retains canonical summary hash");
+        let submitted_ref = db
+            .get_latest_active_trace_object_ref(
+                "tenant-a",
+                submission_id,
+                StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            )
+            .await
+            .expect("submitted object ref reads")
+            .expect("submitted envelope object ref exists");
+
+        let tenant_dir = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"));
+        let metadata_path = submission_metadata_path(temp.path(), "tenant-a", submission_id);
+        std::fs::remove_dir_all(tenant_dir.join("metadata")).expect("remove file metadata");
+        std::fs::remove_dir_all(tenant_dir.join("derived")).expect("remove derived metadata");
+
+        let review_state = test_state_with_db_reviewer_reads_require_object_refs(
+            temp.path().to_path_buf(),
+            Some(db.clone()),
+        );
+        let Json(review_receipt) = review_decision_handler(
+            State(review_state),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Approve,
+                reason: Some("db metadata-backed review".to_string()),
+                credit_points_pending: Some(1.5),
+            }),
+        )
+        .await
+        .expect("review decision can read metadata and body from DB");
+        assert_eq!(review_receipt.status, "accepted");
+
+        let reviewed_submission = db
+            .list_trace_submissions("tenant-a")
+            .await
+            .expect("DB submissions read after review")
+            .into_iter()
+            .find(|record| record.submission_id == submission_id)
+            .expect("reviewed DB submission exists");
+        assert_eq!(
+            reviewed_submission.status,
+            StorageTraceCorpusStatus::Accepted
+        );
+        assert_eq!(
+            reviewed_submission.canonical_summary_hash.as_deref(),
+            Some(canonical_summary_hash.as_str())
+        );
+        assert_eq!(reviewed_submission.credit_points_pending, Some(1.5));
+        assert!(
+            !metadata_path.exists(),
+            "DB-backed review should not recreate missing file metadata"
+        );
+
+        let reviewed_ref = db
+            .get_latest_active_trace_object_ref(
+                "tenant-a",
+                submission_id,
+                StorageTraceObjectArtifactKind::ReviewSnapshot,
+            )
+            .await
+            .expect("review snapshot object ref reads")
+            .expect("review snapshot object ref exists");
+        assert_eq!(
+            reviewed_ref.artifact_kind,
+            StorageTraceObjectArtifactKind::ReviewSnapshot
+        );
+        let db_audit_events = db
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("DB audit events read");
+        assert!(db_audit_events.iter().any(|event| {
+            event.action == StorageTraceAuditAction::Read
+                && event.submission_id == Some(submission_id)
+                && event.object_ref_id == Some(submitted_ref.object_ref_id)
                 && event.reason.as_deref() == Some("surface=review_decision")
         }));
     }
