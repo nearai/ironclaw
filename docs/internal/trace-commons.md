@@ -89,7 +89,8 @@ trace-card uses the bearer token can upload. Set
 `TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE` to require matching `iss` and `aud`
 claims. The config-status route reports only whether signed-token auth and
 issuer/audience checks are enabled; it never returns the secret or configured
-claim values.
+claim values. Submitted-trace audit rows record only the safe auth method
+(`static_token` or `signed_claim`) plus the hashed actor principal.
 Process-evaluation workers can submit bounded process quality metadata through
 `POST /v1/workers/process-evaluation` using the CLI helper:
 

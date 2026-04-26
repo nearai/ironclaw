@@ -287,8 +287,25 @@ struct TenantAuth {
     role: TokenRole,
     principal_ref: String,
     expires_at: Option<DateTime<Utc>>,
+    auth_method: TraceAuthMethod,
     allowed_consent_scopes: BTreeSet<ConsentScope>,
     allowed_uses: BTreeSet<TraceAllowedUse>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TraceAuthMethod {
+    StaticToken,
+    SignedClaim,
+}
+
+impl TraceAuthMethod {
+    fn storage_name(self) -> &'static str {
+        match self {
+            Self::StaticToken => "static_token",
+            Self::SignedClaim => "signed_claim",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1026,6 +1043,7 @@ fn signed_token_claims_to_auth(claims: TraceCommonsSignedTokenClaims) -> ApiResu
         role,
         principal_ref: principal_storage_ref(&format!("signed:{tenant_id}:{actor_ref}")),
         expires_at: None,
+        auth_method: TraceAuthMethod::SignedClaim,
         allowed_consent_scopes: claims.allowed_consent_scopes,
         allowed_uses: claims.allowed_uses,
     })
@@ -1179,6 +1197,7 @@ fn insert_token_with_expiry(
             role,
             principal_ref: principal_storage_ref(token),
             expires_at,
+            auth_method: TraceAuthMethod::StaticToken,
             allowed_consent_scopes: BTreeSet::new(),
             allowed_uses: BTreeSet::new(),
         },
@@ -1573,7 +1592,7 @@ async fn submit_trace_handler(
     append_audit_event(
         &state.root,
         &tenant.tenant_id,
-        TraceCommonsAuditEvent::submitted(&record),
+        TraceCommonsAuditEvent::submitted(&record, &tenant),
     )
     .map_err(internal_error)?;
     let mirror_result =
@@ -6647,7 +6666,7 @@ async fn mirror_submission_to_db_with_options(
             actor_principal_ref: record.auth_principal_ref.clone(),
             actor_role: format!("{:?}", tenant.role).to_ascii_lowercase(),
             action: StorageTraceAuditAction::Submit,
-            reason: None,
+            reason: Some(format!("auth_method={}", tenant.auth_method.storage_name())),
             request_id: None,
             submission_id: Some(record.submission_id),
             object_ref_id: Some(object_ref_id),
@@ -13482,7 +13501,7 @@ struct TraceCommonsAuditEvent {
 }
 
 impl TraceCommonsAuditEvent {
-    fn submitted(record: &TraceCommonsSubmissionRecord) -> Self {
+    fn submitted(record: &TraceCommonsSubmissionRecord, auth: &TenantAuth) -> Self {
         Self {
             event_id: Uuid::new_v4(),
             tenant_id: record.tenant_id.clone(),
@@ -13490,9 +13509,9 @@ impl TraceCommonsAuditEvent {
             kind: "submitted".to_string(),
             created_at: Utc::now(),
             status: Some(record.status),
-            actor_role: None,
+            actor_role: Some(auth.role),
             actor_principal_ref: Some(record.auth_principal_ref.clone()),
-            reason: None,
+            reason: Some(format!("auth_method={}", auth.auth_method.storage_name())),
             export_count: None,
             export_id: None,
             decision_inputs_hash: None,
@@ -14766,6 +14785,7 @@ mod tests {
             role: TokenRole::Reviewer,
             principal_ref: principal_storage_ref("review-token"),
             expires_at: None,
+            auth_method: TraceAuthMethod::StaticToken,
             allowed_consent_scopes: BTreeSet::new(),
             allowed_uses: BTreeSet::new(),
         }
@@ -18181,6 +18201,13 @@ mod tests {
                 .expect("tenant b read")
                 .is_some()
         );
+        let audit_events = read_all_audit_events(temp.path(), "tenant-b").expect("audit reads");
+        assert!(audit_events.iter().any(|event| {
+            event.submission_id == submission_id
+                && event.kind == "submitted"
+                && event.actor_role == Some(TokenRole::Contributor)
+                && event.reason.as_deref() == Some("auth_method=static_token")
+        }));
         let Json(credit) = credit_handler(State(state), auth_headers("token-b"))
             .await
             .expect("credit succeeds");
@@ -23411,6 +23438,7 @@ mod tests {
             role: TokenRole::RetentionWorker,
             principal_ref: "test-retention-worker".to_string(),
             expires_at: None,
+            auth_method: TraceAuthMethod::StaticToken,
             allowed_consent_scopes: BTreeSet::new(),
             allowed_uses: BTreeSet::new(),
         };
@@ -28205,6 +28233,13 @@ mod tests {
             record.auth_principal_ref,
             principal_storage_ref("signed:tenant-b:actor-123")
         );
+        let audit_events = read_all_audit_events(temp.path(), "tenant-b").expect("audit reads");
+        assert!(audit_events.iter().any(|event| {
+            event.submission_id == submission_id
+                && event.kind == "submitted"
+                && event.actor_role == Some(TokenRole::Contributor)
+                && event.reason.as_deref() == Some("auth_method=signed_claim")
+        }));
     }
 
     #[tokio::test]
