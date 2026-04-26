@@ -87,7 +87,7 @@ async fn capability_host_records_blocked_auth_for_authorization_denial() {
         err,
         CapabilityInvocationError::AuthorizationDenied { .. }
     ));
-    let record = run_state.get(invocation_id).unwrap();
+    let record = run_state.get(invocation_id).await.unwrap().unwrap();
     assert_eq!(record.status, RunStatus::BlockedAuth);
     assert_eq!(record.error_kind.as_deref(), Some("AuthorizationDenied"));
 }
@@ -122,7 +122,7 @@ async fn capability_host_rejects_invalid_context_before_recording_run_state() {
             ..
         }
     ));
-    assert!(run_state.records().is_empty());
+    assert!(run_state.records().await.unwrap().is_empty());
 }
 
 #[tokio::test]
