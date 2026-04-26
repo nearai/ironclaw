@@ -68,6 +68,24 @@ jobs:
           provenance: false
           sbom: false
 
+      - name: Make GHCR package public
+        shell: bash
+        run: |
+          OWNER_TYPE="$(gh api "/repos/${GITHUB_REPOSITORY}" --jq '.owner.type')"
+          OWNER_LOGIN="$(gh api "/repos/${GITHUB_REPOSITORY}" --jq '.owner.login')"
+
+          if [ "$OWNER_TYPE" = "User" ]; then
+            gh api -X PUT \
+              -H "Accept: application/vnd.github+json" \
+              "/user/packages/container/ironclaw/visibility" \
+              -f visibility=public
+          else
+            gh api -X PUT \
+              -H "Accept: application/vnd.github+json" \
+              "/orgs/${OWNER_LOGIN}/packages/container/ironclaw/visibility" \
+              -f visibility=public
+          fi
+
       - name: Trigger Railway deploy from main
         if: github.ref == 'refs/heads/main'
         shell: bash
