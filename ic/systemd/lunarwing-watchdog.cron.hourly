@@ -1,0 +1,10 @@
+#!/bin/sh
+
+# Install as /etc/cron.hourly/lunarwing-watchdog after copying
+# scripts/lunarwing-watchdog-openrc.sh to /usr/local/sbin/lunarwing-watchdog-openrc.
+#
+# systemd's timer uses Persistent=true. Plain cron.hourly does not replay missed
+# runs after downtime. If you need that behavior on Gentoo, prefer fcron or a
+# similar scheduler with catch-up support.
+
+exec /usr/local/sbin/lunarwing-watchdog-openrc

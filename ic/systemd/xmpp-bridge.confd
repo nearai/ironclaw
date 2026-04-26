@@ -1,0 +1,24 @@
+# /etc/conf.d/xmpp-bridge
+#
+# Gentoo/OpenRC configuration for the LunarWing XMPP bridge.
+# Copy this file to /etc/conf.d/xmpp-bridge and adjust values as needed.
+# Keep secrets in /etc/lunarwing/xmpp-bridge.env (0600) unless you explicitly
+# prefer exporting them directly from this conf.d file.
+
+xmpp_bridge_command="/usr/local/bin/xmpp-bridge"
+xmpp_bridge_user="lunarwing"
+xmpp_bridge_group="lunarwing"
+xmpp_bridge_workdir="/var/lib/lunarwing"
+xmpp_bridge_state_dir="/var/lib/lunarwing"
+xmpp_bridge_runtime_dir="/run/lunarwing"
+xmpp_bridge_log_dir="/var/log/lunarwing"
+xmpp_bridge_output_log="/var/log/lunarwing/xmpp-bridge.log"
+xmpp_bridge_error_log="/var/log/lunarwing/xmpp-bridge.err"
+xmpp_bridge_env_file="/etc/lunarwing/xmpp-bridge.env"
+xmpp_bridge_base_dir="/var/lib/lunarwing"
+xmpp_bridge_bind="127.0.0.1:8787"
+xmpp_bridge_max_messages="1024"
+xmpp_bridge_rust_log="xmpp_bridge=info,info"
+
+# Keep the bridge ordered before the main daemon by default.
+xmpp_bridge_rc_before="lunarwing"

@@ -1,0 +1,77 @@
+#!/sbin/openrc-run
+
+description="LunarWing XMPP bridge sidecar"
+
+: "${xmpp_bridge_command:=/usr/local/bin/xmpp-bridge}"
+: "${xmpp_bridge_user:=lunarwing}"
+: "${xmpp_bridge_group:=lunarwing}"
+: "${xmpp_bridge_workdir:=/var/lib/lunarwing}"
+: "${xmpp_bridge_pidfile:=/run/lunarwing/xmpp-bridge.pid}"
+: "${xmpp_bridge_state_dir:=/var/lib/lunarwing}"
+: "${xmpp_bridge_runtime_dir:=/run/lunarwing}"
+: "${xmpp_bridge_log_dir:=/var/log/lunarwing}"
+: "${xmpp_bridge_output_log:=${xmpp_bridge_log_dir}/xmpp-bridge.log}"
+: "${xmpp_bridge_error_log:=${xmpp_bridge_log_dir}/xmpp-bridge.err}"
+: "${xmpp_bridge_env_file:=/etc/lunarwing/xmpp-bridge.env}"
+: "${xmpp_bridge_base_dir:=/var/lib/lunarwing}"
+: "${xmpp_bridge_bind:=127.0.0.1:8787}"
+: "${xmpp_bridge_max_messages:=1024}"
+: "${xmpp_bridge_rust_log:=xmpp_bridge=info,info}"
+: "${xmpp_bridge_umask:=0077}"
+: "${xmpp_bridge_respawn_delay:=5}"
+: "${xmpp_bridge_respawn_max:=5}"
+: "${xmpp_bridge_respawn_period:=60}"
+: "${xmpp_bridge_retry:=SIGTERM/30/KILL/5}"
+
+command="${xmpp_bridge_command}"
+command_user="${xmpp_bridge_user}:${xmpp_bridge_group}"
+directory="${xmpp_bridge_workdir}"
+pidfile="${xmpp_bridge_pidfile}"
+supervisor="supervise-daemon"
+retry="${xmpp_bridge_retry}"
+respawn_delay="${xmpp_bridge_respawn_delay}"
+respawn_max="${xmpp_bridge_respawn_max}"
+respawn_period="${xmpp_bridge_respawn_period}"
+output_log="${xmpp_bridge_output_log}"
+error_log="${xmpp_bridge_error_log}"
+required_files="${command}"
+
+depend() {
+    need net localmount
+    use dns logger
+    after firewall
+
+    [ -n "${xmpp_bridge_rc_need:-}" ] && need ${xmpp_bridge_rc_need}
+    [ -n "${xmpp_bridge_rc_use:-}" ] && use ${xmpp_bridge_rc_use}
+    [ -n "${xmpp_bridge_rc_after:-}" ] && after ${xmpp_bridge_rc_after}
+    [ -n "${xmpp_bridge_rc_before:-lunarwing}" ] && before ${xmpp_bridge_rc_before:-lunarwing}
+}
+
+load_env() {
+    export IRONCLAW_BASE_DIR="${xmpp_bridge_base_dir}"
+    export XMPP_BRIDGE_BIND="${xmpp_bridge_bind}"
+    export XMPP_BRIDGE_MAX_MESSAGES="${xmpp_bridge_max_messages}"
+    export RUST_LOG="${xmpp_bridge_rust_log}"
+
+    if [ -n "${xmpp_bridge_env_file}" ]; then
+        if [ ! -r "${xmpp_bridge_env_file}" ]; then
+            eerror "Environment file not readable: ${xmpp_bridge_env_file}"
+            return 1
+        fi
+
+        set -a
+        . "${xmpp_bridge_env_file}"
+        set +a
+    fi
+}
+
+start_pre() {
+    checkpath -d -m 0750 -o "${xmpp_bridge_user}:${xmpp_bridge_group}" "${xmpp_bridge_state_dir}" || return 1
+    checkpath -d -m 0750 -o "${xmpp_bridge_user}:${xmpp_bridge_group}" "${xmpp_bridge_log_dir}" || return 1
+    checkpath -d -m 0750 -o "${xmpp_bridge_user}:${xmpp_bridge_group}" "${xmpp_bridge_runtime_dir}" || return 1
+    checkpath -f -m 0640 -o "${xmpp_bridge_user}:${xmpp_bridge_group}" "${output_log}" || return 1
+    checkpath -f -m 0640 -o "${xmpp_bridge_user}:${xmpp_bridge_group}" "${error_log}" || return 1
+
+    load_env || return 1
+    umask "${xmpp_bridge_umask}"
+}

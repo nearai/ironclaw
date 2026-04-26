@@ -1,0 +1,8 @@
+# /etc/conf.d/lunarwing-watchdog
+#
+# Optional configuration for the Gentoo/OpenRC watchdog wrapper.
+
+lunarwing_watchdog_service="lunarwing"
+lunarwing_watchdog_log="/var/log/lunarwing-watchdog.log"
+lunarwing_watchdog_lock="/run/lunarwing-watchdog.lock"
+lunarwing_watchdog_post_restart_sleep_seconds="5"

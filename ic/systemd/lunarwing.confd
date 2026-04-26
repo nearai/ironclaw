@@ -1,0 +1,25 @@
+# /etc/conf.d/lunarwing
+#
+# Gentoo/OpenRC configuration for the LunarWing service.
+# Copy this file to /etc/conf.d/lunarwing and adjust paths as needed.
+# Keep secrets in /etc/lunarwing/lunarwing.env (0600) unless you explicitly
+# prefer exporting them directly from this conf.d file.
+
+lunarwing_command="/usr/local/bin/ironclaw"
+lunarwing_args="--no-onboard run"
+lunarwing_user="lunarwing"
+lunarwing_group="lunarwing"
+lunarwing_workdir="/var/lib/lunarwing"
+lunarwing_state_dir="/var/lib/lunarwing"
+lunarwing_runtime_dir="/run/lunarwing"
+lunarwing_log_dir="/var/log/lunarwing"
+lunarwing_output_log="/var/log/lunarwing/lunarwing.log"
+lunarwing_error_log="/var/log/lunarwing/lunarwing.err"
+lunarwing_env_file="/etc/lunarwing/lunarwing.env"
+lunarwing_cli_enabled="false"
+lunarwing_base_dir="/var/lib/lunarwing"
+lunarwing_rust_log="ironclaw=info,lunarwing=info"
+
+# Optional OpenRC dependency wiring.
+# Set this when the companion bridge is installed and should be started first.
+lunarwing_rc_need="xmpp-bridge"

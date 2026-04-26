@@ -1,2 +1,80 @@
-# openrc level service 
-## Install Gentoo
+#!/sbin/openrc-run
+
+description="LunarWing AI assistant"
+
+: "${lunarwing_command:=/usr/local/bin/ironclaw}"
+: "${lunarwing_args:=--no-onboard run}"
+: "${lunarwing_user:=lunarwing}"
+: "${lunarwing_group:=lunarwing}"
+: "${lunarwing_workdir:=/var/lib/lunarwing}"
+: "${lunarwing_pidfile:=/run/lunarwing/lunarwing.pid}"
+: "${lunarwing_state_dir:=/var/lib/lunarwing}"
+: "${lunarwing_runtime_dir:=/run/lunarwing}"
+: "${lunarwing_log_dir:=/var/log/lunarwing}"
+: "${lunarwing_output_log:=${lunarwing_log_dir}/lunarwing.log}"
+: "${lunarwing_error_log:=${lunarwing_log_dir}/lunarwing.err}"
+: "${lunarwing_env_file:=/etc/lunarwing/lunarwing.env}"
+: "${lunarwing_cli_enabled:=false}"
+: "${lunarwing_base_dir:=/var/lib/lunarwing}"
+: "${lunarwing_rust_log:=ironclaw=info,lunarwing=info}"
+: "${lunarwing_umask:=0077}"
+: "${lunarwing_respawn_delay:=5}"
+: "${lunarwing_respawn_max:=5}"
+: "${lunarwing_respawn_period:=60}"
+: "${lunarwing_retry:=SIGTERM/30/KILL/5}"
+
+command="${lunarwing_command}"
+command_args="${lunarwing_args}"
+command_user="${lunarwing_user}:${lunarwing_group}"
+directory="${lunarwing_workdir}"
+pidfile="${lunarwing_pidfile}"
+supervisor="supervise-daemon"
+retry="${lunarwing_retry}"
+respawn_delay="${lunarwing_respawn_delay}"
+respawn_max="${lunarwing_respawn_max}"
+respawn_period="${lunarwing_respawn_period}"
+output_log="${lunarwing_output_log}"
+error_log="${lunarwing_error_log}"
+required_files="${command}"
+
+depend() {
+    need net localmount
+    use dns logger
+    after firewall
+
+    [ -n "${lunarwing_rc_need:-}" ] && need ${lunarwing_rc_need}
+    [ -n "${lunarwing_rc_use:-}" ] && use ${lunarwing_rc_use}
+    [ -n "${lunarwing_rc_after:-}" ] && after ${lunarwing_rc_after}
+    [ -n "${lunarwing_rc_before:-}" ] && before ${lunarwing_rc_before}
+}
+
+load_env() {
+    export CLI_ENABLED="${lunarwing_cli_enabled}"
+    export IRONCLAW_BASE_DIR="${lunarwing_base_dir}"
+    export RUST_LOG="${lunarwing_rust_log}"
+
+    if [ -n "${lunarwing_env_file}" ]; then
+        if [ ! -r "${lunarwing_env_file}" ]; then
+            eerror "Environment file not readable: ${lunarwing_env_file}"
+            return 1
+        fi
+
+        set -a
+        . "${lunarwing_env_file}"
+        set +a
+    fi
+}
+
+prepare_paths() {
+    checkpath -d -m 0750 -o "${lunarwing_user}:${lunarwing_group}" "${lunarwing_state_dir}"
+    checkpath -d -m 0750 -o "${lunarwing_user}:${lunarwing_group}" "${lunarwing_log_dir}"
+    checkpath -d -m 0750 -o "${lunarwing_user}:${lunarwing_group}" "${lunarwing_runtime_dir}"
+    checkpath -f -m 0640 -o "${lunarwing_user}:${lunarwing_group}" "${output_log}"
+    checkpath -f -m 0640 -o "${lunarwing_user}:${lunarwing_group}" "${error_log}"
+}
+
+start_pre() {
+    prepare_paths || return 1
+    load_env || return 1
+    umask "${lunarwing_umask}"
+}
