@@ -192,6 +192,7 @@ Filesystem import rules:
 - paths are guest-visible `ScopedPath` values such as `/workspace/file.txt`
 - `MountView` resolves scoped paths to `VirtualPath` targets
 - read/list/stat/write go through `ScopedFilesystem` permission checks
+- read/list outputs are bounded by the guest output capacity and runtime output-byte budget before copying into guest memory
 - no raw `HostPath` reaches the guest
 - no broad WASI preopens are granted
 - missing filesystem context returns a negative guest status instead of ambient access
@@ -273,9 +274,9 @@ pub struct WasmRuntimeConfig {
 }
 
 pub trait WasmHostFilesystem: Send + Sync {
-    fn read_utf8(&self, path: &str) -> Result<String, String>;
+    fn read_utf8(&self, path: &str, max_bytes: usize) -> Result<String, String>;
     fn write_utf8(&self, path: &str, contents: &str) -> Result<(), String>;
-    fn list_utf8(&self, path: &str) -> Result<String, String>;
+    fn list_utf8(&self, path: &str, max_bytes: usize) -> Result<String, String>;
     fn stat_len(&self, path: &str) -> Result<u64, String>;
 }
 
@@ -360,7 +361,7 @@ impl WasmRuntime {
         &self,
         module: &PreparedWasmModule,
         descriptor: &CapabilityDescriptor,
-        reservation: Option<&ResourceReservation>,
+        reservation: Option<&ActiveResourceReservation>,
         invocation: CapabilityInvocation,
         filesystem: Arc<dyn WasmHostFilesystem>,
     ) -> Result<CapabilityResult, WasmError>;
@@ -442,6 +443,7 @@ Local contract tests should prove:
 - core `host.log_utf8` captures bounded structured logs in capability results and cannot exceed the runtime output-byte budget
 - core `host.time_unix_ms` is available without adding privileged authority
 - filesystem imports read/write/list/stat through `ScopedFilesystem` and `MountView`
+- filesystem read/list imports reject oversized outputs before copying them into guest memory
 - filesystem imports deny by default when no filesystem context is provided
 - filesystem write respects mount permissions and cannot create host-path access
 - unsupported host imports still fail closed during module preparation

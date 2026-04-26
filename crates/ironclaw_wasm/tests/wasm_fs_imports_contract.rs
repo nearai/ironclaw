@@ -15,7 +15,7 @@ fn fs_read_import_uses_scoped_filesystem_mounts() {
     let runtime = WasmRuntime::for_testing().unwrap();
     let module = runtime.prepare(fs_read_spec()).unwrap();
     let descriptor = make_descriptor("fs-demo", "fs-demo.read", RuntimeKind::Wasm);
-    let reservation = sample_reservation();
+    let reservation = sample_active_reservation();
 
     let result = runtime
         .invoke_json_with_filesystem(
@@ -31,11 +31,35 @@ fn fs_read_import_uses_scoped_filesystem_mounts() {
 }
 
 #[test]
+fn fs_read_import_bounds_filesystem_output_capacity() {
+    let oversized = "x".repeat(600);
+    let (wasm_fs, _storage) = scoped_filesystem(MountPermissions::read_only(), |project| {
+        std::fs::write(project.join("input.json"), oversized).unwrap();
+    });
+    let runtime = WasmRuntime::for_testing().unwrap();
+    let module = runtime.prepare(fs_read_spec()).unwrap();
+    let descriptor = make_descriptor("fs-demo", "fs-demo.read", RuntimeKind::Wasm);
+    let reservation = sample_active_reservation();
+
+    let result = runtime
+        .invoke_json_with_filesystem(
+            &module,
+            &descriptor,
+            Some(&reservation),
+            CapabilityInvocation { input: json!({}) },
+            Arc::new(wasm_fs),
+        )
+        .unwrap();
+
+    assert_eq!(result.output, json!({"ok": false}));
+}
+
+#[test]
 fn fs_imports_deny_by_default_without_filesystem_context() {
     let runtime = WasmRuntime::for_testing().unwrap();
     let module = runtime.prepare(fs_read_spec()).unwrap();
     let descriptor = make_descriptor("fs-demo", "fs-demo.read", RuntimeKind::Wasm);
-    let reservation = sample_reservation();
+    let reservation = sample_active_reservation();
 
     let result = runtime
         .invoke_json(
@@ -55,7 +79,7 @@ fn fs_write_import_respects_mount_permissions() {
     let runtime = WasmRuntime::for_testing().unwrap();
     let module = runtime.prepare(fs_write_spec()).unwrap();
     let descriptor = make_descriptor("fs-demo", "fs-demo.write", RuntimeKind::Wasm);
-    let reservation = sample_reservation();
+    let reservation = sample_active_reservation();
 
     let result = runtime
         .invoke_json_with_filesystem(
@@ -97,7 +121,7 @@ fn fs_list_and_stat_imports_use_scoped_filesystem() {
     let runtime = WasmRuntime::for_testing().unwrap();
     let module = runtime.prepare(fs_list_stat_spec()).unwrap();
     let descriptor = make_descriptor("fs-demo", "fs-demo.list_stat", RuntimeKind::Wasm);
-    let reservation = sample_reservation();
+    let reservation = sample_active_reservation();
 
     let result = runtime
         .invoke_json_with_filesystem(
@@ -336,10 +360,10 @@ fn sample_scope() -> ResourceScope {
     }
 }
 
-fn sample_reservation() -> ResourceReservation {
-    ResourceReservation {
-        id: ResourceReservationId::new(),
-        scope: sample_scope(),
-        estimate: ResourceEstimate::default(),
-    }
+fn sample_active_reservation() -> ActiveResourceReservation {
+    let governor = InMemoryResourceGovernor::new();
+    let reservation = governor
+        .reserve(sample_scope(), ResourceEstimate::default())
+        .unwrap();
+    governor.active_reservation(reservation.id).unwrap()
 }

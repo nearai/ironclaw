@@ -88,9 +88,9 @@ impl WasmRuntimeConfig {
 
 /// Synchronous filesystem surface exposed to WASM host imports.
 pub trait WasmHostFilesystem: Send + Sync {
-    fn read_utf8(&self, path: &str) -> Result<String, String>;
+    fn read_utf8(&self, path: &str, max_bytes: usize) -> Result<String, String>;
     fn write_utf8(&self, path: &str, contents: &str) -> Result<(), String>;
-    fn list_utf8(&self, path: &str) -> Result<String, String>;
+    fn list_utf8(&self, path: &str, max_bytes: usize) -> Result<String, String>;
     fn stat_len(&self, path: &str) -> Result<u64, String>;
 }
 
@@ -119,9 +119,16 @@ impl<F> WasmHostFilesystem for WasmScopedFilesystem<F>
 where
     F: RootFilesystem,
 {
-    fn read_utf8(&self, path: &str) -> Result<String, String> {
+    fn read_utf8(&self, path: &str, max_bytes: usize) -> Result<String, String> {
         let path = ScopedPath::new(path.to_string()).map_err(|error| error.to_string())?;
+        let stat = block_on(self.scoped.stat(&path)).map_err(|error| error.to_string())?;
+        if stat.len > max_bytes as u64 {
+            return Err("filesystem read exceeds host import output capacity".to_string());
+        }
         let bytes = block_on(self.scoped.read_file(&path)).map_err(|error| error.to_string())?;
+        if bytes.len() > max_bytes {
+            return Err("filesystem read exceeds host import output capacity".to_string());
+        }
         String::from_utf8(bytes).map_err(|error| error.to_string())
     }
 
@@ -131,14 +138,18 @@ where
             .map_err(|error| error.to_string())
     }
 
-    fn list_utf8(&self, path: &str) -> Result<String, String> {
+    fn list_utf8(&self, path: &str, max_bytes: usize) -> Result<String, String> {
         let path = ScopedPath::new(path.to_string()).map_err(|error| error.to_string())?;
         let entries = block_on(self.scoped.list_dir(&path)).map_err(|error| error.to_string())?;
         let names = entries
             .into_iter()
             .map(|entry| entry.name)
             .collect::<Vec<_>>();
-        serde_json::to_string(&names).map_err(|error| error.to_string())
+        let listing = serde_json::to_string(&names).map_err(|error| error.to_string())?;
+        if listing.len() > max_bytes {
+            return Err("filesystem listing exceeds host import output capacity".to_string());
+        }
+        Ok(listing)
     }
 
     fn stat_len(&self, path: &str) -> Result<u64, String> {
@@ -913,21 +924,21 @@ struct RuntimeStoreData {
     limiter: WasmRuntimeLimiter,
     logs: Vec<WasmLogEntry>,
     log_bytes: u64,
-    max_log_bytes: u64,
+    max_output_bytes: u64,
     filesystem: Option<Arc<dyn WasmHostFilesystem>>,
 }
 
 impl RuntimeStoreData {
     fn new(
         memory_limit: u64,
-        max_log_bytes: u64,
+        max_output_bytes: u64,
         filesystem: Option<Arc<dyn WasmHostFilesystem>>,
     ) -> Self {
         Self {
             limiter: WasmRuntimeLimiter::new(memory_limit),
             logs: Vec::new(),
             log_bytes: 0,
-            max_log_bytes,
+            max_output_bytes,
             filesystem,
         }
     }
@@ -940,7 +951,7 @@ impl RuntimeStoreData {
         let Some(next_log_bytes) = self.log_bytes.checked_add(message_len) else {
             return false;
         };
-        if next_log_bytes > self.max_log_bytes {
+        if next_log_bytes > self.max_output_bytes {
             return false;
         }
         self.log_bytes = next_log_bytes;
@@ -1182,7 +1193,10 @@ fn host_fs_read_utf8(
     let Some(filesystem) = caller.data().filesystem.clone() else {
         return -10;
     };
-    match filesystem.read_utf8(&path) {
+    let Ok(max_bytes) = guest_output_capacity(caller, out_cap) else {
+        return -6;
+    };
+    match filesystem.read_utf8(&path, max_bytes) {
         Ok(contents) => write_guest_bytes(caller, out_ptr, out_cap, contents.as_bytes()),
         Err(_) => -11,
     }
@@ -1223,7 +1237,10 @@ fn host_fs_list_utf8(
     let Some(filesystem) = caller.data().filesystem.clone() else {
         return -10;
     };
-    match filesystem.list_utf8(&path) {
+    let Ok(max_bytes) = guest_output_capacity(caller, out_cap) else {
+        return -6;
+    };
+    match filesystem.list_utf8(&path, max_bytes) {
         Ok(contents) => write_guest_bytes(caller, out_ptr, out_cap, contents.as_bytes()),
         Err(_) => -11,
     }
@@ -1262,6 +1279,15 @@ fn read_guest_utf8(
     let mut bytes = vec![0_u8; len];
     memory.read(&*caller, offset, &mut bytes).map_err(|_| -4)?;
     String::from_utf8(bytes).map_err(|_| -5)
+}
+
+fn guest_output_capacity(
+    caller: &Caller<'_, RuntimeStoreData>,
+    out_cap: i32,
+) -> Result<usize, i32> {
+    let capacity = usize::try_from(out_cap).map_err(|_| -1)?;
+    let max_output = usize::try_from(caller.data().max_output_bytes).unwrap_or(usize::MAX);
+    Ok(capacity.min(max_output))
 }
 
 fn write_guest_bytes(
