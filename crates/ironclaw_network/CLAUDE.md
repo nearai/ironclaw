@@ -1,6 +1,6 @@
 # ironclaw_network guardrails
 
-- Own network policy evaluation and scoped network permits only.
+- Own network policy evaluation helpers and scoped network permits only.
 - Do not perform HTTP I/O, DNS resolution, proxying, secret injection, resource reservation, audit/event emission, or product workflow here.
 - Preserve tenant/user/project scope in requests, permits, and errors.
 - Fail closed when no target pattern matches or no allowed targets are configured.

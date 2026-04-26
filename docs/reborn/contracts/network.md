@@ -45,8 +45,8 @@ Ownership remains:
 host_api       -> NetworkPolicy, NetworkTarget, NetworkMethod shapes
 network        -> scoped policy evaluation and metadata-only permits
 authorization  -> whether a caller has a grant with network authority
-capabilities   -> caller-facing workflow; currently fails closed on ApplyNetworkPolicy obligations
-host_runtime   -> future composition of network enforcers into runtime adapters/obligation handlers
+capabilities   -> caller-facing workflow and fail-closed obligation handler seam
+host_runtime   -> metadata-only ApplyNetworkPolicy obligation preflight plus future composition of network enforcers into runtime adapters
 runtimes        -> perform I/O only after host-side authorization and network permit handling
 ```
 
@@ -93,6 +93,7 @@ This slice does not implement:
 - HTTP client/proxy execution
 - DNS resolution or DNS-rebinding protection
 - resource reservation for network egress
+- full runtime enforcement of `ApplyNetworkPolicy` beyond current metadata preflight
 - credential or secret injection
 - durable audit/event emission
 - per-method policy matrices
