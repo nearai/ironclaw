@@ -136,6 +136,7 @@ docs/reborn/contracts/mcp.md
 docs/reborn/contracts/scripts.md
 docs/reborn/contracts/processes.md
 docs/reborn/contracts/runtime-selection.md
+docs/reborn/contracts/runtime-profiles.md
 docs/reborn/contracts/auth.md
 docs/reborn/contracts/network.md
 docs/reborn/contracts/events.md

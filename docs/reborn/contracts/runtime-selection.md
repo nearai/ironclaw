@@ -3,6 +3,7 @@
 **Date:** 2026-04-26
 **Status:** Decision guide / contract boundary
 **Depends on:** `docs/reborn/contracts/capabilities.md`, `docs/reborn/contracts/dispatcher.md`, `docs/reborn/contracts/processes.md`, `docs/reborn/contracts/scripts.md`, `docs/reborn/contracts/wasm.md`, `docs/reborn/contracts/host-runtime.md`
+**Profile presets:** `docs/reborn/contracts/runtime-profiles.md`
 
 ---
 
