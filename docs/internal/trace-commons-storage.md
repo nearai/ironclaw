@@ -890,7 +890,8 @@ Process-evaluation derived rows should use `worker_kind = process_evaluation`, s
 evaluator version in `worker_version`, keep label and rubric output in bounded metadata or
 an optional `worker_intermediate` object ref, and expose only safe aggregate values such as
 tool-selection, argument-quality, ordering, verification, side-effect-safety ratings, and
-overall score. Derived rows are versioned rather than overwritten. Process-evaluation
+overall score. DB derived ids are versioned by evaluator version rather than overwritten, so
+rerunning a new rubric version preserves the previous process-evaluation row. Process-evaluation
 requests may also include a bounded utility credit delta plus external reference; the
 service appends `training_utility` delayed credit idempotently and reports appended/skipped
 counts without making the worker a generic credit mutator. Process-evaluation audit rows use

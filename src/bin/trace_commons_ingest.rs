@@ -6139,20 +6139,15 @@ async fn mirror_process_evaluation_to_db(
     db.append_trace_object_ref(object_ref)
         .await
         .context("failed to mirror process-evaluated trace object ref")?;
+    let process_evaluation_worker_version = process_evaluation_worker_version(envelope);
     db.append_trace_derived_record(StorageTraceDerivedRecordWrite {
-        derived_id: deterministic_trace_uuid("process-evaluation", record),
+        derived_id: process_evaluation_derived_id(record, &process_evaluation_worker_version),
         tenant_id: record.tenant_id.clone(),
         submission_id: record.submission_id,
         trace_id: record.trace_id,
         status: storage_derived_status(record.status),
         worker_kind: StorageTraceWorkerKind::ProcessEvaluation,
-        worker_version: envelope
-            .process_evaluation
-            .as_ref()
-            .map(|labels| labels.evaluator_version.trim())
-            .filter(|version| !version.is_empty())
-            .unwrap_or("process-evaluation-worker-v1")
-            .to_string(),
+        worker_version: process_evaluation_worker_version,
         input_object_ref: input_object_ref_id.map(|object_ref_id| {
             ironclaw::trace_corpus_storage::TenantScopedTraceObjectRef {
                 tenant_id: record.tenant_id.clone(),
@@ -6209,6 +6204,28 @@ async fn mirror_process_evaluation_to_db(
         )
     })?;
     Ok(Some(output_object_ref_id))
+}
+
+fn process_evaluation_worker_version(envelope: &TraceContributionEnvelope) -> String {
+    envelope
+        .process_evaluation
+        .as_ref()
+        .map(|labels| labels.evaluator_version.trim())
+        .filter(|version| !version.is_empty())
+        .unwrap_or("process-evaluation-worker-v1")
+        .to_string()
+}
+
+fn process_evaluation_derived_id(
+    record: &TraceCommonsSubmissionRecord,
+    evaluator_version: &str,
+) -> Uuid {
+    deterministic_trace_uuid_for_external_ref(
+        "process-evaluation",
+        &record.tenant_id,
+        record.submission_id,
+        evaluator_version,
+    )
 }
 
 async fn mirror_credit_event_to_db(
@@ -17025,6 +17042,31 @@ mod tests {
         assert_eq!(response.utility_credit_appended_count, 1);
         assert_eq!(response.utility_credit_skipped_existing_count, 0);
 
+        let Json(second_response) = process_evaluation_worker_handler(
+            State(state.clone()),
+            auth_headers("process-eval-worker-token-a"),
+            Json(TraceProcessEvaluationJobRequest {
+                submission_id,
+                process_evaluation: ProcessEvaluationLabels {
+                    evaluator_version: "db-credit-judge-v2".to_string(),
+                    labels: vec![
+                        ironclaw::trace_contribution::ProcessEvaluatorLabel::CorrectToolSelection,
+                    ],
+                    tool_selection: Some(ProcessEvalRating::Fail),
+                    overall_score: Some(0.34),
+                    ..ProcessEvaluationLabels::default()
+                },
+                reason: "second process evaluator version preserves a separate derived row"
+                    .to_string(),
+                utility_credit_points_delta: None,
+                utility_external_ref: None,
+            }),
+        )
+        .await
+        .expect("second process evaluation version is recorded");
+        assert_eq!(second_response.utility_credit_appended_count, 0);
+        assert_eq!(second_response.utility_credit_skipped_existing_count, 0);
+
         let db_credit_events = db
             .list_trace_credit_events("tenant-a")
             .await
@@ -17085,6 +17127,18 @@ mod tests {
             record.submission_id == submission_id
                 && record.worker_kind == StorageTraceWorkerKind::ProcessEvaluation
         }));
+        let process_eval_versions = db_derived
+            .iter()
+            .filter(|record| {
+                record.submission_id == submission_id
+                    && record.worker_kind == StorageTraceWorkerKind::ProcessEvaluation
+            })
+            .map(|record| record.worker_version.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            process_eval_versions,
+            BTreeSet::from(["db-credit-judge-v1", "db-credit-judge-v2"])
+        );
 
         let db_reviewer_state = test_state_with_db_reviewer_reads(
             temp.path().to_path_buf(),
@@ -17103,6 +17157,14 @@ mod tests {
                 .by_rating
                 .get("verification")
                 .and_then(|ratings| ratings.get("pass")),
+            Some(&1)
+        );
+        assert_eq!(
+            analytics
+                .process_evaluation
+                .by_rating
+                .get("tool_selection")
+                .and_then(|ratings| ratings.get("fail")),
             Some(&1)
         );
 
