@@ -130,6 +130,49 @@ async fn dispatcher_emits_failed_event_for_missing_backend_without_reserving() {
     );
 }
 
+#[tokio::test]
+async fn event_sink_failure_does_not_change_dispatch_result() {
+    let fs = filesystem_with_echo_extensions();
+    let registry =
+        ExtensionDiscovery::discover(&fs, &VirtualPath::new("/system/extensions").unwrap())
+            .await
+            .unwrap();
+    let governor = InMemoryResourceGovernor::new();
+    let wasm_runtime = WasmRuntime::for_testing().unwrap();
+    let failing_events = FailingEventSink;
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
+        .with_wasm_runtime(&wasm_runtime)
+        .with_event_sink(&failing_events);
+
+    let result = dispatcher
+        .dispatch_json(CapabilityDispatchRequest {
+            capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
+            scope: sample_scope(),
+            estimate: ResourceEstimate {
+                concurrency_slots: Some(1),
+                output_bytes: Some(10_000),
+                ..ResourceEstimate::default()
+            },
+            input: json!({"message": "hello wasm"}),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.output, json!({"message": "hello wasm"}));
+    assert_eq!(result.receipt.status, ReservationStatus::Reconciled);
+}
+
+struct FailingEventSink;
+
+#[async_trait::async_trait]
+impl EventSink for FailingEventSink {
+    async fn emit(&self, _event: RuntimeEvent) -> Result<(), EventError> {
+        Err(EventError::Sink {
+            reason: "forced sink failure".to_string(),
+        })
+    }
+}
+
 #[derive(Clone)]
 struct EchoScriptBackend;
 

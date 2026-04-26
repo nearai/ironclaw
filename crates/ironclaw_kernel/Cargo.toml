@@ -16,6 +16,7 @@ serde_json = "1"
 thiserror = "2"
 
 [dev-dependencies]
+async-trait = "0.1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }
 wat = "1"

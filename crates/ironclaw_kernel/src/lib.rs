@@ -145,7 +145,7 @@ where
             scope.clone(),
             capability_id.clone(),
         ))
-        .await?;
+        .await;
 
         let descriptor = match self.registry.get_capability(&request.capability_id) {
             Some(descriptor) => descriptor,
@@ -154,7 +154,7 @@ where
                     capability: request.capability_id,
                 };
                 self.emit_dispatch_failure(scope, capability_id, None, None, &error)
-                    .await?;
+                    .await;
                 return Err(error);
             }
         };
@@ -172,7 +172,7 @@ where
                     Some(descriptor.runtime),
                     &error,
                 )
-                .await?;
+                .await;
                 return Err(error);
             }
         };
@@ -190,7 +190,7 @@ where
                 Some(descriptor.runtime),
                 &error,
             )
-            .await?;
+            .await;
             return Err(error);
         }
 
@@ -207,7 +207,7 @@ where
                         Some(RuntimeKind::Wasm),
                         &error,
                     )
-                    .await?;
+                    .await;
                     return Err(error);
                 };
                 self.emit_event(RuntimeEvent::runtime_selected(
@@ -216,7 +216,7 @@ where
                     descriptor.provider.clone(),
                     RuntimeKind::Wasm,
                 ))
-                .await?;
+                .await;
 
                 let execution = match wasm_runtime
                     .execute_extension_json(
@@ -244,7 +244,7 @@ where
                             Some(RuntimeKind::Wasm),
                             &error,
                         )
-                        .await?;
+                        .await;
                         return Err(error);
                     }
                 };
@@ -256,7 +256,7 @@ where
                     RuntimeKind::Wasm,
                     output_bytes,
                 ))
-                .await?;
+                .await;
 
                 Ok(CapabilityDispatchResult {
                     capability_id,
@@ -279,7 +279,7 @@ where
                         Some(RuntimeKind::Script),
                         &error,
                     )
-                    .await?;
+                    .await;
                     return Err(error);
                 };
                 self.emit_event(RuntimeEvent::runtime_selected(
@@ -288,7 +288,7 @@ where
                     descriptor.provider.clone(),
                     RuntimeKind::Script,
                 ))
-                .await?;
+                .await;
 
                 let execution = match script_runtime.execute_extension_json(
                     self.governor,
@@ -312,7 +312,7 @@ where
                             Some(RuntimeKind::Script),
                             &error,
                         )
-                        .await?;
+                        .await;
                         return Err(error);
                     }
                 };
@@ -324,7 +324,7 @@ where
                     RuntimeKind::Script,
                     output_bytes,
                 ))
-                .await?;
+                .await;
 
                 Ok(CapabilityDispatchResult {
                     capability_id,
@@ -347,7 +347,7 @@ where
                     Some(runtime),
                     &error,
                 )
-                .await?;
+                .await;
                 Err(error)
             }
         }
@@ -360,7 +360,7 @@ where
         provider: Option<ExtensionId>,
         runtime: Option<RuntimeKind>,
         error: &DispatchError,
-    ) -> Result<(), DispatchError> {
+    ) {
         self.emit_event(RuntimeEvent::dispatch_failed(
             scope,
             capability_id,
@@ -368,14 +368,13 @@ where
             runtime,
             dispatch_error_kind(error),
         ))
-        .await
+        .await;
     }
 
-    async fn emit_event(&self, event: RuntimeEvent) -> Result<(), DispatchError> {
+    async fn emit_event(&self, event: RuntimeEvent) {
         if let Some(sink) = self.event_sink {
-            sink.emit(event).await?;
+            let _ = sink.emit(event).await;
         }
-        Ok(())
     }
 }
 
