@@ -74,7 +74,7 @@ V1 provides two sinks:
 | `InMemoryEventSink` | Tests, demos, and live progress capture |
 | `JsonlEventSink<F: RootFilesystem>` | Durable JSONL runtime history under a `VirtualPath` |
 
-`JsonlEventSink` writes through `RootFilesystem`, not raw host paths. It also supports `read_events()` for deterministic demo/test readback from JSONL. It is a minimal durable history sink, not the final audit store, replay service, or stream fanout implementation.
+`JsonlEventSink` writes through `RootFilesystem`, not raw host paths. It also supports `read_events()` for deterministic demo/test readback from JSONL. Runtime, process, and approval audit events all use the same sink contract. It is a minimal durable history sink, not the final audit store, replay service, or stream fanout implementation.
 
 ---
 
@@ -84,6 +84,12 @@ The live vertical slice mounts an explicit `/engine` root and persists demo disp
 
 ```text
 /engine/events/reborn-demo.jsonl
+```
+
+Approval audit tests use the same durable sink shape at a host-selected virtual path such as:
+
+```text
+/engine/events/approval-audit.jsonl
 ```
 
 The path is a `VirtualPath`; runtime code and guests still do not receive raw host paths.
@@ -160,7 +166,7 @@ CapabilityId
 ApprovalRequestId
 ```
 
-It does not include the approval reason, replay input, invocation fingerprint, lease ID, lease contents, approver-specific secret material, or runtime output. Approval event emission is best-effort observability: sink failures are ignored and must not change approval resolution outcomes.
+It does not include the approval reason, replay input, invocation fingerprint, lease ID, lease contents, approver-specific secret material, raw host paths, or runtime output. This redaction applies equally when events are persisted through `JsonlEventSink`. Approval event emission is best-effort observability: sink failures are ignored and must not change approval resolution outcomes.
 
 Approval events are emitted by `ironclaw_approvals`, not by `ironclaw_dispatcher`, so the dispatcher remains authorization-, approval-, and state-blind.
 
