@@ -1814,10 +1814,19 @@ async fn run_benchmark_conversion(
         .iter()
         .map(|candidate| candidate.submission_id)
         .collect::<Vec<_>>();
+    let source_object_refs = revalidate_db_export_sources(
+        state,
+        tenant,
+        &source_submission_ids,
+        state.db_reviewer_require_object_refs,
+    )
+    .await
+    .map_err(internal_error)?;
     append_derived_source_read_audits(
         state,
         tenant,
         &source_submission_ids,
+        &source_object_refs,
         "benchmark_conversion",
         Some(&purpose),
     )
@@ -1981,10 +1990,19 @@ async fn ranker_training_candidates_handler(
         .iter()
         .map(|candidate| candidate.submission_id)
         .collect::<Vec<_>>();
+    let source_object_refs = revalidate_db_export_sources(
+        state.as_ref(),
+        &tenant,
+        &source_submission_ids,
+        state.db_reviewer_require_object_refs,
+    )
+    .await
+    .map_err(internal_error)?;
     append_derived_source_read_audits(
         state.as_ref(),
         &tenant,
         &source_submission_ids,
+        &source_object_refs,
         "ranker_training_candidates",
         Some(&purpose),
     )
@@ -2111,10 +2129,19 @@ async fn ranker_training_pairs_handler(
             .map_err(internal_error)?;
     let pairs = build_ranker_training_pairs(&candidates, pair_limit);
     let source_submission_ids = ranker_pair_source_submission_ids(&pairs);
+    let source_object_refs = revalidate_db_export_sources(
+        state.as_ref(),
+        &tenant,
+        &source_submission_ids,
+        state.db_reviewer_require_object_refs,
+    )
+    .await
+    .map_err(internal_error)?;
     append_derived_source_read_audits(
         state.as_ref(),
         &tenant,
         &source_submission_ids,
+        &source_object_refs,
         "ranker_training_pairs",
         Some(&purpose),
     )
@@ -5828,6 +5855,7 @@ async fn append_derived_source_read_audits(
     state: &AppState,
     tenant: &TenantAuth,
     submission_ids: &[Uuid],
+    object_ref_ids: &BTreeMap<Uuid, Uuid>,
     surface: &str,
     purpose: Option<&str>,
 ) -> anyhow::Result<usize> {
@@ -5837,11 +5865,67 @@ async fn append_derived_source_read_audits(
         if !seen.insert(submission_id) {
             continue;
         }
-        append_trace_content_read_audit(state, tenant, submission_id, None, surface, purpose)
-            .await?;
+        append_trace_content_read_audit(
+            state,
+            tenant,
+            submission_id,
+            object_ref_ids.get(&submission_id).copied(),
+            surface,
+            purpose,
+        )
+        .await?;
         appended += 1;
     }
     Ok(appended)
+}
+
+async fn revalidate_db_export_sources(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_ids: &[Uuid],
+    require_object_refs: bool,
+) -> anyhow::Result<BTreeMap<Uuid, Uuid>> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(BTreeMap::new());
+    };
+
+    let mut seen = BTreeSet::new();
+    let mut object_ref_ids = BTreeMap::new();
+    for submission_id in submission_ids.iter().copied() {
+        if !seen.insert(submission_id) {
+            continue;
+        }
+        let record = db
+            .get_trace_submission(&tenant.tenant_id, submission_id)
+            .await
+            .with_context(|| format!("failed to revalidate export source {submission_id}"))?
+            .with_context(|| format!("missing DB submission for export source {submission_id}"))?;
+        anyhow::ensure!(
+            record.status == StorageTraceCorpusStatus::Accepted
+                && record.revoked_at.is_none()
+                && record.purged_at.is_none(),
+            "trace export source {submission_id} is no longer accepted"
+        );
+        let object_ref = db
+            .get_latest_active_trace_object_ref(
+                &tenant.tenant_id,
+                submission_id,
+                StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            )
+            .await
+            .with_context(|| {
+                format!("failed to read active submitted-envelope object ref for {submission_id}")
+            })?;
+        if let Some(object_ref) = object_ref {
+            read_envelope_from_object_ref(state, &tenant.tenant_id, &object_ref).with_context(
+                || format!("failed to verify export source object ref for {submission_id}"),
+            )?;
+            object_ref_ids.insert(submission_id, object_ref.object_ref_id);
+        } else if require_object_refs {
+            anyhow::bail!("missing active submitted-envelope object ref for {submission_id}");
+        }
+    }
+    Ok(object_ref_ids)
 }
 
 async fn mirror_audit_event_to_db(
@@ -12426,6 +12510,114 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn benchmark_and_ranker_exports_revalidate_db_source_status_before_publish() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-export-source-revalidation.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut preferred = sample_envelope().await;
+        make_metadata_only_low_risk(&mut preferred);
+        preferred.consent.scopes = vec![ConsentScope::RankingTraining];
+        preferred.value.submission_score = 0.9;
+        let preferred_id = preferred.submission_id;
+        let mut revoked_in_db = sample_envelope().await;
+        make_metadata_only_low_risk(&mut revoked_in_db);
+        revoked_in_db.consent.scopes = vec![ConsentScope::RankingTraining];
+        revoked_in_db.value.submission_score = 0.1;
+        let revoked_id = revoked_in_db.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(preferred),
+        )
+        .await
+        .expect("preferred source submits");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(revoked_in_db),
+        )
+        .await
+        .expect("revoked-in-db source submits");
+        db.update_trace_submission_status(
+            "tenant-a",
+            revoked_id,
+            StorageTraceCorpusStatus::Revoked,
+            &principal_storage_ref("review-token-a"),
+            Some("test_db_status_race"),
+        )
+        .await
+        .expect("DB source status updates");
+
+        let benchmark_error = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("stale_benchmark_source".to_string()),
+                consent_scope: None,
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect_err("benchmark conversion revalidates DB source status");
+        assert_eq!(benchmark_error.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let ranker_error = ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("stale_ranker_source".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect_err("ranker candidate export revalidates DB source status");
+        assert_eq!(ranker_error.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let pair_error = ranker_training_pairs_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("stale_ranker_pair_source".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect_err("ranker pair export revalidates DB source status");
+        assert_eq!(pair_error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            db.list_trace_export_manifests("tenant-a")
+                .await
+                .expect("export manifests read")
+                .is_empty(),
+            "stale-source exports should fail before publishing manifests"
+        );
+        assert_ne!(preferred_id, revoked_id);
+    }
+
     #[tokio::test]
     async fn active_learning_queue_is_tenant_scoped_and_excludes_revoked_traces() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -16729,12 +16921,7 @@ mod tests {
                     db_audit_events.iter().any(|event| {
                         event.action == StorageTraceAuditAction::Read
                             && event.submission_id == Some(submission_id)
-                            && event.object_ref_id
-                                == if surface == "vector_index" {
-                                    Some(active_object_ref.object_ref_id)
-                                } else {
-                                    None
-                                }
+                            && event.object_ref_id == Some(active_object_ref.object_ref_id)
                             && event.reason.as_deref().is_some_and(|reason| {
                                 reason.contains(&format!("surface={surface}"))
                                     && reason.contains(&format!("purpose={purpose}"))
