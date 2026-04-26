@@ -1455,15 +1455,7 @@ impl TraceCorpusStore for LibSqlBackend {
                 canonical_summary_hash, reason, effective_at, retain_until,
                 created_by_principal_ref
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-             ON CONFLICT (tenant_id, submission_id) DO UPDATE SET
-                tombstone_id = excluded.tombstone_id,
-                trace_id = excluded.trace_id,
-                redaction_hash = excluded.redaction_hash,
-                canonical_summary_hash = excluded.canonical_summary_hash,
-                reason = excluded.reason,
-                effective_at = excluded.effective_at,
-                retain_until = excluded.retain_until,
-                created_by_principal_ref = excluded.created_by_principal_ref",
+             ON CONFLICT (tenant_id, submission_id) DO NOTHING",
             libsql::params![
                 tombstone.tenant_id.as_str(),
                 tombstone.tombstone_id.to_string(),

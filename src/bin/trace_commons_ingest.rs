@@ -914,6 +914,21 @@ async fn revoke_submission(
             "trace submission not found",
         ));
     }
+    let db_record = if record.is_none() {
+        db_submission_record_for_revocation(state, &tenant.tenant_id, submission_id)
+            .await
+            .map_err(internal_error)?
+    } else {
+        None
+    };
+    if let Some(db_record) = db_record.as_ref()
+        && !can_access_storage_submission(&tenant, db_record)
+    {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "trace submission not found",
+        ));
+    }
     let mut derived = read_derived_record(&state.root, &tenant.tenant_id, submission_id)
         .map_err(internal_error)?;
     let tombstone = TraceCommonsRevocation {
@@ -956,8 +971,14 @@ async fn revoke_submission(
         TraceCommonsAuditEvent::revoked(&tenant, submission_id),
     )
     .map_err(internal_error)?;
-    if let Err(error) =
-        mirror_revocation_to_db(state, &tenant, submission_id, mirrored_record.as_ref()).await
+    if let Err(error) = mirror_revocation_to_db(
+        state,
+        &tenant,
+        submission_id,
+        mirrored_record.as_ref(),
+        db_record.as_ref(),
+    )
+    .await
     {
         tracing::warn!(%error, %submission_id, "Trace Commons DB dual-write revocation mirror failed");
     }
@@ -2991,6 +3012,12 @@ fn can_access_submission(auth: &TenantAuth, record: &TraceCommonsSubmissionRecor
         || record.auth_principal_ref == auth.principal_ref
 }
 
+fn can_access_storage_submission(auth: &TenantAuth, record: &StorageTraceSubmissionRecord) -> bool {
+    auth.role.can_review()
+        || record.auth_principal_ref == legacy_principal_ref()
+        || record.auth_principal_ref == auth.principal_ref
+}
+
 fn visible_submission_records(
     auth: &TenantAuth,
     records: Vec<TraceCommonsSubmissionRecord>,
@@ -3990,6 +4017,7 @@ async fn mirror_revocation_to_db(
     tenant: &TenantAuth,
     submission_id: Uuid,
     record: Option<&TraceCommonsSubmissionRecord>,
+    db_record: Option<&StorageTraceSubmissionRecord>,
 ) -> anyhow::Result<()> {
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
@@ -4024,6 +4052,25 @@ async fn mirror_revocation_to_db(
         })
         .await
         .context("failed to mirror trace revocation tombstone")?;
+    } else if let Some(db_record) = db_record {
+        db.write_trace_tombstone(StorageTraceTombstoneWrite {
+            tombstone_id: deterministic_trace_uuid_for(
+                "revocation-tombstone",
+                &db_record.tenant_id,
+                db_record.submission_id,
+            ),
+            tenant_id: db_record.tenant_id.clone(),
+            submission_id: db_record.submission_id,
+            trace_id: Some(db_record.trace_id),
+            redaction_hash: Some(db_record.redaction_hash.clone()),
+            canonical_summary_hash: db_record.canonical_summary_hash.clone(),
+            reason: "contributor_revocation".to_string(),
+            effective_at: Utc::now(),
+            retain_until: None,
+            created_by_principal_ref: tenant.principal_ref.clone(),
+        })
+        .await
+        .context("failed to mirror DB-only trace revocation tombstone")?;
     }
 
     db.update_trace_submission_status(
@@ -4061,7 +4108,28 @@ async fn mirror_revocation_to_db(
         .await
         .context("failed to mirror trace export manifest item invalidation")?;
 
-    if let Some(record) = record
+    let audit_source = record
+        .map(|record| {
+            (
+                deterministic_trace_uuid("revocation-artifact-invalidation", record),
+                record.tenant_id.clone(),
+                record.submission_id,
+            )
+        })
+        .or_else(|| {
+            db_record.map(|record| {
+                (
+                    deterministic_trace_uuid_for(
+                        "revocation-artifact-invalidation",
+                        &record.tenant_id,
+                        record.submission_id,
+                    ),
+                    record.tenant_id.clone(),
+                    record.submission_id,
+                )
+            })
+        });
+    if let Some((audit_event_id, audit_tenant_id, audit_submission_id)) = audit_source
         && (invalidation_counts.object_refs_invalidated > 0
             || invalidation_counts.derived_records_invalidated > 0
             || vector_entries_invalidated > 0
@@ -4094,14 +4162,14 @@ async fn mirror_revocation_to_db(
             export_manifest_items_invalidated.min(u64::from(u32::MAX)) as u32,
         );
         db.append_trace_audit_event(StorageTraceAuditEventWrite {
-            audit_event_id: deterministic_trace_uuid("revocation-artifact-invalidation", record),
-            tenant_id: record.tenant_id.clone(),
+            audit_event_id,
+            tenant_id: audit_tenant_id,
             actor_principal_ref: tenant.principal_ref.clone(),
             actor_role: format!("{:?}", tenant.role).to_ascii_lowercase(),
             action: StorageTraceAuditAction::Revoke,
             reason: Some("contributor_revocation_artifact_invalidation".to_string()),
             request_id: None,
-            submission_id: Some(record.submission_id),
+            submission_id: Some(audit_submission_id),
             object_ref_id: None,
             export_manifest_id: None,
             decision_inputs_hash: None,
@@ -4118,6 +4186,19 @@ async fn mirror_revocation_to_db(
     }
 
     Ok(())
+}
+
+async fn db_submission_record_for_revocation(
+    state: &AppState,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> anyhow::Result<Option<StorageTraceSubmissionRecord>> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(None);
+    };
+    db.get_trace_submission(tenant_id, submission_id)
+        .await
+        .context("failed to read DB trace submission for revocation")
 }
 
 async fn mirror_expiration_to_db(
@@ -5449,6 +5530,9 @@ fn write_revocation(root: &Path, tombstone: &TraceCommonsRevocation) -> anyhow::
         .join(tenant_key)
         .join("revocations")
         .join(format!("{}.json", tombstone.submission_id));
+    if path.exists() {
+        return Ok(());
+    }
     write_json_file(&path, tombstone, "trace revocation tombstone")
 }
 
@@ -5909,7 +5993,8 @@ async fn run_maintenance(
         if record.is_revoked() {
             revoked_submission_ids.insert(record.submission_id);
             if !request.dry_run {
-                mirror_revocation_to_db(state, tenant, record.submission_id, Some(record)).await?;
+                mirror_revocation_to_db(state, tenant, record.submission_id, Some(record), None)
+                    .await?;
             }
             continue;
         }
@@ -5923,7 +6008,8 @@ async fn run_maintenance(
                 record.status = TraceCorpusStatus::Revoked;
                 record.credit_points_final = Some(0.0);
                 write_submission_record(&state.root, record)?;
-                mirror_revocation_to_db(state, tenant, record.submission_id, Some(record)).await?;
+                mirror_revocation_to_db(state, tenant, record.submission_id, Some(record), None)
+                    .await?;
             }
             continue;
         }
@@ -6431,7 +6517,8 @@ async fn backfill_db_mirror_from_files(
         )
         .await?;
         if record.is_revoked() {
-            mirror_revocation_to_db(state, tenant, record.submission_id, Some(record)).await?;
+            mirror_revocation_to_db(state, tenant, record.submission_id, Some(record), None)
+                .await?;
         }
         backfilled += 1;
     }
@@ -15144,6 +15231,89 @@ mod tests {
         assert_eq!(manifests[0].export_manifest_id, export.export_id);
         assert!(manifests[0].invalidated_at.is_some());
         assert!(manifests[0].deleted_at.is_none());
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn db_only_revocation_requires_original_contributor_or_reviewer() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-db-only-revocation-auth.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission dual-writes to DB mirror");
+        let tenant_dir = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"));
+        std::fs::remove_dir_all(tenant_dir.join("metadata")).expect("remove file metadata");
+        std::fs::remove_dir_all(tenant_dir.join("derived")).expect("remove file derived");
+
+        let unauthorized = revoke_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a-2"),
+            AxumPath(submission_id),
+        )
+        .await
+        .expect_err("same-tenant non-owner cannot revoke DB-only submission");
+        assert_eq!(unauthorized.0, StatusCode::NOT_FOUND);
+        let db_submission = db
+            .get_trace_submission("tenant-a", submission_id)
+            .await
+            .expect("DB submission reads")
+            .expect("DB submission exists");
+        assert_eq!(db_submission.status, StorageTraceCorpusStatus::Accepted);
+        assert!(
+            db.list_trace_tombstones("tenant-a")
+                .await
+                .expect("DB tombstones read")
+                .is_empty()
+        );
+
+        let status = revoke_trace_handler(
+            State(state),
+            auth_headers("token-a"),
+            AxumPath(submission_id),
+        )
+        .await
+        .expect("original contributor can revoke DB-only submission");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let revoked = db
+            .get_trace_submission("tenant-a", submission_id)
+            .await
+            .expect("revoked DB submission reads")
+            .expect("revoked DB submission exists");
+        assert_eq!(revoked.status, StorageTraceCorpusStatus::Revoked);
+        let tombstones = db
+            .list_trace_tombstones("tenant-a")
+            .await
+            .expect("DB tombstones read after owner revocation");
+        assert_eq!(tombstones.len(), 1);
+        assert_eq!(tombstones[0].submission_id, submission_id);
+        assert_eq!(
+            tombstones[0].created_by_principal_ref,
+            db_submission.auth_principal_ref
+        );
     }
 
     #[cfg(feature = "libsql")]

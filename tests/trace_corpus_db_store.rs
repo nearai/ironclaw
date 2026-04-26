@@ -713,6 +713,25 @@ mod libsql_trace_corpus_store {
             .await
             .expect("append tombstone");
 
+        let later_effective_at = DateTime::parse_from_rfc3339("2026-04-26T12:00:00Z")
+            .expect("parse later effective timestamp")
+            .with_timezone(&Utc);
+        backend
+            .write_trace_tombstone(TraceTombstoneWrite {
+                tombstone_id: Uuid::new_v4(),
+                tenant_id: tenant_id.to_string(),
+                submission_id,
+                trace_id: Some(inserted.trace_id),
+                redaction_hash: Some("sha256:later-redaction".to_string()),
+                canonical_summary_hash: Some("sha256:later-canonical".to_string()),
+                reason: "later duplicate revocation".to_string(),
+                effective_at: later_effective_at,
+                retain_until: None,
+                created_by_principal_ref: "principal:later-user".to_string(),
+            })
+            .await
+            .expect("repeat tombstone write is idempotent");
+
         backend
             .write_trace_tombstone(TraceTombstoneWrite {
                 tombstone_id: Uuid::new_v4(),
