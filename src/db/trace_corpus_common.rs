@@ -4,6 +4,8 @@ use uuid::Uuid;
 use crate::error::DatabaseError;
 use crate::trace_corpus_storage::{TraceAuditAction, TraceCorpusStatus};
 
+pub(crate) const TRACE_AUDIT_EVENT_GENESIS_HASH: &str = "sha256:genesis";
+
 pub(crate) fn enum_to_storage<T: Serialize>(value: T) -> Result<String, DatabaseError> {
     let value = serde_json::to_value(value)
         .map_err(|e| DatabaseError::Serialization(format!("trace enum encode failed: {e}")))?;
@@ -39,4 +41,29 @@ pub(crate) fn audit_action_for_status(status: TraceCorpusStatus) -> TraceAuditAc
         TraceCorpusStatus::Expired => TraceAuditAction::Retain,
         TraceCorpusStatus::Received => TraceAuditAction::Submit,
     }
+}
+
+pub(crate) fn validate_trace_audit_append_chain(
+    tenant_id: &str,
+    audit_event_id: Uuid,
+    latest_event_hash: Option<&str>,
+    previous_event_hash: Option<&str>,
+    event_hash_present: bool,
+) -> Result<(), DatabaseError> {
+    if !event_hash_present {
+        return Ok(());
+    }
+
+    if let Some(expected_previous) = latest_event_hash {
+        let provided_previous = previous_event_hash.unwrap_or(TRACE_AUDIT_EVENT_GENESIS_HASH);
+        if provided_previous == expected_previous {
+            return Ok(());
+        }
+
+        return Err(DatabaseError::Constraint(format!(
+            "trace audit append for tenant {tenant_id} event {audit_event_id} has stale previous_event_hash: expected {expected_previous}, got {provided_previous}"
+        )));
+    }
+
+    Ok(())
 }

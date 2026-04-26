@@ -6,6 +6,7 @@ use uuid::Uuid;
 use super::{LibSqlBackend, fmt_opt_ts, fmt_ts, get_opt_text, get_opt_ts, get_text, get_ts};
 use crate::db::trace_corpus_common::{
     audit_action_for_status, enum_from_storage, enum_to_storage, parse_uuid,
+    validate_trace_audit_append_chain,
 };
 use crate::error::DatabaseError;
 use crate::trace_corpus_storage::{
@@ -390,35 +391,41 @@ fn row_to_export_manifest_item(
 }
 
 fn row_to_audit_event(row: &libsql::Row) -> Result<TraceAuditEventRecord, DatabaseError> {
-    let submission_id = get_opt_text(row, 7)
+    let audit_sequence = row.get::<i64>(1).map_err(|e| {
+        DatabaseError::Serialization(format!(
+            "trace_audit_events.audit_sequence column read failed: {e}"
+        ))
+    })?;
+    let submission_id = get_opt_text(row, 8)
         .map(|id| parse_uuid(&id, "trace_audit_events.submission_id"))
         .transpose()?;
-    let object_ref_id = get_opt_text(row, 8)
+    let object_ref_id = get_opt_text(row, 9)
         .map(|id| parse_uuid(&id, "trace_audit_events.object_ref_id"))
         .transpose()?;
-    let export_manifest_id = get_opt_text(row, 9)
+    let export_manifest_id = get_opt_text(row, 10)
         .map(|id| parse_uuid(&id, "trace_audit_events.export_manifest_id"))
         .transpose()?;
-    let metadata = serde_json::from_str(&get_text(row, 14)).map_err(|e| {
+    let metadata = serde_json::from_str(&get_text(row, 15)).map_err(|e| {
         DatabaseError::Serialization(format!("trace audit metadata JSON decode failed: {e}"))
     })?;
     Ok(TraceAuditEventRecord {
         tenant_id: get_text(row, 0),
-        audit_event_id: parse_uuid(&get_text(row, 1), "trace_audit_events.audit_event_id")?,
-        actor_principal_ref: get_text(row, 2),
-        actor_role: get_text(row, 3),
-        action: enum_from_storage(&get_text(row, 4), "TraceAuditAction")?,
-        reason: get_opt_text(row, 5),
-        request_id: get_opt_text(row, 6),
+        audit_sequence,
+        audit_event_id: parse_uuid(&get_text(row, 2), "trace_audit_events.audit_event_id")?,
+        actor_principal_ref: get_text(row, 3),
+        actor_role: get_text(row, 4),
+        action: enum_from_storage(&get_text(row, 5), "TraceAuditAction")?,
+        reason: get_opt_text(row, 6),
+        request_id: get_opt_text(row, 7),
         submission_id,
         object_ref_id,
         export_manifest_id,
-        decision_inputs_hash: get_opt_text(row, 10),
-        previous_event_hash: get_opt_text(row, 11),
-        event_hash: get_opt_text(row, 12),
-        canonical_event_json: get_opt_text(row, 13),
+        decision_inputs_hash: get_opt_text(row, 11),
+        previous_event_hash: get_opt_text(row, 12),
+        event_hash: get_opt_text(row, 13),
+        canonical_event_json: get_opt_text(row, 14),
         metadata,
-        occurred_at: get_ts(row, 15),
+        occurred_at: get_ts(row, 16),
     })
 }
 
@@ -1350,34 +1357,103 @@ impl TraceCorpusStore for LibSqlBackend {
     ) -> Result<(), DatabaseError> {
         self.ensure_trace_tenant(&audit_event.tenant_id).await?;
         let conn = self.connect().await?;
-        conn.execute(
-            "INSERT INTO trace_audit_events (
-                tenant_id, audit_event_id, actor_principal_ref, actor_role, action, reason,
-                request_id, submission_id, object_ref_id, export_manifest_id,
-                decision_inputs_hash, previous_event_hash, event_hash, canonical_event_json,
-                metadata_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-            libsql::params![
-                audit_event.tenant_id.as_str(),
-                audit_event.audit_event_id.to_string(),
-                audit_event.actor_principal_ref.as_str(),
-                audit_event.actor_role.as_str(),
-                enum_to_storage(audit_event.action)?,
-                opt_string(audit_event.reason),
-                opt_string(audit_event.request_id),
-                opt_uuid(audit_event.submission_id),
-                opt_uuid(audit_event.object_ref_id),
-                opt_uuid(audit_event.export_manifest_id),
-                opt_string(audit_event.decision_inputs_hash),
-                opt_string(audit_event.previous_event_hash),
-                opt_string(audit_event.event_hash),
-                opt_string(audit_event.canonical_event_json),
-                json_string(&audit_event.metadata)?,
-            ],
-        )
-        .await
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        Ok(())
+        conn.execute("BEGIN IMMEDIATE", libsql::params![])
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let result = async {
+            let latest_event_hash = {
+                let mut rows = conn
+                    .query(
+                        "SELECT event_hash
+                         FROM trace_audit_events
+                         WHERE tenant_id = ?1
+                           AND event_hash IS NOT NULL
+                         ORDER BY audit_sequence DESC
+                         LIMIT 1",
+                        libsql::params![audit_event.tenant_id.as_str()],
+                    )
+                    .await
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+                rows.next()
+                    .await
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?
+                    .map(|row| get_text(&row, 0))
+            };
+            validate_trace_audit_append_chain(
+                &audit_event.tenant_id,
+                audit_event.audit_event_id,
+                latest_event_hash.as_deref(),
+                audit_event.previous_event_hash.as_deref(),
+                audit_event.event_hash.is_some(),
+            )?;
+
+            let next_audit_sequence = {
+                let mut rows = conn
+                    .query(
+                        "SELECT COALESCE(MAX(audit_sequence), 0) + 1
+                         FROM trace_audit_events
+                         WHERE tenant_id = ?1",
+                        libsql::params![audit_event.tenant_id.as_str()],
+                    )
+                    .await
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+                let row = rows
+                    .next()
+                    .await
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?
+                    .ok_or_else(|| {
+                        DatabaseError::Query(
+                            "trace audit sequence query returned no rows".to_string(),
+                        )
+                    })?;
+                row.get::<i64>(0)
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?
+            };
+
+            conn.execute(
+                "INSERT INTO trace_audit_events (
+                    tenant_id, audit_sequence, audit_event_id, actor_principal_ref, actor_role,
+                    action, reason, request_id, submission_id, object_ref_id, export_manifest_id,
+                    decision_inputs_hash, previous_event_hash, event_hash, canonical_event_json,
+                    metadata_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                libsql::params![
+                    audit_event.tenant_id.as_str(),
+                    next_audit_sequence,
+                    audit_event.audit_event_id.to_string(),
+                    audit_event.actor_principal_ref.as_str(),
+                    audit_event.actor_role.as_str(),
+                    enum_to_storage(audit_event.action)?,
+                    opt_string(audit_event.reason),
+                    opt_string(audit_event.request_id),
+                    opt_uuid(audit_event.submission_id),
+                    opt_uuid(audit_event.object_ref_id),
+                    opt_uuid(audit_event.export_manifest_id),
+                    opt_string(audit_event.decision_inputs_hash),
+                    opt_string(audit_event.previous_event_hash),
+                    opt_string(audit_event.event_hash),
+                    opt_string(audit_event.canonical_event_json),
+                    json_string(&audit_event.metadata)?,
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            Ok(())
+        }
+        .await;
+
+        match result {
+            Ok(()) => {
+                conn.execute("COMMIT", libsql::params![])
+                    .await
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = conn.execute("ROLLBACK", libsql::params![]).await;
+                Err(error)
+            }
+        }
     }
 
     async fn list_trace_audit_events(
@@ -1388,14 +1464,14 @@ impl TraceCorpusStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 "SELECT
-                    tenant_id, audit_event_id, actor_principal_ref, actor_role, action, reason,
-                    request_id, submission_id, object_ref_id, export_manifest_id,
+                    tenant_id, audit_sequence, audit_event_id, actor_principal_ref, actor_role,
+                    action, reason, request_id, submission_id, object_ref_id, export_manifest_id,
                     decision_inputs_hash, previous_event_hash, event_hash, canonical_event_json,
                     metadata_json,
                     occurred_at
                  FROM trace_audit_events
                  WHERE tenant_id = ?1
-                 ORDER BY occurred_at ASC",
+                 ORDER BY audit_sequence ASC",
                 libsql::params![tenant_id],
             )
             .await

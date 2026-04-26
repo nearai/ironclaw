@@ -5,7 +5,9 @@ use tokio_postgres::Row;
 use uuid::Uuid;
 
 use crate::db::postgres::PgBackend;
-use crate::db::trace_corpus_common::{audit_action_for_status, enum_from_storage, enum_to_storage};
+use crate::db::trace_corpus_common::{
+    audit_action_for_status, enum_from_storage, enum_to_storage, validate_trace_audit_append_chain,
+};
 use crate::error::DatabaseError;
 use crate::trace_corpus_storage::{
     TenantScopedTraceObjectRef, TraceArtifactInvalidationCounts, TraceAuditEventRecord,
@@ -304,6 +306,7 @@ fn row_to_audit_event(row: &Row) -> Result<TraceAuditEventRecord, DatabaseError>
     let metadata: serde_json::Value = row.get("metadata_json");
     Ok(TraceAuditEventRecord {
         tenant_id: row.get("tenant_id"),
+        audit_sequence: row.get("audit_sequence"),
         audit_event_id: row.get("audit_event_id"),
         actor_principal_ref: row.get("actor_principal_ref"),
         actor_role: row.get("actor_role"),
@@ -1223,19 +1226,56 @@ impl TraceCorpusStore for PgBackend {
         self.ensure_trace_tenant(&audit_event.tenant_id).await?;
         let mut client = self.pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &audit_event.tenant_id).await?;
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
+            &[&audit_event.tenant_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        let latest_event_hash: Option<String> = tx
+            .query_opt(
+                "SELECT event_hash
+                 FROM trace_audit_events
+                 WHERE tenant_id = $1
+                   AND event_hash IS NOT NULL
+                 ORDER BY audit_sequence DESC
+                 LIMIT 1",
+                &[&audit_event.tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .map(|row| row.get("event_hash"));
+        validate_trace_audit_append_chain(
+            &audit_event.tenant_id,
+            audit_event.audit_event_id,
+            latest_event_hash.as_deref(),
+            audit_event.previous_event_hash.as_deref(),
+            audit_event.event_hash.is_some(),
+        )?;
+        let next_audit_sequence: i64 = tx
+            .query_one(
+                "SELECT COALESCE(MAX(audit_sequence), 0) + 1
+                 FROM trace_audit_events
+                 WHERE tenant_id = $1",
+                &[&audit_event.tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get(0);
         let action = enum_to_storage(audit_event.action)?;
         let metadata_json = serde_json::to_value(&audit_event.metadata).map_err(|e| {
             DatabaseError::Serialization(format!("trace audit metadata encode failed: {e}"))
         })?;
         tx.execute(
             "INSERT INTO trace_audit_events (
-                    tenant_id, audit_event_id, actor_principal_ref, actor_role, action,
-                    reason, request_id, submission_id, object_ref_id, export_manifest_id,
+                    tenant_id, audit_sequence, audit_event_id, actor_principal_ref, actor_role,
+                    action, reason, request_id, submission_id, object_ref_id, export_manifest_id,
                     decision_inputs_hash, previous_event_hash, event_hash, canonical_event_json,
                     metadata_json
-                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
             &[
                 &audit_event.tenant_id,
+                &next_audit_sequence,
                 &audit_event.audit_event_id,
                 &audit_event.actor_principal_ref,
                 &audit_event.actor_role,
@@ -1267,14 +1307,14 @@ impl TraceCorpusStore for PgBackend {
         let rows = tx
             .query(
                 "SELECT
-                    tenant_id, audit_event_id, actor_principal_ref, actor_role, action, reason,
-                    request_id, submission_id, object_ref_id, export_manifest_id,
+                    tenant_id, audit_sequence, audit_event_id, actor_principal_ref, actor_role,
+                    action, reason, request_id, submission_id, object_ref_id, export_manifest_id,
                     decision_inputs_hash, previous_event_hash, event_hash, canonical_event_json,
                     metadata_json,
                     occurred_at
                  FROM trace_audit_events
                  WHERE tenant_id = $1
-                 ORDER BY occurred_at ASC",
+                 ORDER BY audit_sequence ASC",
                 &[&tenant_id],
             )
             .await

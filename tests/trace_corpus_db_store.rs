@@ -46,6 +46,58 @@ mod libsql_trace_corpus_store {
         }
     }
 
+    fn sample_audit_event(
+        tenant_id: &str,
+        submission_id: Uuid,
+        previous_event_hash: &str,
+        event_hash: &str,
+    ) -> TraceAuditEventWrite {
+        TraceAuditEventWrite {
+            tenant_id: tenant_id.to_string(),
+            audit_event_id: Uuid::new_v4(),
+            submission_id: Some(submission_id),
+            actor_principal_ref: "principal:test-user".to_string(),
+            actor_role: "contributor".to_string(),
+            action: TraceAuditAction::Submit,
+            reason: None,
+            request_id: Some(format!("request:{event_hash}")),
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: Some(previous_event_hash.to_string()),
+            event_hash: Some(event_hash.to_string()),
+            canonical_event_json: Some(format!("{{\"event_hash\":\"{event_hash}\"}}")),
+            metadata: TraceAuditSafeMetadata::Submission {
+                status: TraceCorpusStatus::Accepted,
+                privacy_risk: "low".to_string(),
+            },
+        }
+    }
+
+    fn sample_unhashed_audit_event(tenant_id: &str, submission_id: Uuid) -> TraceAuditEventWrite {
+        TraceAuditEventWrite {
+            tenant_id: tenant_id.to_string(),
+            audit_event_id: Uuid::new_v4(),
+            submission_id: Some(submission_id),
+            actor_principal_ref: "principal:test-user".to_string(),
+            actor_role: "system".to_string(),
+            action: TraceAuditAction::Review,
+            reason: Some("db_native_review_projection".to_string()),
+            request_id: None,
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+            canonical_event_json: None,
+            metadata: TraceAuditSafeMetadata::ReviewDecision {
+                decision: "accepted".to_string(),
+                resulting_status: TraceCorpusStatus::Accepted,
+                reason_code: Some("db_native_review_projection".to_string()),
+            },
+        }
+    }
+
     #[tokio::test]
     async fn libsql_store_preserves_tenant_scope_and_status_lifecycle() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
@@ -1038,5 +1090,93 @@ mod libsql_trace_corpus_store {
             .expect("list beta manifest items");
         assert_eq!(beta_items.len(), 1);
         assert!(beta_items[0].source_invalidated_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn libsql_audit_append_rejects_stale_previous_hash_per_tenant() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let db_path = temp_dir.path().join("trace-corpus.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("create libsql backend");
+        backend.run_migrations().await.expect("run migrations");
+
+        let tenant_id = "tenant-audit-chain";
+        let submission_id = Uuid::new_v4();
+        backend
+            .upsert_trace_submission(sample_submission(tenant_id, submission_id))
+            .await
+            .expect("insert submission");
+
+        backend
+            .append_trace_audit_event(sample_unhashed_audit_event(tenant_id, submission_id))
+            .await
+            .expect("append DB-native unhashed audit event");
+        backend
+            .append_trace_audit_event(sample_audit_event(
+                tenant_id,
+                submission_id,
+                "sha256:file-only-predecessor",
+                "sha256:first",
+            ))
+            .await
+            .expect("append first mirrored hash-chain segment");
+        backend
+            .append_trace_audit_event(sample_audit_event(
+                tenant_id,
+                submission_id,
+                "sha256:first",
+                "sha256:second",
+            ))
+            .await
+            .expect("append second audit event");
+
+        let stale_append = backend
+            .append_trace_audit_event(sample_audit_event(
+                tenant_id,
+                submission_id,
+                "sha256:file-only-predecessor",
+                "sha256:stale",
+            ))
+            .await;
+        assert!(
+            stale_append.is_err(),
+            "stale audit hash-chain predecessor must be rejected"
+        );
+
+        let audit_events = backend
+            .list_trace_audit_events(tenant_id)
+            .await
+            .expect("list audit events");
+        assert_eq!(audit_events.len(), 3);
+        assert_eq!(
+            audit_events
+                .iter()
+                .map(|event| event.event_hash.as_deref())
+                .collect::<Vec<_>>(),
+            vec![None, Some("sha256:first"), Some("sha256:second")]
+        );
+        assert_eq!(
+            audit_events
+                .iter()
+                .map(|event| event.audit_sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+
+        let other_submission_id = Uuid::new_v4();
+        backend
+            .upsert_trace_submission(sample_submission("tenant-audit-other", other_submission_id))
+            .await
+            .expect("insert other tenant submission");
+        backend
+            .append_trace_audit_event(sample_audit_event(
+                "tenant-audit-other",
+                other_submission_id,
+                "sha256:genesis",
+                "sha256:first-other-tenant",
+            ))
+            .await
+            .expect("other tenant starts an independent audit chain");
     }
 }

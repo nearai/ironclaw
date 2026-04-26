@@ -6,8 +6,9 @@ use chrono::{DateTime, Utc};
 use ironclaw::config::{DatabaseBackend, DatabaseConfig, SslMode};
 use ironclaw::db::{Database, postgres::PgBackend};
 use ironclaw::trace_corpus_storage::{
-    TenantScopedTraceObjectRef, TraceCorpusStatus, TraceCorpusStore, TraceDerivedRecordWrite,
-    TraceDerivedStatus, TraceExportManifestItemInvalidationReason, TraceExportManifestItemWrite,
+    TenantScopedTraceObjectRef, TraceAuditAction, TraceAuditEventWrite, TraceAuditSafeMetadata,
+    TraceCorpusStatus, TraceCorpusStore, TraceDerivedRecordWrite, TraceDerivedStatus,
+    TraceExportManifestItemInvalidationReason, TraceExportManifestItemWrite,
     TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefWrite, TraceSubmissionWrite,
     TraceTombstoneWrite, TraceWorkerKind,
 };
@@ -89,6 +90,58 @@ fn sample_submission(tenant_id: &str, submission_id: Uuid) -> TraceSubmissionWri
         credit_points_pending: Some(1.0),
         credit_points_final: None,
         expires_at: None,
+    }
+}
+
+fn sample_audit_event(
+    tenant_id: &str,
+    submission_id: Uuid,
+    previous_event_hash: &str,
+    event_hash: &str,
+) -> TraceAuditEventWrite {
+    TraceAuditEventWrite {
+        tenant_id: tenant_id.to_string(),
+        audit_event_id: Uuid::new_v4(),
+        submission_id: Some(submission_id),
+        actor_principal_ref: format!("principal:{tenant_id}"),
+        actor_role: "contributor".to_string(),
+        action: TraceAuditAction::Submit,
+        reason: None,
+        request_id: Some(format!("request:{event_hash}")),
+        object_ref_id: None,
+        export_manifest_id: None,
+        decision_inputs_hash: None,
+        previous_event_hash: Some(previous_event_hash.to_string()),
+        event_hash: Some(event_hash.to_string()),
+        canonical_event_json: Some(format!("{{\"event_hash\":\"{event_hash}\"}}")),
+        metadata: TraceAuditSafeMetadata::Submission {
+            status: TraceCorpusStatus::Accepted,
+            privacy_risk: "low".to_string(),
+        },
+    }
+}
+
+fn sample_unhashed_audit_event(tenant_id: &str, submission_id: Uuid) -> TraceAuditEventWrite {
+    TraceAuditEventWrite {
+        tenant_id: tenant_id.to_string(),
+        audit_event_id: Uuid::new_v4(),
+        submission_id: Some(submission_id),
+        actor_principal_ref: format!("principal:{tenant_id}"),
+        actor_role: "system".to_string(),
+        action: TraceAuditAction::Review,
+        reason: Some("db_native_review_projection".to_string()),
+        request_id: None,
+        object_ref_id: None,
+        export_manifest_id: None,
+        decision_inputs_hash: None,
+        previous_event_hash: None,
+        event_hash: None,
+        canonical_event_json: None,
+        metadata: TraceAuditSafeMetadata::ReviewDecision {
+            decision: "accepted".to_string(),
+            resulting_status: TraceCorpusStatus::Accepted,
+            reason_code: Some("db_native_review_projection".to_string()),
+        },
     }
 }
 
@@ -215,6 +268,116 @@ async fn assert_trace_rls_policies_installed(backend: &PgBackend) {
     let mut expected_tables = expected_tables;
     expected_tables.sort();
     assert_eq!(actual_tables, expected_tables);
+}
+
+#[tokio::test]
+async fn pg_store_rejects_stale_audit_previous_hash_per_tenant() {
+    let Some(backend) = single_connection_postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+    assert_trace_rls_policies_installed(&backend).await;
+
+    let tenant_id = format!("pg-audit-chain-{}", Uuid::new_v4());
+    let other_tenant_id = format!("pg-audit-chain-other-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    let other_submission_id = Uuid::new_v4();
+
+    backend
+        .upsert_trace_submission(sample_submission(&tenant_id, submission_id))
+        .await
+        .expect("insert submission");
+    backend
+        .upsert_trace_submission(sample_submission(&other_tenant_id, other_submission_id))
+        .await
+        .expect("insert other tenant submission");
+
+    backend
+        .append_trace_audit_event(sample_unhashed_audit_event(&tenant_id, submission_id))
+        .await
+        .expect("append DB-native unhashed audit event");
+    backend
+        .append_trace_audit_event(sample_audit_event(
+            &tenant_id,
+            submission_id,
+            "sha256:file-only-predecessor",
+            "sha256:first",
+        ))
+        .await
+        .expect("append first mirrored hash-chain segment");
+    backend
+        .append_trace_audit_event(sample_audit_event(
+            &tenant_id,
+            submission_id,
+            "sha256:first",
+            "sha256:second",
+        ))
+        .await
+        .expect("append second audit event");
+
+    let stale_append = backend
+        .append_trace_audit_event(sample_audit_event(
+            &tenant_id,
+            submission_id,
+            "sha256:file-only-predecessor",
+            "sha256:stale",
+        ))
+        .await;
+    assert!(
+        stale_append.is_err(),
+        "stale audit hash-chain predecessor must be rejected"
+    );
+
+    let audit_events = backend
+        .list_trace_audit_events(&tenant_id)
+        .await
+        .expect("list audit events");
+    assert_eq!(audit_events.len(), 3);
+    assert_eq!(
+        audit_events
+            .iter()
+            .map(|event| event.event_hash.as_deref())
+            .collect::<Vec<_>>(),
+        vec![None, Some("sha256:first"), Some("sha256:second")]
+    );
+    assert_eq!(
+        audit_events
+            .iter()
+            .map(|event| event.audit_sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+
+    backend
+        .append_trace_audit_event(sample_audit_event(
+            &other_tenant_id,
+            other_submission_id,
+            "sha256:genesis",
+            "sha256:first-other-tenant",
+        ))
+        .await
+        .expect("other tenant starts an independent audit chain");
+
+    let mut client = backend.pool().get().await.expect("get cleanup connection");
+    for tenant_id in [&tenant_id, &other_tenant_id] {
+        let tx = client
+            .transaction()
+            .await
+            .expect("start cleanup transaction");
+        tx.execute(
+            "SELECT set_config('ironclaw.trace_tenant_id', $1, true)",
+            &[tenant_id],
+        )
+        .await
+        .expect("set cleanup tenant context");
+        let _ = tx
+            .execute(
+                "DELETE FROM trace_tenants WHERE tenant_id = $1",
+                &[tenant_id],
+            )
+            .await;
+        tx.commit().await.expect("commit cleanup transaction");
+    }
 }
 
 #[tokio::test]

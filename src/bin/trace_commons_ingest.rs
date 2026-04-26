@@ -8745,13 +8745,12 @@ async fn verify_db_audit_chain(
         .await
         .context("failed to list DB audit events for hash-chain verification")?;
     let mut report = TraceDbAuditChainReport::default();
-    let mut expected_previous_hash = TRACE_AUDIT_EVENT_GENESIS_HASH.to_string();
+    let mut expected_previous_hash: Option<String> = None;
     for (index, event) in events.into_iter().enumerate() {
         let row_number = index + 1;
         report.event_count += 1;
         let Some(event_hash) = event.event_hash.as_deref() else {
             report.legacy_event_count += 1;
-            expected_previous_hash = TRACE_AUDIT_EVENT_GENESIS_HASH.to_string();
             continue;
         };
         if !event_hash.starts_with("sha256:") {
@@ -8764,7 +8763,9 @@ async fn verify_db_audit_chain(
             .previous_event_hash
             .as_deref()
             .unwrap_or(TRACE_AUDIT_EVENT_GENESIS_HASH);
-        if previous_event_hash != expected_previous_hash {
+        if let Some(expected_previous_hash) = expected_previous_hash.as_deref()
+            && previous_event_hash != expected_previous_hash
+        {
             report.failures.push(format!(
                 "db row {row_number} event {}: previous_event_hash mismatch",
                 event.audit_event_id
@@ -8791,7 +8792,7 @@ async fn verify_db_audit_chain(
         } else {
             report.payload_unverified_event_count += 1;
         }
-        expected_previous_hash = event_hash.to_string();
+        expected_previous_hash = Some(event_hash.to_string());
         report.last_event_hash = Some(event_hash.to_string());
     }
     report.mismatch_count = report.failures.len();

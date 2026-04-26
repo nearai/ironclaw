@@ -1110,6 +1110,7 @@ CREATE INDEX IF NOT EXISTS idx_trace_derived_records_cluster
 
 CREATE TABLE IF NOT EXISTS trace_audit_events (
     tenant_id TEXT NOT NULL,
+    audit_sequence INTEGER NOT NULL,
     audit_event_id TEXT NOT NULL,
     actor_principal_ref TEXT NOT NULL,
     actor_role TEXT NOT NULL,
@@ -1132,6 +1133,8 @@ CREATE INDEX IF NOT EXISTS idx_trace_audit_events_submission
     ON trace_audit_events (tenant_id, submission_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_trace_audit_events_action
     ON trace_audit_events (tenant_id, action, occurred_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_trace_audit_events_tenant_sequence
+    ON trace_audit_events (tenant_id, audit_sequence);
 
 CREATE TABLE IF NOT EXISTS trace_export_manifests (
     tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
@@ -1391,6 +1394,30 @@ CREATE TABLE IF NOT EXISTS trace_tenant_policies (
 ALTER TABLE trace_audit_events ADD COLUMN canonical_event_json TEXT;
 "#,
     ),
+    (
+        34,
+        "trace_audit_append_order",
+        r#"
+ALTER TABLE trace_audit_events ADD COLUMN audit_sequence INTEGER;
+WITH ordered AS (
+    SELECT
+        rowid AS row_id,
+        ROW_NUMBER() OVER (
+            PARTITION BY tenant_id
+            ORDER BY occurred_at ASC, audit_event_id ASC
+        ) AS audit_sequence
+    FROM trace_audit_events
+)
+UPDATE trace_audit_events
+SET audit_sequence = (
+    SELECT ordered.audit_sequence
+    FROM ordered
+    WHERE ordered.row_id = trace_audit_events.rowid
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_trace_audit_events_tenant_sequence
+    ON trace_audit_events (tenant_id, audit_sequence);
+"#,
+    ),
 ];
 
 /// Migrations whose ADD COLUMN should be skipped when the column already
@@ -1412,6 +1439,7 @@ const IDEMPOTENT_ADD_COLUMN_MIGRATIONS: &[(i64, &str, &str)] = &[
     (31, "trace_audit_events", "previous_event_hash"),
     (31, "trace_audit_events", "event_hash"),
     (33, "trace_audit_events", "canonical_event_json"),
+    (34, "trace_audit_events", "audit_sequence"),
 ];
 
 /// Check whether `table` already contains `column` via `pragma_table_info`.

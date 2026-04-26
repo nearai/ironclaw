@@ -419,6 +419,7 @@ pub struct TraceAuditEventWrite {
 pub struct TraceAuditEventRecord {
     pub audit_event_id: Uuid,
     pub tenant_id: String,
+    pub audit_sequence: i64,
     pub actor_principal_ref: String,
     pub actor_role: String,
     pub action: TraceAuditAction,
