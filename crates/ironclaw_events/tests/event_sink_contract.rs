@@ -141,14 +141,71 @@ fn scoped_jsonl_paths_are_tenant_user_scoped_and_reject_traversal() {
 }
 
 #[tokio::test]
+async fn jsonl_sinks_treat_missing_log_files_as_empty() {
+    let fs = Arc::new(engine_filesystem(tempfile::tempdir().unwrap().keep()));
+    let scope = sample_scope();
+    let event_sink = JsonlEventSink::new(
+        Arc::clone(&fs),
+        scoped_runtime_event_log_path(&scope, "reborn-demo.jsonl").unwrap(),
+    );
+    let audit_sink = JsonlAuditSink::new(
+        Arc::clone(&fs),
+        scoped_audit_log_path(&scope, "approval-audit.jsonl").unwrap(),
+    );
+
+    assert_eq!(event_sink.read_events().await.unwrap(), Vec::new());
+    assert_eq!(audit_sink.read_records().await.unwrap(), Vec::new());
+}
+
+#[tokio::test]
+async fn jsonl_event_sink_rejects_malformed_existing_log_without_appending() {
+    let fs = Arc::new(engine_filesystem(tempfile::tempdir().unwrap().keep()));
+    let scope = sample_scope();
+    let path = scoped_runtime_event_log_path(&scope, "reborn-demo.jsonl").unwrap();
+    fs.write_file(&path, b"{not-json}\n").await.unwrap();
+    let sink = JsonlEventSink::new(Arc::clone(&fs), path.clone());
+
+    assert!(matches!(
+        sink.read_events().await.unwrap_err(),
+        EventError::Serialize { .. }
+    ));
+    assert!(matches!(
+        sink.emit(RuntimeEvent::dispatch_requested(
+            scope,
+            CapabilityId::new("echo.say").unwrap(),
+        ))
+        .await
+        .unwrap_err(),
+        EventError::Serialize { .. }
+    ));
+    assert_eq!(fs.read_file(&path).await.unwrap(), b"{not-json}\n");
+}
+
+#[tokio::test]
+async fn jsonl_audit_sink_rejects_malformed_existing_log_without_appending() {
+    let fs = Arc::new(engine_filesystem(tempfile::tempdir().unwrap().keep()));
+    let scope = sample_scope();
+    let path = scoped_audit_log_path(&scope, "approval-audit.jsonl").unwrap();
+    fs.write_file(&path, b"{not-json}\n").await.unwrap();
+    let sink = JsonlAuditSink::new(Arc::clone(&fs), path.clone());
+
+    assert!(matches!(
+        sink.read_records().await.unwrap_err(),
+        EventError::Serialize { .. }
+    ));
+    assert!(matches!(
+        sink.emit_audit(sample_approval_audit_envelope())
+            .await
+            .unwrap_err(),
+        EventError::Serialize { .. }
+    ));
+    assert_eq!(fs.read_file(&path).await.unwrap(), b"{not-json}\n");
+}
+
+#[tokio::test]
 async fn jsonl_event_sink_persists_redacted_runtime_events_without_host_paths() {
     let storage = tempfile::tempdir().unwrap().keep();
-    let mut fs = LocalFilesystem::new();
-    fs.mount_local(
-        VirtualPath::new("/engine").unwrap(),
-        HostPath::from_path_buf(storage.clone()),
-    )
-    .unwrap();
+    let fs = engine_filesystem(storage.clone());
     let scope = sample_scope();
     let path = scoped_runtime_event_log_path(&scope, "reborn-demo.jsonl").unwrap();
     let sink = JsonlEventSink::new(Arc::new(fs), path.clone());
@@ -176,6 +233,16 @@ async fn jsonl_event_sink_persists_redacted_runtime_events_without_host_paths() 
         events[0].error_kind.as_deref(),
         Some("MissingRuntimeBackend")
     );
+}
+
+fn engine_filesystem(storage: std::path::PathBuf) -> LocalFilesystem {
+    let mut fs = LocalFilesystem::new();
+    fs.mount_local(
+        VirtualPath::new("/engine").unwrap(),
+        HostPath::from_path_buf(storage),
+    )
+    .unwrap();
+    fs
 }
 
 fn sample_approval_audit_envelope() -> AuditEnvelope {

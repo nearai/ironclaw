@@ -109,7 +109,7 @@ V1 provides:
 
 `JsonlEventSink` and `JsonlAuditSink` are append-style JSONL persistence helpers over the Reborn filesystem contract.
 
-They treat only a true missing log file as an empty history. Backend, mount, permission, UTF-8, or malformed JSONL failures are returned as errors and must not be silently converted to empty history. `emit`/`emit_audit` must not overwrite or truncate an existing log after a read failure.
+They treat only a true missing log file as an empty history. Backend, mount, permission, UTF-8, or malformed JSONL failures are returned as errors and must not be silently converted to empty history. `emit`/`emit_audit` validate existing JSONL before appending, and must not append to, overwrite, or truncate an existing log after a read or parse failure.
 
 Dispatchers and approval resolvers still treat sink failures as best-effort observability. The sink returns errors to the caller, and the owning runtime/control-plane service decides whether the error is outcome-affecting. Current dispatcher and approval resolver semantics ignore sink errors and preserve the original dispatch/approval outcome.
 
