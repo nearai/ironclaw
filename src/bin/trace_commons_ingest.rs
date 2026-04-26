@@ -79,6 +79,9 @@ const TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN: &str =
     "TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN";
 const TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES: &str =
     "TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES";
+const TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: &str =
+    "TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST";
+const DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: usize = 500;
 const TRACE_BACKFILL_FAILURE_DETAIL_LIMIT: usize = 20;
 
 #[tokio::main]
@@ -119,6 +122,7 @@ struct AppState {
     object_primary_derived_exports: bool,
     require_db_reconciliation_clean: bool,
     require_export_guardrails: bool,
+    max_export_items_per_request: usize,
     legal_hold_retention_policy_ids: Arc<BTreeSet<String>>,
     artifact_store: Option<ConfiguredTraceArtifactStore>,
 }
@@ -385,6 +389,7 @@ impl AppState {
             );
         }
         let require_export_guardrails = env_truthy("TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS");
+        let max_export_items_per_request = parse_max_export_items_per_request_from_env()?;
         let legal_hold_retention_policy_ids = parse_legal_hold_retention_policy_ids_from_env()?;
         let artifact_store = trace_artifact_store_from_env(&root)?;
         let object_primary_submit_review = env_truthy(TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW);
@@ -442,6 +447,7 @@ impl AppState {
             object_primary_derived_exports,
             require_db_reconciliation_clean,
             require_export_guardrails,
+            max_export_items_per_request,
             legal_hold_retention_policy_ids: Arc::new(legal_hold_retention_policy_ids),
             artifact_store,
         })
@@ -804,6 +810,28 @@ fn parse_legal_hold_retention_policy_ids(configured: &str) -> anyhow::Result<BTr
     Ok(policy_ids)
 }
 
+fn parse_max_export_items_per_request_from_env() -> anyhow::Result<usize> {
+    match std::env::var(TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST) {
+        Ok(configured) => parse_max_export_items_per_request(&configured),
+        Err(std::env::VarError::NotPresent) => {
+            Ok(DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST)
+        }
+        Err(error) => Err(error).with_context(|| {
+            format!("failed to read {TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST}")
+        }),
+    }
+}
+
+fn parse_max_export_items_per_request(configured: &str) -> anyhow::Result<usize> {
+    let parsed = configured.trim().parse::<usize>().with_context(|| {
+        format!("{TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST} must be a positive integer")
+    })?;
+    if parsed == 0 {
+        anyhow::bail!("{TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST} must be at least 1");
+    }
+    Ok(parsed)
+}
+
 fn validate_retention_policy_id(policy_id: &str) -> anyhow::Result<()> {
     let valid = policy_id.len() <= 128
         && policy_id.chars().all(|character| {
@@ -890,6 +918,7 @@ struct TraceCommonsConfigStatusResponse {
     object_primary_derived_exports: bool,
     require_db_reconciliation_clean: bool,
     require_export_guardrails: bool,
+    max_export_items_per_request: usize,
     legal_hold_retention_policy_ids: Vec<String>,
     artifact_store_configured: bool,
     artifact_object_store: Option<String>,
@@ -914,6 +943,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         object_primary_derived_exports: state.object_primary_derived_exports,
         require_db_reconciliation_clean: state.require_db_reconciliation_clean,
         require_export_guardrails: state.require_export_guardrails,
+        max_export_items_per_request: state.max_export_items_per_request,
         legal_hold_retention_policy_ids: state
             .legal_hold_retention_policy_ids
             .iter()
@@ -1946,7 +1976,7 @@ async fn dataset_replay_handler(
         .into_iter()
         .map(|record| (record.submission_id, record))
         .collect::<BTreeMap<_, _>>();
-    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let limit = resolve_export_limit(state.as_ref(), query.limit);
     let mut items = Vec::new();
     for record in records
         .into_iter()
@@ -2157,7 +2187,7 @@ async fn run_benchmark_conversion(
         })
         .map(|record| (record.submission_id, record))
         .collect::<BTreeMap<_, _>>();
-    let limit = body.limit.unwrap_or(100).clamp(1, 500);
+    let limit = resolve_export_limit(state, body.limit);
 
     let mut candidates = Vec::new();
     for derived in derived
@@ -2357,7 +2387,7 @@ async fn ranker_training_candidates_handler(
     )
     .await?;
     let mut candidate_query = query;
-    candidate_query.limit = Some(candidate_query.limit.unwrap_or(100).clamp(1, 500));
+    candidate_query.limit = Some(resolve_export_limit(state.as_ref(), candidate_query.limit));
     let candidates = collect_ranker_training_candidates(
         state.as_ref(),
         &tenant,
@@ -2515,7 +2545,7 @@ async fn ranker_training_pairs_handler(
     )
     .await?;
     let mut pair_query = query;
-    let pair_limit = pair_query.limit.unwrap_or(100).clamp(1, 500);
+    let pair_limit = resolve_export_limit(state.as_ref(), pair_query.limit);
     pair_query.limit = Some(pair_limit.saturating_add(1));
     let candidates = collect_ranker_training_candidates(
         state.as_ref(),
@@ -2964,7 +2994,9 @@ async fn collect_ranker_training_candidates(
         .into_iter()
         .map(|record| (record.submission_id, record))
         .collect::<BTreeMap<_, _>>();
-    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST);
     let requested_status = query.status.unwrap_or(TraceCorpusStatus::Accepted);
     let mut candidates = records
         .into_iter()
@@ -3083,6 +3115,12 @@ fn normalized_export_purpose(value: Option<&str>, default: &str) -> String {
         .filter(|purpose| !purpose.is_empty())
         .unwrap_or(default)
         .to_string()
+}
+
+fn resolve_export_limit(state: &AppState, requested_limit: Option<usize>) -> usize {
+    requested_limit
+        .unwrap_or(100)
+        .clamp(1, state.max_export_items_per_request)
 }
 
 fn enforce_dataset_export_guardrails(
@@ -10716,6 +10754,7 @@ mod tests {
             object_primary_derived_exports: false,
             require_db_reconciliation_clean: false,
             require_export_guardrails: false,
+            max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store: None,
         })
@@ -11040,6 +11079,7 @@ mod tests {
             object_primary_derived_exports: false,
             require_db_reconciliation_clean: false,
             require_export_guardrails,
+            max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store,
         })
@@ -11094,6 +11134,7 @@ mod tests {
             object_primary_derived_exports: true,
             require_db_reconciliation_clean: false,
             require_export_guardrails: true,
+            max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store: Some(artifact_store),
         })
@@ -11133,6 +11174,7 @@ mod tests {
             object_primary_derived_exports: false,
             require_db_reconciliation_clean: false,
             require_export_guardrails: false,
+            max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store: Some(artifact_store),
         })
@@ -11170,6 +11212,7 @@ mod tests {
             object_primary_derived_exports: false,
             require_db_reconciliation_clean: true,
             require_export_guardrails: false,
+            max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store: None,
         })
@@ -11369,6 +11412,30 @@ mod tests {
                 .contains(TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES)
         );
         assert!(!error.to_string().contains("sk-test/token"));
+    }
+
+    #[test]
+    fn parses_max_export_items_per_request() {
+        assert_eq!(
+            parse_max_export_items_per_request("25").expect("export cap parses"),
+            25
+        );
+
+        let zero_error =
+            parse_max_export_items_per_request("0").expect_err("zero export cap is invalid");
+        assert!(
+            zero_error
+                .to_string()
+                .contains(TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST)
+        );
+
+        let parse_error =
+            parse_max_export_items_per_request("many").expect_err("non-numeric cap is invalid");
+        assert!(
+            parse_error
+                .to_string()
+                .contains(TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST)
+        );
     }
 
     #[test]
@@ -11848,6 +11915,10 @@ mod tests {
             serde_json::json!(true)
         );
         assert_eq!(value["require_export_guardrails"], serde_json::json!(true));
+        assert_eq!(
+            value["max_export_items_per_request"],
+            serde_json::json!(DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST)
+        );
         assert_eq!(
             value["artifact_object_store"],
             serde_json::json!(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE)
@@ -14284,6 +14355,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bulk_export_limit_cap_is_applied_by_export_callers() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::get_mut(&mut state)
+            .expect("state is uniquely owned")
+            .max_export_items_per_request = 1;
+
+        for index in 0..3 {
+            let mut envelope = sample_envelope().await;
+            make_metadata_only_low_risk(&mut envelope);
+            envelope.consent.scopes = vec![
+                ConsentScope::DebuggingEvaluation,
+                ConsentScope::BenchmarkOnly,
+                ConsentScope::RankingTraining,
+            ];
+            envelope.value.submission_score = 0.9 - (index as f32 * 0.1);
+            let _ = submit_trace_handler(
+                State(state.clone()),
+                auth_headers("token-a"),
+                Json(envelope),
+            )
+            .await
+            .expect("submission succeeds");
+        }
+
+        let Json(replay) = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(50),
+                purpose: Some("capped_replay".to_string()),
+                status: None,
+                privacy_risk: None,
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("replay export succeeds");
+        assert_eq!(replay.item_count, 1);
+        assert_eq!(replay.manifest.filters.limit, 1);
+
+        let Json(benchmark) = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(50),
+                purpose: Some("capped_benchmark".to_string()),
+                consent_scope: None,
+                status: None,
+                privacy_risk: None,
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("benchmark conversion succeeds");
+        assert_eq!(benchmark.item_count, 1);
+        assert_eq!(benchmark.filters.limit, 1);
+
+        let Json(candidates) = ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(50),
+                purpose: Some("capped_ranker_candidates".to_string()),
+                status: None,
+                consent_scope: None,
+                privacy_risk: None,
+            }),
+        )
+        .await
+        .expect("ranker candidate export succeeds");
+        assert_eq!(candidates.item_count, 1);
+
+        let Json(pairs) = ranker_training_pairs_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(50),
+                purpose: Some("capped_ranker_pairs".to_string()),
+                status: None,
+                consent_scope: None,
+                privacy_risk: None,
+            }),
+        )
+        .await
+        .expect("ranker pair export succeeds");
+        assert_eq!(pairs.item_count, 1);
+    }
+
+    #[tokio::test]
     async fn revoked_traces_are_excluded_from_export_and_benchmark_with_manifest_artifacts() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
@@ -16541,6 +16702,7 @@ mod tests {
             object_primary_derived_exports: false,
             require_db_reconciliation_clean: false,
             require_export_guardrails: false,
+            max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::from([
                 "private_corpus_revocable".to_string()
             ])),
