@@ -120,8 +120,9 @@ Reborn has one host core with many adapters and runtime ports. It should not gro
 +-----------------------------------------------------------------------+
 | Shared host services and records                                       |
 | RootFilesystem/mounts [exists]  ResourceGovernor [exists]              |
-| Runtime/control-plane events [partial]   Process persistence + ProcessHost [exists] |
-| Durable leases [partial]        Secret metadata/leases [exists]        |
+| Network policy boundary [exists] Runtime/control-plane events [partial]|
+| Process persistence + ProcessHost [exists] Durable leases [partial]    |
+| Secret metadata/leases [exists]                                        |
 | User-facing scoped event API [not yet]                                  |
 +-----------------------------------------------------------------------+
 ```
@@ -218,6 +219,7 @@ The current implemented or contract-backed Reborn stack includes these slices:
 | Extension discovery/registry | `[exists]` manifests, package validation, capability descriptors, runtime declaration mapping |
 | Resource governor | `[exists]` reservation/reconcile/release model and V1 dimensions for hosted resource control |
 | Secrets | `[exists/partial]` `ironclaw_secrets` service boundary with scoped metadata, in-memory storage, and one-shot secret leases; durable encrypted persistence and runtime injection are not complete |
+| Network | `[exists/partial]` `ironclaw_network` service boundary with scoped policy evaluation, exact/wildcard target matching, literal private IP denial, and egress-estimate checks; HTTP execution/proxying and DNS rebinding protection are not complete |
 | Capability access | `[exists/partial]` grant matching, action-time authorization, lease-backed authorizer semantics, in-memory and filesystem-backed exact-invocation lease stores |
 | CapabilityHost | `[exists]` caller-facing invocation, approval-blocking, resume, spawn workflow gate, and `ProcessServices` spawn wiring over the neutral host API dispatch port |
 | Host runtime composition | `[exists]` `HostRuntimeServices` composition helper for shared registry/filesystem/governor/authorizer/runtime/process/approval services -> `RuntimeDispatcher`, `CapabilityHost`, `ApprovalResolver`, and `ProcessHost` handles |
@@ -246,6 +248,7 @@ These are explicit gaps, not architecture contradictions:
 | Process product APIs | Process records, scoped status/kill/await/subscribe/result/output APIs, cooperative cancellation tokens, result records with filesystem JSON output refs, lifecycle events, and resource cleanup ownership exist as service slices; generalized artifact refs for streaming/binary outputs, output streams, forced abort handles, richer scoped read/projection APIs, durable subscription cursors, and event fanout are not complete. |
 | Durable leases | Async filesystem-backed exact-invocation lease persistence now covers issue, claim, consume, revoke, reload, tenant/user/invocation isolation, and fail-closed approval+lease coordination without nested async `block_on`; single-store ACID transactions, full audit retention policy, and reusable approval scopes are not complete. |
 | User-facing scoped event API | Runtime/process events, approval audit records, tenant/user-scoped JSONL helpers, and JSONL/in-memory sinks exist, but scoped SSE/WebSocket/reconnect APIs and projection reducers are not productized. |
+| Network execution boundary | Scoped network policy evaluation exists, but HTTP client/proxy execution, DNS resolution/rebinding defenses, response streaming, and network egress resource reservation are not complete. |
 | FirstParty/System runtime execution | `RuntimeKind::FirstParty` and `RuntimeKind::System` are recognized host API/runtime markers, but no trusted host service adapters are registered yet. |
 | Full MCP server lifecycle | MCP is a current adapter lane, not yet a complete product lifecycle for server install/start/auth/restart/monitoring. |
 | Auth-blocked resume product path | `BlockedAuth` is reserved in run-state; full OAuth/token prompt, callback, and retry-after-auth workflow remains to be implemented. |
@@ -323,6 +326,7 @@ Use these docs as the detailed contract sources behind this map:
 - `docs/reborn/contracts/runtime-profiles.md`
 - `docs/reborn/contracts/resources.md`
 - `docs/reborn/contracts/secrets.md`
+- `docs/reborn/contracts/network.md`
 - `docs/reborn/contracts/events.md`
 - `docs/reborn/contracts/events-projections.md`
 - `docs/reborn/contracts/agent-loop-protocol.md`
