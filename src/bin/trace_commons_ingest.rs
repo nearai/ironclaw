@@ -69,6 +69,7 @@ const TRACE_COMMONS_FILE_OBJECT_STORE: &str = "trace_commons_file_store";
 const TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE: &str = "trace_commons_encrypted_artifact_store";
 const TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE: &str =
     "trace_commons_service_local_encrypted";
+const TRACE_BACKFILL_FAILURE_DETAIL_LIMIT: usize = 20;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -6565,7 +6566,7 @@ async fn run_maintenance(
         } else {
             0
         };
-    let db_mirror_backfilled = backfill_db_mirror_from_files(
+    let db_mirror_backfill = backfill_db_mirror_from_files(
         state,
         tenant,
         &records,
@@ -6574,6 +6575,8 @@ async fn run_maintenance(
         request.dry_run,
     )
     .await?;
+    let db_mirror_backfilled = db_mirror_backfill.backfilled;
+    let db_mirror_backfill_failed = db_mirror_backfill.failed;
     let vector_entries_indexed = index_vector_metadata_from_db(
         state,
         tenant,
@@ -6602,6 +6605,7 @@ async fn run_maintenance(
         trace_object_files_deleted,
         encrypted_artifacts_deleted,
         db_mirror_backfilled,
+        db_mirror_backfill_failed,
         vector_entries_indexed,
     };
     let audit_event =
@@ -6662,6 +6666,8 @@ async fn run_maintenance(
         trace_object_files_deleted,
         encrypted_artifacts_deleted,
         db_mirror_backfilled,
+        db_mirror_backfill_failed,
+        db_mirror_backfill_failures: db_mirror_backfill.failures,
         vector_entries_indexed,
         audit_chain,
         db_reconciliation,
@@ -6930,9 +6936,10 @@ async fn backfill_db_mirror_from_files(
     derived: &[TraceCommonsDerivedRecord],
     enabled: bool,
     dry_run: bool,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<TraceBackfillReport> {
+    let mut report = TraceBackfillReport::default();
     if !enabled {
-        return Ok(0);
+        return Ok(report);
     }
     if state.db_mirror.is_none() && !dry_run {
         anyhow::bail!(
@@ -6948,35 +6955,64 @@ async fn backfill_db_mirror_from_files(
         .iter()
         .map(|record| (record.submission_id, record))
         .collect::<BTreeMap<_, _>>();
-    let mut backfilled = 0usize;
     for record in records {
         if record.status == TraceCorpusStatus::Purged {
             continue;
         }
-        let envelope = read_envelope_by_record(state, record)
-            .with_context(|| format!("failed to validate envelope {}", record.submission_id))?;
-        let derived_record = derived_by_submission
-            .get(&record.submission_id)
-            .copied()
-            .with_context(|| {
-                format!(
-                    "trace submission {} is missing a derived precheck record",
-                    record.submission_id
-                )
-            })?;
-        if dry_run {
-            backfilled += 1;
-            continue;
-        }
         if let Some(db) = db
+            && !dry_run
             && db
                 .get_trace_submission(&tenant.tenant_id, record.submission_id)
-                .await?
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to query existing DB submission for backfill {}",
+                        record.submission_id
+                    )
+                })?
                 .is_some()
         {
             continue;
         }
-        mirror_submission_to_db_with_options(
+
+        let envelope = match read_envelope_by_record(state, record)
+            .with_context(|| format!("failed to validate envelope {}", record.submission_id))
+        {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                report.record_failure(
+                    "submission",
+                    record.submission_id.to_string(),
+                    error.to_string(),
+                );
+                continue;
+            }
+        };
+        let derived_record = derived_by_submission
+            .get(&record.submission_id)
+            .copied()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "trace submission {} is missing a derived precheck record",
+                    record.submission_id
+                )
+            });
+        let derived_record = match derived_record {
+            Ok(record) => record,
+            Err(error) => {
+                report.record_failure(
+                    "submission",
+                    record.submission_id.to_string(),
+                    error.to_string(),
+                );
+                continue;
+            }
+        };
+        if dry_run {
+            report.backfilled += 1;
+            continue;
+        }
+        if let Err(error) = mirror_submission_to_db_with_options(
             state,
             tenant,
             record,
@@ -6984,26 +7020,55 @@ async fn backfill_db_mirror_from_files(
             &envelope,
             false,
         )
-        .await?;
-        if record.is_revoked() {
-            mirror_revocation_to_db(state, tenant, record.submission_id, Some(record), None)
-                .await?;
+        .await
+        {
+            report.record_failure(
+                "submission",
+                record.submission_id.to_string(),
+                error.to_string(),
+            );
+            continue;
         }
-        backfilled += 1;
+        if record.is_revoked()
+            && let Err(error) =
+                mirror_revocation_to_db(state, tenant, record.submission_id, Some(record), None)
+                    .await
+        {
+            report.record_failure(
+                "submission",
+                record.submission_id.to_string(),
+                error.to_string(),
+            );
+            continue;
+        }
+        report.backfilled += 1;
     }
 
     let file_credit_events = read_all_credit_events(&state.root, &tenant.tenant_id)?;
     let file_audit_events = read_all_audit_events(&state.root, &tenant.tenant_id)?;
     let file_export_manifests = read_all_export_manifests(&state.root, &tenant.tenant_id)?;
     if dry_run {
-        return Ok(backfilled
-            + file_credit_events.len()
-            + file_audit_events.len()
-            + file_export_manifests.len());
+        report.backfilled += file_credit_events.len() + file_audit_events.len();
+        for manifest in &file_export_manifests {
+            match replay_export_items_for_manifest_backfill(
+                state,
+                manifest,
+                &records_by_submission,
+                &derived_by_submission,
+            ) {
+                Ok(_) => report.backfilled += 1,
+                Err(error) => report.record_failure(
+                    "replay_export_manifest",
+                    manifest.export_id.to_string(),
+                    error.to_string(),
+                ),
+            }
+        }
+        return Ok(report);
     }
 
     let Some(db) = db else {
-        return Ok(backfilled);
+        return Ok(report);
     };
     let existing_credit_event_ids = db
         .list_trace_credit_events(&tenant.tenant_id)
@@ -7016,8 +7081,14 @@ async fn backfill_db_mirror_from_files(
         if existing_credit_event_ids.contains(&event.event_id) {
             continue;
         }
-        mirror_credit_event_to_db(state, event).await?;
-        backfilled += 1;
+        match mirror_credit_event_to_db(state, event).await {
+            Ok(()) => report.backfilled += 1,
+            Err(error) => report.record_failure(
+                "credit_event",
+                event.event_id.to_string(),
+                error.to_string(),
+            ),
+        }
     }
 
     let existing_audit_event_ids = db
@@ -7032,8 +7103,12 @@ async fn backfill_db_mirror_from_files(
             continue;
         }
         let (action, metadata) = audit_backfill_storage_projection(event);
-        mirror_audit_event_to_db(state, tenant, event, action, metadata).await?;
-        backfilled += 1;
+        match mirror_audit_event_to_db(state, tenant, event, action, metadata).await {
+            Ok(()) => report.backfilled += 1,
+            Err(error) => {
+                report.record_failure("audit_event", event.event_id.to_string(), error.to_string())
+            }
+        }
     }
 
     let existing_export_manifest_ids = db
@@ -7047,22 +7122,39 @@ async fn backfill_db_mirror_from_files(
         if existing_export_manifest_ids.contains(&manifest.export_id) {
             continue;
         }
-        let items = replay_export_items_for_manifest_backfill(
+        let items = match replay_export_items_for_manifest_backfill(
             state,
             manifest,
             &records_by_submission,
             &derived_by_submission,
-        )?;
-        mirror_export_manifest_to_db(
+        ) {
+            Ok(items) => items,
+            Err(error) => {
+                report.record_failure(
+                    "replay_export_manifest",
+                    manifest.export_id.to_string(),
+                    error.to_string(),
+                );
+                continue;
+            }
+        };
+        match mirror_export_manifest_to_db(
             state,
             StorageTraceObjectArtifactKind::ExportArtifact,
             manifest,
             &items,
         )
-        .await?;
-        backfilled += 1;
+        .await
+        {
+            Ok(()) => report.backfilled += 1,
+            Err(error) => report.record_failure(
+                "replay_export_manifest",
+                manifest.export_id.to_string(),
+                error.to_string(),
+            ),
+        }
     }
-    Ok(backfilled)
+    Ok(report)
 }
 
 fn audit_backfill_storage_projection(
@@ -7771,6 +7863,40 @@ fn deterministic_vector_entry_uuid(
     Uuid::new_v5(&Uuid::NAMESPACE_URL, input.as_bytes())
 }
 
+#[derive(Debug, Default, Clone, Serialize)]
+struct TraceBackfillReport {
+    backfilled: usize,
+    failed: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    failures: Vec<TraceBackfillFailure>,
+}
+
+impl TraceBackfillReport {
+    fn record_failure(&mut self, item_kind: &str, item_ref: String, reason: String) {
+        self.failed += 1;
+        tracing::warn!(
+            %item_kind,
+            %item_ref,
+            %reason,
+            "Trace Commons DB mirror backfill skipped item"
+        );
+        if self.failures.len() < TRACE_BACKFILL_FAILURE_DETAIL_LIMIT {
+            self.failures.push(TraceBackfillFailure {
+                item_kind: item_kind.to_string(),
+                item_ref,
+                reason,
+            });
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TraceBackfillFailure {
+    item_kind: String,
+    item_ref: String,
+    reason: String,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct TraceMaintenanceAuditCounts {
     records_marked_revoked: usize,
@@ -7783,6 +7909,7 @@ struct TraceMaintenanceAuditCounts {
     trace_object_files_deleted: usize,
     encrypted_artifacts_deleted: usize,
     db_mirror_backfilled: usize,
+    db_mirror_backfill_failed: usize,
     vector_entries_indexed: usize,
 }
 
@@ -7828,6 +7955,10 @@ impl TraceMaintenanceAuditCounts {
         counts.insert(
             "db_mirror_backfilled".to_string(),
             self.db_mirror_backfilled.min(u32::MAX as usize) as u32,
+        );
+        counts.insert(
+            "db_mirror_backfill_failed".to_string(),
+            self.db_mirror_backfill_failed.min(u32::MAX as usize) as u32,
         );
         counts.insert(
             "vector_entries_indexed".to_string(),
@@ -8928,6 +9059,9 @@ struct TraceMaintenanceResponse {
     trace_object_files_deleted: usize,
     encrypted_artifacts_deleted: usize,
     db_mirror_backfilled: usize,
+    db_mirror_backfill_failed: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    db_mirror_backfill_failures: Vec<TraceBackfillFailure>,
     vector_entries_indexed: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     audit_chain: Option<TraceAuditChainReport>,
@@ -9603,7 +9737,7 @@ impl TraceCommonsAuditEvent {
             actor_role: Some(auth.role),
             actor_principal_ref: Some(auth.principal_ref.clone()),
             reason: Some(format!(
-                "purpose={purpose};dry_run={dry_run};records_marked_revoked={};records_marked_expired={};records_marked_purged={};derived_marked_revoked={};derived_marked_expired={};export_cache_files_pruned={};export_provenance_invalidated={};trace_object_files_deleted={};encrypted_artifacts_deleted={};db_mirror_backfilled={};vector_entries_indexed={}",
+                "purpose={purpose};dry_run={dry_run};records_marked_revoked={};records_marked_expired={};records_marked_purged={};derived_marked_revoked={};derived_marked_expired={};export_cache_files_pruned={};export_provenance_invalidated={};trace_object_files_deleted={};encrypted_artifacts_deleted={};db_mirror_backfilled={};db_mirror_backfill_failed={};vector_entries_indexed={}",
                 counts.records_marked_revoked,
                 counts.records_marked_expired,
                 counts.records_marked_purged,
@@ -9614,6 +9748,7 @@ impl TraceCommonsAuditEvent {
                 counts.trace_object_files_deleted,
                 counts.encrypted_artifacts_deleted,
                 counts.db_mirror_backfilled,
+                counts.db_mirror_backfill_failed,
                 counts.vector_entries_indexed
             )),
             export_count: Some(counts.export_cache_files_pruned),
@@ -15081,6 +15216,126 @@ mod tests {
         .await
         .expect("backfill can be rerun after repairing file-only revoke audit");
         assert_eq!(third_response.db_mirror_backfilled, 0);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn maintenance_backfill_isolates_bad_file_backed_submissions() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let file_state = test_state(temp.path().to_path_buf());
+        let mut good = sample_envelope().await;
+        make_metadata_only_low_risk(&mut good);
+        let good_id = good.submission_id;
+        let mut bad = sample_envelope().await;
+        make_metadata_only_low_risk(&mut bad);
+        let bad_id = bad.submission_id;
+
+        let _ = submit_trace_handler(
+            State(file_state.clone()),
+            auth_headers("token-a"),
+            Json(good),
+        )
+        .await
+        .expect("good file-backed submission succeeds");
+        let _ = submit_trace_handler(State(file_state), auth_headers("token-a"), Json(bad))
+            .await
+            .expect("bad file-backed submission initially succeeds");
+
+        let bad_derived_path = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"))
+            .join("derived")
+            .join(format!("{bad_id}.json"));
+        std::fs::remove_file(&bad_derived_path).expect("remove bad derived record");
+
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-backfill-isolates-bad-record.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+
+        let Json(response) = maintenance_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_backfill_bad_record_isolation".to_string()),
+                dry_run: false,
+                backfill_db_mirror: true,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("maintenance isolates bad backfill records");
+        assert!(response.db_mirror_backfilled >= 1);
+        assert_eq!(response.db_mirror_backfill_failed, 1);
+        assert_eq!(response.db_mirror_backfill_failures.len(), 1);
+        assert_eq!(
+            response.db_mirror_backfill_failures[0].item_kind,
+            "submission"
+        );
+        assert_eq!(
+            response.db_mirror_backfill_failures[0].item_ref,
+            bad_id.to_string()
+        );
+        assert!(
+            response.db_mirror_backfill_failures[0]
+                .reason
+                .contains("missing a derived precheck record")
+        );
+
+        assert!(
+            db.get_trace_submission("tenant-a", good_id)
+                .await
+                .expect("good mirror query succeeds")
+                .is_some()
+        );
+        assert!(
+            db.get_trace_submission("tenant-a", bad_id)
+                .await
+                .expect("bad mirror query succeeds")
+                .is_none()
+        );
+        let audit_events = db
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("audit events read");
+        let maintenance_audit = audit_events
+            .iter()
+            .find(|event| {
+                event.action == StorageTraceAuditAction::Retain
+                    && event
+                        .reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("test_backfill_bad_record_isolation"))
+            })
+            .expect("maintenance audit event mirrored");
+        match &maintenance_audit.metadata {
+            StorageTraceAuditSafeMetadata::Maintenance { action_counts, .. } => {
+                assert_eq!(
+                    action_counts
+                        .get("db_mirror_backfill_failed")
+                        .copied()
+                        .unwrap_or_default(),
+                    1
+                );
+            }
+            metadata => panic!("unexpected maintenance metadata: {metadata:?}"),
+        }
     }
 
     #[cfg(feature = "libsql")]
