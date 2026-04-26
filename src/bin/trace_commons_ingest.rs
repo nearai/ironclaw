@@ -69,6 +69,8 @@ const TRACE_COMMONS_FILE_OBJECT_STORE: &str = "trace_commons_file_store";
 const TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE: &str = "trace_commons_encrypted_artifact_store";
 const TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE: &str =
     "trace_commons_service_local_encrypted";
+const TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW: &str =
+    "TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW";
 const TRACE_BACKFILL_FAILURE_DETAIL_LIMIT: usize = 20;
 
 #[tokio::main]
@@ -104,6 +106,7 @@ struct AppState {
     db_tenant_policy_reads: bool,
     require_db_mirror_writes: bool,
     require_derived_export_object_refs: bool,
+    object_primary_submit_review: bool,
     require_export_guardrails: bool,
     artifact_store: Option<ConfiguredTraceArtifactStore>,
 }
@@ -364,6 +367,17 @@ impl AppState {
         }
         let require_export_guardrails = env_truthy("TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS");
         let artifact_store = trace_artifact_store_from_env(&root)?;
+        let object_primary_submit_review = env_truthy(TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW);
+        validate_object_primary_submit_review_config(
+            object_primary_submit_review,
+            db_mirror.is_some(),
+            require_db_mirror_writes,
+            db_reviewer_reads,
+            db_reviewer_require_object_refs,
+            artifact_store
+                .as_ref()
+                .map(ConfiguredTraceArtifactStore::object_store_name),
+        )?;
         Ok(Self {
             root,
             tokens: Arc::new(tokens),
@@ -379,10 +393,45 @@ impl AppState {
             db_tenant_policy_reads,
             require_db_mirror_writes,
             require_derived_export_object_refs,
+            object_primary_submit_review,
             require_export_guardrails,
             artifact_store,
         })
     }
+}
+
+fn validate_object_primary_submit_review_config(
+    enabled: bool,
+    db_mirror_configured: bool,
+    require_db_mirror_writes: bool,
+    db_reviewer_reads: bool,
+    db_reviewer_require_object_refs: bool,
+    artifact_store_name: Option<&str>,
+) -> anyhow::Result<()> {
+    if !enabled {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        db_mirror_configured,
+        "{TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW} requires TRACE_COMMONS_DB_DUAL_WRITE"
+    );
+    anyhow::ensure!(
+        require_db_mirror_writes,
+        "{TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW} requires TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES"
+    );
+    anyhow::ensure!(
+        db_reviewer_reads,
+        "{TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW} requires TRACE_COMMONS_DB_REVIEWER_READS"
+    );
+    anyhow::ensure!(
+        db_reviewer_require_object_refs,
+        "{TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW} requires TRACE_COMMONS_DB_REVIEWER_REQUIRE_OBJECT_REFS"
+    );
+    anyhow::ensure!(
+        artifact_store_name == Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE),
+        "{TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW} requires TRACE_COMMONS_OBJECT_STORE=local_service"
+    );
+    Ok(())
 }
 
 fn enforce_db_mirror_write_result(
@@ -4076,8 +4125,10 @@ fn store_envelope(
     envelope: &TraceContributionEnvelope,
 ) -> anyhow::Result<StoredTraceEnvelope> {
     let object_key = trace_envelope_object_key(tenant_id, status, envelope.submission_id);
-    let path = state.root.join(&object_key);
-    write_json_file(&path, envelope, "trace contribution envelope")?;
+    if !state.object_primary_submit_review {
+        let path = state.root.join(&object_key);
+        write_json_file(&path, envelope, "trace contribution envelope")?;
+    }
     let artifact_receipt = if let Some(store) = state.artifact_store.as_ref() {
         Some(store.put_json(
             &tenant_storage_ref(tenant_id),
@@ -4086,6 +4137,10 @@ fn store_envelope(
             envelope,
         )?)
     } else {
+        anyhow::ensure!(
+            !state.object_primary_submit_review,
+            "{TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW} requires a configured encrypted object store"
+        );
         None
     };
     Ok(StoredTraceEnvelope {
@@ -9972,6 +10027,7 @@ mod tests {
             db_tenant_policy_reads: false,
             require_db_mirror_writes: false,
             require_derived_export_object_refs: false,
+            object_primary_submit_review: false,
             require_export_guardrails: false,
             artifact_store: None,
         })
@@ -10291,8 +10347,43 @@ mod tests {
             db_tenant_policy_reads,
             require_db_mirror_writes,
             require_derived_export_object_refs,
+            object_primary_submit_review: false,
             require_export_guardrails,
             artifact_store,
+        })
+    }
+
+    fn test_state_with_object_primary_submit_review(
+        root: PathBuf,
+        db_mirror: Arc<dyn Database>,
+        artifact_store: ConfiguredTraceArtifactStore,
+    ) -> Arc<AppState> {
+        let mut tokens = BTreeMap::new();
+        insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Contributor);
+        insert_token(
+            &mut tokens,
+            "tenant-a",
+            "review-token-a",
+            TokenRole::Reviewer,
+        );
+        Arc::new(AppState {
+            root,
+            tokens: Arc::new(tokens),
+            tenant_policies: Arc::new(BTreeMap::new()),
+            require_tenant_submission_policy: false,
+            db_mirror: Some(db_mirror),
+            db_contributor_reads: false,
+            db_reviewer_reads: true,
+            db_reviewer_require_object_refs: true,
+            db_replay_export_reads: false,
+            db_replay_export_require_object_refs: false,
+            db_audit_reads: false,
+            db_tenant_policy_reads: false,
+            require_db_mirror_writes: true,
+            require_derived_export_object_refs: false,
+            object_primary_submit_review: true,
+            require_export_guardrails: false,
+            artifact_store: Some(artifact_store),
         })
     }
 
@@ -10503,6 +10594,86 @@ mod tests {
                 .to_string()
                 .contains("unsupported TRACE_COMMONS_OBJECT_STORE")
         );
+    }
+
+    #[test]
+    fn object_primary_submit_review_validates_production_guards() {
+        validate_object_primary_submit_review_config(
+            true,
+            true,
+            true,
+            true,
+            true,
+            Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE),
+        )
+        .expect("complete production guard config is valid");
+
+        let cases = [
+            (
+                false,
+                true,
+                true,
+                true,
+                Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE),
+                "TRACE_COMMONS_DB_DUAL_WRITE",
+            ),
+            (
+                true,
+                false,
+                true,
+                true,
+                Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE),
+                "TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES",
+            ),
+            (
+                true,
+                true,
+                false,
+                true,
+                Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE),
+                "TRACE_COMMONS_DB_REVIEWER_READS",
+            ),
+            (
+                true,
+                true,
+                true,
+                false,
+                Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE),
+                "TRACE_COMMONS_DB_REVIEWER_REQUIRE_OBJECT_REFS",
+            ),
+            (true, true, true, true, None, "TRACE_COMMONS_OBJECT_STORE"),
+            (
+                true,
+                true,
+                true,
+                true,
+                Some(TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE),
+                "TRACE_COMMONS_OBJECT_STORE",
+            ),
+        ];
+        for (
+            db_mirror_configured,
+            require_db_mirror_writes,
+            db_reviewer_reads,
+            db_reviewer_require_object_refs,
+            artifact_store_name,
+            expected,
+        ) in cases
+        {
+            let error = validate_object_primary_submit_review_config(
+                true,
+                db_mirror_configured,
+                require_db_mirror_writes,
+                db_reviewer_reads,
+                db_reviewer_require_object_refs,
+                artifact_store_name,
+            )
+            .expect_err("incomplete object-primary config must fail");
+            assert!(
+                error.to_string().contains(expected),
+                "expected {expected} in {error}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -11437,6 +11608,184 @@ mod tests {
         let round_trip =
             read_envelope_by_record(state.as_ref(), &record).expect("encrypted envelope reads");
         assert_eq!(round_trip.submission_id, submission_id);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn object_primary_submit_writes_no_plaintext_envelope_body() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_root = temp.path().join("service-object-store");
+        let artifact_store = test_artifact_store(&artifact_root);
+        let configured_store = ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            artifact_store,
+        );
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-object-primary-submit.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_object_primary_submit_review(
+            temp.path().to_path_buf(),
+            db.clone() as Arc<dyn Database>,
+            configured_store,
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let Json(receipt) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("object-primary submission succeeds");
+
+        assert_eq!(receipt.status, "accepted");
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        assert!(
+            !temp.path().join(&record.object_key).exists(),
+            "object-primary mode should not leave a plaintext envelope body"
+        );
+        let artifact_receipt = record
+            .artifact_receipt
+            .as_ref()
+            .expect("artifact receipt is persisted in file metadata");
+        let metadata_round_trip =
+            read_envelope_by_record(state.as_ref(), &record).expect("metadata receipt reads");
+        assert_eq!(metadata_round_trip.submission_id, submission_id);
+
+        let object_ref = db
+            .get_latest_active_trace_object_ref(
+                "tenant-a",
+                submission_id,
+                StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            )
+            .await
+            .expect("object ref reads")
+            .expect("submitted envelope object ref exists");
+        assert_eq!(
+            object_ref.object_store,
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+        );
+        assert_eq!(object_ref.object_key, artifact_receipt.object_key);
+        let object_ref_round_trip =
+            read_envelope_from_object_ref(state.as_ref(), "tenant-a", &object_ref)
+                .expect("DB object ref reads encrypted envelope");
+        assert_eq!(object_ref_round_trip.submission_id, submission_id);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn object_primary_review_writes_review_snapshot_without_plaintext_body() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_root = temp.path().join("review-service-object-store");
+        let artifact_store = test_artifact_store(&artifact_root);
+        let configured_store = ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            artifact_store,
+        );
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-object-primary-review.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_object_primary_submit_review(
+            temp.path().to_path_buf(),
+            db.clone() as Arc<dyn Database>,
+            configured_store,
+        );
+        let envelope = sample_envelope().await;
+        let submission_id = envelope.submission_id;
+
+        let Json(submit_receipt) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("quarantined submission succeeds");
+        assert_eq!(submit_receipt.status, "quarantined");
+        let submitted_record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("submitted record reads")
+            .expect("submitted record exists");
+        assert!(
+            !temp.path().join(&submitted_record.object_key).exists(),
+            "submitted plaintext body should not exist"
+        );
+        let submitted_ref = db
+            .get_latest_active_trace_object_ref(
+                "tenant-a",
+                submission_id,
+                StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            )
+            .await
+            .expect("submitted object ref reads")
+            .expect("submitted object ref exists");
+
+        let Json(review_receipt) = review_decision_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Approve,
+                reason: Some("object-primary reviewer approval".to_string()),
+                credit_points_pending: Some(1.75),
+            }),
+        )
+        .await
+        .expect("review decision reads body through object ref");
+        assert_eq!(review_receipt.status, "accepted");
+
+        let reviewed_record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("reviewed record reads")
+            .expect("reviewed record exists");
+        assert_eq!(reviewed_record.status, TraceCorpusStatus::Accepted);
+        assert!(
+            !temp.path().join(&reviewed_record.object_key).exists(),
+            "reviewed plaintext body should not exist"
+        );
+        let reviewed_ref = db
+            .get_latest_active_trace_object_ref(
+                "tenant-a",
+                submission_id,
+                StorageTraceObjectArtifactKind::ReviewSnapshot,
+            )
+            .await
+            .expect("review snapshot object ref reads")
+            .expect("review snapshot object ref exists");
+        assert_eq!(
+            reviewed_ref.object_store,
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+        );
+        let reviewed_envelope =
+            read_envelope_from_object_ref(state.as_ref(), "tenant-a", &reviewed_ref)
+                .expect("review snapshot reads through object ref");
+        assert_eq!(reviewed_envelope.value.credit_points_pending, 1.75);
+
+        let db_audit_events = db
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("DB audit events read");
+        assert!(db_audit_events.iter().any(|event| {
+            event.action == StorageTraceAuditAction::Read
+                && event.submission_id == Some(submission_id)
+                && event.object_ref_id == Some(submitted_ref.object_ref_id)
+                && event.reason.as_deref() == Some("surface=review_decision")
+        }));
     }
 
     #[cfg(feature = "libsql")]
