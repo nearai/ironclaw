@@ -55,6 +55,26 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
+            crate_name: "ironclaw_memory",
+            forbidden: vec![
+                "ironclaw_authorization",
+                "ironclaw_approvals",
+                "ironclaw_capabilities",
+                "ironclaw_dispatcher",
+                "ironclaw_events",
+                "ironclaw_extensions",
+                "ironclaw_host_runtime",
+                "ironclaw_secrets",
+                "ironclaw_network",
+                "ironclaw_mcp",
+                "ironclaw_processes",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_scripts",
+                "ironclaw_wasm",
+            ],
+        },
+        BoundaryRule {
             crate_name: "ironclaw_resources",
             forbidden: vec![
                 "ironclaw_authorization",

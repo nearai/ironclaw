@@ -147,19 +147,32 @@ Non-responsibilities:
 
 ## 6. Memory backend direction
 
-The eventual memory filesystem backend should adapt the existing workspace model into Reborn instead of storing memory as opaque bytes in `root_filesystem_entries`.
+The memory filesystem backend adapts the existing workspace model into Reborn instead of storing memory as opaque bytes in `root_filesystem_entries`.
 
-Target behavior:
+Canonical path shape:
 
 ```text
-/memory/{tenant}/{user}/SOUL.md
-/memory/{tenant}/{user}/MEMORY.md
-/memory/{tenant}/{user}/AGENTS.md
-/memory/{tenant}/{user}/USER.md
-/memory/{tenant}/{user}/notes/*.md
+/memory/tenants/{tenant_id}/users/{user_id}/projects/{project_id-or-_none}/SOUL.md
+/memory/tenants/{tenant_id}/users/{user_id}/projects/{project_id-or-_none}/MEMORY.md
+/memory/tenants/{tenant_id}/users/{user_id}/projects/{project_id-or-_none}/AGENTS.md
+/memory/tenants/{tenant_id}/users/{user_id}/projects/{project_id-or-_none}/USER.md
+/memory/tenants/{tenant_id}/users/{user_id}/projects/{project_id-or-_none}/notes/*.md
 ```
 
-Source tables remain memory-oriented:
+Implemented first seam in `ironclaw_memory`:
+
+```rust
+MemoryDocumentFilesystem
+MemoryDocumentScope
+MemoryDocumentPath
+MemoryDocumentRepository
+MemoryDocumentIndexer
+InMemoryMemoryDocumentRepository
+```
+
+`ironclaw_filesystem` remains generic. `ironclaw_memory` owns memory-specific path grammar, scope parsing, repository delegation, directory inference, and write-after-persist index hook invocation.
+
+Production repository adapters should map this seam onto memory-oriented tables/services:
 
 ```text
 memory_documents
@@ -168,7 +181,7 @@ memory_document_versions
 embedding/search index tables
 ```
 
-`RootFilesystem::read_file` and `write_file` expose file-shaped documents; the memory service owns indexing, embedding, metadata inheritance, and search.
+`RootFilesystem::read_file` and `write_file` expose file-shaped documents; the memory service/repository owns indexing, embedding, metadata inheritance, versioning, and search.
 
 ---
 
