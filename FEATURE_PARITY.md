@@ -185,6 +185,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `/subagents spawn` | ✅ | ❌ | P3 | Spawn subagents from chat |
 | `/export-session` | ✅ | ❌ | P3 | Export current session transcript |
 
+Trace Commons incremental note: retention maintenance now honors `TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES` so configured policy classes are skipped for new expiration and purge passes.
+
 ### Owner: _Unassigned_
 
 ---

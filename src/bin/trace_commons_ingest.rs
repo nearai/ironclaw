@@ -77,6 +77,8 @@ const TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS";
 const TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN: &str =
     "TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN";
+const TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES: &str =
+    "TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES";
 const TRACE_BACKFILL_FAILURE_DETAIL_LIMIT: usize = 20;
 
 #[tokio::main]
@@ -117,6 +119,7 @@ struct AppState {
     object_primary_derived_exports: bool,
     require_db_reconciliation_clean: bool,
     require_export_guardrails: bool,
+    legal_hold_retention_policy_ids: Arc<BTreeSet<String>>,
     artifact_store: Option<ConfiguredTraceArtifactStore>,
 }
 
@@ -382,6 +385,7 @@ impl AppState {
             );
         }
         let require_export_guardrails = env_truthy("TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS");
+        let legal_hold_retention_policy_ids = parse_legal_hold_retention_policy_ids_from_env()?;
         let artifact_store = trace_artifact_store_from_env(&root)?;
         let object_primary_submit_review = env_truthy(TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW);
         let object_primary_replay_export = env_truthy(TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT);
@@ -438,6 +442,7 @@ impl AppState {
             object_primary_derived_exports,
             require_db_reconciliation_clean,
             require_export_guardrails,
+            legal_hold_retention_policy_ids: Arc::new(legal_hold_retention_policy_ids),
             artifact_store,
         })
     }
@@ -777,6 +782,41 @@ fn parse_tenant_submission_policies(
         .context("TRACE_COMMONS_TENANT_POLICIES must be a JSON object keyed by tenant id")
 }
 
+fn parse_legal_hold_retention_policy_ids_from_env() -> anyhow::Result<BTreeSet<String>> {
+    match std::env::var(TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES) {
+        Ok(configured) => parse_legal_hold_retention_policy_ids(&configured),
+        Err(std::env::VarError::NotPresent) => Ok(BTreeSet::new()),
+        Err(error) => Err(error).with_context(|| {
+            format!("failed to read {TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES}")
+        }),
+    }
+}
+
+fn parse_legal_hold_retention_policy_ids(configured: &str) -> anyhow::Result<BTreeSet<String>> {
+    let mut policy_ids = BTreeSet::new();
+    for policy_id in configured.split(',').map(str::trim) {
+        if policy_id.is_empty() {
+            continue;
+        }
+        validate_retention_policy_id(policy_id)?;
+        policy_ids.insert(policy_id.to_string());
+    }
+    Ok(policy_ids)
+}
+
+fn validate_retention_policy_id(policy_id: &str) -> anyhow::Result<()> {
+    let valid = policy_id.len() <= 128
+        && policy_id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | ':')
+        });
+    if !valid {
+        anyhow::bail!(
+            "{TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES} contains an invalid retention policy id"
+        );
+    }
+    Ok(())
+}
+
 fn insert_token(
     tokens: &mut BTreeMap<String, TenantAuth>,
     tenant_id: &str,
@@ -850,6 +890,7 @@ struct TraceCommonsConfigStatusResponse {
     object_primary_derived_exports: bool,
     require_db_reconciliation_clean: bool,
     require_export_guardrails: bool,
+    legal_hold_retention_policy_ids: Vec<String>,
     artifact_store_configured: bool,
     artifact_object_store: Option<String>,
 }
@@ -873,6 +914,11 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         object_primary_derived_exports: state.object_primary_derived_exports,
         require_db_reconciliation_clean: state.require_db_reconciliation_clean,
         require_export_guardrails: state.require_export_guardrails,
+        legal_hold_retention_policy_ids: state
+            .legal_hold_retention_policy_ids
+            .iter()
+            .cloned()
+            .collect(),
         artifact_store_configured: state.artifact_store.is_some(),
         artifact_object_store: state
             .artifact_store
@@ -6729,7 +6775,7 @@ async fn run_maintenance(
             }
             continue;
         }
-        if record.is_expired_at(now) {
+        if record.is_expired_at(now) && !retention_policy_is_on_legal_hold(state, record) {
             records_marked_expired += 1;
             expired_submission_ids.insert(record.submission_id);
             if !request.dry_run {
@@ -6772,6 +6818,9 @@ async fn run_maintenance(
     let mut encrypted_artifacts_deleted = 0usize;
     if let Some(purge_cutoff) = request.purge_expired_before {
         for record in &mut records {
+            if retention_policy_is_on_legal_hold(state, record) {
+                continue;
+            }
             if record.status != TraceCorpusStatus::Expired
                 || record
                     .expires_at
@@ -6924,6 +6973,15 @@ async fn run_maintenance(
         audit_chain,
         db_reconciliation,
     })
+}
+
+fn retention_policy_is_on_legal_hold(
+    state: &AppState,
+    record: &TraceCommonsSubmissionRecord,
+) -> bool {
+    state
+        .legal_hold_retention_policy_ids
+        .contains(&record.retention_policy_id)
 }
 
 async fn verify_audit_chain(
@@ -10576,6 +10634,7 @@ mod tests {
             object_primary_derived_exports: false,
             require_db_reconciliation_clean: false,
             require_export_guardrails: false,
+            legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store: None,
         })
     }
@@ -10899,6 +10958,7 @@ mod tests {
             object_primary_derived_exports: false,
             require_db_reconciliation_clean: false,
             require_export_guardrails,
+            legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store,
         })
     }
@@ -10952,6 +11012,7 @@ mod tests {
             object_primary_derived_exports: true,
             require_db_reconciliation_clean: false,
             require_export_guardrails: true,
+            legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store: Some(artifact_store),
         })
     }
@@ -10990,6 +11051,7 @@ mod tests {
             object_primary_derived_exports: false,
             require_db_reconciliation_clean: false,
             require_export_guardrails: false,
+            legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store: Some(artifact_store),
         })
     }
@@ -11026,6 +11088,7 @@ mod tests {
             object_primary_derived_exports: false,
             require_db_reconciliation_clean: true,
             require_export_guardrails: false,
+            legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store: None,
         })
     }
@@ -11203,6 +11266,27 @@ mod tests {
                 .allowed_uses
                 .contains(&TraceAllowedUse::AggregateAnalytics)
         );
+    }
+
+    #[test]
+    fn parses_legal_hold_retention_policy_ids_from_csv() {
+        let policies = parse_legal_hold_retention_policy_ids(
+            "private_corpus_revocable, benchmark-revocable,tenant:policy.1",
+        )
+        .expect("legal hold policies parse");
+
+        assert!(policies.contains("private_corpus_revocable"));
+        assert!(policies.contains("benchmark-revocable"));
+        assert!(policies.contains("tenant:policy.1"));
+
+        let error = parse_legal_hold_retention_policy_ids("private_corpus_revocable,sk-test/token")
+            .expect_err("unsafe policy id should fail");
+        assert!(
+            error
+                .to_string()
+                .contains(TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES)
+        );
+        assert!(!error.to_string().contains("sk-test/token"));
     }
 
     #[test]
@@ -16246,6 +16330,117 @@ mod tests {
         artifact_store
             .read_artifact(&tenant_storage_ref("tenant-a"), &receipt)
             .expect_err("encrypted artifact was deleted");
+    }
+
+    #[tokio::test]
+    async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut tokens = BTreeMap::new();
+        insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Contributor);
+        insert_token(
+            &mut tokens,
+            "tenant-a",
+            "review-token-a",
+            TokenRole::Reviewer,
+        );
+        let state = Arc::new(AppState {
+            root: temp.path().to_path_buf(),
+            tokens: Arc::new(tokens),
+            tenant_policies: Arc::new(BTreeMap::new()),
+            require_tenant_submission_policy: false,
+            db_mirror: None,
+            db_contributor_reads: false,
+            db_reviewer_reads: false,
+            db_reviewer_require_object_refs: false,
+            db_replay_export_reads: false,
+            db_replay_export_require_object_refs: false,
+            db_audit_reads: false,
+            db_tenant_policy_reads: false,
+            require_db_mirror_writes: false,
+            require_derived_export_object_refs: false,
+            object_primary_submit_review: false,
+            object_primary_replay_export: false,
+            object_primary_derived_exports: false,
+            require_db_reconciliation_clean: false,
+            require_export_guardrails: false,
+            legal_hold_retention_policy_ids: Arc::new(BTreeSet::from([
+                "private_corpus_revocable".to_string()
+            ])),
+            artifact_store: None,
+        });
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        assert_eq!(record.retention_policy_id, "private_corpus_revocable");
+        let object_path = temp.path().join(&record.object_key);
+        assert!(object_path.exists());
+
+        let metadata_path = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"))
+            .join("metadata")
+            .join(format!("{submission_id}.json"));
+        let mut metadata_json = serde_json::to_value(record).expect("record serializes");
+        metadata_json["expires_at"] =
+            serde_json::json!((Utc::now() - chrono::Duration::days(2)).to_rfc3339());
+        write_json_file(&metadata_path, &metadata_json, "legal-hold trace metadata")
+            .expect("metadata writes");
+
+        let Json(response) = maintenance_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("legal_hold_retention".to_string()),
+                dry_run: false,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: Some(Utc::now()),
+            }),
+        )
+        .await
+        .expect("maintenance succeeds");
+        assert_eq!(response.records_marked_expired, 0);
+        assert_eq!(response.records_marked_purged, 0);
+        assert_eq!(response.expired_submission_count, 0);
+        assert_eq!(response.trace_object_files_deleted, 0);
+        assert!(object_path.exists());
+
+        let held_record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("held record reads")
+            .expect("held record exists");
+        assert_eq!(held_record.status, TraceCorpusStatus::Accepted);
+        assert!(held_record.purged_at.is_none());
+
+        let Json(export) = dataset_replay_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("legal_hold_export_check".to_string()),
+                status: None,
+                privacy_risk: None,
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("legal-hold trace remains exportable while held");
+        assert_eq!(export.item_count, 1);
     }
 
     #[cfg(feature = "libsql")]
