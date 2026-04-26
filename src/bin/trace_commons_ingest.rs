@@ -7460,9 +7460,24 @@ async fn reconcile_db_mirror(
         .list_trace_tombstones(&tenant.tenant_id)
         .await
         .context("failed to list trace tombstones for DB reconciliation")?;
+    let db_submission_export_eligibility = db_records
+        .iter()
+        .map(|record| {
+            (
+                record.submission_id,
+                storage_submission_is_export_source_eligible(record),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let invalid_source_submission_ids = db_submission_export_eligibility
+        .iter()
+        .filter_map(|(submission_id, eligible)| (!eligible).then_some(*submission_id))
+        .collect::<BTreeSet<_>>();
     let mut db_export_manifest_item_count = 0usize;
     let mut db_export_manifest_item_missing_object_ref_count = 0usize;
     let mut db_export_manifest_ids_with_missing_object_refs = BTreeSet::new();
+    let mut active_export_manifest_ids_for_invalid_sources = BTreeSet::new();
+    let mut active_export_manifest_items_for_invalid_sources = Vec::new();
     for manifest in &db_export_manifests {
         let items = db
             .list_trace_export_manifest_items(&tenant.tenant_id, manifest.export_manifest_id)
@@ -7482,7 +7497,72 @@ async fn reconcile_db_mirror(
         if missing_object_ref_count > 0 {
             db_export_manifest_ids_with_missing_object_refs.insert(manifest.export_manifest_id);
         }
+        let manifest_active = manifest.invalidated_at.is_none() && manifest.deleted_at.is_none();
+        if manifest_active
+            && manifest.source_submission_ids.iter().any(|submission_id| {
+                !db_submission_export_eligibility
+                    .get(submission_id)
+                    .copied()
+                    .unwrap_or(false)
+            })
+        {
+            active_export_manifest_ids_for_invalid_sources.insert(manifest.export_manifest_id);
+        }
+        active_export_manifest_items_for_invalid_sources.extend(
+            items
+                .iter()
+                .filter(|item| item.source_invalidated_at.is_none())
+                .filter(|item| {
+                    !db_submission_export_eligibility
+                        .get(&item.submission_id)
+                        .copied()
+                        .unwrap_or(false)
+                })
+                .map(|item| TraceDbExportManifestItemInvalidSource {
+                    export_manifest_id: item.export_manifest_id,
+                    submission_id: item.submission_id,
+                    derived_id: item.derived_id,
+                    object_ref_id: item.object_ref_id,
+                    vector_entry_id: item.vector_entry_id,
+                    source_status_at_export: item.source_status_at_export,
+                    source_invalidation_reason: item.source_invalidation_reason,
+                }),
+        );
     }
+    let active_derived_submission_ids_for_invalid_sources = db_derived
+        .iter()
+        .filter(|record| record.status == StorageTraceDerivedStatus::Current)
+        .filter_map(|record| {
+            (invalid_source_submission_ids.contains(&record.submission_id))
+                .then_some(record.submission_id)
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    active_export_manifest_items_for_invalid_sources.sort_by_key(|item| {
+        (
+            item.export_manifest_id,
+            item.submission_id,
+            item.derived_id,
+            item.object_ref_id,
+        )
+    });
+    let active_export_manifest_ids_with_ineligible_items =
+        active_export_manifest_items_for_invalid_sources
+            .iter()
+            .map(|item| item.export_manifest_id)
+            .collect::<BTreeSet<_>>();
+    active_export_manifest_ids_for_invalid_sources.extend(
+        active_export_manifest_items_for_invalid_sources
+            .iter()
+            .filter(|item| {
+                !db_submission_export_eligibility
+                    .get(&item.submission_id)
+                    .copied()
+                    .unwrap_or(false)
+            })
+            .map(|item| item.export_manifest_id),
+    );
     let db_replay_export_manifest_count = db_export_manifests
         .iter()
         .filter(|manifest| is_replay_dataset_storage_manifest(manifest))
@@ -7875,6 +7955,16 @@ async fn reconcile_db_mirror(
             db_export_manifest_ids_with_missing_object_refs
                 .into_iter()
                 .collect(),
+        active_derived_submission_ids_for_invalid_sources,
+        active_export_manifest_ids_for_invalid_sources:
+            active_export_manifest_ids_for_invalid_sources
+                .into_iter()
+                .collect(),
+        active_export_manifest_items_for_invalid_sources,
+        active_export_manifest_ids_with_ineligible_items:
+            active_export_manifest_ids_with_ineligible_items
+                .into_iter()
+                .collect(),
         file_revocation_tombstone_count: file_revocations.len(),
         db_tombstone_count: db_tombstones.len(),
         db_object_ref_count,
@@ -7891,6 +7981,12 @@ async fn reconcile_db_mirror(
         accepted_current_derived_without_active_vector_entry,
         invalid_active_vector_entries,
     }))
+}
+
+fn storage_submission_is_export_source_eligible(record: &StorageTraceSubmissionRecord) -> bool {
+    record.status == StorageTraceCorpusStatus::Accepted
+        && record.revoked_at.is_none()
+        && record.purged_at.is_none()
 }
 
 fn is_ranker_training_storage_manifest(record: &StorageTraceExportManifestRecord) -> bool {
@@ -9180,6 +9276,10 @@ struct TraceDbReconciliationReport {
     db_export_manifest_item_count: usize,
     db_export_manifest_item_missing_object_ref_count: usize,
     db_export_manifest_ids_with_missing_object_refs: Vec<Uuid>,
+    active_derived_submission_ids_for_invalid_sources: Vec<Uuid>,
+    active_export_manifest_ids_for_invalid_sources: Vec<Uuid>,
+    active_export_manifest_items_for_invalid_sources: Vec<TraceDbExportManifestItemInvalidSource>,
+    active_export_manifest_ids_with_ineligible_items: Vec<Uuid>,
     file_revocation_tombstone_count: usize,
     db_tombstone_count: usize,
     db_object_ref_count: usize,
@@ -9195,6 +9295,17 @@ struct TraceDbReconciliationReport {
     active_vector_entries: usize,
     accepted_current_derived_without_active_vector_entry: Vec<Uuid>,
     invalid_active_vector_entries: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceDbExportManifestItemInvalidSource {
+    export_manifest_id: Uuid,
+    submission_id: Uuid,
+    derived_id: Option<Uuid>,
+    object_ref_id: Option<Uuid>,
+    vector_entry_id: Option<Uuid>,
+    source_status_at_export: StorageTraceCorpusStatus,
+    source_invalidation_reason: Option<StorageTraceExportManifestItemInvalidationReason>,
 }
 
 #[derive(Debug, Serialize)]
@@ -15861,6 +15972,108 @@ mod tests {
 
     #[cfg(feature = "libsql")]
     #[tokio::test]
+    async fn maintenance_reconciliation_reports_active_exports_with_ineligible_sources() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp
+            .path()
+            .join("trace-reconcile-active-export-ineligible-source.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let Json(export) = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("ineligible_source_reconciliation".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("replay export succeeds");
+
+        db.update_trace_submission_status(
+            "tenant-a",
+            submission_id,
+            StorageTraceCorpusStatus::Revoked,
+            "test-reconciler",
+            Some("simulate missed export invalidation"),
+        )
+        .await
+        .expect("DB source status can be changed without export invalidation");
+
+        let Json(response) = maintenance_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_ineligible_export_source_reconciliation".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: true,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("reviewer can reconcile DB mirror");
+        let reconciliation = response
+            .db_reconciliation
+            .expect("reconciliation report exists");
+        assert_eq!(
+            reconciliation.active_derived_submission_ids_for_invalid_sources,
+            vec![submission_id]
+        );
+        assert_eq!(
+            reconciliation.active_export_manifest_ids_for_invalid_sources,
+            vec![export.export_id]
+        );
+        assert_eq!(
+            reconciliation
+                .active_export_manifest_items_for_invalid_sources
+                .len(),
+            1
+        );
+        let invalid_item = &reconciliation.active_export_manifest_items_for_invalid_sources[0];
+        assert_eq!(invalid_item.export_manifest_id, export.export_id);
+        assert_eq!(invalid_item.submission_id, submission_id);
+        assert_eq!(
+            invalid_item.source_status_at_export,
+            StorageTraceCorpusStatus::Accepted
+        );
+        assert_eq!(
+            reconciliation.active_export_manifest_ids_with_ineligible_items,
+            vec![export.export_id]
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
     async fn maintenance_reconciliation_splits_db_export_manifest_counts_by_kind() {
         use ironclaw::db::libsql::LibSqlBackend;
 
@@ -17332,7 +17545,7 @@ mod tests {
         assert_eq!(export.item_count, 1);
 
         revoke_trace_handler(
-            State(state),
+            State(state.clone()),
             auth_headers("token-a"),
             AxumPath(submission_id),
         )
@@ -17347,6 +17560,42 @@ mod tests {
         assert_eq!(manifests[0].export_manifest_id, export.export_id);
         assert!(manifests[0].invalidated_at.is_some());
         assert!(manifests[0].deleted_at.is_none());
+
+        let Json(response) = maintenance_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("revocation_invalidated_export_reconciliation".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: true,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("reviewer can reconcile after revocation invalidation");
+        let reconciliation = response
+            .db_reconciliation
+            .expect("reconciliation report exists");
+        assert!(
+            reconciliation
+                .active_derived_submission_ids_for_invalid_sources
+                .is_empty()
+        );
+        assert!(
+            reconciliation
+                .active_export_manifest_ids_for_invalid_sources
+                .is_empty()
+        );
+        assert!(
+            reconciliation
+                .active_export_manifest_items_for_invalid_sources
+                .is_empty()
+        );
     }
 
     #[cfg(feature = "libsql")]
