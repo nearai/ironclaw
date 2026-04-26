@@ -214,7 +214,11 @@ fn mounted_empty_extension_root() -> LocalFilesystem {
 fn package_from_manifest(manifest: &str) -> ExtensionPackage {
     let manifest = ExtensionManifest::parse(manifest).unwrap();
     let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
-    ExtensionPackage::from_manifest(manifest, root).unwrap()
+    if matches!(manifest.trust, TrustClass::FirstParty | TrustClass::System) {
+        ExtensionPackage::from_trusted_manifest(manifest, root).unwrap()
+    } else {
+        ExtensionPackage::from_manifest(manifest, root).unwrap()
+    }
 }
 
 fn json_echo_module() -> Vec<u8> {
