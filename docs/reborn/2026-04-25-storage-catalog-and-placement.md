@@ -167,6 +167,11 @@ MemoryDocumentScope
 MemoryDocumentPath
 MemoryDocumentRepository
 MemoryDocumentIndexer
+MemoryDocumentIndexRepository
+ChunkConfig
+chunk_document
+content_sha256
+ChunkingMemoryDocumentIndexer
 InMemoryMemoryDocumentRepository
 LibSqlMemoryDocumentRepository
 PostgresMemoryDocumentRepository
@@ -174,21 +179,18 @@ PostgresMemoryDocumentRepository
 
 `ironclaw_filesystem` remains generic. `ironclaw_memory` owns memory-specific path grammar, scope parsing, repository delegation, directory inference, and write-after-persist index hook invocation.
 
-The PostgreSQL/libSQL repository adapters map file-shaped memory documents into the existing `memory_documents` table shape. The adapter stores scoped owner identity in the `user_id` column and maps project-scoped documents under `projects/{project_id}/...` so the backend remains compatible with the current document table model.
+Reuse rule: Reborn memory should port/adapt the current working workspace implementation instead of inventing parallel SQL or chunking semantics. The current source-of-truth implementation is in `src/workspace/{document,chunker,repository,search}.rs`, `src/db/libsql/workspace.rs`, and the existing workspace migrations.
 
-The current repository adapters intentionally touch only document rows:
+The PostgreSQL/libSQL repository adapters map file-shaped memory documents into the existing table family:
 
 ```text
 memory_documents
-```
-
-These remain owned by later memory service/indexer wiring:
-
-```text
 memory_chunks
+memory_chunks_fts          # libSQL FTS5 side table/triggers
 memory_document_versions
-embedding/search index tables
 ```
+
+The adapter stores scoped owner identity in the `user_id` column and maps project-scoped documents under `projects/{project_id}/...` so the backend remains compatible with the current document table model. The first memory-owned indexer now ports the existing word-overlap chunking and `sha256:{hex}` version hash format. Embedding-provider integration, metadata inheritance, schema validation, multi-scope search, and full search result APIs remain later memory service work.
 
 `RootFilesystem::read_file` and `write_file` expose file-shaped documents; the memory service/repository owns indexing, embedding, metadata inheritance, versioning, and search.
 
