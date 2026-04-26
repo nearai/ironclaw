@@ -126,6 +126,8 @@ Private ingestion service routes used by the operator panel:
 | POST | `/v1/benchmarks/convert` | Convert approved replayable traces into benchmark candidates |
 | GET | `/v1/ranker/training-candidates` | Export approved ranker training candidates |
 | GET | `/v1/ranker/training-pairs` | Export approved ranker training pairs |
+| GET | `/v1/admin/retention/jobs` | Admin-only DB-backed retention maintenance job ledger |
+| GET | `/v1/admin/retention/jobs/{retention_job_id}/items` | Admin-only per-submission retention job actions |
 | POST | `/v1/admin/maintenance` | Run tenant-scoped revocation propagation and export-cache maintenance |
 | GET | `/v1/audit/events` | List tenant audit events when available |
 

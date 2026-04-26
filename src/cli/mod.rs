@@ -255,7 +255,7 @@ pub enum Command {
         about = "Manage trace contributions",
         long_about = "Create local redacted trace contribution previews, explicitly submit or revoke them, and operate private Trace Commons reviewer/admin APIs.\nExamples:\n  ironclaw traces preview --recorded-trace trace.json --output contribution.json\n  ironclaw traces submit --envelope contribution.json --endpoint https://example.internal/v1/traces\n  ironclaw traces ingest-health --endpoint https://example.internal"
     )]
-    Traces(TracesCommand),
+    Traces(Box<TracesCommand>),
 
     /// Probe external dependencies and validate configuration
     #[command(

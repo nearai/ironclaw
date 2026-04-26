@@ -425,6 +425,59 @@ pub enum TracesCommand {
         json: bool,
     },
 
+    /// List DB-backed retention maintenance jobs from the central corpus
+    RetentionJobsList {
+        /// Trace Commons ingestion base URL or /v1/traces URL
+        #[arg(long)]
+        endpoint: String,
+
+        /// Maximum retention jobs to return
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Filter by retention job status
+        #[arg(long, value_enum)]
+        status: Option<TraceRetentionJobStatusArg>,
+
+        /// Environment variable containing an admin bearer token
+        #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
+        bearer_token_env: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List DB-backed retention maintenance job items from the central corpus
+    RetentionJobItems {
+        /// Trace Commons ingestion base URL or /v1/traces URL
+        #[arg(long)]
+        endpoint: String,
+
+        /// Retention job ID
+        retention_job_id: Uuid,
+
+        /// Maximum retention job items to return
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Filter by lifecycle action
+        #[arg(long, value_enum)]
+        action: Option<TraceRetentionJobItemActionArg>,
+
+        /// Filter by item status
+        #[arg(long, value_enum)]
+        status: Option<TraceRetentionJobItemStatusArg>,
+
+        /// Environment variable containing an admin bearer token
+        #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
+        bearer_token_env: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Index scoped vector metadata through the worker route
     WorkerVectorIndex {
         /// Trace Commons ingestion base URL or /v1/traces URL
@@ -1201,6 +1254,68 @@ impl std::fmt::Display for TracePrivacyRiskArg {
     }
 }
 
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceRetentionJobStatusArg {
+    Planned,
+    Running,
+    DryRun,
+    Complete,
+    Failed,
+    Paused,
+}
+
+impl std::fmt::Display for TraceRetentionJobStatusArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::Planned => "planned",
+            Self::Running => "running",
+            Self::DryRun => "dry_run",
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+            Self::Paused => "paused",
+        };
+        write!(f, "{value}")
+    }
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceRetentionJobItemActionArg {
+    Revoke,
+    Expire,
+    Purge,
+}
+
+impl std::fmt::Display for TraceRetentionJobItemActionArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::Revoke => "revoke",
+            Self::Expire => "expire",
+            Self::Purge => "purge",
+        };
+        write!(f, "{value}")
+    }
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceRetentionJobItemStatusArg {
+    Pending,
+    Done,
+    Failed,
+    Skipped,
+}
+
+impl std::fmt::Display for TraceRetentionJobItemStatusArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::Pending => "pending",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+        };
+        write!(f, "{value}")
+    }
+}
+
 pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
     match cmd {
         TracesCommand::OptIn {
@@ -1438,6 +1553,36 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
                 purge_expired_before,
                 json,
             })
+            .await
+        }
+        TracesCommand::RetentionJobsList {
+            endpoint,
+            limit,
+            status,
+            bearer_token_env,
+            json,
+        } => {
+            trace_commons_retention_jobs_list(&endpoint, &bearer_token_env, limit, status, json)
+                .await
+        }
+        TracesCommand::RetentionJobItems {
+            endpoint,
+            retention_job_id,
+            limit,
+            action,
+            status,
+            bearer_token_env,
+            json,
+        } => {
+            trace_commons_retention_job_items(
+                &endpoint,
+                &bearer_token_env,
+                retention_job_id,
+                limit,
+                action,
+                status,
+                json,
+            )
             .await
         }
         TracesCommand::WorkerVectorIndex {
@@ -2711,6 +2856,103 @@ fn trace_commons_retention_maintenance_summary_lines(value: &serde_json::Value) 
             ),
         ],
     )
+}
+
+async fn trace_commons_retention_jobs_list(
+    endpoint: &str,
+    bearer_token_env: &str,
+    limit: Option<usize>,
+    status: Option<TraceRetentionJobStatusArg>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let mut query = optional_usize_query("limit", limit);
+    if let Some(status) = status {
+        query.push(("status", status.to_string()));
+    }
+    let Some(response) = trace_commons_optional_api_request(
+        Method::GET,
+        endpoint,
+        "/v1/admin/retention/jobs",
+        &query,
+        Some(bearer_token_env),
+        None,
+    )
+    .await?
+    else {
+        print_trace_commons_unsupported("/v1/admin/retention/jobs");
+        return Ok(());
+    };
+
+    if json {
+        print_trace_commons_json(&response)
+    } else {
+        print_trace_commons_items(
+            "Central retention maintenance jobs",
+            response.json.as_ref(),
+            &[
+                "retention_job_id",
+                "status",
+                "purpose",
+                "dry_run",
+                "selected_revoked_count",
+                "selected_expired_count",
+                "started_at",
+                "completed_at",
+                "created_at",
+            ],
+        );
+        Ok(())
+    }
+}
+
+async fn trace_commons_retention_job_items(
+    endpoint: &str,
+    bearer_token_env: &str,
+    retention_job_id: Uuid,
+    limit: Option<usize>,
+    action: Option<TraceRetentionJobItemActionArg>,
+    status: Option<TraceRetentionJobItemStatusArg>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let mut query = optional_usize_query("limit", limit);
+    if let Some(action) = action {
+        query.push(("action", action.to_string()));
+    }
+    if let Some(status) = status {
+        query.push(("status", status.to_string()));
+    }
+    let path = format!("/v1/admin/retention/jobs/{retention_job_id}/items");
+    let Some(response) = trace_commons_optional_api_request(
+        Method::GET,
+        endpoint,
+        &path,
+        &query,
+        Some(bearer_token_env),
+        None,
+    )
+    .await?
+    else {
+        print_trace_commons_unsupported(&path);
+        return Ok(());
+    };
+
+    if json {
+        print_trace_commons_json(&response)
+    } else {
+        print_trace_commons_items(
+            "Central retention maintenance job items",
+            response.json.as_ref(),
+            &[
+                "submission_id",
+                "action",
+                "status",
+                "reason",
+                "verified_at",
+                "updated_at",
+            ],
+        );
+        Ok(())
+    }
 }
 
 async fn trace_commons_vector_index_run(
@@ -4713,6 +4955,26 @@ mod tests {
     };
     use clap::Parser;
 
+    fn unwrap_traces_command(cli: Cli) -> TracesCommand {
+        let Some(Command::Traces(command)) = cli.command else {
+            panic!("expected traces command");
+        };
+        *command
+    }
+
+    fn parse_cli_result<const N: usize>(args: [&'static str; N]) -> Result<Cli, clap::Error> {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || Cli::try_parse_from(args))
+            .expect("parser thread should spawn")
+            .join()
+            .expect("parser thread should not panic")
+    }
+
+    fn parse_cli<const N: usize>(args: [&'static str; N]) -> Cli {
+        parse_cli_result(args).expect("CLI args should parse")
+    }
+
     #[test]
     fn trace_scope_arg_maps_to_consent_scope() {
         assert_eq!(
@@ -4878,11 +5140,9 @@ mod tests {
 
     #[test]
     fn list_submissions_summary_flag_parses_through_cli() {
-        let cli = Cli::try_parse_from(["ironclaw", "traces", "list-submissions", "--summary"])
-            .expect("list-submissions --summary should parse");
+        let cli = parse_cli(["ironclaw", "traces", "list-submissions", "--summary"]);
 
-        let Some(Command::Traces(TracesCommand::ListSubmissions { json, summary })) = cli.command
-        else {
+        let TracesCommand::ListSubmissions { json, summary } = unwrap_traces_command(cli) else {
             panic!("expected traces list-submissions command");
         };
 
@@ -4925,7 +5185,7 @@ mod tests {
 
     #[test]
     fn ranker_training_candidates_purpose_flag_parses_through_cli() {
-        let cli = Cli::try_parse_from([
+        let cli = parse_cli([
             "ironclaw",
             "traces",
             "ranker-training-candidates",
@@ -4933,11 +5193,9 @@ mod tests {
             "https://trace.example/internal",
             "--purpose",
             "nightly-ranker-candidates",
-        ])
-        .expect("ranker candidates --purpose should parse");
+        ]);
 
-        let Some(Command::Traces(TracesCommand::RankerTrainingCandidates { purpose, .. })) =
-            cli.command
+        let TracesCommand::RankerTrainingCandidates { purpose, .. } = unwrap_traces_command(cli)
         else {
             panic!("expected traces ranker-training-candidates command");
         };
@@ -4947,7 +5205,7 @@ mod tests {
 
     #[test]
     fn ranker_training_pairs_purpose_flag_parses_through_cli() {
-        let cli = Cli::try_parse_from([
+        let cli = parse_cli([
             "ironclaw",
             "traces",
             "ranker-training-pairs",
@@ -4955,11 +5213,9 @@ mod tests {
             "https://trace.example/internal",
             "--purpose",
             "nightly-ranker-pairs",
-        ])
-        .expect("ranker pairs --purpose should parse");
+        ]);
 
-        let Some(Command::Traces(TracesCommand::RankerTrainingPairs { purpose, .. })) = cli.command
-        else {
+        let TracesCommand::RankerTrainingPairs { purpose, .. } = unwrap_traces_command(cli) else {
             panic!("expected traces ranker-training-pairs command");
         };
 
@@ -4983,18 +5239,16 @@ mod tests {
 
     #[test]
     fn tenant_policy_get_parses_through_cli() {
-        let cli = Cli::try_parse_from([
+        let cli = parse_cli([
             "ironclaw",
             "traces",
             "tenant-policy-get",
             "--endpoint",
             "https://trace.example/internal",
             "--json",
-        ])
-        .expect("tenant-policy-get should parse");
+        ]);
 
-        let Some(Command::Traces(TracesCommand::TenantPolicyGet { endpoint, json, .. })) =
-            cli.command
+        let TracesCommand::TenantPolicyGet { endpoint, json, .. } = unwrap_traces_command(cli)
         else {
             panic!("expected traces tenant-policy-get command");
         };
@@ -5005,7 +5259,7 @@ mod tests {
 
     #[test]
     fn config_status_parses_through_cli() {
-        let cli = Cli::try_parse_from([
+        let cli = parse_cli([
             "ironclaw",
             "traces",
             "config-status",
@@ -5013,13 +5267,12 @@ mod tests {
             "https://trace.example/internal",
             "--bearer-token-env",
             "TRACE_COMMONS_ADMIN_TOKEN",
-        ])
-        .expect("config-status should parse");
+        ]);
 
-        let Some(Command::Traces(TracesCommand::ConfigStatus {
+        let TracesCommand::ConfigStatus {
             endpoint,
             bearer_token_env,
-        })) = cli.command
+        } = unwrap_traces_command(cli)
         else {
             panic!("expected traces config-status command");
         };
@@ -5030,7 +5283,7 @@ mod tests {
 
     #[test]
     fn tenant_policy_set_parses_through_cli() {
-        let cli = Cli::try_parse_from([
+        let cli = parse_cli([
             "ironclaw",
             "traces",
             "tenant-policy-set",
@@ -5042,15 +5295,14 @@ mod tests {
             "debugging-evaluation,ranking-training",
             "--allowed-uses",
             "debugging,ranking-model-training",
-        ])
-        .expect("tenant-policy-set should parse");
+        ]);
 
-        let Some(Command::Traces(TracesCommand::TenantPolicySet {
+        let TracesCommand::TenantPolicySet {
             policy_version,
             allowed_consent_scopes,
             allowed_uses,
             ..
-        })) = cli.command
+        } = unwrap_traces_command(cli)
         else {
             panic!("expected traces tenant-policy-set command");
         };
@@ -5156,7 +5408,7 @@ mod tests {
 
     #[test]
     fn benchmark_lifecycle_update_parses_through_cli() {
-        let cli = Cli::try_parse_from([
+        let cli = parse_cli([
             "ironclaw",
             "traces",
             "benchmark-lifecycle-update",
@@ -5186,10 +5438,9 @@ mod tests {
             "published after evaluator pass",
             "--bearer-token-env",
             "TRACE_COMMONS_BENCHMARK_WORKER_TOKEN",
-        ])
-        .expect("benchmark-lifecycle-update should parse");
+        ]);
 
-        let Some(Command::Traces(TracesCommand::BenchmarkLifecycleUpdate {
+        let TracesCommand::BenchmarkLifecycleUpdate {
             conversion_id,
             registry_status,
             registry_ref,
@@ -5203,7 +5454,7 @@ mod tests {
             reason,
             bearer_token_env,
             ..
-        })) = cli.command
+        } = unwrap_traces_command(cli)
         else {
             panic!("expected traces benchmark-lifecycle-update command");
         };
@@ -5292,7 +5543,7 @@ mod tests {
 
     #[test]
     fn worker_commands_parse_through_cli() {
-        let benchmark = Cli::try_parse_from([
+        let benchmark = parse_cli([
             "ironclaw",
             "traces",
             "worker-benchmark-convert",
@@ -5302,18 +5553,17 @@ mod tests {
             "nightly-worker-benchmark",
             "--status",
             "accepted",
-        ])
-        .expect("worker-benchmark-convert should parse");
-        let Some(Command::Traces(TracesCommand::WorkerBenchmarkConvert {
+        ]);
+        let TracesCommand::WorkerBenchmarkConvert {
             purpose, status, ..
-        })) = benchmark.command
+        } = unwrap_traces_command(benchmark)
         else {
             panic!("expected traces worker-benchmark-convert command");
         };
         assert_eq!(purpose, "nightly-worker-benchmark");
         assert_eq!(status, Some(TraceCorpusStatusArg::Accepted));
 
-        let retention = Cli::try_parse_from([
+        let retention = parse_cli([
             "ironclaw",
             "traces",
             "worker-retention-maintenance",
@@ -5322,20 +5572,17 @@ mod tests {
             "--purpose",
             "retention-worker",
             "--dry-run",
-        ])
-        .expect("worker-retention-maintenance should parse");
-        let Some(Command::Traces(TracesCommand::WorkerRetentionMaintenance {
-            purpose,
-            dry_run,
-            ..
-        })) = retention.command
+        ]);
+        let TracesCommand::WorkerRetentionMaintenance {
+            purpose, dry_run, ..
+        } = unwrap_traces_command(retention)
         else {
             panic!("expected traces worker-retention-maintenance command");
         };
         assert_eq!(purpose.as_deref(), Some("retention-worker"));
         assert!(dry_run);
 
-        let vector = Cli::try_parse_from([
+        let vector = parse_cli([
             "ironclaw",
             "traces",
             "worker-vector-index",
@@ -5343,18 +5590,15 @@ mod tests {
             "https://trace.example/internal",
             "--purpose",
             "vector-worker",
-        ])
-        .expect("worker-vector-index should parse");
-        let Some(Command::Traces(TracesCommand::WorkerVectorIndex { purpose, .. })) =
-            vector.command
-        else {
+        ]);
+        let TracesCommand::WorkerVectorIndex { purpose, .. } = unwrap_traces_command(vector) else {
             panic!("expected traces worker-vector-index command");
         };
         assert_eq!(purpose.as_deref(), Some("vector-worker"));
 
         let utility_submission_id =
             Uuid::parse_str("018f2b7b-0c11-72fd-95c4-1f9f98feac01").expect("valid uuid");
-        let utility = Cli::try_parse_from([
+        let utility = parse_cli([
             "ironclaw",
             "traces",
             "worker-utility-credit",
@@ -5369,15 +5613,14 @@ mod tests {
             "--external-ref",
             "ranker:nightly-42",
             "018f2b7b-0c11-72fd-95c4-1f9f98feac01",
-        ])
-        .expect("worker-utility-credit should parse");
-        let Some(Command::Traces(TracesCommand::WorkerUtilityCredit {
+        ]);
+        let TracesCommand::WorkerUtilityCredit {
             event_type,
             credit_points_delta,
             external_ref,
             submission_ids,
             ..
-        })) = utility.command
+        } = unwrap_traces_command(utility)
         else {
             panic!("expected traces worker-utility-credit command");
         };
@@ -5390,7 +5633,7 @@ mod tests {
     #[test]
     fn worker_utility_credit_rejects_reviewer_and_abuse_events() {
         for event_type in ["reviewer-bonus", "abuse-penalty"] {
-            let parsed = Cli::try_parse_from([
+            let parsed = parse_cli_result([
                 "ironclaw",
                 "traces",
                 "worker-utility-credit",
@@ -5456,55 +5699,46 @@ mod tests {
     fn process_evaluation_submit_parses_through_cli() {
         let submission_id =
             Uuid::parse_str("018f2b7b-0c11-72fd-95c4-1f9f98feac01").expect("valid uuid");
-        let cli = std::thread::Builder::new()
-            .stack_size(8 * 1024 * 1024)
-            .spawn(|| {
-                Cli::try_parse_from([
-                    "ironclaw",
-                    "traces",
-                    "process-evaluation-submit",
-                    "--endpoint",
-                    "https://trace.example/internal",
-                    "--submission-id",
-                    "018f2b7b-0c11-72fd-95c4-1f9f98feac01",
-                    "--reason",
-                    "nightly evaluator pass",
-                    "--evaluator-name",
-                    "process-quality",
-                    "--evaluator-version",
-                    "2026-04-26.1",
-                    "--label",
-                    "proper_verification",
-                    "--label",
-                    "safe_tool_ordering",
-                    "--tool-selection",
-                    "pass",
-                    "--tool-argument-quality",
-                    "partial",
-                    "--tool-ordering",
-                    "not_applicable",
-                    "--verification",
-                    "fail",
-                    "--side-effect-safety",
-                    "unknown",
-                    "--overall-score",
-                    "0.75",
-                    "--utility-credit-points-delta",
-                    "2.5",
-                    "--utility-external-ref",
-                    "process-eval:nightly:42",
-                    "--bearer-token-env",
-                    "TRACE_COMMONS_PROCESS_EVALUATION_WORKER_TOKEN",
-                    "--json",
-                ])
-            })
-            .expect("parser thread should spawn")
-            .join()
-            .expect("parser thread should not panic")
-            .expect("process-evaluation-submit should parse");
+        let cli = parse_cli([
+            "ironclaw",
+            "traces",
+            "process-evaluation-submit",
+            "--endpoint",
+            "https://trace.example/internal",
+            "--submission-id",
+            "018f2b7b-0c11-72fd-95c4-1f9f98feac01",
+            "--reason",
+            "nightly evaluator pass",
+            "--evaluator-name",
+            "process-quality",
+            "--evaluator-version",
+            "2026-04-26.1",
+            "--label",
+            "proper_verification",
+            "--label",
+            "safe_tool_ordering",
+            "--tool-selection",
+            "pass",
+            "--tool-argument-quality",
+            "partial",
+            "--tool-ordering",
+            "not_applicable",
+            "--verification",
+            "fail",
+            "--side-effect-safety",
+            "unknown",
+            "--overall-score",
+            "0.75",
+            "--utility-credit-points-delta",
+            "2.5",
+            "--utility-external-ref",
+            "process-eval:nightly:42",
+            "--bearer-token-env",
+            "TRACE_COMMONS_PROCESS_EVALUATION_WORKER_TOKEN",
+            "--json",
+        ]);
 
-        let Some(Command::Traces(TracesCommand::ProcessEvaluationSubmit(args))) = cli.command
-        else {
+        let TracesCommand::ProcessEvaluationSubmit(args) = unwrap_traces_command(cli) else {
             panic!("expected traces process-evaluation-submit command");
         };
 
@@ -5970,6 +6204,60 @@ mod tests {
         assert_eq!(
             url,
             "https://trace.example/internal/v1/datasets/replay/manifests"
+        );
+    }
+
+    #[test]
+    fn retention_jobs_list_parses_through_cli() {
+        let cli = parse_cli([
+            "ironclaw",
+            "traces",
+            "retention-jobs-list",
+            "--endpoint",
+            "https://trace.example/internal",
+            "--limit",
+            "25",
+            "--status",
+            "dry-run",
+            "--bearer-token-env",
+            "TRACE_COMMONS_ADMIN_TOKEN",
+        ]);
+
+        let TracesCommand::RetentionJobsList {
+            endpoint,
+            limit,
+            status,
+            bearer_token_env,
+            json,
+        } = unwrap_traces_command(cli)
+        else {
+            panic!("expected traces retention-jobs-list command");
+        };
+
+        assert_eq!(endpoint, "https://trace.example/internal");
+        assert_eq!(limit, Some(25));
+        assert_eq!(status, Some(TraceRetentionJobStatusArg::DryRun));
+        assert_eq!(bearer_token_env, "TRACE_COMMONS_ADMIN_TOKEN");
+        assert!(!json);
+    }
+
+    #[test]
+    fn retention_job_items_use_ingest_endpoint() {
+        let job_id =
+            Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("static uuid parses");
+        let url = trace_commons_api_url(
+            "https://trace.example/internal/v1/traces",
+            &format!("/v1/admin/retention/jobs/{job_id}/items"),
+            &[
+                ("action", "purge".to_string()),
+                ("status", "done".to_string()),
+            ],
+        )
+        .expect("url builds");
+
+        assert_eq!(
+            url,
+            "https://trace.example/internal/v1/admin/retention/jobs/11111111-1111-1111-1111-111111111111/items?action=purge&status=done"
         );
     }
 

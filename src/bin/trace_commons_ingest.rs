@@ -48,8 +48,10 @@ use ironclaw::trace_corpus_storage::{
     TraceObjectRefRecord as StorageTraceObjectRefRecord,
     TraceObjectRefWrite as StorageTraceObjectRefWrite,
     TraceRetentionJobItemAction as StorageTraceRetentionJobItemAction,
+    TraceRetentionJobItemRecord as StorageTraceRetentionJobItemRecord,
     TraceRetentionJobItemStatus as StorageTraceRetentionJobItemStatus,
     TraceRetentionJobItemWrite as StorageTraceRetentionJobItemWrite,
+    TraceRetentionJobRecord as StorageTraceRetentionJobRecord,
     TraceRetentionJobStatus as StorageTraceRetentionJobStatus,
     TraceRetentionJobWrite as StorageTraceRetentionJobWrite,
     TraceSubmissionRecord as StorageTraceSubmissionRecord,
@@ -758,6 +760,11 @@ fn app(state: Arc<AppState>) -> Router {
                 .post(put_tenant_policy_handler)
                 .put(put_tenant_policy_handler),
         )
+        .route("/v1/admin/retention/jobs", get(retention_jobs_handler))
+        .route(
+            "/v1/admin/retention/jobs/{retention_job_id}/items",
+            get(retention_job_items_handler),
+        )
         .route("/v1/admin/config-status", get(config_status_handler))
         .route("/v1/admin/maintenance", post(maintenance_handler))
         .route(
@@ -1150,6 +1157,15 @@ fn trace_tenant_policy_db(state: &AppState) -> ApiResult<Arc<dyn Database>> {
         api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "trace tenant policy DB is not configured",
+        )
+    })
+}
+
+fn trace_retention_ledger_db(state: &AppState) -> ApiResult<Arc<dyn Database>> {
+    state.db_mirror.as_ref().cloned().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trace retention ledger DB is not configured",
         )
     })
 }
@@ -2673,6 +2689,85 @@ async fn replay_export_manifests_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(manifests))
+}
+
+#[derive(Debug, Deserialize)]
+struct RetentionJobsQuery {
+    limit: Option<usize>,
+    status: Option<StorageTraceRetentionJobStatus>,
+}
+
+async fn retention_jobs_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<RetentionJobsQuery>,
+) -> ApiResult<Json<Vec<TraceRetentionJobSummary>>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_admin(&tenant)?;
+    let db = trace_retention_ledger_db(state.as_ref())?;
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let jobs = db
+        .list_trace_retention_jobs(&tenant.tenant_id)
+        .await
+        .map_err(internal_error)?;
+    let summaries = jobs
+        .into_iter()
+        .rev()
+        .filter(|job| query.status.is_none_or(|status| job.status == status))
+        .take(limit)
+        .map(TraceRetentionJobSummary::from_storage_record)
+        .collect::<Vec<_>>();
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::read(&tenant, "retention_jobs", summaries.len()),
+        StorageTraceAuditAction::Read,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(summaries))
+}
+
+#[derive(Debug, Deserialize)]
+struct RetentionJobItemsQuery {
+    limit: Option<usize>,
+    action: Option<StorageTraceRetentionJobItemAction>,
+    status: Option<StorageTraceRetentionJobItemStatus>,
+}
+
+async fn retention_job_items_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(retention_job_id): AxumPath<Uuid>,
+    Query(query): Query<RetentionJobItemsQuery>,
+) -> ApiResult<Json<Vec<TraceRetentionJobItemSummary>>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_admin(&tenant)?;
+    let db = trace_retention_ledger_db(state.as_ref())?;
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let items = db
+        .list_trace_retention_job_items(&tenant.tenant_id, retention_job_id)
+        .await
+        .map_err(internal_error)?;
+    let summaries = items
+        .into_iter()
+        .rev()
+        .filter(|item| query.action.is_none_or(|action| item.action == action))
+        .filter(|item| query.status.is_none_or(|status| item.status == status))
+        .take(limit)
+        .map(TraceRetentionJobItemSummary::from_storage_record)
+        .collect::<Vec<_>>();
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::read(&tenant, "retention_job_items", summaries.len()),
+        StorageTraceAuditAction::Read,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(summaries))
 }
 
 #[derive(Debug, Deserialize)]
@@ -11210,6 +11305,88 @@ impl TraceExportManifestSummary {
                 .purpose_code
                 .as_deref()
                 .is_some_and(is_ranker_training_purpose_code)
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRetentionJobSummary {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    retention_job_id: Uuid,
+    purpose: String,
+    dry_run: bool,
+    status: StorageTraceRetentionJobStatus,
+    requested_by_principal_ref: String,
+    requested_by_role: String,
+    purge_expired_before: Option<DateTime<Utc>>,
+    prune_export_cache: bool,
+    max_export_age_hours: Option<i64>,
+    audit_event_id: Option<Uuid>,
+    action_counts: BTreeMap<String, u32>,
+    selected_revoked_count: u32,
+    selected_expired_count: u32,
+    started_at: Option<DateTime<Utc>>,
+    completed_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl TraceRetentionJobSummary {
+    fn from_storage_record(record: StorageTraceRetentionJobRecord) -> Self {
+        Self {
+            tenant_storage_ref: tenant_storage_ref(&record.tenant_id),
+            tenant_id: record.tenant_id,
+            retention_job_id: record.retention_job_id,
+            purpose: record.purpose,
+            dry_run: record.dry_run,
+            status: record.status,
+            requested_by_principal_ref: record.requested_by_principal_ref,
+            requested_by_role: record.requested_by_role,
+            purge_expired_before: record.purge_expired_before,
+            prune_export_cache: record.prune_export_cache,
+            max_export_age_hours: record.max_export_age_hours,
+            audit_event_id: record.audit_event_id,
+            action_counts: record.action_counts,
+            selected_revoked_count: record.selected_revoked_count,
+            selected_expired_count: record.selected_expired_count,
+            started_at: record.started_at,
+            completed_at: record.completed_at,
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRetentionJobItemSummary {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    retention_job_id: Uuid,
+    submission_id: Uuid,
+    action: StorageTraceRetentionJobItemAction,
+    status: StorageTraceRetentionJobItemStatus,
+    reason: String,
+    action_counts: BTreeMap<String, u32>,
+    verified_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl TraceRetentionJobItemSummary {
+    fn from_storage_record(record: StorageTraceRetentionJobItemRecord) -> Self {
+        Self {
+            tenant_storage_ref: tenant_storage_ref(&record.tenant_id),
+            tenant_id: record.tenant_id,
+            retention_job_id: record.retention_job_id,
+            submission_id: record.submission_id,
+            action: record.action,
+            status: record.status,
+            reason: record.reason,
+            action_counts: record.action_counts,
+            verified_at: record.verified_at,
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+        }
     }
 }
 
@@ -20517,6 +20694,162 @@ mod tests {
                 .action_counts
                 .contains_key("object_refs_invalidated")
         );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn admin_can_list_durable_retention_jobs_and_items() {
+        use axum::extract::Query;
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-retention-ledger-api.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let metadata_path = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"))
+            .join("metadata")
+            .join(format!("{submission_id}.json"));
+        let mut metadata_json = serde_json::to_value(record).expect("record serializes");
+        metadata_json["expires_at"] =
+            serde_json::json!((Utc::now() - chrono::Duration::days(1)).to_rfc3339());
+        write_json_file(&metadata_path, &metadata_json, "expired trace metadata")
+            .expect("expired metadata writes");
+
+        let Json(maintenance) = maintenance_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_retention_ledger_api".to_string()),
+                dry_run: false,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: Some(Utc::now()),
+            }),
+        )
+        .await
+        .expect("maintenance purges traces");
+
+        let contributor_error = retention_jobs_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Query(RetentionJobsQuery {
+                limit: None,
+                status: None,
+            }),
+        )
+        .await
+        .expect_err("contributors cannot list retention jobs");
+        assert_eq!(contributor_error.0, StatusCode::FORBIDDEN);
+
+        let Json(jobs) = retention_jobs_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Query(RetentionJobsQuery {
+                limit: Some(10),
+                status: Some(StorageTraceRetentionJobStatus::Complete),
+            }),
+        )
+        .await
+        .expect("admin can list retention jobs");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].tenant_id, "tenant-a");
+        assert_eq!(jobs[0].purpose, "test_retention_ledger_api");
+        assert_eq!(jobs[0].status, StorageTraceRetentionJobStatus::Complete);
+        assert_eq!(jobs[0].audit_event_id, Some(maintenance.audit_event_id));
+        assert_eq!(jobs[0].selected_expired_count, 1);
+
+        let Json(items) = retention_job_items_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            AxumPath(jobs[0].retention_job_id),
+            Query(RetentionJobItemsQuery {
+                limit: None,
+                action: None,
+                status: Some(StorageTraceRetentionJobItemStatus::Done),
+            }),
+        )
+        .await
+        .expect("admin can list retention job items");
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().any(|item| {
+            item.submission_id == submission_id
+                && item.action == StorageTraceRetentionJobItemAction::Expire
+                && item.reason == "retention_expired"
+        }));
+        assert!(items.iter().any(|item| {
+            item.submission_id == submission_id
+                && item.action == StorageTraceRetentionJobItemAction::Purge
+                && item.reason == "retention_purged"
+        }));
+
+        let Json(other_tenant_jobs) = retention_jobs_handler(
+            State(state.clone()),
+            auth_headers("admin-token-b"),
+            Query(RetentionJobsQuery {
+                limit: Some(10),
+                status: None,
+            }),
+        )
+        .await
+        .expect("other tenant admin can list own empty retention jobs");
+        assert!(other_tenant_jobs.is_empty());
+
+        let Json(other_tenant_items) = retention_job_items_handler(
+            State(state.clone()),
+            auth_headers("admin-token-b"),
+            AxumPath(jobs[0].retention_job_id),
+            Query(RetentionJobItemsQuery {
+                limit: None,
+                action: None,
+                status: None,
+            }),
+        )
+        .await
+        .expect("other tenant admin sees no cross-tenant retention items");
+        assert!(other_tenant_items.is_empty());
+
+        let audit_events = db
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("tenant-a audit events read");
+        assert!(audit_events.iter().any(|event| {
+            event.action == StorageTraceAuditAction::Read
+                && event.reason.as_deref() == Some("surface=retention_jobs;item_count=1")
+        }));
+        assert!(audit_events.iter().any(|event| {
+            event.action == StorageTraceAuditAction::Read
+                && event.reason.as_deref() == Some("surface=retention_job_items;item_count=2")
+        }));
     }
 
     #[cfg(feature = "libsql")]

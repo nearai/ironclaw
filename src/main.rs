@@ -153,7 +153,7 @@ async fn async_main() -> anyhow::Result<()> {
         }
         Some(Command::Traces(traces_cmd)) => {
             init_cli_tracing();
-            return run_traces_command(traces_cmd.clone()).await;
+            return run_traces_command(*traces_cmd.clone()).await;
         }
         Some(Command::Doctor) => {
             init_cli_tracing();
