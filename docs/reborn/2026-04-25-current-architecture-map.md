@@ -146,8 +146,9 @@ caller / first-party service / future turn service
       -> validates ExecutionContext and ResourceScope consistency
       -> looks up CapabilityDescriptor in ExtensionRegistry
       -> asks authorizer / approval / lease services for a decision
+      -> satisfies authorization obligations through configured handler, or fails closed
       -> records run-state when configured
-      -> dispatches only if authorized
+      -> dispatches only if authorized and obligations are satisfied
       -> either:
            dispatch_json(...) through RuntimeDispatcher
            or create a ProcessRecord through ProcessManager
@@ -175,6 +176,7 @@ Process/background execution exists as a capability-backed slice, not as an arbi
 ```text
 CapabilityHost::spawn_json(...)
   -> authorize SpawnCapability + target effects
+  -> satisfy authorization obligations through configured handler, or fail closed
   -> ProcessManager::spawn(ProcessStart)
   -> ProcessStore persists ProcessRecord as Running
   -> BackgroundProcessManager starts a ProcessExecutor task
@@ -193,7 +195,7 @@ Implemented/current pieces:
 - `ProcessHost` exists as the current host-facing `status`, `kill`, `await_process`, `subscribe`, `result`, `output`, and `await_result` API over scoped process current state/results; when wired to `ProcessCancellationRegistry`, scoped kill also signals cooperative executor cancellation.
 - `ProcessServices` exists as convenience composition so `ProcessHost` and `BackgroundProcessManager` share the same process store, result store, and cancellation registry.
 - `CapabilityHost::with_process_services(...)` exists as convenience spawn wiring that derives the process manager from that shared services bundle without absorbing process lifecycle/result APIs.
-- `HostRuntimeServices` exists as a composition-only helper that builds `RuntimeDispatcher`, concrete runtime adapter wrappers, `CapabilityHost`, `ApprovalResolver`, and `ProcessHost` handles from shared registry/filesystem/governor/authorizer/runtime/process/approval services.
+- `HostRuntimeServices` exists as a composition-only helper that builds `RuntimeDispatcher`, concrete runtime adapter wrappers, `CapabilityHost`, `ApprovalResolver`, and `ProcessHost` handles from shared registry/filesystem/governor/authorizer/runtime/process/approval/obligation-handler services.
 - Process lifecycle events exist through `EventingProcessStore` and runtime `EventSink`; approval-resolution audit exists through optional `ApprovalResolver` `AuditSink` wiring and typed `AuditEnvelope::approval_resolved(...)` records.
 - Process resource reservation ownership exists through `ResourceManagedProcessStore`; public process starts cannot forge reserved handles, and runtime-backed process dispatch suppresses duplicate reservation through the process-dispatch adapter.
 
@@ -221,8 +223,8 @@ The current implemented or contract-backed Reborn stack includes these slices:
 | Secrets | `[exists/partial]` `ironclaw_secrets` service boundary with scoped metadata, in-memory storage, and one-shot secret leases; durable encrypted persistence and runtime injection are not complete |
 | Network | `[exists/partial]` `ironclaw_network` service boundary with scoped policy evaluation, exact/wildcard target matching, literal private IP denial, and egress-estimate checks; HTTP execution/proxying and DNS rebinding protection are not complete |
 | Capability access | `[exists/partial]` grant matching, action-time authorization, lease-backed authorizer semantics, in-memory and filesystem-backed exact-invocation lease stores |
-| CapabilityHost | `[exists]` caller-facing invocation, approval-blocking, resume, spawn workflow gate, and `ProcessServices` spawn wiring over the neutral host API dispatch port |
-| Host runtime composition | `[exists]` `HostRuntimeServices` composition helper for shared registry/filesystem/governor/authorizer/runtime/process/approval services -> `RuntimeDispatcher`, `CapabilityHost`, `ApprovalResolver`, and `ProcessHost` handles |
+| CapabilityHost | `[exists]` caller-facing invocation, approval-blocking, resume, spawn workflow gate, fail-closed `CapabilityObligationHandler` seam, and `ProcessServices` spawn wiring over the neutral host API dispatch port |
+| Host runtime composition | `[exists]` `HostRuntimeServices` composition helper for shared registry/filesystem/governor/authorizer/runtime/process/approval/obligation-handler services -> `RuntimeDispatcher`, `CapabilityHost`, `ApprovalResolver`, and `ProcessHost` handles |
 | Architecture guardrails | `[exists/partial]` `ironclaw_architecture` test crate walks `cargo metadata` and enforces central Reborn dependency-boundary rules; per-crate guardrail files document local invariants |
 | Approvals/resume | `[exists/partial]` pending approval records, invocation fingerprints, approval resolver, fail-closed approval+lease persistence ordering/rollback, metadata-only `AuditEnvelope::approval_resolved(...)` audit records with JSONL persistence coverage, in-memory and async filesystem-backed exact-invocation leases, `resume_json` replay checks |
 | Run-state | `[exists]` `Running`, `BlockedApproval`, `BlockedAuth`, `Completed`, `Failed` current-state stores with tenant/user partitioning |
@@ -252,7 +254,8 @@ These are explicit gaps, not architecture contradictions:
 | FirstParty/System runtime execution | `RuntimeKind::FirstParty` and `RuntimeKind::System` are recognized host API/runtime markers, but no trusted host service adapters are registered yet. |
 | Full MCP server lifecycle | MCP is a current adapter lane, not yet a complete product lifecycle for server install/start/auth/restart/monitoring. |
 | Auth-blocked resume product path | `BlockedAuth` is reserved in run-state; full OAuth/token prompt, callback, and retry-after-auth workflow remains to be implemented. |
-| Secret injection and durability | Scoped in-memory secret metadata and one-shot leases exist; encrypted durable persistence, audit emission, rotation, and `InjectSecretOnce` obligation handling remain to be implemented. |
+| Concrete obligation handlers | The capability-host seam now exists and fails closed when unsupported, but built-in handlers for `InjectSecretOnce`, `ApplyNetworkPolicy`, `AuditBefore`/`AuditAfter`, `RedactOutput`, and `EnforceOutputLimit` are not productized yet. |
+| Secret injection and durability | Scoped in-memory secret metadata and one-shot leases exist; encrypted durable persistence, audit emission, rotation, and production `InjectSecretOnce` secret material injection remain to be implemented. |
 
 ---
 
