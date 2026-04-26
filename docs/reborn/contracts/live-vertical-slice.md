@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-25
 **Status:** Runnable V1 demo
-**Crates:** `ironclaw_filesystem`, `ironclaw_extensions`, `ironclaw_resources`, `ironclaw_wasm`, `ironclaw_scripts`, `ironclaw_events`, `ironclaw_mcp`, `ironclaw_authorization`, `ironclaw_capabilities`, `ironclaw_run_state`, `ironclaw_dispatcher`
+**Crates:** `ironclaw_filesystem`, `ironclaw_extensions`, `ironclaw_resources`, `ironclaw_wasm`, `ironclaw_scripts`, `ironclaw_events`, `ironclaw_mcp`, `ironclaw_dispatcher`
 
 ---
 
@@ -14,8 +14,8 @@ This slice proves the first Reborn host path is runnable:
 LocalFilesystem mounted at /system/extensions
 -> ExtensionDiscovery reads manifests
 -> ExtensionRegistry registers capabilities
--> CapabilityHost invokes through GrantAuthorizer
--> RuntimeDispatcher routes authorized dispatch by RuntimeKind
+-> RuntimeDispatcher receives already-authorized dispatch requests
+-> RuntimeDispatcher routes dispatch by RuntimeKind
 -> WasmRuntime executes a WASM capability
 -> ScriptRuntime executes a script capability
 -> McpRuntime executes an MCP adapter capability
@@ -55,7 +55,7 @@ event[7]=runtime_selected capability=echo-mcp.say runtime=mcp error=none
 event[8]=dispatch_succeeded capability=echo-mcp.say runtime=mcp error=none
 ```
 
-The default example uses an in-process echo script backend and in-process echo MCP client so the demo works without Docker or an external MCP server installed. It still exercises the real `CapabilityHost`, `GrantAuthorizer`, `ScriptRuntime`, `McpRuntime`, manifest-derived command metadata, `RuntimeDispatcher`, resource lifecycle, and event emission path. Run-state and approval persistence are validated by the `ironclaw_run_state` and `ironclaw_capabilities` contract tests rather than by this happy-path demo.
+The default dispatcher example uses an in-process echo script backend, a semantic `runner = "sandboxed_process"` script manifest, and an in-process echo MCP client so the demo works without Docker or an external MCP server installed. It exercises `RuntimeDispatcher`, `ScriptRuntime`, `McpRuntime`, manifest-derived command metadata, resource lifecycle, and event emission path without depending on higher-level authorization or capability-host workflow crates. Caller-facing authorization/run-state/approval flows are validated by `ironclaw_capabilities`, `ironclaw_run_state`, and `ironclaw_host_runtime` contract tests and examples.
 
 ---
 
@@ -96,16 +96,15 @@ The integration test `crates/ironclaw_capabilities/tests/runtime_dispatcher_vert
 
 - extension manifests are read from `LocalFilesystem` via `/system/extensions`
 - extension discovery returns WASM, Script, and MCP packages
-- caller-facing invocation goes through `CapabilityHost`
-- grant checks go through `GrantAuthorizer`, outside the dispatcher
-- host invocation goes through the caller-facing capability host rather than directly into the dispatcher
+- dispatcher crate tests exercise already-authorized `CapabilityDispatchRequest` values directly
+- higher-level caller workflow stays out of dispatcher crate dev surfaces
 - WASM dispatch goes through `RuntimeDispatcher` and `WasmRuntime`
 - Script dispatch goes through `RuntimeDispatcher` and `ScriptRuntime`
 - MCP dispatch goes through `RuntimeDispatcher` and `McpRuntime`
 - all invocations reserve and reconcile resource usage
 - all lanes emit dispatch requested/runtime selected/dispatch succeeded events
 - event history is durably written through `RootFilesystem` at `/engine/events/reborn-demo.jsonl`
-- both lanes return JSON output through the same normalized dispatch result type
+- all lanes return JSON output through the same normalized dispatch result type
 
 ---
 
