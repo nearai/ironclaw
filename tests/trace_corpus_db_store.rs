@@ -1006,15 +1006,89 @@ mod libsql_trace_corpus_store {
             .await
             .expect("insert beta manifest");
 
+        let alpha_object_ref_id = Uuid::new_v4();
+        let alpha_derived_id = Uuid::new_v4();
+        let alpha_vector_entry_id = Uuid::new_v4();
+        backend
+            .append_trace_object_ref(TraceObjectRefWrite {
+                tenant_id: "tenant-alpha".to_string(),
+                object_ref_id: alpha_object_ref_id,
+                submission_id,
+                artifact_kind: TraceObjectArtifactKind::WorkerIntermediate,
+                object_store: "s3://private-corpus".to_string(),
+                object_key: "tenant-alpha/worker/summary.json".to_string(),
+                content_sha256: "sha256:alpha-object".to_string(),
+                encryption_key_ref: "kms:tenant-alpha".to_string(),
+                size_bytes: 128,
+                compression: None,
+                created_by_job_id: None,
+            })
+            .await
+            .expect("insert alpha object ref");
+        backend
+            .append_trace_derived_record(TraceDerivedRecordWrite {
+                tenant_id: "tenant-alpha".to_string(),
+                derived_id: alpha_derived_id,
+                submission_id,
+                trace_id,
+                status: TraceDerivedStatus::Current,
+                worker_kind: TraceWorkerKind::Summary,
+                worker_version: "summary-worker-v1".to_string(),
+                input_object_ref: Some(TenantScopedTraceObjectRef {
+                    tenant_id: "tenant-alpha".to_string(),
+                    submission_id,
+                    object_ref_id: alpha_object_ref_id,
+                }),
+                input_hash: "sha256:alpha-object".to_string(),
+                output_object_ref: None,
+                canonical_summary: Some("Tenant alpha summary.".to_string()),
+                canonical_summary_hash: Some("sha256:alpha-summary".to_string()),
+                summary_model: "summary-model-v1".to_string(),
+                task_success: Some("success".to_string()),
+                privacy_risk: Some("low".to_string()),
+                event_count: Some(2),
+                tool_sequence: vec!["memory_search".to_string()],
+                tool_categories: vec!["memory".to_string()],
+                coverage_tags: vec!["tool:memory_search".to_string()],
+                duplicate_score: Some(0.1),
+                novelty_score: Some(0.4),
+                cluster_id: Some("cluster:alpha".to_string()),
+            })
+            .await
+            .expect("insert alpha derived record");
+        backend
+            .upsert_trace_vector_entry(TraceVectorEntryWrite {
+                tenant_id: "tenant-alpha".to_string(),
+                submission_id,
+                derived_id: alpha_derived_id,
+                vector_entry_id: alpha_vector_entry_id,
+                vector_store: "trace-commons-main".to_string(),
+                embedding_model: "text-embedding-3-small".to_string(),
+                embedding_dimension: 1536,
+                embedding_version: "embedding-v1".to_string(),
+                source_projection: TraceVectorEntrySourceProjection::CanonicalSummary,
+                source_hash: "sha256:alpha-summary".to_string(),
+                status: TraceVectorEntryStatus::Active,
+                nearest_trace_ids: Vec::new(),
+                cluster_id: Some("cluster:alpha".to_string()),
+                duplicate_score: Some(0.1),
+                novelty_score: Some(0.4),
+                indexed_at: Some(Utc::now()),
+                invalidated_at: None,
+                deleted_at: None,
+            })
+            .await
+            .expect("insert alpha vector entry");
+
         backend
             .upsert_trace_export_manifest_item(TraceExportManifestItemWrite {
                 tenant_id: "tenant-alpha".to_string(),
                 export_manifest_id: alpha_export_id,
                 submission_id,
                 trace_id,
-                derived_id: Some(Uuid::new_v4()),
-                object_ref_id: Some(Uuid::new_v4()),
-                vector_entry_id: Some(Uuid::new_v4()),
+                derived_id: Some(alpha_derived_id),
+                object_ref_id: Some(alpha_object_ref_id),
+                vector_entry_id: Some(alpha_vector_entry_id),
                 source_status_at_export: TraceCorpusStatus::Accepted,
                 source_hash_at_export: "sha256:alpha-source".to_string(),
             })
@@ -1090,6 +1164,335 @@ mod libsql_trace_corpus_store {
             .expect("list beta manifest items");
         assert_eq!(beta_items.len(), 1);
         assert!(beta_items[0].source_invalidated_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn libsql_store_rejects_export_manifest_item_cross_tenant_refs() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let db_path = temp_dir
+            .path()
+            .join("trace-export-manifest-cross-tenant-refs.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("create libsql backend");
+        backend.run_migrations().await.expect("run migrations");
+
+        let submission_id = Uuid::new_v4();
+        let trace_id = Uuid::new_v4();
+        let mut alpha_submission = sample_submission("tenant-alpha", submission_id);
+        alpha_submission.trace_id = trace_id;
+        backend
+            .upsert_trace_submission(alpha_submission)
+            .await
+            .expect("insert alpha submission");
+        let mut beta_submission = sample_submission("tenant-beta", submission_id);
+        beta_submission.trace_id = trace_id;
+        backend
+            .upsert_trace_submission(beta_submission)
+            .await
+            .expect("insert beta submission");
+
+        let beta_object_ref_id = Uuid::new_v4();
+        let beta_derived_id = Uuid::new_v4();
+        let beta_vector_entry_id = Uuid::new_v4();
+        backend
+            .append_trace_object_ref(TraceObjectRefWrite {
+                tenant_id: "tenant-beta".to_string(),
+                object_ref_id: beta_object_ref_id,
+                submission_id,
+                artifact_kind: TraceObjectArtifactKind::WorkerIntermediate,
+                object_store: "s3://private-corpus".to_string(),
+                object_key: "tenant-beta/worker/summary.json".to_string(),
+                content_sha256: "sha256:beta-object".to_string(),
+                encryption_key_ref: "kms:tenant-beta".to_string(),
+                size_bytes: 128,
+                compression: None,
+                created_by_job_id: None,
+            })
+            .await
+            .expect("insert beta object ref");
+        backend
+            .append_trace_derived_record(TraceDerivedRecordWrite {
+                tenant_id: "tenant-beta".to_string(),
+                derived_id: beta_derived_id,
+                submission_id,
+                trace_id,
+                status: TraceDerivedStatus::Current,
+                worker_kind: TraceWorkerKind::Summary,
+                worker_version: "summary-worker-v1".to_string(),
+                input_object_ref: Some(TenantScopedTraceObjectRef {
+                    tenant_id: "tenant-beta".to_string(),
+                    submission_id,
+                    object_ref_id: beta_object_ref_id,
+                }),
+                input_hash: "sha256:beta-object".to_string(),
+                output_object_ref: None,
+                canonical_summary: Some("Tenant beta summary.".to_string()),
+                canonical_summary_hash: Some("sha256:beta-summary".to_string()),
+                summary_model: "summary-model-v1".to_string(),
+                task_success: Some("success".to_string()),
+                privacy_risk: Some("low".to_string()),
+                event_count: Some(2),
+                tool_sequence: vec!["memory_search".to_string()],
+                tool_categories: vec!["memory".to_string()],
+                coverage_tags: vec!["tool:memory_search".to_string()],
+                duplicate_score: Some(0.1),
+                novelty_score: Some(0.4),
+                cluster_id: Some("cluster:beta".to_string()),
+            })
+            .await
+            .expect("insert beta derived record");
+        backend
+            .upsert_trace_vector_entry(TraceVectorEntryWrite {
+                tenant_id: "tenant-beta".to_string(),
+                submission_id,
+                derived_id: beta_derived_id,
+                vector_entry_id: beta_vector_entry_id,
+                vector_store: "trace-commons-main".to_string(),
+                embedding_model: "text-embedding-3-small".to_string(),
+                embedding_dimension: 1536,
+                embedding_version: "embedding-v1".to_string(),
+                source_projection: TraceVectorEntrySourceProjection::CanonicalSummary,
+                source_hash: "sha256:beta-summary".to_string(),
+                status: TraceVectorEntryStatus::Active,
+                nearest_trace_ids: Vec::new(),
+                cluster_id: Some("cluster:beta".to_string()),
+                duplicate_score: Some(0.1),
+                novelty_score: Some(0.4),
+                indexed_at: Some(Utc::now()),
+                invalidated_at: None,
+                deleted_at: None,
+            })
+            .await
+            .expect("insert beta vector entry");
+
+        let alpha_export_id = Uuid::new_v4();
+        backend
+            .upsert_trace_export_manifest(TraceExportManifestWrite {
+                tenant_id: "tenant-alpha".to_string(),
+                export_manifest_id: alpha_export_id,
+                artifact_kind: TraceObjectArtifactKind::ExportArtifact,
+                purpose_code: Some("replay_dataset".to_string()),
+                audit_event_id: Some(Uuid::new_v4()),
+                source_submission_ids: vec![submission_id],
+                source_submission_ids_hash: "sha256:alpha-sources".to_string(),
+                item_count: 1,
+                generated_at: Utc::now(),
+            })
+            .await
+            .expect("insert alpha manifest");
+
+        let err = backend
+            .upsert_trace_export_manifest_item(TraceExportManifestItemWrite {
+                tenant_id: "tenant-alpha".to_string(),
+                export_manifest_id: alpha_export_id,
+                submission_id,
+                trace_id,
+                derived_id: Some(beta_derived_id),
+                object_ref_id: Some(beta_object_ref_id),
+                vector_entry_id: Some(beta_vector_entry_id),
+                source_status_at_export: TraceCorpusStatus::Accepted,
+                source_hash_at_export: "sha256:alpha-source".to_string(),
+            })
+            .await
+            .expect_err("cross-tenant export refs must be rejected");
+
+        assert!(
+            err.to_string().contains("does not belong to tenant"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn libsql_store_rejects_derived_record_mismatched_tenant_object_ref() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let db_path = temp_dir
+            .path()
+            .join("trace-derived-cross-tenant-object-ref.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("create libsql backend");
+        backend.run_migrations().await.expect("run migrations");
+
+        let submission_id = Uuid::new_v4();
+        let trace_id = Uuid::new_v4();
+        let mut alpha_submission = sample_submission("tenant-alpha", submission_id);
+        alpha_submission.trace_id = trace_id;
+        backend
+            .upsert_trace_submission(alpha_submission)
+            .await
+            .expect("insert alpha submission");
+        let mut beta_submission = sample_submission("tenant-beta", submission_id);
+        beta_submission.trace_id = trace_id;
+        backend
+            .upsert_trace_submission(beta_submission)
+            .await
+            .expect("insert beta submission");
+
+        let beta_object_ref_id = Uuid::new_v4();
+        backend
+            .append_trace_object_ref(TraceObjectRefWrite {
+                tenant_id: "tenant-beta".to_string(),
+                object_ref_id: beta_object_ref_id,
+                submission_id,
+                artifact_kind: TraceObjectArtifactKind::WorkerIntermediate,
+                object_store: "s3://private-corpus".to_string(),
+                object_key: "tenant-beta/worker/summary.json".to_string(),
+                content_sha256: "sha256:beta-object".to_string(),
+                encryption_key_ref: "kms:tenant-beta".to_string(),
+                size_bytes: 128,
+                compression: None,
+                created_by_job_id: None,
+            })
+            .await
+            .expect("insert beta object ref");
+
+        let err = backend
+            .append_trace_derived_record(TraceDerivedRecordWrite {
+                tenant_id: "tenant-alpha".to_string(),
+                derived_id: Uuid::new_v4(),
+                submission_id,
+                trace_id,
+                status: TraceDerivedStatus::Current,
+                worker_kind: TraceWorkerKind::Summary,
+                worker_version: "summary-worker-v1".to_string(),
+                input_object_ref: Some(TenantScopedTraceObjectRef {
+                    tenant_id: "tenant-beta".to_string(),
+                    submission_id,
+                    object_ref_id: beta_object_ref_id,
+                }),
+                input_hash: "sha256:beta-object".to_string(),
+                output_object_ref: None,
+                canonical_summary: Some("Tenant alpha summary.".to_string()),
+                canonical_summary_hash: Some("sha256:alpha-summary".to_string()),
+                summary_model: "summary-model-v1".to_string(),
+                task_success: Some("success".to_string()),
+                privacy_risk: Some("low".to_string()),
+                event_count: Some(2),
+                tool_sequence: vec!["memory_search".to_string()],
+                tool_categories: vec!["memory".to_string()],
+                coverage_tags: vec!["tool:memory_search".to_string()],
+                duplicate_score: Some(0.1),
+                novelty_score: Some(0.4),
+                cluster_id: Some("cluster:alpha".to_string()),
+            })
+            .await
+            .expect_err("derived records must reject cross-tenant object refs");
+
+        assert!(
+            err.to_string().contains("does not belong to tenant"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn libsql_store_rejects_vector_entry_mismatched_submission_derived_id() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let db_path = temp_dir
+            .path()
+            .join("trace-vector-mismatched-derived-id.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("create libsql backend");
+        backend.run_migrations().await.expect("run migrations");
+
+        let tenant_id = "tenant-alpha";
+        let submission_a_id = Uuid::new_v4();
+        let trace_a_id = Uuid::new_v4();
+        let mut submission_a = sample_submission(tenant_id, submission_a_id);
+        submission_a.trace_id = trace_a_id;
+        backend
+            .upsert_trace_submission(submission_a)
+            .await
+            .expect("insert submission A");
+
+        let submission_b_id = Uuid::new_v4();
+        let trace_b_id = Uuid::new_v4();
+        let mut submission_b = sample_submission(tenant_id, submission_b_id);
+        submission_b.trace_id = trace_b_id;
+        backend
+            .upsert_trace_submission(submission_b)
+            .await
+            .expect("insert submission B");
+
+        let object_ref_b_id = Uuid::new_v4();
+        let derived_b_id = Uuid::new_v4();
+        backend
+            .append_trace_object_ref(TraceObjectRefWrite {
+                tenant_id: tenant_id.to_string(),
+                object_ref_id: object_ref_b_id,
+                submission_id: submission_b_id,
+                artifact_kind: TraceObjectArtifactKind::WorkerIntermediate,
+                object_store: "s3://private-corpus".to_string(),
+                object_key: "tenant-alpha/submission-b/summary.json".to_string(),
+                content_sha256: "sha256:submission-b-object".to_string(),
+                encryption_key_ref: "kms:tenant-alpha".to_string(),
+                size_bytes: 128,
+                compression: None,
+                created_by_job_id: None,
+            })
+            .await
+            .expect("insert submission B object ref");
+        backend
+            .append_trace_derived_record(TraceDerivedRecordWrite {
+                tenant_id: tenant_id.to_string(),
+                derived_id: derived_b_id,
+                submission_id: submission_b_id,
+                trace_id: trace_b_id,
+                status: TraceDerivedStatus::Current,
+                worker_kind: TraceWorkerKind::Summary,
+                worker_version: "summary-worker-v1".to_string(),
+                input_object_ref: Some(TenantScopedTraceObjectRef {
+                    tenant_id: tenant_id.to_string(),
+                    submission_id: submission_b_id,
+                    object_ref_id: object_ref_b_id,
+                }),
+                input_hash: "sha256:submission-b-object".to_string(),
+                output_object_ref: None,
+                canonical_summary: Some("Submission B summary.".to_string()),
+                canonical_summary_hash: Some("sha256:submission-b-summary".to_string()),
+                summary_model: "summary-model-v1".to_string(),
+                task_success: Some("success".to_string()),
+                privacy_risk: Some("low".to_string()),
+                event_count: Some(2),
+                tool_sequence: vec!["memory_search".to_string()],
+                tool_categories: vec!["memory".to_string()],
+                coverage_tags: vec!["tool:memory_search".to_string()],
+                duplicate_score: Some(0.1),
+                novelty_score: Some(0.4),
+                cluster_id: Some("cluster:alpha".to_string()),
+            })
+            .await
+            .expect("insert submission B derived record");
+
+        let err = backend
+            .upsert_trace_vector_entry(TraceVectorEntryWrite {
+                tenant_id: tenant_id.to_string(),
+                submission_id: submission_a_id,
+                derived_id: derived_b_id,
+                vector_entry_id: Uuid::new_v4(),
+                vector_store: "trace-commons-main".to_string(),
+                embedding_model: "text-embedding-3-small".to_string(),
+                embedding_dimension: 1536,
+                embedding_version: "embedding-v1".to_string(),
+                source_projection: TraceVectorEntrySourceProjection::CanonicalSummary,
+                source_hash: "sha256:submission-a-summary".to_string(),
+                status: TraceVectorEntryStatus::Active,
+                nearest_trace_ids: Vec::new(),
+                cluster_id: Some("cluster:alpha".to_string()),
+                duplicate_score: Some(0.1),
+                novelty_score: Some(0.4),
+                indexed_at: Some(Utc::now()),
+                invalidated_at: None,
+                deleted_at: None,
+            })
+            .await
+            .expect_err("vector entries must reject derived ids from another submission");
+
+        assert!(
+            err.to_string().contains("does not belong to tenant"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]

@@ -2,7 +2,9 @@ use serde::{Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
 use crate::error::DatabaseError;
-use crate::trace_corpus_storage::{TraceAuditAction, TraceCorpusStatus};
+use crate::trace_corpus_storage::{
+    TenantScopedTraceObjectRef, TraceAuditAction, TraceCorpusStatus,
+};
 
 pub(crate) const TRACE_AUDIT_EVENT_GENESIS_HASH: &str = "sha256:genesis";
 
@@ -66,4 +68,20 @@ pub(crate) fn validate_trace_audit_append_chain(
     }
 
     Ok(())
+}
+
+pub(crate) fn validate_tenant_scoped_trace_object_ref(
+    field: &str,
+    object_ref: &TenantScopedTraceObjectRef,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> Result<(), DatabaseError> {
+    if object_ref.tenant_id == tenant_id && object_ref.submission_id == submission_id {
+        return Ok(());
+    }
+
+    Err(DatabaseError::Constraint(format!(
+        "trace {field} object_ref_id {} does not belong to tenant {tenant_id} submission {submission_id}",
+        object_ref.object_ref_id
+    )))
 }

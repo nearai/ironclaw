@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use tokio_postgres::Row;
+use tokio_postgres::{Row, Transaction};
 use uuid::Uuid;
 
 use crate::db::postgres::PgBackend;
 use crate::db::trace_corpus_common::{
-    audit_action_for_status, enum_from_storage, enum_to_storage, validate_trace_audit_append_chain,
+    audit_action_for_status, enum_from_storage, enum_to_storage,
+    validate_tenant_scoped_trace_object_ref, validate_trace_audit_append_chain,
 };
 use crate::error::DatabaseError;
 use crate::trace_corpus_storage::{
@@ -40,6 +41,91 @@ const TRACE_EXPORT_MANIFEST_ITEM_COLUMNS: &str = "\
 const TRACE_TOMBSTONE_COLUMNS: &str = "\
     tenant_id, tombstone_id, submission_id, trace_id, redaction_hash, canonical_summary_hash, \
     reason, effective_at, retain_until, created_by_principal_ref, created_at";
+
+async fn ensure_pg_object_ref_belongs_to_submission(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    submission_id: Uuid,
+    object_ref_id: Uuid,
+    field: &str,
+) -> Result<(), DatabaseError> {
+    let exists = tx
+        .query_opt(
+            "SELECT 1
+             FROM trace_object_refs
+             WHERE tenant_id = $1
+               AND submission_id = $2
+               AND object_ref_id = $3
+             LIMIT 1",
+            &[&tenant_id, &submission_id, &object_ref_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?
+        .is_some();
+    if exists {
+        return Ok(());
+    }
+
+    Err(DatabaseError::Constraint(format!(
+        "trace {field} object_ref_id {object_ref_id} does not belong to tenant {tenant_id} submission {submission_id}"
+    )))
+}
+
+async fn ensure_pg_derived_record_belongs_to_submission(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    submission_id: Uuid,
+    derived_id: Uuid,
+) -> Result<(), DatabaseError> {
+    let exists = tx
+        .query_opt(
+            "SELECT 1
+             FROM trace_derived_records
+             WHERE tenant_id = $1
+               AND submission_id = $2
+               AND derived_id = $3
+             LIMIT 1",
+            &[&tenant_id, &submission_id, &derived_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?
+        .is_some();
+    if exists {
+        return Ok(());
+    }
+
+    Err(DatabaseError::Constraint(format!(
+        "trace export manifest derived_id {derived_id} does not belong to tenant {tenant_id} submission {submission_id}"
+    )))
+}
+
+async fn ensure_pg_vector_entry_belongs_to_submission(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    submission_id: Uuid,
+    vector_entry_id: Uuid,
+) -> Result<(), DatabaseError> {
+    let exists = tx
+        .query_opt(
+            "SELECT 1
+             FROM trace_vector_entries
+             WHERE tenant_id = $1
+               AND submission_id = $2
+               AND vector_entry_id = $3
+             LIMIT 1",
+            &[&tenant_id, &submission_id, &vector_entry_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?
+        .is_some();
+    if exists {
+        return Ok(());
+    }
+
+    Err(DatabaseError::Constraint(format!(
+        "trace export manifest vector_entry_id {vector_entry_id} does not belong to tenant {tenant_id} submission {submission_id}"
+    )))
+}
 
 fn json_array_strings(
     value: serde_json::Value,
@@ -792,6 +878,38 @@ impl TraceCorpusStore for PgBackend {
         let mut client = self.pool().get().await?;
         let tx =
             Self::begin_trace_tenant_transaction(&mut client, &derived_record.tenant_id).await?;
+        if let Some(object_ref) = derived_record.input_object_ref.as_ref() {
+            validate_tenant_scoped_trace_object_ref(
+                "derived input",
+                object_ref,
+                &derived_record.tenant_id,
+                derived_record.submission_id,
+            )?;
+            ensure_pg_object_ref_belongs_to_submission(
+                &tx,
+                &derived_record.tenant_id,
+                derived_record.submission_id,
+                object_ref.object_ref_id,
+                "derived input",
+            )
+            .await?;
+        }
+        if let Some(object_ref) = derived_record.output_object_ref.as_ref() {
+            validate_tenant_scoped_trace_object_ref(
+                "derived output",
+                object_ref,
+                &derived_record.tenant_id,
+                derived_record.submission_id,
+            )?;
+            ensure_pg_object_ref_belongs_to_submission(
+                &tx,
+                &derived_record.tenant_id,
+                derived_record.submission_id,
+                object_ref.object_ref_id,
+                "derived output",
+            )
+            .await?;
+        }
         let status = enum_to_storage(derived_record.status)?;
         let worker_kind = enum_to_storage(derived_record.worker_kind)?;
         let input_object_ref_id = derived_record
@@ -908,6 +1026,13 @@ impl TraceCorpusStore for PgBackend {
         self.ensure_trace_tenant(&vector_entry.tenant_id).await?;
         let mut client = self.pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &vector_entry.tenant_id).await?;
+        ensure_pg_derived_record_belongs_to_submission(
+            &tx,
+            &vector_entry.tenant_id,
+            vector_entry.submission_id,
+            vector_entry.derived_id,
+        )
+        .await?;
         let source_projection = enum_to_storage(vector_entry.source_projection)?;
         let status = enum_to_storage(vector_entry.status)?;
         let row = tx
@@ -1079,6 +1204,34 @@ impl TraceCorpusStore for PgBackend {
         self.ensure_trace_tenant(&item.tenant_id).await?;
         let mut client = self.pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &item.tenant_id).await?;
+        if let Some(derived_id) = item.derived_id {
+            ensure_pg_derived_record_belongs_to_submission(
+                &tx,
+                &item.tenant_id,
+                item.submission_id,
+                derived_id,
+            )
+            .await?;
+        }
+        if let Some(object_ref_id) = item.object_ref_id {
+            ensure_pg_object_ref_belongs_to_submission(
+                &tx,
+                &item.tenant_id,
+                item.submission_id,
+                object_ref_id,
+                "export manifest item",
+            )
+            .await?;
+        }
+        if let Some(vector_entry_id) = item.vector_entry_id {
+            ensure_pg_vector_entry_belongs_to_submission(
+                &tx,
+                &item.tenant_id,
+                item.submission_id,
+                vector_entry_id,
+            )
+            .await?;
+        }
         let source_status_at_export = enum_to_storage(item.source_status_at_export)?;
         let row = tx
             .query_one(

@@ -6,7 +6,7 @@ use uuid::Uuid;
 use super::{LibSqlBackend, fmt_opt_ts, fmt_ts, get_opt_text, get_opt_ts, get_text, get_ts};
 use crate::db::trace_corpus_common::{
     audit_action_for_status, enum_from_storage, enum_to_storage, parse_uuid,
-    validate_trace_audit_append_chain,
+    validate_tenant_scoped_trace_object_ref, validate_trace_audit_append_chain,
 };
 use crate::error::DatabaseError;
 use crate::trace_corpus_storage::{
@@ -53,6 +53,111 @@ const TRACE_EXPORT_MANIFEST_ITEM_COLUMNS: &str = "\
 const TRACE_TOMBSTONE_COLUMNS: &str = "\
     tenant_id, tombstone_id, submission_id, trace_id, redaction_hash, canonical_summary_hash, \
     reason, effective_at, retain_until, created_by_principal_ref, created_at";
+
+async fn ensure_libsql_object_ref_belongs_to_submission(
+    conn: &libsql::Connection,
+    tenant_id: &str,
+    submission_id: Uuid,
+    object_ref_id: Uuid,
+    field: &str,
+) -> Result<(), DatabaseError> {
+    let mut rows = conn
+        .query(
+            "SELECT 1
+             FROM trace_object_refs
+             WHERE tenant_id = ?1
+               AND submission_id = ?2
+               AND object_ref_id = ?3
+             LIMIT 1",
+            libsql::params![
+                tenant_id,
+                submission_id.to_string(),
+                object_ref_id.to_string()
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    let exists = rows
+        .next()
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?
+        .is_some();
+    if exists {
+        return Ok(());
+    }
+
+    Err(DatabaseError::Constraint(format!(
+        "trace {field} object_ref_id {object_ref_id} does not belong to tenant {tenant_id} submission {submission_id}"
+    )))
+}
+
+async fn ensure_libsql_derived_record_belongs_to_submission(
+    conn: &libsql::Connection,
+    tenant_id: &str,
+    submission_id: Uuid,
+    derived_id: Uuid,
+) -> Result<(), DatabaseError> {
+    let mut rows = conn
+        .query(
+            "SELECT 1
+             FROM trace_derived_records
+             WHERE tenant_id = ?1
+               AND submission_id = ?2
+               AND derived_id = ?3
+             LIMIT 1",
+            libsql::params![tenant_id, submission_id.to_string(), derived_id.to_string()],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    let exists = rows
+        .next()
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?
+        .is_some();
+    if exists {
+        return Ok(());
+    }
+
+    Err(DatabaseError::Constraint(format!(
+        "trace export manifest derived_id {derived_id} does not belong to tenant {tenant_id} submission {submission_id}"
+    )))
+}
+
+async fn ensure_libsql_vector_entry_belongs_to_submission(
+    conn: &libsql::Connection,
+    tenant_id: &str,
+    submission_id: Uuid,
+    vector_entry_id: Uuid,
+) -> Result<(), DatabaseError> {
+    let mut rows = conn
+        .query(
+            "SELECT 1
+             FROM trace_vector_entries
+             WHERE tenant_id = ?1
+               AND submission_id = ?2
+               AND vector_entry_id = ?3
+             LIMIT 1",
+            libsql::params![
+                tenant_id,
+                submission_id.to_string(),
+                vector_entry_id.to_string()
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    let exists = rows
+        .next()
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?
+        .is_some();
+    if exists {
+        return Ok(());
+    }
+
+    Err(DatabaseError::Constraint(format!(
+        "trace export manifest vector_entry_id {vector_entry_id} does not belong to tenant {tenant_id} submission {submission_id}"
+    )))
+}
 
 fn opt_f32(value: Option<f32>) -> libsql::Value {
     match value {
@@ -871,6 +976,38 @@ impl TraceCorpusStore for LibSqlBackend {
     ) -> Result<(), DatabaseError> {
         self.ensure_trace_tenant(&derived_record.tenant_id).await?;
         let conn = self.connect().await?;
+        if let Some(object_ref) = derived_record.input_object_ref.as_ref() {
+            validate_tenant_scoped_trace_object_ref(
+                "derived input",
+                object_ref,
+                &derived_record.tenant_id,
+                derived_record.submission_id,
+            )?;
+            ensure_libsql_object_ref_belongs_to_submission(
+                &conn,
+                &derived_record.tenant_id,
+                derived_record.submission_id,
+                object_ref.object_ref_id,
+                "derived input",
+            )
+            .await?;
+        }
+        if let Some(object_ref) = derived_record.output_object_ref.as_ref() {
+            validate_tenant_scoped_trace_object_ref(
+                "derived output",
+                object_ref,
+                &derived_record.tenant_id,
+                derived_record.submission_id,
+            )?;
+            ensure_libsql_object_ref_belongs_to_submission(
+                &conn,
+                &derived_record.tenant_id,
+                derived_record.submission_id,
+                object_ref.object_ref_id,
+                "derived output",
+            )
+            .await?;
+        }
         let input_object_ref_id = derived_record
             .input_object_ref
             .as_ref()
@@ -981,6 +1118,13 @@ impl TraceCorpusStore for LibSqlBackend {
     ) -> Result<TraceVectorEntryRecord, DatabaseError> {
         self.ensure_trace_tenant(&vector_entry.tenant_id).await?;
         let conn = self.connect().await?;
+        ensure_libsql_derived_record_belongs_to_submission(
+            &conn,
+            &vector_entry.tenant_id,
+            vector_entry.submission_id,
+            vector_entry.derived_id,
+        )
+        .await?;
         let nearest_trace_ids = json_string(&vector_entry.nearest_trace_ids)?;
         conn.execute(
             "INSERT INTO trace_vector_entries (
@@ -1197,6 +1341,34 @@ impl TraceCorpusStore for LibSqlBackend {
     ) -> Result<TraceExportManifestItemRecord, DatabaseError> {
         self.ensure_trace_tenant(&item.tenant_id).await?;
         let conn = self.connect().await?;
+        if let Some(derived_id) = item.derived_id {
+            ensure_libsql_derived_record_belongs_to_submission(
+                &conn,
+                &item.tenant_id,
+                item.submission_id,
+                derived_id,
+            )
+            .await?;
+        }
+        if let Some(object_ref_id) = item.object_ref_id {
+            ensure_libsql_object_ref_belongs_to_submission(
+                &conn,
+                &item.tenant_id,
+                item.submission_id,
+                object_ref_id,
+                "export manifest item",
+            )
+            .await?;
+        }
+        if let Some(vector_entry_id) = item.vector_entry_id {
+            ensure_libsql_vector_entry_belongs_to_submission(
+                &conn,
+                &item.tenant_id,
+                item.submission_id,
+                vector_entry_id,
+            )
+            .await?;
+        }
         conn.execute(
             "INSERT INTO trace_export_manifest_items (
                 tenant_id, export_manifest_id, submission_id, trace_id, derived_id,

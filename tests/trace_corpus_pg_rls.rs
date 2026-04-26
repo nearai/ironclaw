@@ -10,7 +10,8 @@ use ironclaw::trace_corpus_storage::{
     TraceCorpusStatus, TraceCorpusStore, TraceDerivedRecordWrite, TraceDerivedStatus,
     TraceExportManifestItemInvalidationReason, TraceExportManifestItemWrite,
     TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefWrite, TraceSubmissionWrite,
-    TraceTombstoneWrite, TraceWorkerKind,
+    TraceTombstoneWrite, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
+    TraceVectorEntryWrite, TraceWorkerKind,
 };
 use secrecy::{ExposeSecret, SecretString};
 use tokio::time::{Duration, sleep};
@@ -1072,15 +1073,89 @@ async fn store_facade_invalidates_export_manifest_items_by_submission_with_tenan
         .await
         .expect("insert tenant B manifest");
 
+    let tenant_a_object_ref_id = Uuid::new_v4();
+    let tenant_a_derived_id = Uuid::new_v4();
+    let tenant_a_vector_entry_id = Uuid::new_v4();
+    backend
+        .append_trace_object_ref(TraceObjectRefWrite {
+            tenant_id: tenant_a.clone(),
+            object_ref_id: tenant_a_object_ref_id,
+            submission_id,
+            artifact_kind: TraceObjectArtifactKind::WorkerIntermediate,
+            object_store: "s3://private-corpus".to_string(),
+            object_key: format!("{tenant_a}/worker/summary.json"),
+            content_sha256: format!("sha256:{tenant_a}:object"),
+            encryption_key_ref: format!("kms:{tenant_a}"),
+            size_bytes: 128,
+            compression: None,
+            created_by_job_id: None,
+        })
+        .await
+        .expect("insert tenant A object ref");
+    backend
+        .append_trace_derived_record(TraceDerivedRecordWrite {
+            tenant_id: tenant_a.clone(),
+            derived_id: tenant_a_derived_id,
+            submission_id,
+            trace_id,
+            status: TraceDerivedStatus::Current,
+            worker_kind: TraceWorkerKind::Summary,
+            worker_version: "summary-worker-v1".to_string(),
+            input_object_ref: Some(TenantScopedTraceObjectRef {
+                tenant_id: tenant_a.clone(),
+                submission_id,
+                object_ref_id: tenant_a_object_ref_id,
+            }),
+            input_hash: format!("sha256:{tenant_a}:object"),
+            output_object_ref: None,
+            canonical_summary: Some("Tenant A summary.".to_string()),
+            canonical_summary_hash: Some(format!("sha256:{tenant_a}:summary")),
+            summary_model: "summary-model-v1".to_string(),
+            task_success: Some("success".to_string()),
+            privacy_risk: Some("low".to_string()),
+            event_count: Some(2),
+            tool_sequence: vec!["memory_search".to_string()],
+            tool_categories: vec!["memory".to_string()],
+            coverage_tags: vec!["tool:memory_search".to_string()],
+            duplicate_score: Some(0.1),
+            novelty_score: Some(0.4),
+            cluster_id: Some(format!("cluster:{tenant_a}")),
+        })
+        .await
+        .expect("insert tenant A derived record");
+    backend
+        .upsert_trace_vector_entry(TraceVectorEntryWrite {
+            tenant_id: tenant_a.clone(),
+            submission_id,
+            derived_id: tenant_a_derived_id,
+            vector_entry_id: tenant_a_vector_entry_id,
+            vector_store: "trace-commons-main".to_string(),
+            embedding_model: "text-embedding-3-small".to_string(),
+            embedding_dimension: 1536,
+            embedding_version: "embedding-v1".to_string(),
+            source_projection: TraceVectorEntrySourceProjection::CanonicalSummary,
+            source_hash: format!("sha256:{tenant_a}:summary"),
+            status: TraceVectorEntryStatus::Active,
+            nearest_trace_ids: Vec::new(),
+            cluster_id: Some(format!("cluster:{tenant_a}")),
+            duplicate_score: Some(0.1),
+            novelty_score: Some(0.4),
+            indexed_at: Some(Utc::now()),
+            invalidated_at: None,
+            deleted_at: None,
+        })
+        .await
+        .expect("insert tenant A vector entry");
+
     backend
         .upsert_trace_export_manifest_item(TraceExportManifestItemWrite {
             tenant_id: tenant_a.clone(),
             export_manifest_id: tenant_a_export_id,
             submission_id,
             trace_id,
-            derived_id: Some(Uuid::new_v4()),
-            object_ref_id: Some(Uuid::new_v4()),
-            vector_entry_id: Some(Uuid::new_v4()),
+            derived_id: Some(tenant_a_derived_id),
+            object_ref_id: Some(tenant_a_object_ref_id),
+            vector_entry_id: Some(tenant_a_vector_entry_id),
             source_status_at_export: TraceCorpusStatus::Accepted,
             source_hash_at_export: format!("sha256:{tenant_a}:source"),
         })
@@ -1183,4 +1258,391 @@ async fn store_facade_invalidates_export_manifest_items_by_submission_with_tenan
             .await;
         tx.commit().await.expect("commit cleanup transaction");
     }
+}
+
+#[tokio::test]
+async fn store_facade_rejects_export_manifest_item_cross_tenant_refs() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+    assert_trace_rls_policies_installed(&backend).await;
+
+    let tenant_a = format!("rls-export-ref-a-{}", Uuid::new_v4());
+    let tenant_b = format!("rls-export-ref-b-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    let trace_id = Uuid::new_v4();
+
+    let mut tenant_a_submission = sample_submission(&tenant_a, submission_id);
+    tenant_a_submission.trace_id = trace_id;
+    backend
+        .upsert_trace_submission(tenant_a_submission)
+        .await
+        .expect("insert tenant A submission");
+    let mut tenant_b_submission = sample_submission(&tenant_b, submission_id);
+    tenant_b_submission.trace_id = trace_id;
+    backend
+        .upsert_trace_submission(tenant_b_submission)
+        .await
+        .expect("insert tenant B submission");
+
+    let tenant_b_object_ref_id = Uuid::new_v4();
+    let tenant_b_derived_id = Uuid::new_v4();
+    let tenant_b_vector_entry_id = Uuid::new_v4();
+    backend
+        .append_trace_object_ref(TraceObjectRefWrite {
+            tenant_id: tenant_b.clone(),
+            object_ref_id: tenant_b_object_ref_id,
+            submission_id,
+            artifact_kind: TraceObjectArtifactKind::WorkerIntermediate,
+            object_store: "s3://private-corpus".to_string(),
+            object_key: format!("{tenant_b}/worker/summary.json"),
+            content_sha256: format!("sha256:{tenant_b}:object"),
+            encryption_key_ref: format!("kms:{tenant_b}"),
+            size_bytes: 128,
+            compression: None,
+            created_by_job_id: None,
+        })
+        .await
+        .expect("insert tenant B object ref");
+    backend
+        .append_trace_derived_record(TraceDerivedRecordWrite {
+            tenant_id: tenant_b.clone(),
+            derived_id: tenant_b_derived_id,
+            submission_id,
+            trace_id,
+            status: TraceDerivedStatus::Current,
+            worker_kind: TraceWorkerKind::Summary,
+            worker_version: "summary-worker-v1".to_string(),
+            input_object_ref: Some(TenantScopedTraceObjectRef {
+                tenant_id: tenant_b.clone(),
+                submission_id,
+                object_ref_id: tenant_b_object_ref_id,
+            }),
+            input_hash: format!("sha256:{tenant_b}:object"),
+            output_object_ref: None,
+            canonical_summary: Some("Tenant B summary.".to_string()),
+            canonical_summary_hash: Some(format!("sha256:{tenant_b}:summary")),
+            summary_model: "summary-model-v1".to_string(),
+            task_success: Some("success".to_string()),
+            privacy_risk: Some("low".to_string()),
+            event_count: Some(2),
+            tool_sequence: vec!["memory_search".to_string()],
+            tool_categories: vec!["memory".to_string()],
+            coverage_tags: vec!["tool:memory_search".to_string()],
+            duplicate_score: Some(0.1),
+            novelty_score: Some(0.4),
+            cluster_id: Some(format!("cluster:{tenant_b}")),
+        })
+        .await
+        .expect("insert tenant B derived record");
+    backend
+        .upsert_trace_vector_entry(TraceVectorEntryWrite {
+            tenant_id: tenant_b.clone(),
+            submission_id,
+            derived_id: tenant_b_derived_id,
+            vector_entry_id: tenant_b_vector_entry_id,
+            vector_store: "trace-commons-main".to_string(),
+            embedding_model: "text-embedding-3-small".to_string(),
+            embedding_dimension: 1536,
+            embedding_version: "embedding-v1".to_string(),
+            source_projection: TraceVectorEntrySourceProjection::CanonicalSummary,
+            source_hash: format!("sha256:{tenant_b}:summary"),
+            status: TraceVectorEntryStatus::Active,
+            nearest_trace_ids: Vec::new(),
+            cluster_id: Some(format!("cluster:{tenant_b}")),
+            duplicate_score: Some(0.1),
+            novelty_score: Some(0.4),
+            indexed_at: Some(Utc::now()),
+            invalidated_at: None,
+            deleted_at: None,
+        })
+        .await
+        .expect("insert tenant B vector entry");
+
+    let tenant_a_export_id = Uuid::new_v4();
+    backend
+        .upsert_trace_export_manifest(TraceExportManifestWrite {
+            tenant_id: tenant_a.clone(),
+            export_manifest_id: tenant_a_export_id,
+            artifact_kind: TraceObjectArtifactKind::ExportArtifact,
+            purpose_code: Some("replay_dataset".to_string()),
+            audit_event_id: Some(Uuid::new_v4()),
+            source_submission_ids: vec![submission_id],
+            source_submission_ids_hash: format!("sha256:{tenant_a}:sources"),
+            item_count: 1,
+            generated_at: Utc::now(),
+        })
+        .await
+        .expect("insert tenant A manifest");
+
+    let err = backend
+        .upsert_trace_export_manifest_item(TraceExportManifestItemWrite {
+            tenant_id: tenant_a.clone(),
+            export_manifest_id: tenant_a_export_id,
+            submission_id,
+            trace_id,
+            derived_id: Some(tenant_b_derived_id),
+            object_ref_id: Some(tenant_b_object_ref_id),
+            vector_entry_id: Some(tenant_b_vector_entry_id),
+            source_status_at_export: TraceCorpusStatus::Accepted,
+            source_hash_at_export: format!("sha256:{tenant_a}:source"),
+        })
+        .await
+        .expect_err("cross-tenant export refs must be rejected");
+
+    assert!(
+        err.to_string().contains("does not belong to tenant"),
+        "unexpected error: {err}"
+    );
+
+    let mut client = backend.pool().get().await.expect("get cleanup connection");
+    for tenant_id in [&tenant_a, &tenant_b] {
+        let tx = client
+            .transaction()
+            .await
+            .expect("start cleanup transaction");
+        tx.execute(
+            "SELECT set_config('ironclaw.trace_tenant_id', $1, true)",
+            &[tenant_id],
+        )
+        .await
+        .expect("set cleanup tenant context");
+        let _ = tx
+            .execute(
+                "DELETE FROM trace_tenants WHERE tenant_id = $1",
+                &[tenant_id],
+            )
+            .await;
+        tx.commit().await.expect("commit cleanup transaction");
+    }
+}
+
+#[tokio::test]
+async fn store_facade_rejects_derived_record_mismatched_tenant_object_ref() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+    assert_trace_rls_policies_installed(&backend).await;
+
+    let tenant_a = format!("rls-derived-ref-a-{}", Uuid::new_v4());
+    let tenant_b = format!("rls-derived-ref-b-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    let trace_id = Uuid::new_v4();
+
+    let mut tenant_a_submission = sample_submission(&tenant_a, submission_id);
+    tenant_a_submission.trace_id = trace_id;
+    backend
+        .upsert_trace_submission(tenant_a_submission)
+        .await
+        .expect("insert tenant A submission");
+    let mut tenant_b_submission = sample_submission(&tenant_b, submission_id);
+    tenant_b_submission.trace_id = trace_id;
+    backend
+        .upsert_trace_submission(tenant_b_submission)
+        .await
+        .expect("insert tenant B submission");
+
+    let tenant_b_object_ref_id = Uuid::new_v4();
+    backend
+        .append_trace_object_ref(TraceObjectRefWrite {
+            tenant_id: tenant_b.clone(),
+            object_ref_id: tenant_b_object_ref_id,
+            submission_id,
+            artifact_kind: TraceObjectArtifactKind::WorkerIntermediate,
+            object_store: "s3://private-corpus".to_string(),
+            object_key: format!("{tenant_b}/worker/summary.json"),
+            content_sha256: format!("sha256:{tenant_b}:object"),
+            encryption_key_ref: format!("kms:{tenant_b}"),
+            size_bytes: 128,
+            compression: None,
+            created_by_job_id: None,
+        })
+        .await
+        .expect("insert tenant B object ref");
+
+    let err = backend
+        .append_trace_derived_record(TraceDerivedRecordWrite {
+            tenant_id: tenant_a.clone(),
+            derived_id: Uuid::new_v4(),
+            submission_id,
+            trace_id,
+            status: TraceDerivedStatus::Current,
+            worker_kind: TraceWorkerKind::Summary,
+            worker_version: "summary-worker-v1".to_string(),
+            input_object_ref: Some(TenantScopedTraceObjectRef {
+                tenant_id: tenant_b.clone(),
+                submission_id,
+                object_ref_id: tenant_b_object_ref_id,
+            }),
+            input_hash: format!("sha256:{tenant_b}:object"),
+            output_object_ref: None,
+            canonical_summary: Some("Tenant A summary.".to_string()),
+            canonical_summary_hash: Some(format!("sha256:{tenant_a}:summary")),
+            summary_model: "summary-model-v1".to_string(),
+            task_success: Some("success".to_string()),
+            privacy_risk: Some("low".to_string()),
+            event_count: Some(2),
+            tool_sequence: vec!["memory_search".to_string()],
+            tool_categories: vec!["memory".to_string()],
+            coverage_tags: vec!["tool:memory_search".to_string()],
+            duplicate_score: Some(0.1),
+            novelty_score: Some(0.4),
+            cluster_id: Some(format!("cluster:{tenant_a}")),
+        })
+        .await
+        .expect_err("derived records must reject cross-tenant object refs");
+
+    assert!(
+        err.to_string().contains("does not belong to tenant"),
+        "unexpected error: {err}"
+    );
+
+    let mut client = backend.pool().get().await.expect("get cleanup connection");
+    for tenant_id in [&tenant_a, &tenant_b] {
+        let tx = client
+            .transaction()
+            .await
+            .expect("start cleanup transaction");
+        tx.execute(
+            "SELECT set_config('ironclaw.trace_tenant_id', $1, true)",
+            &[tenant_id],
+        )
+        .await
+        .expect("set cleanup tenant context");
+        let _ = tx
+            .execute(
+                "DELETE FROM trace_tenants WHERE tenant_id = $1",
+                &[tenant_id],
+            )
+            .await;
+        tx.commit().await.expect("commit cleanup transaction");
+    }
+}
+
+#[tokio::test]
+async fn store_facade_rejects_vector_entry_mismatched_submission_derived_id() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+    assert_trace_rls_policies_installed(&backend).await;
+
+    let tenant_id = format!("rls-vector-derived-{}", Uuid::new_v4());
+    let submission_a_id = Uuid::new_v4();
+    let trace_a_id = Uuid::new_v4();
+    let mut submission_a = sample_submission(&tenant_id, submission_a_id);
+    submission_a.trace_id = trace_a_id;
+    backend
+        .upsert_trace_submission(submission_a)
+        .await
+        .expect("insert submission A");
+
+    let submission_b_id = Uuid::new_v4();
+    let trace_b_id = Uuid::new_v4();
+    let mut submission_b = sample_submission(&tenant_id, submission_b_id);
+    submission_b.trace_id = trace_b_id;
+    backend
+        .upsert_trace_submission(submission_b)
+        .await
+        .expect("insert submission B");
+
+    let object_ref_b_id = Uuid::new_v4();
+    let derived_b_id = Uuid::new_v4();
+    backend
+        .append_trace_object_ref(TraceObjectRefWrite {
+            tenant_id: tenant_id.clone(),
+            object_ref_id: object_ref_b_id,
+            submission_id: submission_b_id,
+            artifact_kind: TraceObjectArtifactKind::WorkerIntermediate,
+            object_store: "s3://private-corpus".to_string(),
+            object_key: format!("{tenant_id}/submission-b/summary.json"),
+            content_sha256: format!("sha256:{tenant_id}:submission-b-object"),
+            encryption_key_ref: format!("kms:{tenant_id}"),
+            size_bytes: 128,
+            compression: None,
+            created_by_job_id: None,
+        })
+        .await
+        .expect("insert submission B object ref");
+    backend
+        .append_trace_derived_record(TraceDerivedRecordWrite {
+            tenant_id: tenant_id.clone(),
+            derived_id: derived_b_id,
+            submission_id: submission_b_id,
+            trace_id: trace_b_id,
+            status: TraceDerivedStatus::Current,
+            worker_kind: TraceWorkerKind::Summary,
+            worker_version: "summary-worker-v1".to_string(),
+            input_object_ref: Some(TenantScopedTraceObjectRef {
+                tenant_id: tenant_id.clone(),
+                submission_id: submission_b_id,
+                object_ref_id: object_ref_b_id,
+            }),
+            input_hash: format!("sha256:{tenant_id}:submission-b-object"),
+            output_object_ref: None,
+            canonical_summary: Some("Submission B summary.".to_string()),
+            canonical_summary_hash: Some(format!("sha256:{tenant_id}:submission-b-summary")),
+            summary_model: "summary-model-v1".to_string(),
+            task_success: Some("success".to_string()),
+            privacy_risk: Some("low".to_string()),
+            event_count: Some(2),
+            tool_sequence: vec!["memory_search".to_string()],
+            tool_categories: vec!["memory".to_string()],
+            coverage_tags: vec!["tool:memory_search".to_string()],
+            duplicate_score: Some(0.1),
+            novelty_score: Some(0.4),
+            cluster_id: Some(format!("cluster:{tenant_id}")),
+        })
+        .await
+        .expect("insert submission B derived record");
+
+    let err = backend
+        .upsert_trace_vector_entry(TraceVectorEntryWrite {
+            tenant_id: tenant_id.clone(),
+            submission_id: submission_a_id,
+            derived_id: derived_b_id,
+            vector_entry_id: Uuid::new_v4(),
+            vector_store: "trace-commons-main".to_string(),
+            embedding_model: "text-embedding-3-small".to_string(),
+            embedding_dimension: 1536,
+            embedding_version: "embedding-v1".to_string(),
+            source_projection: TraceVectorEntrySourceProjection::CanonicalSummary,
+            source_hash: format!("sha256:{tenant_id}:submission-a-summary"),
+            status: TraceVectorEntryStatus::Active,
+            nearest_trace_ids: Vec::new(),
+            cluster_id: Some(format!("cluster:{tenant_id}")),
+            duplicate_score: Some(0.1),
+            novelty_score: Some(0.4),
+            indexed_at: Some(Utc::now()),
+            invalidated_at: None,
+            deleted_at: None,
+        })
+        .await
+        .expect_err("vector entries must reject derived ids from another submission");
+
+    assert!(
+        err.to_string().contains("does not belong to tenant"),
+        "unexpected error: {err}"
+    );
+
+    let mut client = backend.pool().get().await.expect("get cleanup connection");
+    let tx = client
+        .transaction()
+        .await
+        .expect("start cleanup transaction");
+    tx.execute(
+        "SELECT set_config('ironclaw.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set cleanup tenant context");
+    let _ = tx
+        .execute(
+            "DELETE FROM trace_tenants WHERE tenant_id = $1",
+            &[&tenant_id],
+        )
+        .await;
+    tx.commit().await.expect("commit cleanup transaction");
 }
