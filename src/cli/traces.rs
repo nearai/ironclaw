@@ -4011,6 +4011,19 @@ fn apply_cli_submission_status_updates(
 
     let mut records = read_local_records()?;
     let now = chrono::Utc::now();
+    let changed = apply_cli_submission_status_updates_to_records(&mut records, updates, now);
+
+    if changed > 0 {
+        write_local_records(&records)?;
+    }
+    Ok(changed)
+}
+
+fn apply_cli_submission_status_updates_to_records(
+    records: &mut [LocalSubmissionRecord],
+    updates: &[TraceSubmissionStatusUpdate],
+    now: chrono::DateTime<chrono::Utc>,
+) -> usize {
     let mut changed = 0usize;
     for update in updates {
         let Some(record) = records
@@ -4032,6 +4045,8 @@ fn apply_cli_submission_status_updates(
         explanation.extend(update.delayed_credit_explanations.clone());
         let status_changed = record.server_status.as_deref() != Some(update.status.as_str());
         let credit_changed = (old_effective_credit - new_effective_credit).abs() > f32::EPSILON;
+        let explanation_changed =
+            !explanation.is_empty() && record.credit_explanation != explanation;
 
         record.trace_id = update.trace_id;
         record.server_status = Some(update.status.clone());
@@ -4049,7 +4064,7 @@ fn apply_cli_submission_status_updates(
             record.status = LocalSubmissionStatus::Purged;
         }
 
-        if status_changed || credit_changed {
+        if status_changed || credit_changed || explanation_changed {
             record.last_credit_notice_at = None;
             let sync_reason = if update.credit_points_ledger.abs() > f32::EPSILON {
                 format!(
@@ -4072,10 +4087,7 @@ fn apply_cli_submission_status_updates(
         }
     }
 
-    if changed > 0 {
-        write_local_records(&records)?;
-    }
-    Ok(changed)
+    changed
 }
 
 fn maybe_print_credit_notice(policy: &StandingTraceContributionPolicy) -> anyhow::Result<()> {
@@ -5555,6 +5567,74 @@ mod tests {
         assert_eq!(summary.final_credit, 2.25);
         assert_eq!(summary.delayed_credit_delta, 1.25);
         assert_eq!(summary.credit_events_total, 2);
+    }
+
+    #[test]
+    fn cli_credit_sync_resets_notice_when_explanation_changes_without_credit_delta() {
+        let submission_id =
+            Uuid::parse_str("018f2b7b-0c11-72fd-95c4-1f9f98feac11").expect("valid uuid");
+        let trace_id = Uuid::parse_str("018f2b7b-0c11-72fd-95c4-1f9f98feac12").expect("valid uuid");
+        let now = chrono::Utc::now();
+        let mut records = vec![LocalSubmissionRecord {
+            submission_id,
+            trace_id,
+            endpoint: Some("https://trace.example/internal/v1/traces".to_string()),
+            status: LocalSubmissionStatus::Submitted,
+            server_status: Some("accepted".to_string()),
+            submitted_at: Some(now),
+            revoked_at: None,
+            privacy_risk: "low".to_string(),
+            redaction_counts: BTreeMap::new(),
+            credit_points_pending: 1.0,
+            credit_points_final: Some(2.0),
+            credit_explanation: vec!["Previous explanation.".to_string()],
+            credit_events: Vec::new(),
+            last_credit_notice_at: Some(now),
+        }];
+        let update = TraceSubmissionStatusUpdate {
+            submission_id,
+            trace_id,
+            status: "accepted".to_string(),
+            credit_points_pending: 1.0,
+            credit_points_final: Some(2.0),
+            credit_points_ledger: 0.0,
+            credit_points_total: Some(2.0),
+            explanation: vec!["Accepted after privacy checks.".to_string()],
+            delayed_credit_explanations: vec![
+                "Process evaluation changed the utility explanation.".to_string(),
+            ],
+        };
+
+        let changed = apply_cli_submission_status_updates_to_records(
+            &mut records,
+            std::slice::from_ref(&update),
+            now,
+        );
+
+        assert_eq!(changed, 1);
+        assert!(records[0].last_credit_notice_at.is_none());
+        assert_eq!(
+            records[0].credit_explanation,
+            vec![
+                "Accepted after privacy checks.".to_string(),
+                "Process evaluation changed the utility explanation.".to_string(),
+            ]
+        );
+        assert_eq!(records[0].credit_events.len(), 1);
+        assert_eq!(
+            records[0].credit_events[0].kind,
+            TraceCreditEventKind::CreditSynced
+        );
+        assert_eq!(records[0].credit_events[0].points_delta, 0.0);
+
+        let unchanged = apply_cli_submission_status_updates_to_records(
+            &mut records,
+            std::slice::from_ref(&update),
+            now,
+        );
+
+        assert_eq!(unchanged, 0);
+        assert_eq!(records[0].credit_events.len(), 1);
     }
 
     #[test]
