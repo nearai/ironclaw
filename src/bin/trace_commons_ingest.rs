@@ -2595,7 +2595,7 @@ async fn maintenance_handler(
     )?;
     let response = run_maintenance(state.as_ref(), &tenant, body)
         .await
-        .map_err(internal_error)?;
+        .map_err(maintenance_error)?;
     Ok(Json(response))
 }
 
@@ -2644,7 +2644,7 @@ async fn retention_maintenance_handler(
         },
     )
     .await
-    .map_err(internal_error)?;
+    .map_err(maintenance_error)?;
     Ok(Json(response))
 }
 
@@ -2705,7 +2705,7 @@ async fn vector_index_handler(
         },
     )
     .await
-    .map_err(internal_error)?;
+    .map_err(maintenance_error)?;
     Ok(Json(response))
 }
 
@@ -7491,7 +7491,7 @@ async fn reconcile_db_mirror(
     let db = state
         .db_mirror
         .as_ref()
-        .context("Trace Commons DB reconciliation requires TRACE_COMMONS_DB_DUAL_WRITE")?;
+        .ok_or_else(|| anyhow::Error::new(TraceDbDualWriteRequiredForReconciliation))?;
     let db_records = db
         .list_trace_submissions(&tenant.tenant_id)
         .await
@@ -7983,7 +7983,7 @@ async fn reconcile_db_mirror(
         ),
     );
 
-    Ok(Some(TraceDbReconciliationReport {
+    let mut report = TraceDbReconciliationReport {
         file_submission_count: file_records.len(),
         db_submission_count: db_records.len(),
         missing_submission_ids_in_db,
@@ -8040,7 +8040,10 @@ async fn reconcile_db_mirror(
         active_vector_entries,
         accepted_current_derived_without_active_vector_entry,
         invalid_active_vector_entries,
-    }))
+        blocking_gaps: Vec::new(),
+    };
+    report.blocking_gaps = report.compute_blocking_gap_summaries();
+    Ok(Some(report))
 }
 
 fn require_db_reconciliation_clean_request(
@@ -8048,9 +8051,7 @@ fn require_db_reconciliation_clean_request(
     request: &TraceMaintenanceRequest,
 ) -> anyhow::Result<()> {
     if state.require_db_reconciliation_clean && !request.reconcile_db_mirror {
-        anyhow::bail!(
-            "{TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN} requires reconcile_db_mirror=true"
-        );
+        return Err(anyhow::Error::new(TraceDbReconciliationRequestRequired));
     }
     Ok(())
 }
@@ -8065,12 +8066,11 @@ fn enforce_db_reconciliation_clean(
     let Some(report) = report else {
         return Ok(());
     };
-    let gaps = report.blocking_gap_summaries();
-    anyhow::ensure!(
-        gaps.is_empty(),
-        "Trace Commons DB reconciliation is not clean: {}",
-        gaps.join(", ")
-    );
+    if !report.blocking_gaps.is_empty() {
+        return Err(anyhow::Error::new(TraceDbReconciliationNotClean {
+            gaps: report.blocking_gaps.clone(),
+        }));
+    }
     Ok(())
 }
 
@@ -8439,6 +8439,19 @@ fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Jso
     )
 }
 
+fn maintenance_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
+    if let Some(error) = error.downcast_ref::<TraceDbReconciliationRequestRequired>() {
+        return api_error(StatusCode::BAD_REQUEST, error.to_string());
+    }
+    if let Some(error) = error.downcast_ref::<TraceDbReconciliationNotClean>() {
+        return api_error(StatusCode::CONFLICT, error.to_string());
+    }
+    if let Some(error) = error.downcast_ref::<TraceDbDualWriteRequiredForReconciliation>() {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string());
+    }
+    internal_error(error)
+}
+
 fn internal_error(error: impl std::fmt::Display) -> (StatusCode, Json<ApiError>) {
     tracing::error!(%error, "Trace Commons ingestion operation failed");
     api_error(
@@ -8446,6 +8459,51 @@ fn internal_error(error: impl std::fmt::Display) -> (StatusCode, Json<ApiError>)
         "trace commons operation failed",
     )
 }
+
+#[derive(Debug)]
+struct TraceDbReconciliationRequestRequired;
+
+impl std::fmt::Display for TraceDbReconciliationRequestRequired {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN} requires reconcile_db_mirror=true"
+        )
+    }
+}
+
+impl std::error::Error for TraceDbReconciliationRequestRequired {}
+
+#[derive(Debug)]
+struct TraceDbReconciliationNotClean {
+    gaps: Vec<String>,
+}
+
+impl std::fmt::Display for TraceDbReconciliationNotClean {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Trace Commons DB reconciliation is not clean: {}",
+            self.gaps.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for TraceDbReconciliationNotClean {}
+
+#[derive(Debug)]
+struct TraceDbDualWriteRequiredForReconciliation;
+
+impl std::fmt::Display for TraceDbDualWriteRequiredForReconciliation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Trace Commons DB reconciliation requires TRACE_COMMONS_DB_DUAL_WRITE"
+        )
+    }
+}
+
+impl std::error::Error for TraceDbDualWriteRequiredForReconciliation {}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -9386,10 +9444,11 @@ struct TraceDbReconciliationReport {
     active_vector_entries: usize,
     accepted_current_derived_without_active_vector_entry: Vec<Uuid>,
     invalid_active_vector_entries: usize,
+    blocking_gaps: Vec<String>,
 }
 
 impl TraceDbReconciliationReport {
-    fn blocking_gap_summaries(&self) -> Vec<String> {
+    fn compute_blocking_gap_summaries(&self) -> Vec<String> {
         let mut gaps = Vec::new();
         push_gap_count(
             &mut gaps,
@@ -16380,6 +16439,18 @@ mod tests {
             vec![audit_event_id]
         );
         assert!(reconciliation.missing_audit_event_ids_in_files.is_empty());
+        assert!(
+            reconciliation
+                .blocking_gaps
+                .iter()
+                .any(|gap| gap == "missing_credit_event_ids_in_db=1")
+        );
+        assert!(
+            reconciliation
+                .blocking_gaps
+                .iter()
+                .any(|gap| gap == "missing_audit_event_ids_in_db=1")
+        );
     }
 
     #[cfg(feature = "libsql")]
@@ -16559,6 +16630,75 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn maintenance_reconciliation_without_db_mirror_returns_operator_error() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let error = maintenance_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_reconciliation_requires_db".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: true,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect_err("DB reconciliation requires configured DB mirror");
+        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(error.1.0.error.contains("TRACE_COMMONS_DB_DUAL_WRITE"));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn maintenance_reconciliation_clean_gate_accepts_empty_clean_report() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-reconcile-clean-empty.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_required_db_reconciliation_clean(
+            temp.path().to_path_buf(),
+            db as Arc<dyn Database>,
+        );
+
+        let Json(response) = maintenance_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_clean_reconciliation_gate".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: true,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("clean reconciliation gate allows empty report");
+
+        let reconciliation = response
+            .db_reconciliation
+            .expect("reconciliation report exists");
+        assert!(reconciliation.blocking_gaps.is_empty());
+    }
+
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn maintenance_reconciliation_clean_gate_requires_reconciliation_request() {
@@ -16595,7 +16735,8 @@ mod tests {
         )
         .await
         .expect_err("clean reconciliation gate requires reconcile_db_mirror");
-        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.0.error.contains("reconcile_db_mirror=true"));
 
         let audit_events =
             read_all_audit_events(temp.path(), "tenant-a").expect("audit events read");
@@ -16658,7 +16799,8 @@ mod tests {
         )
         .await
         .expect_err("required clean reconciliation fails closed on drift");
-        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert!(error.1.0.error.contains("status_mismatches=1"));
 
         let audit_events =
             read_all_audit_events(temp.path(), "tenant-a").expect("audit events read");

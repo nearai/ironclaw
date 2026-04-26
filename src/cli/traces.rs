@@ -2588,6 +2588,11 @@ fn maintenance_reconciliation_lines(value: &serde_json::Value) -> Vec<String> {
     ) {
         lines.push(line);
     }
+    if let Some(line) =
+        compact_json_items(reconciliation, "    blocking", &[("blocking_gaps", "gaps")])
+    {
+        lines.push(line);
+    }
 
     if lines.len() == 1 { Vec::new() } else { lines }
 }
@@ -3538,7 +3543,11 @@ mod tests {
                     "88888888-8888-8888-8888-888888888888",
                     "99999999-9999-9999-9999-999999999999"
                 ],
-                "invalid_active_vector_entries": 1
+                "invalid_active_vector_entries": 1,
+                "blocking_gaps": [
+                    "missing_submission_ids_in_db=2",
+                    "reviewer_metadata_reader_parity=failed"
+                ]
             }
         });
 
@@ -3555,6 +3564,7 @@ mod tests {
                 "    exports/tombstones: file_replay_manifests=1 db_export_manifests=2 db_replay_manifests=1 db_benchmark_manifests=0 db_ranker_manifests=1 db_other_manifests=0 db_export_items=3 file_revocation_tombstones=1 db_tombstones=1".to_string(),
                 "    reader parity: contributor_credit=true reviewer_metadata=false analytics=true audit=true replay_export_manifests=true failures=1".to_string(),
                 "    vectors: active=7 eligible_without_active=2 invalid_active=1".to_string(),
+                "    blocking: gaps=2".to_string(),
             ]
         );
         let rendered = lines.join("\n");
