@@ -736,4 +736,6 @@ The next implementation work should be a sequence of small self-contained crates
 
 Start with `ironclaw_host_api`, then the durable filesystem, then the resource/budget governor, then extension discovery, then WASM capability execution, then Docker-backed script runner execution, then kernel composition, then tiny budgeted WASM and script echo capabilities.
 
+Implementation note (2026-04-26): the current concrete crate for the composition-heavy kernel concept is `ironclaw_host_runtime`. There is no active `ironclaw_kernel` crate in the Reborn stack; keep using `ironclaw_host_runtime` in implementation docs unless the team deliberately renames it later.
+
 After those paths are working, add MCP as the required adapter lane for existing MCP servers/tools. Only then should the team move conversation, missions, agent loop, gateway, TUI, auth, network hardening, GitHub, or self-repair into the new model.

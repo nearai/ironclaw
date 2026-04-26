@@ -7,6 +7,8 @@
 
 This document records the current Reborn shape after the recent architecture discussion. It is a map, not a replacement for the contract docs under `docs/reborn/contracts/`.
 
+Terminology note: older docs use **kernel** for the small host-core composition concept. The current concrete crate for that concept is `ironclaw_host_runtime`; there is no active `ironclaw_kernel` crate in the Reborn stack.
+
 Legend:
 
 ```text
@@ -217,6 +219,7 @@ The current implemented or contract-backed Reborn stack includes these slices:
 | Capability access | `[exists/partial]` grant matching, action-time authorization, lease-backed authorizer semantics, in-memory and filesystem-backed exact-invocation lease stores |
 | CapabilityHost | `[exists]` caller-facing invocation, approval-blocking, resume, spawn workflow gate, and `ProcessServices` spawn wiring over the neutral host API dispatch port |
 | Host runtime composition | `[exists]` `HostRuntimeServices` composition helper for shared registry/filesystem/governor/authorizer/runtime/process/approval services -> `RuntimeDispatcher`, `CapabilityHost`, `ApprovalResolver`, and `ProcessHost` handles |
+| Architecture guardrails | `[exists/partial]` `ironclaw_architecture` test crate walks `cargo metadata` and enforces central Reborn dependency-boundary rules; per-crate guardrail files document local invariants |
 | Approvals/resume | `[exists/partial]` pending approval records, invocation fingerprints, approval resolver, fail-closed approval+lease persistence ordering/rollback, metadata-only `AuditEnvelope::approval_resolved(...)` audit records with JSONL persistence coverage, in-memory and async filesystem-backed exact-invocation leases, `resume_json` replay checks |
 | Run-state | `[exists]` `Running`, `BlockedApproval`, `BlockedAuth`, `Completed`, `Failed` current-state stores with tenant/user partitioning |
 | Dispatcher | `[exists]` implementation of the neutral `ironclaw_host_api` dispatch port for already-authorized requests to WASM, Script, and MCP lanes; `FirstParty`/`System` recognized but unsupported; event sink failures are best-effort and runtime failures are redacted to stable kinds |
