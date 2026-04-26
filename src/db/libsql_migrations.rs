@@ -287,6 +287,18 @@ CREATE TABLE IF NOT EXISTS heartbeat_state (
 
 CREATE INDEX IF NOT EXISTS idx_heartbeat_user ON heartbeat_state(user_id);
 
+-- ==================== Reborn RootFilesystem ====================
+
+CREATE TABLE IF NOT EXISTS root_filesystem_entries (
+    path TEXT PRIMARY KEY,
+    contents BLOB NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_root_filesystem_entries_path
+    ON root_filesystem_entries(path);
+
 -- ==================== Secrets ====================
 
 CREATE TABLE IF NOT EXISTS secrets (
@@ -990,6 +1002,20 @@ ALTER TABLE agent_jobs ADD COLUMN restart_params TEXT;
         "llm_calls_created_at_index",
         r#"
 CREATE INDEX IF NOT EXISTS idx_llm_calls_created_at ON llm_calls(created_at);
+"#,
+    ),
+    (
+        25,
+        "root_filesystem_entries",
+        r#"
+CREATE TABLE IF NOT EXISTS root_filesystem_entries (
+    path TEXT PRIMARY KEY,
+    contents BLOB NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_root_filesystem_entries_path
+    ON root_filesystem_entries(path);
 "#,
     ),
 ];

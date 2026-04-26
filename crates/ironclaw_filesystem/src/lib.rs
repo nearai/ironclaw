@@ -435,3 +435,414 @@ fn file_type_from_metadata(metadata: &std::fs::Metadata) -> FileType {
 fn io_reason(error: std::io::Error) -> String {
     error.kind().to_string()
 }
+
+#[cfg(feature = "postgres")]
+/// PostgreSQL-backed [`RootFilesystem`] storing file contents by virtual path.
+pub struct PostgresRootFilesystem {
+    pool: deadpool_postgres::Pool,
+}
+
+#[cfg(feature = "postgres")]
+impl PostgresRootFilesystem {
+    pub fn new(pool: deadpool_postgres::Pool) -> Self {
+        Self { pool }
+    }
+
+    pub async fn run_migrations(&self) -> Result<(), FilesystemError> {
+        let client = self.client().await?;
+        client
+            .batch_execute(POSTGRES_ROOT_FILESYSTEM_SCHEMA)
+            .await
+            .map_err(|error| {
+                db_error(
+                    valid_engine_path(),
+                    FilesystemOperation::CreateDirAll,
+                    error,
+                )
+            })
+    }
+
+    async fn client(&self) -> Result<deadpool_postgres::Object, FilesystemError> {
+        self.pool
+            .get()
+            .await
+            .map_err(|error| FilesystemError::Backend {
+                path: valid_engine_path(),
+                operation: FilesystemOperation::Stat,
+                reason: error.to_string(),
+            })
+    }
+}
+
+#[cfg(feature = "postgres")]
+#[async_trait]
+impl RootFilesystem for PostgresRootFilesystem {
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        let client = self.client().await?;
+        let row = client
+            .query_opt(
+                "SELECT contents FROM root_filesystem_entries WHERE path = $1",
+                &[&path.as_str()],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+        row.map(|row| row.get("contents"))
+            .ok_or_else(|| not_found(path.clone(), FilesystemOperation::ReadFile))
+    }
+
+    async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        let client = self.client().await?;
+        client
+            .execute(
+                r#"
+                INSERT INTO root_filesystem_entries (path, contents)
+                VALUES ($1, $2)
+                ON CONFLICT (path) DO UPDATE SET
+                    contents = EXCLUDED.contents,
+                    updated_at = NOW()
+                "#,
+                &[&path.as_str(), &bytes],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::WriteFile, error))?;
+        Ok(())
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        if self.exact_file_len(path).await?.is_some() {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ListDir,
+                reason: "not a directory".to_string(),
+            });
+        }
+        let rows = self.all_paths().await?;
+        direct_children(path, rows)
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        if let Some(len) = self.exact_file_len(path).await? {
+            return Ok(FileStat {
+                path: path.clone(),
+                file_type: FileType::File,
+                len,
+            });
+        }
+        let rows = self.all_paths().await?;
+        if rows
+            .iter()
+            .any(|(child_path, _)| virtual_prefix_matches(path.as_str(), child_path.as_str()))
+        {
+            return Ok(FileStat {
+                path: path.clone(),
+                file_type: FileType::Directory,
+                len: 0,
+            });
+        }
+        Err(not_found(path.clone(), FilesystemOperation::Stat))
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl PostgresRootFilesystem {
+    async fn exact_file_len(&self, path: &VirtualPath) -> Result<Option<u64>, FilesystemError> {
+        let client = self.client().await?;
+        let row = client
+            .query_opt(
+                "SELECT OCTET_LENGTH(contents) AS len FROM root_filesystem_entries WHERE path = $1",
+                &[&path.as_str()],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::Stat, error))?;
+        Ok(row.map(|row| {
+            let len: i32 = row.get("len");
+            len.max(0) as u64
+        }))
+    }
+
+    async fn all_paths(&self) -> Result<Vec<(VirtualPath, u64)>, FilesystemError> {
+        let client = self.client().await?;
+        let rows = client
+            .query(
+                "SELECT path, OCTET_LENGTH(contents) AS len FROM root_filesystem_entries ORDER BY path",
+                &[],
+            )
+            .await
+            .map_err(|error| {
+                db_error(
+                    VirtualPath::new("/engine").unwrap_or_else(|_| unreachable!("literal virtual path is valid")),
+                    FilesystemOperation::ListDir,
+                    error,
+                )
+            })?;
+        rows.into_iter()
+            .map(|row| {
+                let path: String = row.get("path");
+                let len: i32 = row.get("len");
+                Ok((VirtualPath::new(path)?, len.max(0) as u64))
+            })
+            .collect()
+    }
+}
+
+#[cfg(feature = "postgres")]
+const POSTGRES_ROOT_FILESYSTEM_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS root_filesystem_entries (
+    path TEXT PRIMARY KEY CHECK (path LIKE '/%'),
+    contents BYTEA NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_root_filesystem_entries_path
+    ON root_filesystem_entries(path);
+"#;
+
+#[cfg(feature = "libsql")]
+/// libSQL-backed [`RootFilesystem`] storing file contents by virtual path.
+pub struct LibSqlRootFilesystem {
+    db: Arc<libsql::Database>,
+}
+
+#[cfg(feature = "libsql")]
+impl LibSqlRootFilesystem {
+    pub fn new(db: Arc<libsql::Database>) -> Self {
+        Self { db }
+    }
+
+    pub async fn run_migrations(&self) -> Result<(), FilesystemError> {
+        let conn = self.connect().await?;
+        conn.execute_batch(LIBSQL_ROOT_FILESYSTEM_SCHEMA)
+            .await
+            .map_err(|error| {
+                libsql_db_error(
+                    valid_engine_path(),
+                    FilesystemOperation::CreateDirAll,
+                    error,
+                )
+            })?;
+        Ok(())
+    }
+
+    async fn connect(&self) -> Result<libsql::Connection, FilesystemError> {
+        let conn = self
+            .db
+            .connect()
+            .map_err(|error| FilesystemError::Backend {
+                path: valid_engine_path(),
+                operation: FilesystemOperation::Stat,
+                reason: error.to_string(),
+            })?;
+        conn.query("PRAGMA busy_timeout = 5000", ())
+            .await
+            .map_err(|error| {
+                libsql_db_error(valid_engine_path(), FilesystemOperation::Stat, error)
+            })?;
+        Ok(conn)
+    }
+}
+
+#[cfg(feature = "libsql")]
+#[async_trait]
+impl RootFilesystem for LibSqlRootFilesystem {
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT contents FROM root_filesystem_entries WHERE path = ?1",
+                libsql::params![path.as_str()],
+            )
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?
+        else {
+            return Err(not_found(path.clone(), FilesystemOperation::ReadFile));
+        };
+        row.get(0)
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))
+    }
+
+    async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        let conn = self.connect().await?;
+        conn.execute(
+            r#"
+            INSERT INTO root_filesystem_entries (path, contents, updated_at)
+            VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            ON CONFLICT (path) DO UPDATE SET
+                contents = excluded.contents,
+                updated_at = excluded.updated_at
+            "#,
+            libsql::params![path.as_str(), libsql::Value::Blob(bytes.to_vec())],
+        )
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error))?;
+        Ok(())
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        if self.exact_file_len(path).await?.is_some() {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ListDir,
+                reason: "not a directory".to_string(),
+            });
+        }
+        let rows = self.all_paths().await?;
+        direct_children(path, rows)
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        if let Some(len) = self.exact_file_len(path).await? {
+            return Ok(FileStat {
+                path: path.clone(),
+                file_type: FileType::File,
+                len,
+            });
+        }
+        let rows = self.all_paths().await?;
+        if rows
+            .iter()
+            .any(|(child_path, _)| virtual_prefix_matches(path.as_str(), child_path.as_str()))
+        {
+            return Ok(FileStat {
+                path: path.clone(),
+                file_type: FileType::Directory,
+                len: 0,
+            });
+        }
+        Err(not_found(path.clone(), FilesystemOperation::Stat))
+    }
+}
+
+#[cfg(feature = "libsql")]
+impl LibSqlRootFilesystem {
+    async fn exact_file_len(&self, path: &VirtualPath) -> Result<Option<u64>, FilesystemError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT length(contents) FROM root_filesystem_entries WHERE path = ?1",
+                libsql::params![path.as_str()],
+            )
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Stat, error))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Stat, error))?;
+        Ok(row.map(|row| row.get::<i64>(0).unwrap_or(0).max(0) as u64))
+    }
+
+    async fn all_paths(&self) -> Result<Vec<(VirtualPath, u64)>, FilesystemError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT path, length(contents) FROM root_filesystem_entries ORDER BY path",
+                (),
+            )
+            .await
+            .map_err(|error| {
+                libsql_db_error(valid_engine_path(), FilesystemOperation::ListDir, error)
+            })?;
+        let mut paths = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|error| {
+            libsql_db_error(valid_engine_path(), FilesystemOperation::ListDir, error)
+        })? {
+            let path: String = row.get(0).map_err(|error| {
+                libsql_db_error(valid_engine_path(), FilesystemOperation::ListDir, error)
+            })?;
+            let len = row.get::<i64>(1).unwrap_or(0).max(0) as u64;
+            paths.push((VirtualPath::new(path)?, len));
+        }
+        Ok(paths)
+    }
+}
+
+#[cfg(feature = "libsql")]
+const LIBSQL_ROOT_FILESYSTEM_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS root_filesystem_entries (
+    path TEXT PRIMARY KEY,
+    contents BLOB NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_root_filesystem_entries_path
+    ON root_filesystem_entries(path);
+"#;
+
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+fn direct_children(
+    parent: &VirtualPath,
+    rows: Vec<(VirtualPath, u64)>,
+) -> Result<Vec<DirEntry>, FilesystemError> {
+    let mut entries = std::collections::BTreeMap::<String, DirEntry>::new();
+    let prefix = format!("{}/", parent.as_str().trim_end_matches('/'));
+    for (path, _len) in rows {
+        let Some(tail) = path.as_str().strip_prefix(&prefix) else {
+            continue;
+        };
+        if tail.is_empty() {
+            continue;
+        }
+        let (name, file_type) = if let Some((directory, _rest)) = tail.split_once('/') {
+            (directory.to_string(), FileType::Directory)
+        } else {
+            (tail.to_string(), FileType::File)
+        };
+        let entry_path = VirtualPath::new(format!(
+            "{}/{}",
+            parent.as_str().trim_end_matches('/'),
+            name
+        ))?;
+        entries.entry(name.clone()).or_insert(DirEntry {
+            name,
+            path: entry_path,
+            file_type,
+        });
+    }
+    if entries.is_empty() {
+        return Err(not_found(parent.clone(), FilesystemOperation::ListDir));
+    }
+    Ok(entries.into_values().collect())
+}
+
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+fn not_found(path: VirtualPath, operation: FilesystemOperation) -> FilesystemError {
+    FilesystemError::Backend {
+        path,
+        operation,
+        reason: "not found".to_string(),
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn db_error(
+    path: VirtualPath,
+    operation: FilesystemOperation,
+    error: tokio_postgres::Error,
+) -> FilesystemError {
+    FilesystemError::Backend {
+        path,
+        operation,
+        reason: error.to_string(),
+    }
+}
+
+#[cfg(feature = "libsql")]
+fn libsql_db_error(
+    path: VirtualPath,
+    operation: FilesystemOperation,
+    error: libsql::Error,
+) -> FilesystemError {
+    FilesystemError::Backend {
+        path,
+        operation,
+        reason: error.to_string(),
+    }
+}
+
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+fn valid_engine_path() -> VirtualPath {
+    VirtualPath::new("/engine").unwrap_or_else(|_| unreachable!("literal virtual path is valid"))
+}

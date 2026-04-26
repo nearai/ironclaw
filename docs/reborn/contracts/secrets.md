@@ -61,7 +61,7 @@ host_runtime   -> composition of already-resolved credential material into harde
 runtimes        -> consume injected values only after host-side authorization and lease handling
 ```
 
-`ironclaw_secrets` intentionally stays independent from workflow/runtime/event/authorization/process crates and from concrete Reborn filesystem/runtime crates. Durable backends can implement `EncryptedSecretRepository` outside those boundaries.
+`ironclaw_secrets` intentionally stays independent from workflow/runtime/event/authorization/process crates and from concrete runtime crates. Durable secret persistence should be wired through the Reborn `RootFilesystem` abstraction now that PostgreSQL/libSQL filesystem backends exist, rather than adding direct SQL dependencies to this crate.
 
 ---
 
@@ -142,7 +142,7 @@ Runtime composition must obtain material through explicit scoped secret access b
 
 This slice does not implement:
 
-- concrete PostgreSQL/libSQL encrypted repository adapters
+- filesystem-backed durable repository wiring over PostgreSQL/libSQL `RootFilesystem` backends
 - platform keychain master-key resolution/persistence
 - automatic master-key generation or `.env` fallback wiring
 - secret rotation/versioning
