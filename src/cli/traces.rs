@@ -4109,8 +4109,11 @@ fn maybe_print_credit_notice(policy: &StandingTraceContributionPolicy) -> anyhow
 
     let summary = credit_summary(&records);
     println!(
-        "Trace contribution credit update: {} submitted, pending +{:.2}, final +{:.2}.",
-        summary.submissions_submitted, summary.pending_credit, summary.final_credit
+        "Trace contribution credit update: {} submitted, pending +{:.2}, final +{:.2}, delayed ledger {:+.2}.",
+        summary.submissions_submitted,
+        summary.pending_credit,
+        summary.final_credit,
+        summary.delayed_credit_delta
     );
     for explanation in summary.recent_explanations.iter().take(3) {
         println!("  - {explanation}");
@@ -4299,6 +4302,13 @@ fn print_credit_summary_fields(summary: &CreditSummary, indent: &str) {
     println!("{indent}expired: {}", summary.submissions_expired);
     println!("{indent}pending credit: +{:.2}", summary.pending_credit);
     println!("{indent}final credit: +{:.2}", summary.final_credit);
+    println!(
+        "{indent}delayed ledger: {:+.2}",
+        summary.delayed_credit_delta
+    );
+    if summary.credit_events_total > 0 {
+        println!("{indent}credit events: {}", summary.credit_events_total);
+    }
     if !summary.recent_explanations.is_empty() {
         println!("{indent}recent explanations:");
         for explanation in &summary.recent_explanations {
@@ -4329,6 +4339,16 @@ fn credit_summary(records: &[LocalSubmissionRecord]) -> CreditSummary {
             .count() as u32,
         pending_credit: records.iter().map(|r| r.credit_points_pending).sum(),
         final_credit: records.iter().filter_map(|r| r.credit_points_final).sum(),
+        delayed_credit_delta: records
+            .iter()
+            .flat_map(|record| record.credit_events.iter())
+            .filter(|event| event.kind != TraceCreditEventKind::Accepted)
+            .map(|event| event.points_delta)
+            .sum(),
+        credit_events_total: records
+            .iter()
+            .map(|record| record.credit_events.len() as u32)
+            .sum(),
         recent_explanations: Vec::new(),
     };
 
@@ -5488,6 +5508,53 @@ mod tests {
             url,
             "https://trace.example/internal/v1/workers/process-evaluation"
         );
+    }
+
+    #[test]
+    fn local_credit_summary_includes_delayed_ledger_totals() {
+        let submission_id =
+            Uuid::parse_str("018f2b7b-0c11-72fd-95c4-1f9f98feac01").expect("valid uuid");
+        let trace_id = Uuid::parse_str("018f2b7b-0c11-72fd-95c4-1f9f98feac02").expect("valid uuid");
+        let summary = credit_summary(&[LocalSubmissionRecord {
+            submission_id,
+            trace_id,
+            endpoint: Some("https://trace.example/internal/v1/traces".to_string()),
+            status: LocalSubmissionStatus::Submitted,
+            server_status: Some("accepted".to_string()),
+            submitted_at: Some(chrono::Utc::now()),
+            revoked_at: None,
+            privacy_risk: "low".to_string(),
+            redaction_counts: BTreeMap::new(),
+            credit_points_pending: 1.0,
+            credit_points_final: Some(2.25),
+            credit_explanation: vec!["Accepted after privacy checks.".to_string()],
+            credit_events: vec![
+                TraceCreditEvent {
+                    event_id: Uuid::new_v4(),
+                    submission_id,
+                    contributor_pseudonym: "contributor-a".to_string(),
+                    kind: TraceCreditEventKind::Accepted,
+                    points_delta: 1.0,
+                    reason: "Accepted".to_string(),
+                    created_at: chrono::Utc::now(),
+                },
+                TraceCreditEvent {
+                    event_id: Uuid::new_v4(),
+                    submission_id,
+                    contributor_pseudonym: "contributor-a".to_string(),
+                    kind: TraceCreditEventKind::UsedForTrainingOrRanking,
+                    points_delta: 1.25,
+                    reason: "Process evaluation utility.".to_string(),
+                    created_at: chrono::Utc::now(),
+                },
+            ],
+            last_credit_notice_at: None,
+        }]);
+
+        assert_eq!(summary.pending_credit, 1.0);
+        assert_eq!(summary.final_credit, 2.25);
+        assert_eq!(summary.delayed_credit_delta, 1.25);
+        assert_eq!(summary.credit_events_total, 2);
     }
 
     #[test]

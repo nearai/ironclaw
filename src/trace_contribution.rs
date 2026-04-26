@@ -714,6 +714,10 @@ pub struct CreditSummary {
     pub submissions_expired: u32,
     pub pending_credit: f32,
     pub final_credit: f32,
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub delayed_credit_delta: f32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub credit_events_total: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_explanations: Vec<String>,
 }
@@ -3547,6 +3551,10 @@ fn is_zero_f32(value: &f32) -> bool {
     value.abs() <= f32::EPSILON
 }
 
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
 pub fn trace_contribution_dir_for_scope(scope: Option<&str>) -> PathBuf {
     let base = crate::bootstrap::ironclaw_base_dir().join("trace_contributions");
     match scope {
@@ -4160,6 +4168,8 @@ pub fn trace_credit_summary(records: &[LocalTraceSubmissionRecord]) -> CreditSum
         submissions_expired: report.submissions_expired,
         pending_credit: report.pending_credit,
         final_credit: report.final_credit,
+        delayed_credit_delta: report.delayed_credit_delta,
+        credit_events_total: report.credit_events_total,
         recent_explanations: recent_trace_credit_explanations(records, 6),
     }
 }
@@ -5643,6 +5653,8 @@ mod tests {
             .expect("notice should be due after changed credit");
         assert_eq!(notice.pending_credit, 1.0);
         assert_eq!(notice.final_credit, 2.0);
+        assert_eq!(notice.delayed_credit_delta, 1.0);
+        assert_eq!(notice.credit_events_total, 1);
         assert!(
             notice
                 .recent_explanations

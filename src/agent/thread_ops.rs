@@ -330,13 +330,20 @@ fn capture_turns_from_conversation_messages_with_outcomes(
 
 fn trace_credit_notice_message(summary: &crate::trace_contribution::CreditSummary) -> String {
     let mut message = format!(
-        "Trace contribution credit update: {} submitted, {} expired ({} total), pending +{:.2}, final confirmed +{:.2}. Delayed credit can change after privacy review, replay/eval, duplicate checks, and downstream utility scoring.",
+        "Trace contribution credit update: {} submitted, {} expired ({} total), pending +{:.2}, final confirmed +{:.2}, delayed ledger {:+.2}. Delayed credit can change after privacy review, replay/eval, duplicate checks, and downstream utility scoring.",
         summary.submissions_submitted,
         summary.submissions_expired,
         summary.submissions_total,
         summary.pending_credit,
-        summary.final_credit
+        summary.final_credit,
+        summary.delayed_credit_delta
     );
+    if summary.credit_events_total > 0 {
+        message.push_str(&format!(
+            " {} credit event(s) recorded.",
+            summary.credit_events_total
+        ));
+    }
     if !summary.recent_explanations.is_empty() {
         let explanations = summary
             .recent_explanations
@@ -3178,6 +3185,8 @@ mod tests {
             submissions_expired: 0,
             pending_credit: 12.5,
             final_credit: 7.0,
+            delayed_credit_delta: 1.25,
+            credit_events_total: 3,
             recent_explanations: vec![
                 "Replayable trace earned an initial estimate.".to_string(),
                 "Duplicate checks may adjust credit.".to_string(),
@@ -3187,6 +3196,8 @@ mod tests {
         assert!(message.contains("3 submitted, 0 expired (4 total)"));
         assert!(message.contains("pending +12.50"));
         assert!(message.contains("final confirmed +7.00"));
+        assert!(message.contains("delayed ledger +1.25"));
+        assert!(message.contains("3 credit event(s) recorded"));
         assert!(message.contains("Delayed credit can change"));
         assert!(message.contains("Recent factors: Replayable trace"));
     }
