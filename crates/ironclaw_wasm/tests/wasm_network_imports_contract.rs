@@ -14,11 +14,10 @@ fn network_import_uses_host_http_with_allowlist_policy() {
     let http = WasmPolicyHttpClient::new(
         client.clone(),
         NetworkPolicy {
-            allowed_targets: vec![NetworkTargetPattern {
-                scheme: Some(NetworkScheme::Https),
-                host_pattern: "api.example.test".to_string(),
-                port: None,
-            }],
+            allowed_targets: vec![
+                NetworkTargetPattern::new(Some(NetworkScheme::Https), "api.example.test", None)
+                    .unwrap(),
+            ],
             deny_private_ip_ranges: true,
             max_egress_bytes: Some(1024),
         },
@@ -28,7 +27,7 @@ fn network_import_uses_host_http_with_allowlist_policy() {
         .prepare(http_spec("https://api.example.test/v1/echo"))
         .unwrap();
     let descriptor = make_descriptor("net-demo", "net-demo.http", RuntimeKind::Wasm);
-    let reservation = sample_reservation();
+    let reservation = sample_active_reservation();
 
     let result = runtime
         .invoke_json_with_network(
@@ -54,7 +53,7 @@ fn network_imports_deny_by_default_without_network_context() {
         .prepare(http_spec("https://api.example.test/v1/echo"))
         .unwrap();
     let descriptor = make_descriptor("net-demo", "net-demo.http", RuntimeKind::Wasm);
-    let reservation = sample_reservation();
+    let reservation = sample_active_reservation();
 
     let result = runtime
         .invoke_json(
@@ -77,11 +76,10 @@ fn network_policy_denies_unlisted_host_before_client_call() {
     let http = WasmPolicyHttpClient::new(
         client.clone(),
         NetworkPolicy {
-            allowed_targets: vec![NetworkTargetPattern {
-                scheme: Some(NetworkScheme::Https),
-                host_pattern: "allowed.example.test".to_string(),
-                port: None,
-            }],
+            allowed_targets: vec![
+                NetworkTargetPattern::new(Some(NetworkScheme::Https), "allowed.example.test", None)
+                    .unwrap(),
+            ],
             deny_private_ip_ranges: true,
             max_egress_bytes: Some(1024),
         },
@@ -91,7 +89,7 @@ fn network_policy_denies_unlisted_host_before_client_call() {
         .prepare(http_spec("https://blocked.example.test/v1/echo"))
         .unwrap();
     let descriptor = make_descriptor("net-demo", "net-demo.http", RuntimeKind::Wasm);
-    let reservation = sample_reservation();
+    let reservation = sample_active_reservation();
 
     let result = runtime
         .invoke_json_with_network(
@@ -116,11 +114,10 @@ fn network_policy_blocks_literal_private_ip_targets_before_client_call() {
     let http = WasmPolicyHttpClient::new(
         client.clone(),
         NetworkPolicy {
-            allowed_targets: vec![NetworkTargetPattern {
-                scheme: Some(NetworkScheme::Http),
-                host_pattern: "127.0.0.1".to_string(),
-                port: None,
-            }],
+            allowed_targets: vec![
+                NetworkTargetPattern::new(Some(NetworkScheme::Http), "public.example.test", None)
+                    .unwrap(),
+            ],
             deny_private_ip_ranges: true,
             max_egress_bytes: Some(1024),
         },
@@ -130,7 +127,7 @@ fn network_policy_blocks_literal_private_ip_targets_before_client_call() {
         .prepare(http_spec("http://127.0.0.1/admin"))
         .unwrap();
     let descriptor = make_descriptor("net-demo", "net-demo.http", RuntimeKind::Wasm);
-    let reservation = sample_reservation();
+    let reservation = sample_active_reservation();
 
     let result = runtime
         .invoke_json_with_network(
@@ -155,11 +152,10 @@ fn network_policy_enforces_request_body_egress_limit_before_client_call() {
     let http = WasmPolicyHttpClient::new(
         client.clone(),
         NetworkPolicy {
-            allowed_targets: vec![NetworkTargetPattern {
-                scheme: Some(NetworkScheme::Https),
-                host_pattern: "api.example.test".to_string(),
-                port: None,
-            }],
+            allowed_targets: vec![
+                NetworkTargetPattern::new(Some(NetworkScheme::Https), "api.example.test", None)
+                    .unwrap(),
+            ],
             deny_private_ip_ranges: true,
             max_egress_bytes: Some(4),
         },
@@ -172,7 +168,7 @@ fn network_policy_enforces_request_body_egress_limit_before_client_call() {
         ))
         .unwrap();
     let descriptor = make_descriptor("net-demo", "net-demo.http", RuntimeKind::Wasm);
-    let reservation = sample_reservation();
+    let reservation = sample_active_reservation();
 
     let result = runtime
         .invoke_json_with_network(
@@ -197,11 +193,10 @@ fn network_policy_enforces_response_body_limit() {
     let http = WasmPolicyHttpClient::new(
         client,
         NetworkPolicy {
-            allowed_targets: vec![NetworkTargetPattern {
-                scheme: Some(NetworkScheme::Https),
-                host_pattern: "api.example.test".to_string(),
-                port: None,
-            }],
+            allowed_targets: vec![
+                NetworkTargetPattern::new(Some(NetworkScheme::Https), "api.example.test", None)
+                    .unwrap(),
+            ],
             deny_private_ip_ranges: true,
             max_egress_bytes: Some(4),
         },
@@ -211,7 +206,7 @@ fn network_policy_enforces_response_body_limit() {
         .prepare(http_spec("https://api.example.test/v1/echo"))
         .unwrap();
     let descriptor = make_descriptor("net-demo", "net-demo.http", RuntimeKind::Wasm);
-    let reservation = sample_reservation();
+    let reservation = sample_active_reservation();
 
     let result = runtime
         .invoke_json_with_network(
@@ -226,10 +221,49 @@ fn network_policy_enforces_response_body_limit() {
     assert_eq!(result.output, json!({"ok": false}));
 }
 
+#[test]
+fn network_import_bounds_response_to_guest_output_capacity() {
+    let client = RecordingHttpClient::new(WasmHttpResponse {
+        status: 200,
+        body: format!(r#"{{"payload":"{}"}}"#, "x".repeat(600)),
+    });
+    let http = WasmPolicyHttpClient::new(
+        client.clone(),
+        NetworkPolicy {
+            allowed_targets: vec![
+                NetworkTargetPattern::new(Some(NetworkScheme::Https), "api.example.test", None)
+                    .unwrap(),
+            ],
+            deny_private_ip_ranges: true,
+            max_egress_bytes: None,
+        },
+    );
+    let runtime = WasmRuntime::for_testing().unwrap();
+    let module = runtime
+        .prepare(http_spec("https://api.example.test/v1/echo"))
+        .unwrap();
+    let descriptor = make_descriptor("net-demo", "net-demo.http", RuntimeKind::Wasm);
+    let reservation = sample_active_reservation();
+
+    let result = runtime
+        .invoke_json_with_network(
+            &module,
+            &descriptor,
+            Some(&reservation),
+            CapabilityInvocation { input: json!({}) },
+            Arc::new(http),
+        )
+        .unwrap();
+
+    assert_eq!(result.output, json!({"ok": false}));
+    assert_eq!(*client.response_limits.lock().unwrap(), vec![512]);
+}
+
 #[derive(Clone)]
 struct RecordingHttpClient {
     response: WasmHttpResponse,
     requests: Arc<Mutex<Vec<WasmHttpRequest>>>,
+    response_limits: Arc<Mutex<Vec<usize>>>,
 }
 
 impl RecordingHttpClient {
@@ -237,13 +271,22 @@ impl RecordingHttpClient {
         Self {
             response,
             requests: Arc::new(Mutex::new(Vec::new())),
+            response_limits: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
 
 impl WasmHostHttp for RecordingHttpClient {
-    fn request_utf8(&self, request: WasmHttpRequest) -> Result<WasmHttpResponse, String> {
+    fn request_utf8(
+        &self,
+        request: WasmHttpRequest,
+        max_response_bytes: usize,
+    ) -> Result<WasmHttpResponse, String> {
         self.requests.lock().unwrap().push(request);
+        self.response_limits
+            .lock()
+            .unwrap()
+            .push(max_response_bytes);
         Ok(self.response.clone())
     }
 }
@@ -345,10 +388,10 @@ fn sample_scope() -> ResourceScope {
     }
 }
 
-fn sample_reservation() -> ResourceReservation {
-    ResourceReservation {
-        id: ResourceReservationId::new(),
-        scope: sample_scope(),
-        estimate: ResourceEstimate::default(),
-    }
+fn sample_active_reservation() -> ActiveResourceReservation {
+    let governor = InMemoryResourceGovernor::new();
+    let reservation = governor
+        .reserve(sample_scope(), ResourceEstimate::default())
+        .unwrap();
+    governor.active_reservation(reservation.id).unwrap()
 }

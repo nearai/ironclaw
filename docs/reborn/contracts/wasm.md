@@ -210,6 +210,7 @@ Network import rules:
 - `NetworkPolicy.allowed_targets` must match scheme/host/port
 - `deny_private_ip_ranges` blocks literal private/loopback/link-local IP targets; production host HTTP clients must also enforce DNS/IP resolution safeguards to prevent rebinding or proxy bypasses
 - `max_egress_bytes` bounds request body bytes and, in the V1 shim, returned response body bytes before they are copied into guest memory
+- response bodies are additionally bounded by the guest output capacity and runtime output-byte budget passed to `WasmHostHttp`
 - credentials/secrets are not injected by this import
 - missing network context returns a negative guest status instead of ambient network access
 
@@ -309,7 +310,11 @@ pub struct WasmHttpResponse {
 }
 
 pub trait WasmHostHttp: Send + Sync {
-    fn request_utf8(&self, request: WasmHttpRequest) -> Result<WasmHttpResponse, String>;
+    fn request_utf8(
+        &self,
+        request: WasmHttpRequest,
+        max_response_bytes: usize,
+    ) -> Result<WasmHttpResponse, String>;
 }
 
 pub struct WasmPolicyHttpClient<C>;
@@ -403,7 +408,7 @@ impl WasmRuntime {
         &self,
         module: &PreparedWasmModule,
         descriptor: &CapabilityDescriptor,
-        reservation: Option<&ResourceReservation>,
+        reservation: Option<&ActiveResourceReservation>,
         invocation: CapabilityInvocation,
         http: Arc<dyn WasmHostHttp>,
     ) -> Result<CapabilityResult, WasmError>;
@@ -489,6 +494,7 @@ Local contract tests should prove:
 - filesystem imports deny by default when no filesystem context is provided
 - filesystem write respects mount permissions and cannot create host-path access
 - unsupported host imports still fail closed during module preparation
+- network response imports pass guest/runtime output capacity to the host HTTP client
 - invocation returns actual usage suitable for resource reconciliation
 - no privileged host imports are available unless explicitly registered
 

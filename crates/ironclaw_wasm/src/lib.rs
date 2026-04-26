@@ -180,7 +180,11 @@ pub struct WasmHttpResponse {
 
 /// Synchronous host HTTP surface exposed to WASM network imports.
 pub trait WasmHostHttp: Send + Sync {
-    fn request_utf8(&self, request: WasmHttpRequest) -> Result<WasmHttpResponse, String>;
+    fn request_utf8(
+        &self,
+        request: WasmHttpRequest,
+        max_response_bytes: usize,
+    ) -> Result<WasmHttpResponse, String>;
 }
 
 /// Network-policy enforcing wrapper around a host-provided HTTP client.
@@ -204,7 +208,11 @@ impl<C> WasmHostHttp for WasmPolicyHttpClient<C>
 where
     C: WasmHostHttp,
 {
-    fn request_utf8(&self, request: WasmHttpRequest) -> Result<WasmHttpResponse, String> {
+    fn request_utf8(
+        &self,
+        request: WasmHttpRequest,
+        max_response_bytes: usize,
+    ) -> Result<WasmHttpResponse, String> {
         let target = network_target_for_url(&request.url)?;
         if !network_policy_allows(&self.policy, &target) {
             return Err("network target denied by policy".to_string());
@@ -214,10 +222,16 @@ where
         {
             return Err("network request exceeds egress limit".to_string());
         }
-        let response = self.client.request_utf8(request)?;
-        if let Some(max) = self.policy.max_egress_bytes
-            && response.body.len() as u64 > max
-        {
+        let policy_response_limit = self
+            .policy
+            .max_egress_bytes
+            .and_then(|max| usize::try_from(max).ok())
+            .unwrap_or(usize::MAX);
+        let effective_response_limit = max_response_bytes.min(policy_response_limit);
+        let response = self
+            .client
+            .request_utf8(request, effective_response_limit)?;
+        if response.body.len() > effective_response_limit {
             return Err("network response exceeds body limit".to_string());
         }
         Ok(response)
@@ -1465,7 +1479,10 @@ fn host_http_request_utf8(caller: &mut Caller<'_, RuntimeStoreData>, args: HttpI
     let Some(http) = caller.data().http.clone() else {
         return -10;
     };
-    match http.request_utf8(WasmHttpRequest { method, url, body }) {
+    let Ok(max_response_bytes) = guest_output_capacity(caller, args.out_cap) else {
+        return -6;
+    };
+    match http.request_utf8(WasmHttpRequest { method, url, body }, max_response_bytes) {
         Ok(response) => {
             write_guest_bytes(caller, args.out_ptr, args.out_cap, response.body.as_bytes())
         }
@@ -1497,11 +1514,7 @@ fn network_target_for_url(raw: &str) -> Result<NetworkTarget, String> {
         .filter(|host| !host.trim().is_empty())
         .ok_or_else(|| "URL host is required".to_string())?
         .to_ascii_lowercase();
-    Ok(NetworkTarget {
-        scheme,
-        host,
-        port: url.port(),
-    })
+    NetworkTarget::new(scheme, host, url.port()).map_err(|error| error.to_string())
 }
 
 fn network_policy_allows(policy: &NetworkPolicy, target: &NetworkTarget) -> bool {
@@ -1509,7 +1522,7 @@ fn network_policy_allows(policy: &NetworkPolicy, target: &NetworkTarget) -> bool
         return false;
     }
     if policy.deny_private_ip_ranges
-        && let Ok(ip) = target.host.parse::<IpAddr>()
+        && let Ok(ip) = target.host().parse::<IpAddr>()
         && is_private_or_loopback_ip(ip)
     {
         return false;
@@ -1521,17 +1534,17 @@ fn network_policy_allows(policy: &NetworkPolicy, target: &NetworkTarget) -> bool
 }
 
 fn target_matches_pattern(target: &NetworkTarget, pattern: &NetworkTargetPattern) -> bool {
-    if let Some(scheme) = pattern.scheme
-        && scheme != target.scheme
+    if let Some(scheme) = pattern.scheme()
+        && scheme != target.scheme()
     {
         return false;
     }
-    if let Some(port) = pattern.port
-        && Some(port) != target.port
+    if let Some(port) = pattern.port()
+        && Some(port) != target.port()
     {
         return false;
     }
-    host_matches_pattern(&target.host, &pattern.host_pattern.to_ascii_lowercase())
+    host_matches_pattern(target.host(), &pattern.host_pattern().to_ascii_lowercase())
 }
 
 fn host_matches_pattern(host: &str, pattern: &str) -> bool {
