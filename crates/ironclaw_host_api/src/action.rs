@@ -13,8 +13,8 @@ use std::net::IpAddr;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
-    ApprovalRequest, CapabilityId, CapabilitySet, EffectKind, ExtensionId, HostApiError, MountView,
-    ResourceEstimate, ScopedPath, SecretHandle,
+    ApprovalRequest, CapabilityId, EffectKind, ExtensionId, HostApiError, ResourceEstimate,
+    ScopedPath, SecretHandle,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

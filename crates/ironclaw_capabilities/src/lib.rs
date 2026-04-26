@@ -646,11 +646,6 @@ where
             }
         }
 
-        if let Err(error) = capability_leases.consume(&scope, claimed_lease.grant.id) {
-            fail_run(run_state, &scope, invocation_id, "LeaseConsumption").await?;
-            return Err(CapabilityInvocationError::Lease(Box::new(error)));
-        }
-
         let dispatch = match self
             .dispatcher
             .dispatch_json(CapabilityDispatchRequest {
@@ -668,6 +663,10 @@ where
             }
         };
 
+        if let Err(error) = capability_leases.consume(&scope, claimed_lease.grant.id) {
+            fail_run(run_state, &scope, invocation_id, "LeaseConsumption").await?;
+            return Err(CapabilityInvocationError::Lease(Box::new(error)));
+        }
         run_state.complete(&scope, invocation_id).await?;
 
         Ok(CapabilityInvocationResult { dispatch })
