@@ -2855,6 +2855,8 @@ async fn trace_commons_analytics_summary(
     println!("Trace Commons analytics summary:");
     print_optional_json_field("  tenant", value, "tenant_id");
     print_optional_json_field("  submissions", value, "submissions_total");
+    print_optional_json_field("  min cell count", value, "min_cell_count");
+    print_optional_json_field("  suppressed cells", value, "suppressed_cell_count");
     print_optional_json_field("  duplicate groups", value, "duplicate_groups");
     print_optional_json_field("  average novelty", value, "average_novelty_score");
     print_json_map("  by status", value.get("by_status"));

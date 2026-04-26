@@ -92,6 +92,7 @@ const TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES: &str =
 const TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: &str =
     "TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST";
 const DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: usize = 500;
+const TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT: &str = "TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT";
 const TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR: &str =
     "TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR";
 const TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR: &str =
@@ -140,6 +141,7 @@ struct AppState {
     require_db_reconciliation_clean: bool,
     require_export_guardrails: bool,
     max_export_items_per_request: usize,
+    analytics_min_cell_count: usize,
     submission_quota: TraceSubmissionQuotaConfig,
     legal_hold_retention_policy_ids: Arc<BTreeSet<String>>,
     artifact_store: Option<ConfiguredTraceArtifactStore>,
@@ -429,6 +431,7 @@ impl AppState {
         }
         let require_export_guardrails = env_truthy("TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS");
         let max_export_items_per_request = parse_max_export_items_per_request_from_env()?;
+        let analytics_min_cell_count = parse_analytics_min_cell_count_from_env()?;
         let submission_quota = parse_submission_quota_config_from_env()?;
         let legal_hold_retention_policy_ids = parse_legal_hold_retention_policy_ids_from_env()?;
         let artifact_store = trace_artifact_store_from_env(&root)?;
@@ -488,6 +491,7 @@ impl AppState {
             require_db_reconciliation_clean,
             require_export_guardrails,
             max_export_items_per_request,
+            analytics_min_cell_count,
             submission_quota,
             legal_hold_retention_policy_ids: Arc::new(legal_hold_retention_policy_ids),
             artifact_store,
@@ -891,6 +895,21 @@ fn parse_max_export_items_per_request(configured: &str) -> anyhow::Result<usize>
     Ok(parsed)
 }
 
+fn parse_analytics_min_cell_count_from_env() -> anyhow::Result<usize> {
+    match std::env::var(TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT) {
+        Ok(configured) => parse_analytics_min_cell_count(&configured),
+        Err(std::env::VarError::NotPresent) => Ok(0),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to read {TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT}")),
+    }
+}
+
+fn parse_analytics_min_cell_count(configured: &str) -> anyhow::Result<usize> {
+    configured.trim().parse::<usize>().with_context(|| {
+        format!("{TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT} must be a non-negative integer")
+    })
+}
+
 fn parse_submission_quota_config_from_env() -> anyhow::Result<TraceSubmissionQuotaConfig> {
     Ok(TraceSubmissionQuotaConfig {
         max_per_tenant_per_hour: parse_submission_quota_limit_from_env(
@@ -1004,6 +1023,7 @@ struct TraceCommonsConfigStatusResponse {
     require_db_reconciliation_clean: bool,
     require_export_guardrails: bool,
     max_export_items_per_request: usize,
+    analytics_min_cell_count: usize,
     submission_quota: TraceSubmissionQuotaConfig,
     legal_hold_retention_policy_ids: Vec<String>,
     artifact_store_configured: bool,
@@ -1030,6 +1050,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         require_db_reconciliation_clean: state.require_db_reconciliation_clean,
         require_export_guardrails: state.require_export_guardrails,
         max_export_items_per_request: state.max_export_items_per_request,
+        analytics_min_cell_count: state.analytics_min_cell_count,
         submission_quota: state.submission_quota,
         legal_hold_retention_policy_ids: state
             .legal_hold_retention_policy_ids
@@ -1564,8 +1585,9 @@ async fn analytics_handler(
         read_reviewer_metadata_view(state.as_ref(), &tenant)
             .await
             .map_err(internal_error)?;
-    let response =
+    let mut response =
         TraceCommonsAnalyticsResponse::from_records(tenant.tenant_id.clone(), records, derived);
+    response.apply_min_cell_count(state.analytics_min_cell_count);
     append_audit_event_with_db_mirror(
         state.as_ref(),
         &tenant,
@@ -13646,6 +13668,10 @@ struct TraceCommonsAnalyticsResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     submissions_total: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    min_cell_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    suppressed_cell_count: usize,
     by_status: BTreeMap<String, usize>,
     by_privacy_risk: BTreeMap<String, usize>,
     by_task_success: BTreeMap<String, usize>,
@@ -13699,6 +13725,22 @@ impl TraceProcessEvaluationAnalytics {
             self.evaluated_traces += 1;
         }
     }
+
+    fn apply_min_cell_count(&mut self, min_cell_count: usize) -> usize {
+        let mut suppressed = 0usize;
+        suppressed += suppress_small_analytics_cells(&mut self.by_label, min_cell_count);
+        suppressed += suppress_small_analytics_cells(&mut self.by_score_band, min_cell_count);
+        let axes = self.by_rating.keys().cloned().collect::<Vec<_>>();
+        for axis in axes {
+            if let Some(cells) = self.by_rating.get_mut(&axis) {
+                suppressed += suppress_small_analytics_cells(cells, min_cell_count);
+            }
+            if self.by_rating.get(&axis).is_some_and(BTreeMap::is_empty) {
+                self.by_rating.remove(&axis);
+            }
+        }
+        suppressed
+    }
 }
 
 impl TraceCommonsAnalyticsResponse {
@@ -13711,6 +13753,8 @@ impl TraceCommonsAnalyticsResponse {
             tenant_storage_ref: tenant_storage_ref(&tenant_id),
             tenant_id,
             submissions_total: records.len(),
+            min_cell_count: None,
+            suppressed_cell_count: 0,
             by_status: BTreeMap::new(),
             by_privacy_risk: BTreeMap::new(),
             by_task_success: BTreeMap::new(),
@@ -13770,6 +13814,39 @@ impl TraceCommonsAnalyticsResponse {
         }
         response
     }
+
+    fn apply_min_cell_count(&mut self, min_cell_count: usize) {
+        if min_cell_count <= 1 {
+            return;
+        }
+        self.min_cell_count = Some(min_cell_count);
+        self.suppressed_cell_count +=
+            suppress_small_analytics_cells(&mut self.by_status, min_cell_count);
+        self.suppressed_cell_count +=
+            suppress_small_analytics_cells(&mut self.by_privacy_risk, min_cell_count);
+        self.suppressed_cell_count +=
+            suppress_small_analytics_cells(&mut self.by_task_success, min_cell_count);
+        self.suppressed_cell_count +=
+            suppress_small_analytics_cells(&mut self.by_tool, min_cell_count);
+        self.suppressed_cell_count +=
+            suppress_small_analytics_cells(&mut self.by_tool_category, min_cell_count);
+        self.suppressed_cell_count +=
+            suppress_small_analytics_cells(&mut self.coverage_tags, min_cell_count);
+        self.suppressed_cell_count += self.process_evaluation.apply_min_cell_count(min_cell_count);
+    }
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
+fn suppress_small_analytics_cells(
+    cells: &mut BTreeMap<String, usize>,
+    min_cell_count: usize,
+) -> usize {
+    let before = cells.len();
+    cells.retain(|_, count| *count >= min_cell_count);
+    before.saturating_sub(cells.len())
 }
 
 impl IntoResponse for ApiError {
@@ -13843,6 +13920,7 @@ mod tests {
             require_db_reconciliation_clean: false,
             require_export_guardrails: false,
             max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
+            analytics_min_cell_count: 0,
             submission_quota: TraceSubmissionQuotaConfig::default(),
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store: None,
@@ -14190,6 +14268,7 @@ mod tests {
             require_db_reconciliation_clean: false,
             require_export_guardrails,
             max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
+            analytics_min_cell_count: 0,
             submission_quota: TraceSubmissionQuotaConfig::default(),
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store,
@@ -14246,6 +14325,7 @@ mod tests {
             require_db_reconciliation_clean: false,
             require_export_guardrails: true,
             max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
+            analytics_min_cell_count: 0,
             submission_quota: TraceSubmissionQuotaConfig::default(),
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store: Some(artifact_store),
@@ -14287,6 +14367,7 @@ mod tests {
             require_db_reconciliation_clean: false,
             require_export_guardrails: false,
             max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
+            analytics_min_cell_count: 0,
             submission_quota: TraceSubmissionQuotaConfig::default(),
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store: Some(artifact_store),
@@ -14326,6 +14407,7 @@ mod tests {
             require_db_reconciliation_clean: true,
             require_export_guardrails: false,
             max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
+            analytics_min_cell_count: 0,
             submission_quota: TraceSubmissionQuotaConfig::default(),
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store: None,
@@ -14779,6 +14861,25 @@ mod tests {
             parse_error
                 .to_string()
                 .contains(TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST)
+        );
+    }
+
+    #[test]
+    fn parses_analytics_min_cell_count() {
+        assert_eq!(
+            parse_analytics_min_cell_count("0").expect("zero disables suppression"),
+            0
+        );
+        assert_eq!(
+            parse_analytics_min_cell_count("5").expect("threshold parses"),
+            5
+        );
+        let error =
+            parse_analytics_min_cell_count("small").expect_err("non-numeric threshold is invalid");
+        assert!(
+            error
+                .to_string()
+                .contains(TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT)
         );
     }
 
@@ -17746,12 +17847,23 @@ mod tests {
                 .expect_err("contributor cannot access tenant-wide analytics");
         assert_eq!(contributor_analytics_error.0, StatusCode::FORBIDDEN);
 
-        let Json(analytics) = analytics_handler(State(state), auth_headers("review-token-a"))
-            .await
-            .expect("analytics succeeds");
+        let Json(analytics) =
+            analytics_handler(State(state.clone()), auth_headers("review-token-a"))
+                .await
+                .expect("analytics succeeds");
         assert_eq!(analytics.submissions_total, 3);
         assert_eq!(analytics.duplicate_groups, 1);
         assert_eq!(analytics.by_privacy_risk.get("medium"), Some(&3));
+        let mut suppressed_state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut suppressed_state).analytics_min_cell_count = 4;
+        let Json(suppressed_analytics) =
+            analytics_handler(State(suppressed_state), auth_headers("review-token-a"))
+                .await
+                .expect("analytics suppression succeeds");
+        assert_eq!(suppressed_analytics.submissions_total, 3);
+        assert_eq!(suppressed_analytics.min_cell_count, Some(4));
+        assert!(suppressed_analytics.suppressed_cell_count > 0);
+        assert!(suppressed_analytics.by_privacy_risk.is_empty());
         let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
         assert!(audit_events.iter().any(|event| {
             event.kind == "read"
@@ -21965,6 +22077,7 @@ mod tests {
             require_db_reconciliation_clean: false,
             require_export_guardrails: false,
             max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
+            analytics_min_cell_count: 0,
             submission_quota: TraceSubmissionQuotaConfig::default(),
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::from([
                 "private_corpus_revocable".to_string()

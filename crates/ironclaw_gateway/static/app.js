@@ -7781,6 +7781,8 @@ function traceOperatorHighlights(data) {
     require_export_guardrails: 'export guardrails required',
     skipped_count: 'skipped count',
     skipped: 'skipped count',
+    min_cell_count: 'analytics min cell count',
+    suppressed_cell_count: 'analytics suppressed cells',
     revoked_count: 'revoked count',
     revoked: 'revoked count',
     revoked_submission_count: 'revoked submissions',
