@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-25
 **Status:** Runnable V1 demo
-**Crates:** `ironclaw_filesystem`, `ironclaw_extensions`, `ironclaw_resources`, `ironclaw_wasm`, `ironclaw_scripts`, `ironclaw_events`, `ironclaw_mcp`, `ironclaw_dispatcher`
+**Crates:** `ironclaw_filesystem`, `ironclaw_extensions`, `ironclaw_resources`, `ironclaw_events`, `ironclaw_dispatcher`, `ironclaw_host_runtime`, `ironclaw_scripts`
 
 ---
 
@@ -15,12 +15,11 @@ LocalFilesystem mounted at /system/extensions
 -> ExtensionDiscovery reads manifests
 -> ExtensionRegistry registers capabilities
 -> RuntimeDispatcher receives already-authorized dispatch requests
--> RuntimeDispatcher routes dispatch by RuntimeKind
--> WasmRuntime executes a WASM capability
--> ScriptRuntime executes a script capability
--> McpRuntime executes an MCP adapter capability
+-> RuntimeDispatcher routes dispatch by RuntimeKind through registered adapters
+-> dispatcher example adapters execute JSON echo capabilities
+-> HostRuntimeServices examples wrap real ScriptRuntime backends for end-to-end capability/process demos
 -> InMemoryResourceGovernor reserves and reconciles all invocations
--> JsonlEventSink records requested/selected/succeeded events under /engine/events
+-> JsonlEventSink records requested/selected/succeeded events under tenant/user-scoped /engine event paths
 -> JSON outputs are returned through one dispatch path
 ```
 
@@ -37,12 +36,12 @@ cargo run -p ironclaw_dispatcher --example reborn_echo
 Expected output shape:
 
 ```text
-reborn_vertical_slice=ok
+reborn_dispatcher_adapter_slice=ok
 discovered_extensions=3
 dispatch=echo-wasm.say runtime=wasm output={"message":"hello wasm"} reservation_status=Reconciled
-dispatch=echo-script.say runtime=script script_backend=in_process_echo output={"message":"hello script"} reservation_status=Reconciled
-dispatch=echo-mcp.say runtime=mcp mcp_transport=stdio output={"message":"hello mcp"} reservation_status=Reconciled
-durable_event_path=VirtualPath("/engine/events/reborn-demo.jsonl")
+dispatch=echo-script.say runtime=script output={"message":"hello script"} reservation_status=Reconciled
+dispatch=echo-mcp.say runtime=mcp output={"message":"hello mcp"} reservation_status=Reconciled
+durable_event_path=VirtualPath("/engine/tenants/tenant1/users/user1/events/runtime/reborn-demo.jsonl")
 events=9
 event[0]=dispatch_requested capability=echo-wasm.say runtime=none error=none
 event[1]=runtime_selected capability=echo-wasm.say runtime=wasm error=none
@@ -55,42 +54,11 @@ event[7]=runtime_selected capability=echo-mcp.say runtime=mcp error=none
 event[8]=dispatch_succeeded capability=echo-mcp.say runtime=mcp error=none
 ```
 
-The default dispatcher example uses an in-process echo script backend, a semantic `runner = "sandboxed_process"` script manifest, and an in-process echo MCP client so the demo works without Docker or an external MCP server installed. It exercises `RuntimeDispatcher`, `ScriptRuntime`, `McpRuntime`, manifest-derived command metadata, resource lifecycle, and event emission path without depending on higher-level authorization or capability-host workflow crates. Caller-facing authorization/run-state/approval flows are validated by `ironclaw_capabilities`, `ironclaw_run_state`, and `ironclaw_host_runtime` contract tests and examples.
+The default dispatcher example uses in-crate echo adapters so `ironclaw_dispatcher` can demonstrate routing, resource lifecycle, and event emission without depending on concrete WASM, Script, or MCP runtime crates. Real runtime wiring now lives in `ironclaw_host_runtime`, whose examples use `HostRuntimeServices` to adapt configured runtimes into dispatcher adapters and then drive capability/process workflows without Docker by default.
 
 ---
 
-## 3. Optional Docker backend
-
-To exercise the V1 Docker script backend:
-
-```bash
-IRONCLAW_REBORN_DEMO_DOCKER=1 cargo run -p ironclaw_dispatcher --example reborn_echo
-```
-
-The script manifest declares:
-
-```toml
-[runtime]
-kind = "script"
-backend = "docker"
-image = "alpine:latest"
-command = "sh"
-args = ["-c", "cat"]
-```
-
-`DockerScriptBackend` runs the command as:
-
-```text
-docker run --rm -i --network none alpine:latest sh -c cat
-```
-
-The example writes invocation JSON to stdin and expects JSON on stdout.
-
-Docker availability, image presence, and local Docker permissions are intentionally environment-specific. The default non-Docker backend exists to keep the vertical slice runnable everywhere.
-
----
-
-## 4. What this validates
+## 3. What this validates
 
 The integration test `crates/ironclaw_dispatcher/tests/vertical_slice_contract.rs` validates:
 
@@ -98,17 +66,17 @@ The integration test `crates/ironclaw_dispatcher/tests/vertical_slice_contract.r
 - extension discovery returns WASM, Script, and MCP packages
 - dispatcher crate tests exercise already-authorized `CapabilityDispatchRequest` values directly
 - higher-level caller workflow stays out of dispatcher crate dev surfaces
-- WASM dispatch goes through `RuntimeDispatcher` and `WasmRuntime`
-- Script dispatch goes through `RuntimeDispatcher` and `ScriptRuntime`
-- MCP dispatch goes through `RuntimeDispatcher` and `McpRuntime`
+- WASM dispatch goes through `RuntimeDispatcher` and a registered runtime adapter
+- Script dispatch goes through `RuntimeDispatcher` and a registered runtime adapter
+- MCP dispatch goes through `RuntimeDispatcher` and a registered runtime adapter
 - all invocations reserve and reconcile resource usage
 - all lanes emit dispatch requested/runtime selected/dispatch succeeded events
-- event history is durably written through `RootFilesystem` at `/engine/events/reborn-demo.jsonl`
+- event history is durably written through `RootFilesystem` at the scoped runtime event path
 - all lanes return JSON output through the same normalized dispatch result type
 
 ---
 
-## 5. Non-goals
+## 4. Non-goals
 
 This slice does not add:
 

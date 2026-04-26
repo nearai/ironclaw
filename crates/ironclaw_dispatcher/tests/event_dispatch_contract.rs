@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_dispatcher::*;
@@ -6,11 +6,8 @@ use ironclaw_events::*;
 use ironclaw_extensions::*;
 use ironclaw_filesystem::*;
 use ironclaw_host_api::*;
-use ironclaw_mcp::*;
 use ironclaw_resources::*;
-use ironclaw_scripts::*;
-use ironclaw_wasm::*;
-use serde_json::json;
+use serde_json::{Value, json};
 
 #[tokio::test]
 async fn dispatcher_emits_events_for_wasm_and_script_success() {
@@ -20,12 +17,12 @@ async fn dispatcher_emits_events_for_wasm_and_script_success() {
             .await
             .unwrap();
     let governor = InMemoryResourceGovernor::new();
-    let wasm_runtime = WasmRuntime::for_testing().unwrap();
-    let script_runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), EchoScriptBackend);
+    let wasm_adapter = EchoAdapter::new(RuntimeKind::Wasm);
+    let script_adapter = EchoAdapter::new(RuntimeKind::Script);
     let events = InMemoryEventSink::new();
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
-        .with_wasm_runtime(&wasm_runtime)
-        .with_script_runtime(&script_runtime)
+        .with_runtime_adapter(RuntimeKind::Wasm, &wasm_adapter)
+        .with_runtime_adapter(RuntimeKind::Script, &script_adapter)
         .with_event_sink(&events);
 
     dispatcher
@@ -95,10 +92,10 @@ async fn dispatcher_ignores_event_sink_failures_on_success() {
             .await
             .unwrap();
     let governor = InMemoryResourceGovernor::new();
-    let wasm_runtime = WasmRuntime::for_testing().unwrap();
+    let wasm_adapter = EchoAdapter::new(RuntimeKind::Wasm);
     let events = FailingEventSink;
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
-        .with_wasm_runtime(&wasm_runtime)
+        .with_runtime_adapter(RuntimeKind::Wasm, &wasm_adapter)
         .with_event_sink(&events);
 
     let result = dispatcher
@@ -159,13 +156,10 @@ async fn dispatcher_emits_events_for_mcp_success() {
         .insert(package_from_manifest(MCP_MANIFEST))
         .unwrap();
     let governor = InMemoryResourceGovernor::new();
-    let mcp_runtime = McpRuntime::new(
-        McpRuntimeConfig::for_testing(),
-        RecordingMcpClient::new(McpClientOutput::json(json!({"matches": ["ironclaw"]}))),
-    );
+    let mcp_adapter = StaticAdapter::new(RuntimeKind::Mcp, json!({"matches": ["ironclaw"]}));
     let events = InMemoryEventSink::new();
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
-        .with_mcp_runtime(&mcp_runtime)
+        .with_runtime_adapter(RuntimeKind::Mcp, &mcp_adapter)
         .with_event_sink(&events);
 
     dispatcher
@@ -207,10 +201,10 @@ async fn dispatcher_can_persist_events_to_filesystem_jsonl_sink() {
     .await
     .unwrap();
     let governor = InMemoryResourceGovernor::new();
-    let wasm_runtime = WasmRuntime::for_testing().unwrap();
+    let wasm_adapter = EchoAdapter::new(RuntimeKind::Wasm);
     let events = JsonlEventSink::new(Arc::clone(&fs), event_path.clone());
     let dispatcher = RuntimeDispatcher::new(&registry, fs.as_ref(), &governor)
-        .with_wasm_runtime(&wasm_runtime)
+        .with_runtime_adapter(RuntimeKind::Wasm, &wasm_adapter)
         .with_event_sink(&events);
 
     dispatcher
@@ -299,39 +293,98 @@ impl EventSink for FailingEventSink {
 }
 
 #[derive(Clone)]
-struct RecordingMcpClient {
-    output: McpClientOutput,
-    requests: Arc<Mutex<Vec<McpClientRequest>>>,
+struct EchoAdapter {
+    runtime: RuntimeKind,
 }
 
-impl RecordingMcpClient {
-    fn new(output: McpClientOutput) -> Self {
-        Self {
-            output,
-            requests: Arc::new(Mutex::new(Vec::new())),
-        }
+impl EchoAdapter {
+    fn new(runtime: RuntimeKind) -> Self {
+        Self { runtime }
     }
 }
 
 #[async_trait]
-impl McpClient for RecordingMcpClient {
-    async fn call_tool(&self, request: McpClientRequest) -> Result<McpClientOutput, String> {
-        self.requests.lock().unwrap().push(request);
-        Ok(self.output.clone())
+impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for EchoAdapter {
+    async fn dispatch_json(
+        &self,
+        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        adapter_result(
+            self.runtime,
+            request.governor,
+            request.scope,
+            request.estimate,
+            request.input,
+        )
     }
 }
 
 #[derive(Clone)]
-struct EchoScriptBackend;
+struct StaticAdapter {
+    runtime: RuntimeKind,
+    output: Value,
+}
 
-impl ScriptBackend for EchoScriptBackend {
-    fn execute(&self, request: ScriptBackendRequest) -> Result<ScriptBackendOutput, String> {
-        Ok(ScriptBackendOutput {
-            exit_code: 0,
-            stdout: request.stdin_json.into_bytes(),
-            stderr: Vec::new(),
-            wall_clock_ms: 1,
-        })
+impl StaticAdapter {
+    fn new(runtime: RuntimeKind, output: Value) -> Self {
+        Self { runtime, output }
+    }
+}
+
+#[async_trait]
+impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for StaticAdapter {
+    async fn dispatch_json(
+        &self,
+        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        adapter_result(
+            self.runtime,
+            request.governor,
+            request.scope,
+            request.estimate,
+            self.output.clone(),
+        )
+    }
+}
+
+fn adapter_result(
+    runtime: RuntimeKind,
+    governor: &InMemoryResourceGovernor,
+    scope: ResourceScope,
+    estimate: ResourceEstimate,
+    output: Value,
+) -> Result<RuntimeAdapterResult, DispatchError> {
+    let usage = ResourceUsage {
+        output_bytes: serde_json::to_vec(&output).unwrap().len() as u64,
+        process_count: u32::from(matches!(runtime, RuntimeKind::Script | RuntimeKind::Mcp)),
+        ..ResourceUsage::default()
+    };
+    let reservation = governor
+        .reserve(scope, estimate)
+        .map_err(|_| dispatch_error_for_runtime(runtime, RuntimeDispatchErrorKind::Resource))?;
+    let receipt = governor
+        .reconcile(reservation.id, usage.clone())
+        .map_err(|_| dispatch_error_for_runtime(runtime, RuntimeDispatchErrorKind::Resource))?;
+    Ok(RuntimeAdapterResult {
+        output,
+        output_bytes: usage.output_bytes,
+        usage,
+        receipt,
+    })
+}
+
+fn dispatch_error_for_runtime(
+    runtime: RuntimeKind,
+    kind: RuntimeDispatchErrorKind,
+) -> DispatchError {
+    match runtime {
+        RuntimeKind::Wasm => DispatchError::Wasm { kind },
+        RuntimeKind::Script => DispatchError::Script { kind },
+        RuntimeKind::Mcp => DispatchError::Mcp { kind },
+        RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::UnsupportedRuntime {
+            capability: CapabilityId::new("system.unsupported").unwrap(),
+            runtime,
+        },
     }
 }
 
@@ -376,9 +429,8 @@ fn filesystem_with_echo_extensions() -> LocalFilesystem {
 
 fn write_echo_extensions(root: &std::path::Path) {
     let wasm_root = root.join("echo-wasm");
-    std::fs::create_dir_all(wasm_root.join("wasm")).unwrap();
-    std::fs::write(wasm_root.join("manifest.toml"), WASM_MANIFEST).unwrap();
-    std::fs::write(wasm_root.join("wasm/echo.wasm"), json_echo_module()).unwrap();
+    std::fs::create_dir_all(wasm_root).unwrap();
+    std::fs::write(root.join("echo-wasm/manifest.toml"), WASM_MANIFEST).unwrap();
 
     let script_root = root.join("echo-script");
     std::fs::create_dir_all(&script_root).unwrap();
@@ -389,36 +441,6 @@ fn package_from_manifest(manifest: &str) -> ExtensionPackage {
     let manifest = ExtensionManifest::parse(manifest).unwrap();
     let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
     ExtensionPackage::from_manifest(manifest, root).unwrap()
-}
-
-fn json_echo_module() -> Vec<u8> {
-    wat::parse_str(
-        r#"(module
-            (memory (export "memory") 1)
-            (global $heap (mut i32) (i32.const 1024))
-            (global $out_ptr (mut i32) (i32.const 0))
-            (global $out_len (mut i32) (i32.const 0))
-            (func (export "alloc") (param $len i32) (result i32)
-              (local $ptr i32)
-              global.get $heap
-              local.set $ptr
-              global.get $heap
-              local.get $len
-              i32.add
-              global.set $heap
-              local.get $ptr)
-            (func (export "say") (param $ptr i32) (param $len i32) (result i32)
-              local.get $ptr
-              global.set $out_ptr
-              local.get $len
-              global.set $out_len
-              i32.const 0)
-            (func (export "output_ptr") (result i32)
-              global.get $out_ptr)
-            (func (export "output_len") (result i32)
-              global.get $out_len))"#,
-    )
-    .unwrap()
 }
 
 fn sample_scope() -> ResourceScope {

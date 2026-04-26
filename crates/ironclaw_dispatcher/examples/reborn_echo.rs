@@ -1,52 +1,38 @@
 use std::{error::Error, sync::Arc};
 
 use async_trait::async_trait;
-use ironclaw_dispatcher::RuntimeDispatcher;
+use ironclaw_dispatcher::{
+    RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
+};
 use ironclaw_events::{JsonlEventSink, RuntimeEventKind, scoped_runtime_event_log_path};
 use ironclaw_extensions::ExtensionDiscovery;
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{
-    CapabilityDispatchRequest, CapabilityId, HostPath, InvocationId, ProjectId, ResourceEstimate,
-    ResourceScope, RuntimeKind, TenantId, UserId, VirtualPath,
+    CapabilityDispatchRequest, CapabilityId, DispatchError, HostPath, InvocationId, ProjectId,
+    ResourceEstimate, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind, RuntimeKind,
+    TenantId, UserId, VirtualPath,
 };
-use ironclaw_mcp::{McpClient, McpClientOutput, McpClientRequest, McpRuntime, McpRuntimeConfig};
-use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_scripts::{
-    DockerScriptBackend, ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime,
-    ScriptRuntimeConfig,
-};
-use ironclaw_wasm::WasmRuntime;
+use ironclaw_resources::{InMemoryResourceGovernor, ResourceGovernor};
 use serde_json::{Value, json};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
-    if std::env::var("IRONCLAW_REBORN_DEMO_DOCKER").as_deref() == Ok("1") {
-        run_demo(DockerScriptBackend, "docker").await
-    } else {
-        run_demo(EchoScriptBackend, "in_process_echo").await
-    }
-}
-
-async fn run_demo<B>(script_backend: B, script_backend_label: &str) -> Result<(), Box<dyn Error>>
-where
-    B: ScriptBackend + 'static,
-{
     let fs = Arc::new(filesystem_with_echo_extensions()?);
     let registry =
         ExtensionDiscovery::discover(fs.as_ref(), &VirtualPath::new("/system/extensions")?).await?;
     let discovered_extensions = registry.extensions().count();
 
     let governor = InMemoryResourceGovernor::new();
-    let wasm_runtime = WasmRuntime::for_testing()?;
-    let script_runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), script_backend);
-    let mcp_runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), EchoMcpClient);
+    let wasm_adapter = EchoAdapter::new(RuntimeKind::Wasm);
+    let script_adapter = EchoAdapter::new(RuntimeKind::Script);
+    let mcp_adapter = EchoAdapter::new(RuntimeKind::Mcp);
     let scope = sample_scope()?;
     let event_path = scoped_runtime_event_log_path(&scope, "reborn-demo.jsonl")?;
     let events = JsonlEventSink::new(Arc::clone(&fs), event_path.clone());
     let dispatcher = RuntimeDispatcher::new(&registry, fs.as_ref(), &governor)
-        .with_wasm_runtime(&wasm_runtime)
-        .with_script_runtime(&script_runtime)
-        .with_mcp_runtime(&mcp_runtime)
+        .with_runtime_adapter(RuntimeKind::Wasm, &wasm_adapter)
+        .with_runtime_adapter(RuntimeKind::Script, &script_adapter)
+        .with_runtime_adapter(RuntimeKind::Mcp, &mcp_adapter)
         .with_event_sink(&events);
 
     let wasm = dispatcher
@@ -92,7 +78,7 @@ where
 
     let recorded_events = events.read_events().await?;
 
-    println!("reborn_vertical_slice=ok");
+    println!("reborn_dispatcher_adapter_slice=ok");
     println!("discovered_extensions={discovered_extensions}");
     println!(
         "dispatch={} runtime={} output={} reservation_status={:?}",
@@ -102,15 +88,14 @@ where
         wasm.receipt.status
     );
     println!(
-        "dispatch={} runtime={} script_backend={} output={} reservation_status={:?}",
+        "dispatch={} runtime={} output={} reservation_status={:?}",
         script.capability_id,
         runtime_label(script.runtime),
-        script_backend_label,
         stable_json(&script.output),
         script.receipt.status
     );
     println!(
-        "dispatch={} runtime={} mcp_transport=stdio output={} reservation_status={:?}",
+        "dispatch={} runtime={} output={} reservation_status={:?}",
         mcp.capability_id,
         runtime_label(mcp.runtime),
         stable_json(&mcp.output),
@@ -131,25 +116,48 @@ where
 }
 
 #[derive(Clone)]
-struct EchoMcpClient;
+struct EchoAdapter {
+    runtime: RuntimeKind,
+}
 
-#[async_trait]
-impl McpClient for EchoMcpClient {
-    async fn call_tool(&self, request: McpClientRequest) -> Result<McpClientOutput, String> {
-        Ok(McpClientOutput::json(request.input))
+impl EchoAdapter {
+    fn new(runtime: RuntimeKind) -> Self {
+        Self { runtime }
     }
 }
 
-#[derive(Clone)]
-struct EchoScriptBackend;
-
-impl ScriptBackend for EchoScriptBackend {
-    fn execute(&self, request: ScriptBackendRequest) -> Result<ScriptBackendOutput, String> {
-        Ok(ScriptBackendOutput {
-            exit_code: 0,
-            stdout: request.stdin_json.into_bytes(),
-            stderr: Vec::new(),
-            wall_clock_ms: 1,
+#[async_trait]
+impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for EchoAdapter {
+    async fn dispatch_json(
+        &self,
+        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        let output = request.input;
+        let usage = ResourceUsage {
+            output_bytes: serde_json::to_vec(&output).unwrap().len() as u64,
+            process_count: u32::from(matches!(
+                self.runtime,
+                RuntimeKind::Script | RuntimeKind::Mcp
+            )),
+            ..ResourceUsage::default()
+        };
+        let reservation = request
+            .governor
+            .reserve(request.scope, request.estimate)
+            .map_err(|_| DispatchError::Wasm {
+                kind: RuntimeDispatchErrorKind::Resource,
+            })?;
+        let receipt = request
+            .governor
+            .reconcile(reservation.id, usage.clone())
+            .map_err(|_| DispatchError::Wasm {
+                kind: RuntimeDispatchErrorKind::Resource,
+            })?;
+        Ok(RuntimeAdapterResult {
+            output,
+            output_bytes: usage.output_bytes,
+            usage,
+            receipt,
         })
     }
 }
@@ -162,9 +170,8 @@ fn filesystem_with_echo_extensions() -> Result<LocalFilesystem, Box<dyn Error>> 
     std::fs::create_dir_all(&engine_root)?;
 
     let wasm_root = extensions_root.join("echo-wasm");
-    std::fs::create_dir_all(wasm_root.join("wasm"))?;
+    std::fs::create_dir_all(&wasm_root)?;
     std::fs::write(wasm_root.join("manifest.toml"), WASM_MANIFEST)?;
-    std::fs::write(wasm_root.join("wasm/echo.wasm"), json_echo_module()?)?;
 
     let script_root = extensions_root.join("echo-script");
     std::fs::create_dir_all(&script_root)?;
@@ -184,35 +191,6 @@ fn filesystem_with_echo_extensions() -> Result<LocalFilesystem, Box<dyn Error>> 
         HostPath::from_path_buf(engine_root),
     )?;
     Ok(fs)
-}
-
-fn json_echo_module() -> Result<Vec<u8>, wat::Error> {
-    wat::parse_str(
-        r#"(module
-            (memory (export "memory") 1)
-            (global $heap (mut i32) (i32.const 1024))
-            (global $out_ptr (mut i32) (i32.const 0))
-            (global $out_len (mut i32) (i32.const 0))
-            (func (export "alloc") (param $len i32) (result i32)
-              (local $ptr i32)
-              global.get $heap
-              local.set $ptr
-              global.get $heap
-              local.get $len
-              i32.add
-              global.set $heap
-              local.get $ptr)
-            (func (export "say") (param $ptr i32) (param $len i32) (result i32)
-              local.get $ptr
-              global.set $out_ptr
-              local.get $len
-              global.set $out_len
-              i32.const 0)
-            (func (export "output_ptr") (result i32)
-              global.get $out_ptr)
-            (func (export "output_len") (result i32)
-              global.get $out_len))"#,
-    )
 }
 
 fn sample_scope() -> Result<ResourceScope, Box<dyn Error>> {

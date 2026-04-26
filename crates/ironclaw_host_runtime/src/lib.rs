@@ -6,22 +6,184 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use ironclaw_approvals::ApprovalResolver;
 use ironclaw_authorization::{CapabilityDispatchAuthorizer, CapabilityLeaseStore};
 use ironclaw_capabilities::{CapabilityHost, DispatchProcessExecutor};
-use ironclaw_dispatcher::RuntimeDispatcher;
+use ironclaw_dispatcher::{
+    RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
+};
 use ironclaw_events::{AuditSink, EventSink};
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::CapabilityDispatcher;
-use ironclaw_mcp::McpExecutor;
+use ironclaw_host_api::{
+    CapabilityDispatcher, DispatchError, RuntimeDispatchErrorKind, RuntimeKind,
+};
+use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_processes::{
     ProcessExecutor, ProcessHost, ProcessResultStore, ProcessServices, ProcessStore,
 };
 use ironclaw_resources::ResourceGovernor;
 use ironclaw_run_state::{ApprovalRequestStore, RunStateStore};
-use ironclaw_scripts::ScriptExecutor;
-use ironclaw_wasm::WasmRuntime;
+use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
+use ironclaw_wasm::{CapabilityInvocation, WasmError, WasmExecutionRequest, WasmRuntime};
+
+/// Dispatcher adapter for the concrete WASM runtime crate.
+pub struct WasmRuntimeAdapter {
+    runtime: Arc<WasmRuntime>,
+}
+
+impl WasmRuntimeAdapter {
+    pub fn new(runtime: Arc<WasmRuntime>) -> Self {
+        Self { runtime }
+    }
+}
+
+#[async_trait]
+impl<F, G> RuntimeAdapter<F, G> for WasmRuntimeAdapter
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
+    async fn dispatch_json(
+        &self,
+        request: RuntimeAdapterRequest<'_, F, G>,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        let execution = self
+            .runtime
+            .execute_extension_json(
+                request.filesystem,
+                request.governor,
+                WasmExecutionRequest {
+                    package: request.package,
+                    capability_id: request.capability_id,
+                    scope: request.scope,
+                    estimate: request.estimate,
+                    invocation: CapabilityInvocation {
+                        input: request.input,
+                    },
+                },
+            )
+            .await
+            .map_err(wasm_dispatch_error)?;
+
+        Ok(RuntimeAdapterResult {
+            output: execution.result.output,
+            usage: execution.result.usage,
+            receipt: execution.receipt,
+            output_bytes: execution.result.output_bytes,
+        })
+    }
+}
+
+/// Dispatcher adapter for the concrete script executor port.
+pub struct ScriptRuntimeAdapter {
+    runtime: Arc<dyn ScriptExecutor>,
+}
+
+impl ScriptRuntimeAdapter {
+    pub fn new<T>(runtime: Arc<T>) -> Self
+    where
+        T: ScriptExecutor + 'static,
+    {
+        let runtime: Arc<dyn ScriptExecutor> = runtime;
+        Self { runtime }
+    }
+
+    pub fn from_dyn(runtime: Arc<dyn ScriptExecutor>) -> Self {
+        Self { runtime }
+    }
+}
+
+#[async_trait]
+impl<F, G> RuntimeAdapter<F, G> for ScriptRuntimeAdapter
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
+    async fn dispatch_json(
+        &self,
+        request: RuntimeAdapterRequest<'_, F, G>,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        let execution = self
+            .runtime
+            .execute_extension_json(
+                request.governor,
+                ScriptExecutionRequest {
+                    package: request.package,
+                    capability_id: request.capability_id,
+                    scope: request.scope,
+                    estimate: request.estimate,
+                    invocation: ScriptInvocation {
+                        input: request.input,
+                    },
+                },
+            )
+            .map_err(script_dispatch_error)?;
+
+        Ok(RuntimeAdapterResult {
+            output: execution.result.output,
+            usage: execution.result.usage,
+            receipt: execution.receipt,
+            output_bytes: execution.result.output_bytes,
+        })
+    }
+}
+
+/// Dispatcher adapter for the concrete MCP executor port.
+pub struct McpRuntimeAdapter {
+    runtime: Arc<dyn McpExecutor>,
+}
+
+impl McpRuntimeAdapter {
+    pub fn new<T>(runtime: Arc<T>) -> Self
+    where
+        T: McpExecutor + 'static,
+    {
+        let runtime: Arc<dyn McpExecutor> = runtime;
+        Self { runtime }
+    }
+
+    pub fn from_dyn(runtime: Arc<dyn McpExecutor>) -> Self {
+        Self { runtime }
+    }
+}
+
+#[async_trait]
+impl<F, G> RuntimeAdapter<F, G> for McpRuntimeAdapter
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
+    async fn dispatch_json(
+        &self,
+        request: RuntimeAdapterRequest<'_, F, G>,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        let execution = self
+            .runtime
+            .execute_extension_json(
+                request.governor,
+                McpExecutionRequest {
+                    package: request.package,
+                    capability_id: request.capability_id,
+                    scope: request.scope,
+                    estimate: request.estimate,
+                    invocation: McpInvocation {
+                        input: request.input,
+                    },
+                },
+            )
+            .await
+            .map_err(mcp_dispatch_error)?;
+
+        Ok(RuntimeAdapterResult {
+            output: execution.result.output,
+            usage: execution.result.usage,
+            receipt: execution.receipt,
+            output_bytes: execution.result.output_bytes,
+        })
+    }
+}
 
 /// Composition root for the Reborn host/runtime vertical slice.
 ///
@@ -198,13 +360,22 @@ where
         );
 
         if let Some(runtime) = &self.wasm_runtime {
-            dispatcher = dispatcher.with_wasm_runtime_arc(Arc::clone(runtime));
+            dispatcher = dispatcher.with_runtime_adapter_arc(
+                RuntimeKind::Wasm,
+                Arc::new(WasmRuntimeAdapter::new(Arc::clone(runtime))),
+            );
         }
         if let Some(runtime) = &self.script_runtime {
-            dispatcher = dispatcher.with_script_runtime_arc(Arc::clone(runtime));
+            dispatcher = dispatcher.with_runtime_adapter_arc(
+                RuntimeKind::Script,
+                Arc::new(ScriptRuntimeAdapter::from_dyn(Arc::clone(runtime))),
+            );
         }
         if let Some(runtime) = &self.mcp_runtime {
-            dispatcher = dispatcher.with_mcp_runtime_arc(Arc::clone(runtime));
+            dispatcher = dispatcher.with_runtime_adapter_arc(
+                RuntimeKind::Mcp,
+                Arc::new(McpRuntimeAdapter::from_dyn(Arc::clone(runtime))),
+            );
         }
         if let Some(sink) = &self.event_sink {
             dispatcher = dispatcher.with_event_sink_arc(Arc::clone(sink));
@@ -258,5 +429,85 @@ where
             host = host.with_capability_leases(capability_leases.as_ref());
         }
         host
+    }
+}
+
+fn mcp_dispatch_error(error: McpError) -> DispatchError {
+    DispatchError::Mcp {
+        kind: mcp_error_kind(&error),
+    }
+}
+
+fn script_dispatch_error(error: ScriptError) -> DispatchError {
+    DispatchError::Script {
+        kind: script_error_kind(&error),
+    }
+}
+
+fn wasm_dispatch_error(error: WasmError) -> DispatchError {
+    DispatchError::Wasm {
+        kind: wasm_error_kind(&error),
+    }
+}
+
+fn mcp_error_kind(error: &McpError) -> RuntimeDispatchErrorKind {
+    match error {
+        McpError::Resource(_) => RuntimeDispatchErrorKind::Resource,
+        McpError::Client { .. } => RuntimeDispatchErrorKind::Client,
+        McpError::UnsupportedTransport { .. } => RuntimeDispatchErrorKind::UnsupportedRunner,
+        McpError::ExtensionRuntimeMismatch { .. } => {
+            RuntimeDispatchErrorKind::ExtensionRuntimeMismatch
+        }
+        McpError::CapabilityNotDeclared { .. } => RuntimeDispatchErrorKind::UndeclaredCapability,
+        McpError::DescriptorMismatch { .. } => RuntimeDispatchErrorKind::ExtensionRuntimeMismatch,
+        McpError::InvalidInvocation { .. } => RuntimeDispatchErrorKind::InputEncode,
+        McpError::OutputLimitExceeded { .. } => RuntimeDispatchErrorKind::OutputTooLarge,
+    }
+}
+
+fn script_error_kind(error: &ScriptError) -> RuntimeDispatchErrorKind {
+    match error {
+        ScriptError::Resource(_) => RuntimeDispatchErrorKind::Resource,
+        ScriptError::Backend { .. } => RuntimeDispatchErrorKind::Backend,
+        ScriptError::UnsupportedRunner { .. } => RuntimeDispatchErrorKind::UnsupportedRunner,
+        ScriptError::ExtensionRuntimeMismatch { .. } => {
+            RuntimeDispatchErrorKind::ExtensionRuntimeMismatch
+        }
+        ScriptError::CapabilityNotDeclared { .. } => RuntimeDispatchErrorKind::UndeclaredCapability,
+        ScriptError::DescriptorMismatch { .. } => {
+            RuntimeDispatchErrorKind::ExtensionRuntimeMismatch
+        }
+        ScriptError::InvalidInvocation { .. } => RuntimeDispatchErrorKind::InputEncode,
+        ScriptError::ExitFailure { .. } => RuntimeDispatchErrorKind::ExitFailure,
+        ScriptError::OutputLimitExceeded { .. } => RuntimeDispatchErrorKind::OutputTooLarge,
+        ScriptError::InvalidOutput { .. } => RuntimeDispatchErrorKind::OutputDecode,
+    }
+}
+
+fn wasm_error_kind(error: &WasmError) -> RuntimeDispatchErrorKind {
+    match error {
+        WasmError::Engine { .. } | WasmError::Cache { .. } => RuntimeDispatchErrorKind::Executor,
+        WasmError::Extension(_) => RuntimeDispatchErrorKind::Manifest,
+        WasmError::Filesystem(_) => RuntimeDispatchErrorKind::FilesystemDenied,
+        WasmError::Resource(_) => RuntimeDispatchErrorKind::Resource,
+        WasmError::InvalidModule { .. } => RuntimeDispatchErrorKind::Manifest,
+        WasmError::UnsupportedImport { .. } => RuntimeDispatchErrorKind::Executor,
+        WasmError::DescriptorMismatch { .. } => RuntimeDispatchErrorKind::ExtensionRuntimeMismatch,
+        WasmError::ExtensionRuntimeMismatch { .. } => {
+            RuntimeDispatchErrorKind::ExtensionRuntimeMismatch
+        }
+        WasmError::CapabilityNotDeclared { .. } => RuntimeDispatchErrorKind::UndeclaredCapability,
+        WasmError::InvalidInvocation { .. } => RuntimeDispatchErrorKind::InputEncode,
+        WasmError::MissingReservation => RuntimeDispatchErrorKind::Resource,
+        WasmError::MissingExport { .. } => RuntimeDispatchErrorKind::Executor,
+        WasmError::MissingMemory => RuntimeDispatchErrorKind::Memory,
+        WasmError::GuestAllocation { .. } => RuntimeDispatchErrorKind::Memory,
+        WasmError::GuestError { .. } => RuntimeDispatchErrorKind::Guest,
+        WasmError::InvalidGuestOutput { .. } => RuntimeDispatchErrorKind::OutputDecode,
+        WasmError::FuelExhausted { .. } => RuntimeDispatchErrorKind::Resource,
+        WasmError::MemoryExceeded { .. } => RuntimeDispatchErrorKind::Memory,
+        WasmError::Timeout { .. } => RuntimeDispatchErrorKind::Resource,
+        WasmError::OutputLimitExceeded { .. } => RuntimeDispatchErrorKind::OutputTooLarge,
+        WasmError::Trap { .. } => RuntimeDispatchErrorKind::Guest,
     }
 }

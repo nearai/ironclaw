@@ -25,6 +25,7 @@ ProcessServices
 WASM / Script / MCP runtime backends
 EventSink / AuditSink
   -> HostRuntimeServices
+      -> WASM / Script / MCP RuntimeAdapter wrappers
       -> RuntimeDispatcher
       -> CapabilityHost
       -> ApprovalResolver
@@ -47,12 +48,12 @@ ProcessHost<'_>
 ApprovalResolver<'_, dyn ApprovalRequestStore, dyn CapabilityLeaseStore>
 ```
 
-It may hold shared `Arc` handles to configured services, runtime backends, and observability sinks.
+It may hold shared `Arc` handles to configured services, runtime backends, and observability sinks. It adapts concrete runtime crates into `ironclaw_dispatcher::RuntimeAdapter` implementations when building `RuntimeDispatcher`.
 
 It must not:
 
 - implement grant matching or spawn policy
-- execute runtime lanes directly
+- execute runtime lanes directly outside adapter wrappers
 - own process state transitions or cancellation semantics
 - own approval resolution or lease semantics; `approval_resolver()` only wires `ironclaw_approvals::ApprovalResolver`
 - expose process lifecycle APIs through `CapabilityHost`
@@ -65,7 +66,8 @@ Ownership remains:
 authorization -> grant, lease, and spawn decisions
 capabilities  -> caller-facing invoke/resume/spawn workflow
 processes     -> lifecycle, result, output, cancellation, and process services
-dispatcher    -> already-authorized runtime routing
+dispatcher    -> already-authorized runtime routing through registered adapters
+host_runtime  -> composition of concrete WASM / Script / MCP adapters
 runtimes      -> WASM / Script / MCP execution
 ```
 
@@ -102,7 +104,7 @@ For tests or custom process executors, callers can also provide an arbitrary dis
 let capability_host = services.capability_host(&dispatcher, executor);
 ```
 
-`capability_host_for_runtime_dispatcher(...)` derives a `DispatchProcessExecutor` from the same runtime dispatcher used for immediate dispatch. Spawned capability-backed process work therefore routes through the authorized dispatch interface after `CapabilityHost::spawn_json(...)` has authorized and recorded the process start.
+`capability_host_for_runtime_dispatcher(...)` derives a `DispatchProcessExecutor` from the same runtime dispatcher used for immediate dispatch. Spawned capability-backed process work therefore routes through the authorized dispatch interface after `CapabilityHost::spawn_json(...)` has authorized and recorded the process start. The concrete WASM, Script, and MCP runtimes are wrapped by `WasmRuntimeAdapter`, `ScriptRuntimeAdapter`, and `McpRuntimeAdapter` here instead of being hardcoded into `ironclaw_dispatcher`.
 
 ---
 

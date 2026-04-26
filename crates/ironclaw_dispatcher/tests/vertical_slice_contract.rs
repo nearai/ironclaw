@@ -3,14 +3,11 @@ use ironclaw_dispatcher::*;
 use ironclaw_extensions::*;
 use ironclaw_filesystem::*;
 use ironclaw_host_api::*;
-use ironclaw_mcp::*;
 use ironclaw_resources::*;
-use ironclaw_scripts::*;
-use ironclaw_wasm::*;
 use serde_json::json;
 
 #[tokio::test]
-async fn vertical_slice_discovers_and_dispatches_wasm_script_and_mcp_capabilities() {
+async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
     let fs = filesystem_with_echo_extensions();
     let registry =
         ExtensionDiscovery::discover(&fs, &VirtualPath::new("/system/extensions").unwrap())
@@ -19,15 +16,14 @@ async fn vertical_slice_discovers_and_dispatches_wasm_script_and_mcp_capabilitie
     assert_eq!(registry.extensions().count(), 3);
 
     let governor = InMemoryResourceGovernor::new();
-    let wasm_runtime = WasmRuntime::for_testing().unwrap();
-    let script_backend = EchoScriptBackend;
-    let script_runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), script_backend);
-    let mcp_runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), EchoMcpClient);
+    let wasm_adapter = EchoAdapter::new(RuntimeKind::Wasm);
+    let script_adapter = EchoAdapter::new(RuntimeKind::Script);
+    let mcp_adapter = EchoAdapter::new(RuntimeKind::Mcp);
     let scope = sample_scope();
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
-        .with_wasm_runtime(&wasm_runtime)
-        .with_script_runtime(&script_runtime)
-        .with_mcp_runtime(&mcp_runtime);
+        .with_runtime_adapter(RuntimeKind::Wasm, &wasm_adapter)
+        .with_runtime_adapter(RuntimeKind::Script, &script_adapter)
+        .with_runtime_adapter(RuntimeKind::Mcp, &mcp_adapter);
 
     let wasm_scope = scope.clone();
     let wasm_account = ResourceAccount::tenant(wasm_scope.tenant_id.clone());
@@ -111,35 +107,72 @@ async fn vertical_slice_discovers_and_dispatches_wasm_script_and_mcp_capabilitie
 }
 
 #[derive(Clone)]
-struct EchoMcpClient;
+struct EchoAdapter {
+    runtime: RuntimeKind,
+}
 
-#[async_trait]
-impl McpClient for EchoMcpClient {
-    async fn call_tool(&self, request: McpClientRequest) -> Result<McpClientOutput, String> {
-        Ok(McpClientOutput::json(request.input))
+impl EchoAdapter {
+    fn new(runtime: RuntimeKind) -> Self {
+        Self { runtime }
     }
 }
 
-#[derive(Clone)]
-struct EchoScriptBackend;
-
-impl ScriptBackend for EchoScriptBackend {
-    fn execute(&self, request: ScriptBackendRequest) -> Result<ScriptBackendOutput, String> {
-        Ok(ScriptBackendOutput {
-            exit_code: 0,
-            stdout: request.stdin_json.into_bytes(),
-            stderr: Vec::new(),
-            wall_clock_ms: 1,
+#[async_trait]
+impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for EchoAdapter {
+    async fn dispatch_json(
+        &self,
+        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        let output = request.input;
+        let usage = ResourceUsage {
+            output_bytes: serde_json::to_vec(&output).unwrap().len() as u64,
+            process_count: u32::from(matches!(
+                self.runtime,
+                RuntimeKind::Script | RuntimeKind::Mcp
+            )),
+            ..ResourceUsage::default()
+        };
+        let reservation = request
+            .governor
+            .reserve(request.scope, request.estimate)
+            .map_err(|_| {
+                dispatch_error_for_runtime(self.runtime, RuntimeDispatchErrorKind::Resource)
+            })?;
+        let receipt = request
+            .governor
+            .reconcile(reservation.id, usage.clone())
+            .map_err(|_| {
+                dispatch_error_for_runtime(self.runtime, RuntimeDispatchErrorKind::Resource)
+            })?;
+        Ok(RuntimeAdapterResult {
+            output,
+            output_bytes: usage.output_bytes,
+            usage,
+            receipt,
         })
+    }
+}
+
+fn dispatch_error_for_runtime(
+    runtime: RuntimeKind,
+    kind: RuntimeDispatchErrorKind,
+) -> DispatchError {
+    match runtime {
+        RuntimeKind::Wasm => DispatchError::Wasm { kind },
+        RuntimeKind::Script => DispatchError::Script { kind },
+        RuntimeKind::Mcp => DispatchError::Mcp { kind },
+        RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::UnsupportedRuntime {
+            capability: CapabilityId::new("system.unsupported").unwrap(),
+            runtime,
+        },
     }
 }
 
 fn filesystem_with_echo_extensions() -> LocalFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
     let wasm_root = storage.join("echo-wasm");
-    std::fs::create_dir_all(wasm_root.join("wasm")).unwrap();
+    std::fs::create_dir_all(&wasm_root).unwrap();
     std::fs::write(wasm_root.join("manifest.toml"), WASM_MANIFEST).unwrap();
-    std::fs::write(wasm_root.join("wasm/echo.wasm"), json_echo_module()).unwrap();
 
     let script_root = storage.join("echo-script");
     std::fs::create_dir_all(&script_root).unwrap();
@@ -156,36 +189,6 @@ fn filesystem_with_echo_extensions() -> LocalFilesystem {
     )
     .unwrap();
     fs
-}
-
-fn json_echo_module() -> Vec<u8> {
-    wat::parse_str(
-        r#"(module
-            (memory (export "memory") 1)
-            (global $heap (mut i32) (i32.const 1024))
-            (global $out_ptr (mut i32) (i32.const 0))
-            (global $out_len (mut i32) (i32.const 0))
-            (func (export "alloc") (param $len i32) (result i32)
-              (local $ptr i32)
-              global.get $heap
-              local.set $ptr
-              global.get $heap
-              local.get $len
-              i32.add
-              global.set $heap
-              local.get $ptr)
-            (func (export "say") (param $ptr i32) (param $len i32) (result i32)
-              local.get $ptr
-              global.set $out_ptr
-              local.get $len
-              global.set $out_len
-              i32.const 0)
-            (func (export "output_ptr") (result i32)
-              global.get $out_ptr)
-            (func (export "output_len") (result i32)
-              global.get $out_len))"#,
-    )
-    .unwrap()
 }
 
 fn sample_scope() -> ResourceScope {

@@ -4057,15 +4057,10 @@ dependencies = [
  "ironclaw_extensions",
  "ironclaw_filesystem",
  "ironclaw_host_api",
- "ironclaw_mcp",
  "ironclaw_resources",
- "ironclaw_scripts",
- "ironclaw_wasm",
  "serde_json",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
- "wat",
 ]
 
 [[package]]
