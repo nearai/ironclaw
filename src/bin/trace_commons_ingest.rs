@@ -6467,6 +6467,12 @@ struct TraceMaintenanceLedgerWriteInput<'a> {
     completed_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TraceRetentionLedgerExpectation {
+    retention_job_id: Uuid,
+    expected_item_count: usize,
+}
+
 async fn write_retention_maintenance_ledger_to_db(
     state: &AppState,
     tenant: &TenantAuth,
@@ -8823,15 +8829,6 @@ async fn run_maintenance(
         &purpose,
     )
     .await?;
-    let db_reconciliation = reconcile_db_mirror(
-        state,
-        tenant,
-        &records,
-        &derived,
-        request.reconcile_db_mirror,
-    )
-    .await?;
-
     let maintenance_counts = TraceMaintenanceAuditCounts {
         records_marked_revoked,
         records_marked_expired,
@@ -8902,6 +8899,18 @@ async fn run_maintenance(
     )
     .await;
     enforce_db_mirror_write_result(state, "retention maintenance ledger", ledger_result)?;
+    let db_reconciliation = reconcile_db_mirror(
+        state,
+        tenant,
+        &records,
+        &derived,
+        request.reconcile_db_mirror,
+        Some(TraceRetentionLedgerExpectation {
+            retention_job_id: audit_event_id,
+            expected_item_count: retention_ledger.items.len(),
+        }),
+    )
+    .await?;
     enforce_db_reconciliation_clean(state, db_reconciliation.as_ref())?;
     let audit_chain = if request.verify_audit_chain {
         Some(verify_audit_chain(state, &tenant.tenant_id).await?)
@@ -9712,6 +9721,7 @@ async fn reconcile_db_mirror(
     file_records: &[TraceCommonsSubmissionRecord],
     file_derived: &[TraceCommonsDerivedRecord],
     enabled: bool,
+    retention_ledger_expectation: Option<TraceRetentionLedgerExpectation>,
 ) -> anyhow::Result<Option<TraceDbReconciliationReport>> {
     if !enabled {
         return Ok(None);
@@ -9748,6 +9758,40 @@ async fn reconcile_db_mirror(
         .list_trace_tombstones(&tenant.tenant_id)
         .await
         .context("failed to list trace tombstones for DB reconciliation")?;
+    let db_retention_jobs = db
+        .list_trace_retention_jobs(&tenant.tenant_id)
+        .await
+        .context("failed to list trace retention jobs for DB reconciliation")?;
+    let mut db_retention_job_item_count = 0usize;
+    let mut db_retention_job_item_counts = BTreeMap::new();
+    for job in &db_retention_jobs {
+        let items = db
+            .list_trace_retention_job_items(&tenant.tenant_id, job.retention_job_id)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to list trace retention job items for job {}",
+                    job.retention_job_id
+                )
+            })?;
+        db_retention_job_item_count += items.len();
+        db_retention_job_item_counts.insert(job.retention_job_id, items.len());
+    }
+    let mut missing_current_retention_job_ids_in_db = Vec::new();
+    let mut current_retention_job_item_count_mismatches = Vec::new();
+    if let Some(expectation) = retention_ledger_expectation {
+        match db_retention_job_item_counts.get(&expectation.retention_job_id) {
+            Some(db_item_count) if *db_item_count == expectation.expected_item_count => {}
+            Some(db_item_count) => current_retention_job_item_count_mismatches.push(
+                TraceDbRetentionJobItemCountMismatch {
+                    retention_job_id: expectation.retention_job_id,
+                    expected_item_count: expectation.expected_item_count,
+                    db_item_count: *db_item_count,
+                },
+            ),
+            None => missing_current_retention_job_ids_in_db.push(expectation.retention_job_id),
+        }
+    }
     let db_submission_export_eligibility = db_records
         .iter()
         .map(|record| {
@@ -10232,6 +10276,10 @@ async fn reconcile_db_mirror(
         db_audit_event_count: db_audit_events.len(),
         missing_audit_event_ids_in_db,
         missing_audit_event_ids_in_files,
+        db_retention_job_count: db_retention_jobs.len(),
+        db_retention_job_item_count,
+        missing_current_retention_job_ids_in_db,
+        current_retention_job_item_count_mismatches,
         file_replay_export_manifest_count: file_replay_export_manifests.len(),
         db_export_manifest_count: db_export_manifests.len(),
         db_replay_export_manifest_count,
@@ -12180,6 +12228,10 @@ struct TraceDbReconciliationReport {
     db_audit_event_count: usize,
     missing_audit_event_ids_in_db: Vec<Uuid>,
     missing_audit_event_ids_in_files: Vec<Uuid>,
+    db_retention_job_count: usize,
+    db_retention_job_item_count: usize,
+    missing_current_retention_job_ids_in_db: Vec<Uuid>,
+    current_retention_job_item_count_mismatches: Vec<TraceDbRetentionJobItemCountMismatch>,
     file_replay_export_manifest_count: usize,
     db_export_manifest_count: usize,
     db_replay_export_manifest_count: usize,
@@ -12264,6 +12316,16 @@ impl TraceDbReconciliationReport {
             &mut gaps,
             "missing_audit_event_ids_in_files",
             self.missing_audit_event_ids_in_files.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_current_retention_job_ids_in_db",
+            self.missing_current_retention_job_ids_in_db.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "current_retention_job_item_count_mismatches",
+            self.current_retention_job_item_count_mismatches.len(),
         );
         push_gap_count(
             &mut gaps,
@@ -12366,6 +12428,13 @@ struct TraceDbExportManifestItemInvalidSource {
     vector_entry_id: Option<Uuid>,
     source_status_at_export: StorageTraceCorpusStatus,
     source_invalidation_reason: Option<StorageTraceExportManifestItemInvalidationReason>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceDbRetentionJobItemCountMismatch {
+    retention_job_id: Uuid,
+    expected_item_count: usize,
+    db_item_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -20614,7 +20683,7 @@ mod tests {
                 dry_run: false,
                 backfill_db_mirror: false,
                 index_vectors: false,
-                reconcile_db_mirror: false,
+                reconcile_db_mirror: true,
                 verify_audit_chain: false,
                 prune_export_cache: false,
                 max_export_age_hours: None,
@@ -20625,6 +20694,22 @@ mod tests {
         .expect("maintenance purges traces");
         assert_eq!(response.records_marked_expired, 1);
         assert_eq!(response.records_marked_purged, 1);
+        let reconciliation = response
+            .db_reconciliation
+            .as_ref()
+            .expect("reconciliation report exists");
+        assert_eq!(reconciliation.db_retention_job_count, 1);
+        assert_eq!(reconciliation.db_retention_job_item_count, 2);
+        assert!(
+            reconciliation
+                .missing_current_retention_job_ids_in_db
+                .is_empty()
+        );
+        assert!(
+            reconciliation
+                .current_retention_job_item_count_mismatches
+                .is_empty()
+        );
 
         let jobs = db
             .list_trace_retention_jobs("tenant-a")
@@ -22042,6 +22127,116 @@ mod tests {
                 .blocking_gaps
                 .iter()
                 .any(|gap| gap == "missing_audit_event_ids_in_db=1")
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn maintenance_reconciliation_reports_current_retention_ledger_gaps() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp
+            .path()
+            .join("trace-reconcile-retention-ledger-gaps.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let tenant = TenantAuth {
+            tenant_id: "tenant-a".to_string(),
+            role: TokenRole::RetentionWorker,
+            principal_ref: "test-retention-worker".to_string(),
+        };
+        let retention_job_id = Uuid::new_v4();
+
+        let missing_report = reconcile_db_mirror(
+            &state,
+            &tenant,
+            &[],
+            &[],
+            true,
+            Some(TraceRetentionLedgerExpectation {
+                retention_job_id,
+                expected_item_count: 1,
+            }),
+        )
+        .await
+        .expect("reconciliation succeeds")
+        .expect("report exists");
+        assert_eq!(
+            missing_report.missing_current_retention_job_ids_in_db,
+            vec![retention_job_id]
+        );
+        assert!(
+            missing_report
+                .blocking_gaps
+                .iter()
+                .any(|gap| gap == "missing_current_retention_job_ids_in_db=1")
+        );
+
+        db.upsert_trace_retention_job(StorageTraceRetentionJobWrite {
+            tenant_id: "tenant-a".to_string(),
+            retention_job_id,
+            purpose: "test_retention_ledger_gap".to_string(),
+            dry_run: false,
+            status: StorageTraceRetentionJobStatus::Complete,
+            requested_by_principal_ref: "test-retention-worker".to_string(),
+            requested_by_role: "retentionworker".to_string(),
+            purge_expired_before: None,
+            prune_export_cache: false,
+            max_export_age_hours: None,
+            audit_event_id: Some(retention_job_id),
+            action_counts: BTreeMap::new(),
+            selected_revoked_count: 0,
+            selected_expired_count: 0,
+            started_at: Some(Utc::now()),
+            completed_at: Some(Utc::now()),
+        })
+        .await
+        .expect("retention job writes");
+
+        let mismatch_report = reconcile_db_mirror(
+            &state,
+            &tenant,
+            &[],
+            &[],
+            true,
+            Some(TraceRetentionLedgerExpectation {
+                retention_job_id,
+                expected_item_count: 1,
+            }),
+        )
+        .await
+        .expect("reconciliation succeeds")
+        .expect("report exists");
+        assert!(
+            mismatch_report
+                .missing_current_retention_job_ids_in_db
+                .is_empty()
+        );
+        assert_eq!(
+            mismatch_report
+                .current_retention_job_item_count_mismatches
+                .len(),
+            1
+        );
+        assert_eq!(
+            mismatch_report.current_retention_job_item_count_mismatches[0].db_item_count,
+            0
+        );
+        assert!(
+            mismatch_report
+                .blocking_gaps
+                .iter()
+                .any(|gap| gap == "current_retention_job_item_count_mismatches=1")
         );
     }
 

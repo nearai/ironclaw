@@ -4065,6 +4065,16 @@ fn maintenance_reconciliation_lines(value: &serde_json::Value) -> Vec<String> {
             ("db_audit_event_count", "db_audit_events"),
             ("missing_audit_event_ids_in_db", "missing_audit_in_db"),
             ("missing_audit_event_ids_in_files", "missing_audit_in_files"),
+            ("db_retention_job_count", "db_retention_jobs"),
+            ("db_retention_job_item_count", "db_retention_items"),
+            (
+                "missing_current_retention_job_ids_in_db",
+                "missing_current_retention_jobs",
+            ),
+            (
+                "current_retention_job_item_count_mismatches",
+                "retention_item_mismatches",
+            ),
         ],
     ) {
         lines.push(line);
@@ -6281,58 +6291,30 @@ mod tests {
 
     #[test]
     fn maintenance_reconciliation_lines_summarize_counts_without_ids() {
-        let value = serde_json::json!({
+        let value: serde_json::Value = serde_json::from_str(
+            r#"{
             "db_reconciliation": {
                 "file_submission_count": 3,
                 "db_submission_count": 2,
-                "missing_submission_ids_in_db": [
-                    "11111111-1111-1111-1111-111111111111",
-                    "22222222-2222-2222-2222-222222222222"
-                ],
+                "missing_submission_ids_in_db": ["missing-a", "missing-b"],
                 "missing_submission_ids_in_files": [],
-                "status_mismatches": [
-                    {
-                        "submission_id": "33333333-3333-3333-3333-333333333333",
-                        "file_status": "accepted",
-                        "db_status": "revoked"
-                    }
-                ],
+                "status_mismatches": ["status-mismatch"],
                 "file_derived_count": 4,
                 "db_derived_count": 3,
-                "missing_derived_submission_ids_in_db": [
-                    "44444444-4444-4444-4444-444444444444"
-                ],
-                "missing_derived_submission_ids_in_files": [
-                    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-                ],
-                "derived_status_mismatches": [
-                    {
-                        "submission_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-                        "file_status": "revoked",
-                        "db_status": "current"
-                    }
-                ],
-                "derived_hash_mismatches": [
-                    {
-                        "submission_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
-                        "file_canonical_summary_hash": "sha256:file",
-                        "db_canonical_summary_hash": "sha256:db"
-                    }
-                ],
+                "missing_derived_submission_ids_in_db": ["derived-missing-db"],
+                "missing_derived_submission_ids_in_files": ["derived-missing-files"],
+                "derived_status_mismatches": ["derived-status"],
+                "derived_hash_mismatches": ["derived-hash"],
                 "db_object_ref_count": 2,
-                "accepted_without_active_envelope_object_ref": [
-                    "55555555-5555-5555-5555-555555555555"
-                ],
-                "unreadable_active_envelope_object_refs": [
-                    "66666666-6666-6666-6666-666666666666"
-                ],
-                "hash_mismatched_active_envelope_object_refs": [
-                    "77777777-7777-7777-7777-777777777777"
-                ],
+                "accepted_without_active_envelope_object_ref": ["missing-object-ref"],
+                "unreadable_active_envelope_object_refs": ["unreadable-object-ref"],
+                "hash_mismatched_active_envelope_object_refs": ["hash-mismatch"],
                 "file_credit_event_count": 5,
                 "db_credit_event_count": 4,
                 "file_audit_event_count": 6,
                 "db_audit_event_count": 6,
+                "db_retention_job_count": 2,
+                "db_retention_job_item_count": 4,
                 "file_replay_export_manifest_count": 1,
                 "db_export_manifest_count": 2,
                 "db_replay_export_manifest_count": 1,
@@ -6347,21 +6329,18 @@ mod tests {
                 "analytics_reader_parity_ok": true,
                 "audit_reader_parity_ok": true,
                 "replay_export_manifest_reader_parity_ok": true,
-                "db_reader_parity_failures": [
-                    "reviewer_metadata: file_submissions=3 db_submissions=2 file_derived=4 db_derived=3"
-                ],
+                "db_reader_parity_failures": ["reviewer_metadata: failed"],
                 "active_vector_entries": 7,
-                "accepted_current_derived_without_active_vector_entry": [
-                    "88888888-8888-8888-8888-888888888888",
-                    "99999999-9999-9999-9999-999999999999"
-                ],
+                "accepted_current_derived_without_active_vector_entry": ["vector-a", "vector-b"],
                 "invalid_active_vector_entries": 1,
                 "blocking_gaps": [
                     "missing_submission_ids_in_db=2",
                     "reviewer_metadata_reader_parity=failed"
                 ]
             }
-        });
+        }"#,
+        )
+        .expect("valid reconciliation fixture");
 
         let lines = maintenance_reconciliation_lines(&value);
 
@@ -6372,7 +6351,7 @@ mod tests {
                 "    submissions: files=3 db=2 missing_in_db=2 missing_in_files=0 status_mismatches=1".to_string(),
                 "    derived: files=4 db=3 missing_in_db=1 missing_in_files=1 status_mismatches=1 hash_mismatches=1".to_string(),
                 "    object refs: db=2 accepted_without_active_envelope=1 unreadable_active_envelope=1 hash_mismatched_active_envelope=1".to_string(),
-                "    ledger/audit: file_credit_events=5 db_credit_events=4 file_audit_events=6 db_audit_events=6".to_string(),
+                "    ledger/audit: file_credit_events=5 db_credit_events=4 file_audit_events=6 db_audit_events=6 db_retention_jobs=2 db_retention_items=4".to_string(),
                 "    exports/tombstones: file_replay_manifests=1 db_export_manifests=2 db_replay_manifests=1 db_benchmark_manifests=0 db_ranker_manifests=1 db_other_manifests=0 db_export_items=3 file_revocation_tombstones=1 db_tombstones=1".to_string(),
                 "    reader parity: contributor_credit=true reviewer_metadata=false analytics=true audit=true replay_export_manifests=true failures=1".to_string(),
                 "    vectors: active=7 eligible_without_active=2 invalid_active=1".to_string(),

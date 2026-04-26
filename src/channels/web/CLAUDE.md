@@ -132,6 +132,7 @@ Private ingestion service routes used by the operator panel:
 | GET | `/v1/audit/events` | List tenant audit events when available |
 
 The operator panel must keep calls API-mediated through the configured private ingestion service and degrade cleanly on `404`/`501` for older deployments that do not yet expose the newer operator endpoints.
+The panel includes read-only retention ledger actions for `/v1/admin/retention/jobs` and `/v1/admin/retention/jobs/{retention_job_id}/items`; it uses the session-only admin token and never persists the retention job id or bearer credential.
 
 ### User Management (admin — requires `admin` role, see `docs/USER_MANAGEMENT_API.md`)
 | Method | Path | Description |

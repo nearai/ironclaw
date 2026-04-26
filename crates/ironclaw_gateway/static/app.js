@@ -7486,6 +7486,7 @@ function traceOperatorPanel(baseUrl) {
     + '<input class="settings-input" type="password" id="trace-operator-token" autocomplete="off" placeholder="tenant:reviewer:token" value="' + escapeHtml(traceOperatorBearerToken) + '">'
     + '</div>'
     + traceTextRow('trace-operator-submission-id', 'Submission ID', '', 'uuid for review, revocation, credit, conversion')
+    + traceTextRow('trace-operator-retention-job-id', 'Retention Job ID', '', 'uuid for retention job item lookup')
     + '<div class="settings-row">'
     + '<div class="settings-label-wrap"><div class="settings-label">Review decision</div></div>'
     + '<select class="settings-select" id="trace-operator-decision"><option value="approve">approve</option><option value="reject">reject</option></select>'
@@ -7526,6 +7527,8 @@ function traceOperatorPanel(baseUrl) {
     + '<button class="btn-secondary" data-action="trace-operator-benchmark">Benchmark Convert</button>'
     + '<button class="btn-secondary" data-action="trace-operator-replay">Replay Export</button>'
     + '<button class="btn-secondary" data-action="trace-operator-audit">Audit Events</button>'
+    + '<button class="btn-secondary" data-action="trace-operator-retention-jobs">Retention Jobs</button>'
+    + '<button class="btn-secondary" data-action="trace-operator-retention-items">Retention Items</button>'
     + '</div></div>'
     + '<pre class="trace-operator-result" id="trace-operator-result">No operator request sent.</pre>'
     + '</div>';
@@ -7539,6 +7542,7 @@ function traceOperatorInputs() {
     baseUrl: ((document.getElementById('trace-operator-base-url') || {}).value || '').trim().replace(/\/$/, ''),
     token: traceOperatorBearerToken.trim(),
     submissionId: ((document.getElementById('trace-operator-submission-id') || {}).value || '').trim(),
+    retentionJobId: ((document.getElementById('trace-operator-retention-job-id') || {}).value || '').trim(),
     decision: ((document.getElementById('trace-operator-decision') || {}).value || 'approve'),
     pendingCredit: ((document.getElementById('trace-operator-pending-credit') || {}).value || '').trim(),
     creditKind: ((document.getElementById('trace-operator-credit-kind') || {}).value || 'reviewer_bonus'),
@@ -7599,6 +7603,11 @@ function traceOperatorRequest(action, input) {
   else if (action === 'quarantine') path = '/v1/review/quarantine';
   else if (action === 'replay') path = '/v1/datasets/replay?limit=' + encodeURIComponent(input.limit);
   else if (action === 'audit') path = '/v1/audit/events?limit=' + encodeURIComponent(input.limit);
+  else if (action === 'retention-jobs') path = '/v1/admin/retention/jobs?limit=' + encodeURIComponent(input.limit);
+  else if (action === 'retention-items') {
+    if (!input.retentionJobId) throw new Error('Retention Job ID is required for retention item lookup.');
+    path = '/v1/admin/retention/jobs/' + encodeURIComponent(input.retentionJobId) + '/items?limit=' + encodeURIComponent(input.limit);
+  }
   else if (action === 'revoke') {
     if (!input.submissionId) throw new Error('Submission ID is required for central revocation.');
     method = 'POST';
@@ -7701,6 +7710,7 @@ function traceOperatorHighlights(data) {
     submission_id: 'submission ids',
     audit_event_id: 'audit ids',
     event_id: 'audit ids',
+    retention_job_id: 'retention job ids',
     export_id: 'export ids',
     conversion_id: 'conversion ids',
     manifest_id: 'manifest ids',
@@ -7717,6 +7727,10 @@ function traceOperatorHighlights(data) {
     derived_marked_expired: 'derived marked expired',
     export_cache_files_pruned: 'export cache files pruned',
     item_count: 'export item count',
+    action: 'retention actions',
+    verified_at: 'retention item verified at',
+    selected_revoked_count: 'retention selected revoked',
+    selected_expired_count: 'retention selected expired',
   };
   var hits = {};
   traceCollectFields(data, labels, hits);
