@@ -1442,13 +1442,12 @@ pub fn safe_privacy_filter_redaction_from_output(
     let mut by_label = BTreeMap::new();
     let mut report = RedactionReport::default();
     for span in &detected_spans {
-        let label = span
+        let raw_label = span
             .get("label")
             .or_else(|| span.get("type"))
             .or_else(|| span.get("entity_type"))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
+            .and_then(Value::as_str);
+        let label = safe_privacy_filter_label(raw_label, &mut report);
         *by_label.entry(label.clone()).or_insert(0) += 1;
         report.increment(format!("privacy_filter:{label}"));
         if label.eq_ignore_ascii_case("secret") {
@@ -1480,6 +1479,46 @@ pub fn safe_privacy_filter_redaction_from_output(
         },
         report,
     })
+}
+
+fn safe_privacy_filter_label(raw_label: Option<&str>, report: &mut RedactionReport) -> String {
+    let Some(raw_label) = raw_label else {
+        return "unknown".to_string();
+    };
+    let normalized = raw_label
+        .trim()
+        .chars()
+        .map(|character| {
+            if character == '-' {
+                '_'
+            } else {
+                character.to_ascii_lowercase()
+            }
+        })
+        .collect::<String>();
+    let allowed = matches!(
+        normalized.as_str(),
+        "account_number"
+            | "credit_card"
+            | "ip_address"
+            | "private_address"
+            | "private_date"
+            | "private_email"
+            | "private_location"
+            | "private_name"
+            | "private_person"
+            | "private_phone"
+            | "private_url"
+            | "secret"
+            | "secret_like"
+            | "ssn"
+    );
+    if allowed {
+        return normalized;
+    }
+
+    report.add_warning("Privacy Filter sidecar emitted unsupported span label; mapped to unknown.");
+    "unknown".to_string()
 }
 
 pub fn synthetic_privacy_filter_canary_text() -> String {
@@ -4868,6 +4907,36 @@ mod tests {
         assert!(!json.contains("alice@example.com"));
         assert!(!json.contains("sk-test"));
         assert!(!json.contains("detected_spans"));
+    }
+
+    #[test]
+    fn privacy_filter_output_adapter_maps_unsafe_labels_without_leaking_them() {
+        let output = serde_json::json!({
+            "schema_version": 1,
+            "redacted_text": "Email <PRIVATE_EMAIL> with <SECRET>",
+            "detected_spans": [
+                {"label": "alice@example.com", "text": "alice@example.com"},
+                {"type": "/Users/alice/.ssh/id_rsa", "text": "/Users/alice/.ssh/id_rsa"},
+                {"entity_type": "sk-test-raw-token", "text": "sk-test-raw-token"}
+            ]
+        });
+
+        let safe =
+            safe_privacy_filter_redaction_from_output(&output).expect("privacy output parses");
+        let json = serde_json::to_string(&safe).expect("safe output serializes");
+
+        assert_eq!(safe.summary.by_label.get("unknown"), Some(&3));
+        assert_eq!(safe.report.counts.get("privacy_filter:unknown"), Some(&3));
+        for raw in [
+            "alice@example.com",
+            "/Users/alice/.ssh/id_rsa",
+            "sk-test-raw-token",
+        ] {
+            assert!(!json.contains(raw), "safe output leaked {raw}");
+        }
+        assert!(safe.report.warnings.iter().any(|warning| {
+            warning == "Privacy Filter sidecar emitted unsupported span label; mapped to unknown."
+        }));
     }
 
     #[tokio::test]

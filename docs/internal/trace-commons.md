@@ -10,8 +10,8 @@ Trace Commons is an opt-in pipeline for contributing locally redacted IronClaw t
 - The client submits only `ironclaw.trace_contribution.v1` envelopes after deterministic local redaction.
 - Message text and tool payloads remain excluded unless the user opts into those fields.
 - Medium/high privacy risk traces can be held for manual review by policy.
-- OpenAI Privacy Filter or other PII sidecars must only contribute safe summaries: redacted text, counts, labels, and warnings. Do not serialize original text or `detected_spans[*].text`.
-- `safe_privacy_filter_redaction_from_output` converts Privacy Filter-style output to redacted text plus `SafePrivacyFilterSummary`, dropping raw `text` and raw span contents.
+- OpenAI Privacy Filter or other PII sidecars must only contribute safe summaries: redacted text, allow-listed label counts, and warnings. Do not serialize original text or `detected_spans[*].text`.
+- `safe_privacy_filter_redaction_from_output` converts Privacy Filter-style output to redacted text plus `SafePrivacyFilterSummary`, dropping raw `text`, raw span contents, raw offsets, and unsafe span labels.
 - Tool-specific structured redaction treats email, calendar, messaging, browser, filesystem, and database payload fields as sensitive before generic secret/path scrubbing.
 - Deterministic text redaction preserves safe within-trace structure with stable placeholders such as `<PRIVATE_EMAIL_1>` and `<PRIVATE_LOCAL_PATH_1>` instead of flattening every entity to the same token.
 - A local Privacy Filter sidecar can be enabled with `IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND` and optional whitespace-split `IRONCLAW_TRACE_PRIVACY_FILTER_ARGS`. The sidecar receives `{"text":"..."}` on stdin and must return Privacy Filter-style JSON on stdout. IronClaw keeps only the safe `redacted_text` and aggregate summary. The sidecar is launched with a cleared environment except `PATH`, `LANG`, and `LC_ALL`; `IRONCLAW_TRACE_PRIVACY_FILTER_TIMEOUT_MS`, `IRONCLAW_TRACE_PRIVACY_FILTER_MAX_INPUT_BYTES`, `IRONCLAW_TRACE_PRIVACY_FILTER_MAX_STDOUT_BYTES`, and `IRONCLAW_TRACE_PRIVACY_FILTER_MAX_STDERR_BYTES` tune local guardrails.
@@ -327,7 +327,7 @@ The current implementation is a usable MVP for local development and controlled 
 
 - Run Privacy Filter sidecars as untrusted local subprocesses or containers with timeouts, output size limits, and no access to Trace Commons credentials.
 - Pass only the minimum text required for local redaction. Do not pass bearer tokens, full policy files, queue files, or raw tool payloads unless the local policy explicitly includes those fields.
-- Accept only the safe projection: redacted text, labels, counts, warnings, and summary metadata. Strip `text`, raw span strings, offsets tied to raw text when not needed, and any unknown high-risk fields.
+- Accept only the safe projection: redacted text, allow-listed labels, counts, warnings, and summary metadata. Strip `text`, raw span strings, raw offsets, and unknown high-risk fields; unsupported span labels are mapped to `unknown` so malformed sidecars cannot smuggle emails, paths, or tokens through label names.
 - Treat sidecar failures as non-fatal redaction warnings and fall back to deterministic local redaction rather than uploading raw content.
 - Add canary-secret tests that feed synthetic credentials, local paths, tenant ids, and user ids through the sidecar path and assert they do not appear in envelopes, logs, or derived summaries.
 
@@ -425,7 +425,7 @@ The web settings panel includes a Trace Commons tab for standing opt-in, autonom
 | Vector duplicate/novelty index | Partial | DB schema, storage contract, dedicated vector worker route, maintenance-triggered metadata indexer, object-ref/readability gating before non-dry-run vector writes, per-source vector-index content-read audits with source object refs, and reconciliation gap diagnostics now persist/vector-check vector-entry metadata, nearest trace ids, cluster id, duplicate score, novelty score, and invalidation state for accepted canonical summaries. The embedding worker/vector payload index is still future work. |
 | Ranking/model utility pipeline | Not implemented | Delayed credit kinds are reserved; no trusted offline utility job is implemented. |
 | Benchmark conversion pipeline | Partial | Reviewer/admin conversion and the dedicated benchmark worker route can produce tenant-scoped benchmark candidate artifacts with consent/status/risk filters, source-list hashes, immediate DB source-status revalidation, audit events, per-source derived-summary read audits, derived artifact refs, durable provenance manifests that revocation/maintenance can invalidate, and idempotent utility credit events. Production still needs benchmark registry publication, evaluator results, and revocation invalidation for published artifacts. |
-| Production sidecar operations | Partial | Sidecar launches now use timeout/IO limits, minimal environment inheritance, stderr hashing, non-fatal deterministic fallback, and canary-secret regression coverage. Production still needs container sandboxing and tighter output schema enforcement. |
+| Production sidecar operations | Partial | Sidecar launches now use timeout/IO limits, minimal environment inheritance, stderr hashing, non-fatal deterministic fallback, safe output projection with allow-listed span labels, and canary-secret regression coverage. Production still needs container sandboxing and deployment-specific sidecar isolation. |
 
 ## Credit
 
