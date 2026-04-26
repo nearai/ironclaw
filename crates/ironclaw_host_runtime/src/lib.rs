@@ -4,7 +4,11 @@
 //! together without moving authorization, dispatch, process lifecycle, approval,
 //! or run-state responsibilities out of their owning crates.
 
-use std::{net::IpAddr, sync::Arc};
+use std::{
+    collections::HashMap,
+    net::IpAddr,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -23,8 +27,8 @@ use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AuditEnvelope, AuditEventId, AuditStage,
-    CapabilityDispatcher, DecisionSummary, DispatchError, EffectKind, NetworkPolicy, Obligation,
-    RuntimeDispatchErrorKind, RuntimeKind,
+    CapabilityDispatcher, CapabilityId, DecisionSummary, DispatchError, EffectKind, NetworkPolicy,
+    Obligation, ResourceScope, RuntimeDispatchErrorKind, RuntimeKind,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_network::is_private_or_loopback_ip;
@@ -34,16 +38,44 @@ use ironclaw_processes::{
 use ironclaw_resources::ResourceGovernor;
 use ironclaw_run_state::{ApprovalRequestStore, RunStateStore};
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
-use ironclaw_wasm::{CapabilityInvocation, WasmError, WasmExecutionRequest, WasmRuntime};
+use ironclaw_wasm::{
+    CapabilityInvocation, WasmError, WasmExecutionRequest, WasmHostHttp, WasmHttpRequest,
+    WasmHttpResponse, WasmPolicyHttpClient, WasmRuntime,
+};
 
 /// Dispatcher adapter for the concrete WASM runtime crate.
 pub struct WasmRuntimeAdapter {
     runtime: Arc<WasmRuntime>,
+    network_policies: Option<Arc<NetworkObligationPolicyStore>>,
+    http_client: Option<Arc<dyn WasmHostHttp>>,
 }
 
 impl WasmRuntimeAdapter {
     pub fn new(runtime: Arc<WasmRuntime>) -> Self {
-        Self { runtime }
+        Self {
+            runtime,
+            network_policies: None,
+            http_client: None,
+        }
+    }
+
+    pub fn with_network_policy_store(mut self, store: Arc<NetworkObligationPolicyStore>) -> Self {
+        self.network_policies = Some(store);
+        self
+    }
+
+    pub fn with_http_client<T>(mut self, client: Arc<T>) -> Self
+    where
+        T: WasmHostHttp + 'static,
+    {
+        let client: Arc<dyn WasmHostHttp> = client;
+        self.http_client = Some(client);
+        self
+    }
+
+    pub fn with_http_client_dyn(mut self, client: Arc<dyn WasmHostHttp>) -> Self {
+        self.http_client = Some(client);
+        self
     }
 }
 
@@ -57,23 +89,43 @@ where
         &self,
         request: RuntimeAdapterRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
-        let execution = self
-            .runtime
-            .execute_extension_json(
-                request.filesystem,
-                request.governor,
-                WasmExecutionRequest {
-                    package: request.package,
-                    capability_id: request.capability_id,
-                    scope: request.scope,
-                    estimate: request.estimate,
-                    invocation: CapabilityInvocation {
-                        input: request.input,
-                    },
-                },
-            )
-            .await
-            .map_err(wasm_dispatch_error)?;
+        let network_policy = self
+            .network_policies
+            .as_ref()
+            .and_then(|store| store.take(&request.scope, request.capability_id));
+        let execution_request = WasmExecutionRequest {
+            package: request.package,
+            capability_id: request.capability_id,
+            scope: request.scope,
+            estimate: request.estimate,
+            invocation: CapabilityInvocation {
+                input: request.input,
+            },
+        };
+        let execution = if let Some(policy) = network_policy {
+            let Some(http_client) = &self.http_client else {
+                return Err(DispatchError::Wasm {
+                    kind: RuntimeDispatchErrorKind::NetworkDenied,
+                });
+            };
+            let http = Arc::new(WasmPolicyHttpClient::new(
+                SharedWasmHostHttp::new(Arc::clone(http_client)),
+                policy,
+            ));
+            self.runtime
+                .execute_extension_json_with_network(
+                    request.filesystem,
+                    request.governor,
+                    execution_request,
+                    http,
+                )
+                .await
+        } else {
+            self.runtime
+                .execute_extension_json(request.filesystem, request.governor, execution_request)
+                .await
+        }
+        .map_err(wasm_dispatch_error)?;
 
         Ok(RuntimeAdapterResult {
             output: execution.result.output,
@@ -84,9 +136,27 @@ where
     }
 }
 
+#[derive(Clone)]
+struct SharedWasmHostHttp {
+    inner: Arc<dyn WasmHostHttp>,
+}
+
+impl SharedWasmHostHttp {
+    fn new(inner: Arc<dyn WasmHostHttp>) -> Self {
+        Self { inner }
+    }
+}
+
+impl WasmHostHttp for SharedWasmHostHttp {
+    fn request_utf8(&self, request: WasmHttpRequest) -> Result<WasmHttpResponse, String> {
+        self.inner.request_utf8(request)
+    }
+}
+
 /// Dispatcher adapter for the concrete script executor port.
 pub struct ScriptRuntimeAdapter {
     runtime: Arc<dyn ScriptExecutor>,
+    network_policies: Option<Arc<NetworkObligationPolicyStore>>,
 }
 
 impl ScriptRuntimeAdapter {
@@ -95,11 +165,22 @@ impl ScriptRuntimeAdapter {
         T: ScriptExecutor + 'static,
     {
         let runtime: Arc<dyn ScriptExecutor> = runtime;
-        Self { runtime }
+        Self {
+            runtime,
+            network_policies: None,
+        }
     }
 
     pub fn from_dyn(runtime: Arc<dyn ScriptExecutor>) -> Self {
-        Self { runtime }
+        Self {
+            runtime,
+            network_policies: None,
+        }
+    }
+
+    pub fn with_network_policy_store(mut self, store: Arc<NetworkObligationPolicyStore>) -> Self {
+        self.network_policies = Some(store);
+        self
     }
 }
 
@@ -113,6 +194,17 @@ where
         &self,
         request: RuntimeAdapterRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
+        if self
+            .network_policies
+            .as_ref()
+            .and_then(|store| store.take(&request.scope, request.capability_id))
+            .is_some()
+        {
+            return Err(DispatchError::Script {
+                kind: RuntimeDispatchErrorKind::NetworkDenied,
+            });
+        }
+
         let execution = self
             .runtime
             .execute_extension_json(
@@ -141,6 +233,7 @@ where
 /// Dispatcher adapter for the concrete MCP executor port.
 pub struct McpRuntimeAdapter {
     runtime: Arc<dyn McpExecutor>,
+    network_policies: Option<Arc<NetworkObligationPolicyStore>>,
 }
 
 impl McpRuntimeAdapter {
@@ -149,11 +242,22 @@ impl McpRuntimeAdapter {
         T: McpExecutor + 'static,
     {
         let runtime: Arc<dyn McpExecutor> = runtime;
-        Self { runtime }
+        Self {
+            runtime,
+            network_policies: None,
+        }
     }
 
     pub fn from_dyn(runtime: Arc<dyn McpExecutor>) -> Self {
-        Self { runtime }
+        Self {
+            runtime,
+            network_policies: None,
+        }
+    }
+
+    pub fn with_network_policy_store(mut self, store: Arc<NetworkObligationPolicyStore>) -> Self {
+        self.network_policies = Some(store);
+        self
     }
 }
 
@@ -167,6 +271,17 @@ where
         &self,
         request: RuntimeAdapterRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
+        if self
+            .network_policies
+            .as_ref()
+            .and_then(|store| store.take(&request.scope, request.capability_id))
+            .is_some()
+        {
+            return Err(DispatchError::Mcp {
+                kind: RuntimeDispatchErrorKind::NetworkDenied,
+            });
+        }
+
         let execution = self
             .runtime
             .execute_extension_json(
@@ -193,18 +308,85 @@ where
     }
 }
 
-/// Built-in metadata-only obligation handler for the current host-runtime slice.
+/// In-memory policy handoff from obligation handling to runtime adapters.
+///
+/// Policies are keyed by tenant/user/project/mission/thread/invocation scope and
+/// capability id, and are consumed by runtime adapters immediately before the
+/// actual runtime dispatch.
+#[derive(Debug, Clone, Default)]
+pub struct NetworkObligationPolicyStore {
+    policies: Arc<Mutex<HashMap<NetworkPolicyKey, NetworkPolicy>>>,
+}
+
+impl NetworkObligationPolicyStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        policy: NetworkPolicy,
+    ) {
+        self.policies
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(NetworkPolicyKey::new(scope, capability_id), policy);
+    }
+
+    pub fn take(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+    ) -> Option<NetworkPolicy> {
+        self.policies
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&NetworkPolicyKey::new(scope, capability_id))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct NetworkPolicyKey {
+    tenant_id: String,
+    user_id: String,
+    project_id: Option<String>,
+    mission_id: Option<String>,
+    thread_id: Option<String>,
+    invocation_id: String,
+    capability_id: String,
+}
+
+impl NetworkPolicyKey {
+    fn new(scope: &ResourceScope, capability_id: &CapabilityId) -> Self {
+        Self {
+            tenant_id: scope.tenant_id.as_str().to_string(),
+            user_id: scope.user_id.as_str().to_string(),
+            project_id: scope.project_id.as_ref().map(|id| id.as_str().to_string()),
+            mission_id: scope.mission_id.as_ref().map(|id| id.as_str().to_string()),
+            thread_id: scope.thread_id.as_ref().map(|id| id.as_str().to_string()),
+            invocation_id: scope.invocation_id.to_string(),
+            capability_id: capability_id.as_str().to_string(),
+        }
+    }
+}
+
+/// Built-in obligation handler for the current host-runtime slice.
 ///
 /// Supported obligations:
 ///
 /// - `AuditBefore`: emits one metadata-only audit record and fails closed if no
 ///   audit sink is configured or emission fails.
-/// - `ApplyNetworkPolicy`: validates policy metadata without performing I/O.
+/// - `ApplyNetworkPolicy`: validates policy metadata and hands the scoped policy
+///   to runtime adapters through a configured policy store.
 ///
-/// Runtime/input/output plumbing obligations remain unsupported and fail closed.
+/// Runtime/input/output plumbing obligations other than WASM host-HTTP policy
+/// enforcement remain unsupported and fail closed.
 #[derive(Clone, Default)]
 pub struct BuiltinObligationHandler {
     audit_sink: Option<Arc<dyn AuditSink>>,
+    network_policies: Option<Arc<NetworkObligationPolicyStore>>,
 }
 
 impl BuiltinObligationHandler {
@@ -223,6 +405,11 @@ impl BuiltinObligationHandler {
 
     pub fn with_audit_sink_dyn(mut self, sink: Arc<dyn AuditSink>) -> Self {
         self.audit_sink = Some(sink);
+        self
+    }
+
+    pub fn with_network_policy_store(mut self, store: Arc<NetworkObligationPolicyStore>) -> Self {
+        self.network_policies = Some(store);
         self
     }
 
@@ -258,11 +445,7 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
             });
         }
 
-        for obligation in request.obligations {
-            if let Obligation::ApplyNetworkPolicy { policy } = obligation {
-                validate_network_policy_metadata(policy)?;
-            }
-        }
+        let network_policy = network_policy_obligation(request.obligations)?;
 
         if request
             .obligations
@@ -270,6 +453,17 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
             .any(|obligation| matches!(obligation, Obligation::AuditBefore))
         {
             self.emit_audit_before(&request).await?;
+        }
+
+        if let Some(policy) = network_policy {
+            let Some(store) = &self.network_policies else {
+                return Err(network_obligation_failed());
+            };
+            store.insert(
+                &request.context.resource_scope,
+                request.capability_id,
+                policy,
+            );
         }
 
         Ok(())
@@ -287,6 +481,22 @@ fn unsupported_obligations(obligations: &[Obligation]) -> Vec<Obligation> {
         })
         .cloned()
         .collect()
+}
+
+fn network_policy_obligation(
+    obligations: &[Obligation],
+) -> Result<Option<NetworkPolicy>, CapabilityObligationError> {
+    let mut policy = None;
+    for obligation in obligations {
+        if let Obligation::ApplyNetworkPolicy { policy: next } = obligation {
+            if policy.is_some() {
+                return Err(network_obligation_failed());
+            }
+            validate_network_policy_metadata(next)?;
+            policy = Some(next.clone());
+        }
+    }
+    Ok(policy)
 }
 
 fn validate_network_policy_metadata(
@@ -415,11 +625,13 @@ where
     approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
     capability_leases: Option<Arc<dyn CapabilityLeaseStore>>,
     wasm_runtime: Option<Arc<WasmRuntime>>,
+    wasm_http_client: Option<Arc<dyn WasmHostHttp>>,
     script_runtime: Option<Arc<dyn ScriptExecutor>>,
     mcp_runtime: Option<Arc<dyn McpExecutor>>,
     event_sink: Option<Arc<dyn EventSink>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
     obligation_handler: Option<Arc<dyn CapabilityObligationHandler>>,
+    network_obligation_policies: Arc<NetworkObligationPolicyStore>,
 }
 
 impl<F, G, S, R, A> HostRuntimeServices<F, G, S, R, A>
@@ -447,11 +659,13 @@ where
             approval_requests: None,
             capability_leases: None,
             wasm_runtime: None,
+            wasm_http_client: None,
             script_runtime: None,
             mcp_runtime: None,
             event_sink: None,
             audit_sink: None,
             obligation_handler: None,
+            network_obligation_policies: Arc::new(NetworkObligationPolicyStore::new()),
         }
     }
 
@@ -508,6 +722,20 @@ where
         self
     }
 
+    pub fn with_wasm_http_client<T>(mut self, client: Arc<T>) -> Self
+    where
+        T: WasmHostHttp + 'static,
+    {
+        let client: Arc<dyn WasmHostHttp> = client;
+        self.wasm_http_client = Some(client);
+        self
+    }
+
+    pub fn with_wasm_http_client_dyn(mut self, client: Arc<dyn WasmHostHttp>) -> Self {
+        self.wasm_http_client = Some(client);
+        self
+    }
+
     pub fn with_script_runtime<T>(mut self, runtime: Arc<T>) -> Self
     where
         T: ScriptExecutor + 'static,
@@ -554,11 +782,11 @@ where
     }
 
     pub fn with_builtin_obligation_handler(mut self) -> Self {
-        let handler = if let Some(audit_sink) = &self.audit_sink {
-            BuiltinObligationHandler::new().with_audit_sink_dyn(Arc::clone(audit_sink))
-        } else {
-            BuiltinObligationHandler::new()
-        };
+        let mut handler = BuiltinObligationHandler::new()
+            .with_network_policy_store(Arc::clone(&self.network_obligation_policies));
+        if let Some(audit_sink) = &self.audit_sink {
+            handler = handler.with_audit_sink_dyn(Arc::clone(audit_sink));
+        }
         self.obligation_handler = Some(Arc::new(handler));
         self
     }
@@ -583,21 +811,29 @@ where
         );
 
         if let Some(runtime) = &self.wasm_runtime {
-            dispatcher = dispatcher.with_runtime_adapter_arc(
-                RuntimeKind::Wasm,
-                Arc::new(WasmRuntimeAdapter::new(Arc::clone(runtime))),
-            );
+            let mut adapter = WasmRuntimeAdapter::new(Arc::clone(runtime))
+                .with_network_policy_store(Arc::clone(&self.network_obligation_policies));
+            if let Some(http_client) = &self.wasm_http_client {
+                adapter = adapter.with_http_client_dyn(Arc::clone(http_client));
+            }
+            dispatcher = dispatcher.with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::new(adapter));
         }
         if let Some(runtime) = &self.script_runtime {
             dispatcher = dispatcher.with_runtime_adapter_arc(
                 RuntimeKind::Script,
-                Arc::new(ScriptRuntimeAdapter::from_dyn(Arc::clone(runtime))),
+                Arc::new(
+                    ScriptRuntimeAdapter::from_dyn(Arc::clone(runtime))
+                        .with_network_policy_store(Arc::clone(&self.network_obligation_policies)),
+                ),
             );
         }
         if let Some(runtime) = &self.mcp_runtime {
             dispatcher = dispatcher.with_runtime_adapter_arc(
                 RuntimeKind::Mcp,
-                Arc::new(McpRuntimeAdapter::from_dyn(Arc::clone(runtime))),
+                Arc::new(
+                    McpRuntimeAdapter::from_dyn(Arc::clone(runtime))
+                        .with_network_policy_store(Arc::clone(&self.network_obligation_policies)),
+                ),
             );
         }
         if let Some(sink) = &self.event_sink {

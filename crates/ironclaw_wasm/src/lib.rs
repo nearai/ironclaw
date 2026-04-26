@@ -614,6 +614,47 @@ impl WasmRuntime {
         Ok(WasmExecutionResult { result, receipt })
     }
 
+    /// Execute a WASM extension capability with host-mediated network imports.
+    pub async fn execute_extension_json_with_network<F, G>(
+        &self,
+        fs: &F,
+        governor: &G,
+        request: WasmExecutionRequest<'_>,
+        http: Arc<dyn WasmHostHttp>,
+    ) -> Result<WasmExecutionResult, WasmError>
+    where
+        F: RootFilesystem,
+        G: ResourceGovernor,
+    {
+        let reservation = governor
+            .reserve(request.scope, request.estimate)
+            .map_err(|error| WasmError::Resource(Box::new(error)))?;
+
+        let prepared = match self
+            .prepare_extension_capability(fs, request.package, request.capability_id)
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => return Err(release_after_failure(governor, reservation.id, error)),
+        };
+
+        let result = match self.invoke_json_with_network(
+            prepared.module.as_ref(),
+            &prepared.descriptor,
+            Some(&reservation),
+            request.invocation,
+            http,
+        ) {
+            Ok(result) => result,
+            Err(error) => return Err(release_after_failure(governor, reservation.id, error)),
+        };
+
+        let receipt = governor
+            .reconcile(reservation.id, result.usage.clone())
+            .map_err(|error| WasmError::Resource(Box::new(error)))?;
+        Ok(WasmExecutionResult { result, receipt })
+    }
+
     /// Invoke a capability through the initial JSON pointer/length ABI.
     ///
     /// The guest module must export:
