@@ -487,6 +487,65 @@ pub enum TracesCommand {
         json: bool,
     },
 
+    /// Update benchmark registry/evaluator lifecycle metadata
+    BenchmarkLifecycleUpdate {
+        /// Trace Commons ingestion base URL or /v1/traces URL
+        #[arg(long)]
+        endpoint: String,
+
+        /// Benchmark conversion id to update
+        #[arg(long)]
+        conversion_id: Uuid,
+
+        /// Registry lifecycle status
+        #[arg(long, value_enum)]
+        registry_status: Option<TraceBenchmarkRegistryStatusArg>,
+
+        /// Registry artifact/reference id
+        #[arg(long)]
+        registry_ref: Option<String>,
+
+        /// Published timestamp in RFC3339 format
+        #[arg(long)]
+        published_at: Option<String>,
+
+        /// Evaluator lifecycle status
+        #[arg(long, value_enum)]
+        evaluation_status: Option<TraceBenchmarkEvaluationStatusArg>,
+
+        /// Evaluator run/reference id
+        #[arg(long)]
+        evaluator_ref: Option<String>,
+
+        /// Evaluated timestamp in RFC3339 format
+        #[arg(long)]
+        evaluated_at: Option<String>,
+
+        /// Evaluator score from 0.0 to 1.0
+        #[arg(long)]
+        score: Option<f32>,
+
+        /// Number of passed evaluator checks
+        #[arg(long)]
+        pass_count: Option<u32>,
+
+        /// Number of failed evaluator checks
+        #[arg(long)]
+        fail_count: Option<u32>,
+
+        /// Human/operator reason for the lifecycle update
+        #[arg(long)]
+        reason: Option<String>,
+
+        /// Environment variable containing a reviewer/admin/benchmark-worker bearer token
+        #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
+        bearer_token_env: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Export an approved replay dataset slice from the central corpus
     ReplayDatasetExport {
         /// Trace Commons ingestion base URL or /v1/traces URL
@@ -900,6 +959,48 @@ impl std::fmt::Display for TraceCreditEventTypeArg {
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceBenchmarkRegistryStatusArg {
+    Candidate,
+    Published,
+    Revoked,
+}
+
+impl std::fmt::Display for TraceBenchmarkRegistryStatusArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::Candidate => "candidate",
+            Self::Published => "published",
+            Self::Revoked => "revoked",
+        };
+        write!(f, "{value}")
+    }
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceBenchmarkEvaluationStatusArg {
+    NotRun,
+    Queued,
+    Running,
+    Passed,
+    Failed,
+    Inconclusive,
+}
+
+impl std::fmt::Display for TraceBenchmarkEvaluationStatusArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::NotRun => "not_run",
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Inconclusive => "inconclusive",
+        };
+        write!(f, "{value}")
+    }
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceCorpusStatusArg {
     Accepted,
     Quarantined,
@@ -1189,6 +1290,40 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
                 external_ref,
                 json,
                 path: "/v1/workers/benchmark-convert",
+            })
+            .await
+        }
+        TracesCommand::BenchmarkLifecycleUpdate {
+            endpoint,
+            conversion_id,
+            registry_status,
+            registry_ref,
+            published_at,
+            evaluation_status,
+            evaluator_ref,
+            evaluated_at,
+            score,
+            pass_count,
+            fail_count,
+            reason,
+            bearer_token_env,
+            json,
+        } => {
+            trace_commons_benchmark_lifecycle_update(TraceCommonsBenchmarkLifecycleUpdateOptions {
+                endpoint: &endpoint,
+                bearer_token_env: &bearer_token_env,
+                conversion_id,
+                registry_status,
+                registry_ref,
+                published_at,
+                evaluation_status,
+                evaluator_ref,
+                evaluated_at,
+                score,
+                pass_count,
+                fail_count,
+                reason,
+                json,
             })
             .await
         }
@@ -2184,6 +2319,156 @@ async fn trace_commons_benchmark_convert(
         print_optional_json_field("  purpose", value, "purpose");
     }
     Ok(())
+}
+
+struct TraceCommonsBenchmarkLifecycleUpdateOptions<'a> {
+    endpoint: &'a str,
+    bearer_token_env: &'a str,
+    conversion_id: Uuid,
+    registry_status: Option<TraceBenchmarkRegistryStatusArg>,
+    registry_ref: Option<String>,
+    published_at: Option<String>,
+    evaluation_status: Option<TraceBenchmarkEvaluationStatusArg>,
+    evaluator_ref: Option<String>,
+    evaluated_at: Option<String>,
+    score: Option<f32>,
+    pass_count: Option<u32>,
+    fail_count: Option<u32>,
+    reason: Option<String>,
+    json: bool,
+}
+
+async fn trace_commons_benchmark_lifecycle_update(
+    options: TraceCommonsBenchmarkLifecycleUpdateOptions<'_>,
+) -> anyhow::Result<()> {
+    let body = trace_commons_benchmark_lifecycle_body(
+        options.registry_status,
+        options.registry_ref,
+        options.published_at,
+        options.evaluation_status,
+        options.evaluator_ref,
+        options.evaluated_at,
+        options.score,
+        options.pass_count,
+        options.fail_count,
+        options.reason,
+    )?;
+    let path = format!("/v1/benchmarks/{}/lifecycle", options.conversion_id);
+    let response = trace_commons_api_request(
+        Method::POST,
+        options.endpoint,
+        &path,
+        &[],
+        Some(options.bearer_token_env),
+        Some(body),
+    )
+    .await?;
+    if options.json {
+        print_trace_commons_json(&response)?;
+        return Ok(());
+    }
+
+    println!("Trace Commons benchmark lifecycle updated.");
+    if let Some(value) = response.json.as_ref() {
+        print_optional_json_field("  conversion id", value, "conversion_id");
+        print_optional_json_field("  purpose", value, "purpose");
+        if let Some(registry) = value.get("registry") {
+            print_optional_json_field("  registry status", registry, "status");
+            print_optional_json_field("  registry ref", registry, "registry_ref");
+        }
+        if let Some(evaluation) = value.get("evaluation") {
+            print_optional_json_field("  evaluation status", evaluation, "status");
+            print_optional_json_field("  evaluator ref", evaluation, "evaluator_ref");
+            print_optional_json_field("  score", evaluation, "score");
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn trace_commons_benchmark_lifecycle_body(
+    registry_status: Option<TraceBenchmarkRegistryStatusArg>,
+    registry_ref: Option<String>,
+    published_at: Option<String>,
+    evaluation_status: Option<TraceBenchmarkEvaluationStatusArg>,
+    evaluator_ref: Option<String>,
+    evaluated_at: Option<String>,
+    score: Option<f32>,
+    pass_count: Option<u32>,
+    fail_count: Option<u32>,
+    reason: Option<String>,
+) -> anyhow::Result<serde_json::Value> {
+    if let Some(score) = score
+        && !(0.0..=1.0).contains(&score)
+    {
+        anyhow::bail!("--score must be between 0.0 and 1.0");
+    }
+
+    let mut body = serde_json::json!({});
+    let mut registry = serde_json::Map::new();
+    if let Some(status) = registry_status {
+        registry.insert(
+            "status".to_string(),
+            serde_json::Value::String(status.to_string()),
+        );
+    }
+    if let Some(registry_ref) = registry_ref {
+        registry.insert(
+            "registry_ref".to_string(),
+            serde_json::Value::String(registry_ref),
+        );
+    }
+    if let Some(published_at) = published_at {
+        registry.insert(
+            "published_at".to_string(),
+            serde_json::Value::String(published_at),
+        );
+    }
+    if !registry.is_empty() {
+        body["registry"] = serde_json::Value::Object(registry);
+    }
+
+    let mut evaluation = serde_json::Map::new();
+    if let Some(status) = evaluation_status {
+        evaluation.insert(
+            "status".to_string(),
+            serde_json::Value::String(status.to_string()),
+        );
+    }
+    if let Some(evaluator_ref) = evaluator_ref {
+        evaluation.insert(
+            "evaluator_ref".to_string(),
+            serde_json::Value::String(evaluator_ref),
+        );
+    }
+    if let Some(evaluated_at) = evaluated_at {
+        evaluation.insert(
+            "evaluated_at".to_string(),
+            serde_json::Value::String(evaluated_at),
+        );
+    }
+    if let Some(score) = score {
+        evaluation.insert("score".to_string(), serde_json::json!(score));
+    }
+    if let Some(pass_count) = pass_count {
+        evaluation.insert("pass_count".to_string(), serde_json::json!(pass_count));
+    }
+    if let Some(fail_count) = fail_count {
+        evaluation.insert("fail_count".to_string(), serde_json::json!(fail_count));
+    }
+    if !evaluation.is_empty() {
+        body["evaluation"] = serde_json::Value::Object(evaluation);
+    }
+
+    if body.as_object().is_some_and(serde_json::Map::is_empty) {
+        anyhow::bail!(
+            "benchmark lifecycle update requires at least one registry or evaluation field"
+        );
+    }
+    if let Some(reason) = reason {
+        body["reason"] = serde_json::Value::String(reason);
+    }
+    Ok(body)
 }
 
 struct TraceCommonsReplayDatasetExportOptions<'a> {
@@ -4090,6 +4375,159 @@ mod tests {
             url,
             "https://trace.example/internal/v1/workers/benchmark-convert"
         );
+    }
+
+    #[test]
+    fn benchmark_lifecycle_update_uses_conversion_route() {
+        let conversion_id =
+            Uuid::parse_str("018f2b7b-0c11-72fd-95c4-1f9f98feac01").expect("uuid parses");
+        let url = trace_commons_api_url(
+            "https://trace.example/internal/v1/traces",
+            &format!("/v1/benchmarks/{conversion_id}/lifecycle"),
+            &[],
+        )
+        .expect("url builds");
+
+        assert_eq!(
+            url,
+            "https://trace.example/internal/v1/benchmarks/018f2b7b-0c11-72fd-95c4-1f9f98feac01/lifecycle"
+        );
+    }
+
+    #[test]
+    fn benchmark_lifecycle_update_parses_through_cli() {
+        let cli = Cli::try_parse_from([
+            "ironclaw",
+            "traces",
+            "benchmark-lifecycle-update",
+            "--endpoint",
+            "https://trace.example/internal",
+            "--conversion-id",
+            "018f2b7b-0c11-72fd-95c4-1f9f98feac01",
+            "--registry-status",
+            "published",
+            "--registry-ref",
+            "benchmark:trace-018",
+            "--published-at",
+            "2026-04-26T12:00:00Z",
+            "--evaluation-status",
+            "passed",
+            "--evaluator-ref",
+            "eval:nightly-42",
+            "--evaluated-at",
+            "2026-04-26T12:05:00Z",
+            "--score",
+            "0.97",
+            "--pass-count",
+            "7",
+            "--fail-count",
+            "0",
+            "--reason",
+            "published after evaluator pass",
+            "--bearer-token-env",
+            "TRACE_COMMONS_BENCHMARK_WORKER_TOKEN",
+        ])
+        .expect("benchmark-lifecycle-update should parse");
+
+        let Some(Command::Traces(TracesCommand::BenchmarkLifecycleUpdate {
+            conversion_id,
+            registry_status,
+            registry_ref,
+            published_at,
+            evaluation_status,
+            evaluator_ref,
+            evaluated_at,
+            score,
+            pass_count,
+            fail_count,
+            reason,
+            bearer_token_env,
+            ..
+        })) = cli.command
+        else {
+            panic!("expected traces benchmark-lifecycle-update command");
+        };
+
+        assert_eq!(
+            conversion_id,
+            Uuid::parse_str("018f2b7b-0c11-72fd-95c4-1f9f98feac01").expect("uuid parses")
+        );
+        assert_eq!(
+            registry_status,
+            Some(TraceBenchmarkRegistryStatusArg::Published)
+        );
+        assert_eq!(registry_ref.as_deref(), Some("benchmark:trace-018"));
+        assert_eq!(published_at.as_deref(), Some("2026-04-26T12:00:00Z"));
+        assert_eq!(
+            evaluation_status,
+            Some(TraceBenchmarkEvaluationStatusArg::Passed)
+        );
+        assert_eq!(evaluator_ref.as_deref(), Some("eval:nightly-42"));
+        assert_eq!(evaluated_at.as_deref(), Some("2026-04-26T12:05:00Z"));
+        assert_eq!(score, Some(0.97));
+        assert_eq!(pass_count, Some(7));
+        assert_eq!(fail_count, Some(0));
+        assert_eq!(reason.as_deref(), Some("published after evaluator pass"));
+        assert_eq!(bearer_token_env, "TRACE_COMMONS_BENCHMARK_WORKER_TOKEN");
+    }
+
+    #[test]
+    fn benchmark_lifecycle_body_uses_nested_server_fields() {
+        let body = trace_commons_benchmark_lifecycle_body(
+            Some(TraceBenchmarkRegistryStatusArg::Published),
+            Some("benchmark:trace-018".to_string()),
+            Some("2026-04-26T12:00:00Z".to_string()),
+            Some(TraceBenchmarkEvaluationStatusArg::Passed),
+            Some("eval:nightly-42".to_string()),
+            Some("2026-04-26T12:05:00Z".to_string()),
+            Some(0.5),
+            Some(7),
+            Some(0),
+            Some("published after evaluator pass".to_string()),
+        )
+        .expect("body builds");
+
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "registry": {
+                    "status": "published",
+                    "registry_ref": "benchmark:trace-018",
+                    "published_at": "2026-04-26T12:00:00Z"
+                },
+                "evaluation": {
+                    "status": "passed",
+                    "evaluator_ref": "eval:nightly-42",
+                    "evaluated_at": "2026-04-26T12:05:00Z",
+                    "score": 0.5,
+                    "pass_count": 7,
+                    "fail_count": 0
+                },
+                "reason": "published after evaluator pass"
+            })
+        );
+    }
+
+    #[test]
+    fn benchmark_lifecycle_body_rejects_empty_and_invalid_score() {
+        let empty = trace_commons_benchmark_lifecycle_body(
+            None, None, None, None, None, None, None, None, None, None,
+        );
+        assert!(empty.is_err());
+
+        let invalid_score = trace_commons_benchmark_lifecycle_body(
+            None,
+            None,
+            None,
+            Some(TraceBenchmarkEvaluationStatusArg::Passed),
+            None,
+            None,
+            Some(1.5),
+            None,
+            None,
+            None,
+        );
+        assert!(invalid_score.is_err());
     }
 
     #[test]
