@@ -66,7 +66,9 @@ use ironclaw::trace_corpus_storage::{
     TraceVectorEntryWrite as StorageTraceVectorEntryWrite,
     TraceWorkerKind as StorageTraceWorkerKind,
 };
-use secrecy::SecretString;
+use jsonwebtoken::errors::ErrorKind as JwtErrorKind;
+use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+use secrecy::{ExposeSecret, SecretString};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -93,6 +95,9 @@ const TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: &str =
     "TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST";
 const DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: usize = 500;
 const TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT: &str = "TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT";
+const TRACE_COMMONS_SIGNED_TOKEN_SECRET: &str = "TRACE_COMMONS_SIGNED_TOKEN_SECRET";
+const TRACE_COMMONS_SIGNED_TOKEN_ISSUER: &str = "TRACE_COMMONS_SIGNED_TOKEN_ISSUER";
+const TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE: &str = "TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE";
 const TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR: &str =
     "TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR";
 const TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR: &str =
@@ -123,6 +128,7 @@ async fn main() -> anyhow::Result<()> {
 struct AppState {
     root: PathBuf,
     tokens: Arc<BTreeMap<String, TenantAuth>>,
+    signed_token_verifier: Option<TraceCommonsSignedTokenVerifier>,
     tenant_policies: Arc<BTreeMap<String, TenantSubmissionPolicy>>,
     require_tenant_submission_policy: bool,
     db_mirror: Option<Arc<dyn Database>>,
@@ -283,6 +289,24 @@ struct TenantAuth {
     expires_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Clone)]
+struct TraceCommonsSignedTokenVerifier {
+    secret: SecretString,
+    issuer: Option<String>,
+    audience: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceCommonsSignedTokenClaims {
+    tenant_id: String,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    principal_ref: Option<String>,
+    #[serde(default)]
+    sub: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 struct TenantSubmissionPolicy {
     #[serde(default)]
@@ -361,9 +385,10 @@ impl AppState {
             .map(PathBuf::from)
             .unwrap_or_else(|_| default_data_dir());
         let tokens = parse_tenant_tokens_from_env()?;
-        if tokens.is_empty() {
+        let signed_token_verifier = trace_commons_signed_token_verifier_from_env()?;
+        if tokens.is_empty() && signed_token_verifier.is_none() {
             anyhow::bail!(
-                "TRACE_COMMONS_TENANT_TOKENS or TRACE_COMMONS_INGEST_TOKEN must be configured"
+                "TRACE_COMMONS_TENANT_TOKENS, TRACE_COMMONS_INGEST_TOKEN, or TRACE_COMMONS_SIGNED_TOKEN_SECRET must be configured"
             );
         }
         let tenant_policies = parse_tenant_submission_policies_from_env()?;
@@ -474,6 +499,7 @@ impl AppState {
         Ok(Self {
             root,
             tokens: Arc::new(tokens),
+            signed_token_verifier,
             tenant_policies: Arc::new(tenant_policies),
             require_tenant_submission_policy,
             db_mirror,
@@ -894,6 +920,109 @@ fn parse_token_secret_and_expiry(raw: &str) -> anyhow::Result<(String, Option<Da
     Ok((token.to_string(), expires_at))
 }
 
+fn trace_commons_signed_token_verifier_from_env()
+-> anyhow::Result<Option<TraceCommonsSignedTokenVerifier>> {
+    let secret = match std::env::var(TRACE_COMMONS_SIGNED_TOKEN_SECRET) {
+        Ok(secret) => secret,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read {TRACE_COMMONS_SIGNED_TOKEN_SECRET}"));
+        }
+    };
+    if secret.trim().is_empty() {
+        anyhow::bail!("{TRACE_COMMONS_SIGNED_TOKEN_SECRET} must not be empty");
+    }
+    let secret = secret.trim().to_string();
+
+    Ok(Some(TraceCommonsSignedTokenVerifier {
+        secret: SecretString::from(secret),
+        issuer: optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_ISSUER)?,
+        audience: optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE)?,
+    }))
+}
+
+fn optional_trimmed_env(name: &'static str) -> anyhow::Result<Option<String>> {
+    match std::env::var(name) {
+        Ok(value) => {
+            let value = value.trim();
+            if value.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(value.to_string()))
+            }
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("failed to read {name}")),
+    }
+}
+
+impl TraceCommonsSignedTokenVerifier {
+    fn authenticate(&self, token: &str) -> ApiResult<TenantAuth> {
+        let mut validation = Validation::new(Algorithm::HS256);
+        validation.validate_nbf = true;
+        let mut required_claims = vec!["exp".to_string(), "tenant_id".to_string()];
+        if let Some(issuer) = &self.issuer {
+            validation.set_issuer(&[issuer]);
+            required_claims.push("iss".to_string());
+        }
+        if let Some(audience) = &self.audience {
+            validation.set_audience(&[audience]);
+            required_claims.push("aud".to_string());
+        } else {
+            validation.validate_aud = false;
+        }
+        validation.set_required_spec_claims(&required_claims);
+
+        let token_data = jsonwebtoken::decode::<TraceCommonsSignedTokenClaims>(
+            token,
+            &DecodingKey::from_secret(self.secret.expose_secret().as_bytes()),
+            &validation,
+        )
+        .map_err(|error| {
+            let message = match error.kind() {
+                JwtErrorKind::ExpiredSignature => "expired signed tenant token",
+                JwtErrorKind::ImmatureSignature => "not-yet-valid signed tenant token",
+                _ => "invalid signed tenant token",
+            };
+            api_error(StatusCode::FORBIDDEN, message)
+        })?;
+
+        signed_token_claims_to_auth(token_data.claims)
+    }
+}
+
+fn signed_token_claims_to_auth(claims: TraceCommonsSignedTokenClaims) -> ApiResult<TenantAuth> {
+    let tenant_id = claims.tenant_id.trim();
+    if tenant_id.is_empty() {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "invalid signed tenant token",
+        ));
+    }
+    let role = TokenRole::parse(claims.role.as_deref().unwrap_or("contributor"))
+        .map_err(|_| api_error(StatusCode::FORBIDDEN, "invalid signed tenant token role"))?;
+    let actor_ref = claims
+        .principal_ref
+        .as_deref()
+        .or(claims.sub.as_deref())
+        .map(str::trim)
+        .filter(|actor_ref| !actor_ref.is_empty())
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::FORBIDDEN,
+                "signed tenant token requires principal_ref or sub",
+            )
+        })?;
+
+    Ok(TenantAuth {
+        tenant_id: tenant_id.to_string(),
+        role,
+        principal_ref: principal_storage_ref(&format!("signed:{tenant_id}:{actor_ref}")),
+        expires_at: None,
+    })
+}
+
 fn parse_tenant_submission_policies_from_env()
 -> anyhow::Result<BTreeMap<String, TenantSubmissionPolicy>> {
     match std::env::var("TRACE_COMMONS_TENANT_POLICIES") {
@@ -1083,6 +1212,9 @@ struct TraceTenantPolicyResponse {
 struct TraceCommonsConfigStatusResponse {
     schema_version: &'static str,
     db_mirror_configured: bool,
+    signed_token_auth_enabled: bool,
+    signed_token_issuer_configured: bool,
+    signed_token_audience_configured: bool,
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
     db_reviewer_require_object_refs: bool,
@@ -1110,6 +1242,15 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
     TraceCommonsConfigStatusResponse {
         schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION,
         db_mirror_configured: state.db_mirror.is_some(),
+        signed_token_auth_enabled: state.signed_token_verifier.is_some(),
+        signed_token_issuer_configured: state
+            .signed_token_verifier
+            .as_ref()
+            .is_some_and(|verifier| verifier.issuer.is_some()),
+        signed_token_audience_configured: state
+            .signed_token_verifier
+            .as_ref()
+            .is_some_and(|verifier| verifier.audience.is_some()),
         db_contributor_reads: state.db_contributor_reads,
         db_reviewer_reads: state.db_reviewer_reads,
         db_reviewer_require_object_refs: state.db_reviewer_require_object_refs,
@@ -4982,18 +5123,19 @@ fn authenticate(state: &AppState, headers: &HeaderMap) -> ApiResult<TenantAuth> 
         .strip_prefix("Bearer ")
         .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "missing bearer token"))?
         .trim();
-    let auth = state
-        .tokens
-        .get(token)
-        .cloned()
-        .ok_or_else(|| api_error(StatusCode::FORBIDDEN, "unknown tenant token"))?;
-    if auth
-        .expires_at
-        .is_some_and(|expires_at| expires_at <= Utc::now())
-    {
-        return Err(api_error(StatusCode::FORBIDDEN, "expired tenant token"));
+    if let Some(auth) = state.tokens.get(token).cloned() {
+        if auth
+            .expires_at
+            .is_some_and(|expires_at| expires_at <= Utc::now())
+        {
+            return Err(api_error(StatusCode::FORBIDDEN, "expired tenant token"));
+        }
+        return Ok(auth);
     }
-    Ok(auth)
+    if let Some(verifier) = &state.signed_token_verifier {
+        return verifier.authenticate(token);
+    }
+    Err(api_error(StatusCode::FORBIDDEN, "unknown tenant token"))
 }
 
 fn require_reviewer(auth: &TenantAuth) -> ApiResult<()> {
@@ -13985,6 +14127,7 @@ mod tests {
         Arc::new(AppState {
             root,
             tokens: Arc::new(tokens),
+            signed_token_verifier: None,
             tenant_policies: Arc::new(BTreeMap::new()),
             require_tenant_submission_policy: false,
             db_mirror,
@@ -14134,6 +14277,30 @@ mod tests {
         let mut state = test_state(root);
         Arc::make_mut(&mut state).tokens = Arc::new(tokens);
         state
+    }
+
+    fn test_state_with_signed_token_verifier(
+        root: PathBuf,
+        secret: &str,
+        issuer: Option<&str>,
+        audience: Option<&str>,
+    ) -> Arc<AppState> {
+        let mut state = test_state_with_tokens(root, BTreeMap::new());
+        Arc::make_mut(&mut state).signed_token_verifier = Some(TraceCommonsSignedTokenVerifier {
+            secret: SecretString::from(secret.to_string()),
+            issuer: issuer.map(str::to_string),
+            audience: audience.map(str::to_string),
+        });
+        state
+    }
+
+    fn signed_tenant_token(secret: &str, claims: serde_json::Value) -> String {
+        jsonwebtoken::encode(
+            &jsonwebtoken::Header::new(Algorithm::HS256),
+            &claims,
+            &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .expect("signed tenant token encodes")
     }
 
     fn test_state_with_required_db_mirror_writes(
@@ -14342,6 +14509,7 @@ mod tests {
         Arc::new(AppState {
             root,
             tokens: Arc::new(tokens),
+            signed_token_verifier: None,
             tenant_policies: Arc::new(tenant_policies),
             require_tenant_submission_policy,
             db_mirror,
@@ -14399,6 +14567,7 @@ mod tests {
         Arc::new(AppState {
             root,
             tokens: Arc::new(tokens),
+            signed_token_verifier: None,
             tenant_policies: Arc::new(BTreeMap::new()),
             require_tenant_submission_policy: false,
             db_mirror: Some(db_mirror),
@@ -14441,6 +14610,7 @@ mod tests {
         Arc::new(AppState {
             root,
             tokens: Arc::new(tokens),
+            signed_token_verifier: None,
             tenant_policies: Arc::new(BTreeMap::new()),
             require_tenant_submission_policy: false,
             db_mirror: Some(db_mirror),
@@ -14481,6 +14651,7 @@ mod tests {
         Arc::new(AppState {
             root,
             tokens: Arc::new(tokens),
+            signed_token_verifier: None,
             tenant_policies: Arc::new(BTreeMap::new()),
             require_tenant_submission_policy: false,
             db_mirror: Some(db_mirror),
@@ -15472,7 +15643,7 @@ mod tests {
             TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
             test_artifact_store(temp.path()),
         );
-        let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
             temp.path().to_path_buf(),
             None,
             Some(artifact_store),
@@ -15486,6 +15657,11 @@ mod tests {
             true,
             true,
         );
+        Arc::make_mut(&mut state).signed_token_verifier = Some(TraceCommonsSignedTokenVerifier {
+            secret: SecretString::from("config-status-signed-secret".to_string()),
+            issuer: Some("config-status-issuer".to_string()),
+            audience: Some("config-status-audience".to_string()),
+        });
 
         let contributor_response = app(state.clone())
             .oneshot(
@@ -15521,6 +15697,15 @@ mod tests {
             serde_json::json!(TRACE_CONTRIBUTION_SCHEMA_VERSION)
         );
         assert_eq!(value["db_mirror_configured"], serde_json::json!(false));
+        assert_eq!(value["signed_token_auth_enabled"], serde_json::json!(true));
+        assert_eq!(
+            value["signed_token_issuer_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["signed_token_audience_configured"],
+            serde_json::json!(true)
+        );
         assert_eq!(
             value["require_tenant_submission_policy"],
             serde_json::json!(true)
@@ -15549,6 +15734,9 @@ mod tests {
             "artifact_store_root",
             "bearer_token",
             "principal_ref",
+            "signed_token_secret",
+            "signed_token_issuer",
+            "signed_token_audience",
         ] {
             assert!(
                 !object.contains_key(forbidden_key),
@@ -15559,6 +15747,9 @@ mod tests {
         assert!(!body_text.contains(temp.path().to_string_lossy().as_ref()));
         assert!(!body_text.contains("admin-token-a"));
         assert!(!body_text.contains("token-a"));
+        assert!(!body_text.contains("config-status-signed-secret"));
+        assert!(!body_text.contains("config-status-issuer"));
+        assert!(!body_text.contains("config-status-audience"));
 
         let file_audit_events =
             read_all_audit_events(temp.path(), "tenant-a").expect("file audit events read");
@@ -22202,6 +22393,7 @@ mod tests {
         let state = Arc::new(AppState {
             root: temp.path().to_path_buf(),
             tokens: Arc::new(tokens),
+            signed_token_verifier: None,
             tenant_policies: Arc::new(BTreeMap::new()),
             require_tenant_submission_policy: false,
             db_mirror: None,
@@ -27898,5 +28090,75 @@ mod tests {
         let _ = submit_trace_handler(State(state), auth_headers("fresh-token-a"), Json(envelope))
             .await
             .expect("unexpired token is accepted");
+    }
+
+    #[tokio::test]
+    async fn accepts_signed_tenant_token_and_attributes_to_claim_tenant() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state_with_signed_token_verifier(
+            temp.path().to_path_buf(),
+            "signed-secret",
+            Some("ironclaw-trace-issuer"),
+            Some("trace-commons-ingest"),
+        );
+        let token = signed_tenant_token(
+            "signed-secret",
+            serde_json::json!({
+                "tenant_id": "tenant-b",
+                "role": "contributor",
+                "sub": "actor-123",
+                "iss": "ironclaw-trace-issuer",
+                "aud": "trace-commons-ingest",
+                "exp": (Utc::now() + Duration::minutes(5)).timestamp()
+            }),
+        );
+        let envelope = sample_envelope().await;
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+            .await
+            .expect("signed tenant token is accepted");
+
+        assert!(
+            read_submission_record(temp.path(), "tenant-a", submission_id)
+                .expect("tenant-a metadata read")
+                .is_none()
+        );
+        let record = read_submission_record(temp.path(), "tenant-b", submission_id)
+            .expect("tenant-b metadata read")
+            .expect("tenant-b record exists");
+        assert_eq!(record.tenant_id, "tenant-b");
+        assert_eq!(
+            record.auth_principal_ref,
+            principal_storage_ref("signed:tenant-b:actor-123")
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_expired_signed_tenant_token_through_submit_handler() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state_with_signed_token_verifier(
+            temp.path().to_path_buf(),
+            "signed-secret",
+            None,
+            None,
+        );
+        let token = signed_tenant_token(
+            "signed-secret",
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "contributor",
+                "sub": "actor-123",
+                "exp": (Utc::now() - Duration::minutes(5)).timestamp()
+            }),
+        );
+        let envelope = sample_envelope().await;
+
+        let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+            .await
+            .expect_err("expired signed token is rejected");
+
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert_eq!(error.1.0.error, "expired signed tenant token");
     }
 }
