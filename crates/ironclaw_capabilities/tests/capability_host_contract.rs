@@ -5,9 +5,7 @@ use ironclaw_dispatcher::*;
 use ironclaw_extensions::*;
 use ironclaw_filesystem::*;
 use ironclaw_host_api::*;
-use ironclaw_mcp::*;
 use ironclaw_resources::*;
-use ironclaw_wasm::*;
 use serde_json::json;
 
 #[tokio::test]
@@ -15,10 +13,10 @@ async fn capability_host_denies_missing_grant_before_dispatch_or_reservation() {
     let (fs, package) = wasm_package_with_module(json_echo_module());
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
-    let wasm_runtime = WasmRuntime::for_testing().unwrap();
+    let wasm_adapter = EchoRuntimeAdapter::new(RuntimeKind::Wasm);
     let governor = InMemoryResourceGovernor::new();
-    let dispatcher =
-        RuntimeDispatcher::new(&registry, &fs, &governor).with_wasm_runtime(&wasm_runtime);
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
+        .with_runtime_adapter(RuntimeKind::Wasm, &wasm_adapter);
     let authorizer = GrantAuthorizer::new();
     let host = CapabilityHost::new(&registry, &dispatcher, &authorizer);
     let context = execution_context(CapabilitySet::default());
@@ -53,10 +51,10 @@ async fn capability_host_validates_context_before_authorizer_can_allow_dispatch(
     let (fs, package) = wasm_package_with_module(json_echo_module());
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
-    let wasm_runtime = WasmRuntime::for_testing().unwrap();
+    let wasm_adapter = EchoRuntimeAdapter::new(RuntimeKind::Wasm);
     let governor = InMemoryResourceGovernor::new();
-    let dispatcher =
-        RuntimeDispatcher::new(&registry, &fs, &governor).with_wasm_runtime(&wasm_runtime);
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
+        .with_runtime_adapter(RuntimeKind::Wasm, &wasm_adapter);
     let permissive_authorizer = AllowingAuthorizer;
     let host = CapabilityHost::new(&registry, &dispatcher, &permissive_authorizer);
     let mut context = execution_context(CapabilitySet::default());
@@ -91,10 +89,10 @@ async fn capability_host_authorized_dispatch_reaches_dispatcher() {
     let (fs, package) = wasm_package_with_module(json_echo_module());
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
-    let wasm_runtime = WasmRuntime::for_testing().unwrap();
+    let wasm_adapter = EchoRuntimeAdapter::new(RuntimeKind::Wasm);
     let governor = InMemoryResourceGovernor::new();
-    let dispatcher =
-        RuntimeDispatcher::new(&registry, &fs, &governor).with_wasm_runtime(&wasm_runtime);
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
+        .with_runtime_adapter(RuntimeKind::Wasm, &wasm_adapter);
     let authorizer = GrantAuthorizer::new();
     let host = CapabilityHost::new(&registry, &dispatcher, &authorizer);
     let context = execution_context(CapabilitySet {
@@ -200,10 +198,10 @@ async fn capability_host_routes_mcp_through_same_authorized_path() {
     registry
         .insert(package_from_manifest(MCP_MANIFEST))
         .unwrap();
-    let mcp_runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), EchoMcpClient);
+    let mcp_adapter = EchoRuntimeAdapter::new(RuntimeKind::Mcp);
     let governor = InMemoryResourceGovernor::new();
-    let dispatcher =
-        RuntimeDispatcher::new(&registry, &fs, &governor).with_mcp_runtime(&mcp_runtime);
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
+        .with_runtime_adapter(RuntimeKind::Mcp, &mcp_adapter);
     let authorizer = GrantAuthorizer::new();
     let host = CapabilityHost::new(&registry, &dispatcher, &authorizer);
     let context = execution_context(CapabilitySet {
@@ -305,12 +303,70 @@ impl CapabilityDispatchAuthorizer for ObligatingAuthorizer {
 }
 
 #[derive(Clone)]
-struct EchoMcpClient;
+struct EchoRuntimeAdapter {
+    runtime: RuntimeKind,
+}
+
+impl EchoRuntimeAdapter {
+    fn new(runtime: RuntimeKind) -> Self {
+        Self { runtime }
+    }
+}
 
 #[async_trait]
-impl McpClient for EchoMcpClient {
-    async fn call_tool(&self, request: McpClientRequest) -> Result<McpClientOutput, String> {
-        Ok(McpClientOutput::json(request.input))
+impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for EchoRuntimeAdapter {
+    async fn dispatch_json(
+        &self,
+        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        let output = request.input;
+        let usage = ResourceUsage {
+            output_bytes: serde_json::to_vec(&output).unwrap().len() as u64,
+            process_count: u32::from(matches!(
+                self.runtime,
+                RuntimeKind::Script | RuntimeKind::Mcp
+            )),
+            ..ResourceUsage::default()
+        };
+        let reservation = request
+            .governor
+            .reserve(request.scope, request.estimate)
+            .map_err(|_| {
+                CapabilityDispatchError::new(
+                    runtime_failure_kind(self.runtime),
+                    request.capability_id.clone(),
+                    Some(request.descriptor.provider.clone()),
+                    Some(self.runtime),
+                )
+            })?;
+        let receipt = request
+            .governor
+            .reconcile(reservation.id, usage.clone())
+            .map_err(|_| {
+                CapabilityDispatchError::new(
+                    runtime_failure_kind(self.runtime),
+                    request.capability_id.clone(),
+                    Some(request.descriptor.provider.clone()),
+                    Some(self.runtime),
+                )
+            })?;
+        Ok(RuntimeAdapterResult {
+            output,
+            output_bytes: usage.output_bytes,
+            usage,
+            receipt,
+        })
+    }
+}
+
+fn runtime_failure_kind(runtime: RuntimeKind) -> CapabilityDispatchFailureKind {
+    match runtime {
+        RuntimeKind::Wasm => CapabilityDispatchFailureKind::Wasm,
+        RuntimeKind::Script => CapabilityDispatchFailureKind::Script,
+        RuntimeKind::Mcp => CapabilityDispatchFailureKind::Mcp,
+        RuntimeKind::FirstParty | RuntimeKind::System => {
+            CapabilityDispatchFailureKind::UnsupportedRuntime
+        }
     }
 }
 

@@ -6,22 +6,215 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use ironclaw_approvals::ApprovalResolver;
 use ironclaw_authorization::{CapabilityDispatchAuthorizer, CapabilityLeaseStore};
 use ironclaw_capabilities::{CapabilityHost, DispatchProcessExecutor};
-use ironclaw_dispatcher::RuntimeDispatcher;
+use ironclaw_dispatcher::{
+    DispatchError, RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
+};
 use ironclaw_events::{AuditSink, EventSink};
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::CapabilityDispatcher;
-use ironclaw_mcp::McpExecutor;
+use ironclaw_host_api::{
+    CapabilityDispatchError, CapabilityDispatchFailureKind, CapabilityDispatcher, CapabilityId,
+    ExtensionId, RuntimeKind,
+};
+use ironclaw_mcp::{McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_processes::{
     ProcessExecutor, ProcessHost, ProcessResultStore, ProcessServices, ProcessStore,
 };
 use ironclaw_resources::ResourceGovernor;
 use ironclaw_run_state::{ApprovalRequestStore, RunStateStore};
-use ironclaw_scripts::ScriptExecutor;
-use ironclaw_wasm::WasmRuntime;
+use ironclaw_scripts::{ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
+use ironclaw_wasm::{CapabilityInvocation, WasmExecutionRequest, WasmRuntime};
+
+/// Dispatcher adapter for the concrete WASM runtime crate.
+pub struct WasmRuntimeAdapter {
+    runtime: Arc<WasmRuntime>,
+}
+
+impl WasmRuntimeAdapter {
+    pub fn new(runtime: Arc<WasmRuntime>) -> Self {
+        Self { runtime }
+    }
+}
+
+#[async_trait]
+impl<F, G> RuntimeAdapter<F, G> for WasmRuntimeAdapter
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
+    async fn dispatch_json(
+        &self,
+        request: RuntimeAdapterRequest<'_, F, G>,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        let capability_id = request.capability_id.clone();
+        let provider = request.descriptor.provider.clone();
+        let runtime = request.descriptor.runtime;
+        let execution = self
+            .runtime
+            .execute_extension_json(
+                request.filesystem,
+                request.governor,
+                WasmExecutionRequest {
+                    package: request.package,
+                    capability_id: request.capability_id,
+                    scope: request.scope,
+                    estimate: request.estimate,
+                    invocation: CapabilityInvocation {
+                        input: request.input,
+                    },
+                },
+            )
+            .await
+            .map_err(|_| {
+                runtime_dispatch_error(
+                    &capability_id,
+                    &provider,
+                    runtime,
+                    CapabilityDispatchFailureKind::Wasm,
+                )
+            })?;
+
+        Ok(RuntimeAdapterResult {
+            output: execution.result.output,
+            usage: execution.result.usage,
+            receipt: execution.receipt,
+            output_bytes: execution.result.output_bytes,
+        })
+    }
+}
+
+/// Dispatcher adapter for the concrete script executor port.
+pub struct ScriptRuntimeAdapter {
+    runtime: Arc<dyn ScriptExecutor>,
+}
+
+impl ScriptRuntimeAdapter {
+    pub fn new<T>(runtime: Arc<T>) -> Self
+    where
+        T: ScriptExecutor + 'static,
+    {
+        let runtime: Arc<dyn ScriptExecutor> = runtime;
+        Self { runtime }
+    }
+
+    pub fn from_dyn(runtime: Arc<dyn ScriptExecutor>) -> Self {
+        Self { runtime }
+    }
+}
+
+#[async_trait]
+impl<F, G> RuntimeAdapter<F, G> for ScriptRuntimeAdapter
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
+    async fn dispatch_json(
+        &self,
+        request: RuntimeAdapterRequest<'_, F, G>,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        let capability_id = request.capability_id.clone();
+        let provider = request.descriptor.provider.clone();
+        let runtime = request.descriptor.runtime;
+        let execution = self
+            .runtime
+            .execute_extension_json(
+                request.governor,
+                ScriptExecutionRequest {
+                    package: request.package,
+                    capability_id: request.capability_id,
+                    scope: request.scope,
+                    estimate: request.estimate,
+                    invocation: ScriptInvocation {
+                        input: request.input,
+                    },
+                },
+            )
+            .map_err(|_| {
+                runtime_dispatch_error(
+                    &capability_id,
+                    &provider,
+                    runtime,
+                    CapabilityDispatchFailureKind::Script,
+                )
+            })?;
+
+        Ok(RuntimeAdapterResult {
+            output: execution.result.output,
+            usage: execution.result.usage,
+            receipt: execution.receipt,
+            output_bytes: execution.result.output_bytes,
+        })
+    }
+}
+
+/// Dispatcher adapter for the concrete MCP executor port.
+pub struct McpRuntimeAdapter {
+    runtime: Arc<dyn McpExecutor>,
+}
+
+impl McpRuntimeAdapter {
+    pub fn new<T>(runtime: Arc<T>) -> Self
+    where
+        T: McpExecutor + 'static,
+    {
+        let runtime: Arc<dyn McpExecutor> = runtime;
+        Self { runtime }
+    }
+
+    pub fn from_dyn(runtime: Arc<dyn McpExecutor>) -> Self {
+        Self { runtime }
+    }
+}
+
+#[async_trait]
+impl<F, G> RuntimeAdapter<F, G> for McpRuntimeAdapter
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
+    async fn dispatch_json(
+        &self,
+        request: RuntimeAdapterRequest<'_, F, G>,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        let capability_id = request.capability_id.clone();
+        let provider = request.descriptor.provider.clone();
+        let runtime = request.descriptor.runtime;
+        let execution = self
+            .runtime
+            .execute_extension_json(
+                request.governor,
+                McpExecutionRequest {
+                    package: request.package,
+                    capability_id: request.capability_id,
+                    scope: request.scope,
+                    estimate: request.estimate,
+                    invocation: McpInvocation {
+                        input: request.input,
+                    },
+                },
+            )
+            .await
+            .map_err(|_| {
+                runtime_dispatch_error(
+                    &capability_id,
+                    &provider,
+                    runtime,
+                    CapabilityDispatchFailureKind::Mcp,
+                )
+            })?;
+
+        Ok(RuntimeAdapterResult {
+            output: execution.result.output,
+            usage: execution.result.usage,
+            receipt: execution.receipt,
+            output_bytes: execution.result.output_bytes,
+        })
+    }
+}
 
 /// Composition root for the Reborn host/runtime vertical slice.
 ///
@@ -198,13 +391,22 @@ where
         );
 
         if let Some(runtime) = &self.wasm_runtime {
-            dispatcher = dispatcher.with_wasm_runtime_arc(Arc::clone(runtime));
+            dispatcher = dispatcher.with_runtime_adapter_arc(
+                RuntimeKind::Wasm,
+                Arc::new(WasmRuntimeAdapter::new(Arc::clone(runtime))),
+            );
         }
         if let Some(runtime) = &self.script_runtime {
-            dispatcher = dispatcher.with_script_runtime_arc(Arc::clone(runtime));
+            dispatcher = dispatcher.with_runtime_adapter_arc(
+                RuntimeKind::Script,
+                Arc::new(ScriptRuntimeAdapter::from_dyn(Arc::clone(runtime))),
+            );
         }
         if let Some(runtime) = &self.mcp_runtime {
-            dispatcher = dispatcher.with_mcp_runtime_arc(Arc::clone(runtime));
+            dispatcher = dispatcher.with_runtime_adapter_arc(
+                RuntimeKind::Mcp,
+                Arc::new(McpRuntimeAdapter::from_dyn(Arc::clone(runtime))),
+            );
         }
         if let Some(sink) = &self.event_sink {
             dispatcher = dispatcher.with_event_sink_arc(Arc::clone(sink));
@@ -259,4 +461,18 @@ where
         }
         host
     }
+}
+
+fn runtime_dispatch_error(
+    capability_id: &CapabilityId,
+    provider: &ExtensionId,
+    runtime: RuntimeKind,
+    kind: CapabilityDispatchFailureKind,
+) -> DispatchError {
+    CapabilityDispatchError::new(
+        kind,
+        capability_id.clone(),
+        Some(provider.clone()),
+        Some(runtime),
+    )
 }

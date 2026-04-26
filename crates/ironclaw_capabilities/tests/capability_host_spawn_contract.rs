@@ -16,7 +16,6 @@ use ironclaw_resources::{
     InMemoryResourceGovernor, ReservationStatus, ResourceAccount, ResourceGovernor, ResourceLimits,
     ResourceReceipt,
 };
-use ironclaw_wasm::WasmRuntime;
 use serde_json::json;
 
 #[tokio::test]
@@ -456,10 +455,10 @@ async fn capability_host_spawn_can_run_background_runtime_dispatcher_process() {
             ..ResourceLimits::default()
         },
     );
-    let wasm_runtime = Arc::new(WasmRuntime::for_testing().unwrap());
+    let wasm_adapter = Arc::new(EchoRuntimeAdapter::new(RuntimeKind::Wasm));
     let dispatcher = Arc::new(
         RuntimeDispatcher::from_arcs(registry.clone(), fs, governor.clone())
-            .with_wasm_runtime_arc(wasm_runtime),
+            .with_runtime_adapter_arc(RuntimeKind::Wasm, wasm_adapter),
     );
     let executor = Arc::new(DispatchProcessExecutor::new(dispatcher.clone()));
     let process_store = Arc::new(ResourceManagedProcessStore::new(
@@ -768,6 +767,74 @@ impl CapabilityDispatcher for NoopDispatcher {
         _request: CapabilityDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
         panic!("spawn_json must not call dispatch_json")
+    }
+}
+
+#[derive(Clone)]
+struct EchoRuntimeAdapter {
+    runtime: RuntimeKind,
+}
+
+impl EchoRuntimeAdapter {
+    fn new(runtime: RuntimeKind) -> Self {
+        Self { runtime }
+    }
+}
+
+#[async_trait]
+impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for EchoRuntimeAdapter {
+    async fn dispatch_json(
+        &self,
+        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        let output = request.input;
+        let usage = ResourceUsage {
+            output_bytes: serde_json::to_vec(&output).unwrap().len() as u64,
+            process_count: u32::from(matches!(
+                self.runtime,
+                RuntimeKind::Script | RuntimeKind::Mcp
+            )),
+            ..ResourceUsage::default()
+        };
+        let reservation = request
+            .governor
+            .reserve(request.scope, request.estimate)
+            .map_err(|_| {
+                CapabilityDispatchError::new(
+                    runtime_failure_kind(self.runtime),
+                    request.capability_id.clone(),
+                    Some(request.descriptor.provider.clone()),
+                    Some(self.runtime),
+                )
+            })?;
+        let receipt = request
+            .governor
+            .reconcile(reservation.id, usage.clone())
+            .map_err(|_| {
+                CapabilityDispatchError::new(
+                    runtime_failure_kind(self.runtime),
+                    request.capability_id.clone(),
+                    Some(request.descriptor.provider.clone()),
+                    Some(self.runtime),
+                )
+            })?;
+        Ok(RuntimeAdapterResult {
+            output,
+            output_bytes: usage.output_bytes,
+            usage,
+            receipt,
+        })
+    }
+}
+
+fn runtime_failure_kind(runtime: RuntimeKind) -> CapabilityDispatchFailureKind {
+    match runtime {
+        RuntimeKind::Wasm => CapabilityDispatchFailureKind::Wasm,
+        RuntimeKind::Script => CapabilityDispatchFailureKind::Script,
+        RuntimeKind::Mcp => CapabilityDispatchFailureKind::Mcp,
+        RuntimeKind::FirstParty | RuntimeKind::System => {
+            CapabilityDispatchFailureKind::UnsupportedRuntime
+        }
     }
 }
 

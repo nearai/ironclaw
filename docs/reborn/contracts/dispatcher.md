@@ -13,9 +13,9 @@ Crate: `crates/ironclaw_dispatcher`
 It connects already-validated extension capabilities to runtime lanes:
 
 ```text
-ExtensionRegistry + RootFilesystem + ResourceGovernor + runtime backends
+ExtensionRegistry + RootFilesystem + ResourceGovernor + registered RuntimeAdapter backends
   -> RuntimeDispatcher::dispatch_json(...)
-  -> selected runtime lane
+  -> selected adapter for RuntimeKind
   -> normalized CapabilityDispatchResult
 ```
 
@@ -40,21 +40,21 @@ The dispatcher can be constructed from borrowed service boundaries for request-s
 
 ```rust
 RuntimeDispatcher::new(&registry, &root_filesystem, &resource_governor)
-    .with_wasm_runtime(&wasm_runtime)
-    .with_script_runtime(&script_runtime)
-    .with_mcp_runtime(&mcp_runtime)
+    .with_runtime_adapter(RuntimeKind::Wasm, &wasm_adapter)
+    .with_runtime_adapter(RuntimeKind::Script, &script_adapter)
+    .with_runtime_adapter(RuntimeKind::Mcp, &mcp_adapter)
 ```
 
 For detached background execution, it can also own shared service handles:
 
 ```rust
 RuntimeDispatcher::from_arcs(registry, root_filesystem, resource_governor)
-    .with_wasm_runtime_arc(wasm_runtime)
+    .with_runtime_adapter_arc(RuntimeKind::Script, script_adapter)
 ```
 
 The owned form keeps dispatcher composition-only while allowing the process-dispatch adapter to run capability-backed processes without leaking borrowed app state into a spawned task. `RuntimeDispatcher` implements the host API `CapabilityDispatcher` trait, but `ironclaw_capabilities` no longer depends on this concrete crate.
 
-`ExtensionRegistry` remains the authority for what can run. Runtime crates remain the authority for how a lane runs.
+`ExtensionRegistry` remains the authority for what can run. Runtime adapter owners remain the authority for how a lane runs. The concrete WASM, Script, and MCP adapters now live in `ironclaw_host_runtime`, so `ironclaw_dispatcher` no longer has normal dependencies on `ironclaw_wasm`, `ironclaw_scripts`, or `ironclaw_mcp`.
 
 ---
 
@@ -66,46 +66,44 @@ V1 `dispatch_json` performs only routing and consistency checks:
 1. lookup capability in ExtensionRegistry
 2. lookup provider package in ExtensionRegistry
 3. verify descriptor.runtime == package.manifest.runtime_kind()
-4. select runtime lane from RuntimeKind
-5. call the configured backend for that lane
+4. select the registered `RuntimeAdapter` for `RuntimeKind`
+5. call the configured adapter for that lane
 6. return a normalized host API dispatch result or host-safe failure kind
 ```
 
-For `RuntimeKind::Wasm`, the dispatcher calls:
+`RuntimeAdapter` is the open extension seam:
 
-```text
-ironclaw_wasm::WasmRuntime::execute_extension_json(...)
+```rust
+#[async_trait]
+pub trait RuntimeAdapter<F, G>
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
+    async fn dispatch_json(
+        &self,
+        request: RuntimeAdapterRequest<'_, F, G>,
+    ) -> Result<RuntimeAdapterResult, DispatchError>;
+}
 ```
 
-For `RuntimeKind::Script`, the dispatcher calls:
-
-```text
-ironclaw_scripts::ScriptExecutor::execute_extension_json(...)
-```
-
-For `RuntimeKind::Mcp`, the dispatcher calls:
-
-```text
-ironclaw_mcp::McpExecutor::execute_extension_json(...)
-```
-
-Each runtime lane still owns its local reserve/prepare/invoke/reconcile/release lifecycle. The dispatcher does not duplicate the resource-governor protocol.
+Each runtime adapter owns its local reserve/prepare/invoke/reconcile/release lifecycle. The dispatcher does not duplicate the resource-governor protocol and does not import concrete runtime crates.
 
 ---
 
 ## 4. Runtime lane status
 
-V1 routes these runtime kinds explicitly:
+V1 routes any `RuntimeKind` through a registered adapter:
 
 | Runtime kind | Dispatch behavior |
 | --- | --- |
-| `Wasm` | Executes through configured `WasmRuntime` |
-| `Script` | Executes through configured `ScriptExecutor` |
-| `Mcp` | Executes through configured `McpExecutor` adapter |
-| `FirstParty` | Recognized, returns `UnsupportedRuntime` until host service adapters land |
-| `System` | Recognized, returns `UnsupportedRuntime` until system service adapters land |
+| `Wasm` | Executes through a configured WASM adapter, usually composed by `ironclaw_host_runtime` |
+| `Script` | Executes through a configured Script adapter, usually composed by `ironclaw_host_runtime` |
+| `Mcp` | Executes through a configured MCP adapter, usually composed by `ironclaw_host_runtime` |
+| `FirstParty` | Recognized as a host-service lane but not executed by default in this dispatcher slice |
+| `System` | Recognized as a system-service lane but not executed by default in this dispatcher slice |
 
-If the selected WASM, Script, or MCP runtime is not configured, dispatch returns `MissingRuntimeBackend` before reserving resources.
+If a WASM, Script, or MCP runtime kind has no adapter configured, dispatch returns `MissingRuntimeBackend` before reserving resources. First-party/system lanes fail as `UnsupportedRuntime` unless a later host-service slice deliberately wires a scoped adapter.
 
 ---
 
@@ -116,8 +114,8 @@ The dispatcher fails before execution when:
 - capability ID is not registered
 - provider package is not registered
 - capability descriptor runtime does not match package manifest runtime
-- selected runtime backend is missing
-- selected runtime lane is recognized but not implemented yet
+- selected runtime adapter is missing
+- selected runtime adapter returns a typed dispatch failure
 
 These failures must not reserve resources or perform external effects. Event sink failures are best-effort observability failures and must not turn a preflight or post-execution dispatch outcome into a different workflow result.
 
@@ -150,7 +148,7 @@ This PR does not add:
 - approval prompts
 - full audit/event projection persistence
 - script filesystem mounts, artifact export, network access, or secret injection
-- MCP protocol handshake/lifecycle management beyond the adapter contract
+- MCP protocol handshake/lifecycle management beyond a registered adapter contract
 - host service dispatch for first-party/system capabilities
 - filesystem mount selection
 - network or secret injection
@@ -165,12 +163,14 @@ Those belong in dedicated service crates or later narrow dispatcher composition 
 
 The crate test suite covers:
 
-- WASM capability dispatch through the real WASM executor
+- WASM capability dispatch through a registered adapter
 - unknown capability failure before resource reservation
 - descriptor/package runtime mismatch failure before execution
-- Script capability dispatch through a configured script executor
-- MCP capability dispatch through a configured MCP executor
-- first-party and system lanes recognized but not executed
-- missing WASM, Script, or MCP backend failure before resource reservation
+- Script capability dispatch through a registered adapter
+- MCP capability dispatch through a registered adapter
+- first-party and system lanes recognized but not executed by default
+- missing WASM, Script, or MCP adapter failure before resource reservation
+- event sink failures ignored on both success and failure paths
+- runtime failure details redacted to host-safe dispatch failure kinds
 
 These tests are intentionally caller-level: they drive `RuntimeDispatcher::dispatch_json`, not only helper functions.

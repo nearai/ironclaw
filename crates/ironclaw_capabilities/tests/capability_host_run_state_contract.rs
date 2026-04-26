@@ -8,7 +8,6 @@ use ironclaw_filesystem::*;
 use ironclaw_host_api::*;
 use ironclaw_resources::*;
 use ironclaw_run_state::*;
-use ironclaw_wasm::*;
 use serde_json::json;
 
 #[tokio::test]
@@ -259,10 +258,10 @@ async fn capability_host_resumes_approved_invocation_and_consumes_lease() {
     let (fs, package) = wasm_package_with_module(json_echo_module());
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
-    let wasm_runtime = WasmRuntime::for_testing().unwrap();
+    let wasm_adapter = EchoRuntimeAdapter::new(RuntimeKind::Wasm);
     let governor = InMemoryResourceGovernor::new();
-    let dispatcher =
-        RuntimeDispatcher::new(&registry, &fs, &governor).with_wasm_runtime(&wasm_runtime);
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
+        .with_runtime_adapter(RuntimeKind::Wasm, &wasm_adapter);
     let run_state = InMemoryRunStateStore::new();
     let approval_requests = InMemoryApprovalRequestStore::new();
     let leases = InMemoryCapabilityLeaseStore::new();
@@ -341,10 +340,10 @@ async fn capability_host_rejects_resume_with_unsupported_obligations_before_clai
     let (fs, package) = wasm_package_with_module(json_echo_module());
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
-    let wasm_runtime = WasmRuntime::for_testing().unwrap();
+    let wasm_adapter = EchoRuntimeAdapter::new(RuntimeKind::Wasm);
     let governor = InMemoryResourceGovernor::new();
-    let dispatcher =
-        RuntimeDispatcher::new(&registry, &fs, &governor).with_wasm_runtime(&wasm_runtime);
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
+        .with_runtime_adapter(RuntimeKind::Wasm, &wasm_adapter);
     let run_state = InMemoryRunStateStore::new();
     let approval_requests = InMemoryApprovalRequestStore::new();
     let leases = InMemoryCapabilityLeaseStore::new();
@@ -422,10 +421,10 @@ async fn capability_host_rejects_resume_when_input_fingerprint_differs() {
     let (fs, package) = wasm_package_with_module(json_echo_module());
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
-    let wasm_runtime = WasmRuntime::for_testing().unwrap();
+    let wasm_adapter = EchoRuntimeAdapter::new(RuntimeKind::Wasm);
     let governor = InMemoryResourceGovernor::new();
-    let dispatcher =
-        RuntimeDispatcher::new(&registry, &fs, &governor).with_wasm_runtime(&wasm_runtime);
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
+        .with_runtime_adapter(RuntimeKind::Wasm, &wasm_adapter);
     let run_state = InMemoryRunStateStore::new();
     let approval_requests = InMemoryApprovalRequestStore::new();
     let leases = InMemoryCapabilityLeaseStore::new();
@@ -504,10 +503,10 @@ async fn capability_host_rejects_resume_when_approval_was_denied() {
     let (fs, package) = wasm_package_with_module(json_echo_module());
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
-    let wasm_runtime = WasmRuntime::for_testing().unwrap();
+    let wasm_adapter = EchoRuntimeAdapter::new(RuntimeKind::Wasm);
     let governor = InMemoryResourceGovernor::new();
-    let dispatcher =
-        RuntimeDispatcher::new(&registry, &fs, &governor).with_wasm_runtime(&wasm_runtime);
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
+        .with_runtime_adapter(RuntimeKind::Wasm, &wasm_adapter);
     let run_state = InMemoryRunStateStore::new();
     let approval_requests = InMemoryApprovalRequestStore::new();
     let leases = InMemoryCapabilityLeaseStore::new();
@@ -574,10 +573,10 @@ async fn capability_host_rejects_resume_when_no_matching_lease_exists() {
     let (fs, package) = wasm_package_with_module(json_echo_module());
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
-    let wasm_runtime = WasmRuntime::for_testing().unwrap();
+    let wasm_adapter = EchoRuntimeAdapter::new(RuntimeKind::Wasm);
     let governor = InMemoryResourceGovernor::new();
-    let dispatcher =
-        RuntimeDispatcher::new(&registry, &fs, &governor).with_wasm_runtime(&wasm_runtime);
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
+        .with_runtime_adapter(RuntimeKind::Wasm, &wasm_adapter);
     let run_state = InMemoryRunStateStore::new();
     let approval_requests = InMemoryApprovalRequestStore::new();
     let leases = InMemoryCapabilityLeaseStore::new();
@@ -641,10 +640,10 @@ async fn capability_host_does_not_allow_approval_lease_through_plain_invoke_json
     let (fs, package) = wasm_package_with_module(json_echo_module());
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
-    let wasm_runtime = WasmRuntime::for_testing().unwrap();
+    let wasm_adapter = EchoRuntimeAdapter::new(RuntimeKind::Wasm);
     let governor = InMemoryResourceGovernor::new();
-    let dispatcher =
-        RuntimeDispatcher::new(&registry, &fs, &governor).with_wasm_runtime(&wasm_runtime);
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
+        .with_runtime_adapter(RuntimeKind::Wasm, &wasm_adapter);
     let run_state = InMemoryRunStateStore::new();
     let approval_requests = InMemoryApprovalRequestStore::new();
     let leases = InMemoryCapabilityLeaseStore::new();
@@ -840,10 +839,10 @@ async fn capability_host_records_completed_run_after_authorized_dispatch() {
     let (fs, package) = wasm_package_with_module(json_echo_module());
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
-    let wasm_runtime = WasmRuntime::for_testing().unwrap();
+    let wasm_adapter = EchoRuntimeAdapter::new(RuntimeKind::Wasm);
     let governor = InMemoryResourceGovernor::new();
-    let dispatcher =
-        RuntimeDispatcher::new(&registry, &fs, &governor).with_wasm_runtime(&wasm_runtime);
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
+        .with_runtime_adapter(RuntimeKind::Wasm, &wasm_adapter);
     let authorizer = GrantAuthorizer::new();
     let run_state = InMemoryRunStateStore::new();
     let host = CapabilityHost::new(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
@@ -1039,6 +1038,74 @@ impl CapabilityDispatchAuthorizer for MismatchedFingerprintAuthorizer {
                 reason: "mismatched fingerprint".to_string(),
                 reusable_scope: None,
             },
+        }
+    }
+}
+
+#[derive(Clone)]
+struct EchoRuntimeAdapter {
+    runtime: RuntimeKind,
+}
+
+impl EchoRuntimeAdapter {
+    fn new(runtime: RuntimeKind) -> Self {
+        Self { runtime }
+    }
+}
+
+#[async_trait]
+impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for EchoRuntimeAdapter {
+    async fn dispatch_json(
+        &self,
+        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        let output = request.input;
+        let usage = ResourceUsage {
+            output_bytes: serde_json::to_vec(&output).unwrap().len() as u64,
+            process_count: u32::from(matches!(
+                self.runtime,
+                RuntimeKind::Script | RuntimeKind::Mcp
+            )),
+            ..ResourceUsage::default()
+        };
+        let reservation = request
+            .governor
+            .reserve(request.scope, request.estimate)
+            .map_err(|_| {
+                CapabilityDispatchError::new(
+                    runtime_failure_kind(self.runtime),
+                    request.capability_id.clone(),
+                    Some(request.descriptor.provider.clone()),
+                    Some(self.runtime),
+                )
+            })?;
+        let receipt = request
+            .governor
+            .reconcile(reservation.id, usage.clone())
+            .map_err(|_| {
+                CapabilityDispatchError::new(
+                    runtime_failure_kind(self.runtime),
+                    request.capability_id.clone(),
+                    Some(request.descriptor.provider.clone()),
+                    Some(self.runtime),
+                )
+            })?;
+        Ok(RuntimeAdapterResult {
+            output,
+            output_bytes: usage.output_bytes,
+            usage,
+            receipt,
+        })
+    }
+}
+
+fn runtime_failure_kind(runtime: RuntimeKind) -> CapabilityDispatchFailureKind {
+    match runtime {
+        RuntimeKind::Wasm => CapabilityDispatchFailureKind::Wasm,
+        RuntimeKind::Script => CapabilityDispatchFailureKind::Script,
+        RuntimeKind::Mcp => CapabilityDispatchFailureKind::Mcp,
+        RuntimeKind::FirstParty | RuntimeKind::System => {
+            CapabilityDispatchFailureKind::UnsupportedRuntime
         }
     }
 }

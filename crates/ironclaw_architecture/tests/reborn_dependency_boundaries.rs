@@ -183,8 +183,11 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
                 "ironclaw_host_runtime",
+                "ironclaw_mcp",
                 "ironclaw_processes",
                 "ironclaw_run_state",
+                "ironclaw_scripts",
+                "ironclaw_wasm",
             ],
         },
     ]
