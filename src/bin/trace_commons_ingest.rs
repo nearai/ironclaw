@@ -972,6 +972,16 @@ async fn credit_handler(
     let credit_view = read_contributor_credit_view(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    let item_count = credit_view.records.len();
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::read(&tenant, "contributor_credit", item_count),
+        StorageTraceAuditAction::Read,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(
         TraceCommonsTenantCreditResponse::from_records_and_events(
             tenant.tenant_id,
@@ -989,6 +999,19 @@ async fn credit_events_handler(
     let credit_view = read_contributor_credit_view(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::read(
+            &tenant,
+            "contributor_credit_events",
+            credit_view.credit_events.len(),
+        ),
+        StorageTraceAuditAction::Read,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(credit_view.credit_events))
 }
 
@@ -1023,6 +1046,15 @@ async fn submission_status_handler(
         }
     }
 
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::read(&tenant, "submission_status", statuses.len()),
+        StorageTraceAuditAction::Read,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(statuses))
 }
 
@@ -15782,6 +15814,27 @@ mod tests {
         .expect("active-learning read mirrors audit event");
         assert_eq!(active_learning.item_count, 1);
 
+        let Json(credit_summary) =
+            credit_handler(State(audit_state.clone()), auth_headers("token-a"))
+                .await
+                .expect("contributor credit summary mirrors audit event");
+        assert_eq!(credit_summary.accepted, 1);
+        let Json(contributor_credit_events) =
+            credit_events_handler(State(audit_state.clone()), auth_headers("token-a"))
+                .await
+                .expect("contributor credit events mirror audit event");
+        assert_eq!(contributor_credit_events.len(), 0);
+        let Json(status_updates) = submission_status_handler(
+            State(audit_state.clone()),
+            auth_headers("token-a"),
+            Json(TraceSubmissionStatusRequest {
+                submission_ids: vec![submission_id],
+            }),
+        )
+        .await
+        .expect("contributor status sync mirrors audit event");
+        assert_eq!(status_updates.len(), 1);
+
         let Json(credit_event) = append_credit_event_handler(
             State(audit_state.clone()),
             auth_headers("review-token-a"),
@@ -15904,6 +15957,18 @@ mod tests {
             event.kind == "read"
                 && event.reason.as_deref()
                     == Some("surface=active_learning_review_queue;item_count=1")
+        }));
+        assert!(events.iter().any(|event| {
+            event.kind == "read"
+                && event.reason.as_deref() == Some("surface=contributor_credit;item_count=1")
+        }));
+        assert!(events.iter().any(|event| {
+            event.kind == "read"
+                && event.reason.as_deref() == Some("surface=contributor_credit_events;item_count=0")
+        }));
+        assert!(events.iter().any(|event| {
+            event.kind == "read"
+                && event.reason.as_deref() == Some("surface=submission_status;item_count=1")
         }));
         assert!(events.iter().any(|event| {
             event.submission_id == submission_id && event.kind == "credit_mutate"
