@@ -444,7 +444,7 @@ Protected web API endpoints:
 - `GET /api/traces/submissions`
 - `POST /api/traces/submissions/{submission_id}/revoke`
 
-The web settings panel includes a Trace Commons tab for standing opt-in, autonomous submission controls, queue flushing, persisted held queue reasons, recent submissions, revocation, and richer credit/review totals. The chat composer also has a Trace button that previews the current thread's redacted envelope and can queue it for the same autonomous submission path. Local preview remains available without opt-in, but enqueue/manual-submit/autonomous acceptance now preflights the scoped standing policy and requires both opt-in and an ingestion endpoint before capture/redaction work is queued.
+The web settings panel includes a Trace Commons tab for standing opt-in, autonomous submission controls, queue flushing, persisted held queue reasons, recent submissions, revocation, and richer credit/review totals. The chat composer also has a Trace button that previews the current thread's redacted envelope and can queue it for the same autonomous submission path. Local preview remains available without opt-in, but enqueue/manual-submit/autonomous acceptance now preflights the scoped standing policy and requires both opt-in and an ingestion endpoint before capture/redaction work is queued. Web enqueue and submit requests may not widen capture beyond the standing policy: if the policy disallows message text or tool payloads, crafted requests with those flags are rejected before a queue file is written.
 
 ## Implementation Status Matrix
 

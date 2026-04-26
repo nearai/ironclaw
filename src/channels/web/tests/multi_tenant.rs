@@ -1339,6 +1339,85 @@ mod trace_contribution_isolation {
     }
 
     #[tokio::test]
+    async fn test_trace_preview_enqueue_rejects_capture_fields_disallowed_by_policy() {
+        let (db, _dir) = test_db().await;
+        let alice_user_id = format!("alice-{}", Uuid::new_v4());
+        let bob_user_id = format!("bob-{}", Uuid::new_v4());
+        remove_trace_state(&alice_user_id);
+        remove_trace_state(&bob_user_id);
+        enable_trace_policy(&alice_user_id);
+
+        let alice_thread = db
+            .create_conversation("gateway", &alice_user_id, None)
+            .await
+            .expect("create alice conversation");
+        db.add_conversation_message(alice_thread, "user", "Preview private message text")
+            .await
+            .expect("add alice user message");
+        db.add_conversation_message(alice_thread, "assistant", "Previewed.")
+            .await
+            .expect("add alice assistant message");
+
+        let app = trace_router_with_auth(
+            build_state(Some(db), None),
+            trace_auth(alice_user_id.clone(), bob_user_id.clone()),
+        );
+        let preview_only = json_request(
+            &app,
+            Method::POST,
+            "/api/traces/preview",
+            "tok-alice",
+            serde_json::json!({
+                "thread_id": alice_thread,
+                "include_message_text": true
+            }),
+        )
+        .await;
+        assert_eq!(preview_only.status(), StatusCode::OK);
+
+        let before =
+            crate::trace_contribution::queued_trace_envelope_paths_for_scope(Some(&alice_user_id))
+                .expect("read alice queue")
+                .len();
+        let enqueue_message_text = json_request(
+            &app,
+            Method::POST,
+            "/api/traces/preview",
+            "tok-alice",
+            serde_json::json!({
+                "thread_id": alice_thread,
+                "include_message_text": true,
+                "enqueue": true
+            }),
+        )
+        .await;
+        assert_eq!(enqueue_message_text.status(), StatusCode::CONFLICT);
+
+        let enqueue_tool_payloads = json_request(
+            &app,
+            Method::POST,
+            "/api/traces/preview",
+            "tok-alice",
+            serde_json::json!({
+                "thread_id": alice_thread,
+                "include_tool_payloads": true,
+                "enqueue": true
+            }),
+        )
+        .await;
+        assert_eq!(enqueue_tool_payloads.status(), StatusCode::CONFLICT);
+
+        let after =
+            crate::trace_contribution::queued_trace_envelope_paths_for_scope(Some(&alice_user_id))
+                .expect("read alice queue")
+                .len();
+        assert_eq!(after, before);
+
+        remove_trace_state(&alice_user_id);
+        remove_trace_state(&bob_user_id);
+    }
+
+    #[tokio::test]
     async fn test_trace_submit_is_tenant_scoped_and_requires_preview_ack() {
         let (db, _dir) = test_db().await;
         let alice_user_id = format!("alice-{}", Uuid::new_v4());
@@ -1365,13 +1444,11 @@ mod trace_contribution_isolation {
         );
         let body = serde_json::json!({
             "thread_id": alice_thread,
-            "include_message_text": true,
             "user_previewed": true
         });
 
         let unacknowledged_body = serde_json::json!({
             "thread_id": alice_thread,
-            "include_message_text": true,
             "user_previewed": false
         });
         let unacknowledged_req = Request::builder()
@@ -1437,6 +1514,72 @@ mod trace_contribution_isolation {
 
         remove_queued_traces(&alice_user_id);
         remove_queued_traces(&bob_user_id);
+    }
+
+    #[tokio::test]
+    async fn test_trace_submit_rejects_capture_fields_disallowed_by_policy() {
+        let (db, _dir) = test_db().await;
+        let alice_user_id = format!("alice-{}", Uuid::new_v4());
+        let bob_user_id = format!("bob-{}", Uuid::new_v4());
+        remove_trace_state(&alice_user_id);
+        remove_trace_state(&bob_user_id);
+        enable_trace_policy(&alice_user_id);
+
+        let alice_thread = db
+            .create_conversation("gateway", &alice_user_id, None)
+            .await
+            .expect("create alice conversation");
+        db.add_conversation_message(alice_thread, "user", "Submit private message text")
+            .await
+            .expect("add alice user message");
+        db.add_conversation_message(alice_thread, "assistant", "Submitted.")
+            .await
+            .expect("add alice assistant message");
+
+        let app = trace_router_with_auth(
+            build_state(Some(db), None),
+            trace_auth(alice_user_id.clone(), bob_user_id.clone()),
+        );
+        let before =
+            crate::trace_contribution::queued_trace_envelope_paths_for_scope(Some(&alice_user_id))
+                .expect("read alice queue")
+                .len();
+        let message_text_resp = json_request(
+            &app,
+            Method::POST,
+            "/api/traces/submit",
+            "tok-alice",
+            serde_json::json!({
+                "thread_id": alice_thread,
+                "include_message_text": true,
+                "user_previewed": true
+            }),
+        )
+        .await;
+        assert_eq!(message_text_resp.status(), StatusCode::CONFLICT);
+
+        let tool_payload_resp = json_request(
+            &app,
+            Method::POST,
+            "/api/traces/submit",
+            "tok-alice",
+            serde_json::json!({
+                "thread_id": alice_thread,
+                "include_tool_payloads": true,
+                "user_previewed": true
+            }),
+        )
+        .await;
+        assert_eq!(tool_payload_resp.status(), StatusCode::CONFLICT);
+
+        let after =
+            crate::trace_contribution::queued_trace_envelope_paths_for_scope(Some(&alice_user_id))
+                .expect("read alice queue")
+                .len();
+        assert_eq!(after, before);
+
+        remove_trace_state(&alice_user_id);
+        remove_trace_state(&bob_user_id);
     }
 
     #[tokio::test]

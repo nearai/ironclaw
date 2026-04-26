@@ -209,9 +209,11 @@ pub async fn traces_preview_handler(
     Json(body): Json<TraceContributionPreviewRequest>,
 ) -> Result<Json<TraceContributionPreviewResponse>, (StatusCode, String)> {
     if body.enqueue {
-        preflight_trace_policy_for_user(
+        preflight_trace_upload_for_user(
             &user.user_id,
             TraceContributionAcceptance::QueueFromPreview,
+            body.include_message_text,
+            body.include_tool_payloads,
         )?;
     }
 
@@ -257,7 +259,12 @@ pub async fn traces_submit_handler(
             "Trace submission requires explicit preview acknowledgement".to_string(),
         ));
     }
-    preflight_trace_policy_for_user(&user.user_id, TraceContributionAcceptance::ManualSubmit)?;
+    preflight_trace_upload_for_user(
+        &user.user_id,
+        TraceContributionAcceptance::ManualSubmit,
+        body.include_message_text,
+        body.include_tool_payloads,
+    )?;
 
     let envelope = build_redacted_trace_envelope(
         &state,
@@ -473,12 +480,29 @@ fn internal_error(error: impl std::fmt::Display) -> (StatusCode, String) {
     )
 }
 
-fn preflight_trace_policy_for_user(
+fn preflight_trace_upload_for_user(
     user_id: &str,
     intent: TraceContributionAcceptance,
+    include_message_text: bool,
+    include_tool_payloads: bool,
 ) -> Result<(), (StatusCode, String)> {
     let policy = read_trace_policy_for_scope(Some(user_id)).map_err(internal_error)?;
-    preflight_trace_contribution_policy(&policy, intent).map_err(trace_policy_rejection)
+    preflight_trace_contribution_policy(&policy, intent).map_err(trace_policy_rejection)?;
+    if intent != TraceContributionAcceptance::PreviewOnly {
+        if include_message_text && !policy.include_message_text {
+            return Err((
+                StatusCode::CONFLICT,
+                "trace contribution policy does not allow message text upload".to_string(),
+            ));
+        }
+        if include_tool_payloads && !policy.include_tool_payloads {
+            return Err((
+                StatusCode::CONFLICT,
+                "trace contribution policy does not allow tool payload upload".to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn trace_policy_rejection(rejection: TraceContributionPolicyRejection) -> (StatusCode, String) {
