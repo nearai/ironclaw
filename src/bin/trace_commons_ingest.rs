@@ -1808,12 +1808,20 @@ async fn run_benchmark_conversion(
             break;
         }
     }
-
     let conversion_id = Uuid::new_v4();
     let source_submission_ids = candidates
         .iter()
         .map(|candidate| candidate.submission_id)
         .collect::<Vec<_>>();
+    append_derived_source_read_audits(
+        state,
+        tenant,
+        &source_submission_ids,
+        "benchmark_conversion",
+        Some(&purpose),
+    )
+    .await
+    .map_err(internal_error)?;
     let source_submission_ids_hash =
         source_submission_ids_hash("benchmark_conversion", &source_submission_ids);
     let audit_event = TraceCommonsAuditEvent::benchmark_conversion(
@@ -1972,6 +1980,15 @@ async fn ranker_training_candidates_handler(
         .iter()
         .map(|candidate| candidate.submission_id)
         .collect::<Vec<_>>();
+    append_derived_source_read_audits(
+        state.as_ref(),
+        &tenant,
+        &source_submission_ids,
+        "ranker_training_candidates",
+        Some(&purpose),
+    )
+    .await
+    .map_err(internal_error)?;
     let source_item_list_hash =
         source_submission_ids_hash("ranker_training_candidates_export", &source_submission_ids);
     let audit_event = TraceCommonsAuditEvent::ranker_training_export(
@@ -2092,6 +2109,16 @@ async fn ranker_training_pairs_handler(
             .await
             .map_err(internal_error)?;
     let pairs = build_ranker_training_pairs(&candidates, pair_limit);
+    let source_submission_ids = ranker_pair_source_submission_ids(&pairs);
+    append_derived_source_read_audits(
+        state.as_ref(),
+        &tenant,
+        &source_submission_ids,
+        "ranker_training_pairs",
+        Some(&purpose),
+    )
+    .await
+    .map_err(internal_error)?;
     let export_id = Uuid::new_v4();
     let source_item_list_hash = ranker_pair_list_hash(&pairs);
     let audit_event = TraceCommonsAuditEvent::ranker_training_export(
@@ -2102,7 +2129,6 @@ async fn ranker_training_pairs_handler(
         source_item_list_hash.clone(),
     );
     let audit_event_id = audit_event.event_id;
-    let source_submission_ids = ranker_pair_source_submission_ids(&pairs);
     let provenance = TraceExportProvenanceManifest::new(
         &tenant.tenant_id,
         export_id,
@@ -5761,6 +5787,26 @@ async fn append_trace_content_read_audit(
     Ok(())
 }
 
+async fn append_derived_source_read_audits(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_ids: &[Uuid],
+    surface: &str,
+    purpose: Option<&str>,
+) -> anyhow::Result<usize> {
+    let mut seen = BTreeSet::new();
+    let mut appended = 0usize;
+    for submission_id in submission_ids.iter().copied() {
+        if !seen.insert(submission_id) {
+            continue;
+        }
+        append_trace_content_read_audit(state, tenant, submission_id, None, surface, purpose)
+            .await?;
+        appended += 1;
+    }
+    Ok(appended)
+}
+
 async fn mirror_audit_event_to_db(
     state: &AppState,
     tenant: &TenantAuth,
@@ -6180,9 +6226,14 @@ async fn run_maintenance(
         request.dry_run,
     )
     .await?;
-    let vector_entries_indexed =
-        index_vector_metadata_from_db(state, tenant, request.index_vectors, request.dry_run)
-            .await?;
+    let vector_entries_indexed = index_vector_metadata_from_db(
+        state,
+        tenant,
+        request.index_vectors,
+        request.dry_run,
+        &purpose,
+    )
+    .await?;
     let db_reconciliation = reconcile_db_mirror(
         state,
         tenant,
@@ -6748,6 +6799,7 @@ async fn index_vector_metadata_from_db(
     tenant: &TenantAuth,
     enabled: bool,
     dry_run: bool,
+    purpose: &str,
 ) -> anyhow::Result<usize> {
     if !enabled {
         return Ok(0);
@@ -6846,6 +6898,15 @@ async fn index_vector_metadata_from_db(
         })
         .await
         .context("failed to upsert trace vector entry")?;
+        append_trace_content_read_audit(
+            state,
+            tenant,
+            record.submission_id,
+            None,
+            "vector_index",
+            Some(purpose),
+        )
+        .await?;
     }
     Ok(indexed)
 }
@@ -16415,6 +16476,139 @@ mod tests {
                     .as_deref()
                     .is_some_and(|reason| reason.contains("surface=audit_events"))
         }));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn derived_worker_exports_append_per_source_content_read_audits() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-derived-read-audits.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+
+        let mut preferred = sample_envelope().await;
+        make_metadata_only_low_risk(&mut preferred);
+        preferred.consent.scopes = vec![ConsentScope::RankingTraining];
+        preferred.value.submission_score = 0.9;
+        let preferred_id = preferred.submission_id;
+        let mut rejected = sample_envelope().await;
+        make_metadata_only_low_risk(&mut rejected);
+        rejected.consent.scopes = vec![ConsentScope::RankingTraining];
+        rejected.value.submission_score = 0.1;
+        let rejected_id = rejected.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(preferred),
+        )
+        .await
+        .expect("preferred source submits");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(rejected),
+        )
+        .await
+        .expect("rejected source submits");
+
+        let Json(benchmark) = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("audit_benchmark_sources".to_string()),
+                consent_scope: None,
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("benchmark conversion succeeds");
+        assert_eq!(benchmark.item_count, 2);
+
+        let Json(candidates) = ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("audit_ranker_candidate_sources".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect("ranker candidates export succeeds");
+        assert_eq!(candidates.item_count, 2);
+
+        let Json(pairs) = ranker_training_pairs_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("audit_ranker_pair_sources".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect("ranker pairs export succeeds");
+        assert_eq!(pairs.item_count, 1);
+
+        let Json(vector_response) = vector_index_handler(
+            State(state),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceVectorIndexRequest {
+                purpose: Some("audit_vector_sources".to_string()),
+                dry_run: false,
+            }),
+        )
+        .await
+        .expect("vector indexing succeeds");
+        assert_eq!(vector_response.vector_entries_indexed, 2);
+
+        let db_audit_events = db
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("DB audit events read");
+        for submission_id in [preferred_id, rejected_id] {
+            for (surface, purpose) in [
+                ("benchmark_conversion", "audit_benchmark_sources"),
+                (
+                    "ranker_training_candidates",
+                    "audit_ranker_candidate_sources",
+                ),
+                ("ranker_training_pairs", "audit_ranker_pair_sources"),
+                ("vector_index", "audit_vector_sources"),
+            ] {
+                assert!(
+                    db_audit_events.iter().any(|event| {
+                        event.action == StorageTraceAuditAction::Read
+                            && event.submission_id == Some(submission_id)
+                            && event.object_ref_id.is_none()
+                            && event.reason.as_deref().is_some_and(|reason| {
+                                reason.contains(&format!("surface={surface}"))
+                                    && reason.contains(&format!("purpose={purpose}"))
+                            })
+                    }),
+                    "missing {surface} content-read audit for {submission_id}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
