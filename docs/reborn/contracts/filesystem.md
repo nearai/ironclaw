@@ -289,9 +289,9 @@ Rules:
 
 ---
 
-## 12. Backend mount table
+## 12. Backend mount table and catalog
 
-`RootFilesystem` owns a backend mount table from `VirtualPath` prefix to backend implementation.
+`CompositeRootFilesystem` owns the trusted backend mount table from `VirtualPath` prefix to backend implementation. Each mount carries a `MountDescriptor` so trusted host services can answer where a path lives without probing every backend.
 
 V1 backend types:
 
@@ -302,22 +302,50 @@ LibSqlRootFilesystem     // feature = "libsql"
 Memory/test backends as needed
 ```
 
-The PostgreSQL/libSQL backends store file contents by canonical `VirtualPath` in `root_filesystem_entries`; directories are inferred from path prefixes. They are intentionally database-backed `RootFilesystem` implementations, not secret-specific repositories, so higher-level services such as secrets, process outputs, JSONL logs, or artifacts can persist through the same virtual-path boundary. `write_file` upserts file bytes, `read_file` requires an exact file row, `stat` reports exact files or inferred directories, and `list_dir` returns direct children sorted by name with virtual paths only.
+The PostgreSQL/libSQL backends store file contents by canonical `VirtualPath` in `root_filesystem_entries`; directories are inferred from path prefixes. They are database-backed `RootFilesystem` implementations for generic file-shaped content, not a mandate that every durable service becomes files.
+
+Catalog metadata distinguishes file-shaped content from structured records and derived indexes:
+
+```rust
+pub struct MountDescriptor {
+    pub virtual_root: VirtualPath,
+    pub backend_id: BackendId,
+    pub backend_kind: BackendKind,
+    pub storage_class: StorageClass,
+    pub content_kind: ContentKind,
+    pub index_policy: IndexPolicy,
+    pub capabilities: BackendCapabilities,
+}
+
+pub struct PathPlacement {
+    pub path: VirtualPath,
+    pub matched_root: VirtualPath,
+    pub backend_id: BackendId,
+    pub backend_kind: BackendKind,
+    pub storage_class: StorageClass,
+    pub content_kind: ContentKind,
+    pub index_policy: IndexPolicy,
+    pub capabilities: BackendCapabilities,
+}
+```
+
+Backend mount rules:
+
+- mount target must be a valid `VirtualPath`
+- exact duplicate mount roots fail closed
+- overlapping mount roots are allowed only when longest-prefix routing is unambiguous
+- longest virtual prefix wins for both catalog lookup and filesystem operations
+- backend-local path joins must remain contained
+- backend mount registration is a trusted host operation
+- catalog lookup does not grant runtime authority; untrusted callers still need `ScopedFilesystem` plus `MountView`
 
 Future backend types:
 
 ```text
 ObjectStoreBackend
 RemoteFilesystemBackend
+MemoryDocumentBackend
 ```
-
-Backend mount rules:
-
-- mount target must be a valid `VirtualPath`
-- mount prefixes cannot overlap ambiguously at the same path
-- longest virtual prefix wins
-- backend-local path joins must remain contained
-- backend mount registration is a trusted host operation
 
 ---
 
@@ -334,6 +362,7 @@ pub enum FilesystemError {
     MountNotFound { path: VirtualPath },
     PathOutsideMount { path: VirtualPath },
     SymlinkEscape { path: VirtualPath },
+    MountConflict { path: VirtualPath },
     Backend { path: VirtualPath, operation: FilesystemOperation, reason: String },
 }
 ```
@@ -352,6 +381,16 @@ pub trait RootFilesystem {
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError>;
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError>;
 }
+
+pub trait FilesystemCatalog {
+    async fn describe_path(&self, path: &VirtualPath) -> Result<PathPlacement, FilesystemError>;
+    async fn mounts(&self) -> Result<Vec<MountDescriptor>, FilesystemError>;
+}
+
+pub struct CompositeRootFilesystem;
+
+impl RootFilesystem for CompositeRootFilesystem { /* delegates by longest virtual prefix */ }
+impl FilesystemCatalog for CompositeRootFilesystem { /* reports mount placement */ }
 
 pub struct ScopedFilesystem<F> {
     root: F,
@@ -383,6 +422,10 @@ Add tests through the caller-facing filesystem APIs, not only helper functions:
 - path traversal in scoped path is rejected before backend access
 - local backend denies symlink escape
 - local backend does not leak raw host path in display error
+- `CompositeRootFilesystem` routes operations by longest virtual mount prefix
+- `FilesystemCatalog::describe_path` reports matched root, backend identity, content kind, and index policy
+- exact duplicate composite mount roots fail closed
+- catalog mount listing is stable for diagnostics
 - PostgreSQL/libSQL backends implement `RootFilesystem` without depending on product/runtime/workflow crates
 - libSQL backend reads, writes, stats, overwrites, lists direct children, infers directories, and returns virtual-path-only missing-file errors
 - `/tmp` mount can be created per invocation and cleaned up

@@ -217,10 +217,10 @@ The current implemented or contract-backed Reborn stack includes these slices:
 | Area | Current status |
 | --- | --- |
 | Host API vocabulary | `[exists]` IDs, scopes, runtime kinds, trust classes, capabilities, grants, resources, approvals, events, paths, mount views, neutral dispatch port contracts, and redacted runtime dispatch error kinds |
-| Filesystem/mount surface | `[exists]` root/scoped filesystem contracts, local backend, and feature-gated PostgreSQL/libSQL `RootFilesystem` backends over `root_filesystem_entries`; used by Reborn services through virtual paths |
+| Filesystem/mount surface | `[exists]` root/scoped filesystem contracts, `CompositeRootFilesystem`, `FilesystemCatalog`, catalog descriptors/placement metadata, local backend, and feature-gated PostgreSQL/libSQL `RootFilesystem` backends over `root_filesystem_entries`; used by Reborn services through virtual paths while typed repositories remain valid for structured state |
 | Extension discovery/registry | `[exists]` manifests, package validation, capability descriptors, runtime declaration mapping |
 | Resource governor | `[exists]` reservation/reconcile/release model and V1 dimensions for hosted resource control |
-| Secrets | `[exists/partial]` `ironclaw_secrets` service boundary with scoped metadata, AES-256-GCM/HKDF encryption, encrypted-row repository contract, in-memory encrypted repository, filesystem-backed encrypted repository over `RootFilesystem`, credential mapping metadata, and one-shot secret leases; keychain master-key composition and runtime injection are not complete |
+| Secrets | `[exists/partial]` `ironclaw_secrets` service boundary with scoped metadata, AES-256-GCM/HKDF encryption, encrypted-row repository contract, in-memory encrypted repository, filesystem-backed encrypted repository experiment/reference over `RootFilesystem`, credential mapping metadata, and one-shot secret leases; final storage placement is expected to favor typed secret repositories over generic file mounts, and keychain master-key composition/runtime injection are not complete |
 | Network | `[exists/partial]` `ironclaw_network` service boundary with scoped policy evaluation, exact/wildcard target matching, literal private IP denial, and egress-estimate checks; HTTP execution/proxying and DNS rebinding protection are not complete |
 | Capability access | `[exists/partial]` grant matching, action-time authorization, lease-backed authorizer semantics, in-memory and filesystem-backed exact-invocation lease stores |
 | CapabilityHost | `[exists]` caller-facing invocation, approval-blocking, resume, spawn workflow gate, fail-closed `CapabilityObligationHandler` seam, and `ProcessServices` spawn wiring over the neutral host API dispatch port |
@@ -255,7 +255,7 @@ These are explicit gaps, not architecture contradictions:
 | Full MCP server lifecycle | MCP is a current adapter lane, not yet a complete product lifecycle for server install/start/auth/restart/monitoring. |
 | Auth-blocked resume product path | `BlockedAuth` is reserved in run-state; full OAuth/token prompt, callback, and retry-after-auth workflow remains to be implemented. |
 | Concrete obligation handlers | Built-ins now cover metadata-only `AuditBefore` and WASM-enforced `ApplyNetworkPolicy` backed by hardened network egress; already-resolved HTTP credentials can be injected by explicit host-runtime configuration, but `InjectSecretOnce`, `AuditAfter`, `RedactOutput`, `EnforceOutputLimit`, resource reservation, scoped mounts, and non-WASM network enforcement remain fail-closed until required runtime/input/output plumbing exists. |
-| Secret injection and durability | Scoped secret metadata, credential mapping metadata, AES-256-GCM/HKDF encryption, encrypted-row repository contract, in-memory encrypted repository, filesystem-backed encrypted repository over `RootFilesystem`, and one-shot leases exist; PostgreSQL/libSQL durability now composes through `RootFilesystem` rather than direct SQL adapters, but secrets still need keychain master-key resolution, audit emission, rotation, secret lease consumption in obligation handlers, and production `InjectSecretOnce` secret material injection. |
+| Secret injection and durability | Scoped secret metadata, credential mapping metadata, AES-256-GCM/HKDF encryption, encrypted-row repository contract, in-memory encrypted repository, filesystem-backed encrypted repository experiment/reference over `RootFilesystem`, and one-shot leases exist; final PostgreSQL/libSQL durability should be revisited as typed secret repositories outside generic file mounts, and secrets still need keychain master-key resolution, audit emission, rotation, secret lease consumption in obligation handlers, and production `InjectSecretOnce` secret material injection. |
 
 ---
 
@@ -317,6 +317,7 @@ CodeAct, scripting, subagents, jobs, and other worker modes should be expressed 
 
 Use these docs as the detailed contract sources behind this map:
 
+- `docs/reborn/2026-04-25-storage-catalog-and-placement.md`
 - `docs/reborn/contracts/host-api.md`
 - `docs/reborn/contracts/extensions.md`
 - `docs/reborn/contracts/capability-access.md`
