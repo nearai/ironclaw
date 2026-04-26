@@ -1247,8 +1247,14 @@ async fn submit_trace_handler(
         envelope.value_card.user_visible_explanation = envelope.value.explanation.clone();
     }
 
-    let stored_envelope = store_envelope(&state, &tenant.tenant_id, corpus_status, &envelope)
-        .map_err(internal_error)?;
+    let stored_envelope = store_envelope(
+        &state,
+        &tenant.tenant_id,
+        corpus_status,
+        "submitted-envelope",
+        &envelope,
+    )
+    .map_err(internal_error)?;
     let derived_record = build_derived_record(
         &tenant.tenant_id,
         corpus_status,
@@ -2066,8 +2072,14 @@ async fn process_evaluation_worker_handler(
     envelope_before.process_evaluation = Some(body.process_evaluation);
     apply_credit_estimate_to_envelope(&mut envelope_before);
     let process_eval_value = envelope_before.value_card.scorecard.process_eval_value;
-    let stored = store_envelope(&state, &tenant.tenant_id, record.status, &envelope_before)
-        .map_err(internal_error)?;
+    let stored = store_envelope(
+        &state,
+        &tenant.tenant_id,
+        record.status,
+        "process-evaluated-envelope",
+        &envelope_before,
+    )
+    .map_err(internal_error)?;
     record.object_key = stored.object_key;
     record.artifact_receipt = stored.artifact_receipt;
     if submission_metadata_path(&state.root, &tenant.tenant_id, record.submission_id).exists() {
@@ -2373,6 +2385,7 @@ async fn review_decision_handler(
                 &state,
                 &tenant.tenant_id,
                 TraceCorpusStatus::Accepted,
+                "reviewed-envelope",
                 &envelope,
             )
             .map_err(internal_error)?;
@@ -2392,6 +2405,7 @@ async fn review_decision_handler(
                 &state,
                 &tenant.tenant_id,
                 TraceCorpusStatus::Rejected,
+                "reviewed-envelope",
                 &envelope,
             )
             .map_err(internal_error)?;
@@ -5249,6 +5263,7 @@ fn store_envelope(
     state: &AppState,
     tenant_id: &str,
     status: TraceCorpusStatus,
+    artifact_snapshot_label: &str,
     envelope: &TraceContributionEnvelope,
 ) -> anyhow::Result<StoredTraceEnvelope> {
     let object_key = trace_envelope_object_key(tenant_id, status, envelope.submission_id);
@@ -5260,7 +5275,11 @@ fn store_envelope(
         Some(store.put_json(
             &tenant_storage_ref(tenant_id),
             TraceArtifactKind::ContributionEnvelope,
-            &envelope.submission_id.to_string(),
+            &trace_envelope_artifact_object_id(
+                envelope.submission_id,
+                status,
+                artifact_snapshot_label,
+            ),
             envelope,
         )?)
     } else {
@@ -5274,6 +5293,19 @@ fn store_envelope(
         object_key,
         artifact_receipt,
     })
+}
+
+fn trace_envelope_artifact_object_id(
+    submission_id: Uuid,
+    status: TraceCorpusStatus,
+    artifact_snapshot_label: &str,
+) -> String {
+    format!(
+        "{submission_id}:{}:{}:{}",
+        status.as_str(),
+        artifact_snapshot_label,
+        Uuid::new_v4()
+    )
 }
 
 fn trace_envelope_object_key(
@@ -22284,6 +22316,12 @@ mod tests {
             read_envelope_from_object_ref(review_state.as_ref(), "tenant-a", &reviewed_ref)
                 .expect("reviewed envelope reads through DB object ref");
         assert_eq!(reviewed_envelope.value.credit_points_pending, 1.25);
+
+        let original_submitted_envelope =
+            read_envelope_from_object_ref(review_state.as_ref(), "tenant-a", &object_ref)
+                .expect("original submitted envelope remains readable after review snapshot write");
+        assert_eq!(original_submitted_envelope.submission_id, submission_id);
+        assert_ne!(reviewed_ref.object_key, object_ref.object_key);
 
         let db_audit_events = db
             .list_trace_audit_events("tenant-a")
