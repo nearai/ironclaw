@@ -6893,6 +6893,18 @@ async fn index_vector_metadata_from_db(
         if dry_run {
             continue;
         }
+        let body_read = read_envelope_from_active_db_object_ref(
+            state,
+            &tenant.tenant_id,
+            record.submission_id,
+        )
+        .await?
+        .with_context(|| {
+            format!(
+                "missing active submitted envelope object ref for vector indexing source {}",
+                record.submission_id
+            )
+        })?;
         let nearest_trace_ids = eligible
             .iter()
             .filter(|candidate| candidate.submission_id != record.submission_id)
@@ -6939,7 +6951,7 @@ async fn index_vector_metadata_from_db(
             state,
             tenant,
             record.submission_id,
-            None,
+            body_read.object_ref_id,
             "vector_index",
             Some(purpose),
         )
@@ -16695,6 +16707,15 @@ mod tests {
             .await
             .expect("DB audit events read");
         for submission_id in [preferred_id, rejected_id] {
+            let active_object_ref = db
+                .get_latest_active_trace_object_ref(
+                    "tenant-a",
+                    submission_id,
+                    StorageTraceObjectArtifactKind::SubmittedEnvelope,
+                )
+                .await
+                .expect("active object ref reads")
+                .expect("active submitted envelope object ref exists");
             for (surface, purpose) in [
                 ("benchmark_conversion", "audit_benchmark_sources"),
                 (
@@ -16708,7 +16729,12 @@ mod tests {
                     db_audit_events.iter().any(|event| {
                         event.action == StorageTraceAuditAction::Read
                             && event.submission_id == Some(submission_id)
-                            && event.object_ref_id.is_none()
+                            && event.object_ref_id
+                                == if surface == "vector_index" {
+                                    Some(active_object_ref.object_ref_id)
+                                } else {
+                                    None
+                                }
                             && event.reason.as_deref().is_some_and(|reason| {
                                 reason.contains(&format!("surface={surface}"))
                                     && reason.contains(&format!("purpose={purpose}"))
@@ -16718,6 +16744,64 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn vector_index_requires_readable_active_submitted_object_ref() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-vector-object-ref-gate.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission dual-writes to DB mirror");
+        let conn = db.connect().await.expect("connect to mirror");
+        conn.execute(
+            "UPDATE trace_object_refs
+             SET invalidated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE tenant_id = ?1 AND submission_id = ?2",
+            libsql::params!["tenant-a", submission_id.to_string()],
+        )
+        .await
+        .expect("invalidate active submitted object ref");
+
+        let error = vector_index_handler(
+            State(state),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceVectorIndexRequest {
+                purpose: Some("vector_requires_object_ref".to_string()),
+                dry_run: false,
+            }),
+        )
+        .await
+        .expect_err("vector indexing fails closed without readable active object ref");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            db.list_trace_vector_entries("tenant-a")
+                .await
+                .expect("vector entries read")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
