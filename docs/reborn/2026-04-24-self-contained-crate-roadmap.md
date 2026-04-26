@@ -132,6 +132,7 @@ docs/reborn/contracts/capabilities.md
 docs/reborn/contracts/run-state.md
 docs/reborn/contracts/approvals.md
 docs/reborn/contracts/live-vertical-slice.md
+docs/reborn/contracts/lightweight-agent-loop.md
 docs/reborn/contracts/mcp.md
 docs/reborn/contracts/scripts.md
 docs/reborn/contracts/processes.md

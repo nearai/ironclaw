@@ -3,6 +3,7 @@
 **Date:** 2026-04-25
 **Status:** Draft contract
 **Depends on:** `docs/reborn/2026-04-24-os-like-architecture-design.md`, `docs/reborn/2026-04-24-os-like-architecture-feedback.md`, `docs/reborn/contracts/agent-loop-protocol.md`
+**Default loop mechanics:** `docs/reborn/contracts/lightweight-agent-loop.md`
 
 ---
 

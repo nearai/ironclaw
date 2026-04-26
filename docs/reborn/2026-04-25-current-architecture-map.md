@@ -322,5 +322,6 @@ Use these docs as the detailed contract sources behind this map:
 - `docs/reborn/contracts/events.md`
 - `docs/reborn/contracts/events-projections.md`
 - `docs/reborn/contracts/agent-loop-protocol.md`
+- `docs/reborn/contracts/lightweight-agent-loop.md`
 - `docs/reborn/contracts/runtime-workflows.md`
 - `docs/reborn/contracts/live-vertical-slice.md`
