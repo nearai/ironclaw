@@ -184,6 +184,15 @@ resolver.deny(&scope, approval_request_id).await?;
 
 No lease is issued for denied requests.
 
+Approval resolution is ordered fail-closed around lease persistence:
+
+1. Re-read the approval request and require `Pending`.
+2. Build and persist the exact fingerprinted lease.
+3. Only after lease persistence succeeds, mark the approval request `Approved`.
+4. If the approval status write fails after lease persistence, attempt to revoke the issued lease before returning the run-state error.
+
+This prevents an approval record from becoming `Approved` without durable resume authority, and with lease stores that can revoke the issued record it prevents an approval-write failure from leaving an active orphan lease. The resolver still spans separate stores, so this is a fail-closed coordination rule rather than a single database ACID transaction.
+
 ---
 
 ## 6. Authorization integration
@@ -213,14 +222,10 @@ The dispatcher remains auth-blind and state-blind. It never resolves approvals o
 This slice intentionally keeps approval resolution narrow:
 
 - no UI/user prompt implementation
-- no atomic transaction across approval status update and lease issuance yet
+- no single-store ACID transaction across approval status update and lease issuance yet; resolver ordering and rollback provide fail-closed semantics across separate stores
 - no approval resolution audit event yet
 - no approval support for non-dispatch actions yet
 - no `Action::SpawnCapability`/long-running task approval workflow yet; spawn start authorization exists, but approval/resume for spawn is a later slice
 - no reusable approval-scope expansion yet; V1 leases are exact-invocation only
 
-Before a durable/user-facing approval resume UI ships, the host should revisit atomic persistence for:
-
-```text
-approval record update + lease/grant write + run-state transition
-```
+Before a durable/user-facing approval resume UI ships, the host should revisit whether approval records, lease writes, and run-state transitions should share one transactional persistence boundary.

@@ -3979,6 +3979,7 @@ dependencies = [
 name = "ironclaw_approvals"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "ironclaw_authorization",
  "ironclaw_host_api",
  "ironclaw_run_state",
