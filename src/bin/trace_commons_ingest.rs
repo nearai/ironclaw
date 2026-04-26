@@ -1277,7 +1277,8 @@ async fn append_credit_event_handler(
         ));
     }
 
-    let submission = read_submission_record(&state.root, &tenant.tenant_id, submission_id)
+    let submission = read_reviewer_submission_record(state.as_ref(), &tenant, submission_id)
+        .await
         .map_err(internal_error)?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "trace submission not found"))?;
     if submission.is_terminal() {
@@ -3116,6 +3117,42 @@ struct ReviewDecisionRecord {
     canonical_summary_hash: Option<String>,
     file_record_available: bool,
     allow_file_body_fallback: bool,
+}
+
+async fn read_reviewer_submission_record(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_id: Uuid,
+) -> anyhow::Result<Option<TraceCommonsSubmissionRecord>> {
+    if state.db_reviewer_reads {
+        let db = state
+            .db_mirror
+            .as_ref()
+            .context("TRACE_COMMONS_DB_REVIEWER_READS is enabled without a DB mirror")?;
+        let Some(storage_record) = db
+            .get_trace_submission(&tenant.tenant_id, submission_id)
+            .await
+            .context("failed to read Trace Commons reviewer submission from DB mirror")?
+        else {
+            return Ok(None);
+        };
+        if !can_access_storage_submission(tenant, &storage_record) {
+            return Ok(None);
+        }
+        let Some(record) = trace_commons_record_from_storage_submission(storage_record) else {
+            return Ok(None);
+        };
+        return Ok(Some(record?));
+    }
+
+    let Some(record) = read_submission_record(&state.root, &tenant.tenant_id, submission_id)?
+    else {
+        return Ok(None);
+    };
+    if !can_access_submission(tenant, &record) {
+        return Ok(None);
+    }
+    Ok(Some(record))
 }
 
 async fn read_review_decision_record(
@@ -11010,6 +11047,78 @@ mod tests {
             }),
             "DB-backed contributor credit events should round-trip ranking utility"
         );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn delayed_credit_append_can_use_db_metadata_without_file_record() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-db-credit-append.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let submit_state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(State(submit_state), auth_headers("token-a"), Json(envelope))
+            .await
+            .expect("submission succeeds");
+        let metadata_path = submission_metadata_path(temp.path(), "tenant-a", submission_id);
+        std::fs::remove_file(&metadata_path).expect("remove file-backed metadata");
+
+        let credit_state =
+            test_state_with_db_reviewer_reads(temp.path().to_path_buf(), Some(db.clone()));
+        let Json(appended) = append_credit_event_handler(
+            State(credit_state),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::ReviewerBonus,
+                credit_points_delta: 1.25,
+                reason: Some("DB-backed reviewer credit".to_string()),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("credit append can read submission metadata from DB");
+        assert_eq!(appended.submission_id, submission_id);
+        assert_eq!(
+            appended.auth_principal_ref,
+            principal_storage_ref("token-a")
+        );
+        assert!(
+            !metadata_path.exists(),
+            "DB-backed credit append should not recreate missing file metadata"
+        );
+
+        let db_credit_events = db
+            .list_trace_credit_events("tenant-a")
+            .await
+            .expect("DB credit events read");
+        assert!(db_credit_events.iter().any(|event| {
+            event.submission_id == submission_id
+                && event.event_type == StorageTraceCreditEventType::ReviewerBonus
+                && event.points_delta == "1.2500"
+        }));
+        let db_audit_events = db
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("DB audit events read");
+        assert!(db_audit_events.iter().any(|event| {
+            event.action == StorageTraceAuditAction::CreditMutate
+                && event.submission_id == Some(submission_id)
+        }));
     }
 
     #[cfg(feature = "libsql")]
