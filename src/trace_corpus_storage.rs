@@ -92,6 +92,13 @@ pub enum TraceAuditAction {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum TraceReviewLeaseAuditAction {
+    Claim,
+    Release,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum TraceCreditEventType {
     Accepted,
     PrivacyRejection,
@@ -453,6 +460,11 @@ pub enum TraceAuditSafeMetadata {
         decision: String,
         resulting_status: TraceCorpusStatus,
         reason_code: Option<String>,
+    },
+    ReviewLease {
+        action: TraceReviewLeaseAuditAction,
+        lease_expires_at: Option<DateTime<Utc>>,
+        review_due_at: Option<DateTime<Utc>>,
     },
     Export {
         artifact_kind: TraceObjectArtifactKind,

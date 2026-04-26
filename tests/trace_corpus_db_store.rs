@@ -12,9 +12,10 @@ mod libsql_trace_corpus_store {
         TraceExportManifestItemInvalidationReason, TraceExportManifestItemWrite,
         TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefWrite,
         TraceRetentionJobItemAction, TraceRetentionJobItemStatus, TraceRetentionJobItemWrite,
-        TraceRetentionJobStatus, TraceRetentionJobWrite, TraceSubmissionWrite,
-        TraceTenantPolicyWrite, TraceTombstoneWrite, TraceVectorEntrySourceProjection,
-        TraceVectorEntryStatus, TraceVectorEntryWrite, TraceWorkerKind,
+        TraceRetentionJobStatus, TraceRetentionJobWrite, TraceReviewLeaseAuditAction,
+        TraceSubmissionWrite, TraceTenantPolicyWrite, TraceTombstoneWrite,
+        TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
+        TraceWorkerKind,
     };
     use uuid::Uuid;
 
@@ -545,12 +546,37 @@ mod libsql_trace_corpus_store {
             })
             .await
             .expect("append audit event");
+        let lease_expires_at = Utc::now() + chrono::Duration::minutes(15);
+        backend
+            .append_trace_audit_event(TraceAuditEventWrite {
+                tenant_id: tenant_id.to_string(),
+                audit_event_id: Uuid::new_v4(),
+                submission_id: Some(submission_id),
+                actor_principal_ref: "principal:reviewer".to_string(),
+                actor_role: "reviewer".to_string(),
+                action: TraceAuditAction::Review,
+                reason: Some("action=claim".to_string()),
+                request_id: None,
+                object_ref_id: None,
+                export_manifest_id: None,
+                decision_inputs_hash: None,
+                previous_event_hash: Some("sha256:test-audit-event".to_string()),
+                event_hash: Some("sha256:test-review-lease-event".to_string()),
+                canonical_event_json: Some("{\"kind\":\"review_lease\"}".to_string()),
+                metadata: TraceAuditSafeMetadata::ReviewLease {
+                    action: TraceReviewLeaseAuditAction::Claim,
+                    lease_expires_at: Some(lease_expires_at),
+                    review_due_at: None,
+                },
+            })
+            .await
+            .expect("append review lease audit event");
 
         let audit_events = backend
             .list_trace_audit_events(tenant_id)
             .await
             .expect("list audit events for tenant");
-        assert_eq!(audit_events.len(), 1);
+        assert_eq!(audit_events.len(), 2);
         assert_eq!(audit_events[0].submission_id, Some(submission_id));
         assert_eq!(audit_events[0].action, TraceAuditAction::Submit);
         assert_eq!(audit_events[0].actor_principal_ref, "principal:test-user");
@@ -572,6 +598,24 @@ mod libsql_trace_corpus_store {
             TraceAuditSafeMetadata::Submission {
                 status: TraceCorpusStatus::Accepted,
                 privacy_risk: "low".to_string(),
+            }
+        );
+        assert_eq!(audit_events[1].submission_id, Some(submission_id));
+        assert_eq!(audit_events[1].action, TraceAuditAction::Review);
+        assert_eq!(
+            audit_events[1].previous_event_hash.as_deref(),
+            Some("sha256:test-audit-event")
+        );
+        assert_eq!(
+            audit_events[1].event_hash.as_deref(),
+            Some("sha256:test-review-lease-event")
+        );
+        assert_eq!(
+            audit_events[1].metadata,
+            TraceAuditSafeMetadata::ReviewLease {
+                action: TraceReviewLeaseAuditAction::Claim,
+                lease_expires_at: Some(lease_expires_at),
+                review_due_at: None,
             }
         );
 

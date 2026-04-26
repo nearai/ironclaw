@@ -54,6 +54,7 @@ use ironclaw::trace_corpus_storage::{
     TraceRetentionJobRecord as StorageTraceRetentionJobRecord,
     TraceRetentionJobStatus as StorageTraceRetentionJobStatus,
     TraceRetentionJobWrite as StorageTraceRetentionJobWrite,
+    TraceReviewLeaseAuditAction as StorageTraceReviewLeaseAuditAction,
     TraceSubmissionRecord as StorageTraceSubmissionRecord,
     TraceSubmissionWrite as StorageTraceSubmissionWrite,
     TraceTenantPolicyRecord as StorageTraceTenantPolicyRecord,
@@ -1705,6 +1706,55 @@ struct TraceReviewLeaseRequest {
     review_due_at: Option<DateTime<Utc>>,
 }
 
+fn trace_review_lease_action_name(action: StorageTraceReviewLeaseAuditAction) -> &'static str {
+    match action {
+        StorageTraceReviewLeaseAuditAction::Claim => "claim",
+        StorageTraceReviewLeaseAuditAction::Release => "release",
+    }
+}
+
+fn trace_review_lease_audit_action_from_reason(
+    reason: Option<&str>,
+) -> Option<StorageTraceReviewLeaseAuditAction> {
+    reason?
+        .split(';')
+        .find_map(|part| part.strip_prefix("action="))
+        .and_then(|action| match action {
+            "claim" => Some(StorageTraceReviewLeaseAuditAction::Claim),
+            "release" => Some(StorageTraceReviewLeaseAuditAction::Release),
+            _ => None,
+        })
+}
+
+fn trace_review_lease_timestamp_from_reason(
+    reason: Option<&str>,
+    key: &str,
+) -> Option<DateTime<Utc>> {
+    let prefix = format!("{key}=");
+    reason?
+        .split(';')
+        .find_map(|part| part.strip_prefix(&prefix))
+        .and_then(|timestamp| DateTime::parse_from_rfc3339(timestamp).ok())
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+}
+
+fn trace_review_lease_reason(
+    action: StorageTraceReviewLeaseAuditAction,
+    lease_expires_at: Option<DateTime<Utc>>,
+    review_due_at: Option<DateTime<Utc>>,
+) -> String {
+    let mut reason = format!("action={}", trace_review_lease_action_name(action));
+    if let Some(lease_expires_at) = lease_expires_at {
+        reason.push_str(";lease_expires_at=");
+        reason.push_str(&lease_expires_at.to_rfc3339());
+    }
+    if let Some(review_due_at) = review_due_at {
+        reason.push_str(";review_due_at=");
+        reason.push_str(&review_due_at.to_rfc3339());
+    }
+    reason
+}
+
 #[derive(Debug, Serialize)]
 struct TraceReviewLeaseResponse {
     tenant_id: String,
@@ -2620,12 +2670,16 @@ async fn claim_review_lease_handler(
         TraceCommonsAuditEvent::review_lease(
             &tenant,
             submission_id,
-            "claim",
+            StorageTraceReviewLeaseAuditAction::Claim,
             record.review_lease_expires_at,
             record.review_due_at,
         ),
         StorageTraceAuditAction::Review,
-        StorageTraceAuditSafeMetadata::Empty,
+        StorageTraceAuditSafeMetadata::ReviewLease {
+            action: StorageTraceReviewLeaseAuditAction::Claim,
+            lease_expires_at: record.review_lease_expires_at,
+            review_due_at: record.review_due_at,
+        },
     )
     .await
     .map_err(internal_error)?;
@@ -2657,9 +2711,19 @@ async fn release_review_lease_handler(
     append_audit_event_with_db_mirror(
         state.as_ref(),
         &tenant,
-        TraceCommonsAuditEvent::review_lease(&tenant, submission_id, "release", None, None),
+        TraceCommonsAuditEvent::review_lease(
+            &tenant,
+            submission_id,
+            StorageTraceReviewLeaseAuditAction::Release,
+            None,
+            None,
+        ),
         StorageTraceAuditAction::Review,
-        StorageTraceAuditSafeMetadata::Empty,
+        StorageTraceAuditSafeMetadata::ReviewLease {
+            action: StorageTraceReviewLeaseAuditAction::Release,
+            lease_expires_at: None,
+            review_due_at: None,
+        },
     )
     .await
     .map_err(internal_error)?;
@@ -5399,6 +5463,21 @@ fn trace_commons_audit_event_from_storage(
             reason_code.clone().or_else(|| event.reason.clone()),
             None,
         ),
+        StorageTraceAuditSafeMetadata::ReviewLease {
+            action,
+            lease_expires_at,
+            review_due_at,
+        } => (
+            Some(TraceCorpusStatus::Quarantined),
+            event.reason.clone().or_else(|| {
+                Some(trace_review_lease_reason(
+                    *action,
+                    lease_expires_at.to_owned(),
+                    review_due_at.to_owned(),
+                ))
+            }),
+            None,
+        ),
         StorageTraceAuditSafeMetadata::Export {
             artifact_kind: _,
             purpose_code,
@@ -5481,6 +5560,11 @@ fn storage_audit_event_kind(
         )
     {
         return purpose_code.clone();
+    }
+    if let StorageTraceAuditAction::Review = action
+        && matches!(metadata, StorageTraceAuditSafeMetadata::ReviewLease { .. })
+    {
+        return "review_lease".to_string();
     }
     storage_audit_action_kind(action).to_string()
 }
@@ -9442,6 +9526,7 @@ fn storage_audit_canonical_status(
             resulting_status: status,
             ..
         } => trace_corpus_status_from_storage(*status),
+        StorageTraceAuditSafeMetadata::ReviewLease { .. } => Some(TraceCorpusStatus::Quarantined),
         _ => None,
     }
 }
@@ -9715,6 +9800,19 @@ fn audit_backfill_storage_projection(
             .map(|status| StorageTraceAuditSafeMetadata::Submission {
                 status: storage_corpus_status(status),
                 privacy_risk: "unknown".to_string(),
+            })
+            .unwrap_or(StorageTraceAuditSafeMetadata::Empty),
+        "review_lease" => trace_review_lease_audit_action_from_reason(event.reason.as_deref())
+            .map(|action| StorageTraceAuditSafeMetadata::ReviewLease {
+                action,
+                lease_expires_at: trace_review_lease_timestamp_from_reason(
+                    event.reason.as_deref(),
+                    "lease_expires_at",
+                ),
+                review_due_at: trace_review_lease_timestamp_from_reason(
+                    event.reason.as_deref(),
+                    "review_due_at",
+                ),
             })
             .unwrap_or(StorageTraceAuditSafeMetadata::Empty),
         "dataset_export" | "ranker_training_candidates_export" | "ranker_training_pairs_export" => {
@@ -13096,19 +13194,10 @@ impl TraceCommonsAuditEvent {
     fn review_lease(
         auth: &TenantAuth,
         submission_id: Uuid,
-        action: &str,
+        action: StorageTraceReviewLeaseAuditAction,
         lease_expires_at: Option<DateTime<Utc>>,
         review_due_at: Option<DateTime<Utc>>,
     ) -> Self {
-        let mut reason = format!("action={action}");
-        if let Some(lease_expires_at) = lease_expires_at {
-            reason.push_str(";lease_expires_at=");
-            reason.push_str(&lease_expires_at.to_rfc3339());
-        }
-        if let Some(review_due_at) = review_due_at {
-            reason.push_str(";review_due_at=");
-            reason.push_str(&review_due_at.to_rfc3339());
-        }
         Self {
             event_id: Uuid::new_v4(),
             tenant_id: auth.tenant_id.clone(),
@@ -13118,7 +13207,11 @@ impl TraceCommonsAuditEvent {
             status: Some(TraceCorpusStatus::Quarantined),
             actor_role: Some(auth.role),
             actor_principal_ref: Some(auth.principal_ref.clone()),
-            reason: Some(reason),
+            reason: Some(trace_review_lease_reason(
+                action,
+                lease_expires_at,
+                review_due_at,
+            )),
             export_count: None,
             export_id: None,
             decision_inputs_hash: None,
@@ -17796,9 +17889,14 @@ mod tests {
                 .expect("create libsql mirror"),
         );
         db.run_migrations().await.expect("run migrations");
-        let state = test_state_with_db_reviewer_reads(
+        let state = test_state_with_options(
             temp.path().to_path_buf(),
             Some(db.clone() as Arc<dyn Database>),
+            None,
+            false,
+            true,
+            false,
+            true,
         );
         let envelope = sample_envelope().await;
         let submission_id = envelope.submission_id;
@@ -17870,6 +17968,64 @@ mod tests {
         .expect("lease owner can release lease");
         assert!(released.review_assigned_to_principal_ref.is_none());
         assert!(released.review_lease_expires_at.is_none());
+        let lease_audits = db
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("review lease audit events list")
+            .into_iter()
+            .filter_map(|event| match event.metadata {
+                StorageTraceAuditSafeMetadata::ReviewLease {
+                    action,
+                    lease_expires_at,
+                    review_due_at,
+                } => Some((action, lease_expires_at, review_due_at)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(lease_audits.len(), 2);
+        assert_eq!(lease_audits[0].0, StorageTraceReviewLeaseAuditAction::Claim);
+        assert_eq!(
+            lease_audits[0]
+                .1
+                .map(|timestamp| timestamp.timestamp_millis()),
+            claim
+                .review_lease_expires_at
+                .map(|timestamp| timestamp.timestamp_millis())
+        );
+        assert_eq!(
+            lease_audits[0]
+                .2
+                .map(|timestamp| timestamp.timestamp_millis()),
+            Some(due_at.timestamp_millis())
+        );
+        assert_eq!(
+            lease_audits[1].0,
+            StorageTraceReviewLeaseAuditAction::Release
+        );
+        assert!(lease_audits[1].1.is_none());
+        assert!(lease_audits[1].2.is_none());
+        let Json(projected_audits) = audit_events_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(AuditEventsQuery { limit: Some(10) }),
+        )
+        .await
+        .expect("DB audit reads project review lease events");
+        assert!(projected_audits.iter().any(|event| {
+            event.kind == "review_lease"
+                && event.status == Some(TraceCorpusStatus::Quarantined)
+                && event.reason.as_deref().is_some_and(|reason| {
+                    reason.contains("action=claim") && reason.contains("review_due_at=")
+                })
+        }));
+        assert!(projected_audits.iter().any(|event| {
+            event.kind == "review_lease"
+                && event.status == Some(TraceCorpusStatus::Quarantined)
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason == "action=release")
+        }));
 
         let _ = claim_review_lease_handler(
             State(state.clone()),

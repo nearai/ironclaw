@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use ironclaw::trace_corpus_storage::{
     TenantScopedTraceObjectRef, TraceAuditSafeMetadata, TraceCorpusStatus, TraceCreditEventType,
-    TraceObjectArtifactKind, TraceSubmissionWrite,
+    TraceObjectArtifactKind, TraceReviewLeaseAuditAction, TraceSubmissionWrite,
 };
 use uuid::Uuid;
 
@@ -73,6 +73,22 @@ fn audit_metadata_contract_is_typed_not_arbitrary_json() {
     assert_eq!(json["artifact_kind"], "export_artifact");
     assert!(json.get("request_body").is_none());
     assert!(json.get("tool_payload").is_none());
+}
+
+#[test]
+fn review_lease_audit_metadata_is_typed_and_request_safe() {
+    let metadata = TraceAuditSafeMetadata::ReviewLease {
+        action: TraceReviewLeaseAuditAction::Claim,
+        lease_expires_at: None,
+        review_due_at: None,
+    };
+    let json = serde_json::to_value(metadata).unwrap();
+
+    assert_eq!(json["kind"], "review_lease");
+    assert_eq!(json["action"], "claim");
+    assert!(json.get("request_body").is_none());
+    assert!(json.get("bearer_token").is_none());
+    assert!(json.get("reviewer_email").is_none());
 }
 
 #[test]
