@@ -134,6 +134,7 @@ Private ingestion service routes used by the operator panel:
 
 The operator panel must keep calls API-mediated through the configured private ingestion service and degrade cleanly on `404`/`501` for older deployments that do not yet expose the newer operator endpoints.
 The panel includes read-only config status, replay manifest, and retention ledger actions for `/v1/admin/config-status`, `/v1/datasets/replay/manifests`, `/v1/admin/retention/jobs`, and `/v1/admin/retention/jobs/{retention_job_id}/items`; it uses the session-only admin token and never persists the retention job id or bearer credential.
+Review lease claims POST `{ lease_ttl_seconds?: i64, review_due_at?: RFC3339 DateTime<Utc> }` to `/v1/review/{submission_id}/lease`; claim/release responses include tenant and trace identifiers plus review assignment, lease expiration, and due-at fields for operator confirmation.
 
 ### User Management (admin — requires `admin` role, see `docs/USER_MANAGEMENT_API.md`)
 | Method | Path | Description |

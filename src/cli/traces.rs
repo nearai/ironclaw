@@ -252,6 +252,52 @@ pub enum TracesCommand {
         json: bool,
     },
 
+    /// Claim a DB-backed central trace review lease
+    ReviewLeaseClaim {
+        /// Trace Commons ingestion base URL or /v1/traces URL
+        #[arg(long)]
+        endpoint: String,
+
+        /// Submission ID to lease for review
+        #[arg(long)]
+        submission_id: Uuid,
+
+        /// Optional lease TTL in seconds
+        #[arg(long)]
+        lease_ttl_seconds: Option<i64>,
+
+        /// Optional RFC3339 review due timestamp
+        #[arg(long)]
+        review_due_at: Option<String>,
+
+        /// Environment variable containing a reviewer/admin bearer token
+        #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
+        bearer_token_env: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Release a DB-backed central trace review lease
+    ReviewLeaseRelease {
+        /// Trace Commons ingestion base URL or /v1/traces URL
+        #[arg(long)]
+        endpoint: String,
+
+        /// Submission ID to release from review
+        #[arg(long)]
+        submission_id: Uuid,
+
+        /// Environment variable containing a reviewer/admin bearer token
+        #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
+        bearer_token_env: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Append a delayed central credit ledger event
     AppendCreditEvent {
         /// Trace Commons ingestion base URL or /v1/traces URL
@@ -1436,6 +1482,33 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
             })
             .await
         }
+        TracesCommand::ReviewLeaseClaim {
+            endpoint,
+            submission_id,
+            lease_ttl_seconds,
+            review_due_at,
+            bearer_token_env,
+            json,
+        } => {
+            trace_commons_review_lease_claim(TraceCommonsReviewLeaseClaimOptions {
+                endpoint: &endpoint,
+                bearer_token_env: &bearer_token_env,
+                submission_id,
+                lease_ttl_seconds,
+                review_due_at,
+                json,
+            })
+            .await
+        }
+        TracesCommand::ReviewLeaseRelease {
+            endpoint,
+            submission_id,
+            bearer_token_env,
+            json,
+        } => {
+            trace_commons_review_lease_release(&endpoint, &bearer_token_env, submission_id, json)
+                .await
+        }
         TracesCommand::AppendCreditEvent {
             endpoint,
             submission_id,
@@ -2318,6 +2391,109 @@ async fn trace_commons_review_decision(
         print_optional_json_field("  final credit", value, "credit_points_final");
     }
     Ok(())
+}
+
+struct TraceCommonsReviewLeaseClaimOptions<'a> {
+    endpoint: &'a str,
+    bearer_token_env: &'a str,
+    submission_id: Uuid,
+    lease_ttl_seconds: Option<i64>,
+    review_due_at: Option<String>,
+    json: bool,
+}
+
+async fn trace_commons_review_lease_claim(
+    options: TraceCommonsReviewLeaseClaimOptions<'_>,
+) -> anyhow::Result<()> {
+    let body =
+        trace_commons_review_lease_claim_body(options.lease_ttl_seconds, options.review_due_at)?;
+    let response = trace_commons_api_request(
+        Method::POST,
+        options.endpoint,
+        &format!("/v1/review/{}/lease", options.submission_id),
+        &[],
+        Some(options.bearer_token_env),
+        Some(body),
+    )
+    .await?;
+    if options.json {
+        print_trace_commons_json(&response)?;
+        return Ok(());
+    }
+
+    println!("Claimed central review lease for {}", options.submission_id);
+    print_trace_commons_review_lease_fields(response.json.as_ref());
+    Ok(())
+}
+
+fn trace_commons_review_lease_claim_body(
+    lease_ttl_seconds: Option<i64>,
+    review_due_at: Option<String>,
+) -> anyhow::Result<serde_json::Value> {
+    let mut body = serde_json::Map::new();
+    if let Some(lease_ttl_seconds) = lease_ttl_seconds {
+        if lease_ttl_seconds <= 0 {
+            anyhow::bail!("--lease-ttl-seconds must be greater than 0");
+        }
+        body.insert(
+            "lease_ttl_seconds".to_string(),
+            serde_json::json!(lease_ttl_seconds),
+        );
+    }
+    if let Some(review_due_at) = review_due_at
+        .map(|timestamp| timestamp.trim().to_string())
+        .filter(|timestamp| !timestamp.is_empty())
+    {
+        chrono::DateTime::parse_from_rfc3339(&review_due_at)
+            .map_err(|error| anyhow::anyhow!("--review-due-at must be RFC3339: {error}"))?;
+        body.insert(
+            "review_due_at".to_string(),
+            serde_json::Value::String(review_due_at),
+        );
+    }
+    Ok(serde_json::Value::Object(body))
+}
+
+async fn trace_commons_review_lease_release(
+    endpoint: &str,
+    bearer_token_env: &str,
+    submission_id: Uuid,
+    json: bool,
+) -> anyhow::Result<()> {
+    let response = trace_commons_api_request(
+        Method::DELETE,
+        endpoint,
+        &format!("/v1/review/{submission_id}/lease"),
+        &[],
+        Some(bearer_token_env),
+        None,
+    )
+    .await?;
+    if json {
+        print_trace_commons_json(&response)?;
+        return Ok(());
+    }
+
+    println!("Released central review lease for {submission_id}");
+    print_trace_commons_review_lease_fields(response.json.as_ref());
+    Ok(())
+}
+
+fn print_trace_commons_review_lease_fields(value: Option<&serde_json::Value>) {
+    if let Some(value) = value {
+        print_optional_json_field("  tenant id", value, "tenant_id");
+        print_optional_json_field("  tenant storage ref", value, "tenant_storage_ref");
+        print_optional_json_field("  trace id", value, "trace_id");
+        print_optional_json_field("  status", value, "status");
+        print_optional_json_field(
+            "  assigned principal",
+            value,
+            "review_assigned_to_principal_ref",
+        );
+        print_optional_json_field("  assigned at", value, "review_assigned_at");
+        print_optional_json_field("  lease expires at", value, "review_lease_expires_at");
+        print_optional_json_field("  review due at", value, "review_due_at");
+    }
 }
 
 struct TraceCommonsAppendCreditEventOptions<'a> {
@@ -5173,6 +5349,129 @@ mod tests {
             url,
             "https://trace.example/internal/v1/review/active-learning?limit=25"
         );
+    }
+
+    #[test]
+    fn review_lease_claim_parses_through_cli() {
+        let cli = parse_cli([
+            "ironclaw",
+            "traces",
+            "review-lease-claim",
+            "--endpoint",
+            "https://trace.example/internal",
+            "--submission-id",
+            "018f2b7b-0c11-72fd-95c4-1f9f98feac01",
+            "--lease-ttl-seconds",
+            "900",
+            "--review-due-at",
+            "2026-04-26T12:00:00Z",
+            "--bearer-token-env",
+            "TRACE_COMMONS_REVIEWER_TOKEN",
+            "--json",
+        ]);
+
+        let TracesCommand::ReviewLeaseClaim {
+            endpoint,
+            submission_id,
+            lease_ttl_seconds,
+            review_due_at,
+            bearer_token_env,
+            json,
+        } = unwrap_traces_command(cli)
+        else {
+            panic!("expected traces review-lease-claim command");
+        };
+
+        assert_eq!(endpoint, "https://trace.example/internal");
+        assert_eq!(
+            submission_id,
+            Uuid::parse_str("018f2b7b-0c11-72fd-95c4-1f9f98feac01").expect("uuid parses")
+        );
+        assert_eq!(lease_ttl_seconds, Some(900));
+        assert_eq!(review_due_at.as_deref(), Some("2026-04-26T12:00:00Z"));
+        assert_eq!(bearer_token_env, "TRACE_COMMONS_REVIEWER_TOKEN");
+        assert!(json);
+    }
+
+    #[test]
+    fn review_lease_release_parses_through_cli() {
+        let cli = parse_cli([
+            "ironclaw",
+            "traces",
+            "review-lease-release",
+            "--endpoint",
+            "https://trace.example/internal",
+            "--submission-id",
+            "018f2b7b-0c11-72fd-95c4-1f9f98feac01",
+            "--bearer-token-env",
+            "TRACE_COMMONS_REVIEWER_TOKEN",
+        ]);
+
+        let TracesCommand::ReviewLeaseRelease {
+            endpoint,
+            submission_id,
+            bearer_token_env,
+            json,
+        } = unwrap_traces_command(cli)
+        else {
+            panic!("expected traces review-lease-release command");
+        };
+
+        assert_eq!(endpoint, "https://trace.example/internal");
+        assert_eq!(
+            submission_id,
+            Uuid::parse_str("018f2b7b-0c11-72fd-95c4-1f9f98feac01").expect("uuid parses")
+        );
+        assert_eq!(bearer_token_env, "TRACE_COMMONS_REVIEWER_TOKEN");
+        assert!(!json);
+    }
+
+    #[test]
+    fn review_lease_uses_submission_route_from_ingest_endpoint() {
+        let submission_id =
+            Uuid::parse_str("018f2b7b-0c11-72fd-95c4-1f9f98feac01").expect("uuid parses");
+        let url = trace_commons_api_url(
+            "https://trace.example/internal/v1/traces",
+            &format!("/v1/review/{submission_id}/lease"),
+            &[],
+        )
+        .expect("url builds");
+
+        assert_eq!(
+            url,
+            "https://trace.example/internal/v1/review/018f2b7b-0c11-72fd-95c4-1f9f98feac01/lease"
+        );
+    }
+
+    #[test]
+    fn review_lease_claim_body_omits_absent_optional_fields() {
+        let body = trace_commons_review_lease_claim_body(None, None).expect("body builds");
+
+        assert!(body.as_object().expect("body is object").is_empty());
+    }
+
+    #[test]
+    fn review_lease_claim_body_includes_optional_fields() {
+        let body = trace_commons_review_lease_claim_body(
+            Some(900),
+            Some("2026-04-26T12:00:00Z".to_string()),
+        )
+        .expect("body builds");
+
+        assert_eq!(body["lease_ttl_seconds"], 900);
+        assert_eq!(body["review_due_at"], "2026-04-26T12:00:00Z");
+    }
+
+    #[test]
+    fn review_lease_claim_body_rejects_invalid_optional_fields() {
+        let ttl_error = trace_commons_review_lease_claim_body(Some(0), None)
+            .expect_err("non-positive TTL is rejected");
+        assert!(ttl_error.to_string().contains("greater than 0"));
+
+        let due_at_error =
+            trace_commons_review_lease_claim_body(None, Some("tomorrow-ish".to_string()))
+                .expect_err("non-RFC3339 due timestamp is rejected");
+        assert!(due_at_error.to_string().contains("RFC3339"));
     }
 
     #[test]

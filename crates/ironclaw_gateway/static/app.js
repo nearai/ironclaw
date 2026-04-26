@@ -7485,7 +7485,13 @@ function traceOperatorPanel(baseUrl) {
     + '<div class="settings-label-wrap"><div class="settings-label">Reviewer bearer token</div><div class="settings-description">Paste a reviewer/admin token for this browser session only.</div></div>'
     + '<input class="settings-input" type="password" id="trace-operator-token" autocomplete="off" placeholder="tenant:reviewer:token" value="' + escapeHtml(traceOperatorBearerToken) + '">'
     + '</div>'
-    + traceTextRow('trace-operator-submission-id', 'Submission ID', '', 'uuid for review, revocation, credit, conversion')
+    + traceTextRow('trace-operator-submission-id', 'Submission ID', '', 'uuid for review, lease, revocation, credit, conversion')
+    + '<div class="settings-row">'
+    + '<div class="settings-label-wrap"><div class="settings-label">Review lease</div><div class="settings-description">Optional TTL seconds and RFC3339 due date for claiming.</div></div>'
+    + '<div class="trace-inline-fields">'
+    + '<input class="settings-input" type="number" id="trace-operator-lease-ttl" min="1" step="1" placeholder="ttl seconds">'
+    + '<input class="settings-input" type="text" id="trace-operator-review-due-at" placeholder="review_due_at RFC3339">'
+    + '</div></div>'
     + traceTextRow('trace-operator-retention-job-id', 'Retention Job ID', '', 'uuid for retention job item lookup')
     + '<div class="settings-row">'
     + '<div class="settings-label-wrap"><div class="settings-label">Review decision</div></div>'
@@ -7523,6 +7529,8 @@ function traceOperatorPanel(baseUrl) {
     + '<button class="btn-secondary" data-action="trace-operator-quarantine">Quarantine</button>'
     + '<button class="btn-secondary" data-action="trace-operator-revoke">Central Revoke</button>'
     + '<button class="btn-secondary" data-action="trace-operator-propagate">Revocation Propagation</button>'
+    + '<button class="btn-secondary" data-action="trace-operator-lease-claim">Claim Lease</button>'
+    + '<button class="btn-secondary" data-action="trace-operator-lease-release">Release Lease</button>'
     + '<button class="btn-secondary" data-action="trace-operator-decision">Append Decision</button>'
     + '<button class="btn-secondary" data-action="trace-operator-credit">Append Credit Event</button>'
     + '<button class="btn-secondary" data-action="trace-operator-benchmark">Benchmark Convert</button>'
@@ -7544,6 +7552,8 @@ function traceOperatorInputs() {
     baseUrl: ((document.getElementById('trace-operator-base-url') || {}).value || '').trim().replace(/\/$/, ''),
     token: traceOperatorBearerToken.trim(),
     submissionId: ((document.getElementById('trace-operator-submission-id') || {}).value || '').trim(),
+    leaseTtlSeconds: ((document.getElementById('trace-operator-lease-ttl') || {}).value || '').trim(),
+    reviewDueAt: ((document.getElementById('trace-operator-review-due-at') || {}).value || '').trim(),
     retentionJobId: ((document.getElementById('trace-operator-retention-job-id') || {}).value || '').trim(),
     decision: ((document.getElementById('trace-operator-decision') || {}).value || 'approve'),
     pendingCredit: ((document.getElementById('trace-operator-pending-credit') || {}).value || '').trim(),
@@ -7634,6 +7644,23 @@ function traceOperatorRequest(action, input) {
       privacy_risk: input.risk || undefined,
       external_ref: input.externalRef || undefined,
     };
+  } else if (action === 'lease-claim') {
+    if (!input.submissionId) throw new Error('Submission ID is required for review lease claims.');
+    method = 'POST';
+    path = '/v1/review/' + encodeURIComponent(input.submissionId) + '/lease';
+    body = {};
+    if (input.leaseTtlSeconds !== '') {
+      var leaseTtlSeconds = Number(input.leaseTtlSeconds);
+      if (!Number.isInteger(leaseTtlSeconds) || leaseTtlSeconds < 1) {
+        throw new Error('Review lease TTL must be a positive integer number of seconds.');
+      }
+      body.lease_ttl_seconds = leaseTtlSeconds;
+    }
+    if (input.reviewDueAt) body.review_due_at = input.reviewDueAt;
+  } else if (action === 'lease-release') {
+    if (!input.submissionId) throw new Error('Submission ID is required for review lease release.');
+    method = 'DELETE';
+    path = '/v1/review/' + encodeURIComponent(input.submissionId) + '/lease';
   }
   else if (action === 'decision') {
     if (!input.submissionId) throw new Error('Submission ID is required for review decisions.');
@@ -7712,6 +7739,14 @@ function traceOperatorFormatResult(data) {
 function traceOperatorHighlights(data) {
   var labels = {
     submission_id: 'submission ids',
+    trace_id: 'trace ids',
+    tenant_id: 'tenant ids',
+    tenant_storage_ref: 'tenant storage refs',
+    status: 'statuses',
+    review_assigned_to_principal_ref: 'review assignees',
+    review_assigned_at: 'review assigned at',
+    review_lease_expires_at: 'review lease expires at',
+    review_due_at: 'review due at',
     audit_event_id: 'audit ids',
     event_id: 'audit ids',
     retention_job_id: 'retention job ids',
