@@ -119,7 +119,7 @@ Reborn has one host core with many adapters and runtime ports. It should not gro
 | Shared host services and records                                       |
 | RootFilesystem/mounts [exists]  ResourceGovernor [exists]              |
 | Runtime events sink [partial]   Process persistence + ProcessHost [exists] |
-| Durable leases [not yet]        User-facing scoped event API [not yet] |
+| Durable leases [partial]        User-facing scoped event API [not yet] |
 +-----------------------------------------------------------------------+
 ```
 
@@ -214,10 +214,10 @@ The current implemented or contract-backed Reborn stack includes these slices:
 | Filesystem/mount surface | `[exists]` root/scoped filesystem contracts and filesystem-backed stores used by Reborn services |
 | Extension discovery/registry | `[exists]` manifests, package validation, capability descriptors, runtime declaration mapping |
 | Resource governor | `[exists]` reservation/reconcile/release model and V1 dimensions for hosted resource control |
-| Capability access | `[exists/partial]` grant matching, action-time authorization, lease-backed authorizer semantics |
+| Capability access | `[exists/partial]` grant matching, action-time authorization, lease-backed authorizer semantics, in-memory and filesystem-backed exact-invocation lease stores |
 | CapabilityHost | `[exists]` caller-facing invocation, approval-blocking, resume, spawn workflow gate, and `ProcessServices` spawn wiring over the neutral host API dispatch port |
 | Host runtime composition | `[exists]` `HostRuntimeServices` composition helper for shared registry/filesystem/governor/authorizer/runtime/process services -> `RuntimeDispatcher`, `CapabilityHost`, and `ProcessHost` handles |
-| Approvals/resume | `[exists/partial]` pending approval records, invocation fingerprints, approval resolver, in-memory exact-invocation leases, `resume_json` replay checks |
+| Approvals/resume | `[exists/partial]` pending approval records, invocation fingerprints, approval resolver, in-memory and filesystem-backed exact-invocation leases, `resume_json` replay checks |
 | Run-state | `[exists]` `Running`, `BlockedApproval`, `BlockedAuth`, `Completed`, `Failed` current-state stores with tenant/user partitioning |
 | Dispatcher | `[exists]` implementation of the neutral `ironclaw_host_api` dispatch port for already-authorized requests to WASM, Script, and MCP lanes; `FirstParty`/`System` recognized but unsupported; event sink failures are best-effort and runtime failures are redacted to stable kinds |
 | Runtime events | `[partial]` dispatcher/process event vocabulary/sinks for requested/selected/succeeded/failed and process lifecycle; dispatcher event sink failures are ignored so observability outages do not alter dispatch outcomes |
@@ -239,7 +239,7 @@ These are explicit gaps, not architecture contradictions:
 | Turn service | The shared service that owns one-active-run-per-thread, turn lifecycle, checkpoint/resume edge, and handoff to the loop is not implemented yet. |
 | First-party agent loop runtime | The default parent agent loop should be hosted as a first-party service/extension that emits `Reply | CapabilityCalls`; it is not yet a Reborn runtime/service. |
 | Process product APIs | Process records, scoped status/kill/await/subscribe/result/output APIs, cooperative cancellation tokens, result records with filesystem JSON output refs, lifecycle events, and resource cleanup ownership exist as service slices; generalized artifact refs for streaming/binary outputs, output streams, forced abort handles, richer scoped read/projection APIs, durable subscription cursors, and event fanout are not complete. |
-| Durable leases | Approval leases currently have narrow/in-memory semantics; durable, revocable, auditable lease storage is not complete. |
+| Durable leases | Filesystem-backed exact-invocation lease persistence now covers issue, claim, consume, revoke, reload, and tenant/user/invocation isolation; transactional approval+lease writes, audit events, and reusable approval scopes are not complete. |
 | User-facing scoped event API | Dispatcher events and JSONL/in-memory sinks exist, but scoped SSE/WebSocket/reconnect APIs and projection reducers are not productized. |
 | FirstParty/System runtime execution | `RuntimeKind::FirstParty` and `RuntimeKind::System` are recognized host API/runtime markers, but dispatch returns unsupported until trusted host service adapters land. |
 | Full MCP server lifecycle | MCP is a current adapter lane, not yet a complete product lifecycle for server install/start/auth/restart/monitoring. |
