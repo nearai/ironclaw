@@ -313,6 +313,7 @@ Use these docs as the detailed contract sources behind this map:
 - `docs/reborn/contracts/run-state.md`
 - `docs/reborn/contracts/dispatcher.md`
 - `docs/reborn/contracts/processes.md`
+- `docs/reborn/contracts/runtime-selection.md`
 - `docs/reborn/contracts/resources.md`
 - `docs/reborn/contracts/events.md`
 - `docs/reborn/contracts/events-projections.md`
