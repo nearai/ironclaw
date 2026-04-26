@@ -194,11 +194,13 @@ async fn capability_host_rejects_invalid_context_before_recording_run_state() {
             ..
         }
     ));
-    assert!(run_state
-        .records_for_scope(&original_scope)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        run_state
+            .records_for_scope(&original_scope)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
