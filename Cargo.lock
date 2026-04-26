@@ -3992,8 +3992,12 @@ name = "ironclaw_authorization"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "futures",
+ "ironclaw_filesystem",
  "ironclaw_host_api",
+ "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
 ]
 

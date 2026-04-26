@@ -11,11 +11,13 @@ use std::{
 };
 
 use chrono::Utc;
+use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, Decision, DenyReason, EffectKind,
-    ExecutionContext, InvocationFingerprint, InvocationId, Principal, ResourceEstimate,
-    ResourceScope, TenantId, UserId,
+    ExecutionContext, HostApiError, InvocationFingerprint, InvocationId, Principal,
+    ResourceEstimate, ResourceScope, TenantId, UserId, VirtualPath,
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Authorizes a capability dispatch request against an execution context.
@@ -74,7 +76,7 @@ impl CapabilityDispatchAuthorizer for GrantAuthorizer {
 }
 
 /// Capability lease issued from an approved request or policy workflow.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityLease {
     pub scope: ResourceScope,
     pub grant: CapabilityGrant,
@@ -93,7 +95,7 @@ impl CapabilityLease {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CapabilityLeaseStatus {
     Active,
     Claimed,
@@ -116,11 +118,13 @@ pub enum CapabilityLeaseError {
         lease_id: CapabilityGrantId,
         status: CapabilityLeaseStatus,
     },
+    #[error("capability lease persistence error: {reason}")]
+    Persistence { reason: String },
 }
 
 /// Store of active/revoked capability leases.
 pub trait CapabilityLeaseStore: Send + Sync {
-    fn issue(&self, lease: CapabilityLease) -> CapabilityLease;
+    fn issue(&self, lease: CapabilityLease) -> Result<CapabilityLease, CapabilityLeaseError>;
     fn revoke(
         &self,
         scope: &ResourceScope,
@@ -168,12 +172,12 @@ impl InMemoryCapabilityLeaseStore {
 }
 
 impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
-    fn issue(&self, lease: CapabilityLease) -> CapabilityLease {
+    fn issue(&self, lease: CapabilityLease) -> Result<CapabilityLease, CapabilityLeaseError> {
         self.leases_guard().insert(
             CapabilityLeaseKey::new(&lease.scope, lease.grant.id),
             lease.clone(),
         );
-        lease
+        Ok(lease)
     }
 
     fn revoke(
@@ -242,6 +246,191 @@ impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
             .values()
             .filter(|lease| same_tenant_user(&lease.scope, scope))
             .cloned()
+            .collect::<Vec<_>>();
+        leases.sort_by_key(|lease| lease.grant.id.as_uuid());
+        leases
+    }
+
+    fn active_leases_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityLease> {
+        self.leases_for_scope(&context.resource_scope)
+            .into_iter()
+            .filter(|lease| lease_is_authorizing(lease, context))
+            .collect()
+    }
+}
+
+/// Filesystem-backed capability lease store under tenant/user/invocation-scoped `/engine` paths.
+pub struct FilesystemCapabilityLeaseStore<'a, F>
+where
+    F: RootFilesystem,
+{
+    filesystem: &'a F,
+    lock: Mutex<()>,
+}
+
+impl<'a, F> FilesystemCapabilityLeaseStore<'a, F>
+where
+    F: RootFilesystem,
+{
+    pub fn new(filesystem: &'a F) -> Self {
+        Self {
+            filesystem,
+            lock: Mutex::new(()),
+        }
+    }
+
+    fn read_lease(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<Option<CapabilityLease>, CapabilityLeaseError> {
+        let path = lease_path(scope, lease_id)?;
+        let bytes = match futures::executor::block_on(self.filesystem.read_file(&path)) {
+            Ok(bytes) => bytes,
+            Err(error) if is_not_found(&error) => return Ok(None),
+            Err(error) => return Err(lease_persistence_error(error)),
+        };
+        deserialize(&bytes).map(Some)
+    }
+
+    fn write_lease(&self, lease: &CapabilityLease) -> Result<(), CapabilityLeaseError> {
+        let path = lease_path(&lease.scope, lease.grant.id)?;
+        let bytes = serialize_pretty(lease)?;
+        futures::executor::block_on(self.filesystem.write_file(&path, &bytes))
+            .map_err(lease_persistence_error)
+    }
+
+    fn list_invocation_roots(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<VirtualPath>, CapabilityLeaseError> {
+        let root = lease_tenant_user_root(scope)?;
+        let entries = match futures::executor::block_on(self.filesystem.list_dir(&root)) {
+            Ok(entries) => entries,
+            Err(error) if is_not_found(&error) => return Ok(Vec::new()),
+            Err(error) => return Err(lease_persistence_error(error)),
+        };
+        Ok(entries
+            .into_iter()
+            .filter(|entry| entry.file_type == FileType::Directory)
+            .map(|entry| entry.path)
+            .collect())
+    }
+
+    fn list_lease_files(
+        &self,
+        root: &VirtualPath,
+    ) -> Result<Vec<VirtualPath>, CapabilityLeaseError> {
+        let entries = match futures::executor::block_on(self.filesystem.list_dir(root)) {
+            Ok(entries) => entries,
+            Err(error) if is_not_found(&error) => return Ok(Vec::new()),
+            Err(error) => return Err(lease_persistence_error(error)),
+        };
+        Ok(entries
+            .into_iter()
+            .filter(|entry| entry.file_type == FileType::File)
+            .map(|entry| entry.path)
+            .collect())
+    }
+
+    fn read_lease_file(&self, path: &VirtualPath) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let bytes = futures::executor::block_on(self.filesystem.read_file(path))
+            .map_err(lease_persistence_error)?;
+        deserialize(&bytes)
+    }
+}
+
+impl<F> CapabilityLeaseStore for FilesystemCapabilityLeaseStore<'_, F>
+where
+    F: RootFilesystem,
+{
+    fn issue(&self, lease: CapabilityLease) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.write_lease(&lease)?;
+        Ok(lease)
+    }
+
+    fn revoke(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut lease = self
+            .read_lease(scope, lease_id)?
+            .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
+        lease.status = CapabilityLeaseStatus::Revoked;
+        self.write_lease(&lease)?;
+        Ok(lease)
+    }
+
+    fn get(&self, scope: &ResourceScope, lease_id: CapabilityGrantId) -> Option<CapabilityLease> {
+        self.read_lease(scope, lease_id).ok().flatten()
+    }
+
+    fn claim(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut lease = self
+            .read_lease(scope, lease_id)?
+            .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
+        ensure_claimable(&lease, invocation_fingerprint)?;
+        lease.status = CapabilityLeaseStatus::Claimed;
+        self.write_lease(&lease)?;
+        Ok(lease)
+    }
+
+    fn consume(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut lease = self
+            .read_lease(scope, lease_id)?
+            .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
+        let was_claimed = lease.status == CapabilityLeaseStatus::Claimed;
+        ensure_consumable(&lease)?;
+        if let Some(remaining) = lease.grant.constraints.max_invocations.as_mut() {
+            *remaining -= 1;
+            if *remaining == 0 {
+                lease.status = CapabilityLeaseStatus::Consumed;
+            } else if was_claimed {
+                lease.status = CapabilityLeaseStatus::Active;
+            }
+        } else if was_claimed {
+            lease.status = CapabilityLeaseStatus::Active;
+        }
+        self.write_lease(&lease)?;
+        Ok(lease)
+    }
+
+    fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease> {
+        let Ok(roots) = self.list_invocation_roots(scope) else {
+            return Vec::new();
+        };
+        let mut leases = roots
+            .into_iter()
+            .filter_map(|root| self.list_lease_files(&root).ok())
+            .flatten()
+            .filter_map(|path| self.read_lease_file(&path).ok())
+            .filter(|lease| same_tenant_user(&lease.scope, scope))
             .collect::<Vec<_>>();
         leases.sort_by_key(|lease| lease.grant.id.as_uuid());
         leases
@@ -456,4 +645,73 @@ fn lease_is_expired(lease: &CapabilityLease) -> bool {
 
 fn same_tenant_user(left: &ResourceScope, right: &ResourceScope) -> bool {
     left.tenant_id == right.tenant_id && left.user_id == right.user_id
+}
+
+fn lease_path(
+    scope: &ResourceScope,
+    lease_id: CapabilityGrantId,
+) -> Result<VirtualPath, CapabilityLeaseError> {
+    VirtualPath::new(format!(
+        "{}/{lease_id}.json",
+        lease_invocation_root(scope)?.as_str()
+    ))
+    .map_err(lease_host_api_error)
+}
+
+fn lease_invocation_root(scope: &ResourceScope) -> Result<VirtualPath, CapabilityLeaseError> {
+    VirtualPath::new(format!(
+        "{}/{}",
+        lease_tenant_user_root(scope)?.as_str(),
+        scope.invocation_id
+    ))
+    .map_err(lease_host_api_error)
+}
+
+fn lease_tenant_user_root(scope: &ResourceScope) -> Result<VirtualPath, CapabilityLeaseError> {
+    VirtualPath::new(format!(
+        "/engine/tenants/{}/users/{}/capability-leases",
+        scope.tenant_id, scope.user_id
+    ))
+    .map_err(lease_host_api_error)
+}
+
+fn serialize_pretty<T>(value: &T) -> Result<Vec<u8>, CapabilityLeaseError>
+where
+    T: Serialize,
+{
+    serde_json::to_vec_pretty(value).map_err(|error| CapabilityLeaseError::Persistence {
+        reason: error.to_string(),
+    })
+}
+
+fn deserialize<T>(bytes: &[u8]) -> Result<T, CapabilityLeaseError>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    serde_json::from_slice(bytes).map_err(|error| CapabilityLeaseError::Persistence {
+        reason: error.to_string(),
+    })
+}
+
+fn lease_host_api_error(error: HostApiError) -> CapabilityLeaseError {
+    CapabilityLeaseError::Persistence {
+        reason: error.to_string(),
+    }
+}
+
+fn lease_persistence_error(error: FilesystemError) -> CapabilityLeaseError {
+    CapabilityLeaseError::Persistence {
+        reason: error.to_string(),
+    }
+}
+
+fn is_not_found(error: &FilesystemError) -> bool {
+    match error {
+        FilesystemError::Backend { reason, .. } => {
+            reason.contains("No such file")
+                || reason.contains("not found")
+                || reason.contains("entity not found")
+        }
+        _ => false,
+    }
 }

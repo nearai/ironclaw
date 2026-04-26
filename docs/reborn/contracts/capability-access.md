@@ -91,6 +91,13 @@ Lease lookup is tenant/user/invocation scoped; a lease issued under one tenant/u
 
 V1 supports active, claimed, consumed, and revoked lease state. Revocation, claim, and consumption are tenant/user/invocation scoped. Consumed, claimed, revoked, expired, exhausted, and fingerprinted approval leases are ignored by generic lease-backed authorization.
 
+Lease storage implementations now include:
+
+- `InMemoryCapabilityLeaseStore` for tests and ephemeral composition.
+- `FilesystemCapabilityLeaseStore` for durable virtual-path persistence under `/engine/tenants/{tenant_id}/users/{user_id}/capability-leases/{invocation_id}/{lease_id}.json`.
+
+The filesystem store persists issue, claim, consume, and revoke transitions. Reads are fail-closed for authorization: unreadable or missing lease records do not become ambient grants.
+
 See `docs/reborn/contracts/approvals.md` for how approval resolution issues leases and how resume claims/consumes them.
 
 ---
@@ -120,8 +127,8 @@ The dispatcher remains auth-unaware: it receives already-authorized `CapabilityD
 This slice intentionally keeps authorization narrow:
 
 - no approval prompt UI/orchestration yet
-- no durable grant/lease persistence yet
-- no durable invocation-count/expiration persistence yet
+- no durable grant persistence yet
+- no transactional approval-record + lease write boundary yet
 - no resource ceiling obligation enforcement yet
 - no network/secret/mount policy injection into runtimes yet
 

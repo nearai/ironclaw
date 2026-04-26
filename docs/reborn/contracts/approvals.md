@@ -124,7 +124,7 @@ pub enum CapabilityLeaseStatus {
 }
 ```
 
-V1 includes an in-memory lease store with exact tenant/user/invocation scoped lookup, claim, consumption, and revocation. Lease lookup, claim, consumption, and revocation are not global by ID; the authorizer asks for unexpired active leases visible to the current `ExecutionContext.resource_scope`. This slice treats issued approval leases as one-off invocation leases: a lease only authorizes a context with the same invocation ID as the approved request. Broader reusable approval scopes are a later policy slice.
+V1 includes in-memory and filesystem-backed lease stores with exact tenant/user/invocation scoped lookup, claim, consumption, and revocation. Filesystem leases persist under `/engine/tenants/{tenant_id}/users/{user_id}/capability-leases/{invocation_id}/{lease_id}.json`. Lease lookup, claim, consumption, and revocation are not global by ID; the authorizer asks for unexpired active leases visible to the current `ExecutionContext.resource_scope`. This slice treats issued approval leases as one-off invocation leases: a lease only authorizes a context with the same invocation ID as the approved request. Broader reusable approval scopes are a later policy slice.
 
 Leases preserve the approval request fingerprint so resume can validate that the replayed invocation request matches what was approved. Fingerprinted approval leases are not converted into generic grants for plain `invoke_json`; they can only be used by `resume_json`, which compares the fingerprint and claims the exact lease before dispatch.
 
@@ -213,10 +213,8 @@ The dispatcher remains auth-blind and state-blind. It never resolves approvals o
 This slice intentionally keeps approval resolution narrow:
 
 - no UI/user prompt implementation
-- no durable lease store yet
 - no atomic transaction across approval status update and lease issuance yet
 - no approval resolution audit event yet
-- no lease consumption/revocation persistence beyond the in-memory store
 - no approval support for non-dispatch actions yet
 - no `Action::SpawnCapability`/long-running task approval workflow yet; spawn start authorization exists, but approval/resume for spawn is a later slice
 - no reusable approval-scope expansion yet; V1 leases are exact-invocation only
