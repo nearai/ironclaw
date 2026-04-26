@@ -102,6 +102,7 @@ struct AppState {
     db_audit_reads: bool,
     db_tenant_policy_reads: bool,
     require_db_mirror_writes: bool,
+    require_derived_export_object_refs: bool,
     require_export_guardrails: bool,
     artifact_store: Option<ConfiguredTraceArtifactStore>,
 }
@@ -353,6 +354,13 @@ impl AppState {
                 "TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES requires TRACE_COMMONS_DB_DUAL_WRITE"
             );
         }
+        let require_derived_export_object_refs =
+            env_truthy("TRACE_COMMONS_DERIVED_EXPORT_REQUIRE_OBJECT_REFS");
+        if require_derived_export_object_refs && db_mirror.is_none() {
+            anyhow::bail!(
+                "TRACE_COMMONS_DERIVED_EXPORT_REQUIRE_OBJECT_REFS requires TRACE_COMMONS_DB_DUAL_WRITE"
+            );
+        }
         let require_export_guardrails = env_truthy("TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS");
         let artifact_store = trace_artifact_store_from_env(&root)?;
         Ok(Self {
@@ -369,6 +377,7 @@ impl AppState {
             db_audit_reads,
             db_tenant_policy_reads,
             require_db_mirror_writes,
+            require_derived_export_object_refs,
             require_export_guardrails,
             artifact_store,
         })
@@ -1859,7 +1868,7 @@ async fn run_benchmark_conversion(
         state,
         tenant,
         &source_submission_ids,
-        state.db_reviewer_require_object_refs,
+        state.require_derived_export_object_refs,
     )
     .await
     .map_err(internal_error)?;
@@ -2037,7 +2046,7 @@ async fn ranker_training_candidates_handler(
         state.as_ref(),
         &tenant,
         &source_submission_ids,
-        state.db_reviewer_require_object_refs,
+        state.require_derived_export_object_refs,
     )
     .await
     .map_err(internal_error)?;
@@ -2178,7 +2187,7 @@ async fn ranker_training_pairs_handler(
         state.as_ref(),
         &tenant,
         &source_submission_ids,
-        state.db_reviewer_require_object_refs,
+        state.require_derived_export_object_refs,
     )
     .await
     .map_err(internal_error)?;
@@ -5046,6 +5055,7 @@ fn storage_submission_write_from_record(
     canonical_summary_hash: Option<String>,
 ) -> anyhow::Result<StorageTraceSubmissionWrite> {
     let consent_scopes = consent_scope_storage_strings(&record.consent_scopes)?;
+    let allowed_uses = trace_allowed_use_storage_strings(&envelope.trace_card.allowed_uses)?;
     Ok(StorageTraceSubmissionWrite {
         tenant_id: record.tenant_id.clone(),
         submission_id: record.submission_id,
@@ -5056,7 +5066,7 @@ fn storage_submission_write_from_record(
         schema_version: envelope.schema_version.clone(),
         consent_policy_version: envelope.consent.policy_version.clone(),
         consent_scopes: consent_scopes.clone(),
-        allowed_uses: consent_scopes,
+        allowed_uses,
         retention_policy_id: record.retention_policy_id.clone(),
         status: storage_corpus_status(record.status),
         privacy_risk: serde_storage_string(&record.privacy_risk)?,
@@ -5128,6 +5138,12 @@ fn credit_delta_micros(delta: f32) -> i64 {
 
 fn consent_scope_storage_strings(scopes: &[ConsentScope]) -> anyhow::Result<Vec<String>> {
     scopes.iter().map(serde_storage_string).collect()
+}
+
+fn trace_allowed_use_storage_strings(
+    allowed_uses: &[TraceAllowedUse],
+) -> anyhow::Result<Vec<String>> {
+    allowed_uses.iter().map(serde_storage_string).collect()
 }
 
 fn serde_storage_string<T: Serialize>(value: &T) -> anyhow::Result<String> {
@@ -9657,6 +9673,7 @@ mod tests {
             db_audit_reads: false,
             db_tenant_policy_reads: false,
             require_db_mirror_writes: false,
+            require_derived_export_object_refs: false,
             require_export_guardrails: false,
             artifact_store: None,
         })
@@ -9788,6 +9805,29 @@ mod tests {
             false,
             false,
             true,
+            false,
+        )
+    }
+
+    fn test_state_with_required_derived_export_object_refs(
+        root: PathBuf,
+        db_mirror: Option<Arc<dyn Database>>,
+    ) -> Arc<AppState> {
+        test_state_with_configured_artifact_store_policies_export_guardrails_and_required_db_writes(
+            root,
+            db_mirror,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+            false,
+            true,
         )
     }
 
@@ -9819,6 +9859,7 @@ mod tests {
             require_tenant_submission_policy,
             require_export_guardrails,
             false,
+            false,
         )
     }
 
@@ -9839,6 +9880,7 @@ mod tests {
             true,
             BTreeMap::new(),
             require_tenant_submission_policy,
+            false,
             false,
             false,
         )
@@ -9873,6 +9915,7 @@ mod tests {
             require_tenant_submission_policy,
             require_export_guardrails,
             false,
+            false,
         )
     }
 
@@ -9891,6 +9934,7 @@ mod tests {
         require_tenant_submission_policy: bool,
         require_export_guardrails: bool,
         require_db_mirror_writes: bool,
+        require_derived_export_object_refs: bool,
     ) -> Arc<AppState> {
         let mut tokens = BTreeMap::new();
         insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Contributor);
@@ -9948,6 +9992,7 @@ mod tests {
             db_audit_reads,
             db_tenant_policy_reads,
             require_db_mirror_writes,
+            require_derived_export_object_refs,
             require_export_guardrails,
             artifact_store,
         })
@@ -10839,6 +10884,10 @@ mod tests {
         );
         let mut envelope = sample_envelope().await;
         make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+        envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let expected_allowed_uses = vec!["ranking_model_training".to_string()];
         let submission_id = envelope.submission_id;
 
         let Json(receipt) = submit_trace_handler(
@@ -10856,6 +10905,7 @@ mod tests {
             .expect("mirror query succeeds")
             .expect("mirrored submission exists");
         assert_eq!(mirrored.status, StorageTraceCorpusStatus::Accepted);
+        assert_eq!(mirrored.allowed_uses, expected_allowed_uses);
         assert!(
             db.get_trace_submission("tenant-b", submission_id)
                 .await
@@ -12891,6 +12941,136 @@ mod tests {
             "stale-source exports should fail before publishing manifests"
         );
         assert_ne!(preferred_id, revoked_id);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn benchmark_and_ranker_exports_can_require_active_submitted_object_refs() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp
+            .path()
+            .join("trace-derived-export-object-ref-gate.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let submit_state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut submission_ids = Vec::new();
+        for score in [0.9_f32, 0.1_f32] {
+            let mut envelope = sample_envelope().await;
+            make_metadata_only_low_risk(&mut envelope);
+            envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+            envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+            envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+            envelope.value.submission_score = score;
+            submission_ids.push(envelope.submission_id);
+            let _ = submit_trace_handler(
+                State(submit_state.clone()),
+                auth_headers("token-a"),
+                Json(envelope),
+            )
+            .await
+            .expect("ranker source submission succeeds");
+        }
+        for submission_id in submission_ids.iter().copied() {
+            let invalidation_counts = db
+                .invalidate_trace_submission_artifacts(
+                    "tenant-a",
+                    submission_id,
+                    StorageTraceDerivedStatus::Current,
+                )
+                .await
+                .expect("invalidate submitted object refs");
+            assert_eq!(invalidation_counts.object_refs_invalidated, 1);
+        }
+
+        let utility_credit_count = || {
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit events read")
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event.event_type,
+                        TraceCreditLedgerEventType::BenchmarkConversion
+                            | TraceCreditLedgerEventType::TrainingUtility
+                            | TraceCreditLedgerEventType::RankingUtility
+                    )
+                })
+                .count()
+        };
+        let initial_utility_credit_count = utility_credit_count();
+        let export_state = test_state_with_required_derived_export_object_refs(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+
+        let benchmark_error = benchmark_convert_handler(
+            State(export_state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("require_source_object_ref_benchmark".to_string()),
+                consent_scope: None,
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect_err("benchmark export requires active submitted-envelope object refs");
+        assert_eq!(benchmark_error.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let candidates_error = ranker_training_candidates_handler(
+            State(export_state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("require_source_object_ref_candidates".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect_err("ranker candidate export requires active submitted-envelope object refs");
+        assert_eq!(candidates_error.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let pairs_error = ranker_training_pairs_handler(
+            State(export_state),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("require_source_object_ref_pairs".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect_err("ranker pair export requires active submitted-envelope object refs");
+        assert_eq!(pairs_error.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let tenant_dir = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"));
+        assert!(!tenant_dir.join("benchmarks").exists());
+        assert!(!tenant_dir.join("ranker_exports").exists());
+        assert!(
+            db.list_trace_export_manifests("tenant-a")
+                .await
+                .expect("export manifests read")
+                .is_empty()
+        );
+        assert_eq!(utility_credit_count(), initial_utility_credit_count);
     }
 
     #[tokio::test]

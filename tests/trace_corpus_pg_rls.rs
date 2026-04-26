@@ -366,13 +366,26 @@ async fn store_facade_keeps_same_submission_id_isolated_by_tenant() {
         .await;
     }
 
-    let client = backend.pool().get().await.expect("get cleanup connection");
-    let _ = client
-        .execute(
-            "DELETE FROM trace_tenants WHERE tenant_id = ANY($1)",
-            &[&vec![tenant_a, tenant_b]],
+    let mut client = backend.pool().get().await.expect("get cleanup connection");
+    for tenant_id in [tenant_a, tenant_b] {
+        let tx = client
+            .transaction()
+            .await
+            .expect("start cleanup transaction");
+        tx.execute(
+            "SELECT set_config('ironclaw.trace_tenant_id', $1, true)",
+            &[&tenant_id],
         )
-        .await;
+        .await
+        .expect("set cleanup tenant context");
+        let _ = tx
+            .execute(
+                "DELETE FROM trace_tenants WHERE tenant_id = $1",
+                &[&tenant_id],
+            )
+            .await;
+        tx.commit().await.expect("commit cleanup transaction");
+    }
 }
 
 #[tokio::test]
