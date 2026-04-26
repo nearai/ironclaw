@@ -1370,6 +1370,17 @@ async fn revoke_submission(
         "contributor_revocation",
     )
     .map_err(internal_error)?;
+    let mut benchmark_revocation_reasons = BTreeMap::new();
+    benchmark_revocation_reasons.insert(submission_id, "contributor_revocation".to_string());
+    propagate_benchmark_artifact_source_invalidation(
+        state,
+        &tenant,
+        &benchmark_revocation_reasons,
+        &BTreeSet::new(),
+        false,
+    )
+    .await
+    .map_err(internal_error)?;
 
     append_audit_event(
         &state.root,
@@ -2464,46 +2475,53 @@ async fn update_benchmark_lifecycle(
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "benchmark artifact not found"))?;
     apply_benchmark_lifecycle_update(&mut artifact, body)?;
 
+    persist_benchmark_lifecycle_artifact(state, tenant, &artifact, "benchmark lifecycle")
+        .await
+        .map_err(internal_error)?;
+
+    Ok(Json(artifact))
+}
+
+async fn persist_benchmark_lifecycle_artifact(
+    state: &AppState,
+    tenant: &TenantAuth,
+    artifact: &TraceBenchmarkConversionArtifact,
+    operation: &str,
+) -> anyhow::Result<()> {
     if !state.object_primary_derived_exports {
-        write_benchmark_artifact(&state.root, &tenant.tenant_id, &artifact)
-            .map_err(internal_error)?;
+        write_benchmark_artifact(&state.root, &tenant.tenant_id, artifact)?;
     }
     let artifact_object_ref_material = if state.db_mirror.is_some() {
-        Some(
-            trace_export_artifact_object_ref_material(
-                state,
-                &tenant.tenant_id,
-                TraceArtifactKind::BenchmarkConversion,
-                conversion_id,
-                &benchmark_artifact_path(&state.root, &tenant.tenant_id, conversion_id),
-                &artifact,
-            )
-            .map_err(internal_error)?,
-        )
+        Some(trace_export_artifact_object_ref_material(
+            state,
+            &tenant.tenant_id,
+            TraceArtifactKind::BenchmarkConversion,
+            artifact.conversion_id,
+            &benchmark_artifact_path(&state.root, &tenant.tenant_id, artifact.conversion_id),
+            artifact,
+        )?)
     } else {
         None
     };
     let mirror_result = mirror_benchmark_export_provenance_to_db(
         state,
-        &artifact,
+        artifact,
         artifact_object_ref_material.as_ref(),
     )
     .await;
     if let Err(error) = &mirror_result {
         tracing::warn!(
             %error,
-            export_id = %conversion_id,
+            export_id = %artifact.conversion_id,
             "Trace Commons DB dual-write benchmark lifecycle mirror failed"
         );
     }
-    enforce_db_mirror_write_result(state, "benchmark lifecycle", mirror_result)
-        .map_err(internal_error)?;
+    enforce_db_mirror_write_result(state, operation, mirror_result)?;
 
-    let audit_event = TraceCommonsAuditEvent::benchmark_lifecycle_update(tenant, &artifact);
     append_audit_event_with_db_mirror(
         state,
         tenant,
-        audit_event,
+        TraceCommonsAuditEvent::benchmark_lifecycle_update(tenant, artifact),
         StorageTraceAuditAction::BenchmarkConvert,
         StorageTraceAuditSafeMetadata::Export {
             artifact_kind: StorageTraceObjectArtifactKind::BenchmarkArtifact,
@@ -2511,10 +2529,8 @@ async fn update_benchmark_lifecycle(
             item_count: artifact.item_count.min(u32::MAX as usize) as u32,
         },
     )
-    .await
-    .map_err(internal_error)?;
-
-    Ok(Json(artifact))
+    .await?;
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -6948,6 +6964,23 @@ async fn read_benchmark_conversion_artifact(
     tenant: &TenantAuth,
     conversion_id: Uuid,
 ) -> anyhow::Result<Option<TraceBenchmarkConversionArtifact>> {
+    read_benchmark_conversion_artifact_with_ref_policy(state, tenant, conversion_id, false).await
+}
+
+async fn read_benchmark_conversion_artifact_for_invalidation(
+    state: &AppState,
+    tenant: &TenantAuth,
+    conversion_id: Uuid,
+) -> anyhow::Result<Option<TraceBenchmarkConversionArtifact>> {
+    read_benchmark_conversion_artifact_with_ref_policy(state, tenant, conversion_id, true).await
+}
+
+async fn read_benchmark_conversion_artifact_with_ref_policy(
+    state: &AppState,
+    tenant: &TenantAuth,
+    conversion_id: Uuid,
+    allow_invalidated_object_refs: bool,
+) -> anyhow::Result<Option<TraceBenchmarkConversionArtifact>> {
     let path = benchmark_artifact_path(&state.root, &tenant.tenant_id, conversion_id);
     if path.exists() {
         let body = std::fs::read_to_string(&path).with_context(|| {
@@ -6991,7 +7024,7 @@ async fn read_benchmark_conversion_artifact(
         let Some(object_ref) = object_refs.into_iter().find(|object_ref| {
             object_ref.object_ref_id == object_ref_id
                 && object_ref.artifact_kind == StorageTraceObjectArtifactKind::BenchmarkArtifact
-                && object_ref.invalidated_at.is_none()
+                && (allow_invalidated_object_refs || object_ref.invalidated_at.is_none())
                 && object_ref.deleted_at.is_none()
         }) else {
             continue;
@@ -7077,7 +7110,7 @@ async fn run_maintenance(
         .unwrap_or("trace_commons_retention_revocation_maintenance")
         .to_string();
     require_db_reconciliation_clean_request(state, &request)?;
-    let revocation_reasons = read_all_revocations(&state.root, &tenant.tenant_id)?
+    let mut revocation_reasons = read_all_revocations(&state.root, &tenant.tenant_id)?
         .into_iter()
         .map(|revocation| (revocation.submission_id, revocation.reason))
         .collect::<BTreeMap<_, _>>();
@@ -7091,6 +7124,9 @@ async fn run_maintenance(
     for record in &mut records {
         if record.is_revoked() {
             revoked_submission_ids.insert(record.submission_id);
+            revocation_reasons
+                .entry(record.submission_id)
+                .or_insert_with(|| "contributor_revocation".to_string());
             if !request.dry_run {
                 mirror_revocation_to_db(state, tenant, record.submission_id, Some(record), None)
                     .await?;
@@ -7103,6 +7139,9 @@ async fn run_maintenance(
         }
         if revoked_submission_ids.contains(&record.submission_id) {
             records_marked_revoked += 1;
+            revocation_reasons
+                .entry(record.submission_id)
+                .or_insert_with(|| "contributor_revocation".to_string());
             if !request.dry_run {
                 record.status = TraceCorpusStatus::Revoked;
                 record.credit_points_final = Some(0.0);
@@ -7203,6 +7242,19 @@ async fn run_maintenance(
         } else {
             0
         };
+    let benchmark_artifacts_invalidated =
+        if !revoked_submission_ids.is_empty() || !expired_submission_ids.is_empty() {
+            propagate_benchmark_artifact_source_invalidation(
+                state,
+                tenant,
+                &revocation_reasons,
+                &expired_submission_ids,
+                request.dry_run,
+            )
+            .await?
+        } else {
+            0
+        };
     let db_mirror_backfill = backfill_db_mirror_from_files(
         state,
         tenant,
@@ -7239,6 +7291,7 @@ async fn run_maintenance(
         derived_marked_expired,
         export_cache_files_pruned,
         export_provenance_invalidated,
+        benchmark_artifacts_invalidated,
         trace_object_files_deleted,
         encrypted_artifacts_deleted,
         db_mirror_backfilled,
@@ -7301,6 +7354,7 @@ async fn run_maintenance(
         derived_marked_expired,
         export_cache_files_pruned,
         export_provenance_invalidated,
+        benchmark_artifacts_invalidated,
         trace_object_files_deleted,
         encrypted_artifacts_deleted,
         db_mirror_backfilled,
@@ -8684,6 +8738,7 @@ struct TraceMaintenanceAuditCounts {
     derived_marked_expired: usize,
     export_cache_files_pruned: usize,
     export_provenance_invalidated: usize,
+    benchmark_artifacts_invalidated: usize,
     trace_object_files_deleted: usize,
     encrypted_artifacts_deleted: usize,
     db_mirror_backfilled: usize,
@@ -8721,6 +8776,10 @@ impl TraceMaintenanceAuditCounts {
         counts.insert(
             "export_provenance_invalidated".to_string(),
             self.export_provenance_invalidated.min(u32::MAX as usize) as u32,
+        );
+        counts.insert(
+            "benchmark_artifacts_invalidated".to_string(),
+            self.benchmark_artifacts_invalidated.min(u32::MAX as usize) as u32,
         );
         counts.insert(
             "trace_object_files_deleted".to_string(),
@@ -8882,6 +8941,177 @@ fn invalidate_export_provenance_for_sources(
         write_export_provenance(&path, &provenance)?;
     }
     Ok(invalidated)
+}
+
+async fn propagate_benchmark_artifact_source_invalidation(
+    state: &AppState,
+    tenant: &TenantAuth,
+    revoked_submission_reasons: &BTreeMap<Uuid, String>,
+    expired_submission_ids: &BTreeSet<Uuid>,
+    dry_run: bool,
+) -> anyhow::Result<usize> {
+    let affected = affected_benchmark_conversion_ids(
+        state,
+        tenant,
+        revoked_submission_reasons,
+        expired_submission_ids,
+    )
+    .await?;
+    let mut invalidated = 0usize;
+    for (conversion_id, reason) in affected {
+        let Some(mut artifact) =
+            read_benchmark_conversion_artifact_for_invalidation(state, tenant, conversion_id)
+                .await?
+        else {
+            continue;
+        };
+        if !mark_benchmark_artifact_source_invalidated(&mut artifact, &reason) {
+            continue;
+        }
+        invalidated += 1;
+        if dry_run {
+            continue;
+        }
+        persist_benchmark_lifecycle_artifact(
+            state,
+            tenant,
+            &artifact,
+            "benchmark source invalidation",
+        )
+        .await?;
+        reapply_benchmark_source_invalidation_to_db(
+            state,
+            tenant,
+            &artifact,
+            revoked_submission_reasons,
+            expired_submission_ids,
+        )
+        .await?;
+    }
+    Ok(invalidated)
+}
+
+async fn affected_benchmark_conversion_ids(
+    state: &AppState,
+    tenant: &TenantAuth,
+    revoked_submission_reasons: &BTreeMap<Uuid, String>,
+    expired_submission_ids: &BTreeSet<Uuid>,
+) -> anyhow::Result<BTreeMap<Uuid, String>> {
+    let mut affected = BTreeMap::new();
+    for path in read_export_provenance_paths(&state.root, &tenant.tenant_id)? {
+        let provenance = read_export_provenance(&path)?;
+        if provenance.export_kind != TraceExportProvenanceKind::BenchmarkConversion {
+            continue;
+        }
+        if let Some(reason) = benchmark_source_invalidation_reason(
+            &provenance.source_submission_ids,
+            revoked_submission_reasons,
+            expired_submission_ids,
+        ) {
+            affected.entry(provenance.export_id).or_insert(reason);
+        }
+    }
+
+    if let Some(db) = state.db_mirror.as_ref() {
+        for manifest in db
+            .list_trace_export_manifests(&tenant.tenant_id)
+            .await
+            .context("failed to list benchmark manifests for source invalidation")?
+        {
+            if manifest.artifact_kind != StorageTraceObjectArtifactKind::BenchmarkArtifact {
+                continue;
+            }
+            if let Some(reason) = benchmark_source_invalidation_reason(
+                &manifest.source_submission_ids,
+                revoked_submission_reasons,
+                expired_submission_ids,
+            ) {
+                affected
+                    .entry(manifest.export_manifest_id)
+                    .or_insert(reason);
+            }
+        }
+    }
+
+    Ok(affected)
+}
+
+fn benchmark_source_invalidation_reason(
+    source_submission_ids: &[Uuid],
+    revoked_submission_reasons: &BTreeMap<Uuid, String>,
+    expired_submission_ids: &BTreeSet<Uuid>,
+) -> Option<String> {
+    source_submission_ids.iter().find_map(|submission_id| {
+        revoked_submission_reasons
+            .get(submission_id)
+            .cloned()
+            .or_else(|| {
+                expired_submission_ids
+                    .contains(submission_id)
+                    .then(|| "retention_expired_source".to_string())
+            })
+    })
+}
+
+fn mark_benchmark_artifact_source_invalidated(
+    artifact: &mut TraceBenchmarkConversionArtifact,
+    reason: &str,
+) -> bool {
+    if artifact.registry.status != TraceBenchmarkRegistryStatus::Published {
+        return false;
+    }
+    artifact.registry.status = TraceBenchmarkRegistryStatus::Revoked;
+    artifact.registry.revoked_at = Some(Utc::now());
+    artifact.registry.revocation_reason = Some(reason.to_string());
+    artifact.evaluation.status = TraceBenchmarkEvaluationStatus::Inconclusive;
+    artifact.evaluation.last_update_reason = Some(format!("source invalidated: {reason}"));
+    true
+}
+
+async fn reapply_benchmark_source_invalidation_to_db(
+    state: &AppState,
+    tenant: &TenantAuth,
+    artifact: &TraceBenchmarkConversionArtifact,
+    revoked_submission_reasons: &BTreeMap<Uuid, String>,
+    expired_submission_ids: &BTreeSet<Uuid>,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    for submission_id in &artifact.source_submission_ids {
+        if revoked_submission_reasons.contains_key(submission_id) {
+            db.invalidate_trace_export_manifests_for_submission(&tenant.tenant_id, *submission_id)
+                .await
+                .with_context(|| {
+                    format!("failed to reapply benchmark manifest revocation for {submission_id}")
+                })?;
+            db.invalidate_trace_export_manifest_items_for_submission(
+                &tenant.tenant_id,
+                *submission_id,
+                StorageTraceExportManifestItemInvalidationReason::Revoked,
+            )
+            .await
+            .with_context(|| {
+                format!("failed to reapply benchmark item revocation for {submission_id}")
+            })?;
+        } else if expired_submission_ids.contains(submission_id) {
+            db.invalidate_trace_export_manifests_for_submission(&tenant.tenant_id, *submission_id)
+                .await
+                .with_context(|| {
+                    format!("failed to reapply benchmark manifest expiration for {submission_id}")
+                })?;
+            db.invalidate_trace_export_manifest_items_for_submission(
+                &tenant.tenant_id,
+                *submission_id,
+                StorageTraceExportManifestItemInvalidationReason::Expired,
+            )
+            .await
+            .with_context(|| {
+                format!("failed to reapply benchmark item expiration for {submission_id}")
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn read_export_provenance_paths(root: &Path, tenant_id: &str) -> anyhow::Result<Vec<PathBuf>> {
@@ -9570,6 +9800,10 @@ struct TraceBenchmarkRegistryMetadata {
     registry_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     published_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    revoked_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    revocation_reason: Option<String>,
 }
 
 impl Default for TraceBenchmarkRegistryMetadata {
@@ -9578,6 +9812,8 @@ impl Default for TraceBenchmarkRegistryMetadata {
             status: TraceBenchmarkRegistryStatus::Candidate,
             registry_ref: None,
             published_at: None,
+            revoked_at: None,
+            revocation_reason: None,
         }
     }
 }
@@ -10062,6 +10298,7 @@ struct TraceMaintenanceResponse {
     derived_marked_expired: usize,
     export_cache_files_pruned: usize,
     export_provenance_invalidated: usize,
+    benchmark_artifacts_invalidated: usize,
     trace_object_files_deleted: usize,
     encrypted_artifacts_deleted: usize,
     db_mirror_backfilled: usize,
@@ -10931,7 +11168,7 @@ impl TraceCommonsAuditEvent {
             actor_role: Some(auth.role),
             actor_principal_ref: Some(auth.principal_ref.clone()),
             reason: Some(format!(
-                "purpose={purpose};dry_run={dry_run};records_marked_revoked={};records_marked_expired={};records_marked_purged={};derived_marked_revoked={};derived_marked_expired={};export_cache_files_pruned={};export_provenance_invalidated={};trace_object_files_deleted={};encrypted_artifacts_deleted={};db_mirror_backfilled={};db_mirror_backfill_failed={};vector_entries_indexed={}",
+                "purpose={purpose};dry_run={dry_run};records_marked_revoked={};records_marked_expired={};records_marked_purged={};derived_marked_revoked={};derived_marked_expired={};export_cache_files_pruned={};export_provenance_invalidated={};benchmark_artifacts_invalidated={};trace_object_files_deleted={};encrypted_artifacts_deleted={};db_mirror_backfilled={};db_mirror_backfill_failed={};vector_entries_indexed={}",
                 counts.records_marked_revoked,
                 counts.records_marked_expired,
                 counts.records_marked_purged,
@@ -10939,6 +11176,7 @@ impl TraceCommonsAuditEvent {
                 counts.derived_marked_expired,
                 counts.export_cache_files_pruned,
                 counts.export_provenance_invalidated,
+                counts.benchmark_artifacts_invalidated,
                 counts.trace_object_files_deleted,
                 counts.encrypted_artifacts_deleted,
                 counts.db_mirror_backfilled,
@@ -15200,6 +15438,34 @@ mod tests {
         );
         assert!(provenance["invalidated_at"].is_null());
 
+        let Json(published_benchmark) = benchmark_lifecycle_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            AxumPath(benchmark.conversion_id),
+            Json(BenchmarkLifecycleUpdateRequest {
+                registry: Some(TraceBenchmarkRegistryPatch {
+                    status: Some(TraceBenchmarkRegistryStatus::Published),
+                    registry_ref: Some("benchmark-registry:provenance".to_string()),
+                    published_at: Some(Utc::now()),
+                }),
+                evaluation: Some(TraceBenchmarkEvaluationPatch {
+                    status: Some(TraceBenchmarkEvaluationStatus::Passed),
+                    evaluator_ref: Some("evaluator:provenance".to_string()),
+                    evaluated_at: Some(Utc::now()),
+                    score: Some(1.0),
+                    pass_count: Some(1),
+                    fail_count: Some(0),
+                }),
+                reason: Some("published provenance benchmark".to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark lifecycle publish succeeds");
+        assert_eq!(
+            published_benchmark.registry.status,
+            TraceBenchmarkRegistryStatus::Published
+        );
+
         revoke_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
@@ -15215,6 +15481,46 @@ mod tests {
         .expect("invalidated benchmark provenance parses");
         assert!(invalidated["invalidated_at"].as_str().is_some());
         assert_eq!(invalidated["invalidation_reason"], "contributor_revocation");
+
+        let invalidated_artifact: TraceBenchmarkConversionArtifact = serde_json::from_str(
+            &std::fs::read_to_string(benchmark_artifact_path(
+                temp.path(),
+                "tenant-a",
+                benchmark.conversion_id,
+            ))
+            .expect("invalidated benchmark artifact reads"),
+        )
+        .expect("invalidated benchmark artifact parses");
+        assert_eq!(
+            invalidated_artifact.registry.status,
+            TraceBenchmarkRegistryStatus::Revoked
+        );
+        assert!(invalidated_artifact.registry.revoked_at.is_some());
+        assert_eq!(
+            invalidated_artifact.registry.revocation_reason.as_deref(),
+            Some("contributor_revocation")
+        );
+        assert_eq!(
+            invalidated_artifact.evaluation.status,
+            TraceBenchmarkEvaluationStatus::Inconclusive
+        );
+        assert!(
+            invalidated_artifact
+                .evaluation
+                .last_update_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("contributor_revocation"))
+        );
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("audit events read");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "benchmark_lifecycle_update"
+                && event.export_id == Some(benchmark.conversion_id)
+                && event.reason.as_deref().is_some_and(|reason| {
+                    reason.contains("registry_status=revoked")
+                        && reason.contains("evaluation_status=inconclusive")
+                })
+        }));
     }
 
     #[tokio::test]
@@ -16448,6 +16754,47 @@ mod tests {
         .await
         .expect("replay export mirrors manifest metadata");
         assert_eq!(export.item_count, 1);
+        let Json(benchmark) = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("maintenance_revocation_benchmark".to_string()),
+                consent_scope: None,
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("benchmark conversion mirrors manifest metadata");
+        let Json(published_benchmark) = benchmark_lifecycle_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            AxumPath(benchmark.conversion_id),
+            Json(BenchmarkLifecycleUpdateRequest {
+                registry: Some(TraceBenchmarkRegistryPatch {
+                    status: Some(TraceBenchmarkRegistryStatus::Published),
+                    registry_ref: Some("benchmark-registry:maintenance".to_string()),
+                    published_at: Some(Utc::now()),
+                }),
+                evaluation: Some(TraceBenchmarkEvaluationPatch {
+                    status: Some(TraceBenchmarkEvaluationStatus::Passed),
+                    evaluator_ref: Some("evaluator:maintenance".to_string()),
+                    evaluated_at: Some(Utc::now()),
+                    score: Some(1.0),
+                    pass_count: Some(1),
+                    fail_count: Some(0),
+                }),
+                reason: Some("published maintenance benchmark".to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark lifecycle publish succeeds");
+        assert_eq!(
+            published_benchmark.registry.status,
+            TraceBenchmarkRegistryStatus::Published
+        );
 
         write_revocation(
             temp.path(),
@@ -16481,6 +16828,7 @@ mod tests {
         .expect("maintenance mirrors discovered revocation");
         assert_eq!(response.records_marked_revoked, 1);
         assert_eq!(response.derived_marked_revoked, 1);
+        assert_eq!(response.benchmark_artifacts_invalidated, 1);
 
         let db_submission = db
             .get_trace_submission("tenant-a", submission_id)
@@ -16522,6 +16870,10 @@ mod tests {
         assert!(db_manifests.iter().any(|manifest| {
             manifest.export_manifest_id == export.export_id && manifest.invalidated_at.is_some()
         }));
+        assert!(db_manifests.iter().any(|manifest| {
+            manifest.export_manifest_id == benchmark.conversion_id
+                && manifest.invalidated_at.is_some()
+        }));
         let db_items = db
             .list_trace_export_manifest_items("tenant-a", export.export_id)
             .await
@@ -16531,6 +16883,23 @@ mod tests {
         assert_eq!(
             db_items[0].source_invalidation_reason,
             Some(StorageTraceExportManifestItemInvalidationReason::Revoked)
+        );
+        let invalidated_artifact: TraceBenchmarkConversionArtifact = serde_json::from_str(
+            &std::fs::read_to_string(benchmark_artifact_path(
+                temp.path(),
+                "tenant-a",
+                benchmark.conversion_id,
+            ))
+            .expect("invalidated benchmark artifact reads"),
+        )
+        .expect("invalidated benchmark artifact parses");
+        assert_eq!(
+            invalidated_artifact.registry.status,
+            TraceBenchmarkRegistryStatus::Revoked
+        );
+        assert_eq!(
+            invalidated_artifact.evaluation.status,
+            TraceBenchmarkEvaluationStatus::Inconclusive
         );
         assert_eq!(
             db.list_trace_tombstones("tenant-a")
@@ -20785,7 +21154,7 @@ mod tests {
         assert_eq!(filtered_records.len(), 2);
 
         revoke_trace_handler(
-            State(state),
+            State(state.clone()),
             auth_headers("token-a"),
             AxumPath(first_submission_id),
         )
@@ -20799,6 +21168,59 @@ mod tests {
             .filter(|manifest| manifest.invalidated_at.is_some())
             .count();
         assert_eq!(invalidated_manifest_count, 3);
+        assert!(
+            !benchmark_artifact_path(temp.path(), "tenant-a", benchmark.conversion_id).exists(),
+            "object-primary source invalidation must not recreate plaintext benchmark artifact"
+        );
+        let revoked_benchmark_manifest = db
+            .list_trace_export_manifests("tenant-a")
+            .await
+            .expect("benchmark manifest metadata reads")
+            .into_iter()
+            .find(|manifest| manifest.export_manifest_id == benchmark.conversion_id)
+            .expect("benchmark manifest exists");
+        assert!(revoked_benchmark_manifest.invalidated_at.is_some());
+        let revoked_benchmark_items = db
+            .list_trace_export_manifest_items("tenant-a", benchmark.conversion_id)
+            .await
+            .expect("benchmark manifest items read after revocation");
+        assert_eq!(revoked_benchmark_items.len(), 1);
+        assert!(revoked_benchmark_items[0].source_invalidated_at.is_some());
+        assert_eq!(
+            revoked_benchmark_items[0].source_invalidation_reason,
+            Some(StorageTraceExportManifestItemInvalidationReason::Revoked)
+        );
+        let revoked_benchmark_object_ref = db
+            .list_trace_object_refs("tenant-a", first_submission_id)
+            .await
+            .expect("revoked benchmark object refs read")
+            .into_iter()
+            .find(|object_ref| object_ref.object_ref_id == benchmark_object_ref_id)
+            .expect("revoked benchmark artifact object ref exists");
+        assert!(revoked_benchmark_object_ref.invalidated_at.is_some());
+        let stored_revoked_benchmark: TraceBenchmarkConversionArtifact = configured_store
+            .get_json_by_object_key(
+                &tenant_storage_ref("tenant-a"),
+                TraceArtifactKind::BenchmarkConversion,
+                &revoked_benchmark_object_ref.object_key,
+                &revoked_benchmark_object_ref.content_sha256,
+            )
+            .expect("revoked benchmark artifact reads from object store");
+        assert_eq!(
+            stored_revoked_benchmark.registry.status,
+            TraceBenchmarkRegistryStatus::Revoked
+        );
+        assert_eq!(
+            stored_revoked_benchmark
+                .registry
+                .revocation_reason
+                .as_deref(),
+            Some("contributor_revocation")
+        );
+        assert_eq!(
+            stored_revoked_benchmark.evaluation.status,
+            TraceBenchmarkEvaluationStatus::Inconclusive
+        );
     }
 
     #[cfg(feature = "libsql")]

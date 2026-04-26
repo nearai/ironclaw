@@ -2050,38 +2050,9 @@ async fn trace_commons_maintenance_run(
 
     println!("Trace Commons maintenance run requested.");
     if let Some(value) = response.json.as_ref() {
-        print_optional_json_field("  audit event id", value, "audit_event_id");
-        print_optional_json_field("  purpose", value, "purpose");
-        print_optional_json_field("  dry run", value, "dry_run");
-        print_optional_json_field("  revoked submissions", value, "revoked_submission_count");
-        print_optional_json_field("  expired submissions", value, "expired_submission_count");
-        print_optional_json_field("  records marked revoked", value, "records_marked_revoked");
-        print_optional_json_field("  records marked expired", value, "records_marked_expired");
-        print_optional_json_field("  records marked purged", value, "records_marked_purged");
-        print_optional_json_field("  derived marked revoked", value, "derived_marked_revoked");
-        print_optional_json_field("  derived marked expired", value, "derived_marked_expired");
-        print_optional_json_field(
-            "  export cache files pruned",
-            value,
-            "export_cache_files_pruned",
-        );
-        print_optional_json_field(
-            "  export provenance invalidated",
-            value,
-            "export_provenance_invalidated",
-        );
-        print_optional_json_field(
-            "  trace object files deleted",
-            value,
-            "trace_object_files_deleted",
-        );
-        print_optional_json_field(
-            "  encrypted artifacts deleted",
-            value,
-            "encrypted_artifacts_deleted",
-        );
-        print_optional_json_field("  DB mirror backfilled", value, "db_mirror_backfilled");
-        print_optional_json_field("  vectors indexed", value, "vector_entries_indexed");
+        for line in trace_commons_maintenance_summary_lines(value) {
+            println!("{line}");
+        }
         for line in maintenance_audit_chain_lines(value) {
             println!("{line}");
         }
@@ -2133,6 +2104,40 @@ fn trace_commons_maintenance_body(options: &TraceCommonsMaintenanceOptions) -> s
     body
 }
 
+fn trace_commons_maintenance_summary_lines(value: &serde_json::Value) -> Vec<String> {
+    json_field_lines(
+        value,
+        &[
+            ("  audit event id", "audit_event_id"),
+            ("  purpose", "purpose"),
+            ("  dry run", "dry_run"),
+            ("  revoked submissions", "revoked_submission_count"),
+            ("  expired submissions", "expired_submission_count"),
+            ("  records marked revoked", "records_marked_revoked"),
+            ("  records marked expired", "records_marked_expired"),
+            ("  records marked purged", "records_marked_purged"),
+            ("  derived marked revoked", "derived_marked_revoked"),
+            ("  derived marked expired", "derived_marked_expired"),
+            ("  export cache files pruned", "export_cache_files_pruned"),
+            (
+                "  export provenance invalidated",
+                "export_provenance_invalidated",
+            ),
+            (
+                "  benchmark artifacts invalidated",
+                "benchmark_artifacts_invalidated",
+            ),
+            ("  trace object files deleted", "trace_object_files_deleted"),
+            (
+                "  encrypted artifacts deleted",
+                "encrypted_artifacts_deleted",
+            ),
+            ("  DB mirror backfilled", "db_mirror_backfilled"),
+            ("  vectors indexed", "vector_entries_indexed"),
+        ],
+    )
+}
+
 struct TraceCommonsRetentionMaintenanceOptions<'a> {
     endpoint: &'a str,
     bearer_token_env: &'a str,
@@ -2172,22 +2177,9 @@ async fn trace_commons_retention_maintenance_run(
     }
     println!("Trace Commons retention maintenance requested.");
     if let Some(value) = response.json.as_ref() {
-        print_optional_json_field("  audit event id", value, "audit_event_id");
-        print_optional_json_field("  purpose", value, "purpose");
-        print_optional_json_field("  dry run", value, "dry_run");
-        print_optional_json_field("  records marked revoked", value, "records_marked_revoked");
-        print_optional_json_field("  records marked expired", value, "records_marked_expired");
-        print_optional_json_field("  records marked purged", value, "records_marked_purged");
-        print_optional_json_field(
-            "  export cache files pruned",
-            value,
-            "export_cache_files_pruned",
-        );
-        print_optional_json_field(
-            "  export provenance invalidated",
-            value,
-            "export_provenance_invalidated",
-        );
+        for line in trace_commons_retention_maintenance_summary_lines(value) {
+            println!("{line}");
+        }
     }
     Ok(())
 }
@@ -2215,6 +2207,29 @@ fn trace_commons_retention_maintenance_body(
         body["purge_expired_before"] = serde_json::Value::String(purge_expired_before);
     }
     body
+}
+
+fn trace_commons_retention_maintenance_summary_lines(value: &serde_json::Value) -> Vec<String> {
+    json_field_lines(
+        value,
+        &[
+            ("  audit event id", "audit_event_id"),
+            ("  purpose", "purpose"),
+            ("  dry run", "dry_run"),
+            ("  records marked revoked", "records_marked_revoked"),
+            ("  records marked expired", "records_marked_expired"),
+            ("  records marked purged", "records_marked_purged"),
+            ("  export cache files pruned", "export_cache_files_pruned"),
+            (
+                "  export provenance invalidated",
+                "export_provenance_invalidated",
+            ),
+            (
+                "  benchmark artifacts invalidated",
+                "benchmark_artifacts_invalidated",
+            ),
+        ],
+    )
 }
 
 async fn trace_commons_vector_index_run(
@@ -3150,9 +3165,20 @@ fn print_trace_commons_items(heading: &str, value: Option<&serde_json::Value>, f
 }
 
 fn print_optional_json_field(label: &str, value: &serde_json::Value, field: &str) {
-    if let Some(display) = json_field_display(value, field) {
-        println!("{label}: {display}");
+    if let Some(line) = json_field_line(label, value, field) {
+        println!("{line}");
     }
+}
+
+fn json_field_lines(value: &serde_json::Value, fields: &[(&str, &str)]) -> Vec<String> {
+    fields
+        .iter()
+        .filter_map(|(label, field)| json_field_line(label, value, field))
+        .collect()
+}
+
+fn json_field_line(label: &str, value: &serde_json::Value, field: &str) -> Option<String> {
+    json_field_display(value, field).map(|display| format!("{label}: {display}"))
 }
 
 fn print_json_map(label: &str, value: Option<&serde_json::Value>) {
@@ -4611,6 +4637,34 @@ mod tests {
         assert!(body.get("backfill_db_mirror").is_none());
         assert!(body.get("index_vectors").is_none());
         assert!(body.get("reconcile_db_mirror").is_none());
+    }
+
+    #[test]
+    fn maintenance_summary_lines_include_benchmark_artifact_invalidation() {
+        let value = serde_json::json!({
+            "audit_event_id": "audit-123",
+            "purpose": "source-invalidation",
+            "dry_run": false,
+            "benchmark_artifacts_invalidated": 3
+        });
+
+        let lines = trace_commons_maintenance_summary_lines(&value);
+
+        assert!(lines.contains(&"  benchmark artifacts invalidated: 3".to_string()));
+    }
+
+    #[test]
+    fn retention_maintenance_summary_lines_include_benchmark_artifact_invalidation() {
+        let value = serde_json::json!({
+            "audit_event_id": "audit-123",
+            "purpose": "retention-sweep",
+            "dry_run": false,
+            "benchmark_artifacts_invalidated": 2
+        });
+
+        let lines = trace_commons_retention_maintenance_summary_lines(&value);
+
+        assert!(lines.contains(&"  benchmark artifacts invalidated: 2".to_string()));
     }
 
     #[test]
