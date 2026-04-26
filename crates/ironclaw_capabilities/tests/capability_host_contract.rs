@@ -255,8 +255,6 @@ impl CapabilityDispatcher for RecordingDispatcher {
         })
     }
 }
-    }
-}
 
 #[derive(Clone)]
 struct EchoMcpClient;
