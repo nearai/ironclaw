@@ -2205,11 +2205,14 @@ async fn run_benchmark_conversion(
     );
     let audit_event_id = audit_event.event_id;
     let artifact = TraceBenchmarkConversionArtifact {
+        artifact_schema_version: TRACE_BENCHMARK_CONVERSION_SCHEMA_VERSION.to_string(),
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         conversion_id,
         audit_event_id,
         purpose,
+        registry: TraceBenchmarkRegistryMetadata::default(),
+        evaluation: TraceBenchmarkEvaluationMetadata::default(),
         filters: TraceBenchmarkConversionFilters {
             limit,
             consent_scope,
@@ -9194,19 +9197,98 @@ fn fallback_replay_source_hash(
     ))
 }
 
+const TRACE_BENCHMARK_CONVERSION_SCHEMA_VERSION: &str =
+    "ironclaw.trace_commons.benchmark_conversion.v1";
+
+fn trace_benchmark_conversion_schema_version() -> String {
+    TRACE_BENCHMARK_CONVERSION_SCHEMA_VERSION.to_string()
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct TraceBenchmarkConversionArtifact {
+    #[serde(default = "trace_benchmark_conversion_schema_version")]
+    artifact_schema_version: String,
     tenant_id: String,
     tenant_storage_ref: String,
     conversion_id: Uuid,
     audit_event_id: Uuid,
     purpose: String,
+    #[serde(default)]
+    registry: TraceBenchmarkRegistryMetadata,
+    #[serde(default)]
+    evaluation: TraceBenchmarkEvaluationMetadata,
     filters: TraceBenchmarkConversionFilters,
     source_submission_ids: Vec<Uuid>,
     source_submission_ids_hash: String,
     generated_at: DateTime<Utc>,
     item_count: usize,
     candidates: Vec<TraceBenchmarkCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceBenchmarkRegistryMetadata {
+    status: TraceBenchmarkRegistryStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    registry_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    published_at: Option<DateTime<Utc>>,
+}
+
+impl Default for TraceBenchmarkRegistryMetadata {
+    fn default() -> Self {
+        Self {
+            status: TraceBenchmarkRegistryStatus::Candidate,
+            registry_ref: None,
+            published_at: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum TraceBenchmarkRegistryStatus {
+    Candidate,
+    Published,
+    Revoked,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceBenchmarkEvaluationMetadata {
+    status: TraceBenchmarkEvaluationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    evaluator_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    evaluated_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    score: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pass_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fail_count: Option<u32>,
+}
+
+impl Default for TraceBenchmarkEvaluationMetadata {
+    fn default() -> Self {
+        Self {
+            status: TraceBenchmarkEvaluationStatus::NotRun,
+            evaluator_ref: None,
+            evaluated_at: None,
+            score: None,
+            pass_count: None,
+            fail_count: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum TraceBenchmarkEvaluationStatus {
+    NotRun,
+    Queued,
+    Running,
+    Passed,
+    Failed,
+    Inconclusive,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -14390,6 +14472,102 @@ mod tests {
         .expect("invalidated benchmark provenance parses");
         assert!(invalidated["invalidated_at"].as_str().is_some());
         assert_eq!(invalidated["invalidation_reason"], "contributor_revocation");
+    }
+
+    #[tokio::test]
+    async fn benchmark_conversion_artifact_tracks_registry_and_evaluator_state() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("benchmark source submission succeeds");
+
+        let Json(benchmark) = benchmark_convert_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("registry_evaluator_contract".to_string()),
+                consent_scope: None,
+                status: None,
+                privacy_risk: None,
+                external_ref: Some("benchmark-registry:pending".to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark conversion succeeds");
+
+        assert_eq!(
+            benchmark.artifact_schema_version,
+            TRACE_BENCHMARK_CONVERSION_SCHEMA_VERSION
+        );
+        assert_eq!(
+            benchmark.registry.status,
+            TraceBenchmarkRegistryStatus::Candidate
+        );
+        assert!(benchmark.registry.registry_ref.is_none());
+        assert!(benchmark.registry.published_at.is_none());
+        assert_eq!(
+            benchmark.evaluation.status,
+            TraceBenchmarkEvaluationStatus::NotRun
+        );
+        assert!(benchmark.evaluation.evaluator_ref.is_none());
+        assert!(benchmark.evaluation.evaluated_at.is_none());
+        assert!(benchmark.evaluation.score.is_none());
+
+        let artifact_path =
+            benchmark_artifact_path(temp.path(), "tenant-a", benchmark.conversion_id);
+        let persisted: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(artifact_path).expect("benchmark artifact reads"),
+        )
+        .expect("benchmark artifact parses");
+        assert_eq!(
+            persisted["artifact_schema_version"],
+            TRACE_BENCHMARK_CONVERSION_SCHEMA_VERSION
+        );
+        assert_eq!(persisted["registry"]["status"], "candidate");
+        assert_eq!(persisted["evaluation"]["status"], "not_run");
+        assert!(persisted["registry"]["registry_ref"].is_null());
+        assert!(persisted["evaluation"]["evaluator_ref"].is_null());
+    }
+
+    #[test]
+    fn legacy_benchmark_conversion_artifact_defaults_lifecycle_metadata() {
+        let artifact: TraceBenchmarkConversionArtifact =
+            serde_json::from_value(serde_json::json!({
+                "tenant_id": "tenant-a",
+                "tenant_storage_ref": tenant_storage_ref("tenant-a"),
+                "conversion_id": Uuid::new_v4(),
+                "audit_event_id": Uuid::new_v4(),
+                "purpose": "legacy_artifact",
+                "filters": { "limit": 1 },
+                "source_submission_ids": [],
+                "source_submission_ids_hash": "sha256:legacy",
+                "generated_at": "2026-04-25T00:00:00Z",
+                "item_count": 0,
+                "candidates": []
+            }))
+            .expect("legacy benchmark artifact still deserializes");
+
+        assert_eq!(
+            artifact.artifact_schema_version,
+            TRACE_BENCHMARK_CONVERSION_SCHEMA_VERSION
+        );
+        assert_eq!(
+            artifact.registry.status,
+            TraceBenchmarkRegistryStatus::Candidate
+        );
+        assert_eq!(
+            artifact.evaluation.status,
+            TraceBenchmarkEvaluationStatus::NotRun
+        );
     }
 
     #[tokio::test]
