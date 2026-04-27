@@ -21,11 +21,10 @@ use crate::context::JobContext;
 use crate::db::UserStore;
 use crate::llm::recording::{HttpExchangeRequest, HttpExchangeResponse, HttpInterceptor};
 use crate::secrets::SecretsStore;
+use crate::secrets::host_matches_pattern;
 use crate::tools::tool::{Tool, ToolDiscoverySummary, ToolError, ToolOutput};
 use crate::tools::wasm::capabilities::Capabilities;
-use crate::tools::wasm::credential_injector::{
-    InjectedCredentials, host_matches_pattern, inject_credential,
-};
+use crate::tools::wasm::credential_injector::{InjectedCredentials, inject_credential};
 use crate::tools::wasm::error::WasmError;
 use crate::tools::wasm::host::{HostState, LogLevel};
 use crate::tools::wasm::limits::{ResourceLimits, WasmResourceLimiter};
@@ -94,8 +93,14 @@ impl OAuthRefreshConfig {
 /// panic message, or a `dbg!()` cannot leak credentials. Do NOT add
 /// `#[derive(Debug)]` here without revisiting the redaction.
 struct ResolvedHostCredential {
+    /// Name of the source secret. Non-sensitive metadata used only for
+    /// deterministic tie-breaks when two matching credentials share the
+    /// same path specificity; never rendered to logs or tool output.
+    secret_name: String,
     /// Host patterns this credential applies to (e.g., "www.googleapis.com").
     host_patterns: Vec<String>,
+    /// Path prefixes this credential is scoped to. Empty means all paths.
+    path_patterns: Vec<String>,
     /// Headers to add to matching requests (e.g., "Authorization: Bearer ...").
     headers: HashMap<String, String>,
     /// Query parameters to add to matching requests.
@@ -114,6 +119,7 @@ impl std::fmt::Debug for ResolvedHostCredential {
         let query_keys: Vec<&String> = self.query_params.keys().collect();
         f.debug_struct("ResolvedHostCredential")
             .field("host_patterns", &self.host_patterns)
+            .field("path_patterns", &self.path_patterns)
             .field("header_names", &header_keys)
             .field("query_param_names", &query_keys)
             .field("secret_value", &"[REDACTED]")
@@ -211,25 +217,50 @@ impl StoreData {
 
     /// Inject pre-resolved host credentials into the request.
     ///
-    /// Matches the URL host against each resolved credential's host_patterns.
-    /// Matching credentials have their headers merged and query params appended.
+    /// Matches the URL host against each resolved credential's host_patterns
+    /// and — when declared — path_patterns. Matching credentials are ordered
+    /// by ascending path specificity (longest matching prefix last), with
+    /// ties broken alphabetically on `secret_name`. Last-write-wins header
+    /// merging then means the most-specific mapping wins any conflict,
+    /// deterministically.
     fn inject_host_credentials(
         &self,
         url_host: &str,
         headers: &mut HashMap<String, String>,
         url: &mut String,
     ) {
-        for cred in &self.host_credentials {
-            let matches = cred
-                .host_patterns
-                .iter()
-                .any(|pattern| host_matches_pattern(url_host, pattern));
+        use crate::secrets::{
+            extract_url_path_for_matching, match_specificity, path_matches_prefix,
+        };
 
-            if !matches {
-                continue;
-            }
+        let url_path = extract_url_path_for_matching(url);
 
-            // Merge injected headers (host credentials take precedence)
+        let mut matches_for_request: Vec<&ResolvedHostCredential> = self
+            .host_credentials
+            .iter()
+            .filter(|cred| {
+                cred.host_patterns
+                    .iter()
+                    .any(|pattern| host_matches_pattern(url_host, pattern))
+                    && (cred.path_patterns.is_empty()
+                        || cred
+                            .path_patterns
+                            .iter()
+                            .any(|prefix| path_matches_prefix(&url_path, prefix)))
+            })
+            .collect();
+
+        matches_for_request.sort_by(|a, b| {
+            let spec_a = match_specificity(&a.path_patterns, &url_path);
+            let spec_b = match_specificity(&b.path_patterns, &url_path);
+            spec_a
+                .cmp(&spec_b)
+                .then_with(|| a.secret_name.cmp(&b.secret_name))
+        });
+
+        for cred in matches_for_request {
+            // Merge injected headers (host credentials take precedence; the
+            // most-specific match iterates last, so it wins any conflict).
             for (key, value) in &cred.headers {
                 headers.insert(key.clone(), value.clone());
             }
@@ -653,51 +684,11 @@ impl WasmToolSchemas {
     }
 
     fn is_permissive_schema(schema: &serde_json::Value) -> bool {
-        if schema
-            .get("properties")
-            .and_then(|p| p.as_object())
-            .is_some_and(|p| !p.is_empty())
-        {
-            return false;
-        }
-
-        // Schemas with combinator variants containing properties are not permissive
-        for key in ["oneOf", "anyOf", "allOf"] {
-            if let Some(variants) = schema.get(key).and_then(|v| v.as_array())
-                && variants.iter().any(|v| {
-                    v.get("properties")
-                        .and_then(|p| p.as_object())
-                        .is_some_and(|p| !p.is_empty())
-                })
-            {
-                return false;
-            }
-        }
-
-        true
+        crate::tools::schema_metrics::is_permissive_schema(schema)
     }
 
     fn typed_property_count(schema: &serde_json::Value) -> usize {
-        let mut all_props = serde_json::Map::new();
-
-        if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
-            all_props.extend(props.iter().map(|(k, v)| (k.clone(), v.clone())));
-        }
-
-        for key in ["allOf", "oneOf", "anyOf"] {
-            if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
-                for variant in variants {
-                    if let Some(props) = variant.get("properties").and_then(|p| p.as_object()) {
-                        all_props.extend(props.iter().map(|(k, v)| (k.clone(), v.clone())));
-                    }
-                }
-            }
-        }
-
-        all_props
-            .values()
-            .filter(|prop| schema_is_typed_property(prop))
-            .count()
+        crate::tools::schema_metrics::typed_property_count(schema)
     }
 
     fn new(discovery: serde_json::Value) -> Self {
@@ -1061,16 +1052,25 @@ impl WasmToolWrapper {
         };
 
         // Call execute using the generated typed interface
-        let response = tool_iface.call_execute(&mut store, &request).map_err(|e| {
-            let error_str = e.to_string();
-            if error_str.contains("out of fuel") {
-                WasmError::FuelExhausted { limit: limits.fuel }
-            } else if error_str.contains("unreachable") {
-                WasmError::Trapped("unreachable code executed".to_string())
-            } else {
-                WasmError::Trapped(error_str)
-            }
-        })?;
+        let response = tool_iface
+            .call_execute(&mut store, &request)
+            .map_err(|e| classify_trap_error(e, limits))?;
+
+        // Log fuel consumption for diagnostics
+        if self.runtime.config().fuel_config.enabled
+            && let Ok(remaining) = store.get_fuel()
+        {
+            let consumed = limits.fuel.saturating_sub(remaining);
+            let pct = (consumed as f64 / limits.fuel as f64) * 100.0;
+            tracing::debug!(
+                tool = %self.prepared.name,
+                fuel_consumed = consumed,
+                fuel_remaining = remaining,
+                fuel_limit = limits.fuel,
+                fuel_pct = format!("{pct:.1}%"),
+                "WASM fuel consumption"
+            );
+        }
 
         // Get logs from host state
         let logs = store.data_mut().host_state.take_logs();
@@ -1085,6 +1085,71 @@ impl WasmToolWrapper {
         // Return result (or empty string if none)
         Ok((response.output.unwrap_or_default(), logs))
     }
+}
+
+/// Classify a wasmtime execution error into the appropriate `WasmError` variant.
+///
+/// Prefers structured `Trap` downcast (version-proof) when the error type
+/// exposes a `wasmtime::Trap` directly. Falls back to string matching on the
+/// full error chain for cases where component-model glue or host wrappers
+/// bury the trap inside a nested cause (the `downcast_ref` on the outer
+/// error misses it, but the trap's diagnostic string still appears in the
+/// `Display` chain). The string fallback covers `OutOfFuel` and
+/// `unreachable` — the two traps that have distinct `WasmError` variants —
+/// and is forward-compatible with future wasmtime versions that might rename
+/// or restructure the type hierarchy.
+///
+/// Takes `wasmtime::Error` directly (not `anyhow::Error`) because that's
+/// what `call_execute` returns. wasmtime 43+ has its own `Error` type
+/// distinct from `anyhow::Error`; accepting it natively avoids a lossy
+/// `.into()` conversion that could strip type information needed for the
+/// downcast.
+fn classify_trap_error(error: wasmtime::Error, limits: &ResourceLimits) -> WasmError {
+    // Try structured downcast first (avoids string-matching drift across
+    // wasmtime versions). `wasmtime::Error::downcast_ref` walks the error
+    // chain internally, so traps wrapped by component-model glue are found.
+    if let Some(trap) = error.downcast_ref::<wasmtime::Trap>() {
+        return match trap {
+            wasmtime::Trap::OutOfFuel => WasmError::FuelExhausted { limit: limits.fuel },
+            wasmtime::Trap::StackOverflow => WasmError::Trapped(
+                "stack overflow: the tool's call stack exceeded the WASM stack limit. \
+                 This often happens when parsing very large JSON responses."
+                    .to_string(),
+            ),
+            wasmtime::Trap::UnreachableCodeReached => {
+                WasmError::Trapped("unreachable code executed".to_string())
+            }
+            // Everything else: include trap kind + full chain for diagnosis
+            other => WasmError::Trapped(format!("{other}: {error:#}")),
+        };
+    }
+
+    // Fallback: string matching on the full error chain. The downcast can
+    // miss when the trap is wrapped in layers of component-model or host
+    // glue that don't preserve the Trap type. The Display chain still
+    // contains the diagnostic string, so we check for the two traps that
+    // have distinct WasmError variants.
+    let error_str = format!("{error:#}");
+    if error_str.contains("all fuel consumed")
+        || error_str.contains("out of fuel")
+        || error_str.contains("OutOfFuel")
+    {
+        return WasmError::FuelExhausted { limit: limits.fuel };
+    }
+    // Match wasmtime's actual Display string for UnreachableCodeReached.
+    // A bare `contains("unreachable")` would false-positive on HTTP errors
+    // like "endpoint was unreachable" or "server unreachable: connection
+    // refused", replacing the real diagnostic with a misleading generic
+    // "unreachable code executed" message.
+    if error_str.contains("unreachable code")
+        || error_str.contains("UnreachableCodeReached")
+        || error_str.contains("wasm trap: unreachable")
+    {
+        return WasmError::Trapped("unreachable code executed".to_string());
+    }
+
+    // Unrecognized: full chain for diagnosis
+    WasmError::Trapped(error_str)
 }
 
 /// Extract metadata (description + schema) from a WASM tool by briefly
@@ -1197,11 +1262,11 @@ impl Tool for WasmToolWrapper {
         // Pre-resolve host credentials from secrets store (async, before blocking task).
         // This decrypts the secrets once so the sync http_request() host function
         // can inject them without needing async access.
-        let credential_user_id = &ctx.user_id;
+        let credential_user_id = ctx.user_id.clone();
         let resolution = resolve_host_credentials(
             &self.capabilities,
             self.secrets_store.as_deref(),
-            credential_user_id,
+            &credential_user_id,
             self.role_lookup.as_deref(),
             self.oauth_refresh.as_ref(),
         )
@@ -1216,9 +1281,10 @@ impl Tool for WasmToolWrapper {
         // mapping `optional = true` in their capabilities manifest.
         if !resolution.missing_required.is_empty() {
             return Err(ToolError::ExecutionFailed(format!(
-                "WASM tool '{}' requires credentials that are not configured: {}. \
-                 Configure the missing credentials before re-running the tool.",
+                "WASM tool '{}' requires credentials that are not configured for user '{}': {}. \
+                 Configure the missing credentials with `ironclaw secrets set` and re-run the tool.",
                 self.name(),
+                credential_user_id,
                 resolution.missing_required.join(", ")
             )));
         }
@@ -1317,16 +1383,14 @@ impl std::fmt::Debug for WasmToolWrapper {
 /// so that the synchronous WASM host function can inject credentials
 /// without needing async access to the secrets store.
 ///
-/// Silently skips credentials that can't be resolved (e.g., missing secrets).
-/// The tool will get a 401/403 from the API, which is the expected UX when
-/// auth hasn't been configured yet.
-/// Outcome of pre-resolving WASM tool host credentials. Carries both the
-/// successfully-resolved set and any *required* credentials that could not
-/// be resolved. The caller is responsible for refusing to execute the tool
-/// when `missing_required` is non-empty — proceeding would let the tool
-/// issue requests without the credentials it declared, which a malicious
-/// or misconfigured tool can use to exfiltrate user context to an
-/// unauthenticated endpoint.
+/// Resolves the host credentials declared by a WASM tool for the current user.
+///
+/// Optional mappings may be skipped when unavailable. Required mappings are
+/// tracked in `missing_required` so the caller can fail closed before
+/// execution instead of letting the tool run without the credentials it
+/// declared. That prevents a malicious or misconfigured tool from issuing
+/// requests that silently borrow another scope's secrets or exfiltrate user
+/// context to an unauthenticated endpoint.
 struct HostCredentialsResolution {
     resolved: Vec<ResolvedHostCredential>,
     missing_required: Vec<String>,
@@ -1421,7 +1485,7 @@ async fn resolve_host_credentials(
             &mapping.secret_name,
             role_lookup,
             oauth_refresh.filter(|config| config.secret_name == mapping.secret_name),
-            crate::auth::DefaultFallback::AdminOnly,
+            crate::auth::DefaultFallback::Denied,
         )
         .await
         {
@@ -1449,7 +1513,9 @@ async fn resolve_host_credentials(
         }
 
         resolved.push(ResolvedHostCredential {
+            secret_name: mapping.secret_name.clone(),
             host_patterns: mapping.host_patterns.clone(),
+            path_patterns: mapping.path_patterns.clone(),
             headers: injected.headers,
             query_params: injected.query_params,
             secret_value: secret.expose().to_string(),
@@ -1811,6 +1877,10 @@ mod tests {
 
         async fn exists(&self, user_id: &str, name: &str) -> Result<bool, SecretError> {
             self.inner.exists(user_id, name).await
+        }
+
+        async fn any_exist(&self) -> Result<bool, SecretError> {
+            self.inner.any_exist().await
         }
 
         async fn list(&self, user_id: &str) -> Result<Vec<SecretRef>, SecretError> {
@@ -2355,7 +2425,9 @@ mod tests {
         use std::collections::HashMap;
 
         let host_credentials = vec![ResolvedHostCredential {
+            secret_name: "google_token".to_string(),
             host_patterns: vec!["www.googleapis.com".to_string()],
+            path_patterns: vec![],
             headers: {
                 let mut h = HashMap::new();
                 h.insert(
@@ -2392,12 +2464,186 @@ mod tests {
     }
 
     #[test]
+    fn test_inject_host_credentials_path_scoped() {
+        use crate::tools::wasm::wrapper::{ResolvedHostCredential, StoreData};
+        use std::collections::HashMap;
+
+        let host_credentials = vec![ResolvedHostCredential {
+            secret_name: "scoped_token".to_string(),
+            host_patterns: vec!["api.example.com".to_string()],
+            path_patterns: vec!["/api/v1".to_string()],
+            headers: {
+                let mut h = HashMap::new();
+                h.insert(
+                    "Authorization".to_string(),
+                    "Bearer scoped-token".to_string(),
+                );
+                h
+            },
+            query_params: HashMap::new(),
+            secret_value: "scoped-token".to_string(),
+        }];
+
+        let store_data = StoreData::new(
+            1024 * 1024,
+            Capabilities::default(),
+            HashMap::new(),
+            host_credentials,
+        );
+
+        // Should inject for matching host + matching path
+        let mut headers = HashMap::new();
+        let mut url = "https://api.example.com/api/v1/users".to_string();
+        store_data.inject_host_credentials("api.example.com", &mut headers, &mut url);
+        assert_eq!(
+            headers.get("Authorization"),
+            Some(&"Bearer scoped-token".to_string())
+        );
+
+        // Should NOT inject for matching host + non-matching path
+        let mut headers2 = HashMap::new();
+        let mut url2 = "https://api.example.com/other/endpoint".to_string();
+        store_data.inject_host_credentials("api.example.com", &mut headers2, &mut url2);
+        assert!(!headers2.contains_key("Authorization"));
+
+        // Should NOT inject for matching host + prefix-boundary attack
+        let mut headers3 = HashMap::new();
+        let mut url3 = "https://api.example.com/api/v1-malicious".to_string();
+        store_data.inject_host_credentials("api.example.com", &mut headers3, &mut url3);
+        assert!(!headers3.contains_key("Authorization"));
+    }
+
+    #[test]
+    fn test_inject_host_credentials_different_paths_same_host() {
+        use crate::tools::wasm::wrapper::{ResolvedHostCredential, StoreData};
+        use std::collections::HashMap;
+
+        let host_credentials = vec![
+            ResolvedHostCredential {
+                secret_name: "v1_token".to_string(),
+                host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: vec!["/api/v1".to_string()],
+                headers: {
+                    let mut h = HashMap::new();
+                    h.insert("Authorization".to_string(), "Bearer v1-token".to_string());
+                    h
+                },
+                query_params: HashMap::new(),
+                secret_value: "v1-token".to_string(),
+            },
+            ResolvedHostCredential {
+                secret_name: "v2_token".to_string(),
+                host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: vec!["/api/v2".to_string()],
+                headers: {
+                    let mut h = HashMap::new();
+                    h.insert("Authorization".to_string(), "Bearer v2-token".to_string());
+                    h
+                },
+                query_params: HashMap::new(),
+                secret_value: "v2-token".to_string(),
+            },
+        ];
+
+        let store_data = StoreData::new(
+            1024 * 1024,
+            Capabilities::default(),
+            HashMap::new(),
+            host_credentials,
+        );
+
+        // /api/v1 path gets v1 token
+        let mut headers = HashMap::new();
+        let mut url = "https://api.example.com/api/v1/users".to_string();
+        store_data.inject_host_credentials("api.example.com", &mut headers, &mut url);
+        assert_eq!(
+            headers.get("Authorization"),
+            Some(&"Bearer v1-token".to_string())
+        );
+
+        // /api/v2 path gets v2 token
+        let mut headers2 = HashMap::new();
+        let mut url2 = "https://api.example.com/api/v2/data".to_string();
+        store_data.inject_host_credentials("api.example.com", &mut headers2, &mut url2);
+        assert_eq!(
+            headers2.get("Authorization"),
+            Some(&"Bearer v2-token".to_string())
+        );
+
+        // Unscoped path gets neither
+        let mut headers3 = HashMap::new();
+        let mut url3 = "https://api.example.com/other".to_string();
+        store_data.inject_host_credentials("api.example.com", &mut headers3, &mut url3);
+        assert!(!headers3.contains_key("Authorization"));
+    }
+
+    #[test]
+    fn test_inject_host_credentials_most_specific_path_wins() {
+        // Regression for Firat round-4 (#3125963270): overlapping mappings
+        // had no deterministic precedence and the HashMap-backed WASM
+        // credential source could pick the wrong winner. With ordered
+        // specificity, the longest matching path prefix must always win any
+        // conflicting header, regardless of insertion order.
+        use crate::tools::wasm::wrapper::{ResolvedHostCredential, StoreData};
+        use std::collections::HashMap;
+
+        fn global() -> ResolvedHostCredential {
+            ResolvedHostCredential {
+                secret_name: "global_token".to_string(),
+                host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: vec![],
+                headers: {
+                    let mut h = HashMap::new();
+                    h.insert("Authorization".to_string(), "Bearer GLOBAL".to_string());
+                    h
+                },
+                query_params: HashMap::new(),
+                secret_value: "GLOBAL".to_string(),
+            }
+        }
+        fn scoped() -> ResolvedHostCredential {
+            ResolvedHostCredential {
+                secret_name: "write_token".to_string(),
+                host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: vec!["/api/v1/write".to_string()],
+                headers: {
+                    let mut h = HashMap::new();
+                    h.insert("Authorization".to_string(), "Bearer WRITE".to_string());
+                    h
+                },
+                query_params: HashMap::new(),
+                secret_value: "WRITE".to_string(),
+            }
+        }
+
+        for creds in [
+            // "wrong" order: global first, specific second
+            vec![global(), scoped()],
+            // reverse order: specific first, global second — must still
+            // yield the same WRITE winner under specificity sort
+            vec![scoped(), global()],
+        ] {
+            let store = StoreData::new(1024 * 1024, Capabilities::default(), HashMap::new(), creds);
+            let mut headers = HashMap::new();
+            let mut url = "https://api.example.com/api/v1/write/foo".to_string();
+            store.inject_host_credentials("api.example.com", &mut headers, &mut url);
+            assert_eq!(
+                headers.get("Authorization"),
+                Some(&"Bearer WRITE".to_string()),
+                "most-specific path_patterns (/api/v1/write) must win over global credential"
+            );
+        }
+    }
+
+    #[test]
     fn test_inject_host_credentials_query_params() {
         use crate::tools::wasm::wrapper::{ResolvedHostCredential, StoreData};
         use std::collections::HashMap;
 
         let host_credentials = vec![ResolvedHostCredential {
+            secret_name: "api_key".to_string(),
             host_patterns: vec!["api.example.com".to_string()],
+            path_patterns: vec![],
             headers: HashMap::new(),
             query_params: {
                 let mut q = HashMap::new();
@@ -2427,7 +2673,9 @@ mod tests {
         use std::collections::HashMap;
 
         let host_credentials = vec![ResolvedHostCredential {
+            secret_name: "super_secret".to_string(),
             host_patterns: vec!["api.example.com".to_string()],
+            path_patterns: vec![],
             headers: HashMap::new(),
             query_params: HashMap::new(),
             secret_value: "super-secret-token".to_string(),
@@ -2491,6 +2739,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -2538,6 +2787,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -2586,6 +2836,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -2624,6 +2875,7 @@ mod tests {
                 secret_name: "missing_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -2668,6 +2920,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -2728,6 +2981,7 @@ mod tests {
                 secret_name: "my_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -2771,6 +3025,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -2804,7 +3059,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_resolve_host_credentials_refreshes_via_proxy_without_direct_token_url_validation()
     {
         use crate::secrets::{
@@ -2813,21 +3068,43 @@ mod tests {
         use crate::tools::wasm::capabilities::HttpCapability;
         use crate::tools::wasm::wrapper::{OAuthRefreshConfig, resolve_host_credentials};
 
+        struct EnvLockGuard {
+            _guard: std::sync::MutexGuard<'static, ()>,
+        }
+        impl EnvLockGuard {
+            fn new() -> Self {
+                Self {
+                    _guard: crate::config::helpers::lock_env(),
+                }
+            }
+        }
+
         // The OAuth proxy URL is now SSRF-validated. The mock proxy below
         // binds to a loopback address, which is normally rejected; opt into
         // the loopback escape hatch so the test can exercise the proxy
         // refresh path end-to-end. The escape hatch only affects this
         // process and is not exposed to operators.
-        struct EnvGuard;
+        let _env_lock = EnvLockGuard::new();
+        struct EnvGuard {
+            original: Option<std::ffi::OsString>,
+        }
         impl Drop for EnvGuard {
             fn drop(&mut self) {
-                // safety: env mutation in tests; var is test-only.
-                unsafe { std::env::remove_var("IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK") };
+                // SAFETY: Tests serialize env access with lock_env().
+                unsafe {
+                    match &self.original {
+                        Some(value) => {
+                            std::env::set_var("IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK", value)
+                        }
+                        None => std::env::remove_var("IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK"),
+                    }
+                };
             }
         }
-        // safety: env mutation in tests; var is test-only.
+        let original = std::env::var_os("IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK");
+        // SAFETY: Tests serialize env access with lock_env().
         unsafe { std::env::set_var("IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK", "1") };
-        let _proxy_loopback_guard = EnvGuard;
+        let _proxy_loopback_guard = EnvGuard { original };
 
         let proxy = MockProxyServer::start().await;
         let store = test_secrets_store();
@@ -2855,6 +3132,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -2966,6 +3244,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -3035,6 +3314,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -3406,7 +3686,7 @@ mod tests {
 
     #[cfg(feature = "libsql")]
     #[tokio::test]
-    async fn test_resolve_host_credentials_fallback_to_default_for_admin_user() {
+    async fn test_resolve_host_credentials_denies_default_fallback_for_admin_user() {
         use crate::secrets::{CredentialLocation, CredentialMapping, SecretsStore};
         use crate::tools::wasm::capabilities::HttpCapability;
         use crate::tools::wasm::wrapper::resolve_host_credentials;
@@ -3431,6 +3711,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["sheets.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -3446,8 +3727,9 @@ mod tests {
             ..Default::default()
         };
 
-        // Resolve credentials for a different user (routine context)
-        // Should fallback to "default" and find the token
+        // Resolve credentials for a different user (routine context).
+        // The WASM tool path must fail closed and refuse to borrow the
+        // admin-only default scope.
         let result = resolve_host_credentials(
             &caps,
             Some(&store),
@@ -3457,8 +3739,15 @@ mod tests {
         )
         .await;
 
-        assert!(!result.is_empty(), "fallback to default"); // safety: test code only
-        assert_eq!(result[0].secret_value, "global_token_value"); // safety: test code only
+        assert!(
+            result.is_empty(),
+            "WASM tool credential resolution must not borrow the default scope"
+        );
+        assert_eq!(
+            result.missing_required,
+            vec!["google_oauth_token".to_string()],
+            "missing required credential should still be reported"
+        );
     }
 
     #[cfg(feature = "libsql")]
@@ -3539,6 +3828,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["sheets.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -3692,6 +3982,84 @@ mod tests {
         assert!(!super::needs_content_length_zero("POST", &headers));
     }
 
+    /// Downcast-based classification: real `wasmtime::Trap` variants
+    /// map to the correct `WasmError` via structured downcast.
+    #[test]
+    fn trap_classification_fuel_via_downcast() {
+        use crate::tools::wasm::error::WasmError;
+        use crate::tools::wasm::limits::ResourceLimits;
+
+        let limits = ResourceLimits::default();
+        let err: wasmtime::Error = wasmtime::Trap::OutOfFuel.into();
+        let result = super::classify_trap_error(err, &limits);
+        assert!(
+            matches!(result, WasmError::FuelExhausted { .. }),
+            "OutOfFuel not detected: {result:?}"
+        );
+    }
+
+    #[test]
+    fn trap_classification_stack_overflow_via_downcast() {
+        use crate::tools::wasm::error::WasmError;
+        use crate::tools::wasm::limits::ResourceLimits;
+
+        let limits = ResourceLimits::default();
+        let err: wasmtime::Error = wasmtime::Trap::StackOverflow.into();
+        let result = super::classify_trap_error(err, &limits);
+        assert!(
+            matches!(result, WasmError::Trapped(ref s) if s.contains("stack overflow")),
+            "StackOverflow not detected: {result:?}"
+        );
+    }
+
+    #[test]
+    fn trap_classification_unreachable_via_downcast() {
+        use crate::tools::wasm::error::WasmError;
+        use crate::tools::wasm::limits::ResourceLimits;
+
+        let limits = ResourceLimits::default();
+        let err: wasmtime::Error = wasmtime::Trap::UnreachableCodeReached.into();
+        let result = super::classify_trap_error(err, &limits);
+        assert!(
+            matches!(result, WasmError::Trapped(ref s) if s.contains("unreachable")),
+            "UnreachableCodeReached not detected: {result:?}"
+        );
+    }
+
+    /// Non-Trap errors (host glue, component model) pass through with full chain.
+    #[test]
+    fn trap_classification_non_trap_preserves_chain() {
+        use crate::tools::wasm::error::WasmError;
+        use crate::tools::wasm::limits::ResourceLimits;
+
+        let limits = ResourceLimits::default();
+        let err = wasmtime::Error::msg("component model glue exploded");
+        let result = super::classify_trap_error(err, &limits);
+        assert!(
+            matches!(result, WasmError::Trapped(ref s) if s.contains("component model glue")),
+            "non-trap error lost: {result:?}"
+        );
+    }
+
+    /// String-matching fallback: when the Trap is wrapped in host/component
+    /// glue that the downcast can't see through, the Display chain still
+    /// contains the diagnostic string.
+    #[test]
+    fn trap_classification_fuel_via_string_fallback() {
+        use crate::tools::wasm::error::WasmError;
+        use crate::tools::wasm::limits::ResourceLimits;
+
+        let limits = ResourceLimits::default();
+        // Wrap the fuel message in a plain wasmtime::Error so downcast_ref
+        // for Trap returns None — exercises the string-matching path.
+        let err = wasmtime::Error::msg("wasm trap: all fuel consumed by wasm");
+        let result = super::classify_trap_error(err, &limits);
+        assert!(
+            matches!(result, WasmError::FuelExhausted { .. }),
+            "string-fallback fuel detection failed: {result:?}"
+        );
+    }
+
     #[test]
     fn resolved_host_credential_debug_redacts_secret_material() {
         // Defense-in-depth: a future log line / dbg!() / panic message that
@@ -3710,7 +4078,9 @@ mod tests {
             "another-secret-value-also-do-not-leak".to_string(),
         );
         let cred = super::ResolvedHostCredential {
+            secret_name: "googleapis_secret".to_string(),
             host_patterns: vec!["www.googleapis.com".to_string()],
+            path_patterns: vec![],
             headers,
             query_params,
             secret_value: "raw-secret-bytes".to_string(),

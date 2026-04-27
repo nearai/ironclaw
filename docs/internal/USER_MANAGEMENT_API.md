@@ -494,9 +494,159 @@ Revoke one of the authenticated user's tokens. Users can only revoke their own t
 
 ---
 
+## Responses API
+
+Routes through the full agent loop — tools, memory, safety, and server-side conversation state are all active. Compatible with any standard OpenAI SDK via `client.responses.create()`.
+
+**Path prefix:** The canonical path is `/api/v1/responses`, matching the rest of IronClaw's HTTP surface. The older `/v1/responses` path is retained as an alias for backward compatibility with clients that were already configured against it (see [ironclaw#2201](https://github.com/nearai/ironclaw/issues/2201)). Both paths accept identical request bodies and return identical responses; new integrations should target `/api/v1/responses`.
+
+**Auth:** Any authenticated user (`Authorization: Bearer <token>`)
+
+### POST /api/v1/responses
+
+Alias: `POST /v1/responses` (legacy; kept for backward compatibility).
+
+Create a response.
+
+**Request body:**
+
+```json
+{
+  "model": "default",
+  "input": "What's a good time to send money to India?",
+  "stream": true,
+  "previous_response_id": null
+}
+```
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `model` | string | Currently only `"default"` is accepted; the server-selected model is determined by gateway configuration. Any other value returns 400. |
+| `input` | string or array | User message as a string, or a messages array (see below) |
+| `stream` | boolean | `true` for SSE, `false` for blocking (120s timeout) |
+| `previous_response_id` | string | Pass the previous `id` to continue a conversation thread |
+
+**Messages array input:** `input` may be passed as an array instead of a string:
+
+```json
+{
+  "model": "default",
+  "input": [
+    { "role": "user", "content": "What is 2+2? Reply with just the number." }
+  ]
+}
+```
+
+**Response (non-streaming):** `200 OK`
+
+```json
+{
+  "id": "resp_<uuid>",
+  "object": "response",
+  "created_at": 1743000000,
+  "model": "claude-sonnet-4-5-20250514",
+  "status": "completed",
+  "output": [
+    {
+      "type": "message",
+      "id": "msg_<uuid>",
+      "role": "assistant",
+      "content": [{ "type": "output_text", "text": "Based on today's rate..." }]
+    }
+  ],
+  "usage": {
+    "input_tokens": 320,
+    "output_tokens": 95,
+    "total_tokens": 415
+  }
+}
+```
+
+**Streaming:** When `stream: true`, IronClaw returns SSE events:
+
+| Event | Description |
+|-------|-------------|
+| `response.created` | Response object created, stream begins |
+| `response.output_item.added` | New output item started (message or tool call) |
+| `response.output_text.delta` | Text chunk |
+| `response.output_item.done` | Output item finalized |
+| `response.completed` | Full response done |
+| `response.failed` | Error or tool approval required |
+
+**Multi-turn:** Pass `previous_response_id` from the previous response's `id` to continue in the same thread. IronClaw decodes the thread UUID statelessly from the response ID — no lookup table required.
+
+**Status values:** `completed` | `failed`
+
+---
+
+### Structured context
+
+The `input` field accepts a structured `context` object alongside the user message. Use this to pass machine-readable state that the agent should act on, without relying solely on natural language.
+
+**Request:**
+
+```json
+{
+  "model": "default",
+  "input": "Go ahead with the transfer",
+  "previous_response_id": "resp_...",
+  "x_context": {
+    "notification_response": {
+      "notification_id": "msg_123",
+      "action": "approved",
+      "original_signal": "convert_now",
+      "score": 72,
+      "rate": 85.42,
+      "amount_usd": 1000
+    }
+  }
+}
+```
+
+The agent receives the context prepended to the user message:
+
+```
+[Context: notification_response — notification_id: msg_123, action: approved,
+original_signal: convert_now, score: 72, rate: 85.42, amount_usd: 1000]
+Go ahead with the transfer
+```
+
+The `context` payload is persisted in message metadata for auditability.
+
+---
+
+### GET /api/v1/responses/{id}
+
+Alias: `GET /v1/responses/{id}` (legacy; kept for backward compatibility).
+
+Retrieve a historical response reconstructed from conversation messages in the database. Users can only retrieve their own responses.
+
+**Auth:** Any authenticated user
+
+**Response:** `200 OK` — same shape as the create response object above.
+
+**Errors:** `400` (empty input), `401` (missing or invalid bearer token), `404` (response ID not found or not owned by caller), `500` (internal error)
+
+---
+
 ## Error Format
 
-All error responses return a plain text body with the error message and the corresponding HTTP status code:
+Most endpoints (admin, profile, tokens, settings, memory, jobs, routines, skills, extensions) return a plain text body with the error message and the corresponding HTTP status code.
+
+The **Responses API** (`POST /api/v1/responses`, `GET /api/v1/responses/{id}`, and their legacy `/v1/...` aliases) returns an OpenAI-compatible JSON envelope for errors generated by the handler itself:
+
+```json
+{
+  "error": {
+    "message": "human-readable description",
+    "type": "invalid_request_error"
+  }
+}
+```
+
+An optional `code` string field may appear when the server can attach a machine-readable subtype; it is omitted when absent. Error `type` values used by the current handler: `invalid_request_error` (400), `rate_limit_error` (429), `server_error` (500), `service_unavailable` (503). Clients should be tolerant of additional OpenAI-conventional types appearing in the future.
+
+**Middleware exception:** requests rejected before the handler runs — missing or invalid bearer token (401), service-unavailable during auth setup (503) — are emitted by the shared gateway auth middleware as plain-text bodies, not JSON envelopes. Clients should therefore treat non-JSON 401/503 responses as expected and handler-level failures as JSON.
 
 | Code | Meaning |
 |------|---------|
@@ -504,6 +654,7 @@ All error responses return a plain text body with the error message and the corr
 | `401` | Missing or invalid bearer token |
 | `403` | Authenticated but insufficient role (member accessing admin endpoint) |
 | `404` | Resource not found |
+| `429` | Rate limit exceeded (Responses API) |
 | `503` | Database or secrets store not available |
 | `500` | Internal server error |
 

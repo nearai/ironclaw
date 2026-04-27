@@ -9,8 +9,10 @@ import json
 import os
 import re
 import time
+from itertools import count
 
 import httpx
+import pytest
 
 from helpers import api_post, auth_headers
 
@@ -18,13 +20,25 @@ from helpers import api_post, auth_headers
 BOT_TOKEN = "111222333:FAKE_E2E_TOKEN"
 # Owner user id used in subsequent Telegram messages.
 OWNER_USER_ID = 42
+PAIRED_USER_ID = 77
 # Fixed webhook secret supplied during setup so all tests can use it
 # without extracting it from the server.
 WEBHOOK_SECRET = "e2e-test-webhook-secret-for-telegram"
 PAIRING_CODE_RE = re.compile(r"approve telegram ([A-Z0-9]+)|`([A-Z0-9]+)`")
 
+# Keep synthetic webhook update IDs monotonic across the whole module so the
+# Telegram channel's duplicate/stale-update protection behaves like the real API.
+# Scenario-specific assertions use much larger IDs (100, 200, ...), so these
+# bootstrap/pairing helper IDs stay out of the way.
+_TEST_UPDATE_IDS = count(1)
+_ACTIVATED_TELEGRAM_SERVERS: set[str] = set()
+
 
 # ── helpers ──────────────────────────────────────────────────────────────
+
+
+def _next_test_update_id() -> int:
+    return next(_TEST_UPDATE_IDS)
 
 
 async def reset_fake_tg(fake_tg_url: str):
@@ -97,7 +111,18 @@ def _patch_capabilities_for_testing(channels_dir: str):
 async def activate_telegram(
     base_url: str, http_url: str, fake_tg_url: str, channels_dir: str
 ) -> None:
-    """Install (if needed) and run the Telegram setup flow."""
+    """Install (if needed) and run the Telegram setup flow.
+
+    The E2E fixtures reuse the same Telegram server process across multiple tests,
+    so once a given server instance is activated and paired we can safely reuse
+    it for later scenarios instead of repeatedly restarting the channel.
+
+    Callers are responsible for per-test fake Telegram cleanup; this helper only
+    ensures the shared server is activated and paired exactly once.
+    """
+    if base_url in _ACTIVATED_TELEGRAM_SERVERS:
+        return
+
     await reset_fake_tg(fake_tg_url)
     await install_telegram(base_url)
 
@@ -124,17 +149,18 @@ async def activate_telegram(
     r1.raise_for_status()
     body1 = r1.json()
     assert body1.get("success"), f"Setup call failed: {body1}"
-    assert body1.get("verification") is None, (
-        f"Telegram setup should not return a verification challenge: {body1}"
-    )
+    # Telegram verification challenge flow was removed — channels now go
+    # straight to activation and use the generic pairing flow for ownership.
     assert body1.get("activated"), f"Setup call did not activate Telegram: {body1}"
+
+    await reset_fake_tg(fake_tg_url)
 
     # Complete the pairing flow so OWNER_USER_ID can chat normally in the
     # subsequent round-trip assertions.
     pairing_resp = await post_telegram_webhook(
         http_url,
         {
-            "update_id": 1,
+            "update_id": _next_test_update_id(),
             "message": {
                 "message_id": 1,
                 "from": {
@@ -155,7 +181,34 @@ async def activate_telegram(
     code = extract_pairing_code(messages)
     if code:
         await approve_pairing(base_url, code)
+    _ACTIVATED_TELEGRAM_SERVERS.add(base_url)
     await reset_fake_tg(fake_tg_url)
+
+
+@pytest.fixture
+async def active_telegram(telegram_e2e_server):
+    """Ensure Telegram is activated and the fake API starts clean for each test."""
+    base_url = telegram_e2e_server["base_url"]
+    http_url = telegram_e2e_server["http_url"]
+    fake_tg_url = telegram_e2e_server["fake_tg_url"]
+    channels_dir = telegram_e2e_server["channels_dir"]
+
+    await activate_telegram(base_url, http_url, fake_tg_url, channels_dir)
+    await reset_fake_tg(fake_tg_url)
+    return telegram_e2e_server
+
+
+@pytest.fixture
+async def active_telegram_with_routines(telegram_e2e_server_with_routines):
+    """Ensure the routines-enabled Telegram server is activated and clean."""
+    base_url = telegram_e2e_server_with_routines["base_url"]
+    http_url = telegram_e2e_server_with_routines["http_url"]
+    fake_tg_url = telegram_e2e_server_with_routines["fake_tg_url"]
+    channels_dir = telegram_e2e_server_with_routines["channels_dir"]
+
+    await activate_telegram(base_url, http_url, fake_tg_url, channels_dir)
+    await reset_fake_tg(fake_tg_url)
+    return telegram_e2e_server_with_routines
 
 
 def extract_pairing_code(messages: list[dict]) -> str | None:
@@ -180,6 +233,142 @@ async def approve_pairing(base_url: str, code: str) -> None:
     response.raise_for_status()
     body = response.json()
     assert body.get("success"), f"Pairing approval failed: {body}"
+
+
+async def pair_telegram_user(
+    base_url: str,
+    http_url: str,
+    fake_tg_url: str,
+    *,
+    user_id: int,
+    first_name: str,
+) -> int:
+    """Pair an arbitrary Telegram user to the current IronClaw owner scope.
+
+    Returns the webhook update_id used for the pairing message so callers can
+    send strictly newer updates afterward. Telegram update IDs are monotonic,
+    and the channel intentionally drops stale webhook deliveries.
+    """
+    update_id = _next_test_update_id()
+    pairing_resp = await post_telegram_webhook(
+        http_url,
+        {
+            "update_id": update_id,
+            "message": {
+                "message_id": 1,
+                "from": {
+                    "id": user_id,
+                    "is_bot": False,
+                    "first_name": first_name,
+                },
+                "chat": {"id": user_id, "type": "private"},
+                "date": int(time.time()),
+                "text": "hello from paired user",
+            },
+        },
+        secret=WEBHOOK_SECRET,
+    )
+    assert pairing_resp.status_code == 200
+
+    messages = await wait_for_sent_messages(fake_tg_url, min_count=1, timeout=60)
+    code = extract_pairing_code(messages)
+    assert code, f"Expected pairing code in Telegram reply, got: {messages}"
+    await approve_pairing(base_url, code)
+    await reset_fake_tg(fake_tg_url)
+    return update_id
+
+
+async def create_owner_routine_via_chat(base_url: str, routine_name: str) -> None:
+    """Create an owner-scoped routine through the gateway chat API."""
+    thread_r = await api_post(base_url, "/api/chat/thread/new", timeout=15)
+    assert thread_r.status_code == 200
+    thread_id = thread_r.json()["id"]
+
+    send_r = await api_post(
+        base_url,
+        "/api/chat/send",
+        json={
+            "content": f"create lightweight owner routine {routine_name}",
+            "thread_id": thread_id,
+        },
+        timeout=30,
+    )
+    assert send_r.status_code in (200, 202), (
+        f"Routine create send failed ({send_r.status_code}): {send_r.text}"
+    )
+
+    deadline = time.monotonic() + 30
+    async with httpx.AsyncClient() as client:
+        while time.monotonic() < deadline:
+            history = await client.get(
+                f"{base_url}/api/chat/history",
+                params={"thread_id": thread_id},
+                headers=auth_headers(),
+                timeout=15,
+            )
+            history.raise_for_status()
+            data = history.json()
+
+            pending = data.get("pending_gate") or data.get("pending_approval")
+            if pending:
+                approval = await client.post(
+                    f"{base_url}/api/chat/approval",
+                    json={
+                        "request_id": pending["request_id"],
+                        "action": "approve",
+                        "thread_id": thread_id,
+                    },
+                    headers=auth_headers(),
+                    timeout=15,
+                )
+                assert approval.status_code == 202, (
+                    f"Routine approval failed ({approval.status_code}): {approval.text}"
+                )
+
+            turns = data.get("turns", [])
+            if turns and turns[-1].get("response"):
+                response = turns[-1]["response"]
+                assert routine_name in response, (
+                    f"Routine create response missing routine name: {response}"
+                )
+                return
+
+            await asyncio.sleep(0.5)
+
+    raise TimeoutError(
+        f"Routine '{routine_name}' did not complete via chat within 30 seconds"
+    )
+
+
+async def wait_for_routine(base_url: str, routine_name: str, *, timeout: float = 30) -> dict:
+    """Poll the routines API until the named routine appears."""
+    deadline = time.monotonic() + timeout
+    async with httpx.AsyncClient() as client:
+        while time.monotonic() < deadline:
+            response = await client.get(
+                f"{base_url}/api/routines",
+                headers=auth_headers(),
+                timeout=10,
+            )
+            response.raise_for_status()
+            for routine in response.json().get("routines", []):
+                if routine.get("name") == routine_name:
+                    return routine
+            await asyncio.sleep(0.5)
+    raise TimeoutError(
+        f"Routine '{routine_name}' did not appear within {timeout} seconds"
+    )
+
+
+async def queue_fake_telegram_update(fake_tg_url: str, update: dict) -> None:
+    """Queue an update for fake Telegram polling mode APIs like getUpdates."""
+    async with httpx.AsyncClient() as c:
+        response = await c.post(
+            f"{fake_tg_url}/__mock/queue_update",
+            json=update,
+            timeout=5,
+        )
+    response.raise_for_status()
 
 
 async def post_telegram_webhook(
@@ -282,24 +471,17 @@ async def wait_for_api_call(
 # ── tests ────────────────────────────────────────────────────────────────
 
 
-async def test_telegram_setup_and_dm_roundtrip(telegram_e2e_server):
+async def test_telegram_setup_and_dm_roundtrip(active_telegram):
     """Full DM round-trip: setup → webhook → mock LLM → sendMessage."""
-    base_url = telegram_e2e_server["base_url"]
-    http_url = telegram_e2e_server["http_url"]
-    fake_tg_url = telegram_e2e_server["fake_tg_url"]
-    channels_dir = telegram_e2e_server["channels_dir"]
-
-    # Reset fake API and activate the Telegram channel
-    await activate_telegram(base_url, http_url, fake_tg_url, channels_dir)
-
-    # Clear fake API state to only capture round-trip messages
-    await reset_fake_tg(fake_tg_url)
+    base_url = active_telegram["base_url"]
+    http_url = active_telegram["http_url"]
+    fake_tg_url = active_telegram["fake_tg_url"]
 
     # POST a DM webhook update as the verified owner
     resp = await post_telegram_webhook(
         http_url,
         {
-            "update_id": 100,
+            "update_id": _next_test_update_id(),
             "message": {
                 "message_id": 10,
                 "from": {
@@ -324,21 +506,94 @@ async def test_telegram_setup_and_dm_roundtrip(telegram_e2e_server):
     assert messages[-1]["chat_id"] == OWNER_USER_ID
 
 
-async def test_telegram_edited_message_roundtrip(telegram_e2e_server):
-    """Edited-message webhook triggers a new agent reply."""
-    base_url = telegram_e2e_server["base_url"]
-    http_url = telegram_e2e_server["http_url"]
-    fake_tg_url = telegram_e2e_server["fake_tg_url"]
-    channels_dir = telegram_e2e_server["channels_dir"]
+async def test_paired_telegram_user_lists_owner_routines(
+    active_telegram_with_routines,
+):
+    """A paired Telegram guest should see routines created in owner scope."""
+    base_url = active_telegram_with_routines["base_url"]
+    http_url = active_telegram_with_routines["http_url"]
+    fake_tg_url = active_telegram_with_routines["fake_tg_url"]
+    routine_name = f"telegram-owner-{int(time.time())}"
 
-    await activate_telegram(base_url, http_url, fake_tg_url, channels_dir)
-
+    await create_owner_routine_via_chat(base_url, routine_name)
+    await wait_for_routine(base_url, routine_name)
     await reset_fake_tg(fake_tg_url)
+
+    await pair_telegram_user(
+        base_url,
+        http_url,
+        fake_tg_url,
+        user_id=PAIRED_USER_ID,
+        first_name="Paired Tester",
+    )
 
     resp = await post_telegram_webhook(
         http_url,
         {
-            "update_id": 200,
+            "update_id": _next_test_update_id(),
+            "message": {
+                "message_id": 99,
+                "from": {
+                    "id": PAIRED_USER_ID,
+                    "is_bot": False,
+                    "first_name": "Paired Tester",
+                },
+                "chat": {"id": PAIRED_USER_ID, "type": "private"},
+                "date": int(time.time()),
+                "text": "list owner routines",
+            },
+        },
+        secret=WEBHOOK_SECRET,
+    )
+    assert resp.status_code == 200
+
+    try:
+        messages = await wait_for_sent_messages(fake_tg_url, min_count=1, timeout=60)
+    except TimeoutError as exc:
+        api_calls = await get_api_calls(fake_tg_url)
+        async with httpx.AsyncClient() as client:
+            threads_response = await client.get(
+                f"{base_url}/api/chat/threads",
+                headers=auth_headers(),
+                timeout=10,
+            )
+            threads_response.raise_for_status()
+            threads = threads_response.json().get("threads", [])
+            telegram_threads = [t for t in threads if t.get("channel") == "telegram"]
+            latest_telegram_thread = telegram_threads[0] if telegram_threads else None
+            latest_history = None
+            if latest_telegram_thread:
+                history_response = await client.get(
+                    f"{base_url}/api/chat/history",
+                    params={"thread_id": latest_telegram_thread["id"]},
+                    headers=auth_headers(),
+                    timeout=10,
+                )
+                history_response.raise_for_status()
+                latest_history = history_response.json()
+        raise AssertionError(
+            "Expected paired Telegram user to receive a reply after requesting "
+            f"owner routines; fake Telegram API calls were: {api_calls}; "
+            f"latest telegram thread: {latest_telegram_thread}; "
+            f"latest telegram history: {latest_history}"
+        ) from exc
+    reply_text = "\n".join(m.get("text", "") for m in messages if m.get("chat_id") == PAIRED_USER_ID)
+    assert routine_name in reply_text, (
+        f"Expected paired Telegram user to see owner routine '{routine_name}', "
+        f"got replies: {messages}"
+    )
+
+
+async def test_telegram_edited_message_roundtrip(active_telegram):
+    """Edited-message webhook triggers a new agent reply."""
+    base_url = active_telegram["base_url"]
+    http_url = active_telegram["http_url"]
+    fake_tg_url = active_telegram["fake_tg_url"]
+
+    resp = await post_telegram_webhook(
+        http_url,
+        {
+            "update_id": _next_test_update_id(),
             "edited_message": {
                 "message_id": 20,
                 "from": {
@@ -363,22 +618,17 @@ async def test_telegram_edited_message_roundtrip(telegram_e2e_server):
     )
 
 
-async def test_telegram_unauthorized_user_rejected(telegram_e2e_server):
+async def test_telegram_unauthorized_user_rejected(active_telegram):
     """A webhook from a non-owner user should not produce a sendMessage reply."""
-    base_url = telegram_e2e_server["base_url"]
-    http_url = telegram_e2e_server["http_url"]
-    fake_tg_url = telegram_e2e_server["fake_tg_url"]
-    channels_dir = telegram_e2e_server["channels_dir"]
-
-    await activate_telegram(base_url, http_url, fake_tg_url, channels_dir)
-
-    await reset_fake_tg(fake_tg_url)
+    base_url = active_telegram["base_url"]
+    http_url = active_telegram["http_url"]
+    fake_tg_url = active_telegram["fake_tg_url"]
 
     # Send a message from a different user ID (not the owner)
     resp = await post_telegram_webhook(
         http_url,
         {
-            "update_id": 300,
+            "update_id": _next_test_update_id(),
             "message": {
                 "message_id": 30,
                 "from": {
@@ -411,19 +661,16 @@ async def test_telegram_unauthorized_user_rejected(telegram_e2e_server):
         )
 
 
-async def test_telegram_invalid_webhook_secret_rejected(telegram_e2e_server):
+async def test_telegram_invalid_webhook_secret_rejected(active_telegram):
     """Webhook with wrong secret header is rejected."""
-    base_url = telegram_e2e_server["base_url"]
-    http_url = telegram_e2e_server["http_url"]
-    fake_tg_url = telegram_e2e_server["fake_tg_url"]
-    channels_dir = telegram_e2e_server["channels_dir"]
-
-    await activate_telegram(base_url, http_url, fake_tg_url, channels_dir)
+    base_url = active_telegram["base_url"]
+    http_url = active_telegram["http_url"]
+    fake_tg_url = active_telegram["fake_tg_url"]
 
     resp = await post_telegram_webhook(
         http_url,
         {
-            "update_id": 400,
+            "update_id": _next_test_update_id(),
             "message": {
                 "message_id": 40,
                 "from": {"id": OWNER_USER_ID, "is_bot": False, "first_name": "E2E"},
@@ -439,14 +686,11 @@ async def test_telegram_invalid_webhook_secret_rejected(telegram_e2e_server):
     )
 
 
-async def test_telegram_group_mention_filtering(telegram_e2e_server):
+async def test_telegram_group_mention_filtering(active_telegram):
     """Group messages without a bot mention are ignored; mentioned messages get a reply."""
-    base_url = telegram_e2e_server["base_url"]
-    http_url = telegram_e2e_server["http_url"]
-    fake_tg_url = telegram_e2e_server["fake_tg_url"]
-    channels_dir = telegram_e2e_server["channels_dir"]
-
-    await activate_telegram(base_url, http_url, fake_tg_url, channels_dir)
+    base_url = active_telegram["base_url"]
+    http_url = active_telegram["http_url"]
+    fake_tg_url = active_telegram["fake_tg_url"]
 
     # Part 1: group message WITHOUT bot mention → no reply
     await reset_fake_tg(fake_tg_url)
@@ -454,7 +698,7 @@ async def test_telegram_group_mention_filtering(telegram_e2e_server):
     resp = await post_telegram_webhook(
         http_url,
         {
-            "update_id": 500,
+            "update_id": _next_test_update_id(),
             "message": {
                 "message_id": 50,
                 "from": {
@@ -487,7 +731,7 @@ async def test_telegram_group_mention_filtering(telegram_e2e_server):
     resp = await post_telegram_webhook(
         http_url,
         {
-            "update_id": 501,
+            "update_id": _next_test_update_id(),
             "message": {
                 "message_id": 51,
                 "from": {
@@ -518,22 +762,17 @@ async def test_telegram_group_mention_filtering(telegram_e2e_server):
     )
 
 
-async def test_telegram_long_message_chunking(telegram_e2e_server):
+async def test_telegram_long_message_chunking(active_telegram):
     """Long LLM responses are split into multiple Telegram messages (<=4096 chars each)."""
-    base_url = telegram_e2e_server["base_url"]
-    http_url = telegram_e2e_server["http_url"]
-    fake_tg_url = telegram_e2e_server["fake_tg_url"]
-    channels_dir = telegram_e2e_server["channels_dir"]
-
-    await activate_telegram(base_url, http_url, fake_tg_url, channels_dir)
-
-    await reset_fake_tg(fake_tg_url)
+    base_url = active_telegram["base_url"]
+    http_url = active_telegram["http_url"]
+    fake_tg_url = active_telegram["fake_tg_url"]
 
     # "long response" triggers the ~7400-char canned response in mock_llm.py
     resp = await post_telegram_webhook(
         http_url,
         {
-            "update_id": 600,
+            "update_id": _next_test_update_id(),
             "message": {
                 "message_id": 60,
                 "from": {
@@ -571,22 +810,17 @@ async def test_telegram_long_message_chunking(telegram_e2e_server):
     )
 
 
-async def test_telegram_polling_mode_roundtrip(telegram_e2e_server):
+async def test_telegram_polling_mode_roundtrip(active_telegram):
     """Updates queued via the mock API are picked up by the polling loop."""
-    base_url = telegram_e2e_server["base_url"]
-    fake_tg_url = telegram_e2e_server["fake_tg_url"]
-    channels_dir = telegram_e2e_server["channels_dir"]
-
-    await activate_telegram(base_url, telegram_e2e_server["http_url"], fake_tg_url, channels_dir)
-
-    await reset_fake_tg(fake_tg_url)
+    base_url = active_telegram["base_url"]
+    fake_tg_url = active_telegram["fake_tg_url"]
 
     # Queue an update via the mock control endpoint (simulates polling mode)
     async with httpx.AsyncClient() as c:
         await c.post(
             f"{fake_tg_url}/__mock/queue_update",
             json={
-                "update_id": 700,
+                "update_id": _next_test_update_id(),
                 "message": {
                     "message_id": 70,
                     "from": {
@@ -610,23 +844,18 @@ async def test_telegram_polling_mode_roundtrip(telegram_e2e_server):
     # Receiving a reply for a queued update proves the polling path is active.
 
 
-async def test_telegram_markdown_fallback(telegram_e2e_server):
+async def test_telegram_markdown_fallback(active_telegram):
     """When Telegram rejects Markdown formatting, the bot retries as plain text."""
-    base_url = telegram_e2e_server["base_url"]
-    http_url = telegram_e2e_server["http_url"]
-    fake_tg_url = telegram_e2e_server["fake_tg_url"]
-    channels_dir = telegram_e2e_server["channels_dir"]
-
-    await activate_telegram(base_url, http_url, fake_tg_url, channels_dir)
-
-    await reset_fake_tg(fake_tg_url)
+    base_url = active_telegram["base_url"]
+    http_url = active_telegram["http_url"]
+    fake_tg_url = active_telegram["fake_tg_url"]
     await set_reject_markdown(fake_tg_url, True)
 
     try:
         resp = await post_telegram_webhook(
             http_url,
             {
-                "update_id": 800,
+                "update_id": _next_test_update_id(),
                 "message": {
                     "message_id": 80,
                     "from": {
@@ -669,20 +898,17 @@ async def test_telegram_markdown_fallback(telegram_e2e_server):
         await set_reject_markdown(fake_tg_url, False)
 
 
-async def test_telegram_missing_webhook_secret_rejected(telegram_e2e_server):
+async def test_telegram_missing_webhook_secret_rejected(active_telegram):
     """Webhook with no secret header at all is rejected with 401."""
-    base_url = telegram_e2e_server["base_url"]
-    http_url = telegram_e2e_server["http_url"]
-    fake_tg_url = telegram_e2e_server["fake_tg_url"]
-    channels_dir = telegram_e2e_server["channels_dir"]
-
-    await activate_telegram(base_url, http_url, fake_tg_url, channels_dir)
+    base_url = active_telegram["base_url"]
+    http_url = active_telegram["http_url"]
+    fake_tg_url = active_telegram["fake_tg_url"]
 
     # POST without any secret header (secret=None means no header is sent)
     resp = await post_telegram_webhook(
         http_url,
         {
-            "update_id": 900,
+            "update_id": _next_test_update_id(),
             "message": {
                 "message_id": 90,
                 "from": {"id": OWNER_USER_ID, "is_bot": False, "first_name": "E2E"},
@@ -698,16 +924,11 @@ async def test_telegram_missing_webhook_secret_rejected(telegram_e2e_server):
     )
 
 
-async def test_telegram_rate_limit_resilience(telegram_e2e_server):
+async def test_telegram_rate_limit_resilience(active_telegram):
     """Bot survives Telegram 429 rate limiting and can send after it clears."""
-    base_url = telegram_e2e_server["base_url"]
-    http_url = telegram_e2e_server["http_url"]
-    fake_tg_url = telegram_e2e_server["fake_tg_url"]
-    channels_dir = telegram_e2e_server["channels_dir"]
-
-    await activate_telegram(base_url, http_url, fake_tg_url, channels_dir)
-
-    await reset_fake_tg(fake_tg_url)
+    base_url = active_telegram["base_url"]
+    http_url = active_telegram["http_url"]
+    fake_tg_url = active_telegram["fake_tg_url"]
 
     # Make the next 20 sendMessage calls return 429. Using a high count
     # so the test is resilient to changes in the WASM channel's retry
@@ -719,7 +940,7 @@ async def test_telegram_rate_limit_resilience(telegram_e2e_server):
         resp = await post_telegram_webhook(
             http_url,
             {
-                "update_id": 1000,
+                "update_id": _next_test_update_id(),
                 "message": {
                     "message_id": 100,
                     "from": {
@@ -755,7 +976,7 @@ async def test_telegram_rate_limit_resilience(telegram_e2e_server):
         resp2 = await post_telegram_webhook(
             http_url,
             {
-                "update_id": 1001,
+                "update_id": _next_test_update_id(),
                 "message": {
                     "message_id": 101,
                     "from": {
@@ -782,16 +1003,11 @@ async def test_telegram_rate_limit_resilience(telegram_e2e_server):
         await set_rate_limit(fake_tg_url, 0)
 
 
-async def test_telegram_document_download_failure_graceful(telegram_e2e_server):
+async def test_telegram_document_download_failure_graceful(active_telegram):
     """Bot still replies to message text when document download fails."""
-    base_url = telegram_e2e_server["base_url"]
-    http_url = telegram_e2e_server["http_url"]
-    fake_tg_url = telegram_e2e_server["fake_tg_url"]
-    channels_dir = telegram_e2e_server["channels_dir"]
-
-    await activate_telegram(base_url, http_url, fake_tg_url, channels_dir)
-
-    await reset_fake_tg(fake_tg_url)
+    base_url = active_telegram["base_url"]
+    http_url = active_telegram["http_url"]
+    fake_tg_url = active_telegram["fake_tg_url"]
     await set_fail_downloads(fake_tg_url, True)
 
     try:
@@ -799,7 +1015,7 @@ async def test_telegram_document_download_failure_graceful(telegram_e2e_server):
         resp = await post_telegram_webhook(
             http_url,
             {
-                "update_id": 1100,
+                "update_id": _next_test_update_id(),
                 "message": {
                     "message_id": 110,
                     "from": {
@@ -840,16 +1056,11 @@ async def test_telegram_document_download_failure_graceful(telegram_e2e_server):
         await set_fail_downloads(fake_tg_url, False)
 
 
-async def test_telegram_malformed_payload_resilience(telegram_e2e_server):
+async def test_telegram_malformed_payload_resilience(active_telegram):
     """Malformed JSON webhook is accepted gracefully; bot continues working after."""
-    base_url = telegram_e2e_server["base_url"]
-    http_url = telegram_e2e_server["http_url"]
-    fake_tg_url = telegram_e2e_server["fake_tg_url"]
-    channels_dir = telegram_e2e_server["channels_dir"]
-
-    await activate_telegram(base_url, http_url, fake_tg_url, channels_dir)
-
-    await reset_fake_tg(fake_tg_url)
+    base_url = active_telegram["base_url"]
+    http_url = active_telegram["http_url"]
+    fake_tg_url = active_telegram["fake_tg_url"]
 
     # Send a completely malformed payload (not valid Telegram update JSON)
     headers = {
@@ -884,7 +1095,7 @@ async def test_telegram_malformed_payload_resilience(telegram_e2e_server):
     resp2 = await post_telegram_webhook(
         http_url,
         {
-            "update_id": 1200,
+            "update_id": _next_test_update_id(),
             "message": {
                 "message_id": 120,
                 "from": {

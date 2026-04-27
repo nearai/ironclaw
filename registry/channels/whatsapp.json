@@ -2,7 +2,7 @@
   "name": "whatsapp",
   "display_name": "WhatsApp Channel",
   "kind": "channel",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "wit_version": "0.3.0",
   "description": "Talk to your agent through WhatsApp",
   "keywords": [
@@ -18,8 +18,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/nearai/ironclaw/releases/download/v0.18.0/whatsapp-0.2.0-wasm32-wasip2.tar.gz",
-      "sha256": "feb9194719d9bed796b070ab4dc30348dbfb5d3dec56f9f21e02d14137abab01"
+      "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.25.0/channel-whatsapp-0.2.2-wasm32-wasip2.tar.gz",
+      "sha256": "88c539f28dc0ebd06acf359614cc63fb0f3508241be4c70fe0f46cbc9bfcd73a"
     }
   },
   "auth_summary": {

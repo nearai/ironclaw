@@ -28,7 +28,9 @@ mod heartbeat;
 pub(crate) mod helpers;
 mod hygiene;
 pub(crate) mod llm;
+mod missions;
 pub mod oauth;
+pub mod profile;
 pub mod relay;
 mod routines;
 mod safety;
@@ -59,6 +61,7 @@ pub use self::embeddings::{DEFAULT_EMBEDDING_CACHE_SIZE, EmbeddingsConfig};
 pub use self::heartbeat::HeartbeatConfig;
 pub use self::hygiene::HygieneConfig;
 pub use self::llm::default_session_path;
+pub use self::missions::MissionsConfig;
 pub use self::oauth::OAuthConfig;
 pub use self::relay::RelayConfig;
 pub use self::routines::RoutineConfig;
@@ -118,6 +121,7 @@ pub struct Config {
     pub skills: SkillsConfig,
     pub transcription: TranscriptionConfig,
     pub search: WorkspaceSearchConfig,
+    pub missions: MissionsConfig,
     pub workspace: WorkspaceConfig,
     pub observability: crate::observability::ObservabilityConfig,
     /// OAuth/social login configuration (Google, GitHub, etc.).
@@ -127,7 +131,37 @@ pub struct Config {
     pub relay: Option<RelayConfig>,
 }
 
+/// Generate a fresh random AES-256-GCM master key for `Config::for_testing`.
+///
+/// Returns a hex-encoded 32-byte key (64 hex chars), satisfying the length
+/// check in `SecretsConfig::resolve`. Each call returns a different value —
+/// tests don't need cross-process determinism (each test builds a fresh
+/// secrets store on top of a fresh temp DB), and committing a constant
+/// master key into the source tree would mean every developer who built
+/// with `--features libsql` had a publicly-known key in their process.
+#[cfg(feature = "libsql")]
+fn generate_test_master_key() -> secrecy::SecretString {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let mut hex = String::with_capacity(64);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(hex, "{:02x}", b);
+    }
+    secrecy::SecretString::from(hex)
+}
+
 impl Config {
+    /// Returns whether this deployment is configured to run in multi-tenant mode.
+    ///
+    /// Keep this decision config-driven rather than inferring it from runtime
+    /// DB contents. A deployment may be explicitly multi-tenant before any
+    /// non-owner users have been created.
+    pub fn is_multi_tenant_deployment(&self) -> bool {
+        self.agent.multi_tenant
+    }
+
     /// Create a full Config for integration tests without reading env vars.
     ///
     /// Requires the `libsql` feature. Sets up:
@@ -164,6 +198,7 @@ impl Config {
                 tui: None,
                 wasm_channels_dir: std::env::temp_dir().join("ironclaw-test-channels"),
                 wasm_channels_enabled: false,
+                configured_wasm_channels: Vec::new(),
                 wasm_channel_owner_ids: HashMap::new(),
             },
             agent: AgentConfig::for_testing(),
@@ -175,7 +210,25 @@ impl Config {
                 enabled: false,
                 ..WasmConfig::default()
             },
-            secrets: SecretsConfig::default(),
+            // Test config gets a freshly-generated random master key so
+            // the secrets store is wired up out of the box. Without this,
+            // every replay-mode test that touches credentials would have
+            // to either build its own SecretsStore or skip the secrets
+            // path entirely. The key is generated per call (NOT a
+            // hardcoded constant) — `Config::for_testing` is `pub` so
+            // anything in the crate or downstream tests can call it, and
+            // committing a known master key into the source tree would
+            // mean every developer who built with `--features libsql`
+            // had a publicly-known AES-256-GCM key sitting in their
+            // process. Tests don't need cross-process determinism here:
+            // each test creates its own temp DB, so the secrets store
+            // is born fresh on every call anyway.
+            secrets: SecretsConfig {
+                master_key: Some(generate_test_master_key()),
+                enabled: true,
+                source: crate::settings::KeySource::Env,
+                generated: false,
+            },
             builder: BuilderModeConfig {
                 enabled: false,
                 ..BuilderModeConfig::default()
@@ -200,6 +253,7 @@ impl Config {
             },
             transcription: TranscriptionConfig::default(),
             search: WorkspaceSearchConfig::default(),
+            missions: MissionsConfig::default(),
             workspace: WorkspaceConfig::default(),
             observability: crate::observability::ObservabilityConfig::default(),
             oauth: OAuthConfig::default(),
@@ -241,24 +295,8 @@ impl Config {
         let _ = dotenvy::dotenv();
         crate::bootstrap::load_ironclaw_env();
 
-        // Start with TOML config as a base (lowest priority among the two).
-        let mut settings = Settings::default();
-        Self::apply_toml_overlay(&mut settings, toml_path)?;
-
-        // Overlay DB settings on top so DB values win over TOML.
-        match store.get_all_settings(user_id).await {
-            Ok(mut map) => {
-                if !is_operator {
-                    crate::config::helpers::strip_admin_only_llm_keys(&mut map);
-                }
-                let db_settings = Settings::from_db_map(&map);
-                settings.merge_from(&db_settings);
-            }
-            Err(e) => {
-                tracing::warn!("Failed to load settings from DB, using defaults: {}", e);
-            }
-        };
-
+        let settings =
+            Self::load_db_backed_settings(store, user_id, toml_path, is_operator, false).await?;
         Self::build(&settings).await
     }
 
@@ -359,31 +397,185 @@ impl Config {
         secrets: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
         is_operator: bool,
     ) -> Result<(), ConfigError> {
-        let mut settings = if let Some(store) = store {
-            // TOML as base, then DB on top (DB wins).
-            let mut s = Settings::default();
-            Self::apply_toml_overlay(&mut s, toml_path)?;
-            if let Ok(mut map) = store.get_all_settings(user_id).await {
+        self.llm =
+            Self::resolve_llm_with_secrets(store, user_id, toml_path, secrets, is_operator).await?;
+        Ok(())
+    }
+
+    /// Build the settings overlay used for DB-backed config reads.
+    ///
+    /// Resolution order is profile -> TOML -> admin DB -> per-user DB.
+    /// This is shared between full config loads and LLM-only hot reloads so
+    /// they read the same owner/admin scopes without duplicating merge logic.
+    async fn load_db_backed_settings(
+        store: &(dyn crate::db::SettingsStore + Sync),
+        user_id: &str,
+        toml_path: Option<&std::path::Path>,
+        is_operator: bool,
+        strict_db_reads: bool,
+    ) -> Result<Settings, ConfigError> {
+        let mut settings = Settings::default();
+        profile::apply_profile(&mut settings)?;
+        Self::apply_toml_overlay(&mut settings, toml_path)?;
+
+        let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
+        if user_id != admin_scope {
+            match store.get_all_settings(admin_scope).await {
+                Ok(mut admin_map) if !admin_map.is_empty() => {
+                    if !is_operator {
+                        crate::config::helpers::strip_admin_only_llm_keys(&mut admin_map);
+                    }
+                    let admin_settings = Settings::from_db_map(&admin_map);
+                    settings.merge_from(&admin_settings);
+                }
+                Ok(_) => {}
+                Err(e) if strict_db_reads => {
+                    return Err(ConfigError::ParseError(format!(
+                        "Failed to load admin-scope settings from DB: {e}"
+                    )));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to load admin-scope settings from DB, using defaults: {e}"
+                    );
+                }
+            }
+        }
+
+        match store.get_all_settings(user_id).await {
+            Ok(mut map) => {
                 if !is_operator {
                     crate::config::helpers::strip_admin_only_llm_keys(&mut map);
                 }
                 let db_settings = Settings::from_db_map(&map);
-                s.merge_from(&db_settings);
+                settings.merge_from(&db_settings);
             }
-            s
+            Err(e) if strict_db_reads => {
+                return Err(ConfigError::ParseError(format!(
+                    "Failed to load settings from DB: {e}"
+                )));
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load settings from DB, using defaults: {}", e);
+            }
+        }
+
+        Ok(settings)
+    }
+
+    async fn resolve_llm_with_secrets_inner(
+        store: Option<&(dyn crate::db::SettingsStore + Sync)>,
+        user_id: &str,
+        toml_path: Option<&std::path::Path>,
+        secrets: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
+        is_operator: bool,
+        strict_db_reads: bool,
+    ) -> Result<LlmConfig, ConfigError> {
+        let mut settings = if let Some(store) = store {
+            Self::load_db_backed_settings(store, user_id, toml_path, is_operator, strict_db_reads)
+                .await?
         } else {
-            Settings::default()
+            let mut s = Settings::default();
+            profile::apply_profile(&mut s)?;
+            Self::apply_toml_overlay(&mut s, toml_path)?;
+            s
         };
 
-        // Hydrate API keys from encrypted secrets store into the settings
-        // struct so that LlmConfig::resolve() sees them without any changes
-        // to its synchronous resolution logic.
         if let Some(secrets) = secrets {
             hydrate_llm_keys_from_secrets(&mut settings, secrets, user_id).await;
         }
 
-        self.llm = LlmConfig::resolve(&settings)?;
-        Ok(())
+        // Startup path (non-strict): fall back to NearAI if the user-configured
+        // backend is unusable. This prevents the #2514 crash-loop and keeps the
+        // instance runnable while the user fixes their provider configuration.
+        //
+        // Hot-reload path (strict): use pure `resolve` so a bad save fails the
+        // whole call and lets the caller roll back the triggering settings
+        // write. Silently falling back here would be worse UX — the user
+        // saved "openrouter", runtime would switch to NearAI, the UI would
+        // show NearAI, and the user would wonder where their selection went.
+        if strict_db_reads {
+            return LlmConfig::resolve(&settings);
+        }
+
+        let configured_backend = settings.llm_backend.clone();
+        let cfg = LlmConfig::resolve_with_fallback(&settings)?;
+
+        // If fallback demoted the backend, persist the effective backend to
+        // the DB so the UI, status endpoint, and any other consumers stay
+        // consistent with what is actually running. Without this, the user
+        // would see "Active: openrouter" in Settings while the runtime is
+        // quietly using NearAI.
+        if let Some(store) = store
+            && fallback_fired(configured_backend.as_deref(), &cfg.backend)
+        {
+            tracing::warn!(
+                configured = ?configured_backend,
+                active = %cfg.backend,
+                "Syncing llm_backend in DB to reflect post-fallback runtime state"
+            );
+            if let Err(e) = store
+                .set_setting(
+                    user_id,
+                    "llm_backend",
+                    &serde_json::Value::String(cfg.backend.clone()),
+                )
+                .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to persist post-fallback llm_backend to DB — UI may \
+                     display the previously-selected backend until next save"
+                );
+            }
+            // The previously-selected model is almost certainly wrong for
+            // the NearAI fallback (e.g. an OpenRouter model name). Clear
+            // it so resolve_model() picks NearAI's default on next load.
+            if settings.selected_model.is_some()
+                && let Err(e) = store.delete_setting(user_id, "selected_model").await
+            {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to clear selected_model after fallback"
+                );
+            }
+        }
+
+        Ok(cfg)
+    }
+
+    /// Resolve only the LLM configuration from the current source stack.
+    ///
+    /// This is used by hot reload paths that need the exact owner/admin merge
+    /// semantics from startup without rebuilding unrelated config sections.
+    /// Non-strict mode: applies `resolve_with_fallback`, so an unusable user
+    /// backend downgrades to NearAI at startup instead of crash-looping
+    /// (#2514). Use [`resolve_llm_with_secrets_strict`] for hot-reload paths.
+    pub(crate) async fn resolve_llm_with_secrets(
+        store: Option<&(dyn crate::db::SettingsStore + Sync)>,
+        user_id: &str,
+        toml_path: Option<&std::path::Path>,
+        secrets: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
+        is_operator: bool,
+    ) -> Result<LlmConfig, ConfigError> {
+        Self::resolve_llm_with_secrets_inner(store, user_id, toml_path, secrets, is_operator, false)
+            .await
+    }
+
+    /// Resolve LLM configuration for hot reload paths that must fail closed on
+    /// DB read errors so the caller can roll back the triggering settings write.
+    /// Strict mode also disables the NearAI fallback: a broken save produces
+    /// `Err` rather than a silent demotion, which is the signal the caller
+    /// needs to trigger rollback and preserve the user's explicit selection.
+    pub(crate) async fn resolve_llm_with_secrets_strict(
+        store: Option<&(dyn crate::db::SettingsStore + Sync)>,
+        user_id: &str,
+        toml_path: Option<&std::path::Path>,
+        secrets: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
+        is_operator: bool,
+    ) -> Result<LlmConfig, ConfigError> {
+        Self::resolve_llm_with_secrets_inner(store, user_id, toml_path, secrets, is_operator, true)
+            .await
     }
 
     /// Build config from settings (shared by from_env and from_db).
@@ -420,6 +612,7 @@ impl Config {
             skills: SkillsConfig::resolve(settings)?,
             transcription: TranscriptionConfig::resolve(settings)?,
             search: WorkspaceSearchConfig::resolve(settings)?,
+            missions: MissionsConfig::resolve(settings)?,
             workspace,
             observability: crate::observability::ObservabilityConfig {
                 backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),
@@ -430,13 +623,71 @@ impl Config {
     }
 }
 
+/// Detect whether `resolve_with_fallback` demoted the user-configured backend
+/// to NearAI. Returns true when the user explicitly asked for something
+/// non-trivial (non-empty, not already nearai) and the resolver landed on a
+/// different backend. Aliases like `open_ai` → `openai` are not counted as a
+/// fallback — only cross-backend demotion is.
+fn fallback_fired(configured: Option<&str>, active: &str) -> bool {
+    let configured = match configured.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(c) => c,
+        None => return false,
+    };
+    // Normalize both sides so alias-only drift (e.g. open_ai → openai,
+    // near / near_ai → nearai) doesn't spuriously look like a fallback.
+    normalize_backend(configured) != normalize_backend(active)
+}
+
+/// Normalize a backend id to the canonical form that `LlmConfig::resolve`
+/// lands on after alias resolution. Must produce the same canonical id the
+/// resolver uses — otherwise `fallback_fired` will mis-fire on every restart
+/// for any DB value that's a known alias (e.g. `claude` → `anthropic`,
+/// `bigmodel` → `zai`, `github-copilot` → `github_copilot`) and trigger a
+/// spurious DB rewrite.
+///
+/// Two sources of aliases:
+/// 1. Registry-defined aliases — delegated to `ProviderRegistry::find`, which
+///    is the same lookup `resolve_registry_provider` uses.
+/// 2. Hardcoded aliases for the four "virtual" backends that are not in the
+///    registry (nearai / bedrock / gemini_oauth / openai_codex). These must
+///    stay in sync with the matching branches in `LlmConfig::resolve`.
+fn normalize_backend(raw: &str) -> String {
+    let lower = raw.to_lowercase();
+
+    // (1) Virtual backends (not in the registry) — hardcoded alias list
+    // mirroring LlmConfig::resolve.
+    match lower.as_str() {
+        "nearai" | "near" | "near_ai" => return "nearai".to_string(),
+        "bedrock" | "aws" | "aws_bedrock" => return "bedrock".to_string(),
+        "gemini_oauth" | "gemini-oauth" => return "gemini_oauth".to_string(),
+        "openai_codex" | "openai-codex" | "codex" => return "openai_codex".to_string(),
+        _ => {}
+    }
+
+    // (2) Registry providers — any alias declared in `providers.json` is
+    // resolved by `ProviderRegistry::find` to its canonical `id`. This is the
+    // SAME canonicalization `LlmConfig::resolve_registry_provider` does, so
+    // DB values like `claude` / `bigmodel` / `github-copilot` / `open_ai`
+    // won't look like a fallback.
+    if let Some(def) = crate::llm::ProviderRegistry::load().find(&lower) {
+        return def.id.clone();
+    }
+
+    // Unknown backend — resolve() treats it as openai_compatible at runtime,
+    // but here we conservatively return the input as-is. A truly unknown id
+    // won't match the canonical `active` either way; the comparison in
+    // `fallback_fired` just has to be consistent between both sides.
+    lower
+}
+
 pub(crate) fn load_bootstrap_settings(
     toml_path: Option<&std::path::Path>,
 ) -> Result<Settings, ConfigError> {
     let _ = dotenvy::dotenv();
     crate::bootstrap::load_ironclaw_env();
 
-    let mut settings = Settings::load();
+    let mut settings = Settings::default();
+    profile::apply_profile(&mut settings)?;
     Config::apply_toml_overlay(&mut settings, toml_path)?;
     Ok(settings)
 }
@@ -591,6 +842,24 @@ pub fn inject_single_var(key: &str, value: &str) {
             poisoned
                 .into_inner()
                 .insert(key.to_string(), value.to_string());
+        }
+    }
+}
+
+/// Remove a single key from the injected-vars overlay.
+///
+/// Tests that exercise production paths calling [`inject_single_var`]
+/// must call this during teardown. Without it, an injected value leaks
+/// into later tests' `optional_env` reads and silently flips their
+/// expected branches.
+#[cfg(test)]
+pub(crate) fn clear_injected_var(key: &str) {
+    match INJECTED_VARS.lock() {
+        Ok(mut map) => {
+            map.remove(key);
+        }
+        Err(poisoned) => {
+            poisoned.into_inner().remove(key);
         }
     }
 }
@@ -872,12 +1141,16 @@ mod tests {
         rows: tokio::sync::RwLock<
             std::collections::HashMap<String, std::collections::HashMap<String, serde_json::Value>>,
         >,
+        fail_get_all_settings_for: tokio::sync::RwLock<std::collections::HashSet<String>>,
     }
 
     impl FakeSettingsStore {
         fn new() -> Self {
             Self {
                 rows: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+                fail_get_all_settings_for: tokio::sync::RwLock::new(
+                    std::collections::HashSet::new(),
+                ),
             }
         }
 
@@ -886,6 +1159,13 @@ mod tests {
             rows.entry(user_id.to_string())
                 .or_default()
                 .insert(key.to_string(), value);
+        }
+
+        async fn fail_get_all_settings_for(&self, user_id: &str) {
+            self.fail_get_all_settings_for
+                .write()
+                .await
+                .insert(user_id.to_string());
         }
     }
 
@@ -946,6 +1226,16 @@ mod tests {
             user_id: &str,
         ) -> Result<std::collections::HashMap<String, serde_json::Value>, crate::error::DatabaseError>
         {
+            if self
+                .fail_get_all_settings_for
+                .read()
+                .await
+                .contains(user_id)
+            {
+                return Err(crate::error::DatabaseError::Query(format!(
+                    "injected get_all_settings failure for {user_id}"
+                )));
+            }
             let rows = self.rows.read().await;
             Ok(rows.get(user_id).cloned().unwrap_or_default())
         }
@@ -985,6 +1275,72 @@ mod tests {
         cfg
     }
 
+    /// Return a path to a temporary empty TOML file so that tests do not
+    /// accidentally load the user's real `~/.ironclaw/config.toml`.
+    fn empty_toml_path() -> tempfile::NamedTempFile {
+        tempfile::Builder::new()
+            .suffix(".toml")
+            .tempfile()
+            .expect("create temp toml")
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn re_resolve_llm_without_store_keeps_toml_overlay() {
+        let _env_guard = crate::config::helpers::lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("NEARAI_MODEL");
+        }
+
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let toml_path = dir.path().join("config.toml");
+        Settings {
+            llm_backend: Some("nearai".to_string()),
+            selected_model: Some("toml-selected-model".to_string()),
+            ..Default::default()
+        }
+        .save_toml(&toml_path)
+        .expect("save config.toml");
+
+        let mut cfg = config_for_owner("operator-user");
+        cfg.re_resolve_llm(None, "operator-user", Some(&toml_path))
+            .await
+            .expect("resolve should succeed without a settings store");
+
+        assert_eq!(
+            cfg.llm.backend, "nearai",
+            "re-resolve without a DB store must keep the TOML-selected backend"
+        );
+        assert_eq!(
+            cfg.llm.nearai.model, "toml-selected-model",
+            "re-resolve without a DB store must keep the TOML-selected model"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_llm_with_secrets_strict_fails_on_user_db_read_error() {
+        let store = FakeSettingsStore::new();
+        store.fail_get_all_settings_for("owner-user").await;
+
+        let toml = empty_toml_path();
+        let err = Config::resolve_llm_with_secrets_strict(
+            Some(&store as &(dyn crate::db::SettingsStore + Sync)),
+            "owner-user",
+            Some(toml.path()),
+            None,
+            true,
+        )
+        .await
+        .expect_err("strict resolve should fail closed on DB read error");
+
+        assert!(
+            err.to_string().contains("Failed to load settings from DB"),
+            "strict resolve should surface the DB read failure; got {err}"
+        );
+    }
+
     #[tokio::test]
     async fn re_resolve_llm_strips_admin_only_keys_for_non_operator_user() {
         use crate::db::SettingsStore;
@@ -1000,11 +1356,12 @@ mod tests {
             )
             .await;
 
+        let toml = empty_toml_path();
         let mut cfg = config_for_owner("operator-user");
         cfg.re_resolve_llm_with_secrets(
             Some(&store as &(dyn crate::db::SettingsStore + Sync)),
             "member-user",
-            None,
+            Some(toml.path()),
             None,
             false, // <- non-operator: admin-only keys must be stripped
         )
@@ -1036,18 +1393,93 @@ mod tests {
             )
             .await;
 
+        let toml = empty_toml_path();
         let mut cfg = config_for_owner("operator-user");
         // is_operator=true: admin/operator may legitimately configure
         // builtin overrides, so the resolve path must keep them.
         cfg.re_resolve_llm_with_secrets(
             Some(&store as &(dyn crate::db::SettingsStore + Sync)),
             "operator-user",
-            None,
+            Some(toml.path()),
             None,
             true,
         )
         .await
         .expect("resolve should succeed for operator");
+    }
+
+    #[tokio::test]
+    async fn re_resolve_llm_strips_admin_scope_admin_only_keys_for_non_operator() {
+        // Regression: a non-operator member must not inherit admin-only LLM
+        // keys from the admin-defaults scope, even when the admin scope was
+        // populated by an actual operator. The poisoned model below would
+        // propagate to `cfg.llm.nearai.model` if the strip filter was not
+        // applied to the admin-scope merge inside `re_resolve_llm_with_secrets`.
+        let store = FakeSettingsStore::new();
+        store
+            .seed(
+                crate::tools::permissions::ADMIN_SETTINGS_USER_ID,
+                "llm_builtin_overrides",
+                serde_json::json!({
+                    "nearai": {
+                        "model": "admin-poison-model"
+                    }
+                }),
+            )
+            .await;
+
+        let toml = empty_toml_path();
+        let mut cfg = config_for_owner("operator-user");
+        cfg.re_resolve_llm_with_secrets(
+            Some(&store as &(dyn crate::db::SettingsStore + Sync)),
+            "member-user",
+            Some(toml.path()),
+            None,
+            false,
+        )
+        .await
+        .expect("resolve should succeed for non-operator member");
+
+        assert_ne!(
+            cfg.llm.nearai.model, "admin-poison-model",
+            "admin-scope llm_builtin_overrides must not propagate to a non-operator member"
+        );
+    }
+
+    #[tokio::test]
+    async fn re_resolve_llm_keeps_admin_scope_admin_only_keys_for_operator() {
+        // Mirror of the above: an operator may legitimately inherit admin
+        // defaults, including admin-only LLM keys, since they could set them
+        // themselves directly.
+        let store = FakeSettingsStore::new();
+        store
+            .seed(
+                crate::tools::permissions::ADMIN_SETTINGS_USER_ID,
+                "llm_builtin_overrides",
+                serde_json::json!({
+                    "nearai": {
+                        "model": "admin-set-model"
+                    }
+                }),
+            )
+            .await;
+
+        let toml = empty_toml_path();
+        let mut cfg = config_for_owner("operator-user");
+        cfg.re_resolve_llm_with_secrets(
+            Some(&store as &(dyn crate::db::SettingsStore + Sync)),
+            "another-operator",
+            Some(toml.path()),
+            None,
+            true,
+        )
+        .await
+        .expect("resolve should succeed for operator");
+
+        assert_eq!(
+            cfg.llm.nearai.model, "admin-set-model",
+            "operator must inherit admin-scope builtin override model"
+        );
     }
 
     #[tokio::test]
@@ -1089,5 +1521,87 @@ mod tests {
             Some("sk-existing"),
             "existing key should not be overwritten"
         );
+    }
+
+    // ── fallback_fired / normalize_backend tests ─────────────────────────
+    //
+    // These gate the post-fallback DB sync in re_resolve_llm_with_secrets,
+    // so wrong answers either (a) let stale user intent linger in the DB
+    // (UI shows openrouter, runtime uses NearAI) or (b) clobber the user's
+    // selection every startup even though nothing meaningfully changed.
+
+    #[test]
+    fn fallback_fired_detects_cross_backend_demotion() {
+        // The #2514 scenario: user picked openrouter, config was unusable,
+        // resolver demoted to NearAI. DB must be synced.
+        assert!(fallback_fired(Some("openrouter"), "nearai"));
+        assert!(fallback_fired(Some("anthropic"), "nearai"));
+        assert!(fallback_fired(Some("openai_compatible"), "nearai"));
+    }
+
+    #[test]
+    fn fallback_fired_ignores_alias_normalization() {
+        // `resolve` canonicalises backend aliases (near → nearai, open_ai →
+        // openai) but that is not a fallback and must not trigger a DB
+        // rewrite — doing so would churn the row on every startup.
+        //
+        // Virtual backends (not in the registry — alias set hardcoded in
+        // normalize_backend):
+        assert!(!fallback_fired(Some("near"), "nearai"));
+        assert!(!fallback_fired(Some("near_ai"), "nearai"));
+        assert!(!fallback_fired(Some("aws"), "bedrock"));
+        assert!(!fallback_fired(Some("aws_bedrock"), "bedrock"));
+        assert!(!fallback_fired(Some("codex"), "openai_codex"));
+        assert!(!fallback_fired(Some("openai-codex"), "openai_codex"));
+        assert!(!fallback_fired(Some("gemini-oauth"), "gemini_oauth"));
+    }
+
+    #[test]
+    fn fallback_fired_ignores_registry_aliases() {
+        // Regression: `providers.json` declares aliases for many registry
+        // providers (e.g. `claude` → `anthropic`, `bigmodel` → `zai`,
+        // `github-copilot` → `github_copilot`, `open_ai` → `openai`).
+        // `resolve_registry_provider` canonicalises these to the registry's
+        // `id` field, so a DB value of `claude` produces `cfg.backend ==
+        // "anthropic"`. normalize_backend must delegate to the registry so
+        // this is recognised as alias drift, not a fallback. Otherwise the
+        // DB gets rewritten on every startup for users who happen to have
+        // the alias form saved.
+        assert!(!fallback_fired(Some("claude"), "anthropic"));
+        assert!(!fallback_fired(Some("bigmodel"), "zai"));
+        assert!(!fallback_fired(Some("github-copilot"), "github_copilot"));
+        assert!(!fallback_fired(Some("githubcopilot"), "github_copilot"));
+        assert!(!fallback_fired(Some("open_ai"), "openai"));
+        assert!(!fallback_fired(
+            Some("openai-compatible"),
+            "openai_compatible"
+        ));
+        assert!(!fallback_fired(Some("compatible"), "openai_compatible"));
+        assert!(!fallback_fired(Some("open_router"), "openrouter"));
+    }
+
+    #[test]
+    fn fallback_fired_ignores_empty_or_unset_configured() {
+        // When the DB never had llm_backend set, the default of "nearai"
+        // resolves naturally — there is nothing to sync back.
+        assert!(!fallback_fired(None, "nearai"));
+        assert!(!fallback_fired(Some(""), "nearai"));
+        assert!(!fallback_fired(Some("   "), "nearai"));
+    }
+
+    #[test]
+    fn fallback_fired_treats_case_insensitively() {
+        // DB values can be lowercase or mixed-case; don't treat case-only
+        // drift as a meaningful change.
+        assert!(!fallback_fired(Some("NearAI"), "nearai"));
+        assert!(!fallback_fired(Some("OPENAI"), "openai"));
+    }
+
+    #[test]
+    fn fallback_fired_same_backend_no_sync() {
+        // A properly-configured backend must not trigger a DB rewrite.
+        assert!(!fallback_fired(Some("nearai"), "nearai"));
+        assert!(!fallback_fired(Some("anthropic"), "anthropic"));
+        assert!(!fallback_fired(Some("openrouter"), "openrouter"));
     }
 }

@@ -539,11 +539,18 @@ fn handle_message_event(event_data: &serde_json::Value) {
                         "chat_id": msg_event.message.chat_id,
                         "chat_type": chat_type,
                     });
-                    match channel_host::pairing_upsert_request("feishu", sender_id, &meta.to_string()) {
+                    match channel_host::pairing_upsert_request(
+                        "feishu",
+                        sender_id,
+                        &meta.to_string(),
+                    ) {
                         Ok(result) => {
                             channel_host::log(
                                 channel_host::LogLevel::Info,
-                                &format!("Pairing request created for {}: {}", sender_id, result.code),
+                                &format!(
+                                    "Pairing request created for {}: {}",
+                                    sender_id, result.code
+                                ),
                             );
                             let _ = send_message(
                                 sender_id,

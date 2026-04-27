@@ -6,6 +6,9 @@ under `tests/fixtures/llm_traces/live/`. The fixture lets the same test
 re-run deterministically in CI in *replay* mode without ever calling out
 to a paid LLM.
 
+For scheduled live CI lanes, runner setup, and release gating policy, see
+`docs/internal/live-canary.md`.
+
 ## Modes
 
 `LiveTestHarnessBuilder::build()` picks one of two modes based on the

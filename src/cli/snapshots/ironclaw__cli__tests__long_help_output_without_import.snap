@@ -1,19 +1,29 @@
 ---
 source: src/cli/mod.rs
-assertion_line: 461
 expression: help
 ---
-IronClaw is a secure AI assistant. Use 'ironclaw <subcommand> --help' for details.
-Examples:
-  ironclaw run  # Start the agent
-  ironclaw config list  # List configs
+IronClaw is a secure AI assistant.
+
+Getting started:
+  ironclaw onboard              # Interactive setup wizard (recommended for first run)
+  ironclaw onboard --quick      # Quick setup: just pick a provider and model
+  ironclaw models set-provider openai  # Switch to a specific provider
+  ironclaw doctor               # Check your configuration
+
+Common commands:
+  ironclaw run                  # Start the agent
+  ironclaw config list          # View all settings
+  ironclaw models status        # Show current provider and model
+  ironclaw models list          # List available providers
+
+Use 'ironclaw <subcommand> --help' for details on any command.
 
 Usage: ironclaw [OPTIONS] [COMMAND]
 
 Commands:
   run         Run the AI agent
-  onboard     Run interactive setup wizard
-  config      Manage app configs
+  onboard     Run interactive setup wizard (start here if new to IronClaw)
+  config      Manage app configuration settings
   tool        Manage WASM tools
   registry    Browse/install extensions
   channels    Manage channels
@@ -21,15 +31,16 @@ Commands:
   mcp         Manage MCP servers
   memory      Manage workspace memory
   pairing     Manage DM pairing
+  profile     Manage deployment profiles
   service     Manage OS service
   skills      Manage skills
   hooks       Manage lifecycle hooks
   models      Manage LLM providers and models
-  doctor      Run diagnostics
+  doctor      Run diagnostics (check if everything is configured correctly)
   logs        View and manage gateway logs
   status      Show system status
   completion  Generate completions
-  login       Authenticate with a provider
+  login       Authenticate with a provider (re-login)
   acp         Manage ACP agents
   help        Print this message or the help of the given subcommand(s)
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Validate that all i18n language packs under src/channels/web/static/i18n/
+# Validate that all i18n language packs under crates/ironclaw_gateway/static/i18n/
 # share the same key set with no duplicates and matching placeholder tokens.
 #
 # When a new translation key is added to en.js, it must also be added to
@@ -14,7 +14,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-I18N_DIR="$REPO_ROOT/src/channels/web/static/i18n"
+I18N_DIR="$REPO_ROOT/crates/ironclaw_gateway/static/i18n"
 BASE_LANG="en.js"
 OTHER_LANGS=("zh-CN.js" "ko.js")
 EXIT=0

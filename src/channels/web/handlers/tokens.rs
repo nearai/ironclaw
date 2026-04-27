@@ -12,7 +12,7 @@ use rand::rngs::OsRng;
 use uuid::Uuid;
 
 use crate::channels::web::auth::AuthenticatedUser;
-use crate::channels::web::server::GatewayState;
+use crate::channels::web::platform::state::GatewayState;
 
 /// POST /api/tokens — create a new API token (returns plaintext ONCE).
 pub async fn tokens_create_handler(

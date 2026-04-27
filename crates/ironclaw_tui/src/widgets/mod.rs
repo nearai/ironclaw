@@ -194,6 +194,9 @@ pub struct AppState {
     /// Images pasted via Ctrl+V, pending submission with the next message.
     pub pending_attachments: Vec<crate::event::TuiAttachment>,
 
+    /// Logical line count of the input box (drives dynamic input height).
+    pub input_line_count: usize,
+
     /// Pending thread picker (from /resume).
     pub pending_thread_picker: Option<ThreadPickerState>,
 
@@ -268,6 +271,7 @@ impl Default for AppState {
             toasts: Vec::new(),
             tool_detail_modal: None,
             pending_attachments: Vec::new(),
+            input_line_count: 1,
             pending_thread_picker: None,
             screen_snapshot: ScreenSnapshot::default(),
             text_selection: None,

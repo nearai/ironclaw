@@ -1,7 +1,12 @@
 //! Agent-callable tools for managing extensions (MCP servers and WASM tools).
 //!
-//! These six tools let the LLM search, install, authenticate, activate, list,
-//! and remove extensions entirely through conversation.
+//! These built-ins manage extension discovery and lifecycle from conversation.
+//! In engine v2, the normal model-facing enablement path is
+//! `tool_activate(name=...)`: blocked integrations surface in capability
+//! background, and `tool_activate` internally handles install/auth/activation
+//! as needed. `tool_search`, `tool_list`, and `tool_info` support discovery;
+//! `tool_install` / `tool_auth` remain available as narrower runtime/compat
+//! surfaces rather than the primary v2 prompt contract.
 
 use std::sync::Arc;
 
@@ -51,8 +56,23 @@ fn output_from_ensure_ready(outcome: EnsureReadyOutcome) -> serde_json::Value {
             "phase": phase,
             "message": format!("Extension '{}' is ready.", name),
         }),
-        EnsureReadyOutcome::NeedsAuth { auth, .. } => serde_json::to_value(&auth)
-            .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"})),
+        EnsureReadyOutcome::NeedsAuth {
+            auth,
+            credential_name,
+            ..
+        } => {
+            let mut value = serde_json::to_value(&auth)
+                .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"}));
+            if let Some(credential_name) = credential_name
+                && let Some(obj) = value.as_object_mut()
+            {
+                obj.insert(
+                    "credential_name".to_string(),
+                    serde_json::Value::String(credential_name),
+                );
+            }
+            value
+        }
         EnsureReadyOutcome::NeedsSetup {
             name,
             kind,
@@ -90,10 +110,10 @@ impl Tool for ToolSearchTool {
     fn description(&self) -> &str {
         "Search for available extensions to add new capabilities. Extensions include \
          channels (Telegram, Slack, Discord — connect messaging platforms so IronClaw can \
-         receive and reply there), tools, and MCP servers. Use `tool_install` and \
-         `tool_activate` to install and enable channels; use the `message` tool for proactive \
-         outbound sends. Use discover:true to search online if the built-in registry has no \
-         results."
+         receive and reply there), tools, and MCP servers. When you want to make a discovered \
+         integration usable, call `tool_activate(name=\"...\")`. Use the `message` tool for \
+         proactive outbound sends. Use discover:true to search online if the built-in registry \
+         has no results."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -163,7 +183,9 @@ impl Tool for ToolInstallTool {
 
     fn description(&self) -> &str {
         "Install an extension (channel, tool, or MCP server). \
-         Use the name from tool_search results, or provide an explicit URL."
+         Use the name from tool_search results, or provide an explicit URL. \
+         Also discovers tool source code in the working directory \
+         (tools-src/, tool-src/, or direct subdirectories with Cargo.toml)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -209,16 +231,21 @@ impl Tool for ToolInstallTool {
                 _ => None,
             });
 
-        let result = self
-            .manager
+        self.manager
             .install(name, url, kind_hint, &ctx.user_id)
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
-        let output = serde_json::to_value(&result)
-            .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"}));
+        let result = self
+            .manager
+            .ensure_extension_ready(name, &ctx.user_id, EnsureReadyIntent::PostInstall)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
-        Ok(ToolOutput::success(output, start.elapsed()))
+        Ok(ToolOutput::success(
+            output_from_ensure_ready(result),
+            start.elapsed(),
+        ))
     }
 
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
@@ -317,7 +344,8 @@ impl Tool for ToolActivateTool {
     }
 
     fn description(&self) -> &str {
-        "Activate an installed extension — starts channels, loads tools, or connects to MCP servers."
+        "Make an integration usable. This may install, authenticate, and activate it as needed \
+         before loading tools, starting channels, or connecting to MCP servers."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -888,8 +916,8 @@ mod tests {
         };
 
         let description = tool.description();
-        assert!(description.contains("Use `tool_install` and `tool_activate`"));
-        assert!(description.contains("use the `message` tool for proactive outbound sends"));
+        assert!(description.contains("call `tool_activate(name=\"...\")`"));
+        assert!(description.contains("Use the `message` tool for proactive outbound sends"));
     }
 
     #[test]
@@ -935,6 +963,10 @@ mod tests {
             manager: test_manager_stub(),
         };
         assert_eq!(tool.name(), "tool_activate");
+        assert!(
+            tool.description()
+                .contains("install, authenticate, and activate")
+        );
         assert_eq!(
             tool.requires_approval(&serde_json::json!({})),
             ApprovalRequirement::Never
@@ -950,6 +982,26 @@ mod tests {
         assert!(!activation_error_requires_auth(
             "Activation failed: crashed"
         ));
+    }
+
+    #[test]
+    fn output_from_ensure_ready_needs_auth_includes_credential_name() {
+        let output = output_from_ensure_ready(EnsureReadyOutcome::NeedsAuth {
+            name: "web_search".to_string(),
+            kind: ExtensionKind::WasmTool,
+            phase: crate::extensions::ExtensionPhase::NeedsAuth,
+            credential_name: Some("search_api_key".to_string()),
+            auth: crate::extensions::AuthResult::awaiting_token(
+                "web_search",
+                ExtensionKind::WasmTool,
+                "Enter API key".to_string(),
+                None,
+            ),
+        });
+
+        assert_eq!(output["status"], "awaiting_token");
+        assert_eq!(output["name"], "web_search");
+        assert_eq!(output["credential_name"], "search_api_key");
     }
 
     #[test]

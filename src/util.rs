@@ -1,6 +1,7 @@
 //! Shared utility functions used across the codebase.
 
 use crate::llm::{ChatMessage, Role};
+use serde_json::{Map, Value};
 
 /// Find the largest valid UTF-8 char boundary at or before `pos`.
 ///
@@ -83,10 +84,77 @@ pub fn llm_signals_completion(response: &str) -> bool {
     positive_phrases.iter().any(|p| lower.contains(p))
 }
 
+/// Recursively sort JSON object keys for deterministic comparison/hashing.
+///
+/// Arrays preserve order, objects get sorted keys, scalars pass through.
+pub fn canonicalize_json_value(value: Value) -> Value {
+    match value {
+        Value::Array(items) => {
+            Value::Array(items.into_iter().map(canonicalize_json_value).collect())
+        }
+        Value::Object(obj) => {
+            let mut keys: Vec<String> = obj.keys().cloned().collect();
+            keys.sort();
+            let mut canonical = Map::new();
+            for key in keys {
+                if let Some(value) = obj.get(&key) {
+                    canonical.insert(key, canonicalize_json_value(value.clone()));
+                }
+            }
+            Value::Object(canonical)
+        }
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::llm::ChatMessage;
-    use crate::util::{ensure_ends_with_user_message, floor_char_boundary, llm_signals_completion};
+    use crate::util::{
+        canonicalize_json_value, ensure_ends_with_user_message, floor_char_boundary,
+        llm_signals_completion,
+    };
+
+    // ── canonicalize_json_value ──
+
+    #[test]
+    fn canonicalize_sorts_object_keys() {
+        let input = serde_json::json!({"z": 1, "a": 2, "m": 3});
+        let result = canonicalize_json_value(input);
+        let keys: Vec<&String> = result.as_object().unwrap().keys().collect();
+        assert_eq!(keys, vec!["a", "m", "z"]);
+    }
+
+    #[test]
+    fn canonicalize_is_recursive() {
+        let input = serde_json::json!({"outer": {"z": 1, "a": 2}});
+        let result = canonicalize_json_value(input);
+        let inner_keys: Vec<&String> = result["outer"].as_object().unwrap().keys().collect();
+        assert_eq!(inner_keys, vec!["a", "z"]);
+    }
+
+    #[test]
+    fn canonicalize_preserves_array_order() {
+        let input = serde_json::json!([3, 1, 2]);
+        let result = canonicalize_json_value(input);
+        assert_eq!(result, serde_json::json!([3, 1, 2]));
+    }
+
+    #[test]
+    fn canonicalize_preserves_scalars() {
+        assert_eq!(
+            canonicalize_json_value(serde_json::json!("hello")),
+            serde_json::json!("hello")
+        );
+        assert_eq!(
+            canonicalize_json_value(serde_json::json!(42)),
+            serde_json::json!(42)
+        );
+        assert_eq!(
+            canonicalize_json_value(serde_json::json!(null)),
+            serde_json::json!(null)
+        );
+    }
 
     // ── floor_char_boundary ──
 

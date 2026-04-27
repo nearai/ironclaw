@@ -7,6 +7,18 @@ use std::path::{Path, PathBuf};
 
 use crate::tools::tool::ToolError;
 
+/// Directories excluded by default from recursive filesystem operations.
+///
+/// Shared across `ListDirTool`, `GlobTool`, and other tools that walk the filesystem.
+pub const DEFAULT_EXCLUDED_DIRS: &[&str] = &[
+    "node_modules",
+    "target",
+    ".git",
+    "__pycache__",
+    "venv",
+    ".venv",
+];
+
 /// Normalize a path by resolving `.` and `..` components lexically (no filesystem access).
 ///
 /// This is critical for security: `std::fs::canonicalize` only works on paths that exist,

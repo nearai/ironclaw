@@ -84,7 +84,7 @@ IronClaw is the AI assistant you can actually trust with your personal and profe
 
 ### Prerequisites
 
-- Rust 1.85+
+- Rust 1.92+
 - PostgreSQL 15+ with [pgvector](https://github.com/pgvector/pgvector) extension
 - NEAR AI account (authentication handled via setup wizard)
 
@@ -286,6 +286,8 @@ External content passes through multiple security layers:
 
 ## Usage
 
+Engine v2 is opt-in right now. If you want to run the new engine instead of the legacy agent loop, start IronClaw with `ENGINE_V2=true`. See [Engine v2 architecture](docs/internal/engine-v2-architecture.md#enabling-engine-v2) for more details.
+
 ```bash
 # First-time setup (configures database, auth, etc.)
 ironclaw onboard
@@ -293,8 +295,11 @@ ironclaw onboard
 # Start interactive REPL
 cargo run
 
-# With debug logging
-RUST_LOG=ironclaw=debug cargo run
+# Start interactive REPL with engine v2
+ENGINE_V2=true cargo run
+
+# Engine v2 with debug logging
+ENGINE_V2=true RUST_LOG=ironclaw=debug cargo run
 ```
 
 ## Development

@@ -24,6 +24,11 @@ pub struct LlmCallConfig {
     /// Depth in the recursive call tree (0 = root, 1+ = sub-call).
     /// Implementations can use this to route to cheaper models for sub-calls.
     pub depth: u32,
+    /// Optional per-call model override. When set, the bridge adapter forwards
+    /// this to the underlying `LlmProvider` via `CompletionRequest::model`.
+    /// Providers that don't support per-request overrides will fall back to
+    /// their configured model and log a warning.
+    pub model: Option<String>,
     /// Opaque metadata forwarded to the LLM provider.
     pub metadata: HashMap<String, String>,
 }

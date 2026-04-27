@@ -46,15 +46,23 @@ def _forward_coverage_env(env: dict):
 
 async def _stop_process(proc, sig=signal.SIGINT, timeout=5):
     """Send signal and wait for process to exit."""
+    async def _drain_pipes():
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=1)
+        except (asyncio.TimeoutError, ValueError):
+            pass
+
     try:
         proc.send_signal(sig)
     except ProcessLookupError:
+        await _drain_pipes()
         return
     try:
         await asyncio.wait_for(proc.wait(), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
+    await _drain_pipes()
 
 
 # ---------------------------------------------------------------------------
@@ -329,10 +337,8 @@ class TestV2EngineApprovalFlow:
             timeout=30,
         )
 
-        # Wait for the approval prompt
-        history = await _wait_for_response(
-            base, thread_id, timeout=60, expect_substring="requires approval",
-        )
+        # Wait for the approval prompt (delivered via pending_gate, not response text)
+        await _wait_for_approval(base, thread_id, timeout=60)
 
         # Reply "yes" to approve — goes through SubmissionParser as ApprovalResponse
         await api_post(
@@ -376,10 +382,8 @@ class TestV2EngineApprovalFlow:
             timeout=30,
         )
 
-        # Wait for the approval prompt
-        await _wait_for_response(
-            base, thread_id, timeout=60, expect_substring="requires approval",
-        )
+        # Wait for the approval prompt (delivered via pending_gate)
+        await _wait_for_approval(base, thread_id, timeout=60)
 
         # Deny
         await api_post(
@@ -428,9 +432,7 @@ class TestV2EngineApprovalFlow:
             timeout=30,
         )
 
-        await _wait_for_response(
-            base, thread_id_1, timeout=60, expect_substring="requires approval",
-        )
+        await _wait_for_approval(base, thread_id_1, timeout=60)
 
         await api_post(
             base, "/api/chat/send",
@@ -466,5 +468,252 @@ class TestV2EngineApprovalFlow:
             f"Got {len(turns)} turns."
         )
 
+    async def test_always_approve_persists_to_db(self, v2_approval_server):
+        """After test_approval_always, the DB contains always_allow for the http tool.
+
+        This runs after test_approval_always (module-scoped server, definition
+        order) and verifies the persist_always_allow() DB write via the raw
+        settings API (bypasses the aggregate cache).
+        """
+        base = v2_approval_server
+
+        # test_approval_always already sent "always" for the http tool on this
+        # server. Verify the DB row exists.
+        r = await api_get(base, "/api/settings/tool_permissions.http", timeout=15)
+        assert r.status_code == 200, (
+            f"Expected tool_permissions.http in DB after 'always' approval, "
+            f"got status {r.status_code}"
+        )
+        raw = r.json()
+        assert raw["value"] == "always_allow", (
+            f"Expected always_allow in DB, got {raw['value']!r}"
+        )
+
+    async def test_revoke_always_approve_updates_db(self, v2_approval_server):
+        """PUT ask_each_time after always-approve updates the DB setting.
+
+        Note: in-memory auto_approved set persists until process restart, so
+        the gate won't reappear in the same process. This test verifies the DB
+        layer only. A full restart-based test is deferred to a restartable
+        server fixture.
+        """
+        base = v2_approval_server
+
+        # Revoke the http tool's always_allow (set back to ask_each_time)
+        async with httpx.AsyncClient() as client:
+            r = await client.put(
+                f"{base}/api/settings/tools/http",
+                json={"state": "ask_each_time"},
+                headers={"Authorization": f"Bearer {AUTH_TOKEN}"},
+                timeout=15,
+            )
+        assert r.status_code == 200, f"PUT revoke failed: {r.text}"
+
+        # Verify the DB setting changed via the REST API
+        r2 = await api_get(base, "/api/settings/tools", timeout=15)
+        tools = r2.json()["tools"]
+        http_tool = next((t for t in tools if t["name"] == "http"), None)
+        assert http_tool is not None
+        assert http_tool["current_state"] == "ask_each_time", (
+            f"Expected ask_each_time after revoke, got {http_tool['current_state']!r}"
+        )
+
     # test_approval_prompt_contains_tool_name was removed — the assertion
     # is covered by test_approval_yes which verifies the prompt text.
+
+
+# ---------------------------------------------------------------------------
+# Restart-based persistence test
+# ---------------------------------------------------------------------------
+
+_RESTART_DB_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-v2-restart-e2e-")
+_RESTART_HOME_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-v2-restart-e2e-home-")
+
+
+@pytest.fixture
+async def restartable_v2_server(ironclaw_binary, mock_llm_server):
+    """A restartable ironclaw instance for testing persistence across restarts."""
+    home_dir = _RESTART_HOME_TMPDIR.name
+    os.makedirs(os.path.join(home_dir, ".ironclaw"), exist_ok=True)
+
+    # Allocate a free gateway port AND a free HTTP channel port. The
+    # HTTP channel (`webhook_server`) binds at startup and defaults to
+    # `127.0.0.1:8080`; without explicit `HTTP_HOST`/`HTTP_PORT`, this
+    # fixture would race every other e2e server (and anything else on
+    # 8080) and the ironclaw binary would exit with "Address already
+    # in use". The sibling `v2_approval_server` fixture at the top of
+    # this file already allocates both — mirror that.
+    socks = []
+    for _ in range(2):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        socks.append(s)
+    gateway_port = socks[0].getsockname()[1]
+    http_port = socks[1].getsockname()[1]
+    for s in socks:
+        s.close()
+
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": home_dir,
+        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
+        "RUST_LOG": "ironclaw=debug",
+        "RUST_BACKTRACE": "1",
+        "ENGINE_V2": "true",
+        "HTTP_ALLOW_LOCALHOST": "true",
+        "GATEWAY_ENABLED": "true",
+        "GATEWAY_HOST": "127.0.0.1",
+        "GATEWAY_PORT": str(gateway_port),
+        "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
+        "GATEWAY_USER_ID": "e2e-v2-restart-tester",
+        "HTTP_HOST": "127.0.0.1",
+        "HTTP_PORT": str(http_port),
+        "CLI_ENABLED": "false",
+        "LLM_BACKEND": "openai_compatible",
+        "LLM_BASE_URL": mock_llm_server,
+        "LLM_MODEL": "mock-model",
+        "DATABASE_BACKEND": "libsql",
+        "LIBSQL_PATH": os.path.join(_RESTART_DB_TMPDIR.name, "v2-restart-e2e.db"),
+        "SANDBOX_ENABLED": "false",
+        "SKILLS_ENABLED": "false",
+        "ROUTINES_ENABLED": "false",
+        "HEARTBEAT_ENABLED": "false",
+        "EMBEDDING_ENABLED": "false",
+        "WASM_ENABLED": "false",
+        "ONBOARD_COMPLETED": "true",
+    }
+    _forward_coverage_env(env)
+
+    base_url = f"http://127.0.0.1:{gateway_port}"
+    proc = None
+    # Drain child stdout/stderr into the background. With
+    # `RUST_LOG=ironclaw=debug` startup output exceeds the default
+    # 64 KiB pipe buffer; without a drainer the child blocks on its
+    # next write, `/api/health` never responds, and the fixture times
+    # out with a confusing "server not ready" that is actually
+    # back-pressure on our own pipes. Mirror the last 32 KiB of stderr
+    # so a genuine startup failure (bind error, panic) surfaces in the
+    # timeout message instead of being silently swallowed.
+    drain_tasks: list[asyncio.Task] = []
+    stderr_tail = bytearray()
+
+    async def _drain(stream, mirror):
+        if stream is None:
+            return
+        while True:
+            chunk = await stream.read(4096)
+            if not chunk:
+                return
+            if mirror is not None:
+                mirror.extend(chunk)
+                if len(mirror) > 32 * 1024:
+                    del mirror[: len(mirror) - 32 * 1024]
+
+    async def start():
+        nonlocal proc
+        proc = await asyncio.create_subprocess_exec(
+            ironclaw_binary, "--no-onboard",
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        drain_tasks.append(asyncio.create_task(_drain(proc.stdout, None)))
+        drain_tasks.append(asyncio.create_task(_drain(proc.stderr, stderr_tail)))
+        try:
+            await wait_for_ready(f"{base_url}/api/health", timeout=60)
+        except TimeoutError:
+            # Snapshot stderr before stop() drains/cancels the readers, then
+            # tear the subprocess and drain tasks down explicitly. Without
+            # this, a startup timeout leaks the child process (and its
+            # ports) because `await start()` runs before the fixture's
+            # try/finally guard.
+            stderr_text = bytes(stderr_tail).decode("utf-8", errors="replace")
+            await stop()
+            raise TimeoutError(
+                f"restartable_v2_server did not become ready at {base_url}/api/health.\n"
+                f"stderr tail:\n{stderr_text}"
+            )
+
+    async def stop():
+        nonlocal proc
+        if proc and proc.returncode is None:
+            await _stop_process(proc, sig=signal.SIGINT, timeout=10)
+            if proc.returncode is None:
+                await _stop_process(proc, sig=signal.SIGTERM, timeout=5)
+        # Cancel *and* await the drain tasks. Skipping the await leaks
+        # "Task was destroyed but it is pending!" warnings at teardown
+        # and, on restart-style fixtures that call stop() → start(),
+        # builds up zombie readers across cycles.
+        tasks_to_await = list(drain_tasks)
+        drain_tasks.clear()
+        for task in tasks_to_await:
+            if not task.done():
+                task.cancel()
+        if tasks_to_await:
+            await asyncio.gather(*tasks_to_await, return_exceptions=True)
+
+    await start()
+    try:
+        yield {"base_url": base_url, "start": start, "stop": stop}
+    finally:
+        await stop()
+
+
+async def test_always_approve_survives_restart(restartable_v2_server):
+    """After 'always' approval and process restart, the tool auto-approves without a gate."""
+    server = restartable_v2_server
+    base = server["base_url"]
+
+    # 1. Trigger approval and reply "always"
+    thread_r = await api_post(base, "/api/chat/thread/new", timeout=15)
+    thread_id = thread_r.json()["id"]
+
+    await api_post(
+        base, "/api/chat/send",
+        json={"content": "make approval post restart-persist", "thread_id": thread_id},
+        timeout=30,
+    )
+
+    await _wait_for_approval(base, thread_id, timeout=60)
+
+    await api_post(
+        base, "/api/chat/send",
+        json={"content": "always", "thread_id": thread_id},
+        timeout=30,
+    )
+
+    await _wait_for_no_pending_gate(base, thread_id, timeout=60)
+
+    # Confirm DB state before restart (raw API, no cache)
+    r = await api_get(base, "/api/settings/tool_permissions.http", timeout=15)
+    assert r.status_code == 200, (
+        f"Pre-restart: expected tool_permissions.http in DB, got {r.status_code}"
+    )
+    assert r.json()["value"] == "always_allow", (
+        f"Pre-restart: expected always_allow, got {r.json()['value']!r}"
+    )
+
+    # 2. Stop and restart the server (same DB, new process)
+    await server["stop"]()
+    await server["start"]()
+
+    # 3. In the new process, trigger the same tool — should auto-approve
+    thread_r2 = await api_post(base, "/api/chat/thread/new", timeout=15)
+    thread_id_2 = thread_r2.json()["id"]
+
+    await api_post(
+        base, "/api/chat/send",
+        json={"content": "make approval post restart-verify", "thread_id": thread_id_2},
+        timeout=30,
+    )
+
+    # Should complete without approval prompt
+    history = await _wait_for_response(base, thread_id_2, timeout=60)
+    all_responses = " ".join(
+        (t.get("response") or "") for t in history.get("turns", [])
+    ).lower()
+
+    assert "requires approval" not in all_responses, (
+        f"After restart, tool should auto-approve from DB. Got: {all_responses[:500]}"
+    )

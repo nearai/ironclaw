@@ -1062,6 +1062,9 @@ mod tests {
         let gateway = gateway_captures.lock().await.clone();
         assert_eq!(gateway.len(), 1);
         assert_eq!(gateway[0].0, "owner-scope");
-        assert_eq!(gateway[0].1.thread_id.as_deref(), Some("thread-123"));
+        assert_eq!(
+            gateway[0].1.thread_id.as_ref().map(|t| t.as_str()),
+            Some("thread-123")
+        );
     }
 }

@@ -17,7 +17,22 @@ pub struct GatingResult {
 /// Async wrapper around [`check_requirements_sync`] that offloads blocking
 /// subprocess calls (`which`/`where`) to a blocking thread pool via
 /// `tokio::task::spawn_blocking`.
+///
+/// Fast path: if the requirements contain no bins, env vars, or config
+/// paths to check, return `passed: true` immediately without spawning a
+/// blocking task. Companion `skills` entries are advisory-only and do not
+/// affect gating, so they don't block the fast path. This avoids a
+/// `which` subprocess call per skill load for skills with no
+/// subprocess-checkable requirements (the common case).
 pub async fn check_requirements(requirements: &GatingRequirements) -> GatingResult {
+    if requirements.bins.is_empty() && requirements.env.is_empty() && requirements.config.is_empty()
+    {
+        return GatingResult {
+            passed: true,
+            failures: Vec::new(),
+        };
+    }
+
     let requirements = requirements.clone();
     tokio::task::spawn_blocking(move || check_requirements_sync(&requirements))
         .await
@@ -67,6 +82,10 @@ pub fn check_requirements_sync(requirements: &GatingRequirements) -> GatingResul
             failures.push(format!("required config not found: {}", path));
         }
     }
+
+    // Companion skill dependencies (`requirements.skills`) are intentionally
+    // not checked here — the gating module has no access to the skill
+    // registry. They are advisory metadata only.
 
     GatingResult {
         passed: failures.is_empty(),
@@ -158,9 +177,27 @@ mod tests {
             bins: vec!["__no_such_bin__".to_string()],
             env: vec!["__NO_SUCH_VAR__".to_string()],
             config: vec!["/no/such/file".to_string()],
+            ..Default::default()
         };
         let result = check_requirements_sync(&req);
         assert!(!result.passed);
         assert_eq!(result.failures.len(), 3);
+    }
+
+    #[test]
+    fn test_skill_dependencies_are_ignored_by_gating() {
+        // Companion skill dependencies are advisory metadata only — gating
+        // does not check them. Gating should pass even when `skills` is
+        // populated.
+        let req = GatingRequirements {
+            skills: vec![
+                "commitment-triage".to_string(),
+                "commitment-digest".to_string(),
+            ],
+            ..Default::default()
+        };
+        let result = check_requirements_sync(&req);
+        assert!(result.passed);
+        assert!(result.failures.is_empty());
     }
 }

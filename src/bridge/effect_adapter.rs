@@ -8,24 +8,36 @@
 //! - Sensitive parameter redaction
 //! - Rate limiting (per-user, per-tool)
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
-
 use tokio::sync::RwLock;
 use tracing::debug;
 
+#[cfg(test)]
+use ironclaw_engine::ModelToolSurface;
 use ironclaw_engine::{
-    ActionDef, ActionResult, CapabilityLease, EffectExecutor, EngineError, ThreadExecutionContext,
+    ActionDef, ActionInventory, ActionResult, CapabilityLease, CapabilityRegistry,
+    CapabilitySummary, EffectExecutor, EngineError, MountError, Store, ThreadExecutionContext,
+    WorkspaceMounts,
 };
+use ironclaw_skills::SkillRegistry;
 
-use crate::bridge::auth_manager::{AuthCheckResult, AuthManager};
+use crate::auth::extension::{AuthCheckResult, AuthManager, LatentActionExecution, ToolReadiness};
+use crate::auth::oauth::sanitize_auth_url;
+use crate::bridge::action_discovery::ActionDiscovery;
+use crate::bridge::action_projector::ActionProjector;
+use crate::bridge::capability_projector::CapabilityProjector;
 use crate::bridge::router::synthetic_action_call_id;
+use crate::bridge::sandbox::{InterceptOutcome, maybe_intercept};
+use crate::bridge::tool_permissions::{ToolPermissionResolution, ToolPermissionSnapshot};
 use crate::context::JobContext;
+use crate::extensions::InstalledExtension;
+use crate::extensions::naming::extension_name_candidates;
 use crate::hooks::{HookEvent, HookOutcome, HookRegistry};
-use crate::tools::permissions::{PermissionState, effective_permission};
+use crate::tools::permissions::PermissionState;
 use crate::tools::rate_limiter::RateLimiter;
-use crate::tools::{ApprovalRequirement, ToolRegistry};
+use crate::tools::{ApprovalRequirement, Tool, ToolRegistry};
 use ironclaw_safety::SafetyLayer;
 
 /// Wraps the existing tool pipeline to implement the engine's `EffectExecutor`.
@@ -55,6 +67,42 @@ pub struct EffectBridgeAdapter {
     /// calls bypass the recorder entirely — recorded traces end up with zero
     /// `http_exchanges` and replay can't substitute responses.
     http_interceptor: RwLock<Option<Arc<dyn crate::llm::recording::HttpInterceptor>>>,
+    /// Engine v2 store used to mirror live-installed v1 skills into `DocType::Skill`.
+    engine_store: RwLock<Option<Arc<dyn Store>>>,
+    /// V1 skill registry used to load the just-installed skill for v2 sync.
+    skill_registry: RwLock<Option<Arc<std::sync::RwLock<SkillRegistry>>>>,
+    /// Optional per-project workspace mount table. When set and a sandbox-eligible
+    /// tool call carries a `/project/...` path, the call is dispatched through
+    /// the mount backend (passthrough host filesystem in Phase 1; containerized
+    /// in Phase 5+) instead of the host tool. When unset, all tool calls run
+    /// on the host as before.
+    workspace_mounts: RwLock<Option<Arc<WorkspaceMounts>>>,
+    /// Engine capability registry. `available_actions()` reads this to surface
+    /// actions from non-v1 capabilities (e.g. `missions`) to the LLM. The v1
+    /// `ToolRegistry` only covers built-in + extension tools; engine-native
+    /// capabilities like `missions` are registered here in `router.rs` and
+    /// would otherwise be invisible to the LLM despite having active leases.
+    capability_registry: RwLock<Option<Arc<CapabilityRegistry>>>,
+}
+
+struct ToolApprovalContext<'a> {
+    action_name: &'a str,
+    lookup_name: &'a str,
+    parameters: &'a serde_json::Value,
+    lease: &'a CapabilityLease,
+    context: &'a ThreadExecutionContext,
+    approval_already_granted: bool,
+}
+
+struct ToolInfoSnapshotContext<'a> {
+    action_name: &'a str,
+    canonical_action_name: &'a str,
+    lookup_name: &'a str,
+    parameters: &'a serde_json::Value,
+    lease: &'a CapabilityLease,
+    context: &'a ThreadExecutionContext,
+    approval_already_granted: bool,
+    started_at: &'a Instant,
 }
 
 impl EffectBridgeAdapter {
@@ -74,7 +122,30 @@ impl EffectBridgeAdapter {
             mission_manager: RwLock::new(None),
             auth_manager: RwLock::new(None),
             http_interceptor: RwLock::new(None),
+            engine_store: RwLock::new(None),
+            skill_registry: RwLock::new(None),
+            workspace_mounts: RwLock::new(None),
+            capability_registry: RwLock::new(None),
         }
+    }
+
+    /// Install a per-project workspace mount table on this adapter. When set,
+    /// sandbox-eligible tool calls (`file_read`, `file_write`, `list_dir`,
+    /// `apply_patch`, `shell`) whose path argument resolves into a mount get
+    /// dispatched through the mount backend instead of the host tool.
+    ///
+    /// Pass `None` to remove the mount table and revert to direct host
+    /// execution for all tools.
+    pub async fn set_workspace_mounts(&self, mounts: Option<Arc<WorkspaceMounts>>) {
+        *self.workspace_mounts.write().await = mounts;
+    }
+
+    /// Install the engine capability registry so `available_actions()` can
+    /// surface actions from engine-native capabilities (missions, etc.) to
+    /// the LLM. Called once at bridge setup after `router.rs` has finished
+    /// registering all capabilities.
+    pub async fn set_capability_registry(&self, registry: Arc<CapabilityRegistry>) {
+        *self.capability_registry.write().await = Some(registry);
     }
 
     /// Install the trace HTTP interceptor on this adapter. Every JobContext
@@ -85,6 +156,18 @@ impl EffectBridgeAdapter {
         interceptor: Arc<dyn crate::llm::recording::HttpInterceptor>,
     ) {
         *self.http_interceptor.write().await = Some(interceptor);
+    }
+
+    /// Provide the live engine store so `skill_install` can immediately sync
+    /// installed skills into the v2 doc space.
+    pub async fn set_engine_store(&self, store: Arc<dyn Store>) {
+        *self.engine_store.write().await = Some(store);
+    }
+
+    /// Provide the v1 skill registry so `skill_install` can resolve the
+    /// canonical installed skill after the tool returns its name.
+    pub async fn set_skill_registry(&self, registry: Arc<std::sync::RwLock<SkillRegistry>>) {
+        *self.skill_registry.write().await = Some(registry);
     }
 
     /// Mirror the v1 dispatcher behavior for globally auto-approved tools.
@@ -111,6 +194,17 @@ impl EffectBridgeAdapter {
         &self.tools
     }
 
+    /// Access the underlying safety layer.
+    ///
+    /// The bridge router uses this to redact verbose-only observability
+    /// events (notably `CodeExecuted`) through the leak detector before
+    /// broadcasting them on SSE. The engine crate emits those events
+    /// raw because it has no dependency on `ironclaw_safety`; the
+    /// scrubbing therefore happens at this adapter boundary.
+    pub fn safety(&self) -> &Arc<SafetyLayer> {
+        &self.safety
+    }
+
     /// Set the auth manager for pre-flight credential checks.
     pub async fn set_auth_manager(&self, mgr: Arc<AuthManager>) {
         *self.auth_manager.write().await = Some(mgr);
@@ -126,6 +220,394 @@ impl EffectBridgeAdapter {
         self.mission_manager.read().await.clone()
     }
 
+    /// Fetch the extension list as a `Vec`, using the short-lived cache when
+    /// available. Returns `Some(vec)` when an auth_manager is present, `None`
+    /// otherwise.
+    async fn fetch_extension_list(
+        &self,
+        auth_manager: Option<&AuthManager>,
+        context: &ThreadExecutionContext,
+    ) -> Option<Vec<InstalledExtension>> {
+        let auth_manager = auth_manager?;
+        let extensions = match auth_manager
+            .list_capability_extensions(&context.user_id)
+            .await
+        {
+            Ok(exts) => exts,
+            Err(error) => {
+                debug!(
+                    user_id = %context.user_id,
+                    error = %error,
+                    "failed to load extension inventory; returning empty list"
+                );
+                Vec::new()
+            }
+        };
+        Some(extensions)
+    }
+
+    /// Fetch the extension list as a `HashMap<name, InstalledExtension>`, using
+    /// the short-lived cache when available. Returns `Some(map)` when an
+    /// auth_manager is present, `None` otherwise.
+    async fn fetch_extension_map(
+        &self,
+        auth_manager: Option<&AuthManager>,
+        context: &ThreadExecutionContext,
+    ) -> Option<HashMap<String, InstalledExtension>> {
+        let extensions = self.fetch_extension_list(auth_manager, context).await?;
+        Some(
+            extensions
+                .into_iter()
+                .map(|ext| (ext.name.clone(), ext))
+                .collect(),
+        )
+    }
+
+    async fn tool_activate_requires_install_approval(
+        &self,
+        lookup_name: &str,
+        parameters: &serde_json::Value,
+        context: &ThreadExecutionContext,
+    ) -> bool {
+        if !matches!(lookup_name, "tool_activate" | "tool-activate") {
+            return false;
+        }
+
+        let Some(requested_name) = parameters
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return false;
+        };
+
+        let auth_manager = self.auth_manager.read().await;
+        let Some(auth_manager) = auth_manager.as_ref() else {
+            return true;
+        };
+
+        let extensions = match auth_manager
+            .list_capability_extensions(&context.user_id)
+            .await
+        {
+            Ok(extensions) => extensions,
+            Err(error) => {
+                debug!(
+                    user_id = %context.user_id,
+                    extension_name = requested_name,
+                    error = %error,
+                    "failed to load extension inventory for tool_activate approval; requiring approval"
+                );
+                return true;
+            }
+        };
+
+        matching_extension_requires_install_approval(requested_name, &extensions).unwrap_or(false)
+    }
+
+    async fn resolved_user_permission_for_tool(
+        &self,
+        lookup_name: &str,
+        context: &ThreadExecutionContext,
+    ) -> ToolPermissionResolution {
+        ToolPermissionSnapshot::load(self.tools.as_ref(), &context.user_id)
+            .await
+            .resolve_permission(lookup_name)
+    }
+
+    fn apply_user_permission_override(
+        base_requirement: ApprovalRequirement,
+        explicit_user_permission: Option<PermissionState>,
+    ) -> ApprovalRequirement {
+        match explicit_user_permission {
+            Some(PermissionState::AskEachTime) => ApprovalRequirement::Always,
+            _ => base_requirement,
+        }
+    }
+
+    fn ensure_tool_not_disabled(
+        action_name: &str,
+        user_permission: ToolPermissionResolution,
+    ) -> Result<(), EngineError> {
+        if matches!(user_permission.effective, PermissionState::Disabled) {
+            return Err(EngineError::LeaseDenied {
+                reason: format!("Tool '{}' is disabled for this user.", action_name),
+            });
+        }
+        Ok(())
+    }
+
+    async fn effective_tool_approval_requirement(
+        &self,
+        lookup_name: &str,
+        tool: &dyn Tool,
+        parameters: &serde_json::Value,
+        context: &ThreadExecutionContext,
+        user_permission: ToolPermissionResolution,
+        include_install_approval: bool,
+    ) -> ApprovalRequirement {
+        let base_requirement = if include_install_approval
+            && self
+                .tool_activate_requires_install_approval(lookup_name, parameters, context)
+                .await
+        {
+            ApprovalRequirement::UnlessAutoApproved
+        } else {
+            tool.requires_approval(parameters)
+        };
+        Self::apply_user_permission_override(base_requirement, user_permission.explicit)
+    }
+
+    async fn enforce_tool_approval(
+        &self,
+        approval: &ToolApprovalContext<'_>,
+        tool: &dyn Tool,
+        user_permission: ToolPermissionResolution,
+        include_install_approval: bool,
+    ) -> Result<(), EngineError> {
+        let requirement = self
+            .effective_tool_approval_requirement(
+                approval.lookup_name,
+                tool,
+                approval.parameters,
+                approval.context,
+                user_permission,
+                include_install_approval,
+            )
+            .await;
+        match requirement {
+            ApprovalRequirement::Always => {
+                if !approval.approval_already_granted {
+                    return Err(Self::gate_paused(
+                        "approval",
+                        approval.action_name,
+                        approval.context.current_call_id.as_deref(),
+                        approval.parameters.clone(),
+                        ironclaw_engine::ResumeKind::Approval {
+                            allow_always: false,
+                        },
+                        None,
+                        Some(approval.lease.clone()),
+                    ));
+                }
+            }
+            ApprovalRequirement::UnlessAutoApproved => {
+                let is_approved = self.auto_approve_tools
+                    || self
+                        .auto_approved
+                        .read()
+                        .await
+                        .contains(approval.lookup_name)
+                    || matches!(user_permission.effective, PermissionState::AlwaysAllow);
+                if !is_approved && !approval.approval_already_granted {
+                    return Err(Self::gate_paused(
+                        "approval",
+                        approval.action_name,
+                        approval.context.current_call_id.as_deref(),
+                        approval.parameters.clone(),
+                        ironclaw_engine::ResumeKind::Approval { allow_always: true },
+                        None,
+                        Some(approval.lease.clone()),
+                    ));
+                }
+            }
+            ApprovalRequirement::Never => {}
+        }
+        Ok(())
+    }
+
+    fn snapshot_action_result(
+        context: &ThreadExecutionContext,
+        action_name: &str,
+        output: serde_json::Value,
+        is_error: bool,
+        started_at: &Instant,
+    ) -> ActionResult {
+        ActionResult {
+            call_id: context
+                .current_call_id
+                .clone()
+                .unwrap_or_else(|| synthetic_action_call_id(action_name)),
+            action_name: action_name.to_string(),
+            output,
+            is_error,
+            duration: started_at.elapsed(),
+        }
+    }
+
+    async fn execute_tool_info_from_snapshot(
+        &self,
+        tool_info: &ToolInfoSnapshotContext<'_>,
+    ) -> Result<ActionResult, EngineError> {
+        let resolved_tool = self.tools.get_resolved(tool_info.lookup_name).await;
+        let user_permission = self
+            .resolved_user_permission_for_tool(tool_info.lookup_name, tool_info.context)
+            .await;
+        Self::ensure_tool_not_disabled(tool_info.action_name, user_permission)?;
+
+        if let Some((_, tool)) = resolved_tool.as_ref() {
+            self.enforce_tool_approval(
+                &ToolApprovalContext {
+                    action_name: tool_info.action_name,
+                    lookup_name: tool_info.lookup_name,
+                    parameters: tool_info.parameters,
+                    lease: tool_info.lease,
+                    context: tool_info.context,
+                    approval_already_granted: tool_info.approval_already_granted,
+                },
+                tool.as_ref(),
+                user_permission,
+                false,
+            )
+            .await?;
+        }
+
+        let snapshot_result = tool_info
+            .context
+            .available_action_inventory_snapshot
+            .as_deref()
+            .map(|inventory| ActionDiscovery::tool_info(tool_info.parameters, inventory))
+            .or_else(|| {
+                tool_info
+                    .context
+                    .available_actions_snapshot
+                    .as_deref()
+                    .map(|actions| {
+                        ActionDiscovery::tool_info_from_actions(tool_info.parameters, actions)
+                    })
+            })
+            .unwrap_or(Ok(None));
+
+        match snapshot_result {
+            Ok(Some(output)) => Ok(Self::snapshot_action_result(
+                tool_info.context,
+                tool_info.canonical_action_name,
+                output.result,
+                false,
+                tool_info.started_at,
+            )),
+            Ok(None) => {
+                let requested = tool_info
+                    .parameters
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("<missing>");
+                let error_msg = format!(
+                    "tool_info: no callable or discoverable action named '{requested}' in this execution context"
+                );
+                let sanitized = self.safety.sanitize_tool_output("tool_info", &error_msg);
+                Ok(Self::snapshot_action_result(
+                    tool_info.context,
+                    tool_info.canonical_action_name,
+                    serde_json::json!({"error": sanitized.content}),
+                    true,
+                    tool_info.started_at,
+                ))
+            }
+            Err(error) => {
+                let error_msg = format!("Tool {} failed: {}", "tool_info", error);
+                let sanitized = self.safety.sanitize_tool_output("tool_info", &error_msg);
+                Ok(Self::snapshot_action_result(
+                    tool_info.context,
+                    tool_info.canonical_action_name,
+                    serde_json::json!({"error": sanitized.content}),
+                    true,
+                    tool_info.started_at,
+                ))
+            }
+        }
+    }
+
+    async fn sync_skill_install_result(
+        &self,
+        output_value: &serde_json::Value,
+        project_id: ironclaw_engine::ProjectId,
+    ) -> Result<(), EngineError> {
+        let Some(skill_name) = output_value.get("name").and_then(|value| value.as_str()) else {
+            return Ok(());
+        };
+        let Some(store) = self.engine_store.read().await.clone() else {
+            return Ok(());
+        };
+        let Some(registry) = self.skill_registry.read().await.clone() else {
+            return Ok(());
+        };
+
+        let skill = {
+            let guard = registry.read().map_err(|e| EngineError::Store {
+                reason: format!("skill registry lock poisoned: {e}"),
+            })?;
+            guard.find_by_name(skill_name).cloned()
+        }
+        .ok_or_else(|| EngineError::Skill {
+            reason: format!(
+                "skill_install reported '{}', but the installed skill was not found in the registry",
+                skill_name
+            ),
+        })?;
+
+        crate::bridge::skill_migration::sync_v1_skill_to_store(&skill, &store, project_id).await?;
+        Ok(())
+    }
+
+    /// Ensure a Project entity exists for `projects/<slug>/...` writes.
+    ///
+    /// The engine treats workspace directories as the source of truth for
+    /// projects: writing any file under `projects/<slug>/` declares the
+    /// project exists. This hook runs after a successful `memory_write`,
+    /// finds-or-creates the matching Project in the store, and hands back
+    /// its ID so the caller can splice `project_id` into the tool output.
+    ///
+    /// Returns `Ok(None)` if the target isn't under `projects/<slug>/...`
+    /// (regular workspace writes) or if we can't derive a usable slug
+    /// (`projects/foo.md` with no directory segment, `projects/` alone,
+    /// etc.) — non-fatal, caller just skips enrichment.
+    async fn ensure_project_for_memory_write(
+        &self,
+        target: &str,
+        user_id: &str,
+    ) -> Result<Option<ironclaw_engine::ProjectId>, EngineError> {
+        let Some(slug) = extract_project_slug_from_target(target) else {
+            return Ok(None);
+        };
+        let mgr = self.mission_manager.read().await;
+        let Some(mgr) = mgr.as_ref() else {
+            // Engine not initialized (unit tests / early startup). A tool
+            // call succeeding without a mission manager is already
+            // unusual; just skip enrichment rather than erroring.
+            return Ok(None);
+        };
+        let store = mgr.store().clone();
+        let existing = store
+            .list_projects(user_id)
+            .await
+            .map_err(|e| EngineError::Effect {
+                reason: format!("Failed to list projects: {e}"),
+            })?;
+        let slug_lower = slug.to_ascii_lowercase();
+        let matched = existing.iter().find(|p| {
+            p.user_id == user_id
+                && (ironclaw_engine::types::slugify_simple(&p.name) == slug_lower
+                    || p.name.to_ascii_lowercase() == slug_lower)
+        });
+        if let Some(p) = matched {
+            return Ok(Some(p.id));
+        }
+        // Create a fresh project named after the slug. The model can
+        // rename it later by writing a different `name` into
+        // `projects/<slug>/.project.json` — slug (directory) stays fixed.
+        let project = ironclaw_engine::Project::new(user_id, slug, "");
+        let pid = project.id;
+        store
+            .save_project(&project)
+            .await
+            .map_err(|e| EngineError::Effect {
+                reason: format!("Failed to register project '{slug}': {e}"),
+            })?;
+        Ok(Some(pid))
+    }
+
     fn gate_paused(
         gate_name: &str,
         action_name: &str,
@@ -133,6 +615,7 @@ impl EffectBridgeAdapter {
         parameters: serde_json::Value,
         resume_kind: ironclaw_engine::ResumeKind,
         resume_output: Option<serde_json::Value>,
+        paused_lease: Option<CapabilityLease>,
     ) -> EngineError {
         EngineError::GatePaused {
             gate_name: gate_name.to_string(),
@@ -141,6 +624,7 @@ impl EffectBridgeAdapter {
             parameters: Box::new(parameters),
             resume_kind: Box::new(resume_kind),
             resume_output: resume_output.map(Box::new),
+            paused_lease: paused_lease.map(Box::new),
         }
     }
 
@@ -149,6 +633,7 @@ impl EffectBridgeAdapter {
         parameters: serde_json::Value,
         context: &ThreadExecutionContext,
         output_value: &serde_json::Value,
+        lease: &CapabilityLease,
     ) -> Option<EngineError> {
         let status = output_value.get("status").and_then(|v| v.as_str())?;
         let name = output_value.get("name").and_then(|v| v.as_str())?;
@@ -160,18 +645,32 @@ impl EffectBridgeAdapter {
                 context.current_call_id.as_deref(),
                 parameters,
                 ironclaw_engine::ResumeKind::Authentication {
-                    credential_name: name.to_string(),
+                    // Validate the tool-declared credential name — it is
+                    // external/untrusted input. Fall back to the tool's
+                    // own name (structurally trusted, from the registry)
+                    // if the external value fails validation; if even the
+                    // tool name fails (shouldn't happen in practice),
+                    // preserve the legacy passthrough so the gate can
+                    // still reach the user.
+                    credential_name: output_value
+                        .get("credential_name")
+                        .and_then(|v| v.as_str())
+                        .and_then(|raw| ironclaw_common::CredentialName::new(raw).ok())
+                        .or_else(|| ironclaw_common::CredentialName::new(name).ok())
+                        .unwrap_or_else(|| {
+                            ironclaw_common::CredentialName::from_trusted(name.to_string())
+                        }),
                     instructions: output_value
                         .get("instructions")
                         .and_then(|v| v.as_str())
                         .unwrap_or("Complete authentication to continue.")
                         .to_string(),
-                    auth_url: output_value
-                        .get("auth_url")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
+                    auth_url: sanitize_auth_url(
+                        output_value.get("auth_url").and_then(|v| v.as_str()),
+                    ),
                 },
                 None,
+                Some(lease.clone()),
             )),
             _ => None,
         }
@@ -212,6 +711,16 @@ impl EffectBridgeAdapter {
 
         let result = match action_name {
             "mission_create" => {
+                if should_reject_immediate_mission_create(context) {
+                    return Some(Err(EngineError::Effect {
+                        reason: "Refusing to create a mission for an immediate one-shot request. \
+                             The user asked for this to run now, so complete the task in the \
+                             current foreground thread. Only call mission_create/routine_create \
+                             when the user explicitly asks to schedule, automate, or create a \
+                             recurring routine/mission."
+                            .to_string(),
+                    }));
+                }
                 let name = params
                     .get("name")
                     .or_else(|| params.get("_args").and_then(|a| a.get(0)))
@@ -225,8 +734,47 @@ impl EffectBridgeAdapter {
                 let cadence_str = params
                     .get("cadence")
                     .or_else(|| params.get("_args").and_then(|a| a.get(2)))
+                    .and_then(|v| v.as_str());
+                let Some(cadence_str) = cadence_str else {
+                    return Some(Ok(ActionResult {
+                        call_id: context
+                            .current_call_id
+                            .clone()
+                            .unwrap_or_else(|| synthetic_action_call_id(action_name)),
+                        action_name: action_name.to_string(),
+                        output: serde_json::json!({
+                            "error": concat!(
+                                "cadence is required. Use 'manual', a cron expression ",
+                                "(e.g. '0 9 * * *'), 'event:<channel>:<pattern>' ",
+                                "(e.g. 'event:telegram:.*'), or 'webhook:<path>'"
+                            )
+                        }),
+                        is_error: true,
+                        duration: std::time::Duration::ZERO,
+                    }));
+                };
+                // Use explicit timezone param, fall back to user's channel timezone.
+                // ValidTimezone::parse filters empty/invalid strings.
+                let timezone = params
+                    .get("timezone")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("manual");
+                    .and_then(ironclaw_engine::ValidTimezone::parse)
+                    .or(context.user_timezone);
+                let cadence = match parse_cadence(cadence_str, timezone) {
+                    Ok(c) => c,
+                    Err(msg) => {
+                        return Some(Ok(ActionResult {
+                            call_id: context
+                                .current_call_id
+                                .clone()
+                                .unwrap_or_else(|| synthetic_action_call_id(action_name)),
+                            action_name: action_name.to_string(),
+                            output: serde_json::json!({"error": msg}),
+                            is_error: true,
+                            duration: std::time::Duration::ZERO,
+                        }));
+                    }
+                };
                 // notify_channels: explicit array, or default to current channel
                 let notify_channels =
                     if let Some(arr) = params.get("notify_channels").and_then(|v| v.as_array()) {
@@ -238,35 +786,64 @@ impl EffectBridgeAdapter {
                     } else {
                         vec![]
                     };
+                // Allow explicit project_id override (so agent can create
+                // missions in a specific project from any thread).
+                // Validate ownership to prevent IDOR via prompt injection.
+                let target_project =
+                    if let Some(pid_str) = params.get("project_id").and_then(|v| v.as_str()) {
+                        let store = mgr.store().clone();
+                        match resolve_project_ref(store.as_ref(), pid_str, context).await {
+                            Ok(pid) => pid,
+                            Err(e) => return Some(Err(e)),
+                        }
+                    } else {
+                        context.project_id
+                    };
+                // Validate guardrail params before creating the mission so
+                // a type mismatch doesn't leave a "ghost" mission in storage.
+                let mut guardrail_updates = post_create_update.clone().unwrap_or_default();
+                if let Err(msg) = extract_guardrails(params, &mut guardrail_updates) {
+                    return Some(Ok(ActionResult {
+                        call_id: context
+                            .current_call_id
+                            .clone()
+                            .unwrap_or_else(|| synthetic_action_call_id(action_name)),
+                        action_name: action_name.to_string(),
+                        output: serde_json::json!({"error": msg}),
+                        is_error: true,
+                        duration: std::time::Duration::ZERO,
+                    }));
+                }
+                if let Some(criteria) = params.get("success_criteria").and_then(|v| v.as_str()) {
+                    guardrail_updates.success_criteria = Some(criteria.to_string());
+                }
                 match mgr
                     .create_mission(
-                        context.project_id,
+                        target_project,
                         &context.user_id,
                         name,
                         goal,
-                        parse_cadence(cadence_str),
+                        cadence,
                         notify_channels,
                     )
                     .await
                 {
                     Ok(id) => {
-                        // Routine alias post-create update: apply the
-                        // non-execution routine fields (description,
-                        // context_paths, notify_user, cooldown, max_concurrent,
-                        // dedup_window) via update_mission. Mission_create's
-                        // signature doesn't take these directly.
-                        //
-                        // We don't have a `delete_mission` to roll back on
-                        // partial failure, so the next-best contract is to
-                        // surface the failure clearly: status flips to
-                        // `created_with_warnings` and the warning text goes
-                        // into a `warnings` array. The LLM (or downstream
-                        // code) sees the partial-success signal and can
-                        // call `update_mission` directly to retry, instead
-                        // of believing the routine was fully configured.
+                        let has_updates = guardrail_updates.cooldown_secs.is_some()
+                            || guardrail_updates.max_concurrent.is_some()
+                            || guardrail_updates.dedup_window_secs.is_some()
+                            || guardrail_updates.max_threads_per_day.is_some()
+                            || guardrail_updates.description.is_some()
+                            || guardrail_updates.context_paths.is_some()
+                            || guardrail_updates.notify_user.is_some()
+                            || guardrail_updates.notify_channels.is_some()
+                            || guardrail_updates.cadence.is_some()
+                            || guardrail_updates.success_criteria.is_some();
                         let mut warnings: Vec<String> = Vec::new();
-                        if let Some(updates) = post_create_update.clone()
-                            && let Err(e) = mgr.update_mission(id, &context.user_id, updates).await
+                        if has_updates
+                            && let Err(e) = mgr
+                                .update_mission(id, &context.user_id, guardrail_updates)
+                                .await
                         {
                             tracing::warn!(
                                 mission_id = %id,
@@ -305,14 +882,30 @@ impl EffectBridgeAdapter {
                     let list: Vec<serde_json::Value> = missions
                         .iter()
                         .map(|m| {
+                            let timezone =
+                                if let ironclaw_engine::types::mission::MissionCadence::Cron {
+                                    timezone: Some(tz),
+                                    ..
+                                } = &m.cadence
+                                {
+                                    serde_json::Value::String(tz.to_string())
+                                } else {
+                                    serde_json::Value::Null
+                                };
                             serde_json::json!({
                                 "id": m.id.to_string(),
                                 "name": m.name,
                                 "goal": m.goal,
                                 "status": format!("{:?}", m.status),
+                                "cadence": cadence_to_round_trip_string(&m.cadence),
+                                "timezone": timezone,
                                 "threads": m.thread_history.len(),
                                 "current_focus": m.current_focus,
                                 "notify_channels": m.notify_channels,
+                                "cooldown_secs": m.cooldown_secs,
+                                "max_concurrent": m.max_concurrent,
+                                "dedup_window_secs": m.dedup_window_secs,
+                                "max_threads_per_day": m.max_threads_per_day,
                             })
                         })
                         .collect();
@@ -320,6 +913,75 @@ impl EffectBridgeAdapter {
                 }
                 Err(e) => Err(e),
             },
+            "mission_get" => {
+                let id_str = params
+                    .get("id")
+                    .or_else(|| params.get("name"))
+                    .or_else(|| params.get("_args").and_then(|a| a.get(0)))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let id = uuid::Uuid::parse_str(id_str)
+                    .map(ironclaw_engine::MissionId)
+                    .map_err(|e| EngineError::Effect {
+                        reason: format!("invalid mission id: {e}"),
+                    });
+                match id {
+                    Ok(id) => match mgr.get_mission(id).await {
+                        Ok(Some(mission)) => {
+                            // Ownership check: only the mission owner can
+                            // retrieve its details (mirrors fire/pause/resume).
+                            if mission.user_id != context.user_id {
+                                return Some(Err(EngineError::Effect {
+                                    reason: format!("mission {id_str} belongs to another user"),
+                                }));
+                            }
+                            // Load recent threads (last 5) to show results
+                            let store = mgr.store();
+                            let recent_thread_ids: Vec<_> =
+                                mission.thread_history.iter().rev().take(5).collect();
+                            let mut thread_summaries = Vec::new();
+                            for tid in recent_thread_ids {
+                                if let Ok(Some(thread)) = store.load_thread(*tid).await {
+                                    let last_response = thread
+                                        .messages
+                                        .iter()
+                                        .rev()
+                                        .find(|m| m.role == ironclaw_engine::MessageRole::Assistant)
+                                        .map(|m| m.content.clone());
+                                    thread_summaries.push(serde_json::json!({
+                                        "thread_id": tid.to_string(),
+                                        "state": format!("{:?}", thread.state),
+                                        "created_at": thread.created_at.to_rfc3339(),
+                                        "completed_at": thread.completed_at.map(|t| t.to_rfc3339()),
+                                        "steps": thread.step_count,
+                                        "tokens_used": thread.total_tokens_used,
+                                        "result": last_response,
+                                    }));
+                                }
+                            }
+                            Ok(serde_json::json!({
+                                "id": mission.id.to_string(),
+                                "name": mission.name,
+                                "goal": mission.goal,
+                                "status": format!("{:?}", mission.status),
+                                "current_focus": mission.current_focus,
+                                "approach_history": mission.approach_history.iter().rev().take(10).rev().cloned().collect::<Vec<_>>(),
+                                "success_criteria": mission.success_criteria,
+                                "total_threads": mission.thread_history.len(),
+                                "cadence": format!("{:?}", mission.cadence),
+                                "last_fire_at": mission.last_fire_at.map(|t| t.to_rfc3339()),
+                                "next_fire_at": mission.next_fire_at.map(|t| t.to_rfc3339()),
+                                "recent_threads": thread_summaries,
+                            }))
+                        }
+                        Ok(None) => Err(EngineError::Effect {
+                            reason: format!("mission not found: {id_str}"),
+                        }),
+                        Err(e) => Err(e),
+                    },
+                    Err(e) => Err(e),
+                }
+            }
             "mission_fire" => {
                 let id_str = params
                     .get("id")
@@ -370,7 +1032,7 @@ impl EffectBridgeAdapter {
                     Err(e) => Err(e),
                 }
             }
-            "mission_delete" => {
+            "mission_complete" => {
                 let id_str = params
                     .get("id")
                     .or_else(|| params.get("name")) // routine_delete uses "name" param
@@ -384,7 +1046,7 @@ impl EffectBridgeAdapter {
                     });
                 match id {
                     Ok(id) => match mgr.complete_mission(id).await {
-                        Ok(()) => Ok(serde_json::json!({"status": "deleted"})),
+                        Ok(()) => Ok(serde_json::json!({"status": "completed"})),
                         Err(e) => Err(e),
                     },
                     Err(e) => Err(e),
@@ -411,7 +1073,25 @@ impl EffectBridgeAdapter {
                             updates.goal = Some(goal.to_string());
                         }
                         if let Some(cadence) = params.get("cadence").and_then(|v| v.as_str()) {
-                            updates.cadence = Some(parse_cadence(cadence));
+                            let tz = params
+                                .get("timezone")
+                                .and_then(|v| v.as_str())
+                                .and_then(ironclaw_engine::ValidTimezone::parse)
+                                .or(context.user_timezone);
+                            match parse_cadence(cadence, tz) {
+                                Ok(c) => updates.cadence = Some(c),
+                                Err(msg) => {
+                                    return Some(Ok(ActionResult {
+                                        call_id: context.current_call_id.clone().unwrap_or_else(
+                                            || synthetic_action_call_id(action_name),
+                                        ),
+                                        action_name: action_name.to_string(),
+                                        output: serde_json::json!({"error": msg}),
+                                        is_error: true,
+                                        duration: std::time::Duration::ZERO,
+                                    }));
+                                }
+                            }
                         }
                         if let Some(arr) = params.get("notify_channels").and_then(|v| v.as_array())
                         {
@@ -421,10 +1101,17 @@ impl EffectBridgeAdapter {
                                     .collect(),
                             );
                         }
-                        if let Some(max) =
-                            params.get("max_threads_per_day").and_then(|v| v.as_u64())
-                        {
-                            updates.max_threads_per_day = Some(max as u32);
+                        if let Err(msg) = extract_guardrails(params, &mut updates) {
+                            return Some(Ok(ActionResult {
+                                call_id: context
+                                    .current_call_id
+                                    .clone()
+                                    .unwrap_or_else(|| synthetic_action_call_id(action_name)),
+                                action_name: action_name.to_string(),
+                                output: serde_json::json!({"error": msg}),
+                                is_error: true,
+                                duration: std::time::Duration::ZERO,
+                            }));
                         }
                         if let Some(criteria) =
                             params.get("success_criteria").and_then(|v| v.as_str())
@@ -498,14 +1185,23 @@ impl EffectBridgeAdapter {
         &self,
         action_name: &str,
         parameters: serde_json::Value,
-        _lease: &CapabilityLease,
+        lease: &CapabilityLease,
         context: &ThreadExecutionContext,
         approval_already_granted: bool,
     ) -> Result<ActionResult, EngineError> {
         let start = Instant::now();
+        let canonical_action_name = context
+            .available_actions_snapshot
+            .as_ref()
+            .and_then(|actions| ActionDiscovery::resolve(actions.as_ref(), action_name))
+            .map(|action| action.name.as_str())
+            .unwrap_or(action_name);
 
-        let resolved_name = self.tools.resolve_name(action_name).await;
-        let mut lookup_name = resolved_name.as_deref().unwrap_or(action_name).to_string();
+        let resolved_name = self.tools.resolve_name(canonical_action_name).await;
+        let mut lookup_name = resolved_name
+            .as_deref()
+            .unwrap_or(canonical_action_name)
+            .to_string();
 
         // ── Per-step call limit (prevent amplification loops) ──
         const MAX_CALLS_PER_STEP: u32 = 50;
@@ -522,13 +1218,28 @@ impl EffectBridgeAdapter {
         }
 
         if let Some(result) = self
-            .handle_mission_call(action_name, &parameters, context)
+            .handle_mission_call(canonical_action_name, &parameters, context)
             .await
         {
             return result.map(|mut r| {
                 r.duration = start.elapsed();
                 r
             });
+        }
+
+        if canonical_action_name == "tool_info" {
+            return self
+                .execute_tool_info_from_snapshot(&ToolInfoSnapshotContext {
+                    action_name,
+                    canonical_action_name,
+                    lookup_name: &lookup_name,
+                    parameters: &parameters,
+                    lease,
+                    context,
+                    approval_already_granted,
+                    started_at: &start,
+                })
+                .await;
         }
 
         if is_v1_only_tool(&lookup_name) {
@@ -554,16 +1265,14 @@ impl EffectBridgeAdapter {
         if resolved_name.is_none()
             && let Some(auth_mgr) = self.auth_manager.read().await.as_ref()
             && let Some(latent_execution) = auth_mgr
-                .execute_latent_extension_action(action_name, &context.user_id)
+                .execute_latent_extension_action(canonical_action_name, &context.user_id)
                 .await
         {
             match latent_execution {
-                Ok(crate::bridge::auth_manager::LatentActionExecution::RetryRegisteredAction {
-                    resolved_action,
-                }) => {
+                Ok(LatentActionExecution::RetryRegisteredAction { resolved_action }) => {
                     lookup_name = resolved_action;
                 }
-                Ok(crate::bridge::auth_manager::LatentActionExecution::ProviderReady {
+                Ok(LatentActionExecution::ProviderReady {
                     provider_extension,
                     available_actions,
                 }) => {
@@ -582,7 +1291,7 @@ impl EffectBridgeAdapter {
                         duration: start.elapsed(),
                     });
                 }
-                Ok(crate::bridge::auth_manager::LatentActionExecution::NeedsAuth {
+                Ok(LatentActionExecution::NeedsAuth {
                     credential_name,
                     instructions,
                     auth_url,
@@ -595,12 +1304,13 @@ impl EffectBridgeAdapter {
                         ironclaw_engine::ResumeKind::Authentication {
                             credential_name,
                             instructions,
-                            auth_url,
+                            auth_url: sanitize_auth_url(auth_url.as_deref()),
                         },
                         None,
+                        Some(lease.clone()),
                     ));
                 }
-                Ok(crate::bridge::auth_manager::LatentActionExecution::NeedsSetup { message }) => {
+                Ok(LatentActionExecution::NeedsSetup { message }) => {
                     return Err(EngineError::Effect { reason: message });
                 }
                 Err(err) => {
@@ -610,6 +1320,12 @@ impl EffectBridgeAdapter {
                 }
             }
         }
+
+        let resolved_tool = self.tools.get_resolved(&lookup_name).await;
+        let user_permission = self
+            .resolved_user_permission_for_tool(&lookup_name, context)
+            .await;
+        Self::ensure_tool_not_disabled(action_name, user_permission)?;
 
         if let Some(tool) = self.tools.get(&lookup_name).await
             && let Some(rl_config) = tool.rate_limit_config()
@@ -667,9 +1383,10 @@ impl EffectBridgeAdapter {
                             instructions: cred.setup_instructions.clone().unwrap_or_else(|| {
                                 format!("Provide your {} token", cred.credential_name)
                             }),
-                            auth_url: cred.auth_url.clone(),
+                            auth_url: sanitize_auth_url(cred.auth_url.as_deref()),
                         },
                         None,
+                        Some(lease.clone()),
                     ));
                 }
                 AuthCheckResult::Ready => {
@@ -682,7 +1399,6 @@ impl EffectBridgeAdapter {
         if let Some(provider_extension) = self.tools.provider_extension_for_tool(&lookup_name).await
             && let Some(auth_mgr) = self.auth_manager.read().await.as_ref()
         {
-            use crate::bridge::auth_manager::ToolReadiness;
             match auth_mgr
                 .check_tool_readiness(&provider_extension, &context.user_id)
                 .await
@@ -708,9 +1424,10 @@ impl EffectBridgeAdapter {
                             instructions: instructions.unwrap_or_else(|| {
                                 format!("Authenticate '{}' to continue.", provider_extension)
                             }),
-                            auth_url,
+                            auth_url: sanitize_auth_url(auth_url.as_deref()),
                         },
                         None,
+                        Some(lease.clone()),
                     ));
                 }
                 ToolReadiness::NeedsSetup { message } => {
@@ -725,64 +1442,21 @@ impl EffectBridgeAdapter {
             }
         }
 
-        if let Some((_, tool)) = self.tools.get_resolved(&lookup_name).await {
-            let user_permission = if let Some(db) = self.tools.database() {
-                match db.get_all_settings(&context.user_id).await {
-                    Ok(db_map) => {
-                        let settings = crate::settings::Settings::from_db_map(&db_map);
-                        Some(effective_permission(
-                            &lookup_name,
-                            &settings.tool_permissions,
-                        ))
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            user_id = %context.user_id,
-                            tool = %lookup_name,
-                            error = %error,
-                            "Failed to load tool permission overrides for engine v2"
-                        );
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-
-            if matches!(user_permission, Some(PermissionState::Disabled)) {
-                return Err(EngineError::LeaseDenied {
-                    reason: format!("Tool '{}' is disabled for this user.", action_name),
-                });
-            }
-
-            let requirement = tool.requires_approval(&parameters);
-            match requirement {
-                ApprovalRequirement::Always => {
-                    return Err(EngineError::LeaseDenied {
-                        reason: format!(
-                            "Tool '{}' requires explicit approval for this operation. \
-                             This action cannot be auto-approved.",
-                            action_name
-                        ),
-                    });
-                }
-                ApprovalRequirement::UnlessAutoApproved => {
-                    let is_approved = self.auto_approve_tools
-                        || self.auto_approved.read().await.contains(&lookup_name)
-                        || matches!(user_permission, Some(PermissionState::AlwaysAllow));
-                    if !is_approved && !approval_already_granted {
-                        return Err(Self::gate_paused(
-                            "approval",
-                            action_name,
-                            context.current_call_id.as_deref(),
-                            parameters,
-                            ironclaw_engine::ResumeKind::Approval { allow_always: true },
-                            None,
-                        ));
-                    }
-                }
-                ApprovalRequirement::Never => {}
-            }
+        if let Some((_, tool)) = resolved_tool.as_ref() {
+            self.enforce_tool_approval(
+                &ToolApprovalContext {
+                    action_name,
+                    lookup_name: &lookup_name,
+                    parameters: &parameters,
+                    lease,
+                    context,
+                    approval_already_granted,
+                },
+                tool.as_ref(),
+                user_permission,
+                true,
+            )
+            .await?;
         }
 
         let redacted_params = if let Some(tool) = self.tools.get(&lookup_name).await {
@@ -827,14 +1501,90 @@ impl EffectBridgeAdapter {
             job_ctx.http_interceptor = Some(Arc::clone(interceptor));
         }
 
-        let result = crate::tools::execute::execute_tool_with_safety(
-            &self.tools,
-            &self.safety,
-            &lookup_name,
-            parameters.clone(),
-            &job_ctx,
-        )
-        .await;
+        // ── Sandbox interception (engine v2 Phase 8) ──
+        //
+        // For sandbox-eligible tools (`file_read`, `file_write`, `list_dir`,
+        // `apply_patch`, `shell`), check whether the call's path argument
+        // resolves into a workspace mount. If so, dispatch through the mount
+        // backend (filesystem passthrough today, containerized later) instead
+        // of running the host tool. This is the single decision point that
+        // routes between host and sandbox execution; everything outside this
+        // block runs unchanged.
+        // Pre-intercept safety validation: sandbox-dispatched calls must
+        // pass the same parameter checks as host-dispatched calls (rate
+        // limiting is skipped because the backend has its own limits, but
+        // prompt-injection / param validation must run).
+        let mounts_snapshot = self.workspace_mounts.read().await.as_ref().map(Arc::clone);
+        let sandbox_result = if let Some(mounts) = mounts_snapshot {
+            // Normalize parameters the same way the host path does
+            // (`execute_tool_with_safety` → `prepare_tool_params`) so
+            // validation sees consistent types (e.g. string "true" → bool).
+            let normalized = if let Some(tool) = self.tools.get(&lookup_name).await {
+                crate::tools::prepare_tool_params(tool.as_ref(), &parameters)
+            } else {
+                parameters.clone()
+            };
+            let validation = self.safety.validator().validate_tool_params(&normalized);
+            if !validation.is_valid {
+                let details = validation
+                    .errors
+                    .iter()
+                    .map(|e| format!("{}: {}", e.field, e.message))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                Some(Err(crate::error::Error::from(
+                    crate::error::ToolError::InvalidParameters {
+                        name: lookup_name.clone(),
+                        reason: format!("Invalid tool parameters: {details}"),
+                    },
+                )))
+            } else {
+                match maybe_intercept(&lookup_name, &normalized, context.project_id, &mounts).await
+                {
+                    Ok(InterceptOutcome::Handled(s)) => Some(Ok(s)),
+                    Ok(InterceptOutcome::FellThrough) => None,
+                    Err(MountError::NotFound { path }) => Some(Err(crate::error::Error::from(
+                        crate::error::ToolError::ExecutionFailed {
+                            name: lookup_name.clone(),
+                            reason: format!("sandbox: not found: {path}"),
+                        },
+                    ))),
+                    Err(MountError::PermissionDenied { path }) => Some(Err(
+                        crate::error::Error::from(crate::error::ToolError::ExecutionFailed {
+                            name: lookup_name.clone(),
+                            reason: format!("sandbox: permission denied: {path}"),
+                        }),
+                    )),
+                    Err(MountError::InvalidPath { path, reason }) => Some(Err(
+                        crate::error::Error::from(crate::error::ToolError::InvalidParameters {
+                            name: lookup_name.clone(),
+                            reason: format!("sandbox: invalid path '{path}': {reason}"),
+                        }),
+                    )),
+                    Err(e) => Some(Err(crate::error::Error::from(
+                        crate::error::ToolError::ExecutionFailed {
+                            name: lookup_name.clone(),
+                            reason: format!("sandbox: {e}"),
+                        },
+                    ))),
+                }
+            }
+        } else {
+            None
+        };
+
+        let result = if let Some(intercepted) = sandbox_result {
+            intercepted
+        } else {
+            crate::tools::execute::execute_tool_with_safety(
+                &self.tools,
+                &self.safety,
+                &lookup_name,
+                parameters.clone(),
+                &job_ctx,
+            )
+            .await
+        };
 
         let duration = start.elapsed();
 
@@ -845,12 +1595,16 @@ impl EffectBridgeAdapter {
                 let output_value = serde_json::from_str::<serde_json::Value>(&output)
                     .unwrap_or(serde_json::Value::String(wrapped));
 
-                if (lookup_name == "tool_activate" || lookup_name == "tool_auth")
+                if (lookup_name == "tool_activate"
+                    || lookup_name == "tool_auth"
+                    || lookup_name == "tool_install"
+                    || lookup_name == "tool-install")
                     && let Some(err) = Self::auth_gate_from_extension_result(
                         action_name,
                         parameters.clone(),
                         context,
                         &output_value,
+                        lease,
                     )
                 {
                     return Err(err);
@@ -860,7 +1614,6 @@ impl EffectBridgeAdapter {
                     && let Some(auth_mgr) = self.auth_manager.read().await.as_ref()
                     && let Some(ext_name) = output_value.get("name").and_then(|v| v.as_str())
                 {
-                    use crate::bridge::auth_manager::ToolReadiness;
                     match auth_mgr
                         .check_tool_readiness(ext_name, &context.user_id)
                         .await
@@ -883,11 +1636,14 @@ impl EffectBridgeAdapter {
                                 ironclaw_engine::ResumeKind::Authentication {
                                     credential_name: credential_name.clone(),
                                     instructions: instructions.unwrap_or_else(|| {
-                                        auth_mgr.get_setup_instructions_or_default(&credential_name)
+                                        auth_mgr.get_setup_instructions_or_default(
+                                            credential_name.as_str(),
+                                        )
                                     }),
-                                    auth_url,
+                                    auth_url: sanitize_auth_url(auth_url.as_deref()),
                                 },
                                 Some(output_value),
+                                None,
                             ));
                         }
                         ToolReadiness::NeedsSetup { ref message } => {
@@ -926,6 +1682,31 @@ impl EffectBridgeAdapter {
                     }
                 }
 
+                if lookup_name == "skill_install" {
+                    self.sync_skill_install_result(&output_value, context.project_id)
+                        .await?;
+                }
+
+                // Auto-register a Project entity when a write lands under
+                // `projects/<slug>/...`. Splice the resulting `project_id`
+                // into the tool output so subsequent `mission_create` or
+                // project-aware tool calls can reference it via template
+                // refs (`{{call-N.project_id}}`) without the model needing
+                // to guess a UUID.
+                let mut output_value = output_value;
+                if (lookup_name == "memory_write" || lookup_name == "memory-write")
+                    && let Some(target) = parameters.get("target").and_then(|v| v.as_str())
+                    && let Some(project_id) = self
+                        .ensure_project_for_memory_write(target, &context.user_id)
+                        .await?
+                    && let Some(obj) = output_value.as_object_mut()
+                {
+                    obj.insert(
+                        "project_id".to_string(),
+                        serde_json::Value::String(project_id.0.to_string()),
+                    );
+                }
+
                 Ok(ActionResult {
                     call_id: context
                         .current_call_id
@@ -955,11 +1736,14 @@ impl EffectBridgeAdapter {
                         context.current_call_id.as_deref(),
                         parameters,
                         ironclaw_engine::ResumeKind::Authentication {
-                            credential_name: cred_name.clone(),
+                            credential_name: ironclaw_common::CredentialName::from_trusted(
+                                cred_name.clone(),
+                            ),
                             instructions: format!("Provide your {} token", cred_name),
                             auth_url: None,
                         },
                         None,
+                        Some(lease.clone()),
                     ));
                 }
 
@@ -998,6 +1782,34 @@ impl EffectBridgeAdapter {
     }
 }
 
+fn extension_name_matches(extension_name: &str, requested_name: &str) -> bool {
+    let requested_candidates = extension_name_candidates(requested_name)
+        .into_iter()
+        .collect::<HashSet<_>>();
+    extension_name_candidates(extension_name)
+        .into_iter()
+        .any(|candidate| requested_candidates.contains(&candidate))
+}
+
+fn matching_extension_requires_install_approval(
+    requested_name: &str,
+    extensions: &[InstalledExtension],
+) -> Option<bool> {
+    let mut saw_match = false;
+
+    for extension in extensions {
+        if !extension_name_matches(&extension.name, requested_name) {
+            continue;
+        }
+        if extension.installed {
+            return Some(false);
+        }
+        saw_match = true;
+    }
+
+    saw_match.then_some(true)
+}
+
 #[async_trait::async_trait]
 impl EffectExecutor for EffectBridgeAdapter {
     async fn execute_action(
@@ -1013,96 +1825,342 @@ impl EffectExecutor for EffectBridgeAdapter {
 
     async fn available_actions(
         &self,
-        _leases: &[CapabilityLease],
+        leases: &[CapabilityLease],
+        context: &ThreadExecutionContext,
     ) -> Result<Vec<ActionDef>, EngineError> {
-        let tool_defs = self.tools.tool_definitions().await;
+        Ok(self
+            .available_action_inventory(leases, context)
+            .await?
+            .inline)
+    }
 
-        // Build action defs, excluding v1-only tools and v1 auth tools
-        let mut actions = Vec::with_capacity(tool_defs.len());
-        for td in tool_defs {
-            // Skip tools that can't work in engine v2
-            if is_v1_only_tool(&td.name) {
-                continue;
+    async fn available_action_inventory(
+        &self,
+        leases: &[CapabilityLease],
+        context: &ThreadExecutionContext,
+    ) -> Result<ActionInventory, EngineError> {
+        let auth_manager = self.auth_manager.read().await.clone();
+        let capability_registry = self.capability_registry.read().await.clone();
+        let extensions = self
+            .fetch_extension_map(auth_manager.as_deref(), context)
+            .await;
+        ActionProjector::project_inventory(
+            self.tools.as_ref(),
+            auth_manager.as_deref(),
+            capability_registry,
+            leases,
+            context,
+            extensions.as_ref(),
+        )
+        .await
+    }
+
+    async fn available_capabilities(
+        &self,
+        leases: &[CapabilityLease],
+        context: &ThreadExecutionContext,
+    ) -> Result<Vec<CapabilitySummary>, EngineError> {
+        let auth_manager = self.auth_manager.read().await.clone();
+        let extensions = self
+            .fetch_extension_list(auth_manager.as_deref(), context)
+            .await;
+        CapabilityProjector::project(auth_manager.as_deref(), leases, context, extensions).await
+    }
+}
+
+/// Whole-word immediate-execution markers (word-set membership).
+const IMMEDIATE_WORDS: &[&str] = &["now", "immediate", "immediately", "asap"];
+
+/// Multi-word immediate-execution phrases (substring match on lowered text).
+const IMMEDIATE_PHRASES: &[&str] = &[
+    "right away",
+    "right now",
+    "at once",
+    "do it now",
+    "do this now",
+];
+
+/// Prefix stems for scheduling intent so morphological variants match:
+/// "monitor" matches monitoring/monitors, "routin" matches routine/routinely, etc.
+const SCHEDULE_STEMS: &[&str] = &[
+    "automat",  // automate, automation, automated, automatically
+    "cron",     // cron
+    "daily",    // daily
+    "hourly",   // hourly
+    "mission",  // mission, missions
+    "monitor",  // monitor, monitoring, monitors
+    "monthly",  // monthly
+    "periodic", // periodic, periodically
+    "recur",    // recurring, recurrence, recurs
+    "routin",   // routine, routines, routinely
+    "schedul",  // schedule, scheduled, scheduling
+    "weekly",   // weekly
+];
+
+/// Multi-word scheduling-intent phrases (substring match on lowered text).
+const SCHEDULE_PHRASES: &[&str] = &[
+    "every day",
+    "every morning",
+    "every evening",
+    "every week",
+    "every month",
+    "every hour",
+    "from now on",
+    "long-running",
+];
+
+fn should_reject_immediate_mission_create(context: &ThreadExecutionContext) -> bool {
+    if context.thread_type != ironclaw_engine::types::thread::ThreadType::Foreground {
+        return false;
+    }
+
+    let Some(goal) = context.thread_goal.as_deref() else {
+        return false;
+    };
+
+    let lower = goal.to_ascii_lowercase();
+    let words = word_set(&lower);
+
+    contains_immediate_execution_marker(&lower, &words)
+        && !contains_scheduling_intent(&lower, &words)
+}
+
+fn contains_immediate_execution_marker(lower: &str, words: &HashSet<&str>) -> bool {
+    IMMEDIATE_WORDS.iter().any(|w| words.contains(*w))
+        || IMMEDIATE_PHRASES.iter().any(|p| lower.contains(*p))
+}
+
+fn contains_scheduling_intent(lower: &str, words: &HashSet<&str>) -> bool {
+    SCHEDULE_STEMS
+        .iter()
+        .any(|stem| words.iter().any(|w| w.starts_with(stem)))
+        || SCHEDULE_PHRASES.iter().any(|p| lower.contains(*p))
+}
+
+fn word_set(text: &str) -> HashSet<&str> {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+/// Strictly extract a u64 from a JSON value, rejecting wrong types.
+fn strict_u64(params: &serde_json::Value, key: &str) -> Result<Option<u64>, String> {
+    match params.get(key) {
+        None => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| format!("'{key}' must be an integer, got {v}")),
+    }
+}
+
+/// Extract guardrail overrides from params, failing on type mismatches.
+fn extract_guardrails(
+    params: &serde_json::Value,
+    base: &mut ironclaw_engine::MissionUpdate,
+) -> Result<(), String> {
+    if let Some(v) = strict_u64(params, "cooldown_secs")? {
+        base.cooldown_secs = Some(v);
+    }
+    if let Some(v) = strict_u64(params, "max_concurrent")? {
+        base.max_concurrent = Some(
+            u32::try_from(v).map_err(|_| format!("'max_concurrent' value {v} exceeds u32 max"))?,
+        );
+    }
+    if let Some(v) = strict_u64(params, "dedup_window_secs")? {
+        base.dedup_window_secs = Some(v);
+    }
+    if let Some(v) = strict_u64(params, "max_threads_per_day")? {
+        base.max_threads_per_day = Some(
+            u32::try_from(v)
+                .map_err(|_| format!("'max_threads_per_day' value {v} exceeds u32 max"))?,
+        );
+    }
+    Ok(())
+}
+
+/// Extract the project slug from a `memory_write` target path.
+///
+/// A "project write" is anything under `projects/<slug>/...` where slug
+/// is non-empty, contains no path separators, and isn't a dotfile that
+/// would confuse the workspace (e.g. `projects/./foo`). Returns the raw
+/// slug exactly as it appears in the path — the caller is responsible
+/// for lowercasing / normalizing if needed.
+///
+/// Non-project writes (paths outside `projects/`, or degenerate
+/// `projects/foo` with no file segment) return `None`.
+fn extract_project_slug_from_target(target: &str) -> Option<&str> {
+    let rest = target.strip_prefix("projects/")?;
+    let (slug, remainder) = rest.split_once('/')?;
+    if slug.is_empty() || slug == "." || slug == ".." || slug.starts_with('.') {
+        return None;
+    }
+    // `projects/<slug>/` with nothing after (trailing slash) doesn't
+    // identify a concrete file write. `memory_write` rejects these
+    // anyway, but being explicit avoids creating a project for a
+    // degenerate input.
+    if remainder.is_empty() {
+        return None;
+    }
+    Some(slug)
+}
+
+/// Resolve a user-provided project reference (UUID, slug, or name) to a
+/// `ProjectId`. Enforces ownership when the reference is a UUID
+/// belonging to a different project than `context.project_id`.
+///
+/// Used by `mission_create`'s `project_id` param and any future tool
+/// that takes a project reference from the model.
+async fn resolve_project_ref(
+    store: &dyn Store,
+    pid_str: &str,
+    context: &ThreadExecutionContext,
+) -> Result<ironclaw_engine::ProjectId, EngineError> {
+    match uuid::Uuid::parse_str(pid_str) {
+        Ok(uuid) => {
+            let pid = ironclaw_engine::ProjectId(uuid);
+            if pid == context.project_id {
+                return Ok(pid);
             }
-
-            // Skip v1 auth management tools — auth is kernel-level in v2
-            if is_v1_auth_tool(&td.name) {
-                continue;
+            match store.load_project(pid).await {
+                Ok(Some(p)) if p.is_owned_by(&context.user_id) => Ok(pid),
+                Ok(Some(_)) => Err(EngineError::Effect {
+                    reason: "project_id does not belong to current user".to_string(),
+                }),
+                Ok(None) => Err(EngineError::Effect {
+                    reason: format!("Project not found: {pid_str}"),
+                }),
+                Err(e) => Err(EngineError::Effect {
+                    reason: format!("Failed to validate project ownership: {e}"),
+                }),
             }
-
-            let python_name = td.name.replace('-', "_");
-
-            actions.push(ActionDef {
-                name: python_name,
-                description: td.description,
-                parameters_schema: td.parameters,
-                effects: vec![],
-                // Approval is enforced at execute-time inside this adapter so
-                // thread-scoped one-shot approvals and auth-aware bypasses can
-                // participate. Advertising approval here would cause the engine
-                // policy preflight to interrupt before the adapter can apply
-                // those runtime checks.
-                requires_approval: false,
+        }
+        Err(_) => {
+            let projects =
+                store
+                    .list_projects(&context.user_id)
+                    .await
+                    .map_err(|e| EngineError::Effect {
+                        reason: format!("Failed to resolve project slug '{pid_str}': {e}"),
+                    })?;
+            let needle = pid_str.to_lowercase();
+            let matched = projects.iter().find(|p| {
+                let name_lower = p.name.to_lowercase();
+                let name_slug = ironclaw_engine::types::slugify_simple(&p.name);
+                name_lower == needle || name_slug == needle
             });
-        }
-
-        if let Some(auth_mgr) = self.auth_manager.read().await.as_ref() {
-            for latent in auth_mgr.latent_extension_actions().await {
-                if actions
-                    .iter()
-                    .any(|action| action.name == latent.action_name)
-                {
-                    continue;
-                }
-                actions.push(ActionDef {
-                    name: latent.action_name,
-                    description: latent.description,
-                    parameters_schema: latent.parameters_schema,
-                    effects: vec![],
-                    requires_approval: false,
-                });
+            match matched {
+                Some(p) => Ok(p.id),
+                None => Err(EngineError::Effect {
+                    reason: format!(
+                        "No project matching '{pid_str}' found for current user. \
+                         Use a project name, slug, or UUID."
+                    ),
+                }),
             }
         }
-
-        actions.sort_by(|a, b| a.name.cmp(&b.name));
-
-        Ok(actions)
     }
 }
 
 /// Parse a cadence string into a MissionCadence.
-fn parse_cadence(s: &str) -> ironclaw_engine::types::mission::MissionCadence {
+///
+/// When cadence is a cron expression, `timezone` is used as the scheduling
+/// timezone. This is typically the user's channel timezone, auto-injected
+/// from `ThreadExecutionContext::user_timezone`.
+///
+/// Returns an error for unrecognized cadence strings so the LLM can correct
+/// the call instead of silently falling back to Manual.
+fn parse_cadence(
+    s: &str,
+    timezone: Option<ironclaw_engine::ValidTimezone>,
+) -> Result<ironclaw_engine::types::mission::MissionCadence, String> {
     use ironclaw_engine::types::mission::MissionCadence;
-    let trimmed = s.trim().to_lowercase();
-    if trimmed == "manual" {
-        MissionCadence::Manual
-    } else if trimmed.contains(' ') && trimmed.split_whitespace().count() >= 5 {
-        // Looks like a cron expression
-        MissionCadence::Cron {
+    let trimmed = s.trim();
+    let lower = trimmed.to_lowercase();
+    // Check explicit prefixes BEFORE the cron heuristic. Otherwise an input
+    // like `event: a b c d e` matches `split_whitespace().count() >= 5` and
+    // is silently misclassified as a cron expression — the user said
+    // "event:..." and gets a Cron cadence with a parse error downstream.
+    if lower == "manual" {
+        Ok(MissionCadence::Manual)
+    } else if lower.starts_with("event:") {
+        // Extract from original (not lowercased) to preserve case in regex patterns.
+        let rest = trimmed["event:".len()..].trim();
+        // Expected format: event:<channel>:<pattern>
+        // Split on first ':' after the channel name.
+        let (channel, pattern) = match rest.split_once(':') {
+            Some((ch, pat)) if !ch.trim().is_empty() && !pat.trim().is_empty() => {
+                (ch.trim(), pat.trim())
+            }
+            _ => {
+                return Err(concat!(
+                    "event cadence requires 'event:<channel>:<pattern>', ",
+                    "e.g. 'event:telegram:.*' to match all messages on the telegram channel"
+                )
+                .to_string());
+            }
+        };
+        // Validate with the same size limit the engine uses at runtime.
+        if let Err(e) = regex::RegexBuilder::new(pattern)
+            .size_limit(ironclaw_engine::runtime::mission::MAX_EVENT_REGEX_SIZE)
+            .build()
+        {
+            return Err(format!(
+                "event pattern '{pattern}' is not a valid regex: {e}"
+            ));
+        }
+        Ok(MissionCadence::OnEvent {
+            event_pattern: pattern.to_string(),
+            channel: if channel == "*" {
+                None
+            } else {
+                Some(channel.to_string())
+            },
+        })
+    } else if lower.starts_with("system_event:") {
+        // Round-trip format emitted by cadence_to_round_trip_string():
+        //   system_event:<source>/<event_type>
+        let rest = trimmed["system_event:".len()..].trim();
+        let (source, event_type) = match rest.split_once('/') {
+            Some((s, e)) if !s.trim().is_empty() && !e.trim().is_empty() => {
+                (s.trim().to_string(), e.trim().to_string())
+            }
+            _ => {
+                return Err(
+                    "system_event cadence requires 'system_event:<source>/<event_type>', \
+                     e.g. 'system_event:self-improvement/thread_completed'"
+                        .to_string(),
+                );
+            }
+        };
+        Ok(MissionCadence::OnSystemEvent {
+            source,
+            event_type,
+            filters: std::collections::HashMap::new(),
+        })
+    } else if lower.starts_with("webhook:") {
+        // Extract from original to preserve case in webhook paths.
+        let path = trimmed["webhook:".len()..].trim().to_string();
+        if path.is_empty() {
+            return Err(
+                "webhook cadence requires a path after 'webhook:', e.g. 'webhook:github'"
+                    .to_string(),
+            );
+        }
+        Ok(MissionCadence::Webhook { path, secret: None })
+    } else if lower.split_whitespace().count() >= 5 {
+        // Looks like a cron expression (5+ fields). `split_whitespace` handles
+        // tabs and newlines, not just spaces.
+        Ok(MissionCadence::Cron {
             expression: s.trim().to_string(),
-            timezone: None,
-        }
-    } else if trimmed.starts_with("event:") {
-        MissionCadence::OnEvent {
-            event_pattern: trimmed
-                .strip_prefix("event:")
-                .unwrap_or("")
-                .trim()
-                .to_string(),
-            channel: None,
-        }
-    } else if trimmed.starts_with("webhook:") {
-        MissionCadence::Webhook {
-            path: trimmed
-                .strip_prefix("webhook:")
-                .unwrap_or("")
-                .trim()
-                .to_string(),
-            secret: None,
-        }
+            timezone,
+        })
     } else {
-        // Default to manual if unrecognized
-        MissionCadence::Manual
+        Err(format!(
+            "unrecognized cadence '{s}'. Use 'manual', a cron expression \
+             (e.g. '0 9 * * *'), 'event:<channel>:<pattern>' \
+             (e.g. 'event:telegram:.*'), or 'webhook:<path>'"
+        ))
     }
 }
 
@@ -1273,7 +2331,13 @@ fn routine_to_mission_alias(
         }),
 
         "routine_delete" => Some(RoutineMissionAlias {
-            mission_action: "mission_delete",
+            mission_action: "mission_complete",
+            mission_params: params.clone(),
+            post_create_update: None,
+        }),
+
+        "routine_history" => Some(RoutineMissionAlias {
+            mission_action: "mission_get",
             mission_params: params.clone(),
             post_create_update: None,
         }),
@@ -1385,10 +2449,15 @@ fn parse_routine_request(
                 .and_then(|v| v.as_str())
                 .unwrap_or("0 0 * * * *")
                 .to_string(),
+            // Validate the timezone string at the bridge boundary so an
+            // invalid value never enters the engine. An empty/invalid value
+            // is silently dropped (None) — the engine then resolves the
+            // schedule in UTC, matching the previous string-based behaviour
+            // for unknown zones.
             timezone: request
                 .and_then(|r| r.get("timezone"))
                 .and_then(|v| v.as_str())
-                .map(String::from),
+                .and_then(ironclaw_common::ValidTimezone::parse),
         },
         "message_event" => MissionCadence::OnEvent {
             event_pattern: request
@@ -1450,7 +2519,13 @@ fn cadence_to_round_trip_string(
     use ironclaw_engine::types::mission::MissionCadence;
     match cadence {
         MissionCadence::Cron { expression, .. } => expression.clone(),
-        MissionCadence::OnEvent { event_pattern, .. } => format!("event:{event_pattern}"),
+        MissionCadence::OnEvent {
+            event_pattern,
+            channel,
+        } => match channel {
+            Some(ch) => format!("event:{ch}:{event_pattern}"),
+            None => format!("event:*:{event_pattern}"),
+        },
         MissionCadence::OnSystemEvent {
             source, event_type, ..
         } => {
@@ -1479,7 +2554,7 @@ fn extract_credential_name(error_msg: &str) -> Option<String> {
     None
 }
 
-fn is_v1_only_tool(name: &str) -> bool {
+pub(crate) fn is_v1_only_tool(name: &str) -> bool {
     // routine_* tools are surfaced in v2 too, but are intercepted by
     // `handle_mission_call`'s routine alias path *before* this check fires —
     // they get translated into mission_* dispatches via the existing
@@ -1500,7 +2575,7 @@ fn is_v1_only_tool(name: &str) -> bool {
 
 /// Auth management tools from v1 that are now kernel-internal in v2.
 /// The LLM should not see or call these — auth is handled automatically.
-fn is_v1_auth_tool(name: &str) -> bool {
+pub(crate) fn is_v1_auth_tool(name: &str) -> bool {
     matches!(name, "tool_auth" | "tool-auth")
 }
 
@@ -1508,6 +2583,7 @@ fn is_v1_auth_tool(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::context::JobContext;
+    use crate::extensions::ExtensionKind;
     use crate::tools::{Tool, ToolError, ToolOutput};
     use async_trait::async_trait;
 
@@ -1522,6 +2598,24 @@ mod tests {
             Arc::new(SafetyLayer::new(&config)),
             Arc::new(HookRegistry::default()),
         )
+    }
+
+    fn installed_extension(name: &str) -> InstalledExtension {
+        InstalledExtension {
+            name: name.to_string(),
+            kind: ExtensionKind::McpServer,
+            display_name: Some(name.to_string()),
+            description: Some(format!("{name} integration")),
+            url: None,
+            authenticated: true,
+            active: true,
+            tools: Vec::new(),
+            needs_setup: false,
+            has_auth: true,
+            installed: true,
+            activation_error: None,
+            version: None,
+        }
     }
 
     /// Verify that reset_call_count resets the counter to zero,
@@ -1625,12 +2719,34 @@ mod tests {
             )
             .await;
 
-        assert!(matches!(result, Err(EngineError::LeaseDenied { .. })));
+        match result {
+            Err(EngineError::GatePaused {
+                gate_name,
+                resume_kind,
+                ..
+            }) => {
+                assert_eq!(gate_name, "approval");
+                match *resume_kind {
+                    ironclaw_engine::ResumeKind::Approval { allow_always } => {
+                        assert!(
+                            !allow_always,
+                            "Always gate must set allow_always=false to prevent sticky session approval"
+                        );
+                    }
+                    other => panic!("expected Approval resume kind, got {other:?}"),
+                }
+            }
+            other => {
+                panic!("expected GatePaused for Always-approval (not LeaseDenied), got {other:?}")
+            }
+        }
     }
 
     struct ApprovalTestTool;
 
     struct AlwaysApprovalTestTool;
+
+    struct DefaultAllowNamedApprovalTestTool;
 
     #[async_trait]
     impl Tool for ApprovalTestTool {
@@ -1702,6 +2818,41 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl Tool for DefaultAllowNamedApprovalTestTool {
+        fn name(&self) -> &str {
+            "message"
+        }
+
+        fn description(&self) -> &str {
+            "Test tool named like a default-always-allow builtin"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "value": { "type": "string" }
+                }
+            })
+        }
+
+        async fn execute(
+            &self,
+            params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({ "echo": params }),
+                std::time::Duration::from_millis(1),
+            ))
+        }
+
+        fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+            ApprovalRequirement::UnlessAutoApproved
+        }
+    }
+
     fn lease() -> ironclaw_engine::CapabilityLease {
         ironclaw_engine::CapabilityLease {
             id: ironclaw_engine::types::capability::LeaseId::new(),
@@ -1729,7 +2880,610 @@ mod tests {
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: call_id.map(str::to_string),
             source_channel: None,
+            user_timezone: None,
+            thread_goal: Some("test goal".to_string()),
+            available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         }
+    }
+
+    async fn make_tool_info_adapter_with_permission(
+        permission: crate::tools::permissions::PermissionState,
+    ) -> EffectBridgeAdapter {
+        let db_path = std::env::temp_dir().join(format!(
+            "ironclaw-tool-info-permissions-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db = crate::db::connect_from_config(&crate::config::DatabaseConfig::from_libsql_path(
+            db_path.to_str().expect("db path"),
+            None,
+            None,
+        ))
+        .await
+        .expect("db");
+        db.set_setting(
+            "test_user",
+            "tool_permissions.tool_info",
+            &serde_json::to_value(permission).expect("serialize permission"),
+        )
+        .await
+        .expect("save tool permission");
+
+        let tools = Arc::new(ToolRegistry::new().with_database(db));
+        tools.register_tool_info();
+        EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+    }
+
+    async fn make_approval_test_adapter_with_permission(
+        permission: Option<crate::tools::permissions::PermissionState>,
+    ) -> EffectBridgeAdapter {
+        let db_path = std::env::temp_dir().join(format!(
+            "ironclaw-approval-test-permissions-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db = crate::db::connect_from_config(&crate::config::DatabaseConfig::from_libsql_path(
+            db_path.to_str().expect("db path"),
+            None,
+            None,
+        ))
+        .await
+        .expect("db");
+        if let Some(permission) = permission {
+            db.set_setting(
+                "test_user",
+                "tool_permissions.approval_test",
+                &serde_json::to_value(permission).expect("serialize permission"),
+            )
+            .await
+            .expect("save tool permission");
+        }
+
+        let tools = Arc::new(ToolRegistry::new().with_database(db));
+        tools.register(Arc::new(ApprovalTestTool)).await;
+        EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+    }
+
+    async fn make_tool_info_registry_adapter() -> EffectBridgeAdapter {
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register_tool_info();
+        tools.register(Arc::new(ApprovalTestTool)).await;
+        EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+    }
+
+    async fn make_default_allow_named_adapter() -> EffectBridgeAdapter {
+        let tools = Arc::new(ToolRegistry::new());
+        tools
+            .register(Arc::new(DefaultAllowNamedApprovalTestTool))
+            .await;
+        EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+    }
+
+    async fn make_restart_adapter_with_permission(
+        permission: Option<crate::tools::permissions::PermissionState>,
+    ) -> EffectBridgeAdapter {
+        let db_path = std::env::temp_dir().join(format!(
+            "ironclaw-restart-permissions-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db = crate::db::connect_from_config(&crate::config::DatabaseConfig::from_libsql_path(
+            db_path.to_str().expect("db path"),
+            None,
+            None,
+        ))
+        .await
+        .expect("db");
+        if let Some(permission) = permission {
+            db.set_setting(
+                "test_user",
+                "tool_permissions.restart",
+                &serde_json::to_value(permission).expect("serialize permission"),
+            )
+            .await
+            .expect("save tool permission");
+        }
+
+        let tools = Arc::new(ToolRegistry::new().with_database(db));
+        tools
+            .register(Arc::new(crate::tools::builtin::RestartTool))
+            .await;
+        EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+    }
+
+    #[tokio::test]
+    async fn tool_info_reads_callable_action_snapshot_for_engine_native_actions() {
+        let adapter = make_adapter();
+        let mut ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_tool_info"));
+        ctx.available_actions_snapshot = Some(
+            vec![ActionDef {
+                name: "mission_create".to_string(),
+                description: "Create a mission".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "goal": {"type": "string"},
+                        "cadence": {"type": "string"}
+                    },
+                    "required": ["name", "goal", "cadence"]
+                }),
+                effects: vec![],
+                requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: Some(ironclaw_engine::ActionDiscoveryMetadata {
+                    name: "mission_create".to_string(),
+                    summary: Some(ironclaw_engine::ActionDiscoverySummary {
+                        always_required: vec![
+                            "name".to_string(),
+                            "goal".to_string(),
+                            "cadence".to_string(),
+                        ],
+                        conditional_requirements: vec![
+                            "Use this only for recurring or scheduled work".to_string(),
+                        ],
+                        notes: vec![],
+                        examples: vec![],
+                    }),
+                    schema_override: None,
+                }),
+            }]
+            .into(),
+        );
+
+        let result = adapter
+            .execute_action(
+                "tool_info",
+                serde_json::json!({"name": "mission_create", "detail": "summary"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("tool_info should succeed through callable action discovery");
+
+        assert!(!result.is_error);
+        assert_eq!(result.output["name"], serde_json::json!("mission_create"));
+        assert_eq!(
+            result.output["summary"]["always_required"],
+            serde_json::json!(["name", "goal", "cadence"])
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_info_rejects_actions_outside_callable_snapshot() {
+        let adapter = make_adapter();
+        let mut ctx = exec_ctx(
+            ironclaw_engine::ThreadId::new(),
+            Some("call_tool_info_registry"),
+        );
+        ctx.available_actions_snapshot = Some(
+            vec![ActionDef {
+                name: "mission_create".to_string(),
+                description: "Create a mission".to_string(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![],
+                requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
+            }]
+            .into(),
+        );
+
+        let result = adapter
+            .execute_action(
+                "tool_info",
+                serde_json::json!({"name": "echo", "detail": "summary"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("tool_info should return an error result for out-of-snapshot actions");
+
+        assert!(result.is_error);
+        assert_eq!(result.action_name, "tool_info");
+        assert!(
+            result.output["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no callable or discoverable action named 'echo'"),
+            "unexpected error output: {:?}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_info_rejects_registered_tools_when_snapshots_are_missing() {
+        let adapter = make_tool_info_registry_adapter().await;
+        let ctx = exec_ctx(
+            ironclaw_engine::ThreadId::new(),
+            Some("call_tool_info_without_snapshot"),
+        );
+
+        let result = adapter
+            .execute_action(
+                "tool_info",
+                serde_json::json!({"name": "approval_test", "detail": "summary"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("tool_info should return an error result without snapshots");
+
+        assert!(result.is_error);
+        assert_eq!(result.action_name, "tool_info");
+        assert!(
+            result.output["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no callable or discoverable action named 'approval_test'"),
+            "unexpected error output: {:?}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_info_reads_action_inventory_snapshot() {
+        let adapter = make_adapter();
+        let mut ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_tool_info"));
+        ctx.available_action_inventory_snapshot = Some(Arc::new(ActionInventory {
+            inline: vec![ActionDef {
+                name: "github_search".to_string(),
+                description: "Search GitHub".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"}
+                    },
+                    "required": ["query"]
+                }),
+                effects: vec![],
+                requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: Some(ironclaw_engine::ActionDiscoveryMetadata {
+                    name: "github_search".to_string(),
+                    summary: Some(ironclaw_engine::ActionDiscoverySummary {
+                        always_required: vec!["query".to_string()],
+                        conditional_requirements: vec![],
+                        notes: vec!["Schema available through tool_info".to_string()],
+                        examples: vec![],
+                    }),
+                    schema_override: None,
+                }),
+            }],
+            discoverable: Vec::new(),
+        }));
+
+        let result = adapter
+            .execute_action(
+                "tool_info",
+                serde_json::json!({"name": "github_search", "detail": "summary"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("tool_info should resolve action inventory discovery");
+
+        assert!(!result.is_error);
+        assert_eq!(result.output["name"], serde_json::json!("github_search"));
+        assert_eq!(
+            result.output["summary"]["always_required"],
+            serde_json::json!(["query"])
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_info_respects_disabled_permission_override() {
+        let adapter = make_tool_info_adapter_with_permission(
+            crate::tools::permissions::PermissionState::Disabled,
+        )
+        .await;
+        let mut ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_tool_info"));
+        ctx.available_action_inventory_snapshot = Some(Arc::new(ActionInventory {
+            inline: vec![ActionDef {
+                name: "github_search".to_string(),
+                description: "Search GitHub".to_string(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![],
+                requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
+            }],
+            discoverable: Vec::new(),
+        }));
+
+        let err = adapter
+            .execute_action(
+                "tool_info",
+                serde_json::json!({"name": "github_search"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect_err("disabled tool_info should be denied");
+
+        match err {
+            EngineError::LeaseDenied { reason } => {
+                assert!(reason.contains("Tool 'tool_info' is disabled"));
+            }
+            other => panic!("expected LeaseDenied, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_info_respects_ask_each_time_permission_override() {
+        let adapter = make_tool_info_adapter_with_permission(
+            crate::tools::permissions::PermissionState::AskEachTime,
+        )
+        .await;
+        let mut ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_tool_info"));
+        ctx.available_action_inventory_snapshot = Some(Arc::new(ActionInventory {
+            inline: vec![ActionDef {
+                name: "github_search".to_string(),
+                description: "Search GitHub".to_string(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![],
+                requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
+            }],
+            discoverable: Vec::new(),
+        }));
+
+        let err = adapter
+            .execute_action(
+                "tool_info",
+                serde_json::json!({"name": "github_search"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect_err("ask_each_time tool_info should gate for approval");
+
+        match err {
+            EngineError::GatePaused { gate_name, .. } => {
+                assert_eq!(gate_name, "approval");
+            }
+            other => panic!("expected GatePaused, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fallback_ask_each_time_does_not_override_unless_auto_approved_tools() {
+        let adapter = make_approval_test_adapter_with_permission(None)
+            .await
+            .with_global_auto_approve(true);
+
+        let result = adapter
+            .execute_action(
+                "approval_test",
+                serde_json::json!({"value": "x"}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_global_auto_approve_db_default"),
+                ),
+            )
+            .await
+            .expect("fallback ask_each_time should not override an unless_auto_approved tool");
+
+        assert!(!result.is_error);
+    }
+
+    #[tokio::test]
+    async fn always_allow_default_skips_unless_auto_approved_gates_without_override() {
+        let adapter = make_default_allow_named_adapter()
+            .await
+            .with_global_auto_approve(true);
+
+        let result = adapter
+            .execute_action(
+                "message",
+                serde_json::json!({"value": "x"}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_global_auto_approve_default_allow"),
+                ),
+            )
+            .await
+            .expect("always_allow default should bypass normal approval gate");
+
+        assert!(!result.is_error);
+    }
+
+    // This test intentionally serializes process-global env mutation across the
+    // async restart path to avoid cross-test leakage from restart env toggles.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn restart_uses_default_permission_floor_without_explicit_override() {
+        let _guard = crate::config::helpers::lock_env();
+        let original_in_docker = std::env::var_os("IRONCLAW_IN_DOCKER");
+        let original_disable_restart = std::env::var_os("IRONCLAW_DISABLE_RESTART");
+        // SAFETY: This test serializes env access with lock_env().
+        unsafe {
+            std::env::set_var("IRONCLAW_IN_DOCKER", "true");
+            std::env::set_var("IRONCLAW_DISABLE_RESTART", "true");
+        }
+
+        let adapter = make_restart_adapter_with_permission(None).await;
+
+        let err = adapter
+            .execute_action(
+                "restart",
+                serde_json::json!({"delay_secs": 1}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_restart_default_floor"),
+                ),
+            )
+            .await
+            .expect_err("restart should still pause for approval by default");
+
+        // SAFETY: This test serializes env access with lock_env().
+        unsafe {
+            if let Some(value) = original_in_docker {
+                std::env::set_var("IRONCLAW_IN_DOCKER", value);
+            } else {
+                std::env::remove_var("IRONCLAW_IN_DOCKER");
+            }
+            if let Some(value) = original_disable_restart {
+                std::env::set_var("IRONCLAW_DISABLE_RESTART", value);
+            } else {
+                std::env::remove_var("IRONCLAW_DISABLE_RESTART");
+            }
+        }
+
+        match err {
+            EngineError::GatePaused { gate_name, .. } => {
+                assert_eq!(gate_name, "approval");
+            }
+            other => panic!("expected GatePaused, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_always_allow_override_beats_ask_each_time_fallback() {
+        let adapter = make_approval_test_adapter_with_permission(Some(
+            crate::tools::permissions::PermissionState::AlwaysAllow,
+        ))
+        .await
+        .with_global_auto_approve(true);
+
+        let result = adapter
+            .execute_action(
+                "approval_test",
+                serde_json::json!({"value": "x"}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_global_auto_approve_db_always_allow"),
+                ),
+            )
+            .await
+            .expect("explicit always_allow should bypass ask_each_time fallback");
+
+        assert!(!result.is_error);
+    }
+
+    #[tokio::test]
+    async fn explicit_ask_each_time_override_beats_global_auto_approve() {
+        let adapter = make_approval_test_adapter_with_permission(Some(
+            crate::tools::permissions::PermissionState::AskEachTime,
+        ))
+        .await
+        .with_global_auto_approve(true);
+
+        let err = adapter
+            .execute_action(
+                "approval_test",
+                serde_json::json!({"value": "x"}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_global_auto_approve_db_override"),
+                ),
+            )
+            .await
+            .expect_err("explicit ask_each_time should still gate for approval");
+
+        match err {
+            EngineError::GatePaused { gate_name, .. } => {
+                assert_eq!(gate_name, "approval");
+            }
+            other => panic!("expected GatePaused, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_disabled_override_denies_tool_execution() {
+        let adapter = make_approval_test_adapter_with_permission(Some(
+            crate::tools::permissions::PermissionState::Disabled,
+        ))
+        .await
+        .with_global_auto_approve(true);
+
+        let err = adapter
+            .execute_action(
+                "approval_test",
+                serde_json::json!({"value": "x"}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_global_auto_approve_db_disabled"),
+                ),
+            )
+            .await
+            .expect_err("explicit disabled should deny execution");
+
+        match err {
+            EngineError::LeaseDenied { reason } => {
+                assert!(reason.contains("Tool 'approval_test' is disabled"));
+            }
+            other => panic!("expected LeaseDenied, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hyphenated_engine_native_action_uses_snapshot_canonical_name() {
+        let adapter = make_adapter_with_missions().await;
+        let mut ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_mission_alias"));
+        ctx.available_actions_snapshot =
+            Some(crate::bridge::engine_actions::mission_capability_actions().into());
+
+        let result = adapter
+            .execute_action(
+                "mission-create",
+                serde_json::json!({
+                    "name": "daily check",
+                    "goal": "check systems",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("hyphenated mission action should canonicalize through the snapshot");
+
+        assert!(!result.is_error, "got error: {}", result.output);
+        assert_eq!(result.action_name, "mission_create");
+        assert_eq!(
+            result.output.get("status").and_then(|value| value.as_str()),
+            Some("created")
+        );
     }
 
     #[tokio::test]
@@ -1819,6 +3573,347 @@ mod tests {
         assert!(matches!(third, Err(EngineError::GatePaused { .. })));
     }
 
+    /// End-to-end gate verification for the real `MemoryWriteTool`.
+    ///
+    /// PR #1958 reviewer-flagged regression: the original effect bridge
+    /// mapped `ApprovalRequirement::Always` to `LeaseDenied` (a hard
+    /// refusal). Round 3 fixed both sides: the bridge now maps `Always`
+    /// to `GatePaused(Approval { allow_always: false })`, and
+    /// `MemoryWriteTool::requires_approval` returns `Always` for
+    /// protected orchestrator targets so session auto-approve cannot
+    /// silently skip the gate. This test asserts the full path:
+    /// `requires_approval` → adapter → gate, with the real tool wired
+    /// into a real registry.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn memory_write_orchestrator_target_paused_for_approval_when_self_modify_enabled() {
+        use crate::db::Database;
+        use crate::db::libsql::LibSqlBackend;
+        use crate::tools::builtin::memory::MemoryWriteTool;
+        use crate::workspace::Workspace;
+        use ironclaw_safety::SafetyConfig;
+
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LibSqlBackend::new_local(&dir.path().join("gate.db"))
+            .await
+            .expect("libsql");
+        backend.run_migrations().await.expect("migrations");
+        let db: Arc<dyn Database> = Arc::new(backend);
+        let workspace = Arc::new(Workspace::new_with_db("test_user", db));
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools
+            .register(Arc::new(MemoryWriteTool::from_workspace(workspace)))
+            .await;
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let result = adapter
+            .execute_action(
+                "memory_write",
+                serde_json::json!({
+                    "target": "orchestrator:main",
+                    "content": "def run_loop(): return 1\n"
+                }),
+                &lease(),
+                &exec_ctx(thread_id, Some("call_orch_approve")),
+            )
+            .await;
+
+        match result {
+            Err(EngineError::GatePaused {
+                gate_name,
+                resume_kind,
+                ..
+            }) => {
+                assert_eq!(gate_name, "approval");
+                match *resume_kind {
+                    ironclaw_engine::ResumeKind::Approval { allow_always } => {
+                        assert!(
+                            !allow_always,
+                            "protected orchestrator writes must set allow_always=false \
+                             to prevent session auto-approve bypass"
+                        );
+                    }
+                    other => panic!("expected Approval resume kind, got {other:?}"),
+                }
+            }
+            Err(EngineError::LeaseDenied { reason }) => {
+                panic!(
+                    "memory_write protected target was hard-denied (LeaseDenied) \
+                     instead of pausing for approval — this is the regression \
+                     that PR #1958's Always fix is meant to prevent. \
+                     Reason: {reason}"
+                );
+            }
+            other => panic!("expected GatePaused(approval), got {other:?}"),
+        }
+    }
+
+    /// Sibling check: when self-modify is **disabled**, the tool's
+    /// `execute()` returns `NotAuthorized` and the adapter reports the
+    /// failure as a non-success ToolOutput (not a GatePaused). The agent
+    /// must NOT see this as a resumable gate — it's a permanent refusal.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn memory_write_orchestrator_target_refused_when_self_modify_disabled() {
+        use crate::db::Database;
+        use crate::db::libsql::LibSqlBackend;
+        use crate::tools::builtin::memory::MemoryWriteTool;
+        use crate::workspace::Workspace;
+        use ironclaw_safety::SafetyConfig;
+
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::disable();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LibSqlBackend::new_local(&dir.path().join("gate.db"))
+            .await
+            .expect("libsql");
+        backend.run_migrations().await.expect("migrations");
+        let db: Arc<dyn Database> = Arc::new(backend);
+        let workspace = Arc::new(Workspace::new_with_db("test_user", db));
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools
+            .register(Arc::new(MemoryWriteTool::from_workspace(workspace)))
+            .await;
+
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let result = adapter
+            .execute_action(
+                "memory_write",
+                serde_json::json!({
+                    "target": "orchestrator:main",
+                    "content": "def run_loop(): return 1\n"
+                }),
+                &lease(),
+                &exec_ctx(thread_id, Some("call_orch_disabled")),
+            )
+            .await;
+
+        // The adapter must NOT pause for approval when self-modify is off
+        // (otherwise the agent could be tricked into accepting a write
+        // that the static gate refuses). What it surfaces — error result
+        // vs. is_error ToolOutput — depends on plumbing; both must mention
+        // the self-modify denial.
+        let surfaced = match result {
+            Ok(output) => {
+                assert!(
+                    output.is_error,
+                    "self-modify-disabled write must surface as is_error"
+                );
+                serde_json::to_string(&output.output).unwrap_or_default()
+            }
+            Err(EngineError::GatePaused { .. }) => panic!(
+                "self-modify-disabled write must NOT pause for approval — \
+                 the gate must surface a permanent refusal so the agent \
+                 cannot loop on it"
+            ),
+            Err(e) => format!("{e:?}"),
+        };
+        assert!(
+            surfaced.contains("self-modification is disabled") || surfaced.contains("self-modify"),
+            "expected self-modify denial in surfaced result; got: {surfaced}"
+        );
+    }
+
+    /// Regression for nearai/ironclaw#2206: a `tool_activate`/`tool_auth`
+    /// extension result containing a non-https `auth_url` (e.g.
+    /// `javascript:alert(1)`) must be sanitized to `None` before it reaches
+    /// `ResumeKind::Authentication` and is forwarded onto the gate stream.
+    ///
+    /// This test deliberately drives `EffectBridgeAdapter::execute_action`
+    /// (the call site) instead of `auth_gate_from_extension_result` in
+    /// isolation, per the "Test Through the Caller, Not Just the Helper"
+    /// rule in `.claude/rules/testing.md`.
+    #[tokio::test]
+    async fn auth_gate_strips_non_https_auth_url_from_tool_activate_output() {
+        use ironclaw_safety::SafetyConfig;
+
+        struct OAuthPromptTool;
+
+        #[async_trait]
+        impl Tool for OAuthPromptTool {
+            fn name(&self) -> &str {
+                "tool_activate"
+            }
+
+            fn description(&self) -> &str {
+                "Test stub for tool_activate that returns a malicious auth_url"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                Ok(ToolOutput::success(
+                    serde_json::json!({
+                        "status": "awaiting_authorization",
+                        "name": "evil_ext",
+                        "instructions": "Complete sign-in",
+                        "auth_url": "javascript:alert(1)",
+                    }),
+                    std::time::Duration::from_millis(1),
+                ))
+            }
+
+            fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+                ApprovalRequirement::Never
+            }
+        }
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(OAuthPromptTool)).await;
+
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let result = adapter
+            .execute_action(
+                "tool_activate",
+                serde_json::json!({}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_auth_url_sanitize"),
+                ),
+            )
+            .await;
+
+        match result {
+            Err(EngineError::GatePaused {
+                gate_name,
+                resume_kind,
+                ..
+            }) => {
+                assert_eq!(gate_name, "authentication");
+                match *resume_kind {
+                    ironclaw_engine::ResumeKind::Authentication { auth_url, .. } => {
+                        assert!(
+                            auth_url.is_none(),
+                            "javascript: auth_url must be stripped before reaching ResumeKind, got {auth_url:?}"
+                        );
+                    }
+                    other => panic!("expected Authentication resume kind, got {other:?}"),
+                }
+            }
+            other => {
+                panic!("expected GatePaused(authentication), got {other:?}")
+            }
+        }
+    }
+
+    /// Sibling regression: a well-formed `https://` auth_url must still
+    /// flow through unmodified. Guards against an over-eager sanitizer.
+    #[tokio::test]
+    async fn auth_gate_preserves_https_auth_url_from_tool_activate_output() {
+        use ironclaw_safety::SafetyConfig;
+
+        struct OAuthPromptTool;
+
+        #[async_trait]
+        impl Tool for OAuthPromptTool {
+            fn name(&self) -> &str {
+                "tool_activate"
+            }
+
+            fn description(&self) -> &str {
+                "Test stub for tool_activate that returns a valid auth_url"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                Ok(ToolOutput::success(
+                    serde_json::json!({
+                        "status": "awaiting_authorization",
+                        "name": "good_ext",
+                        "instructions": "Complete sign-in",
+                        "auth_url": "https://accounts.google.com/o/oauth2/auth",
+                    }),
+                    std::time::Duration::from_millis(1),
+                ))
+            }
+
+            fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+                ApprovalRequirement::Never
+            }
+        }
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(OAuthPromptTool)).await;
+
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let result = adapter
+            .execute_action(
+                "tool_activate",
+                serde_json::json!({}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_auth_url_passthrough"),
+                ),
+            )
+            .await;
+
+        match result {
+            Err(EngineError::GatePaused { resume_kind, .. }) => match *resume_kind {
+                ironclaw_engine::ResumeKind::Authentication { auth_url, .. } => {
+                    assert_eq!(
+                        auth_url.as_deref(),
+                        Some("https://accounts.google.com/o/oauth2/auth"),
+                    );
+                }
+                other => panic!("expected Authentication resume kind, got {other:?}"),
+            },
+            other => panic!("expected GatePaused(authentication), got {other:?}"),
+        }
+    }
+
     // ── routine→mission alias tests ────────────────────────────
 
     #[test]
@@ -1896,7 +3991,10 @@ mod tests {
                 timezone,
             } => {
                 assert_eq!(expression, "0 9 * * *");
-                assert_eq!(timezone.as_deref(), Some("America/New_York"));
+                assert_eq!(
+                    timezone.as_ref().map(|tz| tz.tz().name()),
+                    Some("America/New_York")
+                );
             }
             other => panic!("expected Cron cadence, got {:?}", other),
         }
@@ -1990,6 +4088,95 @@ mod tests {
     }
 
     #[test]
+    fn parse_cadence_event_channel_pattern_format() {
+        // event:<channel>:<pattern> should populate both fields.
+        let cadence = parse_cadence("event:telegram:.*", None).expect("should parse");
+        match cadence {
+            ironclaw_engine::types::mission::MissionCadence::OnEvent {
+                event_pattern,
+                channel,
+            } => {
+                assert_eq!(event_pattern, ".*");
+                assert_eq!(channel.as_deref(), Some("telegram"));
+            }
+            other => panic!("expected OnEvent, got {other:?}"),
+        }
+
+        // Pattern with special regex chars.
+        let cadence = parse_cadence("event:github:review requested", None).expect("should parse");
+        match cadence {
+            ironclaw_engine::types::mission::MissionCadence::OnEvent {
+                event_pattern,
+                channel,
+            } => {
+                assert_eq!(event_pattern, "review requested");
+                assert_eq!(channel.as_deref(), Some("github"));
+            }
+            other => panic!("expected OnEvent, got {other:?}"),
+        }
+
+        // Pattern containing colons (split on first colon only).
+        let cadence = parse_cadence("event:slack:error:.*fatal", None).expect("should parse");
+        match cadence {
+            ironclaw_engine::types::mission::MissionCadence::OnEvent {
+                event_pattern,
+                channel,
+            } => {
+                assert_eq!(event_pattern, "error:.*fatal");
+                assert_eq!(channel.as_deref(), Some("slack"));
+            }
+            other => panic!("expected OnEvent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_cadence_event_rejects_missing_channel_or_pattern() {
+        // Just "event:<something>" with no second colon should fail.
+        let err = parse_cadence("event:telegram", None).unwrap_err();
+        assert!(err.contains("event:<channel>:<pattern>"), "got: {err}");
+
+        // Empty channel.
+        let err = parse_cadence("event::.*", None).unwrap_err();
+        assert!(err.contains("event:<channel>:<pattern>"), "got: {err}");
+
+        // Empty pattern.
+        let err = parse_cadence("event:telegram:", None).unwrap_err();
+        assert!(err.contains("event:<channel>:<pattern>"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_cadence_event_rejects_invalid_regex() {
+        let err = parse_cadence("event:telegram:[invalid(", None).unwrap_err();
+        assert!(err.contains("not a valid regex"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_cadence_event_prefix_wins_over_cron_heuristic() {
+        // Regression: an event cadence with 5+ whitespace-separated tokens
+        // in the pattern must NOT be misclassified as a cron expression.
+        let cadence =
+            parse_cadence("event:slack:a]b c d e f", None).expect("should parse as event");
+        assert!(matches!(
+            cadence,
+            ironclaw_engine::types::mission::MissionCadence::OnEvent { .. }
+        ));
+
+        // Same hazard for `webhook:` — verify the prefix wins.
+        let cadence = parse_cadence("webhook: a b c d e", None).expect("should parse");
+        assert!(matches!(
+            cadence,
+            ironclaw_engine::types::mission::MissionCadence::Webhook { .. }
+        ));
+
+        // Sanity: a real cron expression still parses as cron.
+        let cadence = parse_cadence("0 9 * * *", None).expect("should parse");
+        assert!(matches!(
+            cadence,
+            ironclaw_engine::types::mission::MissionCadence::Cron { .. }
+        ));
+    }
+
+    #[test]
     fn routine_create_alias_defaults_to_manual_when_request_missing() {
         let params = serde_json::json!({
             "name": "Manual mission",
@@ -2011,7 +4198,7 @@ mod tests {
             ("routine_fire", "mission_fire"),
             ("routine_pause", "mission_pause"),
             ("routine_resume", "mission_resume"),
-            ("routine_delete", "mission_delete"),
+            ("routine_delete", "mission_complete"),
         ] {
             let alias = routine_to_mission_alias(routine, &params)
                 .unwrap_or_else(|| panic!("expected alias for {routine}"));
@@ -2074,11 +4261,542 @@ mod tests {
     }
 
     #[test]
+    fn extract_guardrails_rejects_string_typed_integers() {
+        // Regression: LLMs pass numeric params as strings (e.g. cooldown_secs="0").
+        // The old code silently ignored the wrong type, so mission_update
+        // returned {"status":"updated"} but changed nothing in the database.
+        let params = serde_json::json!({"cooldown_secs": "0", "max_concurrent": "2"});
+        let mut updates = ironclaw_engine::MissionUpdate::default();
+        let err = extract_guardrails(&params, &mut updates).unwrap_err();
+        assert!(err.contains("must be an integer"), "got: {err}");
+
+        // Integer values must succeed.
+        let params = serde_json::json!({"cooldown_secs": 0, "max_concurrent": 2});
+        let mut updates = ironclaw_engine::MissionUpdate::default();
+        extract_guardrails(&params, &mut updates).expect("should succeed");
+        assert_eq!(updates.cooldown_secs, Some(0));
+        assert_eq!(updates.max_concurrent, Some(2));
+    }
+
+    #[test]
+    fn parse_cadence_rejects_malformed_string() {
+        // Regression: malformed cadence used to silently default to Manual,
+        // causing reactive missions to never fire.
+        let err = parse_cadence("bogus", None).unwrap_err();
+        assert!(
+            err.contains("unrecognized cadence"),
+            "expected helpful error, got: {err}"
+        );
+
+        let err = parse_cadence("every 5 min", None).unwrap_err();
+        assert!(err.contains("unrecognized cadence"));
+    }
+
+    #[test]
+    fn parse_cadence_rejects_bare_event_prefix() {
+        let err = parse_cadence("event:", None).unwrap_err();
+        assert!(err.contains("event:<channel>:<pattern>"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_cadence_system_event_round_trips() {
+        let cadence = parse_cadence("system_event:self-improvement/thread_completed", None)
+            .expect("should parse system_event cadence");
+        assert!(matches!(
+            cadence,
+            ironclaw_engine::types::mission::MissionCadence::OnSystemEvent {
+                ref source,
+                ref event_type,
+                ..
+            } if source == "self-improvement" && event_type == "thread_completed"
+        ));
+    }
+
+    #[test]
+    fn parse_cadence_rejects_malformed_system_event() {
+        let err = parse_cadence("system_event:", None).unwrap_err();
+        assert!(
+            err.contains("system_event:<source>/<event_type>"),
+            "got: {err}"
+        );
+
+        let err = parse_cadence("system_event:no_slash_here", None).unwrap_err();
+        assert!(
+            err.contains("system_event:<source>/<event_type>"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_cadence_rejects_empty_webhook_path() {
+        let err = parse_cadence("webhook:", None).unwrap_err();
+        assert!(err.contains("requires a path"));
+    }
+
+    #[test]
+    fn parse_cadence_accepts_manual() {
+        let cadence = parse_cadence("manual", None).expect("should parse");
+        assert!(matches!(
+            cadence,
+            ironclaw_engine::types::mission::MissionCadence::Manual
+        ));
+    }
+
+    #[test]
     fn routine_alias_returns_none_for_unrelated_action() {
         let params = serde_json::json!({});
         assert!(routine_to_mission_alias("http", &params).is_none());
         assert!(routine_to_mission_alias("mission_create", &params).is_none());
         assert!(routine_to_mission_alias("web_search", &params).is_none());
+    }
+
+    #[test]
+    fn foreground_immediate_one_shot_goal_rejects_mission_create() {
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: Some("gateway".to_string()),
+            user_timezone: None,
+            thread_goal: Some(
+                "Summarize the product feedback for me right now. Do it immediately.".to_string(),
+            ),
+            available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
+        };
+
+        assert!(should_reject_immediate_mission_create(&ctx));
+    }
+
+    #[test]
+    fn foreground_explicit_schedule_allows_mission_create_even_if_run_now() {
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: Some("gateway".to_string()),
+            user_timezone: None,
+            thread_goal: Some(
+                "Create a daily routine to summarize product feedback and run it now.".to_string(),
+            ),
+            available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
+        };
+
+        assert!(!should_reject_immediate_mission_create(&ctx));
+    }
+
+    #[test]
+    fn foreground_immediate_every_quantifier_still_rejects_mission_create() {
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: Some("gateway".to_string()),
+            user_timezone: None,
+            thread_goal: Some("Summarize every product feedback item right now.".to_string()),
+            available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
+        };
+
+        assert!(should_reject_immediate_mission_create(&ctx));
+    }
+
+    #[test]
+    fn foreground_immediate_set_up_without_schedule_still_rejects_mission_create() {
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: Some("gateway".to_string()),
+            user_timezone: None,
+            thread_goal: Some("Set up the product feedback summary right now.".to_string()),
+            available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
+        };
+
+        assert!(should_reject_immediate_mission_create(&ctx));
+    }
+
+    #[test]
+    fn foreground_monitoring_stem_matches_scheduling_intent() {
+        // Regression: "monitoring" must match the "monitor" stem so that
+        // "set up monitoring now" is recognised as scheduling intent and
+        // NOT incorrectly rejected.
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: Some("gateway".to_string()),
+            user_timezone: None,
+            thread_goal: Some("Set up monitoring now.".to_string()),
+            available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
+        };
+
+        // Should NOT be rejected — "monitoring" implies scheduling intent.
+        assert!(!should_reject_immediate_mission_create(&ctx));
+    }
+
+    #[test]
+    fn background_mission_threads_can_create_follow_up_missions() {
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Mission,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: None,
+            user_timezone: None,
+            thread_goal: Some("Summarize feedback immediately.".to_string()),
+            available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
+        };
+
+        assert!(!should_reject_immediate_mission_create(&ctx));
+    }
+
+    // ── Caller-level mission rejection tests ──────────────────
+    //
+    // These test `EffectBridgeAdapter::execute_action` (the caller) rather
+    // than `should_reject_immediate_mission_create` (the helper) in
+    // isolation. This verifies that the computed inputs — thread_goal,
+    // thread_type, and alias-normalized params — flow through correctly.
+    //
+    // Motivated by `.claude/rules/testing.md`: "Test Through the Caller,
+    // Not Just the Helper".
+
+    mod caller_level_mission {
+        use super::*;
+
+        // ── Stubs for MissionManager dependencies ───────────
+
+        struct StubStore;
+
+        #[async_trait]
+        impl ironclaw_engine::Store for StubStore {
+            async fn save_thread(
+                &self,
+                _: &ironclaw_engine::types::thread::Thread,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_thread(
+                &self,
+                _: ironclaw_engine::ThreadId,
+            ) -> Result<Option<ironclaw_engine::types::thread::Thread>, EngineError> {
+                Ok(None)
+            }
+            async fn list_threads(
+                &self,
+                _: ironclaw_engine::ProjectId,
+                _: &str,
+            ) -> Result<Vec<ironclaw_engine::types::thread::Thread>, EngineError> {
+                Ok(vec![])
+            }
+            async fn update_thread_state(
+                &self,
+                _: ironclaw_engine::ThreadId,
+                _: ironclaw_engine::types::thread::ThreadState,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn save_step(
+                &self,
+                _: &ironclaw_engine::types::step::Step,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_steps(
+                &self,
+                _: ironclaw_engine::ThreadId,
+            ) -> Result<Vec<ironclaw_engine::types::step::Step>, EngineError> {
+                Ok(vec![])
+            }
+            async fn append_events(
+                &self,
+                _: &[ironclaw_engine::ThreadEvent],
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_events(
+                &self,
+                _: ironclaw_engine::ThreadId,
+            ) -> Result<Vec<ironclaw_engine::ThreadEvent>, EngineError> {
+                Ok(vec![])
+            }
+            async fn save_project(&self, _: &ironclaw_engine::Project) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_project(
+                &self,
+                _: ironclaw_engine::ProjectId,
+            ) -> Result<Option<ironclaw_engine::Project>, EngineError> {
+                Ok(None)
+            }
+            async fn save_memory_doc(
+                &self,
+                _: &ironclaw_engine::MemoryDoc,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_memory_doc(
+                &self,
+                _: ironclaw_engine::DocId,
+            ) -> Result<Option<ironclaw_engine::MemoryDoc>, EngineError> {
+                Ok(None)
+            }
+            async fn list_memory_docs(
+                &self,
+                _: ironclaw_engine::ProjectId,
+                _: &str,
+            ) -> Result<Vec<ironclaw_engine::MemoryDoc>, EngineError> {
+                Ok(vec![])
+            }
+            async fn save_lease(
+                &self,
+                _: &ironclaw_engine::CapabilityLease,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_active_leases(
+                &self,
+                _: ironclaw_engine::ThreadId,
+            ) -> Result<Vec<ironclaw_engine::CapabilityLease>, EngineError> {
+                Ok(vec![])
+            }
+            async fn revoke_lease(
+                &self,
+                _: ironclaw_engine::types::capability::LeaseId,
+                _: &str,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn save_mission(&self, _: &ironclaw_engine::Mission) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_mission(
+                &self,
+                _: ironclaw_engine::MissionId,
+            ) -> Result<Option<ironclaw_engine::Mission>, EngineError> {
+                Ok(None)
+            }
+            async fn list_missions(
+                &self,
+                _: ironclaw_engine::ProjectId,
+                _: &str,
+            ) -> Result<Vec<ironclaw_engine::Mission>, EngineError> {
+                Ok(vec![])
+            }
+            async fn update_mission_status(
+                &self,
+                _: ironclaw_engine::MissionId,
+                _: ironclaw_engine::MissionStatus,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+        }
+
+        struct StubLlm;
+
+        #[async_trait]
+        impl ironclaw_engine::LlmBackend for StubLlm {
+            async fn complete(
+                &self,
+                _: &[ironclaw_engine::types::message::ThreadMessage],
+                _: &[ironclaw_engine::ActionDef],
+                _: &ironclaw_engine::LlmCallConfig,
+            ) -> Result<ironclaw_engine::LlmOutput, EngineError> {
+                unimplemented!("StubLlm — not called in mission create path")
+            }
+            fn model_name(&self) -> &str {
+                "stub"
+            }
+        }
+
+        struct StubEffects;
+
+        #[async_trait]
+        impl ironclaw_engine::EffectExecutor for StubEffects {
+            async fn execute_action(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+                _: &ironclaw_engine::CapabilityLease,
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<ironclaw_engine::ActionResult, EngineError> {
+                unimplemented!("StubEffects — not called in mission create path")
+            }
+            async fn available_actions(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<Vec<ironclaw_engine::ActionDef>, EngineError> {
+                Ok(vec![])
+            }
+
+            async fn available_capabilities(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, EngineError> {
+                Ok(vec![])
+            }
+        }
+
+        // ── Helpers ──────────────────────────────────────────
+
+        async fn make_adapter_with_mission_manager() -> EffectBridgeAdapter {
+            let store: Arc<dyn ironclaw_engine::Store> = Arc::new(StubStore);
+            let thread_manager = Arc::new(ironclaw_engine::ThreadManager::new(
+                Arc::new(StubLlm) as Arc<dyn ironclaw_engine::LlmBackend>,
+                Arc::new(StubEffects) as Arc<dyn ironclaw_engine::EffectExecutor>,
+                Arc::clone(&store),
+                Arc::new(ironclaw_engine::CapabilityRegistry::new()),
+                Arc::new(ironclaw_engine::LeaseManager::new()),
+                Arc::new(ironclaw_engine::PolicyEngine::new()),
+            ));
+            let mgr = Arc::new(ironclaw_engine::MissionManager::new(store, thread_manager));
+            let adapter = make_adapter();
+            adapter.set_mission_manager(mgr).await;
+            adapter
+        }
+
+        fn foreground_ctx(goal: &str) -> ironclaw_engine::ThreadExecutionContext {
+            ironclaw_engine::ThreadExecutionContext {
+                thread_id: ironclaw_engine::ThreadId::new(),
+                thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+                project_id: ironclaw_engine::ProjectId::new(),
+                user_id: "test_user".to_string(),
+                step_id: ironclaw_engine::StepId::new(),
+                current_call_id: None,
+                source_channel: Some("gateway".to_string()),
+                user_timezone: None,
+                thread_goal: Some(goal.to_string()),
+                available_actions_snapshot: None,
+                available_action_inventory_snapshot: None,
+            }
+        }
+
+        // ── Tests ────────────────────────────────────────────
+
+        /// Caller-level: `execute_action("mission_create", ...)` must
+        /// return an `EngineError::Effect` rejection when the foreground
+        /// thread goal contains immediate-execution markers and no
+        /// scheduling intent.
+        #[tokio::test]
+        async fn execute_action_rejects_mission_create_for_immediate_foreground() {
+            let adapter = make_adapter_with_mission_manager().await;
+            let ctx = foreground_ctx("Summarize the product feedback for me right now");
+
+            let result = adapter
+                .execute_action(
+                    "mission_create",
+                    serde_json::json!({
+                        "name": "Product feedback summarizer",
+                        "goal": "Summarize the product feedback",
+                        "cadence": "manual",
+                    }),
+                    &lease(),
+                    &ctx,
+                )
+                .await;
+
+            match result {
+                Err(EngineError::Effect { reason }) => {
+                    assert!(
+                        reason.contains("Refusing to create a mission"),
+                        "expected rejection message, got: {reason}"
+                    );
+                }
+                other => panic!(
+                    "expected EngineError::Effect for immediate foreground \
+                     mission_create, got: {other:?}"
+                ),
+            }
+        }
+
+        /// Caller-level: `execute_action("mission_create", ...)` must
+        /// succeed when the foreground thread goal contains scheduling
+        /// intent, even though it also contains an immediate marker.
+        #[tokio::test]
+        async fn execute_action_allows_mission_create_with_scheduling_intent() {
+            let adapter = make_adapter_with_mission_manager().await;
+            let ctx = foreground_ctx(
+                "Create a daily routine to summarize product feedback and run it now",
+            );
+
+            let result = adapter
+                .execute_action(
+                    "mission_create",
+                    serde_json::json!({
+                        "name": "Daily feedback summary",
+                        "goal": "Summarize all product feedback from today",
+                        "cadence": "manual",
+                    }),
+                    &lease(),
+                    &ctx,
+                )
+                .await;
+
+            let action_result =
+                result.expect("scheduling-intent foreground mission_create should not be rejected");
+            assert!(
+                !action_result.is_error,
+                "mission_create should succeed, got error output"
+            );
+        }
+
+        /// Caller-level: the `routine_create` alias path must also be
+        /// rejected when the goal is immediate. This exercises the
+        /// `routine_to_mission_alias` → `handle_mission_call` →
+        /// `should_reject_immediate_mission_create` full path.
+        #[tokio::test]
+        async fn execute_action_rejects_routine_create_alias_for_immediate_foreground() {
+            let adapter = make_adapter_with_mission_manager().await;
+            let ctx = foreground_ctx("Send me the weather right now");
+
+            let result = adapter
+                .execute_action(
+                    "routine_create",
+                    serde_json::json!({
+                        "name": "Weather update",
+                        "prompt": "Send the current weather forecast",
+                    }),
+                    &lease(),
+                    &ctx,
+                )
+                .await;
+
+            match result {
+                Err(EngineError::Effect { reason }) => {
+                    assert!(
+                        reason.contains("Refusing to create a mission"),
+                        "expected rejection message via routine alias, got: {reason}"
+                    );
+                }
+                other => panic!(
+                    "expected EngineError::Effect for immediate foreground \
+                     routine_create alias, got: {other:?}"
+                ),
+            }
+        }
     }
 
     // ── extract_credential_name tests ──────────────────────────
@@ -2130,6 +4848,19 @@ mod tests {
         assert!(!is_v1_only_tool("routine_update"));
     }
 
+    // ── routine_to_mission_alias tests ────────────────────────
+
+    /// `routine_history` should map to `mission_get` so the LLM can
+    /// retrieve mission results via either the v1 or v2 action name.
+    #[test]
+    fn routine_history_maps_to_mission_get() {
+        let params = serde_json::json!({"name": "test-mission-id"});
+        let alias = routine_to_mission_alias("routine_history", &params);
+        let alias = alias.expect("routine_history should produce an alias");
+        assert_eq!(alias.mission_action, "mission_get");
+        assert!(alias.post_create_update.is_none());
+    }
+
     #[test]
     fn job_and_build_tools_remain_v1_only() {
         assert!(is_v1_only_tool("create_job"));
@@ -2163,6 +4894,52 @@ mod tests {
         assert!(!is_v1_auth_tool("http"));
         assert!(!is_v1_auth_tool("tool_search"));
         assert!(!is_v1_auth_tool("tool_list"));
+    }
+
+    #[test]
+    fn install_approval_prefers_installed_alias_over_registry_only_match() {
+        let installed = installed_extension("linear-server");
+        let registry_only = InstalledExtension {
+            installed: false,
+            active: false,
+            authenticated: false,
+            has_auth: true,
+            tools: Vec::new(),
+            ..installed_extension("linear_server")
+        };
+
+        let decision = matching_extension_requires_install_approval(
+            "linear_server",
+            &[registry_only, installed],
+        );
+
+        assert_eq!(decision, Some(false));
+    }
+
+    #[test]
+    fn install_approval_requires_confirmation_for_uninstalled_match() {
+        let registry_only = InstalledExtension {
+            installed: false,
+            active: false,
+            authenticated: false,
+            has_auth: true,
+            tools: Vec::new(),
+            ..installed_extension("web_search")
+        };
+
+        let decision = matching_extension_requires_install_approval("web_search", &[registry_only]);
+
+        assert_eq!(decision, Some(true));
+    }
+
+    #[test]
+    fn install_approval_ignores_unknown_extension_names() {
+        let decision = matching_extension_requires_install_approval(
+            "missing_tool",
+            &[installed_extension("web_search")],
+        );
+
+        assert_eq!(decision, None);
     }
 
     // ── Pre-flight auth gate integration test ─────────────────
@@ -2239,6 +5016,10 @@ mod tests {
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
             source_channel: None,
+            user_timezone: None,
+            thread_goal: None,
+            available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         let result = adapter.execute_action("http", params, &lease, &ctx).await;
@@ -2311,7 +5092,8 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
-        );
+        )
+        .with_global_auto_approve(true);
 
         let lease = ironclaw_engine::CapabilityLease {
             id: ironclaw_engine::types::capability::LeaseId::new(),
@@ -2333,6 +5115,10 @@ mod tests {
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: Some("call_123".to_string()),
             source_channel: None,
+            user_timezone: None,
+            thread_goal: None,
+            available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         let result = adapter
@@ -2370,7 +5156,289 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn available_actions_include_latent_inactive_provider_actions() {
+    async fn tool_activate_requires_approval_before_auto_installing_integration() {
+        use crate::extensions::{AuthHint, ExtensionKind, ExtensionSource, RegistryEntry};
+        use crate::secrets::InMemorySecretsStore;
+        use crate::secrets::SecretsCrypto;
+        use crate::tools::builtin::extension_tools::ToolActivateTool;
+        use crate::tools::mcp::process::McpProcessManager;
+        use crate::tools::mcp::session::McpSessionManager;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+
+        let tools = Arc::new(ToolRegistry::new());
+        let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            Arc::clone(&secrets),
+            Arc::clone(&tools),
+            None,
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+            "test_user".to_string(),
+            None,
+            vec![RegistryEntry {
+                name: "web_search".to_string(),
+                display_name: "Web Search".to_string(),
+                kind: ExtensionKind::WasmTool,
+                description: "Search the web".to_string(),
+                keywords: vec!["search".into(), "web".into()],
+                source: ExtensionSource::WasmDownload {
+                    wasm_url: "https://example.com/web_search.wasm".to_string(),
+                    capabilities_url: None,
+                },
+                fallback_source: None,
+                auth_hint: AuthHint::CapabilitiesAuth,
+                version: None,
+            }],
+        ));
+        tools
+            .register(Arc::new(ToolActivateTool::new(Arc::clone(&ext_mgr))))
+            .await;
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        adapter
+            .set_auth_manager(Arc::new(AuthManager::new(
+                secrets,
+                None,
+                Some(ext_mgr),
+                Some(Arc::clone(&tools)),
+            )))
+            .await;
+
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_activate"));
+        let result = adapter
+            .execute_action(
+                "tool_activate",
+                serde_json::json!({"name": "web_search"}),
+                &lease(),
+                &ctx,
+            )
+            .await;
+
+        match result {
+            Err(EngineError::GatePaused {
+                gate_name,
+                action_name,
+                resume_kind,
+                ..
+            }) => {
+                assert_eq!(gate_name, "approval");
+                assert_eq!(action_name, "tool_activate");
+                match *resume_kind {
+                    ironclaw_engine::ResumeKind::Approval { allow_always } => {
+                        assert!(allow_always);
+                    }
+                    other => panic!("expected approval resume kind, got {other:?}"),
+                }
+            }
+            other => panic!("expected approval gate pause, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_activate_requires_approval_when_install_state_is_unavailable() {
+        use crate::extensions::{AuthHint, ExtensionKind, ExtensionSource, RegistryEntry};
+        use crate::secrets::InMemorySecretsStore;
+        use crate::secrets::SecretsCrypto;
+        use crate::tools::builtin::extension_tools::ToolActivateTool;
+        use crate::tools::mcp::process::McpProcessManager;
+        use crate::tools::mcp::session::McpSessionManager;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+
+        let tools = Arc::new(ToolRegistry::new());
+        let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            Arc::clone(&secrets),
+            Arc::clone(&tools),
+            None,
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+            "test_user".to_string(),
+            None,
+            vec![RegistryEntry {
+                name: "web_search".to_string(),
+                display_name: "Web Search".to_string(),
+                kind: ExtensionKind::WasmTool,
+                description: "Search the web".to_string(),
+                keywords: vec!["search".into(), "web".into()],
+                source: ExtensionSource::WasmDownload {
+                    wasm_url: "https://example.com/web_search.wasm".to_string(),
+                    capabilities_url: None,
+                },
+                fallback_source: None,
+                auth_hint: AuthHint::CapabilitiesAuth,
+                version: None,
+            }],
+        ));
+        tools
+            .register(Arc::new(ToolActivateTool::new(Arc::clone(&ext_mgr))))
+            .await;
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_activate"));
+        let result = adapter
+            .execute_action(
+                "tool_activate",
+                serde_json::json!({"name": "web_search"}),
+                &lease(),
+                &ctx,
+            )
+            .await;
+
+        match result {
+            Err(EngineError::GatePaused {
+                gate_name,
+                action_name,
+                resume_kind,
+                ..
+            }) => {
+                assert_eq!(gate_name, "approval");
+                assert_eq!(action_name, "tool_activate");
+                match *resume_kind {
+                    ironclaw_engine::ResumeKind::Approval { allow_always } => {
+                        assert!(allow_always);
+                    }
+                    other => panic!("expected approval resume kind, got {other:?}"),
+                }
+            }
+            other => panic!("expected approval gate pause, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_install_post_install_auth_gate_preserves_secret_name_for_resume() {
+        struct InstallTool;
+
+        #[async_trait]
+        impl Tool for InstallTool {
+            fn name(&self) -> &str {
+                "tool_install"
+            }
+
+            fn description(&self) -> &str {
+                "install"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"}
+                    }
+                })
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                Ok(ToolOutput::success(
+                    serde_json::json!({
+                        "name": "telegram",
+                        "status": "awaiting_token",
+                        "credential_name": "telegram_bot_token",
+                        "instructions": "Enter your Telegram Bot API token (from @BotFather)",
+                    }),
+                    std::time::Duration::from_millis(1),
+                ))
+            }
+        }
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(InstallTool)).await;
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let lease = ironclaw_engine::CapabilityLease {
+            id: ironclaw_engine::types::capability::LeaseId::new(),
+            thread_id: ironclaw_engine::ThreadId::new(),
+            capability_name: "tools".into(),
+            granted_actions: ironclaw_engine::GrantedActions::All,
+            granted_at: chrono::Utc::now(),
+            expires_at: None,
+            max_uses: None,
+            uses_remaining: None,
+            revoked: false,
+            revoked_reason: None,
+        };
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: Some("call_install".to_string()),
+            source_channel: None,
+            user_timezone: None,
+            thread_goal: None,
+            available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
+        };
+
+        let result = adapter
+            .execute_action(
+                "tool_install",
+                serde_json::json!({"name": "telegram"}),
+                &lease,
+                &ctx,
+            )
+            .await;
+
+        match result {
+            Err(EngineError::GatePaused { resume_kind, .. }) => match *resume_kind {
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name, ..
+                } => {
+                    assert_eq!(credential_name, "telegram_bot_token");
+                }
+                other => panic!("expected authentication resume kind, got {other:?}"),
+            },
+            other => panic!("expected auth gate pause after tool_install, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn available_actions_omit_latent_inactive_provider_actions() {
         use crate::secrets::InMemorySecretsStore;
         use crate::secrets::SecretsCrypto;
         use crate::tools::mcp::process::McpProcessManager;
@@ -2429,7 +5497,2068 @@ mod tests {
             )))
             .await;
 
-        let actions = adapter.available_actions(&[]).await.expect("actions");
-        assert!(actions.iter().any(|action| action.name == "latent_tool"));
+        let actions = adapter
+            .available_actions(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
+            .await
+            .expect("actions");
+        assert!(
+            !actions.iter().any(|action| action.name == "latent_tool"),
+            "latent WASM tool should stay out of model-facing available_actions; got: {:?}",
+            actions.iter().map(|a| &a.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn available_capabilities_include_latent_provider_activation_entry() {
+        use crate::secrets::InMemorySecretsStore;
+        use crate::secrets::SecretsCrypto;
+        use crate::tools::mcp::process::McpProcessManager;
+        use crate::tools::mcp::session::McpSessionManager;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("tools")).expect("tools dir");
+        std::fs::write(
+            dir.path().join("tools").join("latent_tool.wasm"),
+            b"fake-wasm",
+        )
+        .expect("write wasm");
+        std::fs::write(
+            dir.path()
+                .join("tools")
+                .join("latent_tool.capabilities.json"),
+            r#"{"description":"latent adapter test"}"#,
+        )
+        .expect("write capabilities");
+
+        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+
+        let tools = Arc::new(ToolRegistry::new());
+        let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            Arc::clone(&secrets),
+            Arc::clone(&tools),
+            None,
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+            "test_user".to_string(),
+            None,
+            vec![],
+        ));
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        adapter
+            .set_auth_manager(Arc::new(AuthManager::new(
+                secrets,
+                None,
+                Some(ext_mgr),
+                Some(Arc::clone(&tools)),
+            )))
+            .await;
+
+        let result = adapter
+            .available_capabilities(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
+            .await;
+
+        match result {
+            Ok(capabilities) => {
+                let latent = capabilities
+                    .into_iter()
+                    .find(|summary| summary.name == "latent_tool")
+                    .expect("latent tool should surface as an activatable capability");
+                assert!(matches!(
+                    latent.status,
+                    ironclaw_engine::CapabilityStatus::Inactive
+                        | ironclaw_engine::CapabilityStatus::AvailableNotInstalled
+                ));
+                assert_eq!(latent.action_preview, vec!["latent_tool".to_string()]);
+            }
+            other => panic!("expected latent capability background entry, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn available_actions_omit_registered_tool_when_provider_is_not_installed() {
+        use crate::secrets::InMemorySecretsStore;
+        use crate::secrets::SecretsCrypto;
+        use crate::tools::mcp::process::McpProcessManager;
+        use crate::tools::mcp::session::McpSessionManager;
+
+        struct LinearSearchTool;
+
+        #[async_trait]
+        impl crate::tools::Tool for LinearSearchTool {
+            fn name(&self) -> &str {
+                "linear_search"
+            }
+
+            fn description(&self) -> &str {
+                "Search Linear issues"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+
+            async fn execute(
+                &self,
+                _: serde_json::Value,
+                _: &crate::context::JobContext,
+            ) -> Result<crate::tools::ToolOutput, crate::tools::ToolError> {
+                Ok(crate::tools::ToolOutput::success(
+                    serde_json::json!({}),
+                    std::time::Duration::from_millis(1),
+                ))
+            }
+
+            fn provider_extension(&self) -> Option<&str> {
+                Some("linear")
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("tools")).expect("tools dir");
+        std::fs::write(dir.path().join("tools").join("linear.wasm"), b"fake-wasm")
+            .expect("write wasm");
+        std::fs::write(
+            dir.path().join("tools").join("linear.capabilities.json"),
+            r#"{"description":"linear provider"}"#,
+        )
+        .expect("write capabilities");
+
+        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(LinearSearchTool)).await;
+        let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            Arc::clone(&secrets),
+            Arc::clone(&tools),
+            None,
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+            "test_user".to_string(),
+            None,
+            vec![],
+        ));
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        adapter
+            .set_auth_manager(Arc::new(AuthManager::new(
+                secrets,
+                None,
+                Some(ext_mgr),
+                Some(Arc::clone(&tools)),
+            )))
+            .await;
+
+        let actions = adapter
+            .available_actions(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
+            .await
+            .expect("actions");
+        assert!(!actions.iter().any(|action| action.name == "linear_search"));
+    }
+
+    struct ProviderActionTool {
+        name: String,
+        description: String,
+        provider_extension: String,
+        parameters_schema: serde_json::Value,
+    }
+
+    struct ProviderFixture {
+        adapter: EffectBridgeAdapter,
+        _dir: tempfile::TempDir,
+    }
+
+    #[async_trait]
+    impl crate::tools::Tool for ProviderActionTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn description(&self) -> &str {
+            &self.description
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            self.parameters_schema.clone()
+        }
+
+        async fn execute(
+            &self,
+            _: serde_json::Value,
+            _: &crate::context::JobContext,
+        ) -> Result<crate::tools::ToolOutput, crate::tools::ToolError> {
+            Ok(crate::tools::ToolOutput::success(
+                serde_json::json!({}),
+                std::time::Duration::from_millis(1),
+            ))
+        }
+
+        fn provider_extension(&self) -> Option<&str> {
+            Some(&self.provider_extension)
+        }
+    }
+
+    async fn make_adapter_with_installed_provider_fixture(
+        provider_name: &str,
+        action_name: &str,
+        capabilities: serde_json::Value,
+        parameters_schema: serde_json::Value,
+    ) -> ProviderFixture {
+        use crate::secrets::InMemorySecretsStore;
+        use crate::secrets::SecretsCrypto;
+        use crate::tools::mcp::process::McpProcessManager;
+        use crate::tools::mcp::session::McpSessionManager;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let dir_path = dir.path().to_path_buf();
+        std::fs::create_dir_all(dir_path.join("tools")).expect("tools dir");
+        std::fs::write(
+            dir_path.join("tools").join(format!("{provider_name}.wasm")),
+            b"fake-wasm",
+        )
+        .expect("write wasm");
+        std::fs::write(
+            dir_path
+                .join("tools")
+                .join(format!("{provider_name}.capabilities.json")),
+            serde_json::to_vec(&capabilities).expect("serialize capabilities"),
+        )
+        .expect("write capabilities");
+
+        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools
+            .register(Arc::new(ProviderActionTool {
+                name: action_name.to_string(),
+                description: format!("{action_name} test action"),
+                provider_extension: provider_name.to_string(),
+                parameters_schema,
+            }))
+            .await;
+
+        let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            Arc::clone(&secrets),
+            Arc::clone(&tools),
+            None,
+            None,
+            dir_path.join("tools"),
+            dir_path.join("channels"),
+            None,
+            "test_user".to_string(),
+            None,
+            vec![],
+        ));
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        adapter
+            .set_auth_manager(Arc::new(AuthManager::new(
+                secrets,
+                None,
+                Some(ext_mgr),
+                Some(Arc::clone(&tools)),
+            )))
+            .await;
+
+        ProviderFixture { adapter, _dir: dir }
+    }
+
+    #[tokio::test]
+    async fn available_actions_omit_installed_needs_auth_provider_action() {
+        let fixture = make_adapter_with_installed_provider_fixture(
+            "gmail",
+            "gmail_send",
+            serde_json::json!({
+                "auth": {
+                    "secret_name": "google_oauth_token",
+                    "display_name": "Google",
+                    "oauth": {
+                        "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+                        "token_url": "https://oauth2.googleapis.com/token",
+                        "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
+                        "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
+                        "scopes": ["https://www.googleapis.com/auth/gmail.send"],
+                        "use_pkce": false,
+                        "extra_params": {
+                            "access_type": "offline",
+                            "prompt": "consent"
+                        }
+                    }
+                }
+            }),
+            serde_json::json!({"type": "object"}),
+        )
+        .await;
+
+        let actions = fixture
+            .adapter
+            .available_actions(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
+            .await
+            .expect("actions");
+        assert!(!actions.iter().any(|action| action.name == "gmail_send"));
+    }
+
+    #[tokio::test]
+    async fn available_actions_omit_installed_needs_setup_provider_action() {
+        let fixture = make_adapter_with_installed_provider_fixture(
+            "notion",
+            "notion_search",
+            serde_json::json!({
+                "setup": {
+                    "required_secrets": [
+                        {
+                            "name": "notion_api_key",
+                            "prompt": "Provide your Notion API key"
+                        }
+                    ]
+                }
+            }),
+            serde_json::json!({"type": "object"}),
+        )
+        .await;
+
+        let actions = fixture
+            .adapter
+            .available_actions(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
+            .await
+            .expect("actions");
+        assert!(!actions.iter().any(|action| action.name == "notion_search"));
+    }
+
+    #[tokio::test]
+    async fn available_actions_omit_installed_inactive_provider_action() {
+        let fixture = make_adapter_with_installed_provider_fixture(
+            "github",
+            "github_search",
+            serde_json::json!({
+                "description": "GitHub provider fixture"
+            }),
+            serde_json::json!({"type": "object"}),
+        )
+        .await;
+
+        let actions = fixture
+            .adapter
+            .available_actions(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
+            .await
+            .expect("actions");
+        assert!(!actions.iter().any(|action| action.name == "github_search"));
+    }
+
+    #[tokio::test]
+    async fn available_action_inventory_keeps_provider_actions_inline_callable() {
+        let fixture = make_adapter_with_installed_provider_fixture(
+            "gmail",
+            "gmail",
+            serde_json::json!({
+                "description": "Gmail provider fixture"
+            }),
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+            }),
+        )
+        .await;
+
+        let base_ctx = exec_ctx(ironclaw_engine::ThreadId::new(), None);
+        let inventory = fixture
+            .adapter
+            .available_action_inventory(&[], &base_ctx)
+            .await
+            .expect("inventory");
+
+        assert!(
+            inventory.inline.iter().any(|action| action.name == "gmail"),
+            "provider action should stay inline-callable"
+        );
+        let gmail = inventory
+            .inline
+            .iter()
+            .find(|action| action.name == "gmail")
+            .expect("provider action should be inline");
+        assert_eq!(gmail.description, "gmail test action");
+        assert_eq!(
+            gmail.parameters_schema,
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+            })
+        );
+
+        let actions = fixture
+            .adapter
+            .available_actions(&[], &base_ctx)
+            .await
+            .expect("actions");
+        assert!(
+            actions.iter().any(|action| action.name == "gmail"),
+            "provider action must remain callable in the provider surface"
+        );
+    }
+
+    #[tokio::test]
+    async fn available_capabilities_include_latent_provider_background() {
+        use crate::secrets::InMemorySecretsStore;
+        use crate::secrets::SecretsCrypto;
+        use crate::tools::mcp::process::McpProcessManager;
+        use crate::tools::mcp::session::McpSessionManager;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("tools")).expect("tools dir");
+        std::fs::write(
+            dir.path().join("tools").join("latent_tool.wasm"),
+            b"fake-wasm",
+        )
+        .expect("write wasm");
+        std::fs::write(
+            dir.path()
+                .join("tools")
+                .join("latent_tool.capabilities.json"),
+            r#"{"description":"latent capability test"}"#,
+        )
+        .expect("write capabilities");
+
+        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+
+        let tools = Arc::new(ToolRegistry::new());
+        let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            Arc::clone(&secrets),
+            Arc::clone(&tools),
+            None,
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+            "test_user".to_string(),
+            None,
+            vec![],
+        ));
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        adapter
+            .set_auth_manager(Arc::new(AuthManager::new(
+                secrets,
+                None,
+                Some(ext_mgr),
+                Some(Arc::clone(&tools)),
+            )))
+            .await;
+
+        let context = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: None,
+            user_timezone: None,
+            thread_goal: None,
+            available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
+        };
+
+        let capabilities = adapter
+            .available_capabilities(&[], &context)
+            .await
+            .expect("capabilities");
+
+        assert!(
+            capabilities
+                .iter()
+                .any(|summary| summary.name == "latent_tool"),
+            "latent provider tool should appear in capability background when it is activatable"
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_install_syncs_installed_skill_into_v2_store() {
+        use ironclaw_skills::v2::V2SkillMetadata;
+
+        struct SkillInstallStub;
+
+        #[async_trait]
+        impl Tool for SkillInstallStub {
+            fn name(&self) -> &str {
+                "skill_install"
+            }
+
+            fn description(&self) -> &str {
+                "stub skill install"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                Ok(ToolOutput::success(
+                    serde_json::json!({
+                        "name": "pikastream-video-meeting",
+                        "status": "installed",
+                    }),
+                    std::time::Duration::from_millis(1),
+                ))
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut raw_registry = SkillRegistry::new(dir.path().to_path_buf());
+        raw_registry
+            .install_skill(
+                r#"---
+name: pikastream-video-meeting
+version: "1.0.0"
+description: Pika meeting setup
+keywords:
+  - pika
+  - hangouts
+---
+# Pika Skill
+
+Use this skill to set up a Pika meeting.
+"#,
+            )
+            .await
+            .expect("install test skill");
+        let skill_registry = Arc::new(std::sync::RwLock::new(raw_registry));
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(SkillInstallStub)).await;
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        let store: Arc<dyn Store> = Arc::new(crate::bridge::store_adapter::HybridStore::new(None));
+        adapter.set_engine_store(Arc::clone(&store)).await;
+        adapter
+            .set_skill_registry(Arc::clone(&skill_registry))
+            .await;
+
+        let ctx = exec_ctx(
+            ironclaw_engine::ThreadId::new(),
+            Some("call_skill_install_sync"),
+        );
+        let result = adapter
+            .execute_action("skill_install", serde_json::json!({}), &lease(), &ctx)
+            .await
+            .expect("skill install should succeed");
+        assert!(!result.is_error);
+
+        let docs = store
+            .list_shared_memory_docs(ctx.project_id)
+            .await
+            .expect("list docs");
+        let doc = docs
+            .into_iter()
+            .find(|doc| doc.title == "skill:pikastream-video-meeting")
+            .expect("synced v2 skill doc");
+        assert_eq!(doc.doc_type, ironclaw_engine::DocType::Skill);
+        assert!(
+            doc.content.contains("Pika Skill"),
+            "doc content: {}",
+            doc.content
+        );
+
+        let metadata: V2SkillMetadata =
+            serde_json::from_value(doc.metadata).expect("valid skill metadata");
+        assert_eq!(metadata.name, "pikastream-video-meeting");
+        assert!(
+            metadata
+                .bundle_path
+                .as_deref()
+                .is_some_and(|path| path.ends_with("/pikastream-video-meeting")),
+            "bundle path: {:?}",
+            metadata.bundle_path
+        );
+    }
+
+    // ── Project auto-registration from memory_write ─────────────
+
+    #[test]
+    fn extract_project_slug_recognizes_project_paths() {
+        // Classic project write: slug is the first segment, file segment
+        // is what identifies a "real" write.
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/commitments/AGENTS.md"),
+            Some("commitments")
+        );
+        // Nested subdir under a project still resolves to the top-level slug.
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/commitments/open/sarah-q2-budget.md"),
+            Some("commitments")
+        );
+    }
+
+    #[test]
+    fn extract_project_slug_rejects_degenerate_targets() {
+        // Non-project writes: never treated as project declarations.
+        assert_eq!(super::extract_project_slug_from_target("AGENTS.md"), None);
+        assert_eq!(
+            super::extract_project_slug_from_target("daily/2026-04-14.md"),
+            None
+        );
+        // `projects/` alone, or `projects/foo` with no trailing segment,
+        // isn't a write we can attribute to a specific project — the
+        // former has no slug, the latter has no file component.
+        assert_eq!(super::extract_project_slug_from_target("projects/"), None);
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/foo"),
+            None
+        );
+        // Dotfile-ish slugs are rejected — a workspace with `projects/./`
+        // or `projects/../` would be malformed, and declaring a project
+        // from it would pollute the store with an unusable entry.
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/./foo.md"),
+            None
+        );
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/../escape.md"),
+            None
+        );
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/.hidden/foo.md"),
+            None
+        );
+    }
+
+    #[test]
+    fn slug_extractor_whitespace_and_special() {
+        // Whitespace in slug — not rejected by extractor (downstream handles)
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/ foo /bar.md"),
+            Some(" foo ")
+        );
+        // Unicode in slug
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/café/notes.md"),
+            Some("café")
+        );
+        // Slug with special chars
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/my_project/file.md"),
+            Some("my_project")
+        );
+    }
+
+    #[test]
+    fn project_new_is_deterministic_from_user_and_slug() {
+        // `Project::new` now derives its ID from `(user_id, slugify(name))`,
+        // so the same inputs produce the same project every time. This is
+        // the invariant that makes workspace-backed projects idempotent:
+        // writing `projects/commitments/AGENTS.md` twice never creates a
+        // duplicate project entity.
+        let a = ironclaw_engine::Project::new("alice", "Commitments", "desc");
+        let b = ironclaw_engine::Project::new("alice", "Commitments", "different desc");
+        assert_eq!(a.id, b.id, "same user+name must produce same ID");
+
+        // Different users still get different IDs for the same slug —
+        // projects are per-user.
+        let c = ironclaw_engine::Project::new("bob", "Commitments", "");
+        assert_ne!(a.id, c.id, "different users must produce different IDs");
+
+        // Slug derivation means `Commitments` and `commitments` land on
+        // the same project, which matches the workspace directory name.
+        let d = ironclaw_engine::Project::new("alice", "commitments", "");
+        assert_eq!(a.id, d.id, "case-different names with same slug match");
+    }
+
+    // ── Caller-level project auto-registration tests ──────────
+    //
+    // `extract_project_slug_from_target` is a predicate that gates a
+    // side effect (`save_project`) via `ensure_project_for_memory_write`.
+    // Per .claude/rules/testing.md, a unit test on the extractor alone
+    // is not sufficient — we must drive execute_action("memory_write")
+    // through the full hook path and inspect the persisted state.
+
+    /// Tool stub that echoes a minimal success body — enough for the
+    /// auto-register post-hook to run and splice `project_id` into it.
+    struct MemoryWriteStub;
+
+    #[async_trait]
+    impl Tool for MemoryWriteStub {
+        fn name(&self) -> &str {
+            "memory_write"
+        }
+        fn description(&self) -> &str {
+            "stub memory_write for auto-register tests"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &crate::context::JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({"status": "ok"}),
+                std::time::Duration::from_millis(1),
+            ))
+        }
+    }
+
+    /// Drive one `memory_write` with the given target and return
+    /// (result_output, projects_in_store_for_user).
+    async fn run_memory_write(
+        target: &str,
+        user_id: &str,
+    ) -> (serde_json::Value, Vec<ironclaw_engine::Project>) {
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(MemoryWriteStub)).await;
+        let (adapter, store, _dyn_store) = make_adapter_with_missions_and_store(tools).await;
+
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            user_id: user_id.to_string(),
+            ..exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_1"))
+        };
+        let result = adapter
+            .execute_action(
+                "memory_write",
+                serde_json::json!({"target": target, "content": "x"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("memory_write should succeed");
+        assert!(!result.is_error, "got error: {}", result.output);
+
+        let projects = store
+            .projects
+            .read()
+            .await
+            .values()
+            .filter(|p| p.user_id == user_id)
+            .cloned()
+            .collect();
+        (result.output, projects)
+    }
+
+    /// Canonical slug: the project gets auto-registered and the
+    /// output has a `project_id` splicing matches `Project::new`.
+    #[tokio::test]
+    async fn memory_write_auto_registers_project_on_canonical_slug() {
+        let user = "alice";
+        let (output, projects) = run_memory_write("projects/commitments/AGENTS.md", user).await;
+
+        assert_eq!(projects.len(), 1, "exactly one project should exist");
+        let expected_id = ironclaw_engine::Project::new(user, "commitments", "").id;
+        assert_eq!(projects[0].id, expected_id);
+        assert_eq!(projects[0].name, "commitments");
+        assert_eq!(
+            output.get("project_id").and_then(|v| v.as_str()),
+            Some(expected_id.0.to_string().as_str()),
+            "output should carry the newly-registered project_id"
+        );
+    }
+
+    /// Idempotency: writing twice must not duplicate the project.
+    /// This is the invariant `ProjectId::from_slug` exists to enforce.
+    #[tokio::test]
+    async fn memory_write_is_idempotent_across_repeated_writes() {
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(MemoryWriteStub)).await;
+        let (adapter, store, _) = make_adapter_with_missions_and_store(tools).await;
+        let user = "alice";
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            user_id: user.to_string(),
+            ..exec_ctx(ironclaw_engine::ThreadId::new(), Some("c1"))
+        };
+
+        for path in [
+            "projects/commitments/AGENTS.md",
+            "projects/commitments/open/foo.md",
+            "projects/commitments/.ceo-setup-complete",
+        ] {
+            let r = adapter
+                .execute_action(
+                    "memory_write",
+                    serde_json::json!({"target": path, "content": "x"}),
+                    &lease(),
+                    &ctx,
+                )
+                .await
+                .expect("write");
+            assert!(!r.is_error);
+        }
+
+        let projects: Vec<_> = store
+            .projects
+            .read()
+            .await
+            .values()
+            .filter(|p| p.user_id == user)
+            .cloned()
+            .collect();
+        assert_eq!(
+            projects.len(),
+            1,
+            "three writes to the same project must not create duplicates"
+        );
+    }
+
+    /// Non-`projects/` writes must never trigger auto-registration.
+    #[tokio::test]
+    async fn memory_write_outside_projects_does_not_register() {
+        let (output, projects) = run_memory_write("daily/2026-04-14.md", "alice").await;
+        assert!(projects.is_empty(), "random writes must not auto-register");
+        assert!(
+            output.get("project_id").is_none(),
+            "no project_id splicing for non-project paths"
+        );
+    }
+
+    /// Edge case: nested subdirectories resolve to the TOP-level slug,
+    /// not a per-subdir project (which would fork identity).
+    #[tokio::test]
+    async fn memory_write_nested_path_registers_top_level_project() {
+        let user = "alice";
+        let (_output, projects) =
+            run_memory_write("projects/commitments/open/team/sarah-q2-budget.md", user).await;
+        assert_eq!(projects.len(), 1);
+        assert_eq!(
+            projects[0].id,
+            ironclaw_engine::Project::new(user, "commitments", "").id,
+            "nested writes must register the top-level project, not a sub-project"
+        );
+    }
+
+    /// Weird-slug case: `projects/My Project/...` still registers a
+    /// project, but the registered project's ID matches what
+    /// `Project::new` (which internally slugifies) would produce.
+    /// This is the anti-fork invariant the review flagged.
+    #[tokio::test]
+    async fn memory_write_weird_slug_matches_project_new_id() {
+        let user = "alice";
+        // These paths all slugify to `my-project`.
+        for path in [
+            "projects/My Project/AGENTS.md",
+            "projects/MY_PROJECT/context.md",
+            "projects/my-project/README.md",
+        ] {
+            let tools = Arc::new(ToolRegistry::new());
+            tools.register(Arc::new(MemoryWriteStub)).await;
+            let (adapter, store, _) = make_adapter_with_missions_and_store(tools).await;
+            let ctx = ironclaw_engine::ThreadExecutionContext {
+                user_id: user.to_string(),
+                ..exec_ctx(ironclaw_engine::ThreadId::new(), Some("c1"))
+            };
+            let r = adapter
+                .execute_action(
+                    "memory_write",
+                    serde_json::json!({"target": path, "content": "x"}),
+                    &lease(),
+                    &ctx,
+                )
+                .await
+                .expect("write");
+            assert!(!r.is_error, "path={path}: {}", r.output);
+
+            let projects: Vec<_> = store.projects.read().await.values().cloned().collect();
+            assert_eq!(
+                projects.len(),
+                1,
+                "path={path}: expected exactly one project"
+            );
+            let expected = ironclaw_engine::Project::new(user, "my-project", "").id;
+            assert_eq!(
+                projects[0].id, expected,
+                "path={path}: auto-registered ID must equal Project::new(_, \"my-project\", _) \
+                 — divergence means the workspace dir will fork identity"
+            );
+        }
+    }
+
+    /// User isolation: two users writing to the same slug must end up
+    /// with different projects, never shared state across tenants.
+    #[tokio::test]
+    async fn memory_write_isolates_projects_by_user() {
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(MemoryWriteStub)).await;
+        let (adapter, store, _) = make_adapter_with_missions_and_store(tools).await;
+
+        for user in ["alice", "bob"] {
+            let ctx = ironclaw_engine::ThreadExecutionContext {
+                user_id: user.to_string(),
+                ..exec_ctx(ironclaw_engine::ThreadId::new(), Some("c1"))
+            };
+            let r = adapter
+                .execute_action(
+                    "memory_write",
+                    serde_json::json!({
+                        "target": "projects/notes/entry.md",
+                        "content": "x"
+                    }),
+                    &lease(),
+                    &ctx,
+                )
+                .await
+                .expect("write");
+            assert!(!r.is_error);
+        }
+
+        let all: Vec<_> = store.projects.read().await.values().cloned().collect();
+        assert_eq!(all.len(), 2, "one project per user, never shared");
+        let a = all.iter().find(|p| p.user_id == "alice").unwrap();
+        let b = all.iter().find(|p| p.user_id == "bob").unwrap();
+        assert_ne!(a.id, b.id, "same slug across users must yield distinct IDs");
+    }
+
+    /// Pathological slug inputs that `extract_project_slug_from_target`
+    /// rejects outright — no project registration and no project_id in
+    /// the output. Covers `projects/` alone, bare `projects/foo`
+    /// (no file), traversal, and dotfile-prefixed dirs.
+    #[tokio::test]
+    async fn memory_write_rejects_pathological_project_targets() {
+        for target in [
+            "projects/",
+            "projects/foo",            // no file segment
+            "projects/./foo.md",       // dot segment
+            "projects/../escape.md",   // traversal
+            "projects/.hidden/foo.md", // dotfile-prefixed dir
+        ] {
+            let (output, projects) = run_memory_write(target, "alice").await;
+            assert!(
+                projects.is_empty(),
+                "{target}: must not auto-register; got {projects:?}"
+            );
+            assert!(
+                output.get("project_id").is_none(),
+                "{target}: must not splice project_id"
+            );
+        }
+    }
+
+    // ── Caller-level mission action tests ─────────────────────
+    //
+    // These drive execute_action("mission_create"/...) through the full
+    // handle_mission_call path, per .claude/rules/testing.md.
+
+    mod mission_store {
+        use ironclaw_engine::types::mission::{Mission, MissionId, MissionStatus};
+        use ironclaw_engine::types::thread::{Thread, ThreadId, ThreadState};
+        use ironclaw_engine::{EngineError, ProjectId};
+        use std::collections::HashMap;
+        use tokio::sync::RwLock;
+
+        pub(super) struct TestStore {
+            threads: RwLock<HashMap<ThreadId, Thread>>,
+            missions: RwLock<HashMap<MissionId, Mission>>,
+            pub(in crate::bridge::effect_adapter) projects:
+                RwLock<HashMap<ProjectId, ironclaw_engine::Project>>,
+        }
+
+        impl TestStore {
+            pub fn new() -> Self {
+                Self {
+                    threads: RwLock::new(HashMap::new()),
+                    missions: RwLock::new(HashMap::new()),
+                    projects: RwLock::new(HashMap::new()),
+                }
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl ironclaw_engine::Store for TestStore {
+            async fn save_thread(&self, thread: &Thread) -> Result<(), EngineError> {
+                self.threads.write().await.insert(thread.id, thread.clone());
+                Ok(())
+            }
+            async fn load_thread(&self, id: ThreadId) -> Result<Option<Thread>, EngineError> {
+                Ok(self.threads.read().await.get(&id).cloned())
+            }
+            async fn list_threads(
+                &self,
+                _: ProjectId,
+                _: &str,
+            ) -> Result<Vec<Thread>, EngineError> {
+                Ok(vec![])
+            }
+            async fn update_thread_state(
+                &self,
+                _: ThreadId,
+                _: ThreadState,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn save_step(&self, _: &ironclaw_engine::Step) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_steps(
+                &self,
+                _: ThreadId,
+            ) -> Result<Vec<ironclaw_engine::Step>, EngineError> {
+                Ok(vec![])
+            }
+            async fn append_events(
+                &self,
+                _: &[ironclaw_engine::ThreadEvent],
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_events(
+                &self,
+                _: ThreadId,
+            ) -> Result<Vec<ironclaw_engine::ThreadEvent>, EngineError> {
+                Ok(vec![])
+            }
+            async fn save_project(
+                &self,
+                project: &ironclaw_engine::Project,
+            ) -> Result<(), EngineError> {
+                self.projects
+                    .write()
+                    .await
+                    .insert(project.id, project.clone());
+                Ok(())
+            }
+            async fn load_project(
+                &self,
+                id: ProjectId,
+            ) -> Result<Option<ironclaw_engine::Project>, EngineError> {
+                Ok(self.projects.read().await.get(&id).cloned())
+            }
+            async fn list_projects(
+                &self,
+                user_id: &str,
+            ) -> Result<Vec<ironclaw_engine::Project>, EngineError> {
+                Ok(self
+                    .projects
+                    .read()
+                    .await
+                    .values()
+                    .filter(|p| p.user_id == user_id)
+                    .cloned()
+                    .collect())
+            }
+            async fn save_memory_doc(
+                &self,
+                _: &ironclaw_engine::MemoryDoc,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_memory_doc(
+                &self,
+                _: ironclaw_engine::DocId,
+            ) -> Result<Option<ironclaw_engine::MemoryDoc>, EngineError> {
+                Ok(None)
+            }
+            async fn list_memory_docs(
+                &self,
+                _: ProjectId,
+                _: &str,
+            ) -> Result<Vec<ironclaw_engine::MemoryDoc>, EngineError> {
+                Ok(vec![])
+            }
+            async fn save_lease(
+                &self,
+                _: &ironclaw_engine::CapabilityLease,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_active_leases(
+                &self,
+                _: ThreadId,
+            ) -> Result<Vec<ironclaw_engine::CapabilityLease>, EngineError> {
+                Ok(vec![])
+            }
+            async fn revoke_lease(
+                &self,
+                _: ironclaw_engine::types::capability::LeaseId,
+                _: &str,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn save_mission(&self, mission: &Mission) -> Result<(), EngineError> {
+                self.missions
+                    .write()
+                    .await
+                    .insert(mission.id, mission.clone());
+                Ok(())
+            }
+            async fn load_mission(&self, id: MissionId) -> Result<Option<Mission>, EngineError> {
+                Ok(self.missions.read().await.get(&id).cloned())
+            }
+            async fn list_missions(
+                &self,
+                project_id: ProjectId,
+                user_id: &str,
+            ) -> Result<Vec<Mission>, EngineError> {
+                Ok(self
+                    .missions
+                    .read()
+                    .await
+                    .values()
+                    .filter(|m| m.project_id == project_id && m.user_id == user_id)
+                    .cloned()
+                    .collect())
+            }
+            async fn list_all_missions(
+                &self,
+                project_id: ProjectId,
+            ) -> Result<Vec<Mission>, EngineError> {
+                Ok(self
+                    .missions
+                    .read()
+                    .await
+                    .values()
+                    .filter(|m| m.project_id == project_id)
+                    .cloned()
+                    .collect())
+            }
+            async fn update_mission_status(
+                &self,
+                id: MissionId,
+                status: MissionStatus,
+            ) -> Result<(), EngineError> {
+                if let Some(m) = self.missions.write().await.get_mut(&id) {
+                    m.status = status;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Build a MissionManager backed by an in-memory store and wire it
+    /// into an EffectBridgeAdapter so tests can drive `execute_action`.
+    async fn make_adapter_with_missions() -> EffectBridgeAdapter {
+        make_adapter_with_missions_and_store(Arc::new(ToolRegistry::new()))
+            .await
+            .0
+    }
+
+    /// Same as `make_adapter_with_missions` but exposes both the adapter
+    /// (with a caller-provided `ToolRegistry` so tests can register stubs)
+    /// and the backing store, so assertions can inspect persisted state
+    /// after `execute_action` runs.
+    async fn make_adapter_with_missions_and_store(
+        tools: Arc<ToolRegistry>,
+    ) -> (
+        EffectBridgeAdapter,
+        Arc<mission_store::TestStore>,
+        Arc<dyn ironclaw_engine::Store>,
+    ) {
+        use ironclaw_engine::{CapabilityRegistry, LeaseManager, PolicyEngine, ThreadManager};
+        use ironclaw_safety::SafetyConfig;
+
+        struct NoopLlm;
+        #[async_trait]
+        impl ironclaw_engine::LlmBackend for NoopLlm {
+            async fn complete(
+                &self,
+                _: &[ironclaw_engine::ThreadMessage],
+                _: &[ironclaw_engine::ActionDef],
+                _: &ironclaw_engine::LlmCallConfig,
+            ) -> Result<ironclaw_engine::LlmOutput, ironclaw_engine::EngineError> {
+                Ok(ironclaw_engine::LlmOutput {
+                    response: ironclaw_engine::types::step::LlmResponse::Text("done".into()),
+                    usage: ironclaw_engine::types::step::TokenUsage::default(),
+                })
+            }
+            fn model_name(&self) -> &str {
+                "noop"
+            }
+        }
+
+        struct NoopEffects;
+        #[async_trait]
+        impl ironclaw_engine::EffectExecutor for NoopEffects {
+            async fn execute_action(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+                _: &ironclaw_engine::CapabilityLease,
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<ironclaw_engine::ActionResult, ironclaw_engine::EngineError> {
+                Ok(ironclaw_engine::ActionResult {
+                    call_id: String::new(),
+                    action_name: String::new(),
+                    output: serde_json::json!({}),
+                    is_error: false,
+                    duration: std::time::Duration::from_millis(1),
+                })
+            }
+            async fn available_actions(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<Vec<ironclaw_engine::ActionDef>, ironclaw_engine::EngineError> {
+                Ok(vec![])
+            }
+
+            async fn available_capabilities(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, ironclaw_engine::EngineError>
+            {
+                Ok(vec![])
+            }
+        }
+
+        let concrete_store = Arc::new(mission_store::TestStore::new());
+        let store: Arc<dyn ironclaw_engine::Store> = concrete_store.clone();
+        let thread_manager = Arc::new(ThreadManager::new(
+            Arc::new(NoopLlm),
+            Arc::new(NoopEffects),
+            Arc::clone(&store),
+            Arc::new(CapabilityRegistry::new()),
+            Arc::new(LeaseManager::new()),
+            Arc::new(PolicyEngine::new()),
+        ));
+        let mgr = ironclaw_engine::MissionManager::new(Arc::clone(&store), thread_manager);
+
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        adapter.set_mission_manager(Arc::new(mgr)).await;
+        (adapter, concrete_store, store)
+    }
+
+    /// Regression: mission_create with missing cadence must return an
+    /// actionable error through the full execute_action path, not panic
+    /// or silently create a Manual mission.
+    #[tokio::test]
+    async fn mission_create_missing_cadence_returns_error_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({"name": "test", "goal": "do stuff"}),
+                &lease(),
+                &exec_ctx(ironclaw_engine::ThreadId::new(), Some("c1")),
+            )
+            .await
+            .expect("should return Ok with is_error=true, not Err");
+
+        assert!(result.is_error, "missing cadence should be an error result");
+        let output = &result.output;
+        assert!(
+            output
+                .get("error")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains("cadence is required")),
+            "error message should mention cadence, got: {output}"
+        );
+    }
+
+    /// Regression: mission_create with a malformed cadence string must
+    /// return a helpful error through execute_action.
+    #[tokio::test]
+    async fn mission_create_malformed_cadence_returns_error_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "test",
+                    "goal": "do stuff",
+                    "cadence": "every tuesday"
+                }),
+                &lease(),
+                &exec_ctx(ironclaw_engine::ThreadId::new(), Some("c2")),
+            )
+            .await
+            .expect("should return Ok with is_error=true");
+
+        assert!(result.is_error);
+        assert!(
+            result
+                .output
+                .get("error")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains("unrecognized cadence")),
+            "got: {}",
+            result.output
+        );
+    }
+
+    /// Regression: mission_create with string-typed guardrails (e.g.
+    /// cooldown_secs="0") must be caught before creating the mission.
+    #[tokio::test]
+    async fn mission_create_string_guardrails_rejected_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "test",
+                    "goal": "do stuff",
+                    "cadence": "manual",
+                    "cooldown_secs": "300"
+                }),
+                &lease(),
+                &exec_ctx(ironclaw_engine::ThreadId::new(), Some("c3")),
+            )
+            .await
+            .expect("should return Ok with is_error=true");
+
+        assert!(result.is_error);
+        assert!(
+            result
+                .output
+                .get("error")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains("must be an integer")),
+            "got: {}",
+            result.output
+        );
+    }
+
+    /// Happy path: mission_create with valid params succeeds through execute_action.
+    #[tokio::test]
+    async fn mission_create_valid_params_succeeds_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "daily check",
+                    "goal": "check systems",
+                    "cadence": "0 9 * * *"
+                }),
+                &lease(),
+                &exec_ctx(ironclaw_engine::ThreadId::new(), Some("c4")),
+            )
+            .await
+            .expect("should succeed");
+
+        assert!(!result.is_error, "got error: {}", result.output);
+        assert_eq!(
+            result.output.get("status").and_then(|v| v.as_str()),
+            Some("created")
+        );
+        assert!(
+            result
+                .output
+                .get("mission_id")
+                .and_then(|v| v.as_str())
+                .is_some()
+        );
+    }
+
+    /// Regression: mission_update with string-typed guardrails must be
+    /// caught at the execute_action level, not silently ignored.
+    #[tokio::test]
+    async fn mission_update_string_guardrails_rejected_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("u1"));
+
+        // First create a mission to get an ID.
+        let create_result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "updatable",
+                    "goal": "test update",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+        assert!(!create_result.is_error);
+        let mission_id = create_result
+            .output
+            .get("mission_id")
+            .and_then(|v| v.as_str())
+            .expect("should have mission_id");
+
+        // Now update with string-typed guardrails — should fail.
+        let update_result = adapter
+            .execute_action(
+                "mission_update",
+                serde_json::json!({
+                    "id": mission_id,
+                    "max_concurrent": "5"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("should return Ok with is_error=true");
+
+        assert!(
+            update_result.is_error,
+            "string guardrails should fail: {}",
+            update_result.output
+        );
+        assert!(
+            update_result
+                .output
+                .get("error")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains("must be an integer")),
+            "got: {}",
+            update_result.output
+        );
+    }
+
+    /// Verify system_event cadence round-trips through mission_list.
+    #[tokio::test]
+    async fn system_event_cadence_round_trips_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("rt1"));
+
+        // Create a mission with a system_event cadence.
+        let create_result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "sys event test",
+                    "goal": "test round-trip",
+                    "cadence": "system_event:self-improvement/thread_completed"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+        assert!(
+            !create_result.is_error,
+            "create failed: {}",
+            create_result.output
+        );
+
+        // List missions — the returned cadence should parse back.
+        let list_result = adapter
+            .execute_action("mission_list", serde_json::json!({}), &lease(), &ctx)
+            .await
+            .expect("list should succeed");
+        assert!(!list_result.is_error);
+
+        let missions = list_result.output.as_array().expect("should be array");
+        let mission = missions
+            .iter()
+            .find(|m| m.get("name").and_then(|v| v.as_str()) == Some("sys event test"))
+            .expect("should find the created mission");
+        let cadence_str = mission
+            .get("cadence")
+            .and_then(|v| v.as_str())
+            .expect("cadence should be a string");
+
+        // The cadence string must parse back successfully.
+        let round_tripped = parse_cadence(cadence_str, None);
+        assert!(
+            round_tripped.is_ok(),
+            "cadence '{cadence_str}' failed to round-trip: {}",
+            round_tripped.unwrap_err()
+        );
+    }
+
+    /// Verify mission_complete returns "completed" status.
+    #[tokio::test]
+    async fn mission_complete_returns_completed_status_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("d1"));
+
+        let create_result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "deletable",
+                    "goal": "test delete",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+        assert!(!create_result.is_error);
+        let mission_id = create_result
+            .output
+            .get("mission_id")
+            .and_then(|v| v.as_str())
+            .expect("should have mission_id");
+
+        let delete_result = adapter
+            .execute_action(
+                "mission_complete",
+                serde_json::json!({"id": mission_id}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("complete should succeed");
+
+        assert!(!delete_result.is_error);
+        assert_eq!(
+            delete_result.output.get("status").and_then(|v| v.as_str()),
+            Some("completed"),
+            "mission_complete should return 'completed', got: {}",
+            delete_result.output
+        );
+    }
+
+    // ── Phase 6 acceptance: full mission lifecycle through the bridge ──
+    //
+    // These tests pin the gateway-facing contract that v2 clients rely on:
+    // a mission round-trips through create → list → fire → complete and
+    // each step's response shape stays stable. Existing per-action tests
+    // above cover error paths; these cover the happy-path interactions
+    // between actions, which is where regressions tend to bite (e.g.
+    // status not surfacing in mission_list after complete, or fire not
+    // returning a thread_id for manual missions).
+
+    /// Full lifecycle: create → list (present) → complete → list (Completed).
+    /// Pins the post-complete visibility of status through `mission_list`,
+    /// which a chat client polls to render terminal-state UI.
+    #[tokio::test]
+    async fn mission_full_lifecycle_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("lc1"));
+
+        // Create
+        let create = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "lifecycle-mission",
+                    "goal": "exercise the full lifecycle",
+                    "cadence": "0 9 * * *"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+        assert!(!create.is_error, "create failed: {}", create.output);
+        let mission_id = create
+            .output
+            .get("mission_id")
+            .and_then(|v| v.as_str())
+            .expect("create must return mission_id")
+            .to_string();
+
+        // List → present, status not yet Completed
+        let list = adapter
+            .execute_action("mission_list", serde_json::json!({}), &lease(), &ctx)
+            .await
+            .expect("list should succeed");
+        let missions = list.output.as_array().expect("list output is array");
+        let entry = missions
+            .iter()
+            .find(|m| m.get("id").and_then(|v| v.as_str()) == Some(mission_id.as_str()))
+            .expect("created mission must appear in list");
+        let initial_status = entry.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        assert_ne!(
+            initial_status, "Completed",
+            "fresh mission should not be Completed; got status={initial_status}"
+        );
+
+        // Complete
+        let complete = adapter
+            .execute_action(
+                "mission_complete",
+                serde_json::json!({"id": mission_id}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("complete should succeed");
+        assert!(!complete.is_error);
+        assert_eq!(
+            complete.output.get("status").and_then(|v| v.as_str()),
+            Some("completed")
+        );
+
+        // List again → Completed status now visible
+        let list_after = adapter
+            .execute_action("mission_list", serde_json::json!({}), &lease(), &ctx)
+            .await
+            .expect("list-after should succeed");
+        let missions_after = list_after.output.as_array().expect("array");
+        let entry_after = missions_after
+            .iter()
+            .find(|m| m.get("id").and_then(|v| v.as_str()) == Some(mission_id.as_str()))
+            .expect("mission still present after complete");
+        let post_status = entry_after
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(
+            post_status, "Completed",
+            "mission_list must surface Completed status after mission_complete; got {post_status}"
+        );
+    }
+
+    /// `mission_fire` on a manual-cadence mission returns a thread_id and
+    /// fired status. Pins the response shape gateway clients consume to
+    /// link the fired mission to its child thread.
+    #[tokio::test]
+    async fn mission_fire_returns_thread_id_for_manual_cadence_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("fire1"));
+
+        let create = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "fireable",
+                    "goal": "test fire flow",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+        let mission_id = create
+            .output
+            .get("mission_id")
+            .and_then(|v| v.as_str())
+            .expect("mission_id present")
+            .to_string();
+
+        let fire = adapter
+            .execute_action(
+                "mission_fire",
+                serde_json::json!({"id": mission_id}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("fire should succeed");
+
+        assert!(!fire.is_error, "fire failed: {}", fire.output);
+        // Two terminal shapes are valid: (a) {thread_id, status="fired"}
+        // when the mission ran; (b) {status="not_fired", reason} when
+        // budget/cooldown gated it. A fresh manual mission has no
+        // budget — must produce shape (a).
+        assert_eq!(
+            fire.output.get("status").and_then(|v| v.as_str()),
+            Some("fired"),
+            "fresh manual mission should fire successfully, got: {}",
+            fire.output
+        );
+        let thread_id = fire
+            .output
+            .get("thread_id")
+            .and_then(|v| v.as_str())
+            .expect("fired response must include thread_id");
+        assert!(
+            uuid::Uuid::parse_str(thread_id).is_ok(),
+            "thread_id must be a valid UUID, got {thread_id:?}",
+        );
+    }
+
+    /// `mission_list` returns every mission the user created in the
+    /// current project, isolated from other users. Pins the per-user
+    /// scoping that chat history and project-detail pages rely on.
+    #[tokio::test]
+    async fn mission_list_returns_all_user_missions_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("list1"));
+
+        let names = ["alpha", "beta", "gamma"];
+        for name in names {
+            let r = adapter
+                .execute_action(
+                    "mission_create",
+                    serde_json::json!({
+                        "name": name,
+                        "goal": format!("test {name}"),
+                        "cadence": "manual"
+                    }),
+                    &lease(),
+                    &ctx,
+                )
+                .await
+                .expect("create should succeed");
+            assert!(!r.is_error, "create {name} failed: {}", r.output);
+        }
+
+        let list = adapter
+            .execute_action("mission_list", serde_json::json!({}), &lease(), &ctx)
+            .await
+            .expect("list should succeed");
+        let missions = list.output.as_array().expect("array");
+        let listed_names: Vec<&str> = missions
+            .iter()
+            .filter_map(|m| m.get("name").and_then(|v| v.as_str()))
+            .collect();
+        for expected in names {
+            assert!(
+                listed_names.contains(&expected),
+                "expected mission {expected:?} in list, got: {listed_names:?}"
+            );
+        }
+    }
+
+    // ── available_actions surfaces engine-registered capability actions ──
+    //
+    // Regression: without the capability registry, `available_actions`
+    // returned only v1 `ToolRegistry` tools + latent OAuth actions, so
+    // the LLM never saw mission tools in its tools list even though the
+    // thread held an active `missions` lease. This test pins that a
+    // thread with a mission lease gets `mission_*` advertised.
+
+    fn mission_capability() -> ironclaw_engine::Capability {
+        ironclaw_engine::Capability {
+            name: "missions".into(),
+            description: "Mission lifecycle".into(),
+            actions: crate::bridge::engine_actions::mission_capability_actions(),
+            knowledge: vec![],
+            policies: vec![],
+        }
+    }
+
+    fn mission_lease(granted: &[&str]) -> ironclaw_engine::CapabilityLease {
+        ironclaw_engine::CapabilityLease {
+            id: ironclaw_engine::types::capability::LeaseId::new(),
+            thread_id: ironclaw_engine::ThreadId::new(),
+            capability_name: "missions".into(),
+            granted_actions: ironclaw_engine::GrantedActions::Specific(
+                granted.iter().map(|s| s.to_string()).collect(),
+            ),
+            granted_at: chrono::Utc::now(),
+            expires_at: None,
+            max_uses: None,
+            uses_remaining: None,
+            revoked: false,
+            revoked_reason: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn available_actions_surfaces_leased_mission_capability() {
+        let adapter = make_adapter();
+        let mut registry = CapabilityRegistry::new();
+        registry.register(mission_capability());
+        adapter.set_capability_registry(Arc::new(registry)).await;
+
+        let actions = adapter
+            .available_actions(
+                &[mission_lease(&[
+                    "mission_create",
+                    "mission_list",
+                    "mission_complete",
+                ])],
+                &exec_ctx(ironclaw_engine::ThreadId::new(), None),
+            )
+            .await
+            .expect("available_actions should succeed");
+
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        for expected in ["mission_create", "mission_list", "mission_complete"] {
+            assert!(
+                names.contains(&expected),
+                "expected {expected} in advertised actions, got: {names:?}"
+            );
+        }
+
+        let mission_create = actions
+            .iter()
+            .find(|action| action.name == "mission_create")
+            .expect("mission_create should be advertised");
+        assert_eq!(
+            mission_create.parameters_schema["required"],
+            serde_json::json!(["name", "goal", "cadence"])
+        );
+        let create_summary = mission_create
+            .discovery_summary()
+            .expect("mission_create should carry curated discovery guidance");
+        assert_eq!(
+            create_summary.always_required,
+            vec![
+                "name".to_string(),
+                "goal".to_string(),
+                "cadence".to_string()
+            ]
+        );
+
+        let mission_list = actions
+            .iter()
+            .find(|action| action.name == "mission_list")
+            .expect("mission_list should be advertised");
+        assert!(mission_list.discovery.is_none());
+        assert!(mission_list.discovery_summary().is_none());
+    }
+
+    #[tokio::test]
+    async fn available_actions_respects_partial_lease_grant() {
+        let adapter = make_adapter();
+        let mut registry = CapabilityRegistry::new();
+        registry.register(mission_capability());
+        adapter.set_capability_registry(Arc::new(registry)).await;
+
+        // Lease only grants mission_list; mission_create / mission_complete
+        // must NOT be advertised to the LLM even though they exist in the
+        // capability registry.
+        let actions = adapter
+            .available_actions(
+                &[mission_lease(&["mission_list"])],
+                &exec_ctx(ironclaw_engine::ThreadId::new(), None),
+            )
+            .await
+            .expect("available_actions should succeed");
+
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            names.contains(&"mission_list"),
+            "mission_list should be advertised: {names:?}"
+        );
+        assert!(
+            !names.contains(&"mission_create"),
+            "mission_create must not leak when lease did not grant it: {names:?}"
+        );
+        assert!(
+            !names.contains(&"mission_complete"),
+            "mission_complete must not leak when lease did not grant it: {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn available_actions_omits_capability_without_lease() {
+        let adapter = make_adapter();
+        let mut registry = CapabilityRegistry::new();
+        registry.register(mission_capability());
+        adapter.set_capability_registry(Arc::new(registry)).await;
+
+        // No leases passed — no capability actions should surface even
+        // though the registry has them.
+        let actions = adapter
+            .available_actions(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
+            .await
+            .expect("available_actions should succeed");
+
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        for name in ["mission_create", "mission_list", "mission_complete"] {
+            assert!(
+                !names.contains(&name),
+                "{name} must not appear without a lease: {names:?}"
+            );
+        }
+    }
+
+    /// Trivial v1 tool for the combined advertising test. Keeps the test
+    /// close to the helper so it doesn't pollute the top-level tool list.
+    struct V1EchoTool;
+
+    #[async_trait]
+    impl Tool for V1EchoTool {
+        fn name(&self) -> &str {
+            "v1_echo"
+        }
+        fn description(&self) -> &str {
+            "v1 echo tool"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(
+            &self,
+            _: serde_json::Value,
+            _: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({}),
+                std::time::Duration::from_millis(1),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn available_actions_merges_v1_tools_with_engine_capabilities() {
+        // Exercises the real production shape: the adapter has both a v1
+        // `ToolRegistry` (echo tool) and a capability registry (missions).
+        // With a missions lease active, the LLM's tools list must include
+        // BOTH. Prior tests covered each path in isolation; this pins the
+        // combined advertising on the same call.
+        use ironclaw_safety::SafetyConfig;
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(V1EchoTool)).await;
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let mut registry = CapabilityRegistry::new();
+        registry.register(mission_capability());
+        adapter.set_capability_registry(Arc::new(registry)).await;
+
+        let actions = adapter
+            .available_actions(
+                &[mission_lease(&[
+                    "mission_create",
+                    "mission_list",
+                    "mission_complete",
+                ])],
+                &exec_ctx(ironclaw_engine::ThreadId::new(), None),
+            )
+            .await
+            .expect("available_actions should succeed");
+
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            names.contains(&"v1_echo"),
+            "v1 tool should be advertised: {names:?}"
+        );
+        for mission in ["mission_create", "mission_list", "mission_complete"] {
+            assert!(
+                names.contains(&mission),
+                "engine capability action {mission} should be advertised alongside v1 tools: {names:?}"
+            );
+        }
+    }
+
+    /// Defensive: an engine capability must not be able to sneak a
+    /// v1-denylisted action (`create_job` etc.) past the v1-isolation
+    /// filters by registering under a different capability name. The
+    /// engine-capability path applies the same `is_v1_only_tool` /
+    /// `is_v1_auth_tool` gates as the v1 path.
+    #[tokio::test]
+    async fn available_actions_filters_v1_denylisted_names_from_engine_capabilities() {
+        let adapter = make_adapter();
+        let mut registry = CapabilityRegistry::new();
+        // A hypothetical malformed capability that tries to expose v1
+        // tools through the v2 advertising path.
+        registry.register(ironclaw_engine::Capability {
+            name: "rogue".into(),
+            description: "should not surface denylisted v1 names".into(),
+            actions: vec![
+                ActionDef {
+                    name: "create_job".into(), // v1-only denylist
+                    description: "forbidden".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                    model_tool_surface: ModelToolSurface::FullSchema,
+                    discovery: None,
+                },
+                ActionDef {
+                    name: "tool_auth".into(), // v1 auth tool
+                    description: "forbidden".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                    model_tool_surface: ModelToolSurface::FullSchema,
+                    discovery: None,
+                },
+                ActionDef {
+                    name: "safe_action".into(),
+                    description: "allowed".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                    model_tool_surface: ModelToolSurface::FullSchema,
+                    discovery: None,
+                },
+            ],
+            knowledge: vec![],
+            policies: vec![],
+        });
+        adapter.set_capability_registry(Arc::new(registry)).await;
+
+        let rogue_lease = ironclaw_engine::CapabilityLease {
+            id: ironclaw_engine::types::capability::LeaseId::new(),
+            thread_id: ironclaw_engine::ThreadId::new(),
+            capability_name: "rogue".into(),
+            granted_actions: ironclaw_engine::GrantedActions::All,
+            granted_at: chrono::Utc::now(),
+            expires_at: None,
+            max_uses: None,
+            uses_remaining: None,
+            revoked: false,
+            revoked_reason: None,
+        };
+
+        let actions = adapter
+            .available_actions(
+                &[rogue_lease],
+                &exec_ctx(ironclaw_engine::ThreadId::new(), None),
+            )
+            .await
+            .expect("available_actions should succeed");
+
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            !names.contains(&"create_job"),
+            "create_job is v1-denylisted and must not surface via engine capability: {names:?}"
+        );
+        assert!(
+            !names.contains(&"tool_auth"),
+            "tool_auth is a v1 auth tool and must not surface via engine capability: {names:?}"
+        );
+        assert!(
+            names.contains(&"safe_action"),
+            "safe_action should surface through the engine capability path: {names:?}"
+        );
     }
 }

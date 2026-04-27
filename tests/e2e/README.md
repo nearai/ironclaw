@@ -64,6 +64,11 @@ Then Playwright drives a headless Chromium browser against the gateway, making D
 3. Use selectors from `helpers.py` (update `SEL` dict if new elements are needed)
 4. Keep tests deterministic -- use the mock LLM, not real providers
 
+## Live Persona Failure Notes
+
+For the live 20+ turn persona workflows and recurring tool-misuse patterns seen
+there, see [`LIVE_TOOL_FAILURES.md`](./LIVE_TOOL_FAILURES.md).
+
 ## Mocking API responses with `page.route()`
 
 For tabs that depend on external data (extensions, jobs, memory, routines), use

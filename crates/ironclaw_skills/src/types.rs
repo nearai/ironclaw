@@ -18,6 +18,15 @@ const MAX_PATTERNS_PER_SKILL: usize = 5;
 /// Maximum number of tags allowed per skill to prevent scoring manipulation.
 const MAX_TAGS_PER_SKILL: usize = 10;
 
+/// Maximum number of companion skill declarations in `requires.skills`.
+/// Maximum length for `setup_marker` paths (bytes). Prevents untrusted
+/// skills from injecting excessively long marker strings.
+const MAX_SETUP_MARKER_LENGTH: usize = 256;
+
+/// Mirrors `MAX_CHAIN_DEPS` in the host crate's skill_install tool to keep
+/// the chain installer's queue size bounded from hostile manifests.
+pub const MAX_REQUIRED_SKILLS_PER_MANIFEST: usize = 10;
+
 /// Minimum length for keywords and tags. Short tokens like "a" or "is"
 /// match too broadly and can be used to game the scoring system.
 const MIN_KEYWORD_TAG_LENGTH: usize = 3;
@@ -84,6 +93,23 @@ pub struct ActivationCriteria {
     /// Maximum context tokens this skill's prompt should consume.
     #[serde(default = "default_max_context_tokens")]
     pub max_context_tokens: usize,
+    /// Workspace path that, when present, marks this skill's setup as
+    /// complete. The selector excludes the skill from candidates if the
+    /// workspace already contains this path.
+    ///
+    /// Used by **one-time setup skills** (the `*-setup` persona bundles)
+    /// so they activate once during onboarding, write the marker as part
+    /// of their setup steps, and then never compete for the activation
+    /// budget again. Reactive operational skills (commitment-triage,
+    /// decision-capture, etc.) leave this field unset and continue to
+    /// activate on every matching message.
+    ///
+    /// To re-trigger setup, delete the marker file from the workspace.
+    /// Typical markers are paths the setup skill itself creates as part
+    /// of its first run (e.g. `commitments/.developer-setup-complete`
+    /// for the developer setup).
+    #[serde(default)]
+    pub setup_marker: Option<String>,
 }
 
 impl ActivationCriteria {
@@ -100,6 +126,13 @@ impl ActivationCriteria {
         self.patterns.truncate(MAX_PATTERNS_PER_SKILL);
         self.tags.retain(|t| t.len() >= MIN_KEYWORD_TAG_LENGTH);
         self.tags.truncate(MAX_TAGS_PER_SKILL);
+
+        // Sanitize setup_marker: reject path traversal and enforce length.
+        if let Some(ref marker) = self.setup_marker
+            && (marker.len() > MAX_SETUP_MARKER_LENGTH || marker.contains(".."))
+        {
+            self.setup_marker = None;
+        }
     }
 }
 
@@ -125,29 +158,13 @@ pub struct SkillManifest {
     /// Parsed at load time; values are never in the LLM context.
     #[serde(default)]
     pub credentials: Vec<SkillCredentialSpec>,
-    /// Optional OpenClaw metadata.
+    /// Gating requirements (binaries, env vars, config files, companion skills).
     #[serde(default)]
-    pub metadata: Option<SkillMetadata>,
+    pub requires: GatingRequirements,
 }
 
 fn default_version() -> String {
     "0.0.0".to_string()
-}
-
-/// Optional metadata section in SKILL.md frontmatter.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SkillMetadata {
-    /// OpenClaw-specific metadata.
-    #[serde(default)]
-    pub openclaw: Option<OpenClawMeta>,
-}
-
-/// OpenClaw-specific metadata.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct OpenClawMeta {
-    /// Gating requirements that must be met for the skill to load.
-    #[serde(default)]
-    pub requires: GatingRequirements,
 }
 
 /// Requirements that must be satisfied for a skill to load.
@@ -162,6 +179,31 @@ pub struct GatingRequirements {
     /// Required config file paths that must exist.
     #[serde(default)]
     pub config: Vec<String>,
+    /// Companion skills that should be installed alongside this one.
+    ///
+    /// Unlike bins/env/config, these entries are advisory metadata only and do
+    /// not currently prevent the skill from loading when missing. This allows
+    /// bundle/setup skills to declare which sub-skills they are intended to be
+    /// used with (e.g., a `ceo-setup` bundle references
+    /// `commitment-triage`, `commitment-digest`, `decision-capture`, etc.).
+    ///
+    /// Capped at `MAX_REQUIRED_SKILLS_PER_MANIFEST` during parsing via
+    /// [`GatingRequirements::enforce_limits`] to keep the chain installer's
+    /// queue size bounded from hostile manifests.
+    #[serde(default)]
+    pub skills: Vec<String>,
+}
+
+impl GatingRequirements {
+    /// Enforce per-manifest limits on `requires.skills`.
+    ///
+    /// Called from the parser so hostile or buggy manifests with hundreds of
+    /// companion-skill declarations can't cause unbounded queue growth in
+    /// the chain installer before the downstream `MAX_CHAIN_DEPS` cap kicks
+    /// in.
+    pub fn enforce_limits(&mut self) {
+        self.skills.truncate(MAX_REQUIRED_SKILLS_PER_MANIFEST);
+    }
 }
 
 /// Where to inject a credential in HTTP requests.
@@ -246,6 +288,9 @@ pub struct SkillCredentialSpec {
     pub location: SkillCredentialLocation,
     /// Host patterns this credential applies to (glob syntax, e.g. `*.googleapis.com`).
     pub hosts: Vec<String>,
+    /// Literal path prefixes to scope this credential to specific endpoints.
+    #[serde(default)]
+    pub path_patterns: Vec<String>,
     /// Optional OAuth configuration for automated token exchange and refresh.
     #[serde(default)]
     pub oauth: Option<SkillOAuthConfig>,
@@ -445,22 +490,23 @@ activation:
     }
 
     #[test]
-    fn test_parse_openclaw_metadata() {
+    fn test_parse_requires() {
         let yaml = r#"
 name: test-skill
-metadata:
-  openclaw:
-    requires:
-      bins: ["vale"]
-      env: ["VALE_CONFIG"]
-      config: ["/etc/vale.ini"]
+requires:
+  bins: ["vale"]
+  env: ["VALE_CONFIG"]
+  config: ["/etc/vale.ini"]
+  skills: ["commitment-triage", "commitment-digest"]
 "#;
         let manifest: SkillManifest = serde_yml::from_str(yaml).expect("parse failed");
-        let meta = manifest.metadata.unwrap();
-        let openclaw = meta.openclaw.unwrap();
-        assert_eq!(openclaw.requires.bins, vec!["vale"]);
-        assert_eq!(openclaw.requires.env, vec!["VALE_CONFIG"]);
-        assert_eq!(openclaw.requires.config, vec!["/etc/vale.ini"]);
+        assert_eq!(manifest.requires.bins, vec!["vale"]);
+        assert_eq!(manifest.requires.env, vec!["VALE_CONFIG"]);
+        assert_eq!(manifest.requires.config, vec!["/etc/vale.ini"]);
+        assert_eq!(
+            manifest.requires.skills,
+            vec!["commitment-triage", "commitment-digest"]
+        );
     }
 
     #[test]
@@ -472,7 +518,7 @@ metadata:
                 description: String::new(),
                 activation: ActivationCriteria::default(),
                 credentials: vec![],
-                metadata: None,
+                requires: GatingRequirements::default(),
             },
             prompt_content: "test prompt".to_string(),
             trust: SkillTrust::Trusted,
@@ -670,6 +716,7 @@ description: No credentials needed
             provider: "github".to_string(),
             location: SkillCredentialLocation::Bearer,
             hosts: vec!["api.github.com".to_string()],
+            path_patterns: Vec::new(),
             oauth: None,
             setup_instructions: Some("Go to Settings > Tokens".to_string()),
         };
@@ -708,5 +755,38 @@ credentials:
         assert!(oauth.use_pkce);
         assert_eq!(oauth.extra_params.get("access_type").unwrap(), "offline");
         assert_eq!(oauth.extra_params.get("prompt").unwrap(), "consent");
+    }
+
+    #[test]
+    fn enforce_limits_rejects_setup_marker_with_path_traversal() {
+        let mut criteria = ActivationCriteria {
+            setup_marker: Some("../etc/passwd".into()),
+            ..Default::default()
+        };
+        criteria.enforce_limits();
+        assert!(criteria.setup_marker.is_none());
+    }
+
+    #[test]
+    fn enforce_limits_rejects_oversized_setup_marker() {
+        let mut criteria = ActivationCriteria {
+            setup_marker: Some("a".repeat(MAX_SETUP_MARKER_LENGTH + 1)),
+            ..Default::default()
+        };
+        criteria.enforce_limits();
+        assert!(criteria.setup_marker.is_none());
+    }
+
+    #[test]
+    fn enforce_limits_preserves_valid_setup_marker() {
+        let mut criteria = ActivationCriteria {
+            setup_marker: Some("commitments/.developer-setup-complete".into()),
+            ..Default::default()
+        };
+        criteria.enforce_limits();
+        assert_eq!(
+            criteria.setup_marker.as_deref(),
+            Some("commitments/.developer-setup-complete")
+        );
     }
 }

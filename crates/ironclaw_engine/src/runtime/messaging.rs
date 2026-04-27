@@ -31,7 +31,16 @@ pub enum ThreadOutcome {
     /// Max iterations reached without completing.
     MaxIterations,
     /// Terminal failure.
-    Failed { error: String },
+    Failed {
+        /// User-safe error message. Rendered into conversation replies.
+        error: String,
+        /// Low-level diagnostic detail preserved from the original typed
+        /// error (e.g. Monty interpreter trace, Python traceback, upstream
+        /// HTTP body). Never user-facing; only surfaced through gateway
+        /// debug mode. `None` when the original error did not carry extra
+        /// detail beyond `error`.
+        debug_detail: Option<String>,
+    },
     /// A unified execution gate paused the thread.
     GatePaused {
         gate_name: String,
@@ -42,6 +51,11 @@ pub enum ThreadOutcome {
         /// Completed action output that should be injected on resume instead
         /// of re-running the action.
         resume_output: Option<serde_json::Value>,
+        /// Lease snapshot captured when the gate paused the action.
+        /// Boxed to keep `ThreadOutcome::GatePaused` under clippy's
+        /// `large_enum_variant` threshold — `CapabilityLease` is ~360
+        /// bytes and would otherwise dominate the whole enum's size.
+        paused_lease: Option<Box<crate::types::capability::CapabilityLease>>,
     },
 }
 

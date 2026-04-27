@@ -1,7 +1,6 @@
 [build]
 builder = "dockerfile"
 dockerfilePath = "Dockerfile"
-target = "runtime-staging"
 
 [deploy]
 healthcheckPath = "/api/health"

@@ -8,6 +8,7 @@ via TOOL_CALL_PATTERNS.
 import argparse
 import asyncio
 import json
+import os
 import re
 import time
 import uuid
@@ -15,7 +16,7 @@ from aiohttp import web
 
 CANNED_RESPONSES = [
     (re.compile(r"empty routine response", re.IGNORECASE), ""),
-    (re.compile(r"hello|hi|hey", re.IGNORECASE), "Hello! How can I help you today?"),
+    (re.compile(r"\bhello\b|\bhi\b|\bhey\b", re.IGNORECASE), "Hello! How can I help you today?"),
     (re.compile(r"2\s*\+\s*2|two plus two", re.IGNORECASE), "The answer is 4."),
     (
         re.compile(r"Tool `gmail` returned:.*Quarterly update", re.IGNORECASE | re.DOTALL),
@@ -26,9 +27,35 @@ CANNED_RESPONSES = [
         "I found these Google Drive files: Budget Q1.xlsx and Roadmap.md.",
     ),
     (
-        re.compile(r"Tool `mock_mcp_mock_search` returned:", re.IGNORECASE | re.DOTALL),
+        re.compile(
+            r"Tool `mock_mcp_mock_search` returned:|The mock_mcp_mock_search tool returned:",
+            re.IGNORECASE | re.DOTALL,
+        ),
         "Mock MCP search completed successfully.",
     ),
+    (
+        re.compile(r"Tool `gmail` returned:|The gmail tool returned:", re.IGNORECASE | re.DOTALL),
+        "Gmail check completed successfully.",
+    ),
+    (
+        re.compile(r"Tool `google_calendar` returned:", re.IGNORECASE | re.DOTALL),
+        "Calendar check completed successfully.",
+    ),
+    (
+        re.compile(r"Tool `github` returned:", re.IGNORECASE | re.DOTALL),
+        "GitHub issue lookup completed successfully.",
+    ),
+    (
+        re.compile(r"Tool `notion_notion_search` returned:", re.IGNORECASE | re.DOTALL),
+        "Notion search completed successfully.",
+    ),
+    (re.compile(r"portfolio|defi|rebalance|yield.*positions", re.IGNORECASE),
+     "I'll analyze your DeFi portfolio. The portfolio skill is active and I can scan "
+     "your wallet addresses across chains to discover positions, check yields, and "
+     "suggest rebalancing opportunities."),
+    (re.compile(r"0x[a-fA-F0-9]{40}", re.IGNORECASE),
+     "I found your wallet address. Let me scan your portfolio across all supported "
+     "chains to discover DeFi positions and classify them against known protocols."),
     (re.compile(r"skill|install", re.IGNORECASE), "I can help you with skills management."),
     (re.compile(r"html.?test|injection.?test", re.IGNORECASE),
      'Here is some content: <script>alert("xss")</script> and <img src=x onerror="alert(1)">'
@@ -56,9 +83,56 @@ TRUNCATED_TOOL_CALL_TRIGGER = re.compile(
 )
 EMPTY_REPLY_TRIGGER = re.compile(r"issue 1780 empty reply", re.IGNORECASE)
 LOOP_FOREVER_TRIGGER = re.compile(r"issue 1780 loop forever", re.IGNORECASE)
+MULTI_STEP_TRIGGER = re.compile(r"multi step echo then time", re.IGNORECASE)
+
+# Lifecycle canary triggers for write+cleanup flows against real provider APIs.
+GITHUB_ISSUE_LIFECYCLE_TRIGGER = re.compile(
+    r"create a github issue in (?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+) titled",
+    re.IGNORECASE,
+)
+GMAIL_ROUNDTRIP_TRIGGER = re.compile(
+    r"send an email to (?P<email>\S+@\S+) with subject",
+    re.IGNORECASE,
+)
+GCAL_LIFECYCLE_TRIGGER = re.compile(
+    r"create a google calendar event titled",
+    re.IGNORECASE,
+)
+NOTION_SEARCH_LIFECYCLE_TRIGGER = re.compile(
+    r"search notion for .*, then search again",
+    re.IGNORECASE,
+)
 
 TOOL_CALL_PATTERNS = [
+    # Parallel tool calls: return both echo and time in one response
+    (
+        re.compile(r"parallel echo and time", re.IGNORECASE),
+        "echo",
+        lambda _: [
+            {"tool_name": "echo", "arguments": {"message": "parallel-test"}},
+            {"tool_name": "time", "arguments": {"operation": "now"}},
+        ],
+    ),
     (re.compile(r"echo (.+)", re.IGNORECASE), "echo", lambda m: {"message": m.group(1)}),
+    (
+        re.compile(
+            r"install https://github\.com/Pika-Labs/Pika-Skills/?(?=$|\s)",
+            re.IGNORECASE,
+        ),
+        "skill_install",
+        lambda _: {
+            "name": "pikastream-video-meeting",
+            "url": "https://github.com/Pika-Labs/Pika-Skills",
+        },
+    ),
+    (
+        re.compile(r"install (?P<url>https?://\S+)", re.IGNORECASE),
+        "skill_install",
+        lambda m: {
+            "name": _derive_skill_name_from_url(m.group("url")),
+            "url": m.group("url"),
+        },
+    ),
     (
         re.compile(r"loop until cap", re.IGNORECASE),
         "echo",
@@ -94,6 +168,33 @@ TOOL_CALL_PATTERNS = [
         re.compile(r"check mock mcp|mock mcp search", re.IGNORECASE),
         "mock_mcp_mock_search",
         lambda _: {"query": "refresh-check"},
+    ),
+    (
+        re.compile(r"list next calendar event|check calendar next event", re.IGNORECASE),
+        "google_calendar",
+        lambda _: {
+            "action": "list_events",
+            "calendar_id": "primary",
+            "max_results": 1,
+        },
+    ),
+    (
+        re.compile(
+            r"read github issue (?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)#(?P<num>\d+)",
+            re.IGNORECASE,
+        ),
+        "github",
+        lambda m: {
+            "action": "get_issue",
+            "owner": m.group("owner"),
+            "repo": m.group("repo"),
+            "issue_number": int(m.group("num")),
+        },
+    ),
+    (
+        re.compile(r"search notion for (?P<query>.+)", re.IGNORECASE),
+        "notion_notion_search",
+        lambda m: {"query": m.group("query").strip()},
     ),
     (re.compile(r"what time|current time", re.IGNORECASE), "time", lambda _: {"operation": "now"}),
     (
@@ -198,6 +299,21 @@ TOOL_CALL_PATTERNS = [
         lambda _: {},
     ),
     (
+        re.compile(
+            r"create (?:an )?issue.*(?:nearai|ironclaw)|issue in nearai/ironclaw",
+            re.IGNORECASE,
+        ),
+        "http",
+        lambda _: {
+            "method": "POST",
+            "url": f"{_github_api_url}/repos/nearai/ironclaw/issues",
+            "body": {
+                "title": "E2E auth flow test issue",
+                "body": "Created by the E2E mock LLM auth-flow scenario.",
+            },
+        },
+    ),
+    (
         re.compile(r"list.*issues.*(?:nearai|ironclaw)|github.*issues", re.IGNORECASE),
         "http",
         lambda _: {
@@ -267,6 +383,145 @@ TOOL_CALL_PATTERNS = [
             "mission_id": "00000000-0000-0000-0000-000000000001",
         },
     ),
+    # ---- Frontend customization via chat (PR #1725 widget system) ----
+    #
+    # These triggers let an E2E Playwright scenario drive the agent into
+    # writing layout / widget files into the workspace via the
+    # ``memory_write`` tool. The customization patterns intentionally
+    # exercise *multiple* tool calls per assistant turn so the v2 engine /
+    # CodeAct dispatch paths get covered: real models often emit several
+    # tool calls in one response, and pinning the tests to a single call
+    # per turn would silently bypass that codepath.
+    #
+    # The args function returns a ``list[dict]`` to opt into multi-call
+    # mode (see ``_normalize_tool_calls``). Each item supplies its own
+    # ``tool_name`` so a single trigger can fan out across different
+    # tools if needed; here every call is a ``memory_write`` writing one
+    # file under ``.system/gateway/``.
+    #
+    # 1. Move the top tab bar into a left side panel by writing the
+    #    ``.system/gateway/custom.css`` overlay file. The CSS targets the
+    #    real DOM nodes (`#app`, `.tab-bar`) defined in
+    #    ``crates/ironclaw_gateway/static/index.html``.
+    (
+        re.compile(r"customize:\s*move tab bar to left", re.IGNORECASE),
+        "memory_write",
+        lambda _: [{
+            "tool_name": "memory_write",
+            "arguments": {
+                "target": ".system/gateway/custom.css",
+                "append": False,
+                "force": True,
+                "content": (
+                    "/* e2e: tab bar to left side panel */\n"
+                    "#app { display: flex; flex-direction: row; align-items: stretch; }\n"
+                    ".tab-bar {\n"
+                    "  flex-direction: column !important;\n"
+                    "  width: 220px;\n"
+                    "  min-height: 100vh;\n"
+                    "  border-right: 1px solid var(--color-border, #333);\n"
+                    "  align-items: stretch;\n"
+                    "}\n"
+                    ".tab-bar button { width: 100%; text-align: left; }\n"
+                    ".tab-bar .tab-indicator { display: none; }\n"
+                    ".tab-content { flex: 1; }\n"
+                ),
+            },
+        }],
+    ),
+    # 2. Install a "Skills Viewer" widget in one shot: manifest +
+    #    implementation are written by two parallel ``memory_write``
+    #    calls in the same assistant turn. This deliberately exercises
+    #    multi-tool-call dispatch — the gateway's widget loader requires
+    #    both files to be present before the new tab can mount, so the
+    #    test would not even reach the assertion phase if the engine
+    #    silently dropped the second call.
+    (
+        re.compile(r"customize:\s*install skills viewer widget", re.IGNORECASE),
+        "memory_write",
+        lambda _: [
+            {
+                "tool_name": "memory_write",
+                "arguments": {
+                    "target": ".system/gateway/widgets/skills-viewer/manifest.json",
+                    "append": False,
+                    "force": True,
+                    "content": json.dumps(
+                        {
+                            "id": "skills-viewer",
+                            "name": "Skills",
+                            "slot": "tab",
+                            "icon": "📚",
+                        },
+                        indent=2,
+                    ),
+                },
+            },
+            {
+                "tool_name": "memory_write",
+                "arguments": {
+                    "target": ".system/gateway/widgets/skills-viewer/index.js",
+                    "append": False,
+                    "force": True,
+                    "content": (
+                "IronClaw.registerWidget({\n"
+                "  id: 'skills-viewer',\n"
+                "  name: 'Skills',\n"
+                "  slot: 'tab',\n"
+                "  icon: '📚',\n"
+                "  init: async function(container, api) {\n"
+                "    container.setAttribute('data-testid', 'skills-viewer-root');\n"
+                "    container.innerHTML = '<div class=\"sv-header\">' +\n"
+                "      '<h2 data-testid=\"skills-viewer-title\">Workspace Skills</h2>' +\n"
+                "      '</div>' +\n"
+                "      '<div class=\"sv-list\" data-testid=\"skills-viewer-list\">' +\n"
+                "      '<div data-testid=\"skills-viewer-status\">Loading…</div>' +\n"
+                "      '</div>';\n"
+                "    var listEl = container.querySelector('[data-testid=\"skills-viewer-list\"]');\n"
+                "    try {\n"
+                "      var resp = await api.fetch('/api/skills');\n"
+                "      var data = await resp.json();\n"
+                "      var skills = (data && data.skills) || [];\n"
+                "      if (!skills.length) {\n"
+                "        listEl.innerHTML = '<div data-testid=\"skills-viewer-empty\">' +\n"
+                "          'No skills installed yet.' +\n"
+                "          '</div>';\n"
+                "        return;\n"
+                "      }\n"
+                "      listEl.innerHTML = '';\n"
+                "      skills.forEach(function(s) {\n"
+                "        var card = document.createElement('div');\n"
+                "        card.className = 'sv-card';\n"
+                "        card.dataset.testid = 'skills-viewer-card';\n"
+                "        card.dataset.skillName = s.name || '';\n"
+                "        var title = document.createElement('div');\n"
+                "        title.className = 'sv-card-title';\n"
+                "        title.textContent = s.name || '(unnamed)';\n"
+                "        var body = document.createElement('pre');\n"
+                "        body.className = 'sv-card-body';\n"
+                "        body.textContent = (s.description || '').slice(0, 200);\n"
+                "        var edit = document.createElement('button');\n"
+                "        edit.type = 'button';\n"
+                "        edit.className = 'sv-card-edit';\n"
+                "        edit.dataset.testid = 'skills-viewer-edit';\n"
+                "        edit.textContent = 'Edit';\n"
+                "        card.appendChild(title);\n"
+                "        card.appendChild(body);\n"
+                "        card.appendChild(edit);\n"
+                "        listEl.appendChild(card);\n"
+                "      });\n"
+                "    } catch (e) {\n"
+                "      listEl.innerHTML = '<div data-testid=\"skills-viewer-error\">' +\n"
+                "        'Failed to load skills: ' + (e && e.message ? e.message : e) +\n"
+                "        '</div>';\n"
+                        "    }\n"
+                        "  }\n"
+                        "});\n"
+                    ),
+                },
+            },
+        ],
+    ),
 ]
 
 
@@ -285,12 +540,25 @@ def _new_oauth_state() -> dict:
     }
 
 
+def _new_mcp_state() -> dict:
+    return {
+        "requests": [],
+    }
+
+
 def _message_text(msg: dict) -> str:
     content = msg.get("content") or ""
     if isinstance(content, list):
-        content = " ".join(
-            p.get("text") or "" for p in content if p.get("type") == "text"
-        )
+        parts = []
+        for p in content:
+            if p.get("type") == "text":
+                parts.append(p.get("text") or "")
+            else:
+                try:
+                    parts.append(json.dumps(p, sort_keys=True))
+                except TypeError:
+                    parts.append(str(p))
+        content = " ".join(parts)
     return content
 
 
@@ -299,6 +567,20 @@ def _last_user_content(messages: list[dict]) -> str:
         if msg.get("role") == "user":
             return _message_text(msg)
     return ""
+
+
+def _last_user_message(messages: list[dict]) -> dict:
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            return msg
+    return {}
+
+
+def _message_payload_text(msg: dict) -> str:
+    try:
+        return json.dumps(msg, sort_keys=True).lower()
+    except TypeError:
+        return str(msg).lower()
 
 
 def _extract_resumed_action_result(last_user: str) -> tuple[str, str] | None:
@@ -327,6 +609,82 @@ def _resumed_action_summary(messages: list[dict]) -> str | None:
 def _conversation_has_user_trigger(messages: list[dict], pattern: re.Pattern[str]) -> bool:
     for msg in messages:
         if msg.get("role") == "user" and pattern.search(_message_text(msg)):
+            return True
+    return False
+
+
+def _conversation_has_active_skill(messages: list[dict], skill_name: str) -> bool:
+    needle = f'<skill name="{skill_name}"'
+    for msg in messages:
+        if msg.get("role") == "system" and needle in _message_text(msg):
+            return True
+        if msg.get("role") == "user" and f"/{skill_name}" in _message_text(msg):
+            return True
+    return False
+
+
+def _active_skill_names(messages: list[dict]) -> set[str]:
+    names = set()
+    for msg in messages:
+        if msg.get("role") != "system":
+            continue
+        for name in re.findall(r'<skill name="([^"]+)"', _message_text(msg)):
+            if name:
+                names.add(name.lower())
+    return names
+
+
+def _missing_explicit_skills(messages: list[dict]) -> list[str]:
+    active = _active_skill_names(messages)
+    missing = []
+    seen = set()
+    for match in re.finditer(r'(^|[\s"\(])/(?P<name>[A-Za-z0-9._-]+)', _last_user_content(messages)):
+        name = match.group("name").lower()
+        if name in active or name in seen:
+            continue
+        seen.add(name)
+        missing.append(name)
+    return missing
+
+
+def _active_skill_bundle_path(messages: list[dict], skill_name: str) -> str | None:
+    needle = f'<skill name="{skill_name}"'
+    for msg in messages:
+        if msg.get("role") != "system":
+            continue
+        content = _message_text(msg)
+        if needle not in content:
+            continue
+        match = re.search(r"Installed bundle path on disk:\s*`([^`]+)`", content)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _derive_skill_name_from_url(url: str) -> str:
+    cleaned = re.sub(r"[?#].*$", "", url).rstrip("/")
+    if not cleaned:
+        return "remote-skill"
+    last = cleaned.rsplit("/", 1)[-1]
+    last = re.sub(r"\.git$", "", last, flags=re.IGNORECASE)
+    last = re.sub(r"\.md$", "", last, flags=re.IGNORECASE)
+    slug = re.sub(r"[^a-z0-9._-]+", "-", last.lower()).strip("-")
+    return slug or "remote-skill"
+
+
+def _conversation_wants_slow_response(messages: list[dict]) -> bool:
+    return _conversation_has_user_trigger(
+        messages,
+        re.compile(r"refresh-mid-response|slow response|slowly", re.IGNORECASE),
+    )
+
+
+def _assistant_has_phrase(messages: list[dict], phrase: str) -> bool:
+    target = phrase.lower()
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        if target in _message_text(msg).lower():
             return True
     return False
 
@@ -431,23 +789,223 @@ def match_job_response(messages: list[dict], has_tools: bool) -> dict | None:
 
 def match_response(messages: list[dict]) -> str:
     content = _last_user_content(messages)
+    payload_text = _message_payload_text(_last_user_message(messages))
     resumed = _resumed_action_summary(messages)
     if resumed:
         return resumed
+    if "user denied action" in content.lower():
+        action_match = re.search(r"User denied action '([^']+)'", content)
+        action_name = action_match.group(1) if action_match else "that action"
+        return (
+            f"The request for {action_name} was denied. "
+            "No installation or setup was performed."
+        )
+    missing_slash_skills = _missing_explicit_skills(messages)
+    if missing_slash_skills:
+        if len(missing_slash_skills) == 1:
+            return (
+                f"Skill '/{missing_slash_skills[0]}' is not installed or was not found. "
+                "Type `/` to see the available commands and installed skills."
+            )
+        rendered = ", ".join(f"`/{name}`" for name in missing_slash_skills)
+        return (
+            f"These slash skills are not installed or were not found: {rendered}. "
+            "Type `/` to see the available commands and installed skills."
+        )
+    if _conversation_has_active_skill(messages, "pikastream-video-meeting"):
+        lower = content.lower()
+        payload_lower = payload_text.lower()
+        if "meet.google.com" in lower or "hangouts.google.com" in lower:
+            return (
+                "I need an avatar image for the video meeting. "
+                "Send me an image, or say \"generate\" and I'll create one for you."
+            )
+        if lower.strip() == "generate":
+            return "Avatar generated. Want to keep this avatar or regenerate?"
+        if (
+            "avatar.png" in lower or "portrait.png" in lower or "headshot" in lower
+            or "avatar.png" in payload_lower or "portrait.png" in payload_lower
+        ):
+            return (
+                "Avatar received. Now send a short audio sample, or say \"skip\" to use the default voice."
+            )
+        if (
+            ("hello.pdf" in lower or ".pdf" in lower or "application/pdf" in lower
+             or "hello.pdf" in payload_lower or "application/pdf" in payload_lower
+             or "hello world" in lower)
+            and not _assistant_has_phrase(messages, "audio sample")
+        ):
+            return (
+                "I still need an avatar image for the video meeting. "
+                "Please upload an image file."
+            )
+        if (
+            "voice.ogg" in lower or "voice.wav" in lower or "voice.mp3" in lower
+            or "audio sample" in lower or "voice.ogg" in payload_lower
+        ):
+            return "Voice sample received. The session is ready for Google Meet / Hangouts setup."
+        if (
+            _assistant_has_phrase(messages, "audio sample")
+            and ("avatar.png" in lower or "portrait.png" in lower or ".png" in lower or ".jpg" in lower)
+        ):
+            return "I still need a short audio sample before I can finish the Hangouts setup."
+        if _conversation_has_tool_name(messages, "shell"):
+            return (
+                "I need an avatar image for the video meeting. "
+                "Send me an image, or say \"generate\" and I'll create one for you."
+            )
+    # Nudge recovery: when the engine sends a "you expressed intent but
+    # didn't call a tool" nudge, check whether the conversation has
+    # portfolio/wallet context from an earlier user message and return a
+    # portfolio-relevant response so the nudge pattern (which matches
+    # before the portfolio patterns in CANNED_RESPONSES) doesn't swallow
+    # the domain context.
+    _nudge_re = re.compile(
+        r"You said you would perform an action|You expressed intent",
+        re.IGNORECASE,
+    )
+    if _nudge_re.search(content):
+        for msg in messages:
+            if msg.get("role") == "user":
+                msg_text = _message_text(msg)
+                if re.search(r"portfolio|defi|rebalance|yield.*positions", msg_text, re.IGNORECASE):
+                    return (
+                        "I'll analyze your DeFi portfolio. The portfolio skill is active and I can scan "
+                        "your wallet addresses across chains to discover positions, check yields, and "
+                        "suggest rebalancing opportunities."
+                    )
+                if re.search(r"0x[a-fA-F0-9]{40}", msg_text, re.IGNORECASE):
+                    return (
+                        "I found your wallet address. Let me scan your portfolio across all supported "
+                        "chains to discover DeFi positions and classify them against known protocols."
+                    )
+
     for pattern, response in CANNED_RESPONSES:
         if pattern.search(content):
             return response
     return DEFAULT_RESPONSE
 
 
-def match_tool_call(messages: list[dict], has_tools: bool) -> dict | None:
+def _normalize_tool_calls(tool_name: str, value: object) -> list[dict]:
+    """Normalize the result of a TOOL_CALL_PATTERNS args function.
+
+    Patterns historically returned a single ``dict`` of arguments and the
+    tuple's ``tool_name`` field named the tool. To let one chat turn emit
+    multiple tool calls (the v2 engine and CodeAct both dispatch lists of
+    tool calls per assistant message), the args function may now return:
+
+    * ``dict`` — a single tool call with the tuple's ``tool_name``.
+    * ``list[dict]`` — multiple tool calls. Each item is itself a
+      ``{"tool_name": ..., "arguments": ...}`` dict so callers can mix
+      different tools in one response. ``tool_name`` falls back to the
+      tuple's value when omitted.
+
+    The return value is always a list of ``{"tool_name", "arguments"}``
+    dicts so the dispatcher can stay shape-agnostic.
+    """
+    if isinstance(value, list):
+        calls = []
+        for index, item in enumerate(value):
+            # Defensive: a malformed pattern that returns a list of
+            # tuples / strings / None would otherwise crash with an
+            # opaque ``AttributeError: 'tuple' object has no attribute
+            # 'get'`` deep inside aiohttp's request handler, taking the
+            # whole mock server down mid-test. Raise a clear TypeError
+            # at the offending call site so the failing pattern is
+            # obvious from the traceback.
+            if not isinstance(item, dict):
+                raise TypeError(
+                    f"_normalize_tool_calls: TOOL_CALL_PATTERNS entry for "
+                    f"{tool_name!r} returned a list whose element [{index}] "
+                    f"is {type(item).__name__}, expected dict. "
+                    f"Each multi-call entry must be "
+                    f'{{"tool_name": ..., "arguments": ...}}.'
+                )
+            arguments = item.get("arguments", {})
+            if not isinstance(arguments, dict):
+                raise TypeError(
+                    f"_normalize_tool_calls: TOOL_CALL_PATTERNS entry for "
+                    f"{tool_name!r} element [{index}] has "
+                    f"arguments={type(arguments).__name__}, expected dict."
+                )
+            calls.append({
+                "tool_name": item.get("tool_name", tool_name),
+                "arguments": arguments,
+            })
+        return calls
+    # Single-call form: the legacy contract is that the args function
+    # returns a dict directly. Anything else (a tuple, a string, None)
+    # is a pattern bug — fail loudly here too rather than letting the
+    # bad shape ride through to the dispatcher.
+    if not isinstance(value, dict):
+        raise TypeError(
+            f"_normalize_tool_calls: TOOL_CALL_PATTERNS entry for "
+            f"{tool_name!r} returned {type(value).__name__}, expected "
+            "dict (single tool call) or list[dict] (multi-call)."
+        )
+    return [{"tool_name": tool_name, "arguments": value}]
+
+
+def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
+    """Return the list of tool calls to emit for the latest user message.
+
+    Returns ``None`` when no pattern matches or when the request did not
+    advertise any tools (so the LLM should fall back to a text response).
+    Otherwise returns a non-empty list of ``{"tool_name", "arguments"}``
+    dicts — single-call patterns produce a one-element list, multi-call
+    patterns can produce many.
+    """
     if not has_tools:
         return None
     content = _last_user_content(messages)
+    if _missing_explicit_skills(messages):
+        return None
+    lower = content.lower()
+    recent_tool_results = _find_tool_results(messages)
+    if (
+        ("check gmail unread" in lower or "gmail unread" in lower)
+        and any(
+            tr["name"] == "gmail"
+            and "Extension not installed:" in tr["content"]
+            for tr in recent_tool_results
+        )
+    ):
+        return [{
+            "tool_name": "tool_install",
+            "arguments": {"name": "gmail"},
+        }]
+    if _conversation_has_active_skill(messages, "pikastream-video-meeting"):
+        bundle_path = _active_skill_bundle_path(messages, "pikastream-video-meeting")
+        if (
+            bundle_path
+            and ("meet.google.com" in lower or "hangouts.google.com" in lower)
+        ):
+            return [{
+                "tool_name": "shell",
+                "arguments": {
+                    "command": (
+                        'python3 -m venv .venv && '
+                        f'./.venv/bin/pip install -q --disable-pip-version-check '
+                        f'-r "{bundle_path}/requirements.txt"'
+                    ),
+                    "workdir": bundle_path,
+                    "timeout": 60,
+                },
+            }]
     for pattern, tool_name, args_fn in TOOL_CALL_PATTERNS:
         m = pattern.search(content)
         if m:
-            return {"tool_name": tool_name, "arguments": args_fn(m)}
+            # Don't re-dispatch a tool that already ran this turn: the
+            # agentic loop calls the mock LLM again after each tool
+            # result, and the "last user content" (which is what we
+            # pattern-match against) hasn't changed. A real LLM would
+            # see the tool result and respond with text — we mirror that
+            # by falling through to the match_response text path when a
+            # matching call is already sitting in the tool_results
+            # buffer.
+            if any(tr["name"] == tool_name for tr in recent_tool_results):
+                return None
+            return _normalize_tool_calls(tool_name, args_fn(m))
     return None
 
 
@@ -464,27 +1022,202 @@ def _extract_tool_name(msg: dict) -> str:
     return "unknown"
 
 
-def _find_tool_result(messages: list[dict]) -> dict | None:
-    """Find a pending tool result that appears after the last user message.
+def _find_tool_results(messages: list[dict]) -> list[dict]:
+    """Collect every fresh tool result that follows the most recent user turn.
 
-    Only returns a tool result if it's a fresh result the agent is waiting
-    for the LLM to summarize (i.e., it follows the most recent user message).
-    This prevents stale tool results from earlier conversation turns from
-    being re-processed.
+    A single assistant turn can dispatch *several* tool calls (the v2 engine
+    fans them out in parallel and CodeAct can call multiple Python helpers
+    per script), so the LLM may be invoked again with a tail of multiple
+    ``role: tool`` messages. Returning all of them lets the summary path
+    acknowledge each result instead of dropping all but the first.
     """
-    # Find the position of the last user message
     last_user_idx = -1
     for i in range(len(messages) - 1, -1, -1):
         if messages[i].get("role") == "user":
             last_user_idx = i
             break
 
-    # Only look for tool results after the last user message
-    for i in range(len(messages) - 1, last_user_idx, -1):
-        if messages[i].get("role") == "tool":
-            return {"name": _extract_tool_name(messages[i]),
-                    "content": messages[i].get("content", "")}
+    tool_call_names: dict[str, str] = {}
+    results: list[dict] = []
+    for i in range(last_user_idx + 1, len(messages)):
+        message = messages[i]
+        if message.get("role") == "assistant":
+            for tool_call in message.get("tool_calls") or []:
+                tool_call_id = tool_call.get("id")
+                tool_name = (
+                    tool_call.get("function", {}).get("name")
+                    or tool_call.get("name")
+                    or "unknown"
+                )
+                if tool_call_id:
+                    tool_call_names[tool_call_id] = tool_name
+            continue
+        if message.get("role") == "tool":
+            name = _extract_tool_name(message)
+            if name == "unknown":
+                name = tool_call_names.get(message.get("tool_call_id", ""), name)
+            results.append({
+                "name": name,
+                "content": message.get("content", ""),
+            })
+    return results
+
+
+def _find_tool_result(messages: list[dict]) -> dict | None:
+    """Backward-compat single-result helper used by the special-response path."""
+    results = _find_tool_results(messages)
+    return results[0] if results else None
+
+
+def _recent_tool_names(messages: list[dict]) -> set[str]:
+    """Collect tool names referenced after the most recent user turn."""
+    last_user_idx = -1
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "user":
+            last_user_idx = i
+            break
+
+    tool_names: set[str] = set()
+    tool_call_names: dict[str, str] = {}
+    for i in range(last_user_idx + 1, len(messages)):
+        message = messages[i]
+        if message.get("role") == "assistant":
+            for tool_call in message.get("tool_calls") or []:
+                tool_name = (
+                    tool_call.get("function", {}).get("name")
+                    or tool_call.get("name")
+                    or "unknown"
+                )
+                if tool_name != "unknown":
+                    tool_names.add(tool_name)
+                tool_call_id = tool_call.get("id")
+                if tool_call_id:
+                    tool_call_names[tool_call_id] = tool_name
+            continue
+        if message.get("role") == "tool":
+            tool_name = _extract_tool_name(message)
+            if tool_name == "unknown":
+                tool_name = tool_call_names.get(message.get("tool_call_id", ""), tool_name)
+            if tool_name != "unknown":
+                tool_names.add(tool_name)
+    return tool_names
+
+
+def _conversation_has_tool_name(messages: list[dict], expected_name: str) -> bool:
+    """Return True when the conversation references a given tool name anywhere."""
+    tool_call_names: dict[str, str] = {}
+    for message in messages:
+        if message.get("role") == "assistant":
+            for tool_call in message.get("tool_calls") or []:
+                tool_name = (
+                    tool_call.get("function", {}).get("name")
+                    or tool_call.get("name")
+                    or "unknown"
+                )
+                if tool_name == expected_name:
+                    return True
+                tool_call_id = tool_call.get("id")
+                if tool_call_id:
+                    tool_call_names[tool_call_id] = tool_name
+            continue
+        if message.get("role") == "tool":
+            tool_name = _extract_tool_name(message)
+            if tool_name == "unknown":
+                tool_name = tool_call_names.get(message.get("tool_call_id", ""), tool_name)
+            if tool_name == expected_name:
+                return True
+    return False
+
+
+# ── Lifecycle canary helpers ────────────────────────────────────────────────
+#
+# These extract structured data from real provider tool-result JSON so the
+# multi-step lifecycle flows can pass IDs between steps (e.g. the issue
+# number from create_issue feeds into create_issue_comment, the event_id
+# from create_event feeds into delete_event, etc.).
+
+
+def _extract_canary_title(text: str) -> str:
+    """Extract a quoted title like '[canary] 1713...' from a user prompt."""
+    m = re.search(r"titled\s+'([^']+)'", text)
+    if m:
+        return m.group(1)
+    m = re.search(r"titled\s+\"([^\"]+)\"", text)
+    if m:
+        return m.group(1)
+    return "[canary] lifecycle-test"
+
+
+def _extract_canary_subject(text: str) -> str:
+    """Extract a subject like '[canary] 1713...' from a user prompt."""
+    m = re.search(r"subject\s+'([^']+)'", text)
+    if m:
+        return m.group(1)
+    m = re.search(r"subject\s+\"([^\"]+)\"", text)
+    if m:
+        return m.group(1)
+    return "[canary] lifecycle-test"
+
+
+def _extract_issue_number(content: str) -> int | None:
+    """Extract the issue number from a GitHub create_issue tool result."""
+    try:
+        data = json.loads(content)
+        if isinstance(data, dict) and "number" in data:
+            return int(data["number"])
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+    m = re.search(r'"number"\s*:\s*(\d+)', content)
+    if m:
+        return int(m.group(1))
     return None
+
+
+def _extract_gmail_message_id(content: str) -> str | None:
+    """Extract the message id from a Gmail send_message tool result."""
+    try:
+        data = json.loads(content)
+        if isinstance(data, dict):
+            return data.get("id") or data.get("message_id")
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+    m = re.search(r'"id"\s*:\s*"([^"]+)"', content)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _extract_calendar_event_id(content: str) -> str | None:
+    """Extract the event id from a Google Calendar create_event tool result."""
+    try:
+        data = json.loads(content)
+        if isinstance(data, dict):
+            event = data.get("event", data)
+            return event.get("id") or event.get("event_id")
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+    m = re.search(r'"id"\s*:\s*"([^"]+)"', content)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _tomorrow_10am_utc() -> str:
+    """Return an RFC3339 timestamp for tomorrow at 10:00 UTC."""
+    from datetime import datetime, timedelta, timezone
+    tomorrow = datetime.now(timezone.utc).replace(
+        hour=10, minute=0, second=0, microsecond=0,
+    ) + timedelta(days=1)
+    return tomorrow.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _tomorrow_1030am_utc() -> str:
+    """Return an RFC3339 timestamp for tomorrow at 10:30 UTC."""
+    from datetime import datetime, timedelta, timezone
+    tomorrow = datetime.now(timezone.utc).replace(
+        hour=10, minute=30, second=0, microsecond=0,
+    ) + timedelta(days=1)
+    return tomorrow.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _make_base(completion_id: str) -> dict:
@@ -541,6 +1274,215 @@ def match_special_response(messages: list[dict], has_tools: bool) -> dict | None
     if EMPTY_REPLY_TRIGGER.search(last_user):
         return {"type": "empty_text"}
 
+    # Multi-step tool chain: echo first, then time, then text completion.
+    # Uses result count (not names) because v2 engine tool results don't
+    # always include the tool name in a parseable format.
+    if _conversation_has_user_trigger(messages, MULTI_STEP_TRIGGER):
+        tool_results = _find_tool_results(messages)
+        n = len(tool_results)
+        if n == 0 and has_tools:
+            return {
+                "type": "tool_call",
+                "tool_call": {"tool_name": "echo", "arguments": {"message": "step-one"}},
+            }
+        if n == 1 and has_tools:
+            return {
+                "type": "tool_call",
+                "tool_call": {"tool_name": "time", "arguments": {"operation": "now"}},
+            }
+        return {
+            "type": "text",
+            "text": "Multi-step complete: executed echo then time.",
+        }
+
+    # ── Lifecycle canary: GitHub issue create → comment → verify ─────────
+    m = GITHUB_ISSUE_LIFECYCLE_TRIGGER.search(last_user)
+    if m and has_tools:
+        owner = m.group("owner")
+        repo = m.group("repo")
+        tool_results = _find_tool_results(messages)
+        n = len(tool_results)
+        if n == 0:
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "github",
+                    "arguments": {
+                        "action": "create_issue",
+                        "owner": owner,
+                        "repo": repo,
+                        "title": _extract_canary_title(last_user),
+                        "body": "Automated canary lifecycle test.",
+                        "labels": ["canary"],
+                    },
+                },
+            }
+        if n == 1:
+            issue_number = _extract_issue_number(tool_results[0].get("content", ""))
+            if issue_number:
+                return {
+                    "type": "tool_call",
+                    "tool_call": {
+                        "tool_name": "github",
+                        "arguments": {
+                            "action": "create_issue_comment",
+                            "owner": owner,
+                            "repo": repo,
+                            "issue_number": issue_number,
+                            "body": "Canary verification",
+                        },
+                    },
+                }
+        if n == 2:
+            issue_number = _extract_issue_number(tool_results[0].get("content", ""))
+            if issue_number:
+                return {
+                    "type": "tool_call",
+                    "tool_call": {
+                        "tool_name": "github",
+                        "arguments": {
+                            "action": "get_issue",
+                            "owner": owner,
+                            "repo": repo,
+                            "issue_number": issue_number,
+                        },
+                    },
+                }
+        return {
+            "type": "text",
+            "text": "github issue lifecycle complete. Issue created, commented, and verified.",
+        }
+
+    # ── Lifecycle canary: Gmail send → list → trash ──────────────────────
+    m = GMAIL_ROUNDTRIP_TRIGGER.search(last_user)
+    if m and has_tools:
+        email = m.group("email")
+        tool_results = _find_tool_results(messages)
+        n = len(tool_results)
+        if n == 0:
+            subject = _extract_canary_subject(last_user)
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "gmail",
+                    "arguments": {
+                        "action": "send_message",
+                        "to": email,
+                        "subject": subject,
+                        "body": "Canary test",
+                    },
+                },
+            }
+        if n == 1:
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "gmail",
+                    "arguments": {
+                        "action": "list_messages",
+                        "query": "subject:[canary] newer_than:1h",
+                        "max_results": 5,
+                    },
+                },
+            }
+        if n == 2:
+            message_id = _extract_gmail_message_id(tool_results[0].get("content", ""))
+            if message_id:
+                return {
+                    "type": "tool_call",
+                    "tool_call": {
+                        "tool_name": "gmail",
+                        "arguments": {
+                            "action": "trash_message",
+                            "message_id": message_id,
+                        },
+                    },
+                }
+        return {
+            "type": "text",
+            "text": "gmail roundtrip complete. Message sent, verified, and trashed.",
+        }
+
+    # ── Lifecycle canary: Google Calendar create → list → delete ─────────
+    if GCAL_LIFECYCLE_TRIGGER.search(last_user) and has_tools:
+        tool_results = _find_tool_results(messages)
+        n = len(tool_results)
+        if n == 0:
+            title = _extract_canary_title(last_user)
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "google_calendar",
+                    "arguments": {
+                        "action": "create_event",
+                        "calendar_id": "primary",
+                        "summary": title,
+                        "start_datetime": _tomorrow_10am_utc(),
+                        "end_datetime": _tomorrow_1030am_utc(),
+                        "timezone": "UTC",
+                    },
+                },
+            }
+        if n == 1:
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "google_calendar",
+                    "arguments": {
+                        "action": "list_events",
+                        "calendar_id": "primary",
+                        "max_results": 5,
+                    },
+                },
+            }
+        if n == 2:
+            event_id = _extract_calendar_event_id(tool_results[0].get("content", ""))
+            if event_id:
+                return {
+                    "type": "tool_call",
+                    "tool_call": {
+                        "tool_name": "google_calendar",
+                        "arguments": {
+                            "action": "delete_event",
+                            "calendar_id": "primary",
+                            "event_id": event_id,
+                        },
+                    },
+                }
+        return {
+            "type": "text",
+            "text": "google_calendar lifecycle complete. Event created, verified, and deleted.",
+        }
+
+    # ── Lifecycle canary: Notion search → search again ────────────────────
+    if NOTION_SEARCH_LIFECYCLE_TRIGGER.search(last_user) and has_tools:
+        tool_results = _find_tool_results(messages)
+        n = len(tool_results)
+        if n == 0:
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "notion_notion_search",
+                    "arguments": {
+                        "query": "canary",
+                    },
+                },
+            }
+        if n == 1:
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "notion_notion_search",
+                    "arguments": {
+                        "query": "test",
+                    },
+                },
+            }
+        return {
+            "type": "text",
+            "text": "notion search lifecycle complete. Both searches executed successfully.",
+        }
+
     return None
 
 
@@ -582,6 +1524,9 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
     has_tools = bool(body.get("tools"))
     cid = f"mock-{uuid.uuid4().hex[:8]}"
 
+    if _conversation_wants_slow_response(messages):
+        await asyncio.sleep(2.0)
+
     # Job-mode conversations (background routine/job execution)
     job_resp = match_job_response(messages, has_tools)
     if job_resp:
@@ -600,11 +1545,54 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
     special = match_special_response(messages, has_tools)
     if special and _conversation_has_user_trigger(messages, LOOP_FOREVER_TRIGGER):
         return await _dispatch_special_response(request, cid, stream, special)
+    # Multi-step chain: must bypass tool-result-summary to issue second tool call
+    if special and _conversation_has_user_trigger(messages, MULTI_STEP_TRIGGER):
+        return await _dispatch_special_response(request, cid, stream, special)
+    # Lifecycle canary multi-step chains: create → verify → cleanup → summarize
+    for lifecycle_trigger in (
+        GITHUB_ISSUE_LIFECYCLE_TRIGGER,
+        GMAIL_ROUNDTRIP_TRIGGER,
+        GCAL_LIFECYCLE_TRIGGER,
+        NOTION_SEARCH_LIFECYCLE_TRIGGER,
+    ):
+        if special and _conversation_has_user_trigger(messages, lifecycle_trigger):
+            return await _dispatch_special_response(request, cid, stream, special)
 
-    # Tool result in messages -> text summary
-    tr = _find_tool_result(messages)
-    if tr:
-        text = f"The {tr['name']} tool returned: {tr['content']}"
+    # Tool result(s) in messages -> text summary covering every fresh result
+    tool_results = _find_tool_results(messages)
+    if _conversation_has_active_skill(messages, "pikastream-video-meeting"):
+        recent_tool_names = _recent_tool_names(messages)
+        if "shell" in recent_tool_names:
+            text = (
+                "Python dependencies are prepared for the Pika video-meeting skill. "
+                "I need an avatar image for the video meeting. "
+                "Send me an image, or say \"generate\" and I'll create one for you."
+            )
+            if not stream:
+                return _text_response(cid, text)
+            return await _stream_text(request, cid, text)
+    if tool_results:
+        if _conversation_has_active_skill(messages, "pikastream-video-meeting"):
+            if any(tr["name"] == "shell" for tr in tool_results):
+                text = (
+                    "Python dependencies are prepared for the Pika video-meeting skill. "
+                    "I need an avatar image for the video meeting. "
+                    "Send me an image, or say \"generate\" and I'll create one for you."
+                )
+                if not stream:
+                    return _text_response(cid, text)
+                return await _stream_text(request, cid, text)
+        if len(tool_results) == 1:
+            tr = tool_results[0]
+            text = f"The {tr['name']} tool returned: {tr['content']}"
+        else:
+            # Multi-call summary: list every result so tests asserting on a
+            # specific tool name still find it, while v2-engine paths that
+            # dispatch several tools per turn get an acknowledging response.
+            lines = [f"Dispatched {len(tool_results)} tools:"]
+            for tr in tool_results:
+                lines.append(f"- {tr['name']}: {tr['content']}")
+            text = "\n".join(lines)
         if not stream:
             return _text_response(cid, text)
         return await _stream_text(request, cid, text)
@@ -642,15 +1630,32 @@ def _text_response(cid: str, text: str) -> web.Response:
     })
 
 
-def _tool_call_response(cid: str, tc: dict) -> web.Response:
+def _tool_call_response(cid: str, calls: list[dict] | dict) -> web.Response:
+    """Build a non-streaming chat completion containing one or more tool calls.
+
+    Accepts either a single ``{"tool_name", "arguments"}`` dict (legacy
+    callers) or a list of them (the new multi-call shape used by the v2
+    engine / CodeAct test paths).
+    """
+    if isinstance(calls, dict):
+        calls = [calls]
+    tool_calls = [
+        {
+            "id": f"call_{uuid.uuid4().hex[:8]}",
+            "type": "function",
+            "function": {
+                "name": tc["tool_name"],
+                "arguments": json.dumps(tc["arguments"]),
+            },
+        }
+        for tc in calls
+    ]
     return web.json_response({
         "id": cid, "object": "chat.completion", "created": int(time.time()),
         "model": "mock-model",
         "choices": [{"index": 0, "message": {
             "role": "assistant", "content": None,
-            "tool_calls": [{"id": f"call_{uuid.uuid4().hex[:8]}", "type": "function",
-                            "function": {"name": tc["tool_name"],
-                                         "arguments": json.dumps(tc["arguments"])}}],
+            "tool_calls": tool_calls,
         }, "finish_reason": "tool_calls"}],
         "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
     })
@@ -696,27 +1701,60 @@ async def _stream_text(request: web.Request, cid: str, text: str) -> web.StreamR
     return resp
 
 
-async def _stream_tool_call(request: web.Request, cid: str, tc: dict) -> web.StreamResponse:
+async def _stream_tool_call(
+    request: web.Request,
+    cid: str,
+    calls: list[dict] | dict,
+) -> web.StreamResponse:
+    """Stream a chat completion containing one or more tool calls.
+
+    Each tool call gets its own ``index`` in the OpenAI delta protocol,
+    so accumulating clients build up a list of distinct calls. We emit
+    a header chunk and an arguments chunk per tool call so streaming
+    parsers exercise their per-index merging logic the same way real
+    providers force them to.
+    """
+    if isinstance(calls, dict):
+        calls = [calls]
     resp = web.StreamResponse(status=200, headers={
         "Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
     await resp.prepare(request)
-    call_id = f"call_{uuid.uuid4().hex[:8]}"
     base = _make_base(cid)
-    # First chunk: role + tool call header with empty arguments
-    chunk = {**base, "choices": [{"index": 0, "delta": {
-        "role": "assistant",
-        "tool_calls": [{"index": 0, "id": call_id, "type": "function",
-                        "function": {"name": tc["tool_name"], "arguments": ""}}],
-    }, "finish_reason": None}]}
-    await _send_sse(resp, chunk)
-    # Second chunk: arguments payload
-    chunk["choices"][0]["delta"] = {
-        "tool_calls": [{"index": 0, "function": {"arguments": json.dumps(tc["arguments"])}}]}
-    await _send_sse(resp, chunk)
-    # Final chunk: finish reason
-    chunk["choices"][0]["delta"] = {}
-    chunk["choices"][0]["finish_reason"] = "tool_calls"
-    await _send_sse(resp, chunk)
+    for idx, tc in enumerate(calls):
+        call_id = f"call_{uuid.uuid4().hex[:8]}"
+        # Header chunk: declare a new tool call slot at this index. Only
+        # the very first chunk in the stream needs the assistant role.
+        delta: dict = {
+            "tool_calls": [{
+                "index": idx,
+                "id": call_id,
+                "type": "function",
+                "function": {"name": tc["tool_name"], "arguments": ""},
+            }],
+        }
+        if idx == 0:
+            delta["role"] = "assistant"
+        chunk = {**base, "choices": [{
+            "index": 0,
+            "delta": delta,
+            "finish_reason": None,
+        }]}
+        await _send_sse(resp, chunk)
+        # Arguments chunk: bind the JSON payload to the same index.
+        chunk["choices"][0]["delta"] = {
+            "tool_calls": [{
+                "index": idx,
+                "function": {"arguments": json.dumps(tc["arguments"])},
+            }],
+        }
+        await _send_sse(resp, chunk)
+    # Final chunk: finish reason terminates the assistant turn.
+    final = {**base, "choices": [{
+        "index": 0,
+        "delta": {},
+        "finish_reason": "tool_calls",
+    }]}
+    await _send_sse(resp, final)
     await resp.write(b"data: [DONE]\n\n")
     return resp
 
@@ -754,6 +1792,21 @@ async def _stream_truncated_tool_call(
     return resp
 
 
+def _is_google_token_url(url: str) -> bool:
+    """Whether an OAuth `token_url` points at Google.
+
+    Used to gate the `AUTH_LIVE_GOOGLE_*` live-token override so
+    non-Google providers (GitHub, Notion, MCP) cannot accidentally
+    receive Google tokens during auth-live-seeded canary runs. The
+    earlier `not code.startswith("mock_mcp_code")` gate only ruled out
+    the MCP code-prefix convention, not GitHub/Notion flows.
+    """
+    if not url:
+        return False
+    lowered = url.lower()
+    return "googleapis.com" in lowered or "accounts.google.com" in lowered
+
+
 async def oauth_exchange(request: web.Request) -> web.Response:
     """Mock OAuth token exchange proxy for E2E tests.
 
@@ -771,13 +1824,30 @@ async def oauth_exchange(request: web.Request) -> web.Response:
     code = data.get("code", "")
     access_token_field = data.get("access_token_field", "access_token")
 
-    if code == "mock_mcp_code":
+    if code.startswith("mock_mcp_code"):
         if not data.get("token_url", "").endswith("/oauth/token"):
             return web.json_response({"error": "missing_token_url"}, status=400)
         if not data.get("client_id"):
             return web.json_response({"error": "missing_client_id"}, status=400)
         if not data.get("resource"):
             return web.json_response({"error": "missing_resource"}, status=400)
+
+    # When real provider tokens are available (auth-live-seeded canary),
+    # return them instead of mock tokens so the extension gets real
+    # credentials. Gate strictly on the Google token_url host: the
+    # previous `not mcp_code` gate also matched GitHub and Notion
+    # exchanges, which would have shipped Google tokens to the wrong
+    # extension and masked real provider-specific failures.
+    live_access = os.environ.get("AUTH_LIVE_GOOGLE_ACCESS_TOKEN", "").strip()
+    live_refresh = os.environ.get("AUTH_LIVE_GOOGLE_REFRESH_TOKEN", "").strip()
+    if live_access and _is_google_token_url(data.get("token_url", "")):
+        resp = {
+            access_token_field: live_access,
+            "expires_in": 3600,
+        }
+        if live_refresh:
+            resp["refresh_token"] = live_refresh
+        return web.json_response(resp)
 
     return web.json_response({
         access_token_field: f"mock-token-{code}",
@@ -800,6 +1870,26 @@ async def oauth_refresh(request: web.Request) -> web.Response:
         return web.json_response({"error": "invalid_gateway_auth"}, status=401)
 
     provider = data.get("provider", "")
+
+    # When real provider tokens are available (auth-live-seeded canary),
+    # return them for Google refreshes instead of validating mock
+    # client_id. Gate strictly on the Google token_url host: the
+    # previous `not mcp:` gate still matched GitHub and Notion
+    # refreshes, which would have returned Google tokens for the wrong
+    # provider and hidden refresh-path bugs.
+    live_access = os.environ.get("AUTH_LIVE_GOOGLE_ACCESS_TOKEN", "").strip()
+    if live_access and _is_google_token_url(data.get("token_url", "")):
+        live_refresh = os.environ.get("AUTH_LIVE_GOOGLE_REFRESH_TOKEN", "").strip()
+        resp = {
+            "access_token": live_access,
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "scope": "mock-scope",
+        }
+        if live_refresh:
+            resp["refresh_token"] = live_refresh
+        return web.json_response(resp)
+
     if provider.startswith("mcp:"):
         if data.get("client_id") != "mock-mcp-client-id":
             return web.json_response({"error": "invalid_mcp_client_id"}, status=400)
@@ -830,6 +1920,15 @@ async def oauth_state_handler(request: web.Request) -> web.Response:
 
 async def oauth_reset(request: web.Request) -> web.Response:
     request.app["oauth_state"] = _new_oauth_state()
+    return web.json_response({"ok": True})
+
+
+async def mcp_state_handler(request: web.Request) -> web.Response:
+    return web.json_response(request.app["mcp_state"])
+
+
+async def mcp_reset(request: web.Request) -> web.Response:
+    request.app["mcp_state"] = _new_mcp_state()
     return web.json_response({"ok": True})
 
 
@@ -882,6 +1981,10 @@ async def _mcp_handle_authed(request: web.Request) -> web.Response:
     body = await request.json()
     method = body.get("method", "")
     req_id = body.get("id")
+    request.app["mcp_state"]["requests"].append({
+        "method": method,
+        "authorization": request.headers.get("Authorization"),
+    })
 
     if method == "initialize":
         return web.json_response({
@@ -904,6 +2007,34 @@ async def _mcp_handle_authed(request: web.Request) -> web.Response:
                     "query": {"type": "string"},
                 }},
             }]},
+        })
+    if method == "tools/call":
+        params = body.get("params") or {}
+        tool_name = params.get("name")
+        arguments = params.get("arguments") or {}
+        if tool_name == "mock_search":
+            query = arguments.get("query", "")
+            return web.json_response({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [{
+                        "type": "text",
+                        "text": f"Mock MCP search result for {query or 'empty query'}",
+                    }],
+                    "is_error": False,
+                },
+            })
+        return web.json_response({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "content": [{
+                    "type": "text",
+                    "text": f"Unknown mock MCP tool: {tool_name}",
+                }],
+                "is_error": True,
+            },
         })
     return web.json_response({"jsonrpc": "2.0", "id": req_id, "error": {
         "code": -32601, "message": f"Method not found: {method}",
@@ -969,6 +2100,7 @@ def main():
     args = parser.parse_args()
     app = web.Application()
     app["oauth_state"] = _new_oauth_state()
+    app["mcp_state"] = _new_mcp_state()
     # Register both /v1/ and non-/v1/ paths (rig-core omits the /v1/ prefix)
     app.router.add_post("/v1/chat/completions", chat_completions)
     app.router.add_post("/chat/completions", chat_completions)
@@ -978,6 +2110,8 @@ def main():
     app.router.add_post("/oauth/refresh", oauth_refresh)
     app.router.add_get("/__mock/oauth/state", oauth_state_handler)
     app.router.add_post("/__mock/oauth/reset", oauth_reset)
+    app.router.add_get("/__mock/mcp/state", mcp_state_handler)
+    app.router.add_post("/__mock/mcp/reset", mcp_reset)
 
     async def set_github_api_url(request: web.Request) -> web.Response:
         global _github_api_url
@@ -1010,8 +2144,8 @@ def main():
         site = web.TCPSite(runner, "127.0.0.1", args.port)
         await site.start()
         port = site._server.sockets[0].getsockname()[1]
-        app["port"] = port  # used by MCP handlers
         print(f"MOCK_LLM_PORT={port}", flush=True)
+        app["port"] = port  # used by MCP handlers
         await asyncio.Event().wait()
 
     asyncio.run(start())

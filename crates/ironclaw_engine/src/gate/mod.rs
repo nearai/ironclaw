@@ -17,6 +17,7 @@ pub mod tool_tier;
 use std::collections::HashSet;
 
 use async_trait::async_trait;
+use ironclaw_common::CredentialName;
 use serde::{Deserialize, Serialize};
 
 use crate::types::capability::ActionDef;
@@ -49,7 +50,7 @@ pub enum ResumeKind {
     /// User must provide a credential (token, API key, OAuth flow).
     Authentication {
         /// Name of the credential that is missing.
-        credential_name: String,
+        credential_name: CredentialName,
         /// User-facing setup instructions.
         instructions: String,
         /// Optional OAuth URL for browser-based flows.
@@ -161,7 +162,7 @@ mod tests {
         );
         assert_eq!(
             ResumeKind::Authentication {
-                credential_name: "x".into(),
+                credential_name: CredentialName::new("x").unwrap(),
                 instructions: "y".into(),
                 auth_url: None,
             }

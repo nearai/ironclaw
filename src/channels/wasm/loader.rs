@@ -223,7 +223,7 @@ impl WasmChannelLoader {
             }
 
             let name = match path.file_stem().and_then(|s| s.to_str()) {
-                Some(n) => n.to_string(),
+                Some(n) => n.replace('-', "_"),
                 None => {
                     results.errors.push((
                         path.clone(),
@@ -233,6 +233,8 @@ impl WasmChannelLoader {
                 }
             };
 
+            // Look up capabilities using the original filename (before
+            // hyphen normalization) so existing sidecar files are found.
             let cap_path = path.with_extension("capabilities.json");
             let has_cap = cap_path.exists();
             channel_entries.push((name, path, if has_cap { Some(cap_path) } else { None }));
@@ -382,7 +384,7 @@ pub async fn discover_channels(
         }
 
         let name = match path.file_stem().and_then(|s| s.to_str()) {
-            Some(n) => n.to_string(),
+            Some(n) => n.replace('-', "_"),
             None => continue,
         };
 

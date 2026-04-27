@@ -166,11 +166,8 @@ pub async fn run_status_command() -> anyhow::Result<()> {
             settings.channels.http_port.unwrap_or(3000)
         ));
     }
-    if channels_dir.exists() {
-        let wasm_count = count_wasm_files(&channels_dir);
-        if wasm_count > 0 {
-            channel_info.push(format!("{} wasm", wasm_count));
-        }
+    if let Some(wasm_summary) = format_wasm_channels_summary(&settings, &channels_dir) {
+        channel_info.push(wasm_summary);
     }
     println!("{}", fmt::kv_line("Channels", &channel_info.join(", "), 12));
 
@@ -263,6 +260,32 @@ fn count_wasm_files(dir: &std::path::Path) -> usize {
         .unwrap_or(0)
 }
 
+fn format_wasm_channels_summary(
+    settings: &Settings,
+    channels_dir: &std::path::Path,
+) -> Option<String> {
+    if settings.channels.wasm_channels_enabled && !settings.channels.wasm_channels.is_empty() {
+        let mut channels = settings.channels.wasm_channels.clone();
+        channels.sort();
+        return Some(format!("{} wasm ({})", channels.len(), channels.join(", ")));
+    }
+
+    let wasm_count = count_wasm_files(channels_dir);
+    if wasm_count > 0 {
+        if settings.channels.wasm_channels_enabled {
+            return Some(format!("{} wasm", wasm_count));
+        } else {
+            return Some(format!(
+                "{} wasm installed ({})",
+                wasm_count,
+                channels_dir.display()
+            ));
+        }
+    }
+
+    None
+}
+
 fn default_tools_dir() -> PathBuf {
     ironclaw_base_dir().join("tools")
 }
@@ -273,7 +296,8 @@ fn default_channels_dir() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::load_settings_from;
+    use super::{format_wasm_channels_summary, load_settings_from};
+    use crate::settings::Settings;
 
     /// Regression test for #354: load_settings_from must read config.toml.
     #[test]
@@ -364,5 +388,31 @@ mod tests {
         // Should fall back to JSON values, not crash
         assert!(settings.heartbeat.enabled);
         assert_eq!(settings.heartbeat.interval_secs, 500);
+    }
+
+    #[test]
+    fn formats_enabled_wasm_channels_with_names() {
+        let mut settings = Settings::default();
+        settings.channels.wasm_channels_enabled = true;
+        settings.channels.wasm_channels = vec!["telegram".to_string(), "slack".to_string()];
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let summary = format_wasm_channels_summary(&settings, dir.path());
+
+        assert_eq!(summary.as_deref(), Some("2 wasm (slack, telegram)"));
+    }
+
+    #[test]
+    fn formats_installed_wasm_channels_when_enabled_list_is_empty() {
+        let mut settings = Settings::default();
+        settings.channels.wasm_channels_enabled = false;
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::File::create(dir.path().join("telegram.wasm")).expect("write wasm");
+        std::fs::File::create(dir.path().join("slack.wasm")).expect("write wasm");
+
+        let summary = format_wasm_channels_summary(&settings, dir.path());
+        let expected = format!("2 wasm installed ({})", dir.path().display());
+
+        assert_eq!(summary.as_deref(), Some(expected.as_str()));
     }
 }

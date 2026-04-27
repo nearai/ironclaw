@@ -7,6 +7,7 @@
 //! followed by parallel execution of all approved actions via `JoinSet`.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::capability::lease::LeaseManager;
 use crate::capability::policy::{PolicyDecision, PolicyEngine};
@@ -63,13 +64,60 @@ pub async fn execute_action_calls(
     let mut preflight_results: Vec<PreflightOutcome> = Vec::with_capacity(calls.len());
     let mut early_events = Vec::new();
     let mut early_results = Vec::new();
+    let active_leases = leases.active_for_thread(thread.id).await;
+    let available_inventory = Arc::new(
+        effects
+            .available_action_inventory(&active_leases, context)
+            .await?,
+    );
+    let available_actions: Arc<[crate::types::capability::ActionDef]> =
+        available_inventory.inline.clone().into();
 
     // ── Phase 1: Preflight (sequential) ─────────────────────────
     // Check leases and policies for every call. RequireApproval interrupts
     // the entire batch immediately. Denied/no-lease calls become error results.
 
     for (idx, call) in calls.iter().enumerate() {
-        // 1. Find the lease for this action (read-only lookup for policy check)
+        // 1. Find the action definition from the callable inventory.
+        let action_def = available_actions
+            .iter()
+            .find(|action| action.matches_name(&call.action_name));
+
+        let Some(action_def) = action_def else {
+            let error = format!(
+                "action '{}' is not callable in this execution context",
+                call.action_name
+            );
+            let error_result = ActionResult {
+                call_id: call.id.clone(),
+                action_name: call.action_name.clone(),
+                output: serde_json::json!({"error": error}),
+                is_error: true,
+                duration: std::time::Duration::ZERO,
+            };
+            let event = EventKind::ActionFailed {
+                step_id: context.step_id,
+                action_name: call.action_name.clone(),
+                call_id: call.id.clone(),
+                error: error_result.output["error"]
+                    .as_str()
+                    .unwrap_or("action is not callable in this execution context")
+                    .to_string(),
+                duration_ms: 0,
+                params_summary: crate::types::event::summarize_params(
+                    &call.action_name,
+                    &call.parameters,
+                ),
+            };
+            preflight_results.push(PreflightOutcome::Error {
+                index: idx,
+                result: error_result,
+                event,
+            });
+            continue;
+        };
+
+        // 2. Find the lease for this action (read-only lookup for policy check)
         let lease = match leases
             .find_lease_for_action(thread.id, &call.action_name)
             .await
@@ -90,7 +138,11 @@ pub async fn execute_action_calls(
                     action_name: call.action_name.clone(),
                     call_id: call.id.clone(),
                     error: format!("no lease for action '{}'", call.action_name),
-                    params_summary: None,
+                    duration_ms: 0,
+                    params_summary: crate::types::event::summarize_params(
+                        &call.action_name,
+                        &call.parameters,
+                    ),
                 };
                 preflight_results.push(PreflightOutcome::Error {
                     index: idx,
@@ -101,76 +153,73 @@ pub async fn execute_action_calls(
             }
         };
 
-        // 2. Find the action definition and check policy
-        let action_def = effects
-            .available_actions(std::slice::from_ref(&lease))
-            .await?
-            .into_iter()
-            .find(|a| a.name == call.action_name);
-
-        if let Some(ref action_def) = action_def {
-            let decision = policy.evaluate(action_def, &lease, capability_policies);
-            match decision {
-                PolicyDecision::Deny { reason } => {
-                    let error_result = ActionResult {
-                        call_id: call.id.clone(),
-                        action_name: call.action_name.clone(),
-                        output: serde_json::json!({"error": format!("denied: {reason}")}),
-                        is_error: true,
-                        duration: std::time::Duration::ZERO,
-                    };
-                    let event = EventKind::ActionFailed {
-                        step_id: context.step_id,
-                        action_name: call.action_name.clone(),
-                        call_id: call.id.clone(),
-                        error: reason,
-                        params_summary: None,
-                    };
-                    preflight_results.push(PreflightOutcome::Error {
-                        index: idx,
-                        result: error_result,
-                        event,
-                    });
-                    continue;
-                }
-                PolicyDecision::RequireApproval { .. } => {
-                    // Collect error results from earlier preflight failures
-                    for pf in preflight_results {
-                        if let PreflightOutcome::Error { result, event, .. } = pf {
-                            early_results.push(result);
-                            early_events.push(event);
-                        }
-                    }
-                    early_events.push(EventKind::ApprovalRequested {
-                        action_name: call.action_name.clone(),
-                        call_id: call.id.clone(),
-                        parameters: Some(call.parameters.clone()),
-                        description: None,
-                        allow_always: None,
-                        gate_name: None,
-                        params_summary: crate::types::event::summarize_params(
-                            &call.action_name,
-                            &call.parameters,
-                        ),
-                    });
-                    return Ok(ActionBatchResult {
-                        results: early_results,
-                        events: early_events,
-                        need_approval: Some(ThreadOutcome::GatePaused {
-                            gate_name: "approval".into(),
-                            action_name: call.action_name.clone(),
-                            call_id: call.id.clone(),
-                            parameters: call.parameters.clone(),
-                            resume_kind: crate::gate::ResumeKind::Approval { allow_always: true },
-                            resume_output: None,
-                        }),
-                    });
-                }
-                PolicyDecision::Allow => {}
+        // 3. Check policy for the callable action.
+        let decision = policy.evaluate(action_def, &lease, capability_policies);
+        match decision {
+            PolicyDecision::Deny { reason } => {
+                let error_result = ActionResult {
+                    call_id: call.id.clone(),
+                    action_name: call.action_name.clone(),
+                    output: serde_json::json!({"error": format!("denied: {reason}")}),
+                    is_error: true,
+                    duration: std::time::Duration::ZERO,
+                };
+                let event = EventKind::ActionFailed {
+                    step_id: context.step_id,
+                    action_name: call.action_name.clone(),
+                    call_id: call.id.clone(),
+                    error: reason,
+                    duration_ms: 0,
+                    params_summary: crate::types::event::summarize_params(
+                        &call.action_name,
+                        &call.parameters,
+                    ),
+                };
+                preflight_results.push(PreflightOutcome::Error {
+                    index: idx,
+                    result: error_result,
+                    event,
+                });
+                continue;
             }
+            PolicyDecision::RequireApproval { .. } => {
+                // Collect error results from earlier preflight failures
+                for pf in preflight_results {
+                    if let PreflightOutcome::Error { result, event, .. } = pf {
+                        early_results.push(result);
+                        early_events.push(event);
+                    }
+                }
+                early_events.push(EventKind::ApprovalRequested {
+                    action_name: call.action_name.clone(),
+                    call_id: call.id.clone(),
+                    parameters: Some(call.parameters.clone()),
+                    description: None,
+                    allow_always: None,
+                    gate_name: None,
+                    params_summary: crate::types::event::summarize_params(
+                        &call.action_name,
+                        &call.parameters,
+                    ),
+                });
+                return Ok(ActionBatchResult {
+                    results: early_results,
+                    events: early_events,
+                    need_approval: Some(ThreadOutcome::GatePaused {
+                        gate_name: "approval".into(),
+                        action_name: call.action_name.clone(),
+                        call_id: call.id.clone(),
+                        parameters: call.parameters.clone(),
+                        resume_kind: crate::gate::ResumeKind::Approval { allow_always: true },
+                        resume_output: None,
+                        paused_lease: None,
+                    }),
+                });
+            }
+            PolicyDecision::Allow => {}
         }
 
-        // 3. Atomically find + consume a lease use under a single write lock.
+        // 4. Atomically find + consume a lease use under a single write lock.
         // This avoids the TOCTOU race where a concurrent call could exhaust
         // the lease between our read-only find (step 1) and this consume.
         let lease = leases
@@ -208,8 +257,9 @@ pub async fn execute_action_calls(
     if runnable_indices.len() == 1 {
         let (idx, lease) = runnable_indices.into_iter().next().unwrap(); // safety: len()==1 checked above
         let call = &calls[idx];
-        let mut exec_ctx = context.clone();
-        exec_ctx.current_call_id = Some(call.id.clone());
+        let exec_ctx =
+            stamp_execution_context(context, &call.id, &available_actions, &available_inventory);
+        let execution_start = Instant::now();
         let exec_result = effects
             .execute_action(
                 &call.action_name,
@@ -221,7 +271,12 @@ pub async fn execute_action_calls(
         if interrupted_call_needs_refund(&exec_result) {
             let _ = leases.refund_use(lease.id).await;
         }
-        slot_results[idx] = Some(classify_exec_result(exec_result, call, &exec_ctx));
+        slot_results[idx] = Some(classify_exec_result(
+            exec_result,
+            call,
+            &exec_ctx,
+            execution_start.elapsed().as_millis() as u64,
+        ));
     } else if runnable_indices.len() > 1 {
         // Multiple calls: execute in parallel via JoinSet
         let mut join_set = tokio::task::JoinSet::new();
@@ -229,26 +284,43 @@ pub async fn execute_action_calls(
 
         for (idx, lease) in runnable_indices {
             let call = calls[idx].clone();
-            let mut ctx = context.clone();
-            ctx.current_call_id = Some(call.id.clone());
+            let ctx = stamp_execution_context(
+                context,
+                &call.id,
+                &available_actions,
+                &available_inventory,
+            );
             let effects = effects.clone();
             let lease = lease.clone();
 
             join_set.spawn(async move {
+                let execution_start = Instant::now();
                 let result = effects
                     .execute_action(&call.action_name, call.parameters.clone(), &lease, &ctx)
                     .await;
-                (idx, lease.id, result, call, ctx)
+                (
+                    idx,
+                    lease.id,
+                    result,
+                    call,
+                    ctx,
+                    execution_start.elapsed().as_millis() as u64,
+                )
             });
         }
 
         while let Some(join_result) = join_set.join_next().await {
             match join_result {
-                Ok((idx, lease_id, result, call, ctx)) => {
+                Ok((idx, lease_id, result, call, ctx, execution_duration_ms)) => {
                     if interrupted_call_needs_refund(&result) {
                         let _ = leases.refund_use(lease_id).await;
                     }
-                    slot_results[idx] = Some(classify_exec_result(result, &call, &ctx));
+                    slot_results[idx] = Some(classify_exec_result(
+                        result,
+                        &call,
+                        &ctx,
+                        execution_duration_ms,
+                    ));
                 }
                 Err(e) => {
                     // Task panicked — should not happen, but handle gracefully
@@ -297,6 +369,11 @@ pub async fn execute_action_calls(
                         allow_always: false,
                     }),
                     resume_output: result.output.get("resume_output").cloned(),
+                    paused_lease: result
+                        .output
+                        .get("paused_lease")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok()),
                 });
             }
             results.push(result);
@@ -311,6 +388,19 @@ pub async fn execute_action_calls(
     })
 }
 
+fn stamp_execution_context(
+    context: &ThreadExecutionContext,
+    call_id: &str,
+    available_actions: &Arc<[crate::types::capability::ActionDef]>,
+    available_inventory: &Arc<crate::types::capability::ActionInventory>,
+) -> ThreadExecutionContext {
+    let mut exec_ctx = context.clone();
+    exec_ctx.current_call_id = Some(call_id.to_string());
+    exec_ctx.available_actions_snapshot = Some(Arc::clone(available_actions));
+    exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(available_inventory));
+    exec_ctx
+}
+
 /// Classify an execution result into an `(ActionResult, EventKind)` pair.
 ///
 /// Used by both the single-call fast path and the parallel JoinSet path
@@ -319,16 +409,48 @@ fn classify_exec_result(
     result: Result<ActionResult, EngineError>,
     call: &ActionCall,
     context: &ThreadExecutionContext,
+    execution_duration_ms: u64,
 ) -> (ActionResult, EventKind) {
     match result {
         Ok(mut action_result) => {
             action_result.call_id = call.id.clone();
-            let event = EventKind::ActionExecuted {
-                step_id: context.step_id,
-                action_name: call.action_name.clone(),
-                call_id: call.id.clone(),
-                duration_ms: action_result.duration.as_millis() as u64,
-                params_summary: None,
+            // Effect adapters wrap tool errors as `Ok(ActionResult { is_error: true })`
+            // — emit ActionFailed in that case so traces and downstream
+            // observers see the failure rather than treating it as success.
+            let event = if action_result.is_error {
+                let error_msg = action_result
+                    .output
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .unwrap_or_else(|| action_result.output.to_string());
+                let duration_ms = action_result.duration.as_millis() as u64;
+                EventKind::ActionFailed {
+                    step_id: context.step_id,
+                    action_name: call.action_name.clone(),
+                    call_id: call.id.clone(),
+                    error: error_msg,
+                    duration_ms: if duration_ms > 0 {
+                        duration_ms
+                    } else {
+                        execution_duration_ms
+                    },
+                    params_summary: crate::types::event::summarize_params(
+                        &call.action_name,
+                        &call.parameters,
+                    ),
+                }
+            } else {
+                EventKind::ActionExecuted {
+                    step_id: context.step_id,
+                    action_name: call.action_name.clone(),
+                    call_id: call.id.clone(),
+                    duration_ms: action_result.duration.as_millis() as u64,
+                    params_summary: crate::types::event::summarize_params(
+                        &call.action_name,
+                        &call.parameters,
+                    ),
+                }
             };
             (action_result, event)
         }
@@ -339,6 +461,7 @@ fn classify_exec_result(
             parameters,
             resume_kind,
             resume_output,
+            paused_lease,
         }) => {
             let _error_msg = format!("gate paused: {gate_name}");
             let error_result = ActionResult {
@@ -349,6 +472,7 @@ fn classify_exec_result(
                     "gate": gate_name,
                     "resume_kind": serde_json::to_value(&*resume_kind).unwrap_or_default(),
                     "resume_output": resume_output.as_deref().cloned(),
+                    "paused_lease": paused_lease.as_deref().cloned(),
                 }),
                 is_error: true,
                 duration: std::time::Duration::ZERO,
@@ -383,7 +507,11 @@ fn classify_exec_result(
                 action_name: call.action_name.clone(),
                 call_id: call.id.clone(),
                 error: e.to_string(),
-                params_summary: None,
+                duration_ms: execution_duration_ms,
+                params_summary: crate::types::event::summarize_params(
+                    &call.action_name,
+                    &call.parameters,
+                ),
             };
             (error_result, event)
         }
@@ -398,7 +526,9 @@ fn interrupted_call_needs_refund(result: &Result<ActionResult, EngineError>) -> 
 mod tests {
     use super::*;
     use crate::traits::effect::ThreadExecutionContext;
-    use crate::types::capability::{ActionDef, CapabilityLease, EffectType, GrantedActions};
+    use crate::types::capability::{
+        ActionDef, CapabilityLease, EffectType, GrantedActions, ModelToolSurface,
+    };
     use crate::types::project::ProjectId;
     use crate::types::step::StepId;
     use crate::types::thread::{Thread, ThreadConfig, ThreadType};
@@ -446,8 +576,17 @@ mod tests {
         async fn available_actions(
             &self,
             _leases: &[CapabilityLease],
+            _context: &ThreadExecutionContext,
         ) -> Result<Vec<ActionDef>, EngineError> {
             Ok(self.actions.clone())
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
+            Ok(vec![])
         }
     }
 
@@ -458,6 +597,8 @@ mod tests {
             parameters_schema: serde_json::json!({"type": "object"}),
             effects: vec![EffectType::ReadLocal],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
+            discovery: None,
         }
     }
 
@@ -470,6 +611,10 @@ mod tests {
             step_id: StepId::new(),
             current_call_id: None,
             source_channel: None,
+            user_timezone: None,
+            thread_goal: Some(thread.goal.clone()),
+            available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         }
     }
 
@@ -680,6 +825,136 @@ mod tests {
         assert_eq!(result.results[1].call_id, "id_bbbb");
     }
 
+    #[tokio::test]
+    async fn alias_normalization_stays_consistent_between_preflight_and_consume() {
+        let thread = Thread::new(
+            "test",
+            ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            ThreadConfig::default(),
+        );
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(
+            vec![test_action("create-issue")],
+            vec![Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "create-issue".into(),
+                output: serde_json::json!({"ok": true}),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })],
+        ));
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+        let ctx = make_exec_context(&thread);
+
+        leases
+            .grant(
+                thread.id,
+                "github",
+                GrantedActions::Specific(vec!["create_issue".into()]),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let calls = vec![ActionCall {
+            id: "call_alias_consume".into(),
+            action_name: "create-issue".into(),
+            parameters: serde_json::json!({"title": "test"}),
+        }];
+
+        let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
+            .await
+            .unwrap();
+
+        assert_eq!(result.results.len(), 1);
+        assert_eq!(result.results[0].call_id, "call_alias_consume");
+        assert_eq!(result.results[0].action_name, "create-issue");
+        assert!(!result.results[0].is_error);
+    }
+
+    #[tokio::test]
+    async fn aliased_action_name_still_triggers_policy_approval() {
+        let thread = Thread::new(
+            "test",
+            ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            ThreadConfig::default(),
+        );
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(
+            vec![ActionDef {
+                name: "create_issue".into(),
+                description: "Create issue".into(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![EffectType::WriteExternal],
+                requires_approval: true,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
+            }],
+            vec![Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "create_issue".into(),
+                output: serde_json::json!({"ok": true}),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })],
+        ));
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+        let ctx = make_exec_context(&thread);
+
+        leases
+            .grant(
+                thread.id,
+                "github",
+                GrantedActions::Specific(vec!["create_issue".into()]),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let calls = vec![ActionCall {
+            id: "call_alias_policy".into(),
+            action_name: "create-issue".into(),
+            parameters: serde_json::json!({"title": "policy should still apply"}),
+        }];
+
+        let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
+            .await
+            .unwrap();
+
+        match result.need_approval {
+            Some(ThreadOutcome::GatePaused {
+                gate_name,
+                action_name,
+                call_id,
+                ..
+            }) => {
+                assert_eq!(gate_name, "approval");
+                assert_eq!(action_name, "create-issue");
+                assert_eq!(call_id, "call_alias_policy");
+            }
+            other => panic!("expected approval gate for aliased action, got {other:?}"),
+        }
+
+        assert!(
+            result.results.is_empty(),
+            "policy preflight should pause before executing the aliased action"
+        );
+        assert!(
+            result.events.iter().any(|event| matches!(
+                event,
+                EventKind::ApprovalRequested { action_name, call_id, .. }
+                    if action_name == "create-issue" && call_id == "call_alias_policy"
+            )),
+            "approval event should use the aliased action name and original call id"
+        );
+    }
+
     // ── GatePaused(Authentication) tests ─────────────────────
 
     #[tokio::test]
@@ -699,11 +974,12 @@ mod tests {
                 call_id: "call_auth_1".into(),
                 parameters: Box::new(serde_json::json!({"url": "https://api.github.com/repos"})),
                 resume_kind: Box::new(crate::gate::ResumeKind::Authentication {
-                    credential_name: "github_token".into(),
+                    credential_name: ironclaw_common::CredentialName::new("github_token").unwrap(),
                     instructions: "Provide your github_token token".into(),
                     auth_url: None,
                 }),
                 resume_output: None,
+                paused_lease: None,
             })],
         ));
         let leases = Arc::new(LeaseManager::new());
@@ -782,11 +1058,12 @@ mod tests {
                     call_id: "call_1".into(),
                     parameters: Box::new(serde_json::json!({})),
                     resume_kind: Box::new(crate::gate::ResumeKind::Authentication {
-                        credential_name: "api_key".into(),
+                        credential_name: ironclaw_common::CredentialName::new("api_key").unwrap(),
                         instructions: "Provide your api_key token".into(),
                         auth_url: None,
                     }),
                     resume_output: None,
+                    paused_lease: None,
                 }),
                 Ok(ActionResult {
                     call_id: String::new(),
@@ -1010,6 +1287,402 @@ mod tests {
         // Event also preserves the exact format
         if let Some(EventKind::ActionExecuted { call_id, .. }) = result.events.first() {
             assert_eq!(call_id, mistral_id);
+        }
+    }
+
+    struct SnapshotAwareEffects;
+
+    #[async_trait::async_trait]
+    impl EffectExecutor for SnapshotAwareEffects {
+        async fn execute_action(
+            &self,
+            name: &str,
+            _params: serde_json::Value,
+            _lease: &CapabilityLease,
+            ctx: &ThreadExecutionContext,
+        ) -> Result<ActionResult, EngineError> {
+            let canonical_name = ctx
+                .available_actions_snapshot
+                .as_ref()
+                .and_then(|actions| actions.iter().find(|action| action.matches_name(name)))
+                .map(|action| action.name.clone())
+                .unwrap_or_else(|| format!("missing_snapshot:{name}"));
+
+            Ok(ActionResult {
+                call_id: String::new(),
+                action_name: canonical_name,
+                output: serde_json::json!({"ok": true}),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })
+        }
+
+        async fn available_actions(
+            &self,
+            _leases: &[CapabilityLease],
+            _context: &ThreadExecutionContext,
+        ) -> Result<Vec<ActionDef>, EngineError> {
+            Ok(vec![test_action("create_issue")])
+        }
+
+        async fn available_action_inventory(
+            &self,
+            _leases: &[CapabilityLease],
+            _context: &ThreadExecutionContext,
+        ) -> Result<crate::types::capability::ActionInventory, EngineError> {
+            Ok(crate::types::capability::ActionInventory {
+                inline: vec![test_action("create_issue")],
+                discoverable: vec![ActionDef {
+                    name: "gmail_send".to_string(),
+                    description: "Send an email".to_string(),
+                    parameters_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "to": {"type": "string"}
+                        },
+                        "required": ["to"]
+                    }),
+                    effects: vec![],
+                    requires_approval: false,
+                    model_tool_surface: ModelToolSurface::CompactToolInfo,
+                    discovery: None,
+                }],
+            })
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn structured_execution_propagates_snapshot_to_executor_context() {
+        let thread = Thread::new(
+            "test",
+            ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            ThreadConfig::default(),
+        );
+        let effects: Arc<dyn EffectExecutor> = Arc::new(SnapshotAwareEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+        let ctx = make_exec_context(&thread);
+
+        leases
+            .grant(
+                thread.id,
+                "tools",
+                GrantedActions::Specific(vec!["create_issue".into()]),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let calls = vec![ActionCall {
+            id: "call_snapshot_ctx".into(),
+            action_name: "create-issue".into(),
+            parameters: serde_json::json!({"title": "snapshot propagation"}),
+        }];
+
+        let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
+            .await
+            .unwrap();
+
+        assert_eq!(result.results.len(), 1);
+        assert_eq!(result.results[0].action_name, "create_issue");
+        assert!(!result.results[0].is_error);
+    }
+
+    struct StructuredToolInfoEffects;
+
+    #[async_trait::async_trait]
+    impl EffectExecutor for StructuredToolInfoEffects {
+        async fn execute_action(
+            &self,
+            name: &str,
+            params: serde_json::Value,
+            _lease: &CapabilityLease,
+            ctx: &ThreadExecutionContext,
+        ) -> Result<ActionResult, EngineError> {
+            let output = if name == "tool_info" {
+                let requested = params
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default();
+                let discovered = ctx
+                    .available_action_inventory_snapshot
+                    .as_ref()
+                    .and_then(|inventory| {
+                        inventory
+                            .discoverable
+                            .iter()
+                            .find(|action| action.matches_name(requested))
+                    })
+                    .map(|action| action.name.clone())
+                    .unwrap_or_else(|| format!("missing_discoverable:{requested}"));
+                serde_json::json!({ "resolved": discovered })
+            } else {
+                serde_json::json!({ "ok": true })
+            };
+
+            Ok(ActionResult {
+                call_id: String::new(),
+                action_name: name.replace('-', "_"),
+                output,
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })
+        }
+
+        async fn available_actions(
+            &self,
+            _leases: &[CapabilityLease],
+            _context: &ThreadExecutionContext,
+        ) -> Result<Vec<ActionDef>, EngineError> {
+            Ok(vec![test_action("tool_info")])
+        }
+
+        async fn available_action_inventory(
+            &self,
+            _leases: &[CapabilityLease],
+            _context: &ThreadExecutionContext,
+        ) -> Result<crate::types::capability::ActionInventory, EngineError> {
+            Ok(crate::types::capability::ActionInventory {
+                inline: vec![test_action("tool_info")],
+                discoverable: vec![ActionDef {
+                    name: "gmail_send".to_string(),
+                    description: "Send an email".to_string(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                    model_tool_surface: ModelToolSurface::CompactToolInfo,
+                    discovery: None,
+                }],
+            })
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn structured_execution_propagates_action_inventory_snapshot_to_executor_context() {
+        let thread = Thread::new(
+            "test",
+            ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            ThreadConfig::default(),
+        );
+        let effects: Arc<dyn EffectExecutor> = Arc::new(StructuredToolInfoEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+        let ctx = make_exec_context(&thread);
+
+        leases
+            .grant(
+                thread.id,
+                "tools",
+                GrantedActions::Specific(vec!["tool_info".into()]),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let calls = vec![ActionCall {
+            id: "call_tool_info_snapshot".into(),
+            action_name: "tool_info".into(),
+            parameters: serde_json::json!({"name": "gmail_send", "detail": "summary"}),
+        }];
+
+        let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
+            .await
+            .unwrap();
+
+        assert_eq!(result.results.len(), 1);
+        assert_eq!(
+            result.results[0].output["resolved"],
+            serde_json::json!("gmail_send")
+        );
+        assert!(!result.results[0].is_error);
+    }
+
+    struct DiscoverableOnlyEffects {
+        executed: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl EffectExecutor for DiscoverableOnlyEffects {
+        async fn execute_action(
+            &self,
+            name: &str,
+            _params: serde_json::Value,
+            _lease: &CapabilityLease,
+            _ctx: &ThreadExecutionContext,
+        ) -> Result<ActionResult, EngineError> {
+            self.executed.lock().unwrap().push(name.to_string());
+            Ok(ActionResult {
+                call_id: String::new(),
+                action_name: name.to_string(),
+                output: serde_json::json!({"ok": true}),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })
+        }
+
+        async fn available_actions(
+            &self,
+            _leases: &[CapabilityLease],
+            _context: &ThreadExecutionContext,
+        ) -> Result<Vec<ActionDef>, EngineError> {
+            Ok(Vec::new())
+        }
+
+        async fn available_action_inventory(
+            &self,
+            _leases: &[CapabilityLease],
+            _context: &ThreadExecutionContext,
+        ) -> Result<crate::types::capability::ActionInventory, EngineError> {
+            Ok(crate::types::capability::ActionInventory {
+                inline: Vec::new(),
+                discoverable: vec![ActionDef {
+                    name: "gmail_send".to_string(),
+                    description: "Send an email".to_string(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                    model_tool_surface: ModelToolSurface::CompactToolInfo,
+                    discovery: None,
+                }],
+            })
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn structured_execution_rejects_discoverable_only_actions() {
+        let thread = Thread::new(
+            "test",
+            ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            ThreadConfig::default(),
+        );
+        let executed = Arc::new(Mutex::new(Vec::new()));
+        let effects: Arc<dyn EffectExecutor> = Arc::new(DiscoverableOnlyEffects {
+            executed: Arc::clone(&executed),
+        });
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+        let ctx = make_exec_context(&thread);
+
+        leases
+            .grant(thread.id, "tools", GrantedActions::All, None, None)
+            .await
+            .unwrap();
+
+        let calls = vec![ActionCall {
+            id: "call_discoverable_only".into(),
+            action_name: "gmail_send".into(),
+            parameters: serde_json::json!({"to": "person@example.com"}),
+        }];
+
+        let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
+            .await
+            .unwrap();
+
+        assert_eq!(result.results.len(), 1);
+        assert!(result.results[0].is_error);
+        assert!(
+            result.results[0].output["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not callable in this execution context")
+        );
+        match result.events.first() {
+            Some(EventKind::ActionFailed { params_summary, .. }) => {
+                assert_eq!(
+                    *params_summary,
+                    crate::types::event::summarize_params(
+                        "gmail_send",
+                        &serde_json::json!({"to": "person@example.com"}),
+                    )
+                );
+            }
+            other => panic!("expected ActionFailed event, got {other:?}"),
+        }
+        assert!(executed.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn structured_policy_denial_preserves_params_summary() {
+        let thread = Thread::new(
+            "test",
+            ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            ThreadConfig::default(),
+        );
+        let effects: Arc<dyn EffectExecutor> =
+            Arc::new(MockEffects::new(vec![test_action("shell")], vec![]));
+        let leases = Arc::new(LeaseManager::new());
+        let mut policy = PolicyEngine::new();
+        policy.deny_effect(EffectType::ReadLocal);
+        let policy = Arc::new(policy);
+        let ctx = make_exec_context(&thread);
+
+        leases
+            .grant(thread.id, "exec", GrantedActions::All, None, None)
+            .await
+            .unwrap();
+
+        let calls = vec![ActionCall {
+            id: "call_policy_denied".into(),
+            action_name: "shell".into(),
+            parameters: serde_json::json!({"cmd": "ls"}),
+        }];
+
+        let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
+            .await
+            .unwrap();
+
+        assert_eq!(result.results.len(), 1);
+        assert!(result.results[0].is_error);
+        match result.events.first() {
+            Some(EventKind::ActionFailed {
+                error,
+                params_summary,
+                ..
+            }) => {
+                assert!(error.contains("denied"));
+                assert_eq!(
+                    *params_summary,
+                    crate::types::event::summarize_params(
+                        "shell",
+                        &serde_json::json!({"cmd": "ls"}),
+                    )
+                );
+            }
+            other => panic!("expected ActionFailed event, got {other:?}"),
         }
     }
 }

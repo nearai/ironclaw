@@ -13,7 +13,7 @@ use axum::{
 };
 
 use crate::channels::web::auth::AdminUser;
-use crate::channels::web::server::GatewayState;
+use crate::channels::web::platform::state::GatewayState;
 use crate::secrets::CreateSecretParams;
 
 /// PUT /api/admin/users/{user_id}/secrets/{name} — create or update a secret.
@@ -186,6 +186,9 @@ pub async fn secrets_delete_handler(
 mod tests {
     use super::*;
     use crate::channels::web::auth::UserIdentity;
+    use crate::channels::web::platform::state::{
+        ActiveConfigSnapshot, PerUserRateLimiter, RateLimiter,
+    };
     use crate::db::{Database, UserRecord};
     use crate::secrets::{InMemorySecretsStore, SecretsCrypto, SecretsStore};
     use secrecy::SecretString;
@@ -214,12 +217,14 @@ mod tests {
             sse: Arc::new(crate::channels::web::sse::SseManager::new()),
             workspace: None,
             workspace_pool: None,
+            multi_tenant_mode: false,
             session_manager: None,
             log_broadcaster: None,
             log_level_handle: None,
             extension_manager: None,
             tool_registry: None,
             store: None,
+            settings_cache: None,
             job_manager: None,
             prompt_queue: None,
             scheduler: None,
@@ -227,17 +232,20 @@ mod tests {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: None,
             llm_provider: None,
+            llm_reload: None,
+            llm_session_manager: None,
+            config_toml_path: None,
             skill_registry: None,
             skill_catalog: None,
             auth_manager: None,
-            chat_rate_limiter: crate::channels::web::server::PerUserRateLimiter::new(30, 60),
-            oauth_rate_limiter: crate::channels::web::server::PerUserRateLimiter::new(20, 60),
-            webhook_rate_limiter: crate::channels::web::server::RateLimiter::new(10, 60),
+            chat_rate_limiter: PerUserRateLimiter::new(30, 60),
+            oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
+            webhook_rate_limiter: RateLimiter::new(10, 60),
             registry_entries: Vec::new(),
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
-            active_config: crate::channels::web::server::ActiveConfigSnapshot::default(),
+            active_config: Arc::new(tokio::sync::RwLock::new(ActiveConfigSnapshot::default())),
             secrets_store: Some(secrets),
             db_auth: None,
             pairing_store: None,
@@ -249,6 +257,7 @@ mod tests {
             near_rpc_url: None,
             near_network: None,
             oauth_sweep_shutdown: None,
+            frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
         }
     }

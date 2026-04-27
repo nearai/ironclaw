@@ -96,57 +96,91 @@ impl ThreadManager {
     ) -> Result<ThreadId, EngineError> {
         self.spawn_thread_with_history(
             goal,
+            None,
             thread_type,
             project_id,
             config,
             parent_id,
             user_id,
             Vec::new(),
-            None,
+            serde_json::Map::new(),
+        )
+        .await
+    }
+
+    /// Spawn a new thread with an explicit sidebar title.
+    ///
+    /// Callers with a semantic short label (e.g. mission name) should
+    /// use this; everything else can rely on `spawn_thread` + the
+    /// read-side fallback that derives a short title from `goal`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn spawn_thread_with_title(
+        &self,
+        goal: impl Into<String>,
+        title: Option<String>,
+        thread_type: ThreadType,
+        project_id: ProjectId,
+        config: ThreadConfig,
+        parent_id: Option<ThreadId>,
+        user_id: impl Into<String>,
+    ) -> Result<ThreadId, EngineError> {
+        self.spawn_thread_with_history(
+            goal,
+            title,
+            thread_type,
+            project_id,
+            config,
+            parent_id,
+            user_id,
+            Vec::new(),
+            serde_json::Map::new(),
         )
         .await
     }
 
     /// Spawn a thread with initial conversation history.
     ///
-    /// `source_channel` records the channel name (e.g. "gateway") that
-    /// originated this thread. It is stored in `thread.metadata.source_channel`
-    /// **before** the execution task is spawned, so the orchestrator's
-    /// `ThreadExecutionContext` sees it on the very first step. Setting it
-    /// post-spawn via `set_thread_metadata` is a race — the spawned task owns
-    /// its own in-memory copy of the `Thread`, and the late metadata update
-    /// only lands on the persisted copy that the running task never re-reads.
+    /// `initial_metadata` is applied to the thread's metadata map *before* the
+    /// background execution task starts, so the executor's in-memory `Thread`
+    /// observes those keys on the first step. This is the only correct way to
+    /// stamp metadata that the very first orchestrator step needs to read
+    /// (e.g. `source_channel` for `mission_create` notify-channel defaulting,
+    /// or `user_timezone` for cron resolution). Setting metadata after spawn
+    /// via `set_thread_metadata` is a race — the spawned task owns its own
+    /// in-memory copy of the `Thread`, and the late update only lands on the
+    /// persisted copy that the running task never re-reads.
     #[allow(clippy::too_many_arguments)]
     pub async fn spawn_thread_with_history(
         &self,
         goal: impl Into<String>,
+        title: Option<String>,
         thread_type: ThreadType,
         project_id: ProjectId,
         config: ThreadConfig,
         parent_id: Option<ThreadId>,
         user_id: impl Into<String>,
         initial_messages: Vec<crate::types::message::ThreadMessage>,
-        source_channel: Option<String>,
+        initial_metadata: serde_json::Map<String, serde_json::Value>,
     ) -> Result<ThreadId, EngineError> {
         let user_id = user_id.into();
         let mut thread = Thread::new(goal, thread_type, project_id, &user_id, config);
         if let Some(pid) = parent_id {
             thread = thread.with_parent(pid);
         }
-        // Stamp source_channel into metadata BEFORE the execution task takes
-        // ownership of the Thread struct. The orchestrator reads this via
-        // `thread_source_channel(thread)` and uses it to populate
-        // `ThreadExecutionContext.source_channel`, which downstream tools
-        // (notably `mission_create`) consult to default `notify_channels`.
-        if let Some(channel) = source_channel
+        // Set the title before save_thread + start_thread so the
+        // executor's in-memory thread observes it atomically.
+        thread.title = title;
+        let thread_id = thread.id;
+
+        // Apply initial metadata before save_thread + start_thread so the
+        // executor's in-memory thread observes it on the first step.
+        if !initial_metadata.is_empty()
             && let Some(obj) = thread.metadata.as_object_mut()
         {
-            obj.insert(
-                "source_channel".to_string(),
-                serde_json::Value::String(channel),
-            );
+            for (k, v) in initial_metadata {
+                obj.insert(k, v);
+            }
         }
-        let thread_id = thread.id;
 
         // Register in tree
         if let Some(pid) = parent_id {
@@ -353,9 +387,13 @@ impl ThreadManager {
 
             let outcome = match result {
                 Ok(outcome) => outcome,
-                Err(error) => ThreadOutcome::Failed {
-                    error: error.to_string(),
-                },
+                Err(error) => {
+                    let debug_detail = error.debug_detail().map(|s| s.to_string());
+                    ThreadOutcome::Failed {
+                        error: error.to_string(),
+                        debug_detail,
+                    }
+                }
             };
             completed.write().await.insert(thread_id, outcome.clone());
             running.write().await.remove(&thread_id);
@@ -397,17 +435,6 @@ impl ThreadManager {
         }
     }
 
-    /// Send a stop signal without ownership check (system operations).
-    pub async fn stop_thread_system(&self, thread_id: ThreadId) -> Result<(), EngineError> {
-        let running = self.running.read().await;
-        if let Some(rt) = running.get(&thread_id) {
-            let _ = rt.signal_tx.send(ThreadSignal::Stop).await;
-            Ok(())
-        } else {
-            Err(EngineError::ThreadNotFound(thread_id))
-        }
-    }
-
     /// Inject a user message into a running thread.
     pub async fn inject_message(
         &self,
@@ -436,35 +463,40 @@ impl ThreadManager {
         }
     }
 
-    /// Inject a message without ownership check (system operations).
-    pub async fn inject_message_system(
+    /// Set a metadata key on the persisted thread record.
+    ///
+    /// Note: this updates the **store**, not the in-memory `Thread` that an
+    /// already-running `ExecutionLoop` is reading from. Callers that need the
+    /// next executor step to observe the new value must apply this *before*
+    /// the executor task is spawned (initial-create path) or before
+    /// `resume_thread`, which reloads from the store.
+    pub async fn set_thread_metadata(
         &self,
         thread_id: ThreadId,
-        message: ThreadMessage,
+        key: &str,
+        value: &str,
     ) -> Result<(), EngineError> {
-        let running = self.running.read().await;
-        if let Some(rt) = running.get(&thread_id) {
-            let _ = rt
-                .signal_tx
-                .send(ThreadSignal::InjectMessage(message))
-                .await;
-            Ok(())
-        } else {
-            Err(EngineError::ThreadNotFound(thread_id))
+        let mut thread = self
+            .store
+            .load_thread(thread_id)
+            .await
+            .map_err(|e| EngineError::Store {
+                reason: format!("set_thread_metadata: load failed: {e}"),
+            })?
+            .ok_or(EngineError::ThreadNotFound(thread_id))?;
+        if let Some(obj) = thread.metadata.as_object_mut() {
+            obj.insert(
+                key.to_string(),
+                serde_json::Value::String(value.to_string()),
+            );
         }
-    }
-
-    /// Set a metadata key on a thread (best-effort, for tagging).
-    pub async fn set_thread_metadata(&self, thread_id: ThreadId, key: &str, value: &str) {
-        if let Ok(Some(mut thread)) = self.store.load_thread(thread_id).await {
-            if let Some(obj) = thread.metadata.as_object_mut() {
-                obj.insert(
-                    key.to_string(),
-                    serde_json::Value::String(value.to_string()),
-                );
-            }
-            let _ = self.store.save_thread(&thread).await;
-        }
+        self.store
+            .save_thread(&thread)
+            .await
+            .map_err(|e| EngineError::Store {
+                reason: format!("set_thread_metadata: save failed: {e}"),
+            })?;
+        Ok(())
     }
 
     /// Check if a thread is still running.
@@ -495,6 +527,7 @@ impl ThreadManager {
                         error!(thread_id = %thread_id, "thread task panicked: {e}");
                         Ok(ThreadOutcome::Failed {
                             error: format!("thread task panicked: {e}"),
+                            debug_detail: None,
                         })
                     }
                 };
@@ -644,7 +677,9 @@ fn is_resolved_action_result_message(message: &ThreadMessage, call_id: &str) -> 
 mod tests {
     use super::*;
     use crate::traits::llm::{LlmCallConfig, LlmOutput};
-    use crate::types::capability::{ActionDef, Capability, CapabilityLease, EffectType};
+    use crate::types::capability::{
+        ActionDef, Capability, CapabilityLease, EffectType, ModelToolSurface,
+    };
     use crate::types::event::ThreadEvent;
     use crate::types::memory::{DocId, MemoryDoc};
     use crate::types::project::Project;
@@ -745,7 +780,16 @@ mod tests {
         async fn available_actions(
             &self,
             _: &[CapabilityLease],
+            _: &crate::traits::effect::ThreadExecutionContext,
         ) -> Result<Vec<ActionDef>, EngineError> {
+            Ok(vec![])
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[CapabilityLease],
+            _: &crate::traits::effect::ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
             Ok(vec![])
         }
     }
@@ -777,8 +821,17 @@ mod tests {
         async fn available_actions(
             &self,
             _: &[CapabilityLease],
+            _: &crate::traits::effect::ThreadExecutionContext,
         ) -> Result<Vec<ActionDef>, EngineError> {
             Ok(self.actions.read().await.clone())
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[CapabilityLease],
+            _: &crate::traits::effect::ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
+            Ok(vec![])
         }
     }
 
@@ -885,6 +938,9 @@ mod tests {
         ) -> Result<Vec<MemoryDoc>, EngineError> {
             Ok(vec![])
         }
+        async fn list_memory_docs_by_owner(&self, _: &str) -> Result<Vec<MemoryDoc>, EngineError> {
+            Ok(vec![])
+        }
         async fn save_lease(&self, lease: &CapabilityLease) -> Result<(), EngineError> {
             self.leases.write().await.insert(lease.id, lease.clone());
             Ok(())
@@ -951,6 +1007,8 @@ mod tests {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::ReadLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             }],
             knowledge: vec![],
             policies: vec![],
@@ -977,6 +1035,8 @@ mod tests {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::ReadLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             }],
             knowledge: vec![],
             policies: vec![],
@@ -1007,6 +1067,8 @@ mod tests {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::WriteLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             }],
             knowledge: vec![],
             policies: vec![],
@@ -1046,6 +1108,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spawn_thread_defaults_title_to_none() {
+        // Regression: without explicit title, the persisted thread has
+        // title = None — so the gateway falls back to deriving from goal
+        // rather than showing stale data.
+        let mgr = make_manager(MockLlm::text("done"));
+        let tid = mgr
+            .spawn_thread(
+                "some long goal",
+                ThreadType::Foreground,
+                ProjectId::new(),
+                ThreadConfig::default(),
+                None,
+                "user",
+            )
+            .await
+            .unwrap();
+        let _ = mgr.join_thread(tid).await.unwrap();
+        let loaded = mgr.store.load_thread(tid).await.unwrap().unwrap();
+        assert_eq!(loaded.title, None);
+    }
+
+    #[tokio::test]
+    async fn spawn_thread_with_title_persists_title() {
+        // Regression: mission-spawned threads pass `Some(mission.name)` so
+        // the sidebar shows the short label instead of the multi-paragraph
+        // meta-prompt that lives in `goal`.
+        let mgr = make_manager(MockLlm::text("done"));
+        let long_goal = "a".repeat(2000);
+        let tid = mgr
+            .spawn_thread_with_title(
+                &long_goal,
+                Some("Daily summary".to_string()),
+                ThreadType::Mission,
+                ProjectId::new(),
+                ThreadConfig::default(),
+                None,
+                "user",
+            )
+            .await
+            .unwrap();
+        let _ = mgr.join_thread(tid).await.unwrap();
+        let loaded = mgr.store.load_thread(tid).await.unwrap().unwrap();
+        assert_eq!(loaded.title.as_deref(), Some("Daily summary"));
+        assert_eq!(loaded.goal.len(), 2000);
+    }
+
+    #[tokio::test]
+    async fn spawn_thread_with_history_persists_derived_title() {
+        // Regression: foreground gateway threads pass a derived short
+        // title; without this, the sidebar would show the full first
+        // user message.
+        let mgr = make_manager(MockLlm::text("done"));
+        let long_message =
+            "first line of a user message\nsecond line that should be ignored".to_string();
+        let derived = Thread::derive_title_from_message(&long_message);
+        assert_eq!(derived.as_deref(), Some("first line of a user message"));
+
+        let tid = mgr
+            .spawn_thread_with_history(
+                long_message,
+                derived.clone(),
+                ThreadType::Foreground,
+                ProjectId::new(),
+                ThreadConfig::default(),
+                None,
+                "user",
+                Vec::new(),
+                serde_json::Map::new(),
+            )
+            .await
+            .unwrap();
+        let _ = mgr.join_thread(tid).await.unwrap();
+        let loaded = mgr.store.load_thread(tid).await.unwrap().unwrap();
+        assert_eq!(loaded.title, derived);
+    }
+
+    #[tokio::test]
     async fn resume_reconciles_tool_lease_with_newly_available_actions() {
         let store = Arc::new(MockStore::new());
         let effects = DynamicEffects::new(vec![ActionDef {
@@ -1054,6 +1193,8 @@ mod tests {
             parameters_schema: serde_json::json!({}),
             effects: vec![EffectType::WriteLocal],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
+            discovery: None,
         }]);
         let mgr = make_manager_with_effects(MockLlm::text("done"), store, effects.clone());
 
@@ -1090,6 +1231,8 @@ mod tests {
                     parameters_schema: serde_json::json!({}),
                     effects: vec![EffectType::WriteLocal],
                     requires_approval: false,
+                    model_tool_surface: ModelToolSurface::FullSchema,
+                    discovery: None,
                 },
                 ActionDef {
                     name: "notion_search".into(),
@@ -1097,6 +1240,8 @@ mod tests {
                     parameters_schema: serde_json::json!({}),
                     effects: vec![EffectType::ReadExternal],
                     requires_approval: false,
+                    model_tool_surface: ModelToolSurface::CompactToolInfo,
+                    discovery: None,
                 },
             ])
             .await;
@@ -1126,6 +1271,8 @@ mod tests {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::WriteLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             },
             ActionDef {
                 name: "notion_search".into(),
@@ -1133,6 +1280,8 @@ mod tests {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::ReadExternal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::CompactToolInfo,
+                discovery: None,
             },
         ]);
         let mgr = make_manager_with_effects(MockLlm::text("done"), store, effects);
@@ -1165,6 +1314,8 @@ mod tests {
             parameters_schema: serde_json::json!({}),
             effects: vec![EffectType::WriteLocal],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
+            discovery: None,
         }];
         let revealed_actions = vec![
             ActionDef {
@@ -1173,6 +1324,8 @@ mod tests {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::WriteLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             },
             ActionDef {
                 name: "notion_search".into(),
@@ -1180,6 +1333,8 @@ mod tests {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::ReadExternal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::CompactToolInfo,
+                discovery: None,
             },
         ];
         let effects = DynamicEffects::new(initial_actions);

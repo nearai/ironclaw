@@ -24,7 +24,7 @@ if $NEEDS_CHECK; then
 fi
 
 # i18n parity: when any language pack changes, all languages must stay in sync.
-if echo "$STAGED" | grep -qE '^src/channels/web/static/i18n/.*\.js$'; then
+if echo "$STAGED" | grep -qE '^crates/ironclaw_gateway/static/i18n/.*\.js$'; then
     echo "pre-commit: checking i18n parity..."
     if ! ./scripts/check-i18n-parity.sh; then
         echo ""

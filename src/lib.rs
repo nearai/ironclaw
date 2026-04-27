@@ -56,6 +56,7 @@ pub mod estimation;
 pub mod evaluation;
 pub mod extensions;
 pub mod gate;
+pub(crate) mod generated_images;
 pub mod history;
 pub mod hooks;
 pub mod http_intercept;

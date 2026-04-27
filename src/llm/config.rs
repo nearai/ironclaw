@@ -180,6 +180,24 @@ pub struct LlmConfig {
     /// Enable cascade mode for smart routing (retry with primary if cheap model
     /// response seems uncertain). Default: true. Set via `SMART_ROUTING_CASCADE`.
     pub smart_routing_cascade: bool,
+    /// Maximum number of retries for transient LLM errors.
+    /// Set via `LLM_MAX_RETRIES` (falls back to `NEARAI_MAX_RETRIES`). Default: 3.
+    pub max_retries: u32,
+    /// Consecutive failures before circuit breaker opens. None = disabled.
+    /// Set via `LLM_CIRCUIT_BREAKER_THRESHOLD` (falls back to `CIRCUIT_BREAKER_THRESHOLD`).
+    pub circuit_breaker_threshold: Option<u32>,
+    /// Seconds the circuit stays open before probing. Default: 30.
+    /// Set via `LLM_CIRCUIT_BREAKER_RECOVERY_SECS` (falls back to `CIRCUIT_BREAKER_RECOVERY_SECS`).
+    pub circuit_breaker_recovery_secs: u64,
+    /// Enable in-memory response caching. Default: false.
+    /// Set via `LLM_RESPONSE_CACHE_ENABLED` (falls back to `RESPONSE_CACHE_ENABLED`).
+    pub response_cache_enabled: bool,
+    /// TTL in seconds for cached responses. Default: 3600.
+    /// Set via `LLM_RESPONSE_CACHE_TTL_SECS` (falls back to `RESPONSE_CACHE_TTL_SECS`).
+    pub response_cache_ttl_secs: u64,
+    /// Max cached responses before LRU eviction. Default: 1000.
+    /// Set via `LLM_RESPONSE_CACHE_MAX_ENTRIES` (falls back to `RESPONSE_CACHE_MAX_ENTRIES`).
+    pub response_cache_max_entries: usize,
 }
 
 impl LlmConfig {
@@ -196,6 +214,38 @@ impl LlmConfig {
                 None
             }
         })
+    }
+
+    /// Resolve the model name to show in status/UI after a hot-reload.
+    ///
+    /// This is used by the gateway status handler to refresh
+    /// `ActiveConfigSnapshot.llm_model` when the provider chain is swapped
+    /// without touching an active provider instance (e.g. before the first
+    /// request lands on the new chain).
+    pub fn active_model_name(&self) -> String {
+        match self.backend.as_str() {
+            "nearai" | "near_ai" | "near" => self.nearai.model.clone(),
+            "bedrock" | "aws_bedrock" | "aws" => self
+                .bedrock
+                .as_ref()
+                .map(|cfg| cfg.model.clone())
+                .unwrap_or_else(|| self.nearai.model.clone()),
+            "gemini_oauth" | "gemini-oauth" => self
+                .gemini_oauth
+                .as_ref()
+                .map(|cfg| cfg.model.clone())
+                .unwrap_or_else(|| self.nearai.model.clone()),
+            "openai_codex" | "openai-codex" | "codex" => self
+                .openai_codex
+                .as_ref()
+                .map(|cfg| cfg.model.clone())
+                .unwrap_or_else(|| "gpt-5.3-codex".to_string()),
+            _ => self
+                .provider
+                .as_ref()
+                .map(|cfg| cfg.model.clone())
+                .unwrap_or_else(|| self.nearai.model.clone()),
+        }
     }
 }
 

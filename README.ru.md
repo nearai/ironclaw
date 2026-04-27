@@ -281,15 +281,26 @@ WASM ──► Валидатор ──► Сканер ───► Инъек
 
 ## Использование
 
+Сейчас engine v2 включается отдельно. Если вы хотите запускать новый движок вместо устаревшего цикла агента, запускайте IronClaw с `ENGINE_V2=true`.
+
 ```bash
 # Первоначальная настройка (БД, аутентификация и т.д.)
 ironclaw onboard
 
-# Запуск интерактивного REPL
+# Запуск установленного бинарника
+ironclaw
+
+# Запуск установленного бинарника с engine v2
+ENGINE_V2=true ironclaw
+
+# Запуск интерактивного REPL из исходников
 cargo run
 
-# С отладочными логами
-RUST_LOG=ironclaw=debug cargo run
+# Запуск интерактивного REPL из исходников с engine v2
+ENGINE_V2=true cargo run
+
+# Engine v2 с отладочными логами
+ENGINE_V2=true RUST_LOG=ironclaw=debug cargo run
 ```
 
 ## Разработка

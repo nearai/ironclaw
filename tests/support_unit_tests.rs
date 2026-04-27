@@ -204,6 +204,7 @@ mod test_channel_tests {
                     error: None,
                     parameters: None,
                     call_id: None,
+                    duration_ms: None,
                 },
                 &metadata,
             )
@@ -329,6 +330,7 @@ mod test_channel_tests {
                     error: None,
                     parameters: None,
                     call_id: None,
+                    duration_ms: None,
                 },
                 &serde_json::Value::Null,
             )
@@ -547,6 +549,54 @@ mod trace_llm_tests {
 
         assert_eq!(resp.content.as_deref(), Some("still works"));
         assert_eq!(llm.hint_mismatches(), 2);
+    }
+
+    /// Hint matching must be case-insensitive: a hint of "write" should match
+    /// a user message starting with "Write". Regression test for the bug where
+    /// case-sensitive `contains` left hinted steps permanently stuck at the
+    /// queue head while unhinted steps were consumed out of order.
+    #[tokio::test]
+    async fn hint_matching_is_case_insensitive() {
+        let trace = LlmTrace::single_turn(
+            "test-model",
+            "Write a file",
+            vec![
+                TraceStep {
+                    request_hint: Some(RequestHint {
+                        last_user_message_contains: Some("write".to_string()),
+                        min_message_count: None,
+                    }),
+                    response: TraceResponse::Text {
+                        content: "hinted step".to_string(),
+                        input_tokens: 10,
+                        output_tokens: 5,
+                    },
+                    expected_tool_results: Vec::new(),
+                },
+                TraceStep {
+                    request_hint: None,
+                    response: TraceResponse::Text {
+                        content: "unhinted step".to_string(),
+                        input_tokens: 10,
+                        output_tokens: 5,
+                    },
+                    expected_tool_results: Vec::new(),
+                },
+            ],
+        );
+        let llm = TraceLlm::from_trace(trace);
+
+        // The hinted step should match "Write" (capital W) against hint "write".
+        let resp = llm
+            .complete_with_tools(make_request("Write a file"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.content.as_deref(),
+            Some("hinted step"),
+            "hinted step should be selected (case-insensitive match)"
+        );
+        assert_eq!(llm.hint_mismatches(), 0);
     }
 
     #[tokio::test]

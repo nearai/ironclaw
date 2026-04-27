@@ -258,7 +258,7 @@ impl WasmToolLoader {
             }
 
             let name = match path.file_stem().and_then(|s| s.to_str()) {
-                Some(n) => n.to_string(),
+                Some(n) => n.replace('-', "_"),
                 None => {
                     results.errors.push((
                         path.clone(),
@@ -268,6 +268,8 @@ impl WasmToolLoader {
                 }
             };
 
+            // Look up capabilities using the original filename (before
+            // hyphen normalization) so existing sidecar files are found.
             let cap_path = path.with_extension("capabilities.json");
             let has_cap = cap_path.exists();
             tool_entries.push((name, path, if has_cap { Some(cap_path) } else { None }));
@@ -549,7 +551,7 @@ fn tools_src_dir() -> PathBuf {
 /// - `tools-src/<name>/target/wasm32-wasip2/release/<crate_name>_tool.wasm`
 /// - `tools-src/<name>/<name>-tool.capabilities.json`
 ///
-/// Returns a map of install-name (e.g. "gmail-tool") to paths.
+/// Returns a map of install-name (e.g. "gmail_tool") to paths.
 pub async fn discover_dev_tools() -> Result<HashMap<String, DiscoveredTool>, std::io::Error> {
     let src_dir = tools_src_dir();
     let mut tools = HashMap::new();
@@ -572,7 +574,7 @@ pub async fn discover_dev_tools() -> Result<HashMap<String, DiscoveredTool>, std
 
         // Convention: crate name uses underscores, directory uses hyphens
         let crate_name = dir_name.replace('-', "_");
-        let install_name = format!("{}-tool", dir_name);
+        let install_name = format!("{}_tool", crate_name);
 
         let wasm_path = wasm_artifact_path(&path, &format!("{}_tool", crate_name));
 
@@ -699,7 +701,7 @@ pub async fn discover_tools(dir: &Path) -> Result<HashMap<String, DiscoveredTool
         }
 
         let name = match path.file_stem().and_then(|s| s.to_str()) {
-            Some(n) => n.to_string(),
+            Some(n) => n.replace('-', "_"),
             None => continue,
         };
 
@@ -885,11 +887,11 @@ mod tests {
         // If build artifacts exist, they should be discovered.
         let tools = super::discover_dev_tools().await.unwrap();
 
-        // If any tools have been built, they should appear with "-tool" suffix
+        // If any tools have been built, they should appear with "_tool" suffix
         for (name, discovered) in &tools {
             assert!(
-                name.ends_with("-tool"),
-                "Dev tool name should end with -tool: {}",
+                name.ends_with("_tool"),
+                "Dev tool name should end with _tool: {}",
                 name
             );
             assert!(

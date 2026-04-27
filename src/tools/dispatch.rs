@@ -619,4 +619,199 @@ mod integration_tests {
             "timed-out action must be marked success=false"
         );
     }
+
+    // ── memory_write protected-path gate (caller-level) ───────
+    //
+    // These tests drive the **dispatcher**, not the tool helper. They
+    // assert the protected-path guard fires through the full safety
+    // pipeline that gateway/CLI/routine callers actually go through, so
+    // a regression in any wrapper layer (param normalization, schema
+    // validation, etc.) is caught here — see the rule in
+    // `.claude/rules/testing.md` ("Test Through the Caller, Not Just the
+    // Helper") and PR #1958 reviewer feedback that the previous PR only
+    // unit-tested the helper.
+
+    use crate::tools::builtin::memory::MemoryWriteTool;
+    use crate::workspace::Workspace;
+
+    async fn dispatcher_with_memory_write() -> (
+        Arc<ToolDispatcher>,
+        Arc<LibSqlBackend>,
+        Arc<dyn Database>,
+        Arc<ToolRegistry>,
+        Arc<Workspace>,
+        tempfile::TempDir,
+    ) {
+        let (dispatcher, backend, db, registry, dir) = test_dispatcher().await;
+        let ws = Arc::new(Workspace::new_with_db("tester", Arc::clone(&db)));
+        registry
+            .register(Arc::new(MemoryWriteTool::from_workspace(Arc::clone(&ws))))
+            .await;
+        (dispatcher, backend, db, registry, ws, dir)
+    }
+
+    #[tokio::test]
+    async fn dispatch_memory_write_blocks_protected_path_when_self_modify_disabled() {
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::disable();
+        let (dispatcher, _backend, _db, _registry, _ws, _dir) =
+            dispatcher_with_memory_write().await;
+
+        let result = dispatcher
+            .dispatch(
+                "memory_write",
+                serde_json::json!({
+                    "target": "orchestrator:main",
+                    "content": "def run_loop(): pass\n",
+                }),
+                "tester",
+                DispatchSource::Channel("gateway".into()),
+            )
+            .await;
+
+        match result {
+            Err(ToolError::NotAuthorized(msg)) => {
+                assert!(
+                    msg.contains("orchestrator self-modification is disabled"),
+                    "expected self-modify denial; got: {msg}"
+                );
+            }
+            other => panic!("expected NotAuthorized, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_memory_write_blocks_physical_orchestrator_path() {
+        // Reviewer-flagged miss: the original guard only matched logical
+        // aliases (`orchestrator:*`). Writing directly to the physical
+        // workspace path skipped the gate. After the fix, this must be
+        // rejected even when self-modify is off.
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::disable();
+        let (dispatcher, _backend, _db, _registry, _ws, _dir) =
+            dispatcher_with_memory_write().await;
+
+        let result = dispatcher
+            .dispatch(
+                "memory_write",
+                serde_json::json!({
+                    "target": ".system/engine/orchestrator/v3.py",
+                    "content": "def run_loop(): pass\n",
+                }),
+                "tester",
+                DispatchSource::Channel("gateway".into()),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(ToolError::NotAuthorized(_))),
+            "physical orchestrator path must be denied; got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_memory_write_blocks_dot_segment_bypass() {
+        // Reviewer-flagged critical: `engine/./orchestrator/v3.py` resolves
+        // to the protected location but the raw `starts_with` check missed
+        // it. Normalization must collapse the dot segment before matching.
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::disable();
+        let (dispatcher, _backend, _db, _registry, _ws, _dir) =
+            dispatcher_with_memory_write().await;
+
+        let result = dispatcher
+            .dispatch(
+                "memory_write",
+                serde_json::json!({
+                    "target": "engine/./orchestrator/v3.py",
+                    "content": "def run_loop(): pass\n",
+                }),
+                "tester",
+                DispatchSource::Channel("gateway".into()),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(ToolError::NotAuthorized(_))),
+            "dot-segment bypass must be denied; got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_memory_write_blocks_double_slash_bypass() {
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::disable();
+        let (dispatcher, _backend, _db, _registry, _ws, _dir) =
+            dispatcher_with_memory_write().await;
+
+        let result = dispatcher
+            .dispatch(
+                "memory_write",
+                serde_json::json!({
+                    "target": ".system/engine//orchestrator/v3.py",
+                    "content": "def run_loop(): pass\n",
+                }),
+                "tester",
+                DispatchSource::Channel("gateway".into()),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(ToolError::NotAuthorized(_))),
+            "double-slash bypass must be denied; got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_memory_write_rejects_traversal_attempts() {
+        // Reviewer-flagged critical: `engine/knowledge/../orchestrator/v3.py`
+        // resolves to the protected location. Normalization rejects the path
+        // outright; execute() returns InvalidParameters before the write.
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
+        let (dispatcher, _backend, _db, _registry, _ws, _dir) =
+            dispatcher_with_memory_write().await;
+
+        let result = dispatcher
+            .dispatch(
+                "memory_write",
+                serde_json::json!({
+                    "target": "engine/knowledge/../orchestrator/v3.py",
+                    "content": "def run_loop(): pass\n",
+                }),
+                "tester",
+                DispatchSource::Channel("gateway".into()),
+            )
+            .await;
+
+        match result {
+            Err(ToolError::InvalidParameters(msg)) => {
+                assert!(
+                    msg.contains("parent-directory") || msg.contains(".."),
+                    "expected traversal-rejection message; got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidParameters for traversal, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_memory_write_unprotected_path_succeeds() {
+        // Sanity: a non-protected target must still flow through dispatch
+        // unblocked. If this fails, the guard is over-eager.
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::disable();
+        let (dispatcher, _backend, _db, _registry, _ws, _dir) =
+            dispatcher_with_memory_write().await;
+
+        let result = dispatcher
+            .dispatch(
+                "memory_write",
+                serde_json::json!({
+                    "target": "daily_log",
+                    "content": "ordinary daily note",
+                }),
+                "tester",
+                DispatchSource::Channel("gateway".into()),
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "unprotected target must succeed; got: {result:?}"
+        );
+    }
 }

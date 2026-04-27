@@ -31,15 +31,18 @@ activation:
   tags:
     - "devops"
   max_context_tokens: 2000
-metadata:
-  openclaw:
-    requires:
-      bins: [docker, kubectl]
-      env: [KUBECONFIG]
+requires:
+  bins: [docker, kubectl]
+  env: [KUBECONFIG]
 ---
 
 # Skill instructions here...
 ```
+
+Only the top-level `requires:` block is supported. The legacy nested shape
+`metadata.openclaw.requires` is unsupported and ignored by the current parser,
+so older external skills must be migrated instead of relying on silent
+compatibility.
 
 ## Selection Pipeline
 

@@ -197,10 +197,31 @@ impl SessionManager {
             }
         }
 
-        // Create new thread (always create a new one for a new key)
+        // Create new thread (always create a new one for a new key).
+        // If the external_thread_id is a valid UUID AND it isn't already
+        // mapped to a different ThreadKey, adopt it as the internal thread ID
+        // so callers (e.g. the Responses API) can look up conversations by
+        // the same UUID they encoded in the response ID.
         let thread_id = {
+            // Check under read lock: only adopt ext_uuid if no other key
+            // maps to it (prevents aliasing two keys to the same thread).
+            let safe_ext_uuid = if let Some(uuid) = ext_uuid {
+                let thread_map = self.thread_map.read().await;
+                if thread_map.values().any(|&v| v == uuid) {
+                    None // Already mapped elsewhere — generate a new UUID
+                } else {
+                    Some(uuid)
+                }
+            } else {
+                None
+            };
+
             let mut sess = session.lock().await;
-            let thread = sess.create_thread(Some(channel));
+            let thread = if let Some(uuid) = safe_ext_uuid {
+                sess.create_thread_with_id(uuid, Some(channel))
+            } else {
+                sess.create_thread(Some(channel))
+            };
             thread.id
         };
 
@@ -308,15 +329,20 @@ impl SessionManager {
             return 0;
         }
 
-        // Collect thread IDs from stale sessions for cleanup
+        // Collect thread IDs from stale sessions for cleanup and hook dispatch.
         let mut stale_thread_ids: Vec<Uuid> = Vec::new();
+        // Per-session thread IDs so SessionEnd hooks can target the right conversations.
+        let mut per_session_thread_ids: std::collections::HashMap<String, Vec<Uuid>> =
+            std::collections::HashMap::new();
         {
             let sessions = self.sessions.read().await;
             for user_id in &stale_users {
                 if let Some(session) = sessions.get(user_id)
                     && let Ok(sess) = session.try_lock()
                 {
-                    stale_thread_ids.extend(sess.threads.keys());
+                    let tids: Vec<Uuid> = sess.threads.keys().copied().collect();
+                    stale_thread_ids.extend(&tids);
+                    per_session_thread_ids.insert(sess.id.to_string(), tids);
                 }
             }
         }
@@ -327,11 +353,15 @@ impl SessionManager {
                 let hooks = hooks.clone();
                 let uid = user_id.clone();
                 let sid = session_id.clone();
+                let tids = per_session_thread_ids
+                    .remove(session_id)
+                    .unwrap_or_default();
                 tokio::spawn(async move {
                     use crate::hooks::HookEvent;
                     let event = HookEvent::SessionEnd {
                         user_id: uid,
                         session_id: sid,
+                        thread_ids: tids,
                     };
                     if let Err(e) = hooks.run(&event).await {
                         tracing::warn!("OnSessionEnd hook error: {}", e);
