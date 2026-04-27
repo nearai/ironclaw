@@ -18,6 +18,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::config::{DatabaseBackend, DatabaseConfig};
 use crate::db::Database;
 use crate::trace_contribution::{ConsentScope, TraceAllowedUse};
 use crate::trace_corpus_storage::{
@@ -26,6 +27,8 @@ use crate::trace_corpus_storage::{
 
 pub const TRACE_UPLOAD_CLAIM_REQUEST_SCHEMA_VERSION: &str =
     "ironclaw.trace_upload_claim_request.v1";
+pub const TRACE_UPLOAD_CLAIM_ISSUER_REQUIRE_TENANT_ACCESS_GRANTS_ENV: &str =
+    "TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_REQUIRE_TENANT_ACCESS_GRANTS";
 const DEFAULT_BIND: &str = "127.0.0.1:3917";
 const DEFAULT_MAX_TTL_SECONDS: i64 = 300;
 
@@ -154,6 +157,53 @@ impl TraceUploadClaimIssuerConfig {
             require_tenant_access_grants: self.require_tenant_access_grants,
         }))
     }
+}
+
+pub async fn configure_tenant_access_grants_from_env(
+    config: &mut TraceUploadClaimIssuerConfig,
+) -> anyhow::Result<()> {
+    if !env_truthy(TRACE_UPLOAD_CLAIM_ISSUER_REQUIRE_TENANT_ACCESS_GRANTS_ENV) {
+        return Ok(());
+    }
+    let db = trace_upload_claim_issuer_db_from_env().await?;
+    config.tenant_access_grant_db = Some(db);
+    config.require_tenant_access_grants = true;
+    Ok(())
+}
+
+async fn trace_upload_claim_issuer_db_from_env() -> anyhow::Result<Arc<dyn Database>> {
+    let backend = std::env::var("DATABASE_BACKEND")
+        .unwrap_or_else(|_| DatabaseBackend::default().to_string())
+        .parse::<DatabaseBackend>()
+        .map_err(|message| {
+            anyhow::anyhow!("invalid DATABASE_BACKEND for trace upload-claim issuer: {message}")
+        })?;
+    let config = match backend {
+        DatabaseBackend::LibSql => {
+            let path = std::env::var("LIBSQL_PATH")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| crate::config::default_libsql_path());
+            let path = path.to_string_lossy().into_owned();
+            let turso_url = std::env::var("LIBSQL_URL").ok();
+            let turso_token = std::env::var("LIBSQL_AUTH_TOKEN").ok();
+            DatabaseConfig::from_libsql_path(&path, turso_url.as_deref(), turso_token.as_deref())
+        }
+        DatabaseBackend::Postgres => {
+            let url = std::env::var("DATABASE_URL").context(
+                "Trace upload-claim issuer tenant access grants require DATABASE_URL when DATABASE_BACKEND=postgres",
+            )?;
+            let pool_size = std::env::var("DATABASE_POOL_SIZE")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(5);
+            DatabaseConfig::from_postgres_url(&url, pool_size)
+        }
+    };
+    let db = crate::db::connect_from_config(&config)
+        .await
+        .context("failed to connect Trace upload-claim issuer tenant grant DB")?;
+    tracing::info!(backend = %backend, "Trace upload-claim issuer tenant grant DB enabled");
+    Ok(db)
 }
 
 struct TraceUploadClaimIssuerState {
@@ -741,6 +791,19 @@ fn optional_env(name: &'static str) -> anyhow::Result<Option<String>> {
     }
 }
 
+fn env_truthy(name: &'static str) -> bool {
+    std::env::var(name)
+        .ok()
+        .is_some_and(|value| parse_truthy_env_value(&value))
+}
+
+fn parse_truthy_env_value(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 fn trim_optional(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
@@ -943,6 +1006,16 @@ mod tests {
         assert!(!text.contains("\"x\""));
         assert!(!text.contains("RSA"));
         assert!(!text.contains("BEGIN PRIVATE KEY"));
+    }
+
+    #[test]
+    fn tenant_access_grant_env_flag_uses_explicit_truthy_values() {
+        for value in ["1", "true", "TRUE", "yes", "on", " on "] {
+            assert!(parse_truthy_env_value(value), "{value} should be truthy");
+        }
+        for value in ["", "0", "false", "off", "no", "tenant-a"] {
+            assert!(!parse_truthy_env_value(value), "{value} should be falsey");
+        }
     }
 
     #[tokio::test]

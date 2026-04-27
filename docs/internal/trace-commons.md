@@ -482,7 +482,12 @@ the raw actor stored in the signed upload claim.
 Configure it with `TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_*` environment variables
 for bind address, signing key PEM or file, signing public key PEM or file,
 signing `kid`, issuer, audience, max TTL, workload public key PEM or file, and
-optional workload issuer/audience checks.
+optional workload issuer/audience checks. Set
+`TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_REQUIRE_TENANT_ACCESS_GRANTS=true` to make
+the standalone issuer connect through the normal `DATABASE_BACKEND`,
+`DATABASE_URL`/`LIBSQL_PATH`, `LIBSQL_URL`, and `LIBSQL_AUTH_TOKEN`
+configuration and fail closed unless the workload actor has an active
+contributor grant for that tenant.
 Production claims must bind the tenant id, actor or job principal, role,
 expiry, optional JWT ID, and allowed consent scopes/uses; the service still
 derives the storage partition from the

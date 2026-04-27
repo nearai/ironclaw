@@ -1,5 +1,6 @@
 use ironclaw::trace_upload_claim_issuer::{
-    TraceUploadClaimIssuerConfig, serve_trace_upload_claim_issuer,
+    TraceUploadClaimIssuerConfig, configure_tenant_access_grants_from_env,
+    serve_trace_upload_claim_issuer,
 };
 
 #[tokio::main]
@@ -10,6 +11,7 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "trace_commons_upload_claim_issuer=info,ironclaw=info".into()),
         )
         .init();
-    let config = TraceUploadClaimIssuerConfig::from_env()?;
+    let mut config = TraceUploadClaimIssuerConfig::from_env()?;
+    configure_tenant_access_grants_from_env(&mut config).await?;
     serve_trace_upload_claim_issuer(config).await
 }
