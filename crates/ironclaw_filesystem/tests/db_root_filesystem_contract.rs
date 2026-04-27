@@ -92,7 +92,7 @@ async fn libsql_root_filesystem_appends_deletes_and_creates_directories() {
     let err = filesystem.read_file(&path).await.unwrap_err();
     assert!(matches!(
         err,
-        FilesystemError::Backend {
+        FilesystemError::NotFound {
             operation: FilesystemOperation::ReadFile,
             ..
         }
@@ -121,7 +121,7 @@ async fn libsql_root_filesystem_fails_closed_for_missing_paths_without_host_path
     let err = filesystem.read_file(&path).await.unwrap_err();
     assert!(matches!(
         err,
-        FilesystemError::Backend {
+        FilesystemError::NotFound {
             operation: FilesystemOperation::ReadFile,
             ..
         }

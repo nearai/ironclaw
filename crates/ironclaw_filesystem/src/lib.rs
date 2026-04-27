@@ -6,7 +6,6 @@
 //! operation against a trusted root filesystem namespace addressed by
 //! [`VirtualPath`]. Backend implementations alone touch raw host paths.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -15,6 +14,7 @@ use ironclaw_host_api::{
     HostApiError, HostPath, MountGrant, MountPermissions, MountView, ScopedPath, VirtualPath,
 };
 use thiserror::Error;
+use tokio::io::AsyncWriteExt;
 
 /// Filesystem operation used for permission checks and audit/error reporting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +60,11 @@ pub enum FilesystemError {
     },
     #[error("no backend mount found for virtual path {path:?}")]
     MountNotFound { path: VirtualPath },
+    #[error("virtual path not found for {operation} at {path:?}")]
+    NotFound {
+        path: VirtualPath,
+        operation: FilesystemOperation,
+    },
     #[error("virtual path escaped backend mount {path:?}")]
     PathOutsideMount { path: VirtualPath },
     #[error("symlink escapes backend mount at virtual path {path:?}")]
@@ -570,36 +575,33 @@ impl LocalFilesystem {
         Ok(())
     }
 
-    fn resolve_existing(
+    async fn resolve_existing(
         &self,
         path: &VirtualPath,
         operation: FilesystemOperation,
     ) -> Result<PathBuf, FilesystemError> {
         let (mount, joined) = self.resolve_joined(path)?;
-        let canonical =
-            std::fs::canonicalize(&joined).map_err(|error| FilesystemError::Backend {
-                path: path.clone(),
-                operation,
-                reason: io_reason(error),
-            })?;
+        let canonical = tokio::fs::canonicalize(&joined)
+            .await
+            .map_err(|error| io_error(path.clone(), operation, error))?;
         ensure_contained(path, mount, &canonical, true)?;
         Ok(canonical)
     }
 
-    fn resolve_for_write(
+    async fn resolve_for_write(
         &self,
         path: &VirtualPath,
         operation: FilesystemOperation,
     ) -> Result<PathBuf, FilesystemError> {
         let (mount, joined) = self.resolve_joined(path)?;
 
-        if joined.exists() {
-            let canonical =
-                std::fs::canonicalize(&joined).map_err(|error| FilesystemError::Backend {
-                    path: path.clone(),
-                    operation,
-                    reason: io_reason(error),
-                })?;
+        if tokio::fs::try_exists(&joined)
+            .await
+            .map_err(|error| io_error(path.clone(), operation, error))?
+        {
+            let canonical = tokio::fs::canonicalize(&joined)
+                .await
+                .map_err(|error| io_error(path.clone(), operation, error))?;
             ensure_contained(path, mount, &canonical, true)?;
             return Ok(canonical);
         }
@@ -607,18 +609,13 @@ impl LocalFilesystem {
         let parent = joined
             .parent()
             .ok_or_else(|| FilesystemError::PathOutsideMount { path: path.clone() })?;
-        ensure_existing_ancestor_contained(path, mount, parent, operation)?;
-        std::fs::create_dir_all(parent).map_err(|error| FilesystemError::Backend {
-            path: path.clone(),
-            operation: FilesystemOperation::CreateDirAll,
-            reason: io_reason(error),
-        })?;
-        let canonical_parent =
-            std::fs::canonicalize(parent).map_err(|error| FilesystemError::Backend {
-                path: path.clone(),
-                operation: FilesystemOperation::CreateDirAll,
-                reason: io_reason(error),
-            })?;
+        ensure_existing_ancestor_contained(path, mount, parent, operation).await?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| io_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
+        let canonical_parent = tokio::fs::canonicalize(parent)
+            .await
+            .map_err(|error| io_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
         // `joined` is constructed from validated virtual path segments under the
         // backend root. If its canonical parent leaves the backend root, an
         // existing symlink in the parent chain caused the escape.
@@ -626,25 +623,19 @@ impl LocalFilesystem {
         Ok(joined)
     }
 
-    fn resolve_for_create_dir_all(&self, path: &VirtualPath) -> Result<PathBuf, FilesystemError> {
+    async fn resolve_for_create_dir_all(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<PathBuf, FilesystemError> {
         let (mount, joined) = self.resolve_joined(path)?;
-        ensure_existing_ancestor_contained(
-            path,
-            mount,
-            &joined,
-            FilesystemOperation::CreateDirAll,
-        )?;
-        std::fs::create_dir_all(&joined).map_err(|error| FilesystemError::Backend {
-            path: path.clone(),
-            operation: FilesystemOperation::CreateDirAll,
-            reason: io_reason(error),
-        })?;
-        let canonical =
-            std::fs::canonicalize(&joined).map_err(|error| FilesystemError::Backend {
-                path: path.clone(),
-                operation: FilesystemOperation::CreateDirAll,
-                reason: io_reason(error),
-            })?;
+        ensure_existing_ancestor_contained(path, mount, &joined, FilesystemOperation::CreateDirAll)
+            .await?;
+        tokio::fs::create_dir_all(&joined)
+            .await
+            .map_err(|error| io_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
+        let canonical = tokio::fs::canonicalize(&joined)
+            .await
+            .map_err(|error| io_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
         ensure_contained(path, mount, &canonical, true)?;
         Ok(canonical)
     }
@@ -679,63 +670,62 @@ impl LocalFilesystem {
 #[async_trait]
 impl RootFilesystem for LocalFilesystem {
     async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
-        let resolved = self.resolve_existing(path, FilesystemOperation::ReadFile)?;
-        std::fs::read(resolved).map_err(|error| FilesystemError::Backend {
-            path: path.clone(),
-            operation: FilesystemOperation::ReadFile,
-            reason: io_reason(error),
-        })
+        let resolved = self
+            .resolve_existing(path, FilesystemOperation::ReadFile)
+            .await?;
+        tokio::fs::read(resolved)
+            .await
+            .map_err(|error| io_error(path.clone(), FilesystemOperation::ReadFile, error))
     }
 
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
-        let resolved = self.resolve_for_write(path, FilesystemOperation::WriteFile)?;
-        std::fs::write(resolved, bytes).map_err(|error| FilesystemError::Backend {
-            path: path.clone(),
-            operation: FilesystemOperation::WriteFile,
-            reason: io_reason(error),
-        })
+        let resolved = self
+            .resolve_for_write(path, FilesystemOperation::WriteFile)
+            .await?;
+        tokio::fs::write(resolved, bytes)
+            .await
+            .map_err(|error| io_error(path.clone(), FilesystemOperation::WriteFile, error))
     }
 
     async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
-        let resolved = self.resolve_for_write(path, FilesystemOperation::AppendFile)?;
-        let mut file = std::fs::OpenOptions::new()
+        let resolved = self
+            .resolve_for_write(path, FilesystemOperation::AppendFile)
+            .await?;
+        let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
+            .write(true)
             .open(resolved)
-            .map_err(|error| FilesystemError::Backend {
-                path: path.clone(),
-                operation: FilesystemOperation::AppendFile,
-                reason: io_reason(error),
-            })?;
+            .await
+            .map_err(|error| io_error(path.clone(), FilesystemOperation::AppendFile, error))?;
         file.write_all(bytes)
-            .map_err(|error| FilesystemError::Backend {
-                path: path.clone(),
-                operation: FilesystemOperation::AppendFile,
-                reason: io_reason(error),
-            })
+            .await
+            .map_err(|error| io_error(path.clone(), FilesystemOperation::AppendFile, error))?;
+        file.flush()
+            .await
+            .map_err(|error| io_error(path.clone(), FilesystemOperation::AppendFile, error))
     }
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        let resolved = self.resolve_existing(path, FilesystemOperation::ListDir)?;
+        let resolved = self
+            .resolve_existing(path, FilesystemOperation::ListDir)
+            .await?;
+        let mut read_dir = tokio::fs::read_dir(resolved)
+            .await
+            .map_err(|error| io_error(path.clone(), FilesystemOperation::ListDir, error))?;
         let mut entries = Vec::new();
-        for entry in std::fs::read_dir(resolved).map_err(|error| FilesystemError::Backend {
-            path: path.clone(),
-            operation: FilesystemOperation::ListDir,
-            reason: io_reason(error),
-        })? {
-            let entry = entry.map_err(|error| FilesystemError::Backend {
-                path: path.clone(),
-                operation: FilesystemOperation::ListDir,
-                reason: io_reason(error),
-            })?;
+        while let Some(entry) = read_dir
+            .next_entry()
+            .await
+            .map_err(|error| io_error(path.clone(), FilesystemOperation::ListDir, error))?
+        {
             let name = entry.file_name().to_string_lossy().to_string();
             let entry_path =
                 VirtualPath::new(format!("{}/{}", path.as_str().trim_end_matches('/'), name))?;
-            let metadata = entry.metadata().map_err(|error| FilesystemError::Backend {
-                path: entry_path.clone(),
-                operation: FilesystemOperation::Stat,
-                reason: io_reason(error),
-            })?;
+            let metadata = entry
+                .metadata()
+                .await
+                .map_err(|error| io_error(entry_path.clone(), FilesystemOperation::Stat, error))?;
             entries.push(DirEntry {
                 name,
                 path: entry_path,
@@ -747,12 +737,12 @@ impl RootFilesystem for LocalFilesystem {
     }
 
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        let resolved = self.resolve_existing(path, FilesystemOperation::Stat)?;
-        let metadata = std::fs::metadata(resolved).map_err(|error| FilesystemError::Backend {
-            path: path.clone(),
-            operation: FilesystemOperation::Stat,
-            reason: io_reason(error),
-        })?;
+        let resolved = self
+            .resolve_existing(path, FilesystemOperation::Stat)
+            .await?;
+        let metadata = tokio::fs::metadata(resolved)
+            .await
+            .map_err(|error| io_error(path.clone(), FilesystemOperation::Stat, error))?;
         Ok(FileStat {
             path: path.clone(),
             file_type: file_type_from_metadata(&metadata),
@@ -761,26 +751,22 @@ impl RootFilesystem for LocalFilesystem {
     }
 
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        let resolved = self.resolve_existing(path, FilesystemOperation::Delete)?;
-        let metadata = std::fs::metadata(&resolved).map_err(|error| FilesystemError::Backend {
-            path: path.clone(),
-            operation: FilesystemOperation::Delete,
-            reason: io_reason(error),
-        })?;
-        if metadata.is_dir() {
-            std::fs::remove_dir_all(resolved)
+        let resolved = self
+            .resolve_existing(path, FilesystemOperation::Delete)
+            .await?;
+        let metadata = tokio::fs::metadata(&resolved)
+            .await
+            .map_err(|error| io_error(path.clone(), FilesystemOperation::Delete, error))?;
+        let result = if metadata.is_dir() {
+            tokio::fs::remove_dir_all(resolved).await
         } else {
-            std::fs::remove_file(resolved)
-        }
-        .map_err(|error| FilesystemError::Backend {
-            path: path.clone(),
-            operation: FilesystemOperation::Delete,
-            reason: io_reason(error),
-        })
+            tokio::fs::remove_file(resolved).await
+        };
+        result.map_err(|error| io_error(path.clone(), FilesystemOperation::Delete, error))
     }
 
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        self.resolve_for_create_dir_all(path).map(|_| ())
+        self.resolve_for_create_dir_all(path).await.map(|_| ())
     }
 }
 
@@ -788,25 +774,27 @@ fn virtual_prefix_matches(prefix: &str, path: &str) -> bool {
     path == prefix || path.starts_with(&format!("{prefix}/"))
 }
 
-fn ensure_existing_ancestor_contained(
+async fn ensure_existing_ancestor_contained(
     virtual_path: &VirtualPath,
     mount: &LocalMount,
     candidate: &Path,
     operation: FilesystemOperation,
 ) -> Result<(), FilesystemError> {
-    let mut ancestor = candidate;
-    while !ancestor.exists() {
+    let mut ancestor = candidate.to_path_buf();
+    while !tokio::fs::try_exists(&ancestor)
+        .await
+        .map_err(|error| io_error(virtual_path.clone(), operation, error))?
+    {
         ancestor = ancestor
             .parent()
             .ok_or_else(|| FilesystemError::PathOutsideMount {
                 path: virtual_path.clone(),
-            })?;
+            })?
+            .to_path_buf();
     }
-    let canonical = std::fs::canonicalize(ancestor).map_err(|error| FilesystemError::Backend {
-        path: virtual_path.clone(),
-        operation,
-        reason: io_reason(error),
-    })?;
+    let canonical = tokio::fs::canonicalize(&ancestor)
+        .await
+        .map_err(|error| io_error(virtual_path.clone(), operation, error))?;
     ensure_contained(virtual_path, mount, &canonical, true)
 }
 
@@ -839,6 +827,22 @@ fn file_type_from_metadata(metadata: &std::fs::Metadata) -> FileType {
         FileType::Symlink
     } else {
         FileType::Other
+    }
+}
+
+fn io_error(
+    path: VirtualPath,
+    operation: FilesystemOperation,
+    error: std::io::Error,
+) -> FilesystemError {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        FilesystemError::NotFound { path, operation }
+    } else {
+        FilesystemError::Backend {
+            path,
+            operation,
+            reason: error.kind().to_string(),
+        }
     }
 }
 
@@ -967,7 +971,9 @@ impl RootFilesystem for PostgresRootFilesystem {
                 reason: "not a directory".to_string(),
             });
         }
-        let rows = self.all_paths().await?;
+        let rows = self
+            .child_entries(path, FilesystemOperation::ListDir)
+            .await?;
         let children = direct_children(path, rows);
         if matches!(exact_entry, Some((_, FileType::Directory))) && is_not_found(&children) {
             return Ok(Vec::new());
@@ -983,11 +989,7 @@ impl RootFilesystem for PostgresRootFilesystem {
                 len,
             });
         }
-        let rows = self.all_paths().await?;
-        if rows
-            .iter()
-            .any(|(child_path, _, _)| virtual_prefix_matches(path.as_str(), child_path.as_str()))
-        {
+        if self.has_child_entry(path).await? {
             return Ok(FileStat {
                 path: path.clone(),
                 file_type: FileType::Directory,
@@ -999,13 +1001,11 @@ impl RootFilesystem for PostgresRootFilesystem {
 
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let client = self.client().await?;
+        let child_pattern = child_path_like_pattern(path);
         client
             .execute(
-                "DELETE FROM root_filesystem_entries WHERE path = $1 OR path LIKE $2",
-                &[
-                    &path.as_str(),
-                    &format!("{}/%", path.as_str().trim_end_matches('/')),
-                ],
+                "DELETE FROM root_filesystem_entries WHERE path = $1 OR path LIKE $2 ESCAPE '!'",
+                &[&path.as_str(), &child_pattern],
             )
             .await
             .map_err(|error| db_error(path.clone(), FilesystemOperation::Delete, error))?;
@@ -1068,21 +1068,20 @@ impl PostgresRootFilesystem {
         }))
     }
 
-    async fn all_paths(&self) -> Result<Vec<(VirtualPath, u64, FileType)>, FilesystemError> {
+    async fn child_entries(
+        &self,
+        parent: &VirtualPath,
+        operation: FilesystemOperation,
+    ) -> Result<Vec<(VirtualPath, u64, FileType)>, FilesystemError> {
         let client = self.client().await?;
+        let pattern = child_path_like_pattern(parent);
         let rows = client
             .query(
-                "SELECT path, OCTET_LENGTH(contents) AS len, is_dir FROM root_filesystem_entries ORDER BY path",
-                &[],
+                "SELECT path, OCTET_LENGTH(contents) AS len, is_dir FROM root_filesystem_entries WHERE path LIKE $1 ESCAPE '!' ORDER BY path",
+                &[&pattern],
             )
             .await
-            .map_err(|error| {
-                db_error(
-                    VirtualPath::new("/engine").unwrap_or_else(|_| unreachable!("literal virtual path is valid")),
-                    FilesystemOperation::ListDir,
-                    error,
-                )
-            })?;
+            .map_err(|error| db_error(parent.clone(), operation, error))?;
         rows.into_iter()
             .map(|row| {
                 let path: String = row.get("path");
@@ -1099,6 +1098,19 @@ impl PostgresRootFilesystem {
                 ))
             })
             .collect()
+    }
+
+    async fn has_child_entry(&self, parent: &VirtualPath) -> Result<bool, FilesystemError> {
+        let client = self.client().await?;
+        let pattern = child_path_like_pattern(parent);
+        let row = client
+            .query_opt(
+                "SELECT 1 FROM root_filesystem_entries WHERE path LIKE $1 ESCAPE '!' LIMIT 1",
+                &[&pattern],
+            )
+            .await
+            .map_err(|error| db_error(parent.clone(), FilesystemOperation::Stat, error))?;
+        Ok(row.is_some())
     }
 }
 
@@ -1226,13 +1238,21 @@ impl RootFilesystem for LibSqlRootFilesystem {
                 reason: "cannot append to a directory".to_string(),
             });
         }
-        let mut contents = match self.read_file(path).await {
-            Ok(contents) => contents,
-            Err(FilesystemError::Backend { reason, .. }) if reason == "not found" => Vec::new(),
-            Err(error) => return Err(error),
-        };
-        contents.extend_from_slice(bytes);
-        self.write_file(path, &contents).await
+        let conn = self.connect().await?;
+        conn.execute(
+            r#"
+            INSERT INTO root_filesystem_entries (path, contents, is_dir, updated_at)
+            VALUES (?1, ?2, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            ON CONFLICT (path) DO UPDATE SET
+                contents = CAST(root_filesystem_entries.contents || excluded.contents AS BLOB),
+                is_dir = 0,
+                updated_at = excluded.updated_at
+            "#,
+            libsql::params![path.as_str(), libsql::Value::Blob(bytes.to_vec())],
+        )
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::AppendFile, error))?;
+        Ok(())
     }
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
@@ -1244,7 +1264,9 @@ impl RootFilesystem for LibSqlRootFilesystem {
                 reason: "not a directory".to_string(),
             });
         }
-        let rows = self.all_paths().await?;
+        let rows = self
+            .child_entries(path, FilesystemOperation::ListDir)
+            .await?;
         let children = direct_children(path, rows);
         if matches!(exact_entry, Some((_, FileType::Directory))) && is_not_found(&children) {
             return Ok(Vec::new());
@@ -1260,11 +1282,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
                 len,
             });
         }
-        let rows = self.all_paths().await?;
-        if rows
-            .iter()
-            .any(|(child_path, _, _)| virtual_prefix_matches(path.as_str(), child_path.as_str()))
-        {
+        if self.has_child_entry(path).await? {
             return Ok(FileStat {
                 path: path.clone(),
                 file_type: FileType::Directory,
@@ -1277,11 +1295,8 @@ impl RootFilesystem for LibSqlRootFilesystem {
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let conn = self.connect().await?;
         conn.execute(
-            "DELETE FROM root_filesystem_entries WHERE path = ?1 OR path LIKE ?2",
-            libsql::params![
-                path.as_str(),
-                format!("{}/%", path.as_str().trim_end_matches('/'))
-            ],
+            "DELETE FROM root_filesystem_entries WHERE path = ?1 OR path LIKE ?2 ESCAPE '!'",
+            libsql::params![path.as_str(), child_path_like_pattern(path)],
         )
         .await
         .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
@@ -1393,24 +1408,29 @@ impl LibSqlRootFilesystem {
         }))
     }
 
-    async fn all_paths(&self) -> Result<Vec<(VirtualPath, u64, FileType)>, FilesystemError> {
+    async fn child_entries(
+        &self,
+        parent: &VirtualPath,
+        operation: FilesystemOperation,
+    ) -> Result<Vec<(VirtualPath, u64, FileType)>, FilesystemError> {
         let conn = self.connect().await?;
+        let pattern = child_path_like_pattern(parent);
         let mut rows = conn
             .query(
-                "SELECT path, length(contents), is_dir FROM root_filesystem_entries ORDER BY path",
-                (),
+                "SELECT path, length(contents), is_dir FROM root_filesystem_entries WHERE path LIKE ?1 ESCAPE '!' ORDER BY path",
+                libsql::params![pattern],
             )
             .await
-            .map_err(|error| {
-                libsql_db_error(valid_engine_path(), FilesystemOperation::ListDir, error)
-            })?;
+            .map_err(|error| libsql_db_error(parent.clone(), operation, error))?;
         let mut paths = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|error| {
-            libsql_db_error(valid_engine_path(), FilesystemOperation::ListDir, error)
-        })? {
-            let path: String = row.get(0).map_err(|error| {
-                libsql_db_error(valid_engine_path(), FilesystemOperation::ListDir, error)
-            })?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| libsql_db_error(parent.clone(), operation, error))?
+        {
+            let path: String = row
+                .get(0)
+                .map_err(|error| libsql_db_error(parent.clone(), operation, error))?;
             let len = row.get::<i64>(1).unwrap_or(0).max(0) as u64;
             let is_dir = row.get::<i64>(2).unwrap_or(0) != 0;
             paths.push((
@@ -1424,6 +1444,23 @@ impl LibSqlRootFilesystem {
             ));
         }
         Ok(paths)
+    }
+
+    async fn has_child_entry(&self, parent: &VirtualPath) -> Result<bool, FilesystemError> {
+        let conn = self.connect().await?;
+        let pattern = child_path_like_pattern(parent);
+        let mut rows = conn
+            .query(
+                "SELECT 1 FROM root_filesystem_entries WHERE path LIKE ?1 ESCAPE '!' LIMIT 1",
+                libsql::params![pattern],
+            )
+            .await
+            .map_err(|error| libsql_db_error(parent.clone(), FilesystemOperation::Stat, error))?;
+        Ok(rows
+            .next()
+            .await
+            .map_err(|error| libsql_db_error(parent.clone(), FilesystemOperation::Stat, error))?
+            .is_some())
     }
 }
 
@@ -1492,20 +1529,29 @@ fn direct_children(
 }
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
-fn not_found(path: VirtualPath, operation: FilesystemOperation) -> FilesystemError {
-    FilesystemError::Backend {
-        path,
-        operation,
-        reason: "not found".to_string(),
+fn child_path_like_pattern(path: &VirtualPath) -> String {
+    let mut pattern = String::new();
+    for character in path.as_str().trim_end_matches('/').chars() {
+        match character {
+            '!' | '%' | '_' => {
+                pattern.push('!');
+                pattern.push(character);
+            }
+            _ => pattern.push(character),
+        }
     }
+    pattern.push_str("/%");
+    pattern
+}
+
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+fn not_found(path: VirtualPath, operation: FilesystemOperation) -> FilesystemError {
+    FilesystemError::NotFound { path, operation }
 }
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 fn is_not_found<T>(result: &Result<T, FilesystemError>) -> bool {
-    matches!(
-        result,
-        Err(FilesystemError::Backend { reason, .. }) if reason == "not found"
-    )
+    matches!(result, Err(FilesystemError::NotFound { .. }))
 }
 
 #[cfg(feature = "postgres")]
