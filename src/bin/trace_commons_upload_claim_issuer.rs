@@ -3,8 +3,17 @@ use ironclaw::trace_upload_claim_issuer::{
     serve_trace_upload_claim_issuer,
 };
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    let _ = dotenvy::dotenv();
+    ironclaw::bootstrap::load_ironclaw_env();
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             std::env::var("RUST_LOG")

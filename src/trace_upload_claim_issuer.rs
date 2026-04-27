@@ -824,7 +824,8 @@ mod tests {
     use super::*;
     use crate::trace_contribution::{ConsentScope, TraceAllowedUse};
     use crate::trace_corpus_storage::{
-        TraceTenantAccessGrantRecord, TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus,
+        TraceCorpusStore, TraceTenantAccessGrantRecord, TraceTenantAccessGrantRole,
+        TraceTenantAccessGrantStatus, TraceTenantAccessGrantWrite,
     };
 
     const TEST_EDDSA_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIAGfN68ko7YyCGJMb3lHVwTn5aiUtbIsAclIx/lX0p2R\n-----END PRIVATE KEY-----\n";
@@ -968,6 +969,93 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn claim_issuer_requires_active_tenant_access_grant_through_router() {
+        use crate::db::libsql::LibSqlBackend;
+
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-upload-claim-issuer-grants.db");
+        let db = std::sync::Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let mut config = test_config();
+        config.tenant_access_grant_db = Some(db.clone() as std::sync::Arc<dyn Database>);
+        config.require_tenant_access_grants = true;
+        let missing_grants = db
+            .list_active_trace_tenant_access_grants_for_principal(
+                "tenant-a",
+                &principal_storage_ref("signed:tenant-a:principal:agent-1"),
+                Utc::now(),
+            )
+            .await
+            .expect("missing grant lookup succeeds");
+        assert!(missing_grants.is_empty());
+
+        let (status, body) = post_claim(
+            config.clone(),
+            workload_token("workload-issuer", "trace-claim-issuer"),
+            claim_request(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        let now = Utc::now();
+        db.upsert_trace_tenant_access_grant(TraceTenantAccessGrantWrite {
+            tenant_id: "tenant-a".to_string(),
+            grant_id: Uuid::new_v4(),
+            principal_ref: principal_storage_ref("signed:tenant-a:principal:agent-1"),
+            role: TraceTenantAccessGrantRole::Contributor,
+            status: TraceTenantAccessGrantStatus::Active,
+            allowed_consent_scopes: vec!["debugging_evaluation".to_string()],
+            allowed_uses: vec!["debugging".to_string()],
+            issuer: Some("trace-commons-upload-issuer".to_string()),
+            audience: Some("trace-commons-upload".to_string()),
+            subject: Some("principal:agent-1".to_string()),
+            issued_at: now,
+            expires_at: Some(now + Duration::hours(1)),
+            revoked_at: None,
+            created_by_principal_ref: None,
+            revoked_by_principal_ref: None,
+            reason: Some("test hosted tenant grant".to_string()),
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("grant writes");
+
+        let (status, body) = post_claim(
+            config,
+            workload_token("workload-issuer", "trace-claim-issuer"),
+            claim_request(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let token = body["access_token"].as_str().expect("access token");
+        let claims = jsonwebtoken::decode::<serde_json::Value>(
+            token,
+            &DecodingKey::from_ed_pem(TEST_EDDSA_PUBLIC_KEY_PEM.as_bytes())
+                .expect("issuer public key parses"),
+            &{
+                let mut validation = Validation::new(Algorithm::EdDSA);
+                validation.set_issuer(&["trace-commons-upload-issuer"]);
+                validation.set_audience(&["trace-commons-upload"]);
+                validation
+            },
+        )
+        .expect("issuer token verifies")
+        .claims;
+        assert_eq!(claims["sub"], "principal:agent-1");
+        assert_eq!(claims["principal_ref"], "principal:agent-1");
+        assert_eq!(
+            claims["allowed_consent_scopes"],
+            json!(["debugging_evaluation"])
+        );
+        assert_eq!(claims["allowed_uses"], json!(["debugging"]));
     }
 
     #[tokio::test]
