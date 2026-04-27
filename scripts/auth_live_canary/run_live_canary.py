@@ -218,7 +218,7 @@ async def seeded_browser_probe(
         result = await send_chat_and_wait_for_terminal_message_fn(
             page,
             probe.response_prompt,
-            timeout=300000,
+            timeout=120000,
         )
         thread_id = await page.evaluate("currentThreadId")
         history = await api_request(
@@ -797,7 +797,7 @@ async def browser_oauth_probe(
         chat_result = await send_chat_and_wait_for_terminal_message_fn(
             page,
             case.trigger_prompt,
-            timeout=300000,
+            timeout=120000,
         )
         history_thread_id = await page.evaluate("() => currentThreadId")
         history = await api_request(
