@@ -30,7 +30,9 @@ use crate::bridge::action_projector::ActionProjector;
 use crate::bridge::capability_projector::CapabilityProjector;
 use crate::bridge::router::synthetic_action_call_id;
 use crate::bridge::sandbox::{InterceptOutcome, maybe_intercept};
-use crate::bridge::tool_permissions::{ToolPermissionResolution, ToolPermissionSnapshot};
+use crate::bridge::tool_permissions::{
+    ToolPermissionResolution, ToolPermissionSnapshot, canonical_tool_name,
+};
 use crate::context::JobContext;
 use crate::extensions::InstalledExtension;
 use crate::extensions::naming::extension_name_candidates;
@@ -317,13 +319,27 @@ impl EffectBridgeAdapter {
     }
 
     fn apply_user_permission_override(
+        lookup_name: &str,
         base_requirement: ApprovalRequirement,
-        explicit_user_permission: Option<PermissionState>,
+        user_permission: ToolPermissionResolution,
     ) -> ApprovalRequirement {
-        match explicit_user_permission {
-            Some(PermissionState::AskEachTime) => ApprovalRequirement::Always,
+        if matches!(user_permission.explicit, Some(PermissionState::AskEachTime)) {
+            return ApprovalRequirement::Always;
+        }
+        match (base_requirement, user_permission.configured) {
+            (ApprovalRequirement::Never, Some(PermissionState::AskEachTime))
+                if Self::enforce_static_ask_floor_for_base_never_tool(lookup_name) =>
+            {
+                ApprovalRequirement::Always
+            }
             _ => base_requirement,
         }
+    }
+
+    fn enforce_static_ask_floor_for_base_never_tool(lookup_name: &str) -> bool {
+        // Other base-Never bridge tools manage auth/install gates internally.
+        // Restart's command-level confirmation does not cover direct v2 calls.
+        canonical_tool_name(lookup_name) == "restart"
     }
 
     fn ensure_tool_not_disabled(
@@ -356,7 +372,7 @@ impl EffectBridgeAdapter {
         } else {
             tool.requires_approval(parameters)
         };
-        Self::apply_user_permission_override(base_requirement, user_permission.explicit)
+        Self::apply_user_permission_override(lookup_name, base_requirement, user_permission)
     }
 
     async fn enforce_tool_approval(

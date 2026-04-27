@@ -2,12 +2,13 @@ use std::collections::HashMap;
 
 use crate::settings::Settings;
 use crate::tools::ToolRegistry;
-use crate::tools::permissions::{PermissionState, effective_permission};
+use crate::tools::permissions::{PermissionState, TOOL_RISK_DEFAULTS};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ToolPermissionResolution {
     pub(crate) effective: PermissionState,
     pub(crate) explicit: Option<PermissionState>,
+    pub(crate) configured: Option<PermissionState>,
 }
 
 #[derive(Clone, Default)]
@@ -37,13 +38,14 @@ impl ToolPermissionSnapshot {
     }
 
     pub(crate) fn resolve_permission(&self, tool_name: &str) -> ToolPermissionResolution {
+        let canonical = canonical_tool_name(tool_name);
         let explicit = self.explicit_permission(tool_name);
-        let effective = explicit.unwrap_or_else(|| {
-            effective_permission(&canonical_tool_name(tool_name), &self.overrides)
-        });
+        let configured = explicit.or_else(|| TOOL_RISK_DEFAULTS.get(canonical.as_str()).copied());
+        let effective = configured.unwrap_or(PermissionState::AskEachTime);
         ToolPermissionResolution {
             effective,
             explicit,
+            configured,
         }
     }
 
