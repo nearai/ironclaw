@@ -668,6 +668,21 @@ async def handle_notion_popup(popup: Any, case_key: str) -> None:
         except Exception:
             pass
 
+    # Notion's MCP consent screen gates the Continue button behind an
+    # "I recognize and trust this URL" checkbox — confirmed via the
+    # canary's CI screenshot. Without ticking it, Continue stays disabled
+    # and the handler's button click is a no-op.
+    try:
+        consent_checkbox = popup.get_by_text(
+            re.compile(r"I recognize and trust this URL", re.I)
+        ).first
+        await consent_checkbox.wait_for(state="visible", timeout=5000)
+        print("[auth-canary] notion 'trust URL' checkbox detected", flush=True)
+        await consent_checkbox.click(timeout=3000)
+        print("[auth-canary] notion 'trust URL' checkbox clicked", flush=True)
+    except Exception as exc:
+        print(f"[auth-canary] notion checkbox skipped: {exc}", flush=True)
+
     await click_first_button_with_text(
         popup,
         ["Allow access", "Allow", "Grant access", "Select pages", "Continue"],
