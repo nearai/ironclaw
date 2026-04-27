@@ -81,6 +81,7 @@ pub mod tools;
 pub mod trace_artifact_store;
 pub mod trace_contribution;
 pub mod trace_corpus_storage;
+pub mod trace_upload_claim_issuer;
 pub mod tracing_fmt;
 pub mod tunnel;
 pub mod util;

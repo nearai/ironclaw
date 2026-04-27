@@ -4275,15 +4275,15 @@ async fn credit_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> ApiResult<Json<TraceCommonsTenantCreditResponse>> {
-    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    let credit_view = read_contributor_credit_view(state.as_ref(), &tenant)
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    let credit_view = read_contributor_credit_view(state.as_ref(), tenant.auth())
         .await
         .map_err(internal_error)?;
     let item_count = credit_view.records.len();
     append_audit_event_with_db_mirror(
         state.as_ref(),
-        &tenant,
-        TraceCommonsAuditEvent::read(&tenant, "contributor_credit", item_count),
+        tenant.auth(),
+        tenant.read_audit_event("contributor_credit", item_count),
         StorageTraceAuditAction::Read,
         StorageTraceAuditSafeMetadata::Empty,
     )
@@ -4291,7 +4291,7 @@ async fn credit_handler(
     .map_err(internal_error)?;
     Ok(Json(
         TraceCommonsTenantCreditResponse::from_records_and_events(
-            tenant.tenant_id,
+            tenant.tenant_id().to_string(),
             credit_view.records,
             &credit_view.credit_events,
         ),
@@ -4302,18 +4302,14 @@ async fn credit_events_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<TraceCommonsCreditLedgerRecord>>> {
-    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    let credit_view = read_contributor_credit_view(state.as_ref(), &tenant)
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    let credit_view = read_contributor_credit_view(state.as_ref(), tenant.auth())
         .await
         .map_err(internal_error)?;
     append_audit_event_with_db_mirror(
         state.as_ref(),
-        &tenant,
-        TraceCommonsAuditEvent::read(
-            &tenant,
-            "contributor_credit_events",
-            credit_view.credit_events.len(),
-        ),
+        tenant.auth(),
+        tenant.read_audit_event("contributor_credit_events", credit_view.credit_events.len()),
         StorageTraceAuditAction::Read,
         StorageTraceAuditSafeMetadata::Empty,
     )
@@ -4370,19 +4366,22 @@ async fn analytics_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> ApiResult<Json<TraceCommonsAnalyticsResponse>> {
-    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    require_reviewer(&tenant)?;
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_reviewer(tenant.auth())?;
     let TraceCommonsMetadataView { records, derived } =
-        read_reviewer_metadata_view(state.as_ref(), &tenant)
+        read_reviewer_metadata_view(state.as_ref(), tenant.auth())
             .await
             .map_err(internal_error)?;
-    let mut response =
-        TraceCommonsAnalyticsResponse::from_records(tenant.tenant_id.clone(), records, derived);
+    let mut response = TraceCommonsAnalyticsResponse::from_records(
+        tenant.tenant_id().to_string(),
+        records,
+        derived,
+    );
     response.apply_min_cell_count(state.analytics_min_cell_count);
     append_audit_event_with_db_mirror(
         state.as_ref(),
-        &tenant,
-        TraceCommonsAuditEvent::read(&tenant, "analytics_summary", response.submissions_total),
+        tenant.auth(),
+        tenant.read_audit_event("analytics_summary", response.submissions_total),
         StorageTraceAuditAction::Read,
         StorageTraceAuditSafeMetadata::Empty,
     )
@@ -4407,10 +4406,10 @@ async fn list_traces_handler(
     headers: HeaderMap,
     Query(query): Query<TraceListQuery>,
 ) -> ApiResult<Json<Vec<TraceCommonsTraceListItem>>> {
-    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    require_reviewer(&tenant)?;
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_reviewer(tenant.auth())?;
     let TraceCommonsMetadataView { records, derived } =
-        read_reviewer_metadata_view(state.as_ref(), &tenant)
+        read_reviewer_metadata_view(state.as_ref(), tenant.auth())
             .await
             .map_err(internal_error)?;
     let derived_by_submission = derived
@@ -4420,7 +4419,7 @@ async fn list_traces_handler(
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
     let consent_scope = parse_consent_scope_filter(query.consent_scope.as_deref())?;
     let purpose_submission_ids =
-        trace_list_purpose_submission_ids(state.as_ref(), &tenant, query.purpose.as_deref())
+        trace_list_purpose_submission_ids(state.as_ref(), tenant.auth(), query.purpose.as_deref())
             .await
             .map_err(internal_error)?;
 
@@ -4452,8 +4451,8 @@ async fn list_traces_handler(
         .collect();
     append_audit_event_with_db_mirror(
         state.as_ref(),
-        &tenant,
-        TraceCommonsAuditEvent::read(&tenant, "trace_list", items.len()),
+        tenant.auth(),
+        tenant.read_audit_event("trace_list", items.len()),
         StorageTraceAuditAction::Read,
         StorageTraceAuditSafeMetadata::Empty,
     )
@@ -4506,10 +4505,10 @@ async fn review_quarantine_handler(
     headers: HeaderMap,
     Query(query): Query<ReviewQueueQuery>,
 ) -> ApiResult<Json<Vec<TraceReviewQueueItem>>> {
-    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    require_reviewer(&tenant)?;
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_reviewer(tenant.auth())?;
     let TraceCommonsMetadataView { records, derived } =
-        read_reviewer_metadata_view(state.as_ref(), &tenant)
+        read_reviewer_metadata_view(state.as_ref(), tenant.auth())
             .await
             .map_err(internal_error)?;
     let derived_by_submission = derived
@@ -4523,7 +4522,7 @@ async fn review_quarantine_handler(
         .filter(|record| {
             trace_review_lease_filter_matches(
                 record,
-                &tenant.principal_ref,
+                tenant.principal_ref(),
                 now,
                 query.lease_filter,
             )
@@ -4540,8 +4539,8 @@ async fn review_quarantine_handler(
     });
     append_audit_event_with_db_mirror(
         state.as_ref(),
-        &tenant,
-        TraceCommonsAuditEvent::read(&tenant, "review_quarantine", queue.len()),
+        tenant.auth(),
+        tenant.read_audit_event("review_quarantine", queue.len()),
         StorageTraceAuditAction::Read,
         StorageTraceAuditSafeMetadata::Empty,
     )
@@ -12506,8 +12505,32 @@ fn read_submission_record(
     }
     let body = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read trace metadata {}", path.display()))?;
-    serde_json::from_str(&body)
-        .with_context(|| format!("failed to parse trace metadata {}", path.display()))
+    let record = serde_json::from_str(&body)
+        .with_context(|| format!("failed to parse trace metadata {}", path.display()))?;
+    ensure_submission_record_tenant(&record, tenant_id)?;
+    Ok(Some(record))
+}
+
+fn ensure_submission_record_tenant(
+    record: &TraceCommonsSubmissionRecord,
+    tenant_id: &str,
+) -> anyhow::Result<()> {
+    let expected_tenant_ref = tenant_storage_ref(tenant_id);
+    anyhow::ensure!(
+        record.tenant_id == tenant_id,
+        "trace metadata tenant mismatch"
+    );
+    anyhow::ensure!(
+        record.tenant_storage_ref == expected_tenant_ref,
+        "trace metadata tenant storage ref mismatch"
+    );
+    if let Some(scope_ref) = record.submitted_tenant_scope_ref.as_deref() {
+        anyhow::ensure!(
+            scope_ref == expected_tenant_ref,
+            "trace metadata submitted tenant scope mismatch"
+        );
+    }
+    Ok(())
 }
 
 fn read_envelope_by_record(
@@ -12969,6 +12992,7 @@ fn read_all_submission_records(
             .with_context(|| format!("failed to read trace metadata {}", path.display()))?;
         let record: TraceCommonsSubmissionRecord = serde_json::from_str(&body)
             .with_context(|| format!("failed to parse trace metadata {}", path.display()))?;
+        ensure_submission_record_tenant(&record, tenant_id)?;
         records.push(record);
     }
     records.sort_by_key(|record| record.received_at);
@@ -13318,8 +13342,25 @@ fn read_derived_record(
     }
     let body = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read trace derived record {}", path.display()))?;
-    serde_json::from_str(&body)
-        .with_context(|| format!("failed to parse trace derived record {}", path.display()))
+    let record = serde_json::from_str(&body)
+        .with_context(|| format!("failed to parse trace derived record {}", path.display()))?;
+    ensure_derived_record_tenant(&record, tenant_id)?;
+    Ok(Some(record))
+}
+
+fn ensure_derived_record_tenant(
+    record: &TraceCommonsDerivedRecord,
+    tenant_id: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        record.tenant_id == tenant_id,
+        "trace derived record tenant mismatch"
+    );
+    anyhow::ensure!(
+        record.tenant_storage_ref == tenant_storage_ref(tenant_id),
+        "trace derived record tenant storage ref mismatch"
+    );
+    Ok(())
 }
 
 fn read_all_derived_records(
@@ -13345,6 +13386,7 @@ fn read_all_derived_records(
             .with_context(|| format!("failed to read trace derived record {}", path.display()))?;
         let record: TraceCommonsDerivedRecord = serde_json::from_str(&body)
             .with_context(|| format!("failed to parse trace derived record {}", path.display()))?;
+        ensure_derived_record_tenant(&record, tenant_id)?;
         records.push(record);
     }
     records.sort_by_key(|record| record.created_at);
@@ -20022,6 +20064,27 @@ mod tests {
             .join("events.jsonl")
     }
 
+    fn corrupt_submission_record_tenant(
+        root: &Path,
+        stored_tenant_id: &str,
+        forged_tenant_id: &str,
+        submission_id: Uuid,
+    ) {
+        let path = submission_metadata_path(root, stored_tenant_id, submission_id);
+        let body = std::fs::read_to_string(&path).expect("metadata reads for corruption");
+        let mut value: serde_json::Value =
+            serde_json::from_str(&body).expect("metadata json parses");
+        value["tenant_id"] = serde_json::json!(forged_tenant_id);
+        value["tenant_storage_ref"] = serde_json::json!(tenant_storage_ref(forged_tenant_id));
+        value["submitted_tenant_scope_ref"] =
+            serde_json::json!(tenant_storage_ref(forged_tenant_id));
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&value).expect("metadata serializes"),
+        )
+        .expect("metadata corruption writes");
+    }
+
     fn read_raw_audit_events(
         root: &Path,
         tenant_id: &str,
@@ -20324,6 +20387,76 @@ mod tests {
         .await
         .expect("owner can still revoke");
         assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn revoke_rejects_mismatched_file_record_tenant_before_side_effects() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let envelope = sample_envelope().await;
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("tenant-a submission succeeds");
+        corrupt_submission_record_tenant(temp.path(), "tenant-a", "tenant-b", submission_id);
+
+        let error = revoke_trace_handler(
+            State(state),
+            auth_headers("token-a"),
+            AxumPath(submission_id),
+        )
+        .await
+        .expect_err("mismatched stored tenant fails closed");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            read_revocation(temp.path(), "tenant-a", submission_id)
+                .expect("tenant-a tombstone lookup succeeds")
+                .is_none()
+        );
+        assert!(
+            read_revocation(temp.path(), "tenant-b", submission_id)
+                .expect("tenant-b tombstone lookup succeeds")
+                .is_none()
+        );
+        assert!(!submission_metadata_path(temp.path(), "tenant-b", submission_id).exists());
+    }
+
+    #[tokio::test]
+    async fn review_rejects_mismatched_file_record_tenant_before_side_effects() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let envelope = sample_envelope().await;
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("tenant-a submission succeeds");
+        corrupt_submission_record_tenant(temp.path(), "tenant-a", "tenant-b", submission_id);
+
+        let error = review_decision_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Approve,
+                reason: Some("tenant mismatch should fail closed".to_string()),
+                credit_points_pending: Some(1.0),
+            }),
+        )
+        .await
+        .expect_err("mismatched stored tenant fails closed");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!submission_metadata_path(temp.path(), "tenant-b", submission_id).exists());
+        assert!(!audit_log_path(temp.path(), "tenant-b").exists());
     }
 
     #[tokio::test]

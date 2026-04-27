@@ -465,6 +465,19 @@ credentials, and a stricter managed-keyset flag that accepts only active
 issuer/keyset EdDSA keys with `kid` headers. Guarded HTTPS issuer-managed
 keysets refresh live after startup with last-good preservation and optional
 max-stale fail-closed enforcement.
+The standalone `trace_commons_upload_claim_issuer` binary is the first
+production-shaped issuer service for hosted tenants. It exposes `POST
+/v1/trace-upload-claim`, `GET /health`, and `GET
+/.well-known/trace-commons-ed25519-keyset.json`; authenticates workload tokens
+with EdDSA/Ed25519 only; rejects RSA key material; signs short-lived contributor
+claims with `kid`, `iss`, `aud`, `iat`, `exp`, and `jti`; and publishes the same
+`kid` plus `public_key_pem` keyset shape consumed by the ingest service. The
+issuer currently enforces workload tenant, scope, and allowed-use narrowing but
+does not yet manage tenant access grants itself.
+Configure it with `TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_*` environment variables
+for bind address, signing key PEM or file, signing public key PEM or file,
+signing `kid`, issuer, audience, max TTL, workload public key PEM or file, and
+optional workload issuer/audience checks.
 Production claims must bind the tenant id, actor or job principal, role,
 expiry, optional JWT ID, and allowed consent scopes/uses; the service still
 derives the storage partition from the
@@ -489,6 +502,7 @@ The current implementation is a usable MVP for local development and controlled 
 
 - Promote the current dual-write mirror into relational metadata reads for all API surfaces and service-owned encrypted object storage for redacted trace bodies. Contributor credit/status, reviewer metadata, replay export selection, and audit reads already have opt-in DB-backed rollout gates.
 - Keep metadata and object keys tenant-scoped from the auth-derived tenant id. Do not trust tenant fields in the envelope as storage partition keys.
+- File-backed compatibility reads now also fail closed if a metadata or derived row stored under one tenant directory claims a different embedded tenant id or tenant storage ref. Continue moving mutating paths to `TenantCtx` so authenticated tenant identity stays the trust boundary after rehydration.
 - Store immutable submission records, append-only credit events, revocation tombstones, review decisions, export job manifests, and processing job state as separate records.
 - Use row-level tenant policies or an equivalent authorization layer for every metadata query.
 - Encrypt object storage at rest, require TLS in transit, and keep object bucket access behind service identities rather than reviewer/user tokens.
