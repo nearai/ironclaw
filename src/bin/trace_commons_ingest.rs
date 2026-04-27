@@ -823,6 +823,9 @@ struct TenantAuth {
     principal_ref: String,
     expires_at: Option<DateTime<Utc>>,
     auth_method: TraceAuthMethod,
+    signed_claim_issuer: Option<String>,
+    signed_claim_audiences: BTreeSet<String>,
+    signed_claim_subject: Option<String>,
     allowed_consent_scopes: BTreeSet<ConsentScope>,
     allowed_uses: BTreeSet<TraceAllowedUse>,
 }
@@ -1007,6 +1010,10 @@ struct TraceCommonsSignedTokenClaims {
     #[serde(default)]
     iat: Option<i64>,
     #[serde(default)]
+    iss: Option<String>,
+    #[serde(default)]
+    aud: Option<TraceCommonsAudienceClaim>,
+    #[serde(default)]
     role: Option<String>,
     #[serde(default)]
     principal_ref: Option<String>,
@@ -1018,6 +1025,27 @@ struct TraceCommonsSignedTokenClaims {
     allowed_consent_scopes: BTreeSet<ConsentScope>,
     #[serde(default)]
     allowed_uses: BTreeSet<TraceAllowedUse>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum TraceCommonsAudienceClaim {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl TraceCommonsAudienceClaim {
+    fn into_set(self) -> BTreeSet<String> {
+        let audiences = match self {
+            Self::Single(audience) => vec![audience],
+            Self::Multiple(audiences) => audiences,
+        };
+        audiences
+            .into_iter()
+            .map(|audience| audience.trim().to_string())
+            .filter(|audience| !audience.is_empty())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -3004,6 +3032,16 @@ fn signed_token_claims_to_auth(claims: TraceCommonsSignedTokenClaims) -> ApiResu
             "invalid signed tenant token",
         ));
     }
+    let signed_claim_issuer = claims
+        .iss
+        .as_deref()
+        .map(str::trim)
+        .filter(|issuer| !issuer.is_empty())
+        .map(ToOwned::to_owned);
+    let signed_claim_audiences = claims
+        .aud
+        .map(TraceCommonsAudienceClaim::into_set)
+        .unwrap_or_default();
     let role = TokenRole::parse(claims.role.as_deref().unwrap_or("contributor"))
         .map_err(|_| api_error(StatusCode::FORBIDDEN, "invalid signed tenant token role"))?;
     let actor_ref = claims
@@ -3018,6 +3056,12 @@ fn signed_token_claims_to_auth(claims: TraceCommonsSignedTokenClaims) -> ApiResu
                 "signed tenant token requires principal_ref or sub",
             )
         })?;
+    let signed_claim_subject = claims
+        .sub
+        .as_deref()
+        .map(str::trim)
+        .filter(|subject| !subject.is_empty())
+        .map(ToOwned::to_owned);
 
     Ok(TenantAuth {
         tenant_id: tenant_id.to_string(),
@@ -3025,6 +3069,9 @@ fn signed_token_claims_to_auth(claims: TraceCommonsSignedTokenClaims) -> ApiResu
         principal_ref: principal_storage_ref(&format!("signed:{tenant_id}:{actor_ref}")),
         expires_at: None,
         auth_method: TraceAuthMethod::SignedClaim,
+        signed_claim_issuer,
+        signed_claim_audiences,
+        signed_claim_subject,
         allowed_consent_scopes: claims.allowed_consent_scopes,
         allowed_uses: claims.allowed_uses,
     })
@@ -3185,6 +3232,9 @@ fn insert_token_with_expiry(
             principal_ref: principal_storage_ref(token),
             expires_at,
             auth_method: TraceAuthMethod::StaticToken,
+            signed_claim_issuer: None,
+            signed_claim_audiences: BTreeSet::new(),
+            signed_claim_subject: None,
             allowed_consent_scopes: BTreeSet::new(),
             allowed_uses: BTreeSet::new(),
         },
@@ -8552,16 +8602,17 @@ async fn authorize_tenant_access_grant(
         .await
         .map_err(internal_error)?;
     let expected_role = trace_tenant_access_grant_role_for_token(auth.role);
-    let mut matching_grants = grants
+    let matching_grants = grants
         .iter()
         .filter(|grant| grant.role == expected_role)
-        .peekable();
-    if matching_grants.peek().is_none() {
+        .filter(|grant| tenant_access_grant_matches_signed_claim_binding(&auth, grant))
+        .collect::<Vec<_>>();
+    if matching_grants.is_empty() {
         tracing::warn!(
             tenant_id = %auth.tenant_id,
             principal_ref = %auth.principal_ref,
             role = auth.role.storage_name(),
-            "Trace Commons rejected request without active tenant access grant"
+            "Trace Commons rejected request without active tenant access grant binding"
         );
         return Err(api_error(
             StatusCode::FORBIDDEN,
@@ -8573,6 +8624,36 @@ async fn authorize_tenant_access_grant(
         apply_tenant_access_grant_scope(&mut auth, grant)?;
     }
     Ok(auth)
+}
+
+fn tenant_access_grant_matches_signed_claim_binding(
+    auth: &TenantAuth,
+    grant: &StorageTraceTenantAccessGrantRecord,
+) -> bool {
+    if auth.auth_method != TraceAuthMethod::SignedClaim {
+        return true;
+    }
+    if let Some(issuer) = grant.issuer.as_deref().and_then(non_empty_trimmed)
+        && auth.signed_claim_issuer.as_deref() != Some(issuer)
+    {
+        return false;
+    }
+    if let Some(audience) = grant.audience.as_deref().and_then(non_empty_trimmed)
+        && !auth.signed_claim_audiences.contains(audience)
+    {
+        return false;
+    }
+    if let Some(subject) = grant.subject.as_deref().and_then(non_empty_trimmed)
+        && auth.signed_claim_subject.as_deref() != Some(subject)
+    {
+        return false;
+    }
+    true
+}
+
+fn non_empty_trimmed(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
 }
 
 fn trace_tenant_access_grant_role_for_token(role: TokenRole) -> StorageTraceTenantAccessGrantRole {
@@ -19871,6 +19952,54 @@ mod tests {
         grant_id
     }
 
+    #[cfg(feature = "libsql")]
+    struct TestSignedClaimGrant<'a> {
+        tenant_id: &'a str,
+        actor: &'a str,
+        grant_id: Uuid,
+        status: StorageTraceTenantAccessGrantStatus,
+        issuer: Option<&'a str>,
+        audience: Option<&'a str>,
+        subject: Option<&'a str>,
+        reason: &'a str,
+    }
+
+    #[cfg(feature = "libsql")]
+    async fn upsert_test_signed_claim_tenant_access_grant_status(
+        db: &dyn Database,
+        grant: TestSignedClaimGrant<'_>,
+    ) -> Uuid {
+        let now = Utc::now();
+        db.upsert_trace_tenant_access_grant(StorageTraceTenantAccessGrantWrite {
+            tenant_id: grant.tenant_id.to_string(),
+            grant_id: grant.grant_id,
+            principal_ref: principal_storage_ref(&format!(
+                "signed:{}:{}",
+                grant.tenant_id, grant.actor
+            )),
+            role: StorageTraceTenantAccessGrantRole::Contributor,
+            status: grant.status,
+            allowed_consent_scopes: Vec::new(),
+            allowed_uses: Vec::new(),
+            issuer: grant.issuer.map(str::to_string),
+            audience: grant.audience.map(str::to_string),
+            subject: grant.subject.map(str::to_string),
+            issued_at: now - Duration::minutes(5),
+            expires_at: Some(now + Duration::minutes(30)),
+            revoked_at: (grant.status == StorageTraceTenantAccessGrantStatus::Revoked)
+                .then_some(now),
+            created_by_principal_ref: Some("issuer:near.com".to_string()),
+            revoked_by_principal_ref: (grant.status
+                == StorageTraceTenantAccessGrantStatus::Revoked)
+                .then(|| "issuer:near.com".to_string()),
+            reason: Some(grant.reason.to_string()),
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("test signed claim tenant access grant writes");
+        grant.grant_id
+    }
+
     fn test_reviewer_auth(tenant_id: &str) -> TenantAuth {
         TenantAuth {
             tenant_id: tenant_id.to_string(),
@@ -19878,6 +20007,9 @@ mod tests {
             principal_ref: principal_storage_ref("review-token"),
             expires_at: None,
             auth_method: TraceAuthMethod::StaticToken,
+            signed_claim_issuer: None,
+            signed_claim_audiences: BTreeSet::new(),
+            signed_claim_subject: None,
             allowed_consent_scopes: BTreeSet::new(),
             allowed_uses: BTreeSet::new(),
         }
@@ -21663,6 +21795,189 @@ mod tests {
                 .await
                 .expect_err("tenant access grant scopes/uses restrict submissions");
         assert_eq!(disallowed_error.0, StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn tenant_access_grants_bind_signed_claim_issuer_audience_and_subject() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp
+            .path()
+            .join("trace-tenant-access-signed-bindings.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let mut state =
+            test_state_with_required_managed_eddsa_signed_token_verifier(temp.path().to_path_buf());
+        {
+            let state_mut = Arc::make_mut(&mut state);
+            state_mut.db_mirror = Some(db.clone() as Arc<dyn Database>);
+            state_mut.require_tenant_access_grants = true;
+        }
+
+        let actor = "tenant-a-agent";
+        let token = eddsa_signed_tenant_token_with_kid(
+            Some("managed-eddsa-1"),
+            managed_eddsa_signed_claim(actor),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::DebuggingEvaluation];
+        envelope.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::Debugging];
+
+        let missing_grant_error = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(&token),
+            Json(envelope.clone()),
+        )
+        .await
+        .expect_err("signed upload claims still require a tenant access grant");
+        assert_eq!(missing_grant_error.0, StatusCode::FORBIDDEN);
+
+        let wrong_issuer_grant_id = Uuid::new_v4();
+        upsert_test_signed_claim_tenant_access_grant_status(
+            db.as_ref(),
+            TestSignedClaimGrant {
+                tenant_id: "tenant-a",
+                actor,
+                grant_id: wrong_issuer_grant_id,
+                status: StorageTraceTenantAccessGrantStatus::Active,
+                issuer: Some("trace-commons-wrong-issuer"),
+                audience: Some("trace-commons-test-audience"),
+                subject: Some(actor),
+                reason: "wrong issuer should not authorize signed claim",
+            },
+        )
+        .await;
+        let wrong_issuer_error = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(&token),
+            Json(envelope.clone()),
+        )
+        .await
+        .expect_err("grant issuer must match signed claim issuer");
+        assert_eq!(wrong_issuer_error.0, StatusCode::FORBIDDEN);
+
+        upsert_test_signed_claim_tenant_access_grant_status(
+            db.as_ref(),
+            TestSignedClaimGrant {
+                tenant_id: "tenant-a",
+                actor,
+                grant_id: wrong_issuer_grant_id,
+                status: StorageTraceTenantAccessGrantStatus::Revoked,
+                issuer: Some("trace-commons-wrong-issuer"),
+                audience: Some("trace-commons-test-audience"),
+                subject: Some(actor),
+                reason: "wrong issuer revoked",
+            },
+        )
+        .await;
+
+        let wrong_audience_grant_id = Uuid::new_v4();
+        upsert_test_signed_claim_tenant_access_grant_status(
+            db.as_ref(),
+            TestSignedClaimGrant {
+                tenant_id: "tenant-a",
+                actor,
+                grant_id: wrong_audience_grant_id,
+                status: StorageTraceTenantAccessGrantStatus::Active,
+                issuer: Some("trace-commons-test-issuer"),
+                audience: Some("trace-commons-wrong-audience"),
+                subject: Some(actor),
+                reason: "wrong audience should not authorize signed claim",
+            },
+        )
+        .await;
+        let wrong_audience_error = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(&token),
+            Json(envelope.clone()),
+        )
+        .await
+        .expect_err("grant audience must match signed claim audience");
+        assert_eq!(wrong_audience_error.0, StatusCode::FORBIDDEN);
+
+        upsert_test_signed_claim_tenant_access_grant_status(
+            db.as_ref(),
+            TestSignedClaimGrant {
+                tenant_id: "tenant-a",
+                actor,
+                grant_id: wrong_audience_grant_id,
+                status: StorageTraceTenantAccessGrantStatus::Revoked,
+                issuer: Some("trace-commons-test-issuer"),
+                audience: Some("trace-commons-wrong-audience"),
+                subject: Some(actor),
+                reason: "wrong audience revoked",
+            },
+        )
+        .await;
+
+        let wrong_subject_grant_id = Uuid::new_v4();
+        upsert_test_signed_claim_tenant_access_grant_status(
+            db.as_ref(),
+            TestSignedClaimGrant {
+                tenant_id: "tenant-a",
+                actor,
+                grant_id: wrong_subject_grant_id,
+                status: StorageTraceTenantAccessGrantStatus::Active,
+                issuer: Some("trace-commons-test-issuer"),
+                audience: Some("trace-commons-test-audience"),
+                subject: Some("tenant-a-other-agent"),
+                reason: "wrong subject should not authorize signed claim",
+            },
+        )
+        .await;
+        let wrong_subject_error = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(&token),
+            Json(envelope.clone()),
+        )
+        .await
+        .expect_err("grant subject must match signed claim subject");
+        assert_eq!(wrong_subject_error.0, StatusCode::FORBIDDEN);
+
+        upsert_test_signed_claim_tenant_access_grant_status(
+            db.as_ref(),
+            TestSignedClaimGrant {
+                tenant_id: "tenant-a",
+                actor,
+                grant_id: wrong_subject_grant_id,
+                status: StorageTraceTenantAccessGrantStatus::Revoked,
+                issuer: Some("trace-commons-test-issuer"),
+                audience: Some("trace-commons-test-audience"),
+                subject: Some("tenant-a-other-agent"),
+                reason: "wrong subject revoked",
+            },
+        )
+        .await;
+
+        upsert_test_signed_claim_tenant_access_grant_status(
+            db.as_ref(),
+            TestSignedClaimGrant {
+                tenant_id: "tenant-a",
+                actor,
+                grant_id: Uuid::new_v4(),
+                status: StorageTraceTenantAccessGrantStatus::Active,
+                issuer: Some("trace-commons-test-issuer"),
+                audience: Some("trace-commons-test-audience"),
+                subject: Some(actor),
+                reason: "issuer-authorized signed claim grant",
+            },
+        )
+        .await;
+
+        let Json(receipt) =
+            submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+                .await
+                .expect("matching issuer/audience/subject grant authorizes signed claim");
+        assert_eq!(receipt.status, "accepted");
     }
 
     #[cfg(feature = "libsql")]
@@ -31315,6 +31630,9 @@ mod tests {
             principal_ref: "test-retention-worker".to_string(),
             expires_at: None,
             auth_method: TraceAuthMethod::StaticToken,
+            signed_claim_issuer: None,
+            signed_claim_audiences: BTreeSet::new(),
+            signed_claim_subject: None,
             allowed_consent_scopes: BTreeSet::new(),
             allowed_uses: BTreeSet::new(),
         };
@@ -37027,6 +37345,45 @@ mod tests {
         assert_eq!(
             record.auth_principal_ref,
             principal_storage_ref("signed:tenant-a:actor-required-managed-eddsa")
+        );
+    }
+
+    #[tokio::test]
+    async fn preserves_managed_eddsa_signed_claim_identity_for_grant_binding() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state =
+            test_state_with_required_managed_eddsa_signed_token_verifier(temp.path().to_path_buf());
+        let mut claims = managed_eddsa_signed_claim("actor-binding-subject");
+        claims["aud"] = serde_json::json!([
+            "trace-commons-secondary-audience",
+            "trace-commons-test-audience"
+        ]);
+        let token = eddsa_signed_tenant_token_with_kid(Some("managed-eddsa-1"), claims);
+
+        let auth = authenticate(state.as_ref(), &auth_headers(&token))
+            .expect("signed claim authenticates");
+
+        assert_eq!(auth.tenant_id, "tenant-a");
+        assert_eq!(auth.auth_method, TraceAuthMethod::SignedClaim);
+        assert_eq!(
+            auth.principal_ref,
+            principal_storage_ref("signed:tenant-a:actor-binding-subject")
+        );
+        assert_eq!(
+            auth.signed_claim_issuer.as_deref(),
+            Some("trace-commons-test-issuer")
+        );
+        assert_eq!(
+            auth.signed_claim_subject.as_deref(),
+            Some("actor-binding-subject")
+        );
+        assert!(
+            auth.signed_claim_audiences
+                .contains("trace-commons-test-audience")
+        );
+        assert!(
+            auth.signed_claim_audiences
+                .contains("trace-commons-secondary-audience")
         );
     }
 
