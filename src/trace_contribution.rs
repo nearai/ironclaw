@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::error::Error;
+use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -3704,6 +3705,8 @@ pub struct TraceQueueCompactionReport {
     pub duplicate_envelopes_removed: u32,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub orphan_hold_sidecars_removed: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub malformed_envelopes_quarantined: u32,
 }
 
 impl TraceQueueCompactionReport {
@@ -3711,11 +3714,13 @@ impl TraceQueueCompactionReport {
         self.scanned_count == 0
             && self.duplicate_envelopes_removed == 0
             && self.orphan_hold_sidecars_removed == 0
+            && self.malformed_envelopes_quarantined == 0
     }
 
     fn reclaimed_count(&self) -> u32 {
         self.duplicate_envelopes_removed
             .saturating_add(self.orphan_hold_sidecars_removed)
+            .saturating_add(self.malformed_envelopes_quarantined)
     }
 }
 
@@ -4149,6 +4154,29 @@ pub fn load_trace_envelope(path: &Path) -> anyhow::Result<TraceContributionEnvel
         .map_err(|e| anyhow::anyhow!("failed to read envelope {}: {}", path.display(), e))?;
     serde_json::from_str(&body)
         .map_err(|e| anyhow::anyhow!("failed to parse envelope {}: {}", path.display(), e))
+}
+
+fn load_queued_trace_envelope_or_quarantine(
+    scope: Option<&str>,
+    path: &Path,
+    phase: &str,
+) -> anyhow::Result<Option<TraceContributionEnvelope>> {
+    let body = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("failed to read envelope {}: {}", path.display(), e))?;
+    match serde_json::from_str(&body) {
+        Ok(envelope) => Ok(Some(envelope)),
+        Err(error) => {
+            let quarantine_path = quarantine_malformed_trace_queue_envelope(scope, path)?;
+            tracing::debug!(
+                %error,
+                path = %path.display(),
+                quarantine_path = %quarantine_path.display(),
+                phase,
+                "Quarantined malformed Trace Commons queue envelope"
+            );
+            Ok(None)
+        }
+    }
 }
 
 pub fn apply_credit_estimate_to_envelope(envelope: &mut TraceContributionEnvelope) {
@@ -4975,7 +5003,11 @@ async fn flush_trace_contribution_queue_for_scope_with_credential_provider(
         .into_iter()
         .take(limit)
     {
-        let mut envelope = load_trace_envelope(&path)?;
+        let Some(mut envelope) = load_queued_trace_envelope_or_quarantine(scope, &path, "flush")?
+        else {
+            had_nonfatal_failure = true;
+            continue;
+        };
         apply_credit_estimate_to_envelope(&mut envelope);
 
         match trace_autonomous_eligibility(&envelope, &policy) {
@@ -6133,16 +6165,11 @@ fn compact_trace_queue_for_scope_unlocked(
     };
     let mut candidates = Vec::new();
     for path in paths {
-        let envelope = match load_trace_envelope(&path) {
-            Ok(envelope) => envelope,
-            Err(error) => {
-                tracing::debug!(
-                    %error,
-                    path = %path.display(),
-                    "Skipping malformed Trace Commons queue envelope during compaction"
-                );
-                continue;
-            }
+        let Some(envelope) = load_queued_trace_envelope_or_quarantine(scope, &path, "compaction")?
+        else {
+            report.malformed_envelopes_quarantined =
+                report.malformed_envelopes_quarantined.saturating_add(1);
+            continue;
         };
         let hold = read_trace_queue_hold_sidecar_for_envelope(&path)
             .ok()
@@ -6873,6 +6900,10 @@ fn trace_queue_dir(scope: Option<&str>) -> PathBuf {
     trace_contribution_dir_for_scope(scope).join("queue")
 }
 
+fn trace_queue_malformed_dir(scope: Option<&str>) -> PathBuf {
+    trace_contribution_dir_for_scope(scope).join("queue_malformed")
+}
+
 fn trace_records_path(scope: Option<&str>) -> PathBuf {
     trace_contribution_dir_for_scope(scope).join("submissions.json")
 }
@@ -6886,20 +6917,130 @@ fn write_json_file<T: Serialize + ?Sized>(
     value: &T,
     label: &str,
 ) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to create {} directory {}: {}",
+            label,
+            parent.display(),
+            e
+        )
+    })?;
+    let body = serde_json::to_string_pretty(value)
+        .map_err(|e| anyhow::anyhow!("failed to serialize {}: {}", label, e))?;
+    let temp_path = parent.join(format!(
+        "{}{}.tmp",
+        trace_json_temp_prefix(path),
+        Uuid::new_v4()
+    ));
+    let mut temp = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .map_err(|e| {
             anyhow::anyhow!(
-                "failed to create {} directory {}: {}",
+                "failed to create temporary {} {}: {}",
                 label,
-                parent.display(),
+                temp_path.display(),
                 e
             )
         })?;
+    if let Err(error) = temp.write_all(body.as_bytes()) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(anyhow::anyhow!(
+            "failed to write temporary {} for {}: {}",
+            label,
+            path.display(),
+            error
+        ));
     }
-    let body = serde_json::to_string_pretty(value)
-        .map_err(|e| anyhow::anyhow!("failed to serialize {}: {}", label, e))?;
-    std::fs::write(path, body)
-        .map_err(|e| anyhow::anyhow!("failed to write {} {}: {}", label, path.display(), e))
+    if let Err(error) = temp.sync_all() {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(anyhow::anyhow!(
+            "failed to sync temporary {} for {}: {}",
+            label,
+            path.display(),
+            error
+        ));
+    }
+    drop(temp);
+    std::fs::rename(&temp_path, path).map_err(|e| {
+        let _ = std::fs::remove_file(&temp_path);
+        anyhow::anyhow!("failed to install {} {}: {}", label, path.display(), e)
+    })?;
+    sync_directory_best_effort(parent, label);
+    Ok(())
+}
+
+fn trace_json_temp_prefix(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| format!(".{name}."))
+        .unwrap_or_else(|| ".trace-json.".to_string())
+}
+
+fn quarantine_malformed_trace_queue_envelope(
+    scope: Option<&str>,
+    path: &Path,
+) -> anyhow::Result<PathBuf> {
+    let quarantine_dir = trace_queue_malformed_dir(scope);
+    std::fs::create_dir_all(&quarantine_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to create malformed trace queue directory {}: {}",
+            quarantine_dir.display(),
+            e
+        )
+    })?;
+    let file_name = path.file_name().ok_or_else(|| {
+        anyhow::anyhow!(
+            "failed to quarantine malformed trace queue envelope without file name: {}",
+            path.display()
+        )
+    })?;
+    let mut quarantine_path = quarantine_dir.join(file_name);
+    if quarantine_path.exists() {
+        let stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("queued-envelope");
+        quarantine_path = quarantine_dir.join(format!("{stem}.{}.json", Uuid::new_v4()));
+    }
+    std::fs::rename(path, &quarantine_path).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to quarantine malformed trace queue envelope {} to {}: {}",
+            path.display(),
+            quarantine_path.display(),
+            e
+        )
+    })?;
+    if let Some(active_dir) = path.parent() {
+        sync_directory_best_effort(active_dir, "trace queue directory");
+    }
+    sync_directory_best_effort(&quarantine_dir, "malformed trace queue directory");
+    Ok(quarantine_path)
+}
+
+fn sync_directory_best_effort(path: &Path, label: &str) {
+    match std::fs::File::open(path) {
+        Ok(file) => {
+            if let Err(error) = file.sync_all() {
+                tracing::debug!(
+                    %error,
+                    path = %path.display(),
+                    label,
+                    "Directory sync is not supported or failed"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                path = %path.display(),
+                label,
+                "Directory sync is not supported or failed"
+            );
+        }
+    }
 }
 
 fn scope_hash(scope: &str) -> String {
@@ -9818,6 +9959,112 @@ mod tests {
             1
         );
         assert_eq!(diagnostics.telemetry.compaction_reclaimed_items_total, 2);
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[tokio::test]
+    async fn queue_flush_quarantines_malformed_envelope_and_submits_later_valid_envelope() {
+        let scope = format!("trace-queue-malformed-recovery-test-{}", Uuid::new_v4());
+        let submitted_ids = Arc::new(std::sync::Mutex::new(Vec::<Uuid>::new()));
+        let submitted_ids_for_route = submitted_ids.clone();
+        let app = axum::Router::new()
+            .route(
+                "/v1/traces",
+                axum::routing::post(
+                    move |axum::Json(body): axum::Json<TraceContributionEnvelope>| {
+                        let submitted_ids = submitted_ids_for_route.clone();
+                        async move {
+                            submitted_ids
+                                .lock()
+                                .expect("submitted ids lock")
+                                .push(body.submission_id);
+                            axum::Json(serde_json::json!({
+                                "status": "accepted",
+                                "credit_points_pending": 1.0,
+                                "explanation": ["accepted"]
+                            }))
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/v1/contributors/me/submission-status",
+                axum::routing::post(|| async {
+                    axum::Json(Vec::<TraceSubmissionStatusUpdate>::new())
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock trace commons listener binds");
+        let endpoint = format!(
+            "http://{}/v1/traces",
+            listener.local_addr().expect("local addr")
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        write_trace_policy_for_scope(
+            Some(&scope),
+            &StandingTraceContributionPolicy {
+                enabled: true,
+                ingestion_endpoint: Some(endpoint),
+                auto_submit_high_value_traces: true,
+                min_submission_score: 0.0,
+                ..Default::default()
+            },
+        )
+        .expect("policy writes");
+
+        let queue_dir = trace_queue_dir(Some(&scope));
+        std::fs::create_dir_all(&queue_dir).expect("queue dir exists");
+        let malformed_path = queue_dir.join(format!("{}.json", Uuid::nil()));
+        let malformed_body = r#"{"redacted_content":"[REDACTED local-only body]","#;
+        std::fs::write(&malformed_path, malformed_body).expect("malformed fixture writes");
+
+        let raw = RawTraceContribution::from_recorded_trace(
+            &sample_trace(),
+            RecordedTraceContributionOptions::default(),
+        );
+        let mut envelope = DeterministicTraceRedactor::default()
+            .redact_trace(raw)
+            .await
+            .expect("redaction should succeed");
+        apply_credit_estimate_to_envelope(&mut envelope);
+        queue_trace_envelope_for_scope(Some(&scope), &envelope).expect("valid envelope queues");
+
+        let provider = RefreshingTestUploadCredentialProvider::new("trace-token", "trace-token");
+        let report = flush_trace_contribution_queue_for_scope_with_credential_provider(
+            Some(&scope),
+            10,
+            &provider,
+        )
+        .await
+        .expect("flush should skip malformed envelope and submit valid envelope");
+
+        assert_eq!(report.submitted, 1);
+        assert_eq!(report.compaction.malformed_envelopes_quarantined, 1);
+        assert!(
+            !malformed_path.exists(),
+            "malformed envelope should leave active queue"
+        );
+        let quarantine_path =
+            trace_queue_malformed_dir(Some(&scope)).join(format!("{}.json", Uuid::nil()));
+        assert!(
+            quarantine_path.exists(),
+            "malformed envelope should be quarantined"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&quarantine_path).expect("quarantine body reads"),
+            malformed_body
+        );
+        assert_eq!(
+            *submitted_ids.lock().expect("submitted ids lock"),
+            vec![envelope.submission_id]
+        );
+        let diagnostics = trace_queue_diagnostics_for_scope(Some(&scope)).expect("diagnostics");
+        assert_eq!(diagnostics.queued_count, 0);
 
         let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
     }

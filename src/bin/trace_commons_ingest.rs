@@ -4225,9 +4225,7 @@ async fn credit_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> ApiResult<Json<TraceCommonsTenantCreditResponse>> {
-    let tenant =
-        authorize_tenant_access_grant(state.as_ref(), authenticate(state.as_ref(), &headers)?)
-            .await?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     let credit_view = read_contributor_credit_view(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
@@ -4254,9 +4252,7 @@ async fn credit_events_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<TraceCommonsCreditLedgerRecord>>> {
-    let tenant =
-        authorize_tenant_access_grant(state.as_ref(), authenticate(state.as_ref(), &headers)?)
-            .await?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     let credit_view = read_contributor_credit_view(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
@@ -4281,11 +4277,7 @@ async fn submission_status_handler(
     headers: HeaderMap,
     Json(body): Json<TraceSubmissionStatusRequest>,
 ) -> ApiResult<Json<Vec<TraceSubmissionStatusUpdate>>> {
-    let tenant = authorize_tenant_access_grant_ctx(
-        state.as_ref(),
-        authenticate_ctx(state.as_ref(), &headers)?,
-    )
-    .await?;
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
     if body.submission_ids.len() > 500 {
         return Err(api_error(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -4328,7 +4320,7 @@ async fn analytics_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> ApiResult<Json<TraceCommonsAnalyticsResponse>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_reviewer(&tenant)?;
     let TraceCommonsMetadataView { records, derived } =
         read_reviewer_metadata_view(state.as_ref(), &tenant)
@@ -4365,7 +4357,7 @@ async fn list_traces_handler(
     headers: HeaderMap,
     Query(query): Query<TraceListQuery>,
 ) -> ApiResult<Json<Vec<TraceCommonsTraceListItem>>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_reviewer(&tenant)?;
     let TraceCommonsMetadataView { records, derived } =
         read_reviewer_metadata_view(state.as_ref(), &tenant)
@@ -4464,7 +4456,7 @@ async fn review_quarantine_handler(
     headers: HeaderMap,
     Query(query): Query<ReviewQueueQuery>,
 ) -> ApiResult<Json<Vec<TraceReviewQueueItem>>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_reviewer(&tenant)?;
     let TraceCommonsMetadataView { records, derived } =
         read_reviewer_metadata_view(state.as_ref(), &tenant)
@@ -4724,7 +4716,7 @@ async fn append_credit_event_handler(
     AxumPath(submission_id): AxumPath<Uuid>,
     Json(body): Json<TraceCreditLedgerAppendRequest>,
 ) -> ApiResult<Json<TraceCommonsCreditLedgerRecord>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_reviewer(&tenant)?;
     if !body.credit_points_delta.is_finite() {
         return Err(api_error(
@@ -4867,7 +4859,7 @@ async fn utility_credit_handler(
     headers: HeaderMap,
     Json(body): Json<TraceUtilityCreditJobRequest>,
 ) -> ApiResult<Json<TraceUtilityCreditJobResponse>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_utility_operator(&tenant)?;
     if !body.event_type.is_utility_job_type() {
         return Err(api_error(
@@ -5021,7 +5013,7 @@ async fn process_evaluation_worker_handler(
     headers: HeaderMap,
     Json(body): Json<TraceProcessEvaluationJobRequest>,
 ) -> ApiResult<Json<TraceProcessEvaluationJobResponse>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_process_evaluation_operator(&tenant)?;
     let reason = body.reason.trim().to_string();
     if reason.is_empty() {
@@ -5387,7 +5379,7 @@ async fn review_decision_handler(
     AxumPath(submission_id): AxumPath<Uuid>,
     Json(body): Json<TraceReviewDecisionRequest>,
 ) -> ApiResult<Json<TraceSubmissionReceipt>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_reviewer(&tenant)?;
     let reason = body
         .reason
@@ -5550,7 +5542,7 @@ async fn claim_review_lease_handler(
     AxumPath(submission_id): AxumPath<Uuid>,
     Json(body): Json<TraceReviewLeaseRequest>,
 ) -> ApiResult<Json<TraceReviewLeaseResponse>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_reviewer(&tenant)?;
     let db = require_db_reviewer_lease_store(state.as_ref(), &tenant)?;
     let ttl_seconds = body
@@ -5612,7 +5604,7 @@ async fn release_review_lease_handler(
     headers: HeaderMap,
     AxumPath(submission_id): AxumPath<Uuid>,
 ) -> ApiResult<Json<TraceReviewLeaseResponse>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_reviewer(&tenant)?;
     let db = require_db_reviewer_lease_store(state.as_ref(), &tenant)?;
     let released = db
@@ -5760,7 +5752,7 @@ async fn dataset_replay_handler(
     headers: HeaderMap,
     Query(query): Query<DatasetExportQuery>,
 ) -> ApiResult<Json<TraceReplayDatasetExport>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_exporter(&tenant)?;
     let now = Utc::now();
     let purpose =
@@ -5797,7 +5789,7 @@ async fn run_worker_replay_export(
     headers: HeaderMap,
     query: DatasetExportQuery,
 ) -> ApiResult<Json<TraceReplayDatasetExport>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_exporter(&tenant)?;
     let now = Utc::now();
     let purpose = normalized_export_purpose(
@@ -6038,7 +6030,7 @@ async fn replay_export_manifests_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<TraceExportManifestSummary>>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_exporter(&tenant)?;
     let manifests = read_replay_export_manifest_summaries(state.as_ref(), &tenant)
         .await
@@ -6066,7 +6058,7 @@ async fn retention_jobs_handler(
     headers: HeaderMap,
     Query(query): Query<RetentionJobsQuery>,
 ) -> ApiResult<Json<Vec<TraceRetentionJobSummary>>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
     let db = trace_retention_ledger_db(state.as_ref())?;
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
@@ -6106,7 +6098,7 @@ async fn retention_job_items_handler(
     AxumPath(retention_job_id): AxumPath<Uuid>,
     Query(query): Query<RetentionJobItemsQuery>,
 ) -> ApiResult<Json<Vec<TraceRetentionJobItemSummary>>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
     let db = trace_retention_ledger_db(state.as_ref())?;
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
@@ -6146,7 +6138,7 @@ async fn export_access_grants_handler(
     headers: HeaderMap,
     Query(query): Query<ExportAccessGrantsQuery>,
 ) -> ApiResult<Json<Vec<TraceExportAccessGrantSummary>>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
     let db = trace_export_control_db(state.as_ref())?;
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
@@ -6194,7 +6186,7 @@ async fn export_jobs_handler(
     headers: HeaderMap,
     Query(query): Query<ExportJobsQuery>,
 ) -> ApiResult<Json<Vec<TraceExportJobSummary>>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
     let db = trace_export_control_db(state.as_ref())?;
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
@@ -6290,7 +6282,7 @@ async fn benchmark_convert_handler(
     headers: HeaderMap,
     Json(body): Json<BenchmarkConversionRequest>,
 ) -> ApiResult<Json<TraceBenchmarkConversionArtifact>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_benchmarker(&tenant)?;
     run_benchmark_conversion(state.as_ref(), &tenant, body).await
 }
@@ -6300,7 +6292,7 @@ async fn benchmark_worker_convert_handler(
     headers: HeaderMap,
     Json(body): Json<BenchmarkConversionRequest>,
 ) -> ApiResult<Json<TraceBenchmarkConversionArtifact>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_benchmarker(&tenant)?;
     run_benchmark_conversion(state.as_ref(), &tenant, body).await
 }
@@ -6311,7 +6303,7 @@ async fn benchmark_lifecycle_handler(
     AxumPath(conversion_id): AxumPath<Uuid>,
     Json(body): Json<BenchmarkLifecycleUpdateRequest>,
 ) -> ApiResult<Json<TraceBenchmarkConversionArtifact>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_benchmarker(&tenant)?;
     update_benchmark_lifecycle(state.as_ref(), &tenant, conversion_id, body).await
 }
@@ -6789,7 +6781,7 @@ async fn ranker_training_candidates_handler(
     headers: HeaderMap,
     Query(query): Query<RankerTrainingExportQuery>,
 ) -> ApiResult<Json<TraceRankerTrainingCandidateExport>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_exporter(&tenant)?;
     let now = Utc::now();
     let purpose = normalized_export_purpose(
@@ -6829,7 +6821,7 @@ async fn run_worker_ranker_training_candidates_export(
     headers: HeaderMap,
     query: RankerTrainingExportQuery,
 ) -> ApiResult<Json<TraceRankerTrainingCandidateExport>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_exporter(&tenant)?;
     let now = Utc::now();
     let purpose = normalized_export_purpose(
@@ -7115,7 +7107,7 @@ async fn ranker_training_pairs_handler(
     headers: HeaderMap,
     Query(query): Query<RankerTrainingExportQuery>,
 ) -> ApiResult<Json<TraceRankerTrainingPairExport>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_exporter(&tenant)?;
     let now = Utc::now();
     let purpose =
@@ -7152,7 +7144,7 @@ async fn run_worker_ranker_training_pairs_export(
     headers: HeaderMap,
     query: RankerTrainingExportQuery,
 ) -> ApiResult<Json<TraceRankerTrainingPairExport>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_exporter(&tenant)?;
     let now = Utc::now();
     let purpose = normalized_export_purpose(
@@ -7449,7 +7441,7 @@ async fn active_learning_review_queue_handler(
     headers: HeaderMap,
     Query(query): Query<ActiveLearningQueueQuery>,
 ) -> ApiResult<Json<TraceActiveLearningReviewQueue>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_reviewer(&tenant)?;
     let TraceCommonsMetadataView { records, derived } =
         read_reviewer_metadata_view(state.as_ref(), &tenant)
@@ -7574,7 +7566,7 @@ async fn maintenance_handler(
     headers: HeaderMap,
     Json(body): Json<TraceMaintenanceRequest>,
 ) -> ApiResult<Json<TraceMaintenanceResponse>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_maintenance_operator(&tenant, &body)?;
     require_purge_purpose(
         body.dry_run,
@@ -7611,7 +7603,7 @@ async fn retention_maintenance_handler(
     headers: HeaderMap,
     Json(body): Json<TraceRetentionMaintenanceRequest>,
 ) -> ApiResult<Json<TraceMaintenanceResponse>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_retention_operator(&tenant)?;
     require_purge_purpose(
         body.dry_run,
@@ -7726,7 +7718,7 @@ async fn vector_index_handler(
     headers: HeaderMap,
     Json(body): Json<TraceVectorIndexRequest>,
 ) -> ApiResult<Json<TraceMaintenanceResponse>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_vector_operator(&tenant)?;
     let vector_tenant_policy = tenant_vector_policy_for_request(state.as_ref(), &tenant).await?;
     let response = run_maintenance(
@@ -7763,7 +7755,7 @@ async fn audit_events_handler(
     headers: HeaderMap,
     Query(query): Query<AuditEventsQuery>,
 ) -> ApiResult<Json<Vec<TraceCommonsAuditEvent>>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_reviewer(&tenant)?;
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
     let events: Vec<_> = read_audit_events(state.as_ref(), &tenant)
@@ -9283,6 +9275,20 @@ fn authenticate(state: &AppState, headers: &HeaderMap) -> ApiResult<TenantAuth> 
 
 fn authenticate_ctx(state: &AppState, headers: &HeaderMap) -> ApiResult<TenantCtx> {
     authenticate(state, headers).map(TenantCtx::from_auth)
+}
+
+async fn authenticate_with_tenant_access_grant(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> ApiResult<TenantAuth> {
+    authorize_tenant_access_grant(state, authenticate(state, headers)?).await
+}
+
+async fn authenticate_ctx_with_tenant_access_grant(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> ApiResult<TenantCtx> {
+    authorize_tenant_access_grant_ctx(state, authenticate_ctx(state, headers)?).await
 }
 
 fn require_reviewer(auth: &TenantAuth) -> ApiResult<()> {
@@ -19812,6 +19818,59 @@ mod tests {
         headers
     }
 
+    #[cfg(feature = "libsql")]
+    async fn upsert_test_tenant_access_grant(
+        db: &dyn Database,
+        tenant_id: &str,
+        token: &str,
+        role: StorageTraceTenantAccessGrantRole,
+    ) -> Uuid {
+        upsert_test_tenant_access_grant_status(
+            db,
+            tenant_id,
+            token,
+            role,
+            Uuid::new_v4(),
+            StorageTraceTenantAccessGrantStatus::Active,
+        )
+        .await
+    }
+
+    #[cfg(feature = "libsql")]
+    async fn upsert_test_tenant_access_grant_status(
+        db: &dyn Database,
+        tenant_id: &str,
+        token: &str,
+        role: StorageTraceTenantAccessGrantRole,
+        grant_id: Uuid,
+        status: StorageTraceTenantAccessGrantStatus,
+    ) -> Uuid {
+        let now = Utc::now();
+        db.upsert_trace_tenant_access_grant(StorageTraceTenantAccessGrantWrite {
+            tenant_id: tenant_id.to_string(),
+            grant_id,
+            principal_ref: principal_storage_ref(token),
+            role,
+            status,
+            allowed_consent_scopes: Vec::new(),
+            allowed_uses: Vec::new(),
+            issuer: Some("https://issuer.near.com".to_string()),
+            audience: Some("trace-commons".to_string()),
+            subject: Some(format!("{tenant_id}-{token}-agent")),
+            issued_at: now - Duration::minutes(5),
+            expires_at: Some(now + Duration::minutes(30)),
+            revoked_at: (status == StorageTraceTenantAccessGrantStatus::Revoked).then_some(now),
+            created_by_principal_ref: Some("issuer:near.com".to_string()),
+            revoked_by_principal_ref: (status == StorageTraceTenantAccessGrantStatus::Revoked)
+                .then(|| "issuer:near.com".to_string()),
+            reason: Some(format!("test {status:?} tenant access grant")),
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("test tenant access grant writes");
+        grant_id
+    }
+
     fn test_reviewer_auth(tenant_id: &str) -> TenantAuth {
         TenantAuth {
             tenant_id: tenant_id.to_string(),
@@ -21827,6 +21886,191 @@ mod tests {
                     if action == "revoked"
             )
         }));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn tenant_access_grants_gate_privileged_routes() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-tenant-access-privileged.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let mut state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        Arc::make_mut(&mut state).require_tenant_access_grants = true;
+
+        let missing_reviewer_error =
+            analytics_handler(State(state.clone()), auth_headers("review-token-a"))
+                .await
+                .expect_err("reviewer reads require active tenant access grants");
+        assert_eq!(missing_reviewer_error.0, StatusCode::FORBIDDEN);
+        let missing_audit_error = audit_events_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(AuditEventsQuery { limit: Some(10) }),
+        )
+        .await
+        .expect_err("audit reads require active tenant access grants");
+        assert_eq!(missing_audit_error.0, StatusCode::FORBIDDEN);
+        let missing_export_error = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("missing_grant_replay".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect_err("export routes require active tenant access grants");
+        assert_eq!(missing_export_error.0, StatusCode::FORBIDDEN);
+        let missing_worker_error = utility_credit_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceUtilityCreditJobRequest {
+                event_type: TraceCreditLedgerEventType::RegressionCatch,
+                credit_points_delta: 1.0,
+                reason: "missing grant should fail before body validation".to_string(),
+                external_ref: "regression-job:missing-grant".to_string(),
+                submission_ids: Vec::new(),
+            }),
+        )
+        .await
+        .expect_err("worker mutation routes require active tenant access grants");
+        assert_eq!(missing_worker_error.0, StatusCode::FORBIDDEN);
+        let missing_admin_observability_error = export_jobs_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Query(ExportJobsQuery {
+                limit: Some(10),
+                status: None,
+                dataset_kind: None,
+            }),
+        )
+        .await
+        .expect_err("admin observability routes require active tenant access grants");
+        assert_eq!(missing_admin_observability_error.0, StatusCode::FORBIDDEN);
+
+        let _ = config_status_handler(State(state.clone()), auth_headers("admin-token-a"))
+            .await
+            .expect("config status remains available for grant recovery");
+        let Json(open_grant_list) = tenant_access_grants_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Query(TraceTenantAccessGrantsQuery {
+                limit: Some(10),
+                status: None,
+                role: None,
+                principal_ref: None,
+            }),
+        )
+        .await
+        .expect("grant management remains available for grant recovery");
+        assert!(open_grant_list.is_empty());
+
+        let reviewer_grant_id = upsert_test_tenant_access_grant(
+            db.as_ref(),
+            "tenant-a",
+            "review-token-a",
+            StorageTraceTenantAccessGrantRole::Reviewer,
+        )
+        .await;
+        upsert_test_tenant_access_grant(
+            db.as_ref(),
+            "tenant-a",
+            "export-worker-token-a",
+            StorageTraceTenantAccessGrantRole::ExportWorker,
+        )
+        .await;
+        upsert_test_tenant_access_grant(
+            db.as_ref(),
+            "tenant-a",
+            "utility-worker-token-a",
+            StorageTraceTenantAccessGrantRole::UtilityWorker,
+        )
+        .await;
+        upsert_test_tenant_access_grant(
+            db.as_ref(),
+            "tenant-a",
+            "admin-token-a",
+            StorageTraceTenantAccessGrantRole::Admin,
+        )
+        .await;
+
+        let _ = analytics_handler(State(state.clone()), auth_headers("review-token-a"))
+            .await
+            .expect("active reviewer grant authorizes reviewer reads");
+        let _ = audit_events_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(AuditEventsQuery { limit: Some(10) }),
+        )
+        .await
+        .expect("active reviewer grant authorizes audit reads");
+        let _ = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("active_grant_replay".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("active export-worker grant authorizes export routes");
+        let active_worker_error = utility_credit_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceUtilityCreditJobRequest {
+                event_type: TraceCreditLedgerEventType::RegressionCatch,
+                credit_points_delta: 1.0,
+                reason: "active grant should reach body validation".to_string(),
+                external_ref: "regression-job:active-grant".to_string(),
+                submission_ids: Vec::new(),
+            }),
+        )
+        .await
+        .expect_err("active worker grant reaches request validation");
+        assert_eq!(active_worker_error.0, StatusCode::BAD_REQUEST);
+        let _ = export_jobs_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Query(ExportJobsQuery {
+                limit: Some(10),
+                status: None,
+                dataset_kind: None,
+            }),
+        )
+        .await
+        .expect("active admin grant authorizes admin observability");
+
+        upsert_test_tenant_access_grant_status(
+            db.as_ref(),
+            "tenant-a",
+            "review-token-a",
+            StorageTraceTenantAccessGrantRole::Reviewer,
+            reviewer_grant_id,
+            StorageTraceTenantAccessGrantStatus::Revoked,
+        )
+        .await;
+        let revoked_reviewer_error =
+            analytics_handler(State(state), auth_headers("review-token-a"))
+                .await
+                .expect_err("revoked reviewer grant no longer authorizes reviewer reads");
+        assert_eq!(revoked_reviewer_error.0, StatusCode::FORBIDDEN);
     }
 
     #[cfg(feature = "libsql")]
