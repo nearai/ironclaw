@@ -2,6 +2,46 @@
 
 This roadmap coordinates the multiphase path from the current Trace Commons MVP to a production-ready private corpus. It is a planning companion to `docs/internal/trace-commons.md` and `docs/internal/trace-commons-storage.md`; those documents remain authoritative for the envelope rules, threat model, API surface, storage schema, and migration details.
 
+## Production Gap Queue
+
+These are the next independent production slices that can be staffed in parallel. Each slice should land behind flags where it changes serving behavior and must add caller-level tenant-scope tests before promotion.
+
+### Auth and Keying
+
+- [ ] Finish issuer-managed EdDSA/Ed25519 signed upload-claim verification, including `kid` rotation, issuer/audience/JTI/TTL policy, safe config-status counts, and rejection of every non-EdDSA asymmetric algorithm.
+- [ ] Promote auth-derived `TenantCtx` into every ingest, review, export, worker, maintenance, and contributor-status path so envelope tenant fields remain attribution only.
+- [ ] Harden PostgreSQL tenant isolation with production roles, transaction-local tenant context coverage, RLS/forced-RLS decisions, and same-id cross-tenant tests; keep libSQL predicate tests in parallel.
+
+### Autonomous Client
+
+- [ ] Turn opted-in post-turn capture into a durable background worker with retry/backoff, idempotency, queue compaction, network-offline handling, and no held files for traces disallowed by standing policy.
+- [ ] Add periodic contributor credit notices across CLI/web/runtime that summarize accepted, quarantined, rejected, revoked, and delayed-credit deltas without exposing trace bodies or central corpus rows.
+- [ ] Add local operator diagnostics for queue health, last successful flush, last status sync, held-reason counts, and policy/version mismatch warnings.
+
+### Ingestion Storage
+
+- [ ] Promote DB/object-primary submit, review, replay, benchmark, and ranker paths from pilot flags to per-tenant rollout flags after reconciliation parity is green.
+- [ ] Replace service-local encrypted artifact storage with a service-owned object-store provider abstraction, KMS/key-ref strategy, tenant-hashed object keys, hash/decrypt verification, and migration/backfill tooling.
+- [ ] Add PostgreSQL integration coverage matching the current libSQL `TraceCorpusStore` slices for submissions, object refs, derived records, vectors, audit, credit, retention jobs, export manifests/items, policies, and tombstones.
+
+### Review and Governance
+
+- [ ] Extend review leases into a fuller assignment/escalation workflow with SLA filters, batch actions, privacy-review reasons, and retention/revocation blocks before decision finalization.
+- [ ] Complete privileged-action ABAC for review override, delayed credit, export, process evaluation, utility credit, purge, and tombstone changes using tenant policy plus signed-claim allowed scopes/uses.
+- [ ] Make audit append/read paths production-grade: DB-primary hash-chain verification, per-source content-read rows, reason enforcement, sampled reconciliation, and no broad corpus download path.
+
+### Datasets
+
+- [ ] Replace deterministic vector similarity with a private embedding worker that reads only approved redacted projections, writes tenant-scoped vector metadata, and invalidates entries on revocation/retention.
+- [ ] Promote benchmark conversion and ranker training exports into durable worker jobs with source-list hashes, artifact object refs, lifecycle state, replayability checks, and idempotent delayed utility credit.
+- [ ] Add export governance for replay, benchmark, ranker, and training slices: explicit purpose, consent/use filters, item caps, source object refs, manifest invalidation, and time-limited controlled job access.
+
+### Observability
+
+- [ ] Add operational dashboards or API summaries for queue throughput, accept/quarantine/reject rates, redaction risk, review SLA, export volume, retention jobs, vector coverage, and delayed credit settlement.
+- [ ] Emit structured metrics/logs for every promotion gate: DB/file parity, object-ref readability/hash failures, RLS/predicate denials, signed-claim failures, worker skips, and revoked-source invalidations.
+- [ ] Build runbooks and smoke checks for per-tenant rollout, rollback, key rotation, object-store migration, retention purge dry runs, and audit-chain verification.
+
 ## Current Gecko-Pass Status
 
 As of the `gecko-pass` branch, Trace Commons has moved beyond the local-only MVP into a dark-launch production-storage bridge:

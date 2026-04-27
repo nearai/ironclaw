@@ -18,8 +18,8 @@ use crate::trace_contribution::{
     ResidualPiiRisk, StandingTraceContributionPolicy, TraceChannel, TraceContributionAcceptance,
     TraceContributionEnvelope, TraceCreditEvent, TraceCreditEventKind, TraceRedactor,
     TraceSubmissionStatusUpdate, estimate_initial_credit, fetch_trace_submission_statuses,
-    preflight_trace_contribution_policy, privacy_filter_adapter_from_env,
-    trace_submission_status_endpoint,
+    mark_trace_credit_notice_due_for_scope, preflight_trace_contribution_policy,
+    privacy_filter_adapter_from_env, trace_submission_status_endpoint,
 };
 
 #[derive(Subcommand, Debug, Clone)]
@@ -131,6 +131,14 @@ pub enum TracesCommand {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+
+        /// Print and mark a due periodic credit notice instead of the full credit report
+        #[arg(long)]
+        notice: bool,
+
+        /// Local tenant/user trace scope to check for a due periodic notice
+        #[arg(long, requires = "notice")]
+        notice_scope: Option<String>,
     },
 
     /// Submit an already-previewed redacted contribution envelope
@@ -1456,7 +1464,11 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
             Ok(())
         }
         TracesCommand::FlushQueue { limit } => flush_queue(limit).await,
-        TracesCommand::Credit { json } => show_credit(json).await,
+        TracesCommand::Credit {
+            json,
+            notice,
+            notice_scope,
+        } => show_credit(json, notice, notice_scope.as_deref()).await,
         TracesCommand::Submit {
             envelope,
             endpoint,
@@ -4807,7 +4819,11 @@ async fn list_submissions(json: bool, summary: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn show_credit(json: bool) -> anyhow::Result<()> {
+async fn show_credit(json: bool, notice: bool, notice_scope: Option<&str>) -> anyhow::Result<()> {
+    if notice {
+        return show_credit_notice(json, notice_scope);
+    }
+
     let policy = read_policy()?;
     if let Err(error) = sync_cli_submission_records(&policy).await {
         eprintln!("Warning: failed to sync remote trace credit status: {error}");
@@ -4824,6 +4840,29 @@ async fn show_credit(json: bool) -> anyhow::Result<()> {
 
     println!("Trace contribution credit:");
     print_credit_summary_fields(&summary, "  ");
+    Ok(())
+}
+
+fn show_credit_notice(json: bool, scope: Option<&str>) -> anyhow::Result<()> {
+    let notice = mark_trace_credit_notice_due_for_scope(scope)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&notice)
+                .map_err(|e| anyhow::anyhow!("failed to serialize credit notice: {}", e))?
+        );
+        return Ok(());
+    }
+
+    let Some(summary) = notice else {
+        println!("No trace contribution credit notice due.");
+        return Ok(());
+    };
+
+    println!("{}", credit_notice_message(&summary));
+    for explanation in summary.recent_explanations.iter().take(3) {
+        println!("  - {explanation}");
+    }
     Ok(())
 }
 
@@ -5387,6 +5426,31 @@ mod tests {
 
         assert!(!json);
         assert!(summary);
+    }
+
+    #[test]
+    fn credit_notice_flags_parse_through_cli() {
+        let cli = parse_cli([
+            "ironclaw",
+            "traces",
+            "credit",
+            "--notice",
+            "--notice-scope",
+            "tenant-a:user-alice",
+        ]);
+
+        let TracesCommand::Credit {
+            json,
+            notice,
+            notice_scope,
+        } = unwrap_traces_command(cli)
+        else {
+            panic!("expected traces credit command");
+        };
+
+        assert!(!json);
+        assert!(notice);
+        assert_eq!(notice_scope.as_deref(), Some("tenant-a:user-alice"));
     }
 
     #[test]

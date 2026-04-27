@@ -97,6 +97,12 @@ const DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: usize = 500;
 const TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT: &str = "TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT";
 const TRACE_COMMONS_SIGNED_TOKEN_SECRET: &str = "TRACE_COMMONS_SIGNED_TOKEN_SECRET";
 const TRACE_COMMONS_SIGNED_TOKEN_SECRETS: &str = "TRACE_COMMONS_SIGNED_TOKEN_SECRETS";
+const TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_PEM: &str =
+    "TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_PEM";
+const TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_FILE: &str =
+    "TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_FILE";
+const TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_FILES: &str =
+    "TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_FILES";
 const TRACE_COMMONS_SIGNED_TOKEN_ISSUER: &str = "TRACE_COMMONS_SIGNED_TOKEN_ISSUER";
 const TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE: &str = "TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE";
 const TRACE_COMMONS_SIGNED_TOKEN_REVOKED_JTIS: &str = "TRACE_COMMONS_SIGNED_TOKEN_REVOKED_JTIS";
@@ -317,11 +323,18 @@ impl TraceAuthMethod {
 struct TraceCommonsSignedTokenVerifier {
     default_secret: Option<SecretString>,
     keyed_secrets: BTreeMap<String, SecretString>,
+    default_eddsa_public_key: Option<TraceCommonsSignedEddsaPublicKey>,
+    keyed_eddsa_public_keys: BTreeMap<String, TraceCommonsSignedEddsaPublicKey>,
     issuer: Option<String>,
     audience: Option<String>,
     revoked_jtis: BTreeSet<String>,
     max_ttl_seconds: Option<i64>,
     require_jti: bool,
+}
+
+#[derive(Clone)]
+struct TraceCommonsSignedEddsaPublicKey {
+    pem: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -974,14 +987,28 @@ fn trace_commons_signed_token_verifier_from_env()
         }
     };
     let keyed_secrets = parse_signed_token_keyed_secrets_from_env()?;
+    let default_eddsa_public_key = parse_signed_token_default_eddsa_public_key_from_env()?;
+    let keyed_eddsa_public_keys = parse_signed_token_keyed_eddsa_public_key_files_from_env()?;
+    for kid in keyed_secrets.keys() {
+        anyhow::ensure!(
+            !keyed_eddsa_public_keys.contains_key(kid),
+            "signed tenant token key id {kid} is configured for both HMAC and EdDSA"
+        );
+    }
 
-    if default_secret.is_none() && keyed_secrets.is_empty() {
+    if default_secret.is_none()
+        && keyed_secrets.is_empty()
+        && default_eddsa_public_key.is_none()
+        && keyed_eddsa_public_keys.is_empty()
+    {
         return Ok(None);
     }
 
     Ok(Some(TraceCommonsSignedTokenVerifier {
         default_secret,
         keyed_secrets,
+        default_eddsa_public_key,
+        keyed_eddsa_public_keys,
         issuer: optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_ISSUER)?,
         audience: optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE)?,
         revoked_jtis: parse_signed_token_revoked_jtis_from_env()?,
@@ -1019,6 +1046,75 @@ fn parse_signed_token_keyed_secrets_from_env() -> anyhow::Result<BTreeMap<String
         secrets.insert(kid.to_string(), SecretString::from(secret.to_string()));
     }
     Ok(secrets)
+}
+
+fn parse_signed_token_default_eddsa_public_key_from_env()
+-> anyhow::Result<Option<TraceCommonsSignedEddsaPublicKey>> {
+    let inline = optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_PEM)?;
+    let file = optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_FILE)?;
+    match (inline, file) {
+        (Some(_), Some(_)) => anyhow::bail!(
+            "{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_PEM} and {TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_FILE} cannot both be configured"
+        ),
+        (Some(pem), None) => Ok(Some(TraceCommonsSignedEddsaPublicKey { pem })),
+        (None, Some(path)) => Ok(Some(TraceCommonsSignedEddsaPublicKey {
+            pem: read_eddsa_public_key_file(&path)?,
+        })),
+        (None, None) => Ok(None),
+    }
+}
+
+fn parse_signed_token_keyed_eddsa_public_key_files_from_env()
+-> anyhow::Result<BTreeMap<String, TraceCommonsSignedEddsaPublicKey>> {
+    let configured = match std::env::var(TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_FILES) {
+        Ok(configured) => configured,
+        Err(std::env::VarError::NotPresent) => return Ok(BTreeMap::new()),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to read {TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_FILES}")
+            });
+        }
+    };
+    let mut keys = BTreeMap::new();
+    for entry in configured.split(',').map(str::trim) {
+        if entry.is_empty() {
+            continue;
+        }
+        let Some((kid, path)) = entry.split_once(':') else {
+            anyhow::bail!(
+                "{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_FILES} entries must use kid:path syntax"
+            );
+        };
+        let kid = kid.trim();
+        let path = path.trim();
+        if kid.is_empty() || path.is_empty() {
+            anyhow::bail!(
+                "{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_FILES} entries must include non-empty kid and path"
+            );
+        }
+        if keys
+            .insert(
+                kid.to_string(),
+                TraceCommonsSignedEddsaPublicKey {
+                    pem: read_eddsa_public_key_file(path)?,
+                },
+            )
+            .is_some()
+        {
+            anyhow::bail!(
+                "{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_FILES} contains duplicate kid {kid}"
+            );
+        }
+    }
+    Ok(keys)
+}
+
+fn read_eddsa_public_key_file(path: &str) -> anyhow::Result<String> {
+    let pem = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read EdDSA public key file {path}"))?;
+    let pem = pem.trim();
+    anyhow::ensure!(!pem.is_empty(), "EdDSA public key file {path} is empty");
+    Ok(pem.to_string())
 }
 
 fn parse_signed_token_revoked_jtis_from_env() -> anyhow::Result<BTreeSet<String>> {
@@ -1077,13 +1173,8 @@ impl TraceCommonsSignedTokenVerifier {
     fn authenticate(&self, token: &str) -> ApiResult<TenantAuth> {
         let header = jsonwebtoken::decode_header(token)
             .map_err(|_| api_error(StatusCode::FORBIDDEN, "invalid signed tenant token"))?;
-        let Some(secret) = self.secret_for_kid(header.kid.as_deref()) else {
-            return Err(api_error(
-                StatusCode::FORBIDDEN,
-                "invalid signed tenant token",
-            ));
-        };
-        let mut validation = Validation::new(Algorithm::HS256);
+        let (algorithm, decoding_key) = self.verification_key_for_header(&header)?;
+        let mut validation = Validation::new(algorithm);
         validation.validate_nbf = true;
         let mut required_claims = vec!["exp".to_string(), "tenant_id".to_string()];
         if let Some(issuer) = &self.issuer {
@@ -1100,7 +1191,7 @@ impl TraceCommonsSignedTokenVerifier {
 
         let token_data = jsonwebtoken::decode::<TraceCommonsSignedTokenClaims>(
             token,
-            &DecodingKey::from_secret(secret.expose_secret().as_bytes()),
+            &decoding_key,
             &validation,
         )
         .map_err(|error| {
@@ -1141,6 +1232,41 @@ impl TraceCommonsSignedTokenVerifier {
         signed_token_claims_to_auth(claims)
     }
 
+    fn verification_key_for_header(
+        &self,
+        header: &jsonwebtoken::Header,
+    ) -> ApiResult<(Algorithm, DecodingKey)> {
+        match header.alg {
+            Algorithm::HS256 => {
+                let Some(secret) = self.secret_for_kid(header.kid.as_deref()) else {
+                    return Err(api_error(
+                        StatusCode::FORBIDDEN,
+                        "invalid signed tenant token",
+                    ));
+                };
+                Ok((
+                    Algorithm::HS256,
+                    DecodingKey::from_secret(secret.expose_secret().as_bytes()),
+                ))
+            }
+            Algorithm::EdDSA => {
+                let Some(public_key) = self.eddsa_public_key_for_kid(header.kid.as_deref()) else {
+                    return Err(api_error(
+                        StatusCode::FORBIDDEN,
+                        "invalid signed tenant token",
+                    ));
+                };
+                let decoding_key = DecodingKey::from_ed_pem(public_key.pem.as_bytes())
+                    .map_err(|_| api_error(StatusCode::FORBIDDEN, "invalid signed tenant token"))?;
+                Ok((Algorithm::EdDSA, decoding_key))
+            }
+            _ => Err(api_error(
+                StatusCode::FORBIDDEN,
+                "unsupported signed tenant token algorithm",
+            )),
+        }
+    }
+
     fn enforce_max_ttl(&self, claims: &TraceCommonsSignedTokenClaims) -> ApiResult<()> {
         let Some(max_ttl_seconds) = self.max_ttl_seconds else {
             return Ok(());
@@ -1176,8 +1302,24 @@ impl TraceCommonsSignedTokenVerifier {
         }
     }
 
+    fn eddsa_public_key_for_kid(
+        &self,
+        kid: Option<&str>,
+    ) -> Option<&TraceCommonsSignedEddsaPublicKey> {
+        match kid.map(str::trim).filter(|kid| !kid.is_empty()) {
+            Some(kid) => self.keyed_eddsa_public_keys.get(kid),
+            None => self.default_eddsa_public_key.as_ref(),
+        }
+    }
+
     fn configured_key_count(&self) -> usize {
-        usize::from(self.default_secret.is_some()) + self.keyed_secrets.len()
+        usize::from(self.default_secret.is_some())
+            + self.keyed_secrets.len()
+            + self.configured_eddsa_key_count()
+    }
+
+    fn configured_eddsa_key_count(&self) -> usize {
+        usize::from(self.default_eddsa_public_key.is_some()) + self.keyed_eddsa_public_keys.len()
     }
 }
 
@@ -1409,6 +1551,7 @@ struct TraceCommonsConfigStatusResponse {
     db_mirror_configured: bool,
     signed_token_auth_enabled: bool,
     signed_token_key_count: usize,
+    signed_token_eddsa_key_count: usize,
     signed_token_issuer_configured: bool,
     signed_token_audience_configured: bool,
     signed_token_revoked_jti_count: usize,
@@ -1446,6 +1589,10 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .signed_token_verifier
             .as_ref()
             .map_or(0, TraceCommonsSignedTokenVerifier::configured_key_count),
+        signed_token_eddsa_key_count: state.signed_token_verifier.as_ref().map_or(
+            0,
+            TraceCommonsSignedTokenVerifier::configured_eddsa_key_count,
+        ),
         signed_token_issuer_configured: state
             .signed_token_verifier
             .as_ref()
@@ -14702,8 +14849,31 @@ mod tests {
         Arc::make_mut(&mut state).signed_token_verifier = Some(TraceCommonsSignedTokenVerifier {
             default_secret: Some(SecretString::from(secret.to_string())),
             keyed_secrets: BTreeMap::new(),
+            default_eddsa_public_key: None,
+            keyed_eddsa_public_keys: BTreeMap::new(),
             issuer: issuer.map(str::to_string),
             audience: audience.map(str::to_string),
+            revoked_jtis: BTreeSet::new(),
+            max_ttl_seconds: None,
+            require_jti: false,
+        });
+        state
+    }
+
+    const TEST_EDDSA_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIAGfN68ko7YyCGJMb3lHVwTn5aiUtbIsAclIx/lX0p2R\n-----END PRIVATE KEY-----\n";
+    const TEST_EDDSA_PUBLIC_KEY_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAMnniSMeHZrdoe3gkL7ZeHmG7vAg65c5TqaBd71B2qDw=\n-----END PUBLIC KEY-----\n";
+
+    fn test_state_with_eddsa_signed_token_verifier(root: PathBuf) -> Arc<AppState> {
+        let mut state = test_state_with_tokens(root, BTreeMap::new());
+        Arc::make_mut(&mut state).signed_token_verifier = Some(TraceCommonsSignedTokenVerifier {
+            default_secret: None,
+            keyed_secrets: BTreeMap::new(),
+            default_eddsa_public_key: Some(TraceCommonsSignedEddsaPublicKey {
+                pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
+            }),
+            keyed_eddsa_public_keys: BTreeMap::new(),
+            issuer: None,
+            audience: None,
             revoked_jtis: BTreeSet::new(),
             max_ttl_seconds: None,
             require_jti: false,
@@ -14728,6 +14898,22 @@ mod tests {
             &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
         )
         .expect("signed tenant token encodes")
+    }
+
+    fn eddsa_signed_tenant_token(claims: serde_json::Value) -> String {
+        eddsa_signed_tenant_token_with_kid(None, claims)
+    }
+
+    fn eddsa_signed_tenant_token_with_kid(kid: Option<&str>, claims: serde_json::Value) -> String {
+        let mut header = jsonwebtoken::Header::new(Algorithm::EdDSA);
+        header.kid = kid.map(str::to_string);
+        jsonwebtoken::encode(
+            &header,
+            &claims,
+            &jsonwebtoken::EncodingKey::from_ed_pem(TEST_EDDSA_PRIVATE_KEY_PEM.as_bytes())
+                .expect("test EdDSA key parses"),
+        )
+        .expect("EdDSA signed tenant token encodes")
     }
 
     fn test_state_with_required_db_mirror_writes(
@@ -16095,6 +16281,8 @@ mod tests {
                 "config-key-1".to_string(),
                 SecretString::from("config-status-keyed-secret".to_string()),
             )]),
+            default_eddsa_public_key: None,
+            keyed_eddsa_public_keys: BTreeMap::new(),
             issuer: Some("config-status-issuer".to_string()),
             audience: Some("config-status-audience".to_string()),
             revoked_jtis: BTreeSet::from(["revoked-config-jti".to_string()]),
@@ -16138,6 +16326,7 @@ mod tests {
         assert_eq!(value["db_mirror_configured"], serde_json::json!(false));
         assert_eq!(value["signed_token_auth_enabled"], serde_json::json!(true));
         assert_eq!(value["signed_token_key_count"], serde_json::json!(2));
+        assert_eq!(value["signed_token_eddsa_key_count"], serde_json::json!(0));
         assert_eq!(
             value["signed_token_issuer_configured"],
             serde_json::json!(true)
@@ -16186,6 +16375,9 @@ mod tests {
             "signed_token_secret",
             "signed_token_secrets",
             "signed_token_key_ids",
+            "signed_token_eddsa_public_key_pem",
+            "signed_token_eddsa_public_key_file",
+            "signed_token_eddsa_public_key_files",
             "signed_token_issuer",
             "signed_token_audience",
             "signed_token_revoked_jtis",
@@ -28606,6 +28798,99 @@ mod tests {
                 && event.actor_role == Some(TokenRole::Contributor)
                 && event.reason.as_deref() == Some("auth_method=signed_claim")
         }));
+    }
+
+    #[tokio::test]
+    async fn accepts_eddsa_signed_tenant_token_and_attributes_to_claim_tenant() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state_with_eddsa_signed_token_verifier(temp.path().to_path_buf());
+        let token = eddsa_signed_tenant_token(serde_json::json!({
+            "tenant_id": "tenant-b",
+            "role": "contributor",
+            "sub": "actor-eddsa",
+            "allowed_consent_scopes": ["debugging_evaluation"],
+            "allowed_uses": ["debugging", "evaluation", "aggregate_analytics"],
+            "exp": (Utc::now() + Duration::minutes(5)).timestamp()
+        }));
+        let envelope = sample_envelope().await;
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+            .await
+            .expect("EdDSA signed tenant token is accepted");
+
+        assert!(
+            read_submission_record(temp.path(), "tenant-a", submission_id)
+                .expect("tenant-a metadata read")
+                .is_none()
+        );
+        let record = read_submission_record(temp.path(), "tenant-b", submission_id)
+            .expect("tenant-b metadata read")
+            .expect("tenant-b record exists");
+        assert_eq!(record.tenant_id, "tenant-b");
+        assert_eq!(
+            record.auth_principal_ref,
+            principal_storage_ref("signed:tenant-b:actor-eddsa")
+        );
+    }
+
+    #[tokio::test]
+    async fn accepts_keyed_eddsa_signed_tenant_token_for_rotation() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state_with_tokens(temp.path().to_path_buf(), BTreeMap::new());
+        Arc::make_mut(&mut state).signed_token_verifier = Some(TraceCommonsSignedTokenVerifier {
+            default_secret: None,
+            keyed_secrets: BTreeMap::new(),
+            default_eddsa_public_key: None,
+            keyed_eddsa_public_keys: BTreeMap::from([(
+                "trace-eddsa-key-1".to_string(),
+                TraceCommonsSignedEddsaPublicKey {
+                    pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
+                },
+            )]),
+            issuer: None,
+            audience: None,
+            revoked_jtis: BTreeSet::new(),
+            max_ttl_seconds: None,
+            require_jti: false,
+        });
+        let token = eddsa_signed_tenant_token_with_kid(
+            Some("trace-eddsa-key-1"),
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "contributor",
+                "sub": "actor-eddsa-rotated",
+                "exp": (Utc::now() + Duration::minutes(5)).timestamp()
+            }),
+        );
+        let envelope = sample_envelope().await;
+
+        let _ = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+            .await
+            .expect("keyed EdDSA signed tenant token is accepted");
+    }
+
+    #[tokio::test]
+    async fn rejects_hs256_signed_token_when_only_eddsa_key_is_configured() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state_with_eddsa_signed_token_verifier(temp.path().to_path_buf());
+        let token = signed_tenant_token(
+            "signed-secret",
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "contributor",
+                "sub": "actor-hs-confused",
+                "exp": (Utc::now() + Duration::minutes(5)).timestamp()
+            }),
+        );
+        let envelope = sample_envelope().await;
+
+        let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+            .await
+            .expect_err("HS256 token cannot use EdDSA verifier");
+
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert_eq!(error.1.0.error, "invalid signed tenant token");
     }
 
     #[tokio::test]

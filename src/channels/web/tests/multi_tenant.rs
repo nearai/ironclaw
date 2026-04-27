@@ -1339,6 +1339,162 @@ mod trace_contribution_isolation {
     }
 
     #[tokio::test]
+    async fn test_trace_preview_enqueue_attribution_and_queue_are_authenticated_user_scoped() {
+        let (db, _dir) = test_db().await;
+        let alice_user_id = format!("alice-{}", Uuid::new_v4());
+        let bob_user_id = format!("bob-{}", Uuid::new_v4());
+        remove_trace_state(&alice_user_id);
+        remove_trace_state(&bob_user_id);
+        enable_trace_policy(&alice_user_id);
+        enable_trace_policy(&bob_user_id);
+
+        let alice_thread = db
+            .create_conversation("gateway", &alice_user_id, None)
+            .await
+            .expect("create alice conversation");
+        db.add_conversation_message(alice_thread, "user", "Queue alice trace")
+            .await
+            .expect("add alice user message");
+        db.add_conversation_message(alice_thread, "assistant", "Alice trace queued.")
+            .await
+            .expect("add alice assistant message");
+
+        let bob_thread = db
+            .create_conversation("gateway", &bob_user_id, None)
+            .await
+            .expect("create bob conversation");
+        db.add_conversation_message(bob_thread, "user", "Queue bob trace")
+            .await
+            .expect("add bob user message");
+        db.add_conversation_message(bob_thread, "assistant", "Bob trace queued.")
+            .await
+            .expect("add bob assistant message");
+
+        let app = trace_router_with_auth(
+            build_state(Some(db), None),
+            trace_auth(alice_user_id.clone(), bob_user_id.clone()),
+        );
+        let alice_before =
+            crate::trace_contribution::queued_trace_envelope_paths_for_scope(Some(&alice_user_id))
+                .expect("read alice queue")
+                .len();
+        let bob_before =
+            crate::trace_contribution::queued_trace_envelope_paths_for_scope(Some(&bob_user_id))
+                .expect("read bob queue")
+                .len();
+
+        let alice_resp = json_request(
+            &app,
+            Method::POST,
+            "/api/traces/preview",
+            "tok-alice",
+            serde_json::json!({
+                "thread_id": alice_thread,
+                "enqueue": true
+            }),
+        )
+        .await;
+        assert_eq!(alice_resp.status(), StatusCode::OK);
+        let alice_preview = response_json(alice_resp).await;
+        assert_eq!(alice_preview["queued"], true);
+        let alice_submission_id = alice_preview["submission_id"]
+            .as_str()
+            .expect("alice submission id")
+            .to_string();
+        let alice_contributor = &alice_preview["envelope"]["contributor"];
+        let alice_contributor_id = alice_contributor["pseudonymous_contributor_id"]
+            .as_str()
+            .expect("alice contributor id");
+        let alice_tenant_ref = alice_contributor["tenant_scope_ref"]
+            .as_str()
+            .expect("alice tenant ref");
+
+        assert!(
+            alice_contributor_id.starts_with("sha256:"),
+            "preview should attribute using a pseudonymous contributor id"
+        );
+        assert!(
+            alice_tenant_ref.starts_with("tenant_sha256:"),
+            "preview should attribute using a pseudonymous tenant ref"
+        );
+        assert!(
+            !alice_preview.to_string().contains(&alice_user_id),
+            "preview response must not expose alice's raw user id"
+        );
+
+        let alice_after =
+            crate::trace_contribution::queued_trace_envelope_paths_for_scope(Some(&alice_user_id))
+                .expect("read alice queue")
+                .len();
+        let bob_after_alice_enqueue =
+            crate::trace_contribution::queued_trace_envelope_paths_for_scope(Some(&bob_user_id))
+                .expect("read bob queue")
+                .len();
+        assert_eq!(alice_after, alice_before + 1);
+        assert_eq!(bob_after_alice_enqueue, bob_before);
+
+        let alice_policy =
+            response_json(authed_get(&app, "/api/traces/policy", "tok-alice").await).await;
+        assert_eq!(alice_policy["queued_envelopes"], alice_after);
+        let bob_policy =
+            response_json(authed_get(&app, "/api/traces/policy", "tok-bob").await).await;
+        assert_eq!(bob_policy["queued_envelopes"], bob_before);
+        assert!(
+            !bob_policy.to_string().contains(&alice_submission_id),
+            "bob policy response must not expose alice queued submission ids"
+        );
+
+        let bob_resp = json_request(
+            &app,
+            Method::POST,
+            "/api/traces/preview",
+            "tok-bob",
+            serde_json::json!({
+                "thread_id": bob_thread,
+                "enqueue": true
+            }),
+        )
+        .await;
+        assert_eq!(bob_resp.status(), StatusCode::OK);
+        let bob_preview = response_json(bob_resp).await;
+        assert_eq!(bob_preview["queued"], true);
+        let bob_contributor = &bob_preview["envelope"]["contributor"];
+        let bob_contributor_id = bob_contributor["pseudonymous_contributor_id"]
+            .as_str()
+            .expect("bob contributor id");
+        let bob_tenant_ref = bob_contributor["tenant_scope_ref"]
+            .as_str()
+            .expect("bob tenant ref");
+
+        assert_ne!(
+            bob_contributor_id, alice_contributor_id,
+            "different authenticated users must receive different contributor pseudonyms"
+        );
+        assert_ne!(
+            bob_tenant_ref, alice_tenant_ref,
+            "different authenticated users must receive different tenant refs"
+        );
+        assert!(
+            !bob_preview.to_string().contains(&bob_user_id),
+            "preview response must not expose bob's raw user id"
+        );
+
+        let alice_after_bob_enqueue =
+            crate::trace_contribution::queued_trace_envelope_paths_for_scope(Some(&alice_user_id))
+                .expect("read alice queue")
+                .len();
+        let bob_after =
+            crate::trace_contribution::queued_trace_envelope_paths_for_scope(Some(&bob_user_id))
+                .expect("read bob queue")
+                .len();
+        assert_eq!(alice_after_bob_enqueue, alice_after);
+        assert_eq!(bob_after, bob_before + 1);
+
+        remove_trace_state(&alice_user_id);
+        remove_trace_state(&bob_user_id);
+    }
+
+    #[tokio::test]
     async fn test_trace_preview_enqueue_rejects_capture_fields_disallowed_by_policy() {
         let (db, _dir) = test_db().await;
         let alice_user_id = format!("alice-{}", Uuid::new_v4());

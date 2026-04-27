@@ -20,11 +20,12 @@ use crate::trace_contribution::{
     TraceContributionPolicyRejection, TraceCreditReport, TraceQueueFlushReport, TraceQueueHold,
     TraceRedactor, apply_credit_estimate_to_envelope, capture_turns_from_conversation_messages,
     flush_trace_contribution_queue_for_scope, local_pseudonymous_contributor_id,
-    local_pseudonymous_tenant_scope_ref, preflight_trace_contribution_policy,
-    queue_trace_envelope_for_scope, read_local_trace_records_for_scope,
-    read_trace_policy_for_scope, read_trace_queue_holds_for_scope,
-    revoke_trace_submission_for_scope, sync_remote_trace_submission_records_for_scope,
-    trace_credit_report, trace_credit_summary, write_trace_policy_for_scope,
+    local_pseudonymous_tenant_scope_ref, mark_trace_credit_notice_due_for_scope,
+    preflight_trace_contribution_policy, queue_trace_envelope_for_scope,
+    read_local_trace_records_for_scope, read_trace_policy_for_scope,
+    read_trace_queue_holds_for_scope, revoke_trace_submission_for_scope,
+    sync_remote_trace_submission_records_for_scope, trace_credit_report, trace_credit_summary,
+    write_trace_policy_for_scope,
 };
 
 #[derive(Debug, Deserialize)]
@@ -108,6 +109,11 @@ pub struct TraceCreditResponse {
     pub summary: CreditSummary,
     pub report: TraceCreditReport,
     pub records: Vec<LocalTraceSubmissionRecord>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TraceCreditNoticeResponse {
+    pub credit_notice: Option<CreditSummary>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -331,6 +337,19 @@ pub async fn traces_credit_handler(
         report,
         records,
     }))
+}
+
+pub async fn traces_credit_notice_handler(
+    AuthenticatedUser(user): AuthenticatedUser,
+) -> Result<Json<TraceCreditNoticeResponse>, (StatusCode, String)> {
+    if let Err(error) =
+        sync_remote_trace_submission_records_for_scope(Some(user.user_id.as_str())).await
+    {
+        tracing::debug!(%error, "Failed to sync Trace Commons credit before web credit notice response");
+    }
+    let credit_notice = mark_trace_credit_notice_due_for_scope(Some(user.user_id.as_str()))
+        .map_err(internal_error)?;
+    Ok(Json(TraceCreditNoticeResponse { credit_notice }))
 }
 
 pub async fn traces_submissions_handler(
@@ -599,6 +618,49 @@ mod tests {
                 .recent_explanations
                 .iter()
                 .all(|reason| !reason.contains("99.0"))
+        );
+    }
+
+    #[tokio::test]
+    async fn traces_credit_notice_handler_returns_authenticated_user_scoped_due_notice() {
+        let user_id = format!("trace-web-credit-notice-user-{}", Uuid::new_v4());
+        let other_user_id = format!("trace-web-credit-notice-other-{}", Uuid::new_v4());
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+            credit_notice_interval_hours: 168,
+            ..Default::default()
+        };
+        write_trace_policy_for_scope(Some(&user_id), &policy).expect("user policy writes");
+        write_trace_policy_for_scope(Some(&other_user_id), &policy).expect("other policy writes");
+        write_trace_records(&user_id, &[submitted_record(4.0)]);
+        write_trace_records(&other_user_id, &[submitted_record(88.0)]);
+
+        let Json(response) = traces_credit_notice_handler(AuthenticatedUser(UserIdentity {
+            user_id: user_id.clone(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        }))
+        .await
+        .expect("credit notice handler succeeds");
+
+        let notice = response
+            .credit_notice
+            .expect("scoped due credit notice is returned");
+        assert_eq!(notice.submissions_submitted, 1);
+        assert_eq!(notice.pending_credit, 4.0);
+        assert_eq!(notice.final_credit, 5.0);
+        assert!(
+            notice
+                .recent_explanations
+                .iter()
+                .any(|reason| reason.contains("Scoped credit 4.0"))
+        );
+        assert!(
+            notice
+                .recent_explanations
+                .iter()
+                .all(|reason| !reason.contains("88.0"))
         );
     }
 }

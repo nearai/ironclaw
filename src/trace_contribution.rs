@@ -3628,6 +3628,17 @@ pub fn write_trace_policy_for_scope(
     write_json_file(&trace_policy_path(scope), policy, "trace policy")
 }
 
+pub fn mark_trace_credit_notice_due_for_scope(
+    scope: Option<&str>,
+) -> anyhow::Result<Option<CreditSummary>> {
+    let _guard = lock_trace_scope_for_mutation_blocking(scope);
+    let policy = read_trace_policy_for_scope(scope)?;
+    if !policy.enabled || policy.credit_notice_interval_hours == 0 {
+        return Ok(None);
+    }
+    mark_trace_credit_noticed_if_due_unlocked(scope, policy.credit_notice_interval_hours)
+}
+
 pub fn queue_trace_envelope_for_scope(
     scope: Option<&str>,
     envelope: &TraceContributionEnvelope,
@@ -5602,11 +5613,156 @@ mod tests {
         );
     }
 
+    fn submitted_credit_record(
+        credit_points_pending: f32,
+        credit_points_final: Option<f32>,
+        last_credit_notice_at: Option<DateTime<Utc>>,
+        credit_explanation: Vec<String>,
+    ) -> LocalTraceSubmissionRecord {
+        LocalTraceSubmissionRecord {
+            submission_id: Uuid::new_v4(),
+            trace_id: Uuid::new_v4(),
+            endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+            status: LocalTraceSubmissionStatus::Submitted,
+            server_status: Some("accepted".to_string()),
+            submitted_at: Some(Utc::now()),
+            revoked_at: None,
+            privacy_risk: "low".to_string(),
+            redaction_counts: BTreeMap::new(),
+            credit_points_pending,
+            credit_points_final,
+            credit_explanation,
+            credit_events: Vec::new(),
+            last_credit_notice_at,
+        }
+    }
+
+    #[test]
+    fn credit_notice_snapshot_returns_none_when_policy_disabled_or_interval_zero() {
+        let disabled_scope = format!("trace-credit-disabled-notice-test-{}", Uuid::new_v4());
+        write_local_trace_records_for_scope(
+            Some(&disabled_scope),
+            &[submitted_credit_record(
+                1.0,
+                Some(1.0),
+                None,
+                vec!["Accepted locally.".to_string()],
+            )],
+        )
+        .expect("disabled scope record writes");
+
+        let disabled_notice = mark_trace_credit_notice_due_for_scope(Some(&disabled_scope))
+            .expect("disabled notice check succeeds");
+        assert_eq!(disabled_notice, None);
+        let disabled_records =
+            read_local_trace_records_for_scope(Some(&disabled_scope)).expect("records read");
+        assert!(
+            disabled_records[0].last_credit_notice_at.is_none(),
+            "disabled policy must not mark the local notice as seen"
+        );
+
+        let zero_interval_scope =
+            format!("trace-credit-zero-interval-notice-test-{}", Uuid::new_v4());
+        write_trace_policy_for_scope(
+            Some(&zero_interval_scope),
+            &StandingTraceContributionPolicy {
+                enabled: true,
+                ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                credit_notice_interval_hours: 0,
+                ..Default::default()
+            },
+        )
+        .expect("zero interval policy writes");
+        write_local_trace_records_for_scope(
+            Some(&zero_interval_scope),
+            &[submitted_credit_record(
+                2.0,
+                Some(2.5),
+                None,
+                vec!["Delayed utility credit posted.".to_string()],
+            )],
+        )
+        .expect("zero interval scope record writes");
+
+        let zero_interval_notice =
+            mark_trace_credit_notice_due_for_scope(Some(&zero_interval_scope))
+                .expect("zero interval notice check succeeds");
+        assert_eq!(zero_interval_notice, None);
+        let zero_interval_records =
+            read_local_trace_records_for_scope(Some(&zero_interval_scope)).expect("records read");
+        assert!(
+            zero_interval_records[0].last_credit_notice_at.is_none(),
+            "zero interval policy must leave the notice unmarked"
+        );
+    }
+
+    #[test]
+    fn scoped_credit_notice_snapshot_marks_only_that_scope() {
+        let due_scope = format!("trace-credit-due-scope-test-{}", Uuid::new_v4());
+        let untouched_scope = format!("trace-credit-untouched-scope-test-{}", Uuid::new_v4());
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+            credit_notice_interval_hours: 168,
+            ..Default::default()
+        };
+        write_trace_policy_for_scope(Some(&due_scope), &policy).expect("due policy writes");
+        write_trace_policy_for_scope(Some(&untouched_scope), &policy)
+            .expect("untouched policy writes");
+        write_local_trace_records_for_scope(
+            Some(&due_scope),
+            &[submitted_credit_record(
+                1.5,
+                Some(2.0),
+                None,
+                vec!["Accepted after privacy checks.".to_string()],
+            )],
+        )
+        .expect("due record writes");
+        write_local_trace_records_for_scope(
+            Some(&untouched_scope),
+            &[submitted_credit_record(
+                9.0,
+                Some(10.0),
+                None,
+                vec!["Should not be marked by another scope.".to_string()],
+            )],
+        )
+        .expect("untouched record writes");
+
+        let notice = mark_trace_credit_notice_due_for_scope(Some(&due_scope))
+            .expect("scoped notice check succeeds")
+            .expect("due scope should produce a notice");
+
+        assert_eq!(notice.submissions_submitted, 1);
+        assert_eq!(notice.pending_credit, 1.5);
+        assert_eq!(notice.final_credit, 2.0);
+
+        let due_records = read_local_trace_records_for_scope(Some(&due_scope)).expect("records");
+        assert!(due_records[0].last_credit_notice_at.is_some());
+        let untouched_records =
+            read_local_trace_records_for_scope(Some(&untouched_scope)).expect("records");
+        assert!(
+            untouched_records[0].last_credit_notice_at.is_none(),
+            "checking one scope must not mark another scope's local credit notice"
+        );
+    }
+
     #[test]
     fn delayed_credit_sync_resets_notice_and_notice_marks_records() {
         let scope = format!("trace-credit-sync-test-{}", Uuid::new_v4());
         let submission_id = Uuid::new_v4();
         let trace_id = Uuid::new_v4();
+        write_trace_policy_for_scope(
+            Some(&scope),
+            &StandingTraceContributionPolicy {
+                enabled: true,
+                ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                credit_notice_interval_hours: 168,
+                ..Default::default()
+            },
+        )
+        .expect("policy writes");
         write_local_trace_records_for_scope(
             Some(&scope),
             &[LocalTraceSubmissionRecord {
@@ -5650,7 +5806,7 @@ mod tests {
         assert!(records[0].last_credit_notice_at.is_none());
         assert_eq!(records[0].credit_events.len(), 1);
 
-        let notice = mark_trace_credit_noticed_if_due(Some(&scope), 168)
+        let notice = mark_trace_credit_notice_due_for_scope(Some(&scope))
             .expect("notice check succeeds")
             .expect("notice should be due after changed credit");
         assert_eq!(notice.pending_credit, 1.0);
