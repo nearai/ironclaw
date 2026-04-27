@@ -10452,6 +10452,12 @@ struct TraceExportArtifactObjectRefMaterial {
 }
 
 const TRACE_VECTOR_PAYLOAD_SCHEMA_VERSION: &str = "ironclaw.trace_commons.vector_payload.v1";
+const TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_MODEL: &str = "redacted-summary-feature-hash-v1";
+const TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_ALGORITHM: &str =
+    "signed_hashing_vector_l2_normalized";
+const TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_VERSION: &str =
+    "trace_commons_vector_payload_embedding_v1";
+const TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_DIMENSION: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TraceVectorPayloadArtifact {
@@ -10468,6 +10474,14 @@ struct TraceVectorPayloadArtifact {
     embedding_model: String,
     embedding_dimension: i32,
     embedding_version: String,
+    #[serde(default)]
+    embedding_algorithm: Option<String>,
+    #[serde(default)]
+    embedding_input_hash: Option<String>,
+    #[serde(default)]
+    embedding_values: Vec<f32>,
+    #[serde(default)]
+    embedding_sha256: Option<String>,
     canonical_summary: Option<String>,
     canonical_summary_hash: Option<String>,
     summary_model: String,
@@ -11264,12 +11278,21 @@ async fn apply_revocation_propagation_item(
             ))
         }
         StorageTraceRevocationPropagationAction::InvalidateVector => {
-            db.invalidate_trace_vector_entries_for_submission(
+            let StorageTraceRevocationPropagationTarget::VectorEntry { vector_entry_id } =
+                &item.target
+            else {
+                return Ok(skipped_revocation_propagation_item(
+                    item,
+                    "vector invalidation requires a vector-entry target",
+                ));
+            };
+            db.invalidate_trace_vector_entry_for_submission(
                 &tenant.tenant_id,
                 item.source_submission_id,
+                *vector_entry_id,
             )
             .await
-            .context("failed to invalidate vector entries for revocation propagation")?;
+            .context("failed to invalidate targeted vector entry for revocation propagation")?;
             Ok(done_revocation_propagation_item(item, "invalidate_vector"))
         }
         StorageTraceRevocationPropagationAction::InvalidateBenchmarkArtifact => {
@@ -11383,16 +11406,17 @@ async fn delete_object_payload_for_revocation_propagation(
             "object payload deletion currently supports only service-local encrypted objects",
         ));
     }
-    if !matches!(
-        object_ref.artifact_kind,
+    let artifact_kind = match object_ref.artifact_kind {
         StorageTraceObjectArtifactKind::SubmittedEnvelope
-            | StorageTraceObjectArtifactKind::ReviewSnapshot
-    ) {
-        return Ok(skipped_revocation_propagation_item(
-            item,
-            "object payload artifact kind is not supported for physical deletion",
-        ));
-    }
+        | StorageTraceObjectArtifactKind::ReviewSnapshot => TraceArtifactKind::ContributionEnvelope,
+        StorageTraceObjectArtifactKind::WorkerIntermediate => TraceArtifactKind::VectorPayload,
+        _ => {
+            return Ok(skipped_revocation_propagation_item(
+                item,
+                "object payload artifact kind is not supported for physical deletion",
+            ));
+        }
+    };
     let Some(store) = state.artifact_store.as_ref() else {
         anyhow::bail!("service-local encrypted object store is not configured");
     };
@@ -11401,19 +11425,47 @@ async fn delete_object_payload_for_revocation_propagation(
         "configured trace artifact store does not match object ref store"
     );
     let tenant_ref = tenant_storage_ref(&tenant.tenant_id);
-    store
-        .get_json_by_object_key::<serde_json::Value>(
-            &tenant_ref,
-            TraceArtifactKind::ContributionEnvelope,
-            &object_ref.object_key,
-            &object_ref.content_sha256,
-        )
-        .map_err(|_| {
-            anyhow::anyhow!("service-local encrypted object verification failed before deletion")
-        })?;
+    match artifact_kind.clone() {
+        TraceArtifactKind::ContributionEnvelope => {
+            store
+                .get_json_by_object_key::<serde_json::Value>(
+                    &tenant_ref,
+                    TraceArtifactKind::ContributionEnvelope,
+                    &object_ref.object_key,
+                    &object_ref.content_sha256,
+                )
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "service-local encrypted object verification failed before deletion"
+                    )
+                })?;
+        }
+        TraceArtifactKind::VectorPayload => {
+            let payload = store
+                .get_json_by_object_key::<TraceVectorPayloadArtifact>(
+                    &tenant_ref,
+                    TraceArtifactKind::VectorPayload,
+                    &object_ref.object_key,
+                    &object_ref.content_sha256,
+                )
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "service-local encrypted object verification failed before deletion"
+                    )
+                })?;
+            anyhow::ensure!(
+                payload.artifact_schema_version == TRACE_VECTOR_PAYLOAD_SCHEMA_VERSION
+                    && payload.tenant_id == tenant.tenant_id
+                    && payload.submission_id == item.source_submission_id
+                    && object_ref.created_by_job_id == Some(payload.vector_entry_id),
+                "service-local vector payload verification failed before deletion"
+            );
+        }
+        _ => unreachable!("unsupported physical-delete artifact kind was filtered above"),
+    }
     let receipt = EncryptedTraceArtifactReceipt {
         tenant_storage_ref: tenant_ref.clone(),
-        artifact_kind: TraceArtifactKind::ContributionEnvelope,
+        artifact_kind: artifact_kind.clone(),
         object_key: object_ref.object_key.clone(),
         ciphertext_sha256: object_ref
             .content_sha256
@@ -13247,22 +13299,73 @@ fn trace_summary_similarity_score(
     let Some(candidate_summary) = candidate_summary else {
         return 0.0;
     };
-    trace_summary_similarity(target_summary, candidate_summary)
+    let target_embedding = trace_redacted_summary_embedding(target_summary);
+    let candidate_embedding = trace_redacted_summary_embedding(candidate_summary);
+    trace_summary_embedding_similarity(&target_embedding, &candidate_embedding)
 }
 
-fn trace_summary_similarity(left: &str, right: &str) -> f32 {
-    let left_tokens = trace_similarity_tokens(left);
-    let right_tokens = trace_similarity_tokens(right);
-    if left_tokens.is_empty() || right_tokens.is_empty() {
+fn trace_vector_embedding_input(record: &StorageTraceDerivedRecord) -> String {
+    let mut input = String::new();
+    input.push_str("canonical_summary:\n");
+    input.push_str(record.canonical_summary.as_deref().unwrap_or_default());
+    input.push_str("\nsummary_model:\n");
+    input.push_str(&record.summary_model);
+    input.push_str("\ntask_success:\n");
+    input.push_str(record.task_success.as_deref().unwrap_or_default());
+    input.push_str("\nprivacy_risk:\n");
+    input.push_str(record.privacy_risk.as_deref().unwrap_or_default());
+    input.push_str("\ntools:\n");
+    input.push_str(&record.tool_sequence.join(" "));
+    input.push_str("\ntool_categories:\n");
+    input.push_str(&record.tool_categories.join(" "));
+    input.push_str("\ncoverage_tags:\n");
+    input.push_str(&record.coverage_tags.join(" "));
+    input
+}
+
+fn trace_redacted_summary_embedding(input: &str) -> Vec<f32> {
+    let mut values = vec![0.0f32; TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_DIMENSION];
+    for token in trace_similarity_tokens(input) {
+        let digest = Sha256::digest(token.as_bytes());
+        let mut index_bytes = [0u8; 8];
+        index_bytes.copy_from_slice(&digest[..8]);
+        let index = (u64::from_le_bytes(index_bytes) as usize)
+            % TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_DIMENSION;
+        let sign = if digest[8] & 1 == 0 { 1.0 } else { -1.0 };
+        values[index] += sign;
+    }
+    let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for value in &mut values {
+            *value /= norm;
+        }
+    }
+    values
+}
+
+fn trace_summary_embedding_similarity(left: &[f32], right: &[f32]) -> f32 {
+    if left.is_empty() || right.is_empty() || left.len() != right.len() {
         return 0.0;
     }
-    let intersection = left_tokens.intersection(&right_tokens).count() as f32;
-    let union = left_tokens.union(&right_tokens).count() as f32;
-    if union == 0.0 {
-        0.0
-    } else {
-        (intersection / union).clamp(0.0, 1.0)
+    left.iter()
+        .zip(right)
+        .map(|(left, right)| left * right)
+        .sum::<f32>()
+        .clamp(0.0, 1.0)
+}
+
+fn trace_redacted_summary_embedding_sha256(values: &[f32]) -> String {
+    let mut payload = format!(
+        "{}:{}:{}:{}:",
+        TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_MODEL,
+        TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_ALGORITHM,
+        TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_VERSION,
+        TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_DIMENSION
+    );
+    for value in values {
+        payload.push_str(&format!("{:08x}", value.to_bits()));
     }
+    sha256_prefixed(&payload)
 }
 
 fn trace_similarity_tokens(input: &str) -> BTreeSet<String> {
@@ -15337,9 +15440,14 @@ async fn index_vector_metadata_from_db(
         };
         let indexed_at = Utc::now();
         let vector_store = "trace_commons_metadata_precheck".to_string();
-        let embedding_model = "canonical-summary-hash-v1".to_string();
-        let embedding_dimension = 1;
-        let embedding_version = "trace_commons_vector_metadata_v1".to_string();
+        let embedding_input = trace_vector_embedding_input(record);
+        let embedding_input_hash = sha256_prefixed(&embedding_input);
+        let embedding_values = trace_redacted_summary_embedding(&embedding_input);
+        let embedding_sha256 = trace_redacted_summary_embedding_sha256(&embedding_values);
+        let embedding_model = TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_MODEL.to_string();
+        let embedding_dimension =
+            i32::try_from(TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_DIMENSION).unwrap_or(i32::MAX);
+        let embedding_version = TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_VERSION.to_string();
         let source_projection = StorageTraceVectorEntrySourceProjection::CanonicalSummary;
         let cluster_id = record.cluster_id.clone().or_else(|| {
             let cluster_hash = neighbors
@@ -15385,6 +15493,10 @@ async fn index_vector_metadata_from_db(
             embedding_model,
             embedding_dimension,
             embedding_version,
+            embedding_algorithm: Some(TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_ALGORITHM.to_string()),
+            embedding_input_hash: Some(embedding_input_hash),
+            embedding_values,
+            embedding_sha256: Some(embedding_sha256),
             canonical_summary: record.canonical_summary.clone(),
             canonical_summary_hash: record.canonical_summary_hash.clone(),
             summary_model: record.summary_model.clone(),
@@ -31834,6 +31946,40 @@ mod tests {
         assert_eq!(payload.vector_entry_id, vector_entry.vector_entry_id);
         assert_eq!(payload.source_hash, vector_entry.source_hash);
         assert_eq!(payload.embedding_version, vector_entry.embedding_version);
+        assert_eq!(
+            vector_entry.embedding_model,
+            TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_MODEL
+        );
+        assert_eq!(
+            usize::try_from(vector_entry.embedding_dimension).expect("dimension fits usize"),
+            TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_DIMENSION
+        );
+        assert_eq!(
+            payload.embedding_algorithm.as_deref(),
+            Some(TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_ALGORITHM)
+        );
+        assert_eq!(
+            payload.embedding_values.len(),
+            TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_DIMENSION
+        );
+        assert!(
+            payload
+                .embedding_input_hash
+                .as_deref()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+        assert!(
+            payload
+                .embedding_sha256
+                .as_deref()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+        let expected_embedding_hash =
+            trace_redacted_summary_embedding_sha256(&payload.embedding_values);
+        assert_eq!(
+            payload.embedding_sha256.as_deref(),
+            Some(expected_embedding_hash.as_str())
+        );
         assert_eq!(
             payload.source_projection,
             StorageTraceVectorEntrySourceProjection::CanonicalSummary

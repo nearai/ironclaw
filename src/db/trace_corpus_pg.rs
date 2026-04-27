@@ -2116,6 +2116,34 @@ impl TraceCorpusStore for PgBackend {
         Ok(updated)
     }
 
+    async fn invalidate_trace_vector_entry_for_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        vector_entry_id: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let invalidated = enum_to_storage(TraceVectorEntryStatus::Invalidated)?;
+        let updated = tx
+            .execute(
+                "UPDATE trace_vector_entries
+                 SET status = $4,
+                     invalidated_at = COALESCE(invalidated_at, NOW()),
+                     updated_at = NOW()
+                 WHERE tenant_id = $1
+                   AND submission_id = $2
+                   AND vector_entry_id = $3
+                   AND status <> $4
+                   AND deleted_at IS NULL",
+                &[&tenant_id, &submission_id, &vector_entry_id, &invalidated],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(updated)
+    }
+
     async fn append_trace_audit_event(
         &self,
         audit_event: TraceAuditEventWrite,

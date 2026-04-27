@@ -1709,6 +1709,146 @@ mod libsql_trace_corpus_store {
     }
 
     #[tokio::test]
+    async fn libsql_store_invalidates_exact_vector_entry_with_tenant_submission_scope() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let db_path = temp_dir.path().join("trace-exact-vector-invalidate.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("create libsql backend");
+        backend.run_migrations().await.expect("run migrations");
+
+        let submission_id = Uuid::new_v4();
+        let trace_id = Uuid::new_v4();
+        let target_derived_id = Uuid::new_v4();
+        let sibling_derived_id = Uuid::new_v4();
+        let target_vector_entry_id = Uuid::new_v4();
+        let sibling_vector_entry_id = Uuid::new_v4();
+
+        for tenant_id in ["tenant-alpha", "tenant-beta"] {
+            let mut submission = sample_submission(tenant_id, submission_id);
+            submission.trace_id = trace_id;
+            backend
+                .upsert_trace_submission(submission)
+                .await
+                .expect("insert scoped submission");
+            for (derived_id, summary_hash) in [
+                (target_derived_id, "sha256:target-summary"),
+                (sibling_derived_id, "sha256:sibling-summary"),
+            ] {
+                backend
+                    .append_trace_derived_record(TraceDerivedRecordWrite {
+                        tenant_id: tenant_id.to_string(),
+                        derived_id,
+                        submission_id,
+                        trace_id,
+                        status: TraceDerivedStatus::Current,
+                        worker_kind: TraceWorkerKind::DuplicatePrecheck,
+                        worker_version: "duplicate-precheck-v1".to_string(),
+                        input_object_ref: None,
+                        input_hash: summary_hash.to_string(),
+                        output_object_ref: None,
+                        canonical_summary: Some(format!("{tenant_id} {summary_hash}")),
+                        canonical_summary_hash: Some(summary_hash.to_string()),
+                        summary_model: "summary-model-v1".to_string(),
+                        task_success: Some("success".to_string()),
+                        privacy_risk: Some("low".to_string()),
+                        event_count: Some(2),
+                        tool_sequence: vec!["memory_search".to_string()],
+                        tool_categories: vec!["memory".to_string()],
+                        coverage_tags: vec!["tool:memory_search".to_string()],
+                        duplicate_score: Some(0.1),
+                        novelty_score: Some(0.4),
+                        cluster_id: Some("cluster:alpha".to_string()),
+                    })
+                    .await
+                    .expect("insert scoped derived record");
+            }
+            for (derived_id, vector_entry_id, source_hash) in [
+                (
+                    target_derived_id,
+                    target_vector_entry_id,
+                    "sha256:target-summary",
+                ),
+                (
+                    sibling_derived_id,
+                    sibling_vector_entry_id,
+                    "sha256:sibling-summary",
+                ),
+            ] {
+                backend
+                    .upsert_trace_vector_entry(TraceVectorEntryWrite {
+                        tenant_id: tenant_id.to_string(),
+                        submission_id,
+                        derived_id,
+                        vector_entry_id,
+                        vector_store: "trace-commons-main".to_string(),
+                        embedding_model: "redacted-summary-feature-hash-v1".to_string(),
+                        embedding_dimension: 64,
+                        embedding_version: "embedding-v1".to_string(),
+                        source_projection: TraceVectorEntrySourceProjection::CanonicalSummary,
+                        source_hash: source_hash.to_string(),
+                        status: TraceVectorEntryStatus::Active,
+                        nearest_trace_ids: Vec::new(),
+                        cluster_id: Some("cluster:alpha".to_string()),
+                        duplicate_score: Some(0.1),
+                        novelty_score: Some(0.4),
+                        indexed_at: Some(Utc::now()),
+                        invalidated_at: None,
+                        deleted_at: None,
+                    })
+                    .await
+                    .expect("insert scoped vector entry");
+            }
+        }
+
+        let invalidated = backend
+            .invalidate_trace_vector_entry_for_submission(
+                "tenant-alpha",
+                submission_id,
+                target_vector_entry_id,
+            )
+            .await
+            .expect("invalidate exact vector entry");
+        assert_eq!(invalidated, 1);
+
+        let alpha_entries = backend
+            .list_trace_vector_entries("tenant-alpha")
+            .await
+            .expect("list tenant-alpha vectors");
+        assert_eq!(alpha_entries.len(), 2);
+        assert!(alpha_entries.iter().any(|entry| {
+            entry.vector_entry_id == target_vector_entry_id
+                && entry.status == TraceVectorEntryStatus::Invalidated
+                && entry.invalidated_at.is_some()
+        }));
+        assert!(alpha_entries.iter().any(|entry| {
+            entry.vector_entry_id == sibling_vector_entry_id
+                && entry.status == TraceVectorEntryStatus::Active
+                && entry.invalidated_at.is_none()
+        }));
+
+        let beta_entries = backend
+            .list_trace_vector_entries("tenant-beta")
+            .await
+            .expect("list tenant-beta vectors");
+        assert!(
+            beta_entries
+                .iter()
+                .all(|entry| entry.status == TraceVectorEntryStatus::Active)
+        );
+
+        let idempotent = backend
+            .invalidate_trace_vector_entry_for_submission(
+                "tenant-alpha",
+                submission_id,
+                target_vector_entry_id,
+            )
+            .await
+            .expect("repeat exact vector invalidation");
+        assert_eq!(idempotent, 0);
+    }
+
+    #[tokio::test]
     async fn libsql_store_preserves_retention_job_scope_and_items() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let db_path = temp_dir.path().join("trace-retention-jobs.db");

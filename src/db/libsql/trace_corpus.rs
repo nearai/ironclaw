@@ -2332,6 +2332,35 @@ impl TraceCorpusStore for LibSqlBackend {
         .map_err(|e| DatabaseError::Query(e.to_string()))
     }
 
+    async fn invalidate_trace_vector_entry_for_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        vector_entry_id: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        let conn = self.connect().await?;
+        let invalidated = enum_to_storage(TraceVectorEntryStatus::Invalidated)?;
+        conn.execute(
+            "UPDATE trace_vector_entries
+             SET status = ?4,
+                 invalidated_at = COALESCE(invalidated_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE tenant_id = ?1
+               AND submission_id = ?2
+               AND vector_entry_id = ?3
+               AND status <> ?4
+               AND deleted_at IS NULL",
+            libsql::params![
+                tenant_id,
+                submission_id.to_string(),
+                vector_entry_id.to_string(),
+                invalidated,
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))
+    }
+
     async fn append_trace_audit_event(
         &self,
         audit_event: TraceAuditEventWrite,

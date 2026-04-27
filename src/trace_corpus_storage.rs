@@ -1165,6 +1165,13 @@ pub trait TraceCorpusStore: Send + Sync {
         submission_id: Uuid,
     ) -> Result<u64, DatabaseError>;
 
+    async fn invalidate_trace_vector_entry_for_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        vector_entry_id: Uuid,
+    ) -> Result<u64, DatabaseError>;
+
     async fn append_trace_audit_event(
         &self,
         audit_event: TraceAuditEventWrite,
