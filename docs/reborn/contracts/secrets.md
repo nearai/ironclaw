@@ -65,8 +65,8 @@ host_api       -> opaque SecretHandle and Action::UseSecret shapes
 filesystem     -> virtual-path storage abstraction plus PostgreSQL/libSQL/local backend implementations
 secrets        -> scoped storage, AES-256-GCM/HKDF encryption, metadata, one-shot leases, encrypted-row repository boundary, filesystem-backed encrypted persistence, and credential mapping metadata
 authorization  -> whether a caller may use a SecretHandle
-capabilities   -> caller-facing workflow; currently fails closed on InjectSecretOnce obligations
-host_runtime   -> composition of already-resolved credential material into hardened runtime egress; future secret lease consumption in obligation handlers
+capabilities   -> caller-facing workflow; calls host-provided obligation handlers before dispatch/process/approval-lease side effects
+host_runtime   -> direct-handle InjectSecretOnce lease/consume composition plus already-resolved credential material in hardened runtime egress
 runtimes        -> consume injected values only after host-side authorization and lease handling
 ```
 
@@ -114,7 +114,7 @@ Rules:
 - revoked leases cannot be consumed
 - metadata includes usage counters and timestamps, but never raw material
 
-This is the minimum shape needed before wiring secret lease consumption into obligation handling.
+This is the minimum shape used by the direct-handle `InjectSecretOnce` obligation path.
 
 ---
 
@@ -233,7 +233,7 @@ For a single local user with three Gmail accounts, this becomes:
 
 This path stores only labels, subject hints, secret handles, and timestamps. Secret material remains exclusively in encrypted secret records and is only exposed by `SecretStore::consume(...)` after an explicit scoped lease.
 
-Future obligation handling may add a richer host-api obligation such as:
+V1 direct-handle obligation handling uses `InjectSecretOnce { handle }`. Future obligation handling may add a richer host-api obligation such as:
 
 ```rust
 InjectCredentialOnce {
@@ -243,7 +243,7 @@ InjectCredentialOnce {
 }
 ```
 
-or keep `InjectSecretOnce { handle }` for simple direct-handle cases. In either shape, account metadata remains support data and does not grant authority.
+for credential-account lookup. For now, account metadata remains support data and does not grant authority; callers that choose a credential account must resolve its secret handle(s) before authorizing direct `InjectSecretOnce` obligations.
 
 ---
 
@@ -258,8 +258,8 @@ This slice does not implement:
 - authorization policy for secret use
 - approval prompts for secret use
 - account selection UI, account defaults, or per-project remembered choices
-- production `InjectSecretOnce` or `InjectCredentialOnce` obligation handling
-- runtime environment/request injection
+- production `InjectCredentialOnce` obligation handling
+- generic runtime environment/request injection beyond the one-shot direct secret injection staging store
 - OAuth/token refresh flows
 - provider account verification
 - network policy enforcement

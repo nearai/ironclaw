@@ -9,12 +9,14 @@ use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, HostRuntimeServices, NetworkObligationPolicyStore,
+    RuntimeSecretInjectionStore,
 };
 use ironclaw_processes::{
     ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor,
     ProcessServices,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
+use ironclaw_secrets::{ExposeSecret, InMemorySecretStore, SecretMaterial, SecretStore};
 use serde_json::json;
 
 #[tokio::test]
@@ -88,6 +90,24 @@ async fn builtin_obligation_handler_stores_network_policy_for_runtime_handoff() 
     );
 }
 
+#[test]
+fn network_obligation_policy_store_isolates_agent_scope() {
+    let store = NetworkObligationPolicyStore::new();
+    let capability_id = CapabilityId::new("echo.say").unwrap();
+    let mut agent_a = execution_context(CapabilitySet::default()).resource_scope;
+    agent_a.agent_id = Some(AgentId::new("agent-a").unwrap());
+    let mut agent_b = agent_a.clone();
+    agent_b.agent_id = Some(AgentId::new("agent-b").unwrap());
+
+    store.insert(&agent_a, &capability_id, allowed_network_policy());
+
+    assert!(
+        store.take(&agent_b, &capability_id).is_none(),
+        "network policies must not cross agent scope"
+    );
+    assert!(store.take(&agent_a, &capability_id).is_some());
+}
+
 #[tokio::test]
 async fn builtin_obligation_handler_fails_closed_without_network_policy_store() {
     let handler = BuiltinObligationHandler::new();
@@ -147,7 +167,227 @@ async fn builtin_obligation_handler_rejects_invalid_network_policy_before_dispat
 }
 
 #[tokio::test]
-async fn builtin_obligation_handler_keeps_runtime_plumbing_obligations_fail_closed() {
+async fn builtin_obligation_handler_leases_consumes_and_stages_secret_once() {
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let injection_store = Arc::new(RuntimeSecretInjectionStore::new());
+    let handler = BuiltinObligationHandler::new()
+        .with_secret_store(secret_store.clone())
+        .with_secret_injection_store(injection_store.clone());
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = CapabilityId::new("echo.say").unwrap();
+    let estimate = ResourceEstimate::default();
+    let handle = SecretHandle::new("api_token").unwrap();
+    secret_store
+        .put(
+            context.resource_scope.clone(),
+            handle.clone(),
+            SecretMaterial::from("runtime-secret"),
+        )
+        .await
+        .unwrap();
+    let obligations = vec![Obligation::InjectSecretOnce {
+        handle: handle.clone(),
+    }];
+
+    handler
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .unwrap();
+
+    let leases = secret_store
+        .leases_for_scope(&context.resource_scope)
+        .await
+        .unwrap();
+    assert_eq!(leases.len(), 1);
+    assert_eq!(
+        leases[0].status,
+        ironclaw_secrets::SecretLeaseStatus::Consumed
+    );
+    let material = injection_store
+        .take(&context.resource_scope, &capability_id, &handle)
+        .unwrap()
+        .expect("secret material should be staged exactly once");
+    assert_eq!(material.expose_secret(), "runtime-secret");
+    assert!(
+        injection_store
+            .take(&context.resource_scope, &capability_id, &handle)
+            .unwrap()
+            .is_none(),
+        "runtime secret injection store must be one-shot"
+    );
+}
+
+#[test]
+fn runtime_secret_injection_store_isolates_agent_and_project_scope() {
+    let store = RuntimeSecretInjectionStore::new();
+    let capability_id = CapabilityId::new("echo.say").unwrap();
+    let handle = SecretHandle::new("api_token").unwrap();
+    let mut agent_a = execution_context(CapabilitySet::default()).resource_scope;
+    agent_a.agent_id = Some(AgentId::new("agent-a").unwrap());
+    agent_a.project_id = Some(ProjectId::new("project-a").unwrap());
+    let mut agent_b = agent_a.clone();
+    agent_b.agent_id = Some(AgentId::new("agent-b").unwrap());
+    let mut project_b = agent_a.clone();
+    project_b.project_id = Some(ProjectId::new("project-b").unwrap());
+
+    store
+        .insert(
+            &agent_a,
+            &capability_id,
+            &handle,
+            SecretMaterial::from("agent-a-project-a"),
+        )
+        .unwrap();
+
+    assert!(
+        store
+            .take(&agent_b, &capability_id, &handle)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .take(&project_b, &capability_id, &handle)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .take(&agent_a, &capability_id, &handle)
+            .unwrap()
+            .unwrap()
+            .expose_secret(),
+        "agent-a-project-a"
+    );
+}
+
+#[tokio::test]
+async fn builtin_obligation_handler_fails_closed_without_secret_store() {
+    let injection_store = Arc::new(RuntimeSecretInjectionStore::new());
+    let handler = BuiltinObligationHandler::new().with_secret_injection_store(injection_store);
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = CapabilityId::new("echo.say").unwrap();
+    let estimate = ResourceEstimate::default();
+    let handle = SecretHandle::new("api_token").unwrap();
+    let obligations = vec![Obligation::InjectSecretOnce {
+        handle: handle.clone(),
+    }];
+
+    let err = handler
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityObligationError::Failed {
+            kind: CapabilityObligationFailureKind::Secret
+        }
+    ));
+}
+
+#[tokio::test]
+async fn builtin_obligation_handler_fails_closed_when_secret_is_missing() {
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let injection_store = Arc::new(RuntimeSecretInjectionStore::new());
+    let handler = BuiltinObligationHandler::new()
+        .with_secret_store(secret_store)
+        .with_secret_injection_store(injection_store.clone());
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = CapabilityId::new("echo.say").unwrap();
+    let estimate = ResourceEstimate::default();
+    let handle = SecretHandle::new("missing_token").unwrap();
+    let obligations = vec![Obligation::InjectSecretOnce {
+        handle: handle.clone(),
+    }];
+
+    let err = handler
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityObligationError::Failed {
+            kind: CapabilityObligationFailureKind::Secret
+        }
+    ));
+    assert!(
+        injection_store
+            .take(&context.resource_scope, &capability_id, &handle)
+            .unwrap()
+            .is_none(),
+        "missing secrets must not stage runtime material"
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_services_can_wire_builtin_secret_obligation_handler() {
+    let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
+    let filesystem = Arc::new(LocalFilesystem::new());
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let authorizer = Arc::new(SecretInjectionAuthorizer);
+    let process_services = ProcessServices::in_memory();
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let services =
+        HostRuntimeServices::new(registry, filesystem, governor, authorizer, process_services)
+            .with_secret_store(secret_store.clone())
+            .with_builtin_obligation_handler();
+    let dispatcher = NoopDispatcher;
+    let capability_host = services.capability_host(&dispatcher, Arc::new(ImmediateExecutor));
+    let context = execution_context(CapabilitySet::default());
+    let handle = SecretHandle::new("api_token").unwrap();
+    secret_store
+        .put(
+            context.resource_scope.clone(),
+            handle.clone(),
+            SecretMaterial::from("service-secret"),
+        )
+        .await
+        .unwrap();
+
+    capability_host
+        .spawn_json(CapabilitySpawnRequest {
+            context: context.clone(),
+            capability_id: CapabilityId::new("echo-script.say").unwrap(),
+            estimate: ResourceEstimate::default(),
+            input: json!({"message": "secret obligation"}),
+        })
+        .await
+        .unwrap();
+
+    let material = services
+        .runtime_secret_injections()
+        .take(
+            &context.resource_scope,
+            &CapabilityId::new("echo-script.say").unwrap(),
+            &handle,
+        )
+        .unwrap()
+        .expect("shared services should stage consumed secret material");
+    assert_eq!(material.expose_secret(), "service-secret");
+}
+
+#[tokio::test]
+async fn builtin_obligation_handler_keeps_other_runtime_plumbing_obligations_fail_closed() {
     let audit = Arc::new(InMemoryAuditSink::new());
     let handler = BuiltinObligationHandler::new().with_audit_sink(audit.clone());
     let context = execution_context(CapabilitySet::default());
@@ -177,7 +417,12 @@ async fn builtin_obligation_handler_keeps_runtime_plumbing_obligations_fail_clos
     let CapabilityObligationError::Unsupported { obligations } = err else {
         panic!("expected unsupported obligations");
     };
-    assert_eq!(obligations.len(), 4);
+    assert_eq!(obligations.len(), 3);
+    assert!(
+        !obligations
+            .iter()
+            .any(|obligation| matches!(obligation, Obligation::InjectSecretOnce { .. }))
+    );
     assert!(audit.records().is_empty());
 }
 
@@ -226,6 +471,37 @@ fn allowed_network_policy() -> NetworkPolicy {
 }
 
 struct AuditBeforeAuthorizer;
+
+struct SecretInjectionAuthorizer;
+
+#[async_trait]
+impl CapabilityDispatchAuthorizer for SecretInjectionAuthorizer {
+    async fn authorize_dispatch(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+    ) -> Decision {
+        Decision::Allow {
+            obligations: vec![Obligation::InjectSecretOnce {
+                handle: SecretHandle::new("api_token").unwrap(),
+            }],
+        }
+    }
+
+    async fn authorize_spawn(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+    ) -> Decision {
+        Decision::Allow {
+            obligations: vec![Obligation::InjectSecretOnce {
+                handle: SecretHandle::new("api_token").unwrap(),
+            }],
+        }
+    }
+}
 
 #[async_trait]
 impl CapabilityDispatchAuthorizer for AuditBeforeAuthorizer {

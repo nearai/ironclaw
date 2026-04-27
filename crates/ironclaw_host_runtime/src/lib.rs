@@ -29,7 +29,7 @@ use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AuditEnvelope, AuditEventId, AuditStage,
     CapabilityDispatcher, CapabilityId, DecisionSummary, DispatchError, EffectKind, NetworkPolicy,
-    Obligation, ResourceScope, RuntimeDispatchErrorKind, RuntimeKind,
+    Obligation, ResourceScope, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_network::{
@@ -43,7 +43,9 @@ use ironclaw_resources::ResourceGovernor;
 use ironclaw_run_state::{ApprovalRequestStore, RunStateStore};
 use ironclaw_safety::LeakDetector;
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
-use ironclaw_secrets::{CredentialLocation, CredentialMapping, ExposeSecret, SecretMaterial};
+use ironclaw_secrets::{
+    CredentialLocation, CredentialMapping, ExposeSecret, SecretMaterial, SecretStore,
+};
 use ironclaw_wasm::{
     CapabilityInvocation, WasmError, WasmExecutionRequest, WasmHostHttp, WasmHttpRequest,
     WasmHttpResponse, WasmPolicyHttpClient, WasmRuntime,
@@ -66,6 +68,112 @@ impl fmt::Debug for RuntimeHttpCredential {
             .field("mapping", &self.mapping)
             .field("material", &"[REDACTED]")
             .finish()
+    }
+}
+
+/// One-shot runtime secret material staged after `InjectSecretOnce` lease consumption.
+///
+/// The store is keyed by scoped invocation, capability, and handle. Runtime adapters
+/// must use `take(...)` so staged material is removed before it can be reused.
+#[derive(Clone, Default)]
+pub struct RuntimeSecretInjectionStore {
+    secrets: Arc<Mutex<HashMap<RuntimeSecretInjectionKey, SecretMaterial>>>,
+}
+
+impl RuntimeSecretInjectionStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        handle: &SecretHandle,
+        material: SecretMaterial,
+    ) -> Result<(), RuntimeSecretInjectionStoreError> {
+        self.lock()?.insert(
+            RuntimeSecretInjectionKey::new(scope, capability_id, handle),
+            material,
+        );
+        Ok(())
+    }
+
+    pub fn take(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        handle: &SecretHandle,
+    ) -> Result<Option<SecretMaterial>, RuntimeSecretInjectionStoreError> {
+        Ok(self.lock()?.remove(&RuntimeSecretInjectionKey::new(
+            scope,
+            capability_id,
+            handle,
+        )))
+    }
+
+    fn lock(
+        &self,
+    ) -> Result<
+        std::sync::MutexGuard<'_, HashMap<RuntimeSecretInjectionKey, SecretMaterial>>,
+        RuntimeSecretInjectionStoreError,
+    > {
+        self.secrets
+            .lock()
+            .map_err(|_| RuntimeSecretInjectionStoreError::Unavailable)
+    }
+}
+
+impl fmt::Debug for RuntimeSecretInjectionStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RuntimeSecretInjectionStore")
+            .field("secrets", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeSecretInjectionStoreError {
+    Unavailable,
+}
+
+impl fmt::Display for RuntimeSecretInjectionStoreError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unavailable => formatter.write_str("runtime secret injection store unavailable"),
+        }
+    }
+}
+
+impl std::error::Error for RuntimeSecretInjectionStoreError {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RuntimeSecretInjectionKey {
+    tenant_id: String,
+    user_id: String,
+    agent_id: Option<String>,
+    project_id: Option<String>,
+    mission_id: Option<String>,
+    thread_id: Option<String>,
+    invocation_id: String,
+    capability_id: String,
+    handle: String,
+}
+
+impl RuntimeSecretInjectionKey {
+    fn new(scope: &ResourceScope, capability_id: &CapabilityId, handle: &SecretHandle) -> Self {
+        Self {
+            tenant_id: scope.tenant_id.as_str().to_string(),
+            user_id: scope.user_id.as_str().to_string(),
+            agent_id: scope.agent_id.as_ref().map(|id| id.as_str().to_string()),
+            project_id: scope.project_id.as_ref().map(|id| id.as_str().to_string()),
+            mission_id: scope.mission_id.as_ref().map(|id| id.as_str().to_string()),
+            thread_id: scope.thread_id.as_ref().map(|id| id.as_str().to_string()),
+            invocation_id: scope.invocation_id.to_string(),
+            capability_id: capability_id.as_str().to_string(),
+            handle: handle.as_str().to_string(),
+        }
     }
 }
 
@@ -615,6 +723,7 @@ impl NetworkObligationPolicyStore {
 struct NetworkPolicyKey {
     tenant_id: String,
     user_id: String,
+    agent_id: Option<String>,
     project_id: Option<String>,
     mission_id: Option<String>,
     thread_id: Option<String>,
@@ -627,6 +736,7 @@ impl NetworkPolicyKey {
         Self {
             tenant_id: scope.tenant_id.as_str().to_string(),
             user_id: scope.user_id.as_str().to_string(),
+            agent_id: scope.agent_id.as_ref().map(|id| id.as_str().to_string()),
             project_id: scope.project_id.as_ref().map(|id| id.as_str().to_string()),
             mission_id: scope.mission_id.as_ref().map(|id| id.as_str().to_string()),
             thread_id: scope.thread_id.as_ref().map(|id| id.as_str().to_string()),
@@ -644,13 +754,18 @@ impl NetworkPolicyKey {
 ///   audit sink is configured or emission fails.
 /// - `ApplyNetworkPolicy`: validates policy metadata and hands the scoped policy
 ///   to runtime adapters through a configured policy store.
+/// - `InjectSecretOnce`: requires a configured [`SecretStore`] and
+///   [`RuntimeSecretInjectionStore`], leases the scoped handle once, consumes it,
+///   and stages the material for one runtime take.
 ///
-/// Runtime/input/output plumbing obligations other than WASM host-HTTP policy
-/// enforcement remain unsupported and fail closed.
+/// Remaining runtime/input/output plumbing obligations remain unsupported and
+/// fail closed.
 #[derive(Clone, Default)]
 pub struct BuiltinObligationHandler {
     audit_sink: Option<Arc<dyn AuditSink>>,
     network_policies: Option<Arc<NetworkObligationPolicyStore>>,
+    secret_store: Option<Arc<dyn SecretStore>>,
+    secret_injections: Option<Arc<RuntimeSecretInjectionStore>>,
 }
 
 impl BuiltinObligationHandler {
@@ -677,6 +792,25 @@ impl BuiltinObligationHandler {
         self
     }
 
+    pub fn with_secret_store<T>(mut self, store: Arc<T>) -> Self
+    where
+        T: SecretStore + 'static,
+    {
+        let store: Arc<dyn SecretStore> = store;
+        self.secret_store = Some(store);
+        self
+    }
+
+    pub fn with_secret_store_dyn(mut self, store: Arc<dyn SecretStore>) -> Self {
+        self.secret_store = Some(store);
+        self
+    }
+
+    pub fn with_secret_injection_store(mut self, store: Arc<RuntimeSecretInjectionStore>) -> Self {
+        self.secret_injections = Some(store);
+        self
+    }
+
     async fn emit_audit_before(
         &self,
         request: &CapabilityObligationRequest<'_>,
@@ -694,6 +828,74 @@ impl BuiltinObligationHandler {
                 kind: CapabilityObligationFailureKind::Audit,
             })
     }
+
+    async fn preflight_secret_injection(
+        &self,
+        request: &CapabilityObligationRequest<'_>,
+        handles: &[SecretHandle],
+    ) -> Result<(), CapabilityObligationError> {
+        if handles.is_empty() {
+            return Ok(());
+        }
+        let Some(secret_store) = &self.secret_store else {
+            return Err(secret_obligation_failed());
+        };
+        if self.secret_injections.is_none() {
+            return Err(secret_obligation_failed());
+        }
+        for handle in handles {
+            let exists = secret_store
+                .metadata(&request.context.resource_scope, handle)
+                .await
+                .map_err(|_| secret_obligation_failed())?
+                .is_some();
+            if !exists {
+                return Err(secret_obligation_failed());
+            }
+        }
+        Ok(())
+    }
+
+    async fn inject_secrets(
+        &self,
+        request: &CapabilityObligationRequest<'_>,
+        handles: &[SecretHandle],
+    ) -> Result<(), CapabilityObligationError> {
+        if handles.is_empty() {
+            return Ok(());
+        }
+        let Some(secret_store) = &self.secret_store else {
+            return Err(secret_obligation_failed());
+        };
+        let Some(secret_injections) = &self.secret_injections else {
+            return Err(secret_obligation_failed());
+        };
+
+        let mut material = Vec::with_capacity(handles.len());
+        for handle in handles {
+            let lease = secret_store
+                .lease_once(&request.context.resource_scope, handle)
+                .await
+                .map_err(|_| secret_obligation_failed())?;
+            let secret = secret_store
+                .consume(&request.context.resource_scope, lease.id)
+                .await
+                .map_err(|_| secret_obligation_failed())?;
+            material.push((handle.clone(), secret));
+        }
+
+        for (handle, secret) in material {
+            secret_injections
+                .insert(
+                    &request.context.resource_scope,
+                    request.capability_id,
+                    &handle,
+                    secret,
+                )
+                .map_err(|_| secret_obligation_failed())?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -710,6 +912,12 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
         }
 
         let network_policy = network_policy_obligation(request.obligations)?;
+        if network_policy.is_some() && self.network_policies.is_none() {
+            return Err(network_obligation_failed());
+        }
+        let secret_handles = secret_injection_obligations(request.obligations);
+        self.preflight_secret_injection(&request, &secret_handles)
+            .await?;
 
         if request
             .obligations
@@ -718,6 +926,8 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
         {
             self.emit_audit_before(&request).await?;
         }
+
+        self.inject_secrets(&request, &secret_handles).await?;
 
         if let Some(policy) = network_policy {
             let Some(store) = &self.network_policies else {
@@ -740,10 +950,22 @@ fn unsupported_obligations(obligations: &[Obligation]) -> Vec<Obligation> {
         .filter(|obligation| {
             !matches!(
                 obligation,
-                Obligation::AuditBefore | Obligation::ApplyNetworkPolicy { .. }
+                Obligation::AuditBefore
+                    | Obligation::ApplyNetworkPolicy { .. }
+                    | Obligation::InjectSecretOnce { .. }
             )
         })
         .cloned()
+        .collect()
+}
+
+fn secret_injection_obligations(obligations: &[Obligation]) -> Vec<SecretHandle> {
+    obligations
+        .iter()
+        .filter_map(|obligation| match obligation {
+            Obligation::InjectSecretOnce { handle } => Some(handle.clone()),
+            _ => None,
+        })
         .collect()
 }
 
@@ -790,6 +1012,12 @@ fn validate_network_policy_metadata(
 fn network_obligation_failed() -> CapabilityObligationError {
     CapabilityObligationError::Failed {
         kind: CapabilityObligationFailureKind::Network,
+    }
+}
+
+fn secret_obligation_failed() -> CapabilityObligationError {
+    CapabilityObligationError::Failed {
+        kind: CapabilityObligationFailureKind::Secret,
     }
 }
 
@@ -858,6 +1086,7 @@ fn obligation_label(obligation: &Obligation) -> Option<&'static str> {
     match obligation {
         Obligation::AuditBefore => Some("audit_before"),
         Obligation::ApplyNetworkPolicy { .. } => Some("apply_network_policy"),
+        Obligation::InjectSecretOnce { .. } => Some("inject_secret_once"),
         _ => None,
     }
 }
@@ -899,6 +1128,8 @@ where
     audit_sink: Option<Arc<dyn AuditSink>>,
     obligation_handler: Option<Arc<dyn CapabilityObligationHandler>>,
     network_obligation_policies: Arc<NetworkObligationPolicyStore>,
+    secret_store: Option<Arc<dyn SecretStore>>,
+    runtime_secret_injections: Arc<RuntimeSecretInjectionStore>,
 }
 
 impl<F, G, S, R, A> HostRuntimeServices<F, G, S, R, A>
@@ -935,6 +1166,8 @@ where
             audit_sink: None,
             obligation_handler: None,
             network_obligation_policies: Arc::new(NetworkObligationPolicyStore::new()),
+            secret_store: None,
+            runtime_secret_injections: Arc::new(RuntimeSecretInjectionStore::new()),
         }
     }
 
@@ -956,6 +1189,10 @@ where
 
     pub fn process_services(&self) -> &ProcessServices<S, R> {
         &self.process_services
+    }
+
+    pub fn runtime_secret_injections(&self) -> Arc<RuntimeSecretInjectionStore> {
+        Arc::clone(&self.runtime_secret_injections)
     }
 
     pub fn process_host(&self) -> ProcessHost<'_> {
@@ -1032,6 +1269,28 @@ where
         self
     }
 
+    pub fn with_secret_store<T>(mut self, store: Arc<T>) -> Self
+    where
+        T: SecretStore + 'static,
+    {
+        let store: Arc<dyn SecretStore> = store;
+        self.secret_store = Some(store);
+        self
+    }
+
+    pub fn with_secret_store_dyn(mut self, store: Arc<dyn SecretStore>) -> Self {
+        self.secret_store = Some(store);
+        self
+    }
+
+    pub fn with_runtime_secret_injection_store(
+        mut self,
+        store: Arc<RuntimeSecretInjectionStore>,
+    ) -> Self {
+        self.runtime_secret_injections = store;
+        self
+    }
+
     pub fn with_script_runtime<T>(mut self, runtime: Arc<T>) -> Self
     where
         T: ScriptExecutor + 'static,
@@ -1079,9 +1338,13 @@ where
 
     pub fn with_builtin_obligation_handler(mut self) -> Self {
         let mut handler = BuiltinObligationHandler::new()
-            .with_network_policy_store(Arc::clone(&self.network_obligation_policies));
+            .with_network_policy_store(Arc::clone(&self.network_obligation_policies))
+            .with_secret_injection_store(Arc::clone(&self.runtime_secret_injections));
         if let Some(audit_sink) = &self.audit_sink {
             handler = handler.with_audit_sink_dyn(Arc::clone(audit_sink));
+        }
+        if let Some(secret_store) = &self.secret_store {
+            handler = handler.with_secret_store_dyn(Arc::clone(secret_store));
         }
         self.obligation_handler = Some(Arc::new(handler));
         self

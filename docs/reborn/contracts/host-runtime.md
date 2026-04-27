@@ -49,7 +49,7 @@ ProcessHost<'_>
 ApprovalResolver<'_, dyn ApprovalRequestStore, dyn CapabilityLeaseStore>
 ```
 
-It may hold shared `Arc` handles to configured services, runtime backends, observability sinks, an optional WASM host HTTP client or hardened network egress client, optional already-resolved runtime HTTP credentials, and an optional capability-obligation handler. It adapts concrete runtime crates into `ironclaw_dispatcher::RuntimeAdapter` implementations when building `RuntimeDispatcher`, and it provides a small `BuiltinObligationHandler` for metadata-only obligations plus WASM network-policy handoff.
+It may hold shared `Arc` handles to configured services, runtime backends, observability sinks, an optional WASM host HTTP client or hardened network egress client, optional already-resolved runtime HTTP credentials, an optional scoped `SecretStore`, a one-shot runtime secret injection store, and an optional capability-obligation handler. It adapts concrete runtime crates into `ironclaw_dispatcher::RuntimeAdapter` implementations when building `RuntimeDispatcher`, and it provides a small `BuiltinObligationHandler` for metadata-only audit, scoped network-policy handoff, and direct-handle secret lease consumption.
 
 It must not:
 
@@ -57,10 +57,10 @@ It must not:
 - execute runtime lanes directly outside adapter wrappers
 - own process state transitions or cancellation semantics
 - own approval resolution or lease semantics; `approval_resolver()` only wires `ironclaw_approvals::ApprovalResolver`
-- own broad runtime/input/output obligation semantics; `with_obligation_handler(...)` passes a shared `CapabilityObligationHandler` through to `CapabilityHost`, and `BuiltinObligationHandler` is limited to audit-before metadata plus `ApplyNetworkPolicy` preflight/hand-off to WASM host HTTP imports and `ironclaw_network` egress. Already-resolved runtime HTTP credentials may be injected only in the hardened WASM egress adapter after pre-injection leak scanning.
+- own broad runtime/input/output obligation semantics; `with_obligation_handler(...)` passes a shared `CapabilityObligationHandler` through to `CapabilityHost`, and `BuiltinObligationHandler` is limited to audit-before metadata, `ApplyNetworkPolicy` preflight/hand-off to WASM host HTTP imports and `ironclaw_network` egress, and direct `InjectSecretOnce { handle }` lease/consume into a one-shot runtime injection store. Already-resolved runtime HTTP credentials may be injected only in the hardened WASM egress adapter after pre-injection leak scanning.
 - expose process lifecycle APIs through `CapabilityHost`
 - turn process subscriptions into a message bus
-- weaken tenant/user scoped persistence boundaries
+- weaken tenant/user/agent/project scoped persistence boundaries
 
 Ownership remains:
 
@@ -96,6 +96,8 @@ let services = HostRuntimeServices::new(
 .with_hardened_network_egress()
 // optional already-resolved credentials for host-mediated WASM HTTP egress:
 .with_runtime_http_credentials(runtime_http_credentials)
+// optional direct-handle InjectSecretOnce support:
+.with_secret_store(secret_store)
 .with_event_sink(event_sink)
 .with_audit_sink(audit_sink)
 .with_builtin_obligation_handler();
@@ -139,11 +141,19 @@ ProcessHost status/kill/result/output
 
 `approval_resolver()` uses the same `ApprovalRequestStore`, `CapabilityLeaseStore`, and optional `AuditSink` handles configured for `CapabilityHost::resume_json(...)`. This prevents accidental split wiring where one component approves a request into one lease store while resume checks another, or where approval audit disappears because the resolver was not wired to the shared audit sink.
 
-If configured, the shared `CapabilityObligationHandler` is passed into each `CapabilityHost` built by this helper. `HostRuntimeServices::with_builtin_obligation_handler()` installs the built-in handler with the shared `NetworkObligationPolicyStore`. It supports `AuditBefore` by emitting a redacted `AuditStage::Before` audit envelope through the configured `AuditSink`, and supports `ApplyNetworkPolicy` by validating policy metadata and storing the scoped policy in `NetworkObligationPolicyStore`; without a policy store, `ApplyNetworkPolicy` fails closed. The WASM runtime adapter consumes that scoped policy during dispatch. If `with_hardened_network_egress()` or `with_http_egress_client(...)` is configured, WASM `host.http_request_utf8` calls go through `ironclaw_network::HardenedHttpEgressClient`/`HttpEgressClient`, which policy-checks, DNS-resolves, private-address-checks, redirect-revalidates, pins validated resolution, and bounds response size before returning bytes. The hardened WASM egress adapter also runs `ironclaw_safety::LeakDetector` on the guest-provided URL/body before any credential injection, injects only already-resolved `RuntimeHttpCredential` values configured by the composition layer, and scans/redacts-or-blocks response bodies before returning them to guest memory. If only a custom `WasmHostHttp` is configured, the adapter still wraps it with `WasmPolicyHttpClient` as a lower-level test/custom-client policy guard. If a network policy is present for Script or MCP lanes, those adapters fail closed with `NetworkDenied` until they have enforceable network plumbing. This handoff still does not consume secret leases, perform OAuth refresh, or reserve egress resources by itself. `InjectSecretOnce`, `AuditAfter`, `RedactOutput`, `EnforceOutputLimit`, resource reservation, and scoped-mount obligations remain unsupported and fail closed until their required runtime/input/output plumbing exists. Unsupported or failed handler outcomes remain fail-closed inside `CapabilityHost` before dispatch, process start, or approval lease claim.
+If configured, the shared `CapabilityObligationHandler` is passed into each `CapabilityHost` built by this helper. `HostRuntimeServices::with_builtin_obligation_handler()` installs the built-in handler with the shared `NetworkObligationPolicyStore` and `RuntimeSecretInjectionStore`.
+
+Supported built-in obligations in this slice:
+
+- `AuditBefore`: emits a redacted `AuditStage::Before` audit envelope through the configured `AuditSink`; without an audit sink, it fails closed.
+- `ApplyNetworkPolicy`: validates policy metadata and stores the scoped policy in `NetworkObligationPolicyStore`; without a policy store, it fails closed. The policy key includes tenant/user/agent/project/mission/thread/invocation/capability scope.
+- `InjectSecretOnce { handle }`: requires `with_secret_store(...)`, verifies the scoped secret exists, calls `SecretStore::lease_once(...)`, calls `SecretStore::consume(...)` exactly once, and stages the returned material in `RuntimeSecretInjectionStore`. Runtime consumers must call `take(...)`, which removes the material so it cannot be reused. Missing secret stores, missing scoped secrets, lease failures, consume failures, and injection-store failures all map to sanitized `CapabilityObligationFailureKind::Secret`.
+
+The WASM runtime adapter consumes accepted network policy during dispatch. If `with_hardened_network_egress()` or `with_http_egress_client(...)` is configured, WASM `host.http_request_utf8` calls go through `ironclaw_network::HardenedHttpEgressClient`/`HttpEgressClient`, which policy-checks, DNS-resolves, private-address-checks, redirect-revalidates, pins validated resolution, and bounds response size before returning bytes. The hardened WASM egress adapter also runs `ironclaw_safety::LeakDetector` on the guest-provided URL/body before any credential injection, injects only already-resolved `RuntimeHttpCredential` values configured by the composition layer, and scans/redacts-or-blocks response bodies before returning them to guest memory. If only a custom `WasmHostHttp` is configured, the adapter still wraps it with `WasmPolicyHttpClient` as a lower-level test/custom-client policy guard. If a network policy is present for Script or MCP lanes, those adapters fail closed with `NetworkDenied` until they have enforceable network plumbing. This handoff still does not perform OAuth refresh, account selection, credential-account resolution, or reserve egress resources by itself. `AuditAfter`, `RedactOutput`, `EnforceOutputLimit`, resource reservation, and scoped-mount obligations remain unsupported and fail closed until their required runtime/input/output plumbing exists. Unsupported or failed handler outcomes remain fail-closed inside `CapabilityHost` before dispatch, process start, or approval lease claim.
 
 This also prevents accidental split wiring where one component starts a process and another reads results or signals cancellation from a different store/registry.
 
-Tenant/user scope still comes from `ExecutionContext.resource_scope`, and all persistence remains under the lower-level store contracts.
+Tenant/user/agent/project scope still comes from `ExecutionContext.resource_scope`, and all persistence remains under the lower-level store contracts.
 
 ---
 
