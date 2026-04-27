@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use ironclaw_host_api::*;
 use rust_decimal_macros::dec;
 use serde_json::json;
@@ -29,6 +31,9 @@ fn capability_id_requires_extension_prefixed_name() {
     let id = CapabilityId::new("github.search_issues").unwrap();
     assert_eq!(id.as_str(), "github.search_issues");
 
+    let nested = CapabilityId::new("github.issues.search").unwrap();
+    assert_eq!(nested.as_str(), "github.issues.search");
+
     for invalid in [
         "github",
         "github.",
@@ -40,6 +45,10 @@ fn capability_id_requires_extension_prefixed_name() {
         assert!(
             CapabilityId::new(invalid).is_err(),
             "{invalid:?} should be rejected"
+        );
+        assert!(
+            serde_json::from_value::<CapabilityId>(json!(invalid)).is_err(),
+            "{invalid:?} should also be rejected when deserialized"
         );
     }
 }
@@ -61,6 +70,10 @@ fn scope_ids_reject_path_segments_and_controls() {
         assert!(
             UserId::new(invalid).is_err(),
             "{invalid:?} should be rejected"
+        );
+        assert!(
+            serde_json::from_value::<UserId>(json!(invalid)).is_err(),
+            "{invalid:?} should also be rejected when deserialized"
         );
     }
 }
@@ -134,6 +147,8 @@ fn scoped_path_rejects_raw_host_paths_urls_and_traversal() {
         "file:///etc/passwd",
         "https://example.com/file",
         "/Users/alice/project",
+        "/opt/ironclaw/project",
+        "/tmp/ironclaw/project",
         "C:\\Users\\alice\\project",
         "/workspace/has\0nul",
     ] {
@@ -160,6 +175,19 @@ fn virtual_path_requires_known_root_and_rejects_traversal() {
             "{invalid:?} should be rejected"
         );
     }
+}
+
+#[test]
+fn host_path_debug_redacts_and_host_path_is_not_serializable() {
+    static_assertions::assert_not_impl_any!(HostPath: serde::Serialize);
+
+    let debug = format!(
+        "{:?}",
+        HostPath::from_path_buf(PathBuf::from("/Users/alice/private-secret"))
+    );
+    assert_eq!(debug, "HostPath(<redacted>)");
+    assert!(!debug.contains("alice"));
+    assert!(!debug.contains("private-secret"));
 }
 
 #[test]
@@ -190,7 +218,7 @@ fn mount_view_resolves_longest_alias_match() {
 }
 
 #[test]
-fn mount_view_denies_unknown_alias_and_broader_child_permissions() {
+fn mount_view_denies_unknown_alias_broader_permissions_and_narrower_targets() {
     let parent = MountView::new(vec![MountGrant::new(
         MountAlias::new("/workspace").unwrap(),
         VirtualPath::new("/projects/p1").unwrap(),
@@ -212,6 +240,32 @@ fn mount_view_denies_unknown_alias_and_broader_child_permissions() {
     .unwrap();
 
     assert!(!child.is_subset_of(&parent));
+
+    let narrower_child = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/p1/subdir").unwrap(),
+        MountPermissions::read_only(),
+    )])
+    .unwrap();
+    assert!(!narrower_child.is_subset_of(&parent));
+}
+
+#[test]
+fn mount_view_traversal_is_rejected_before_or_during_resolution() {
+    let view = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/p1").unwrap(),
+        MountPermissions::read_only(),
+    )])
+    .unwrap();
+
+    assert!(ScopedPath::new("/workspace/../secret").is_err());
+
+    assert!(serde_json::from_value::<ScopedPath>(json!("/workspace/../secret")).is_err());
+    assert!(
+        view.resolve(&ScopedPath::new("/workspace/file.txt").unwrap())
+            .is_ok()
+    );
 }
 
 #[test]
@@ -238,20 +292,27 @@ fn agent_id_is_first_class_optional_execution_scope() {
 #[test]
 fn audit_envelope_carries_agent_scope_without_leaking_payloads() {
     let ctx = sample_context_with_agent(Some("agent1"));
+    let action = Action::WriteFile {
+        path: ScopedPath::new("/workspace/secret.txt").unwrap(),
+        bytes: Some(12),
+    };
     let envelope = AuditEnvelope::denied(
         &ctx,
         AuditStage::Denied,
-        ActionSummary {
-            kind: "dispatch".to_string(),
-            target: Some("echo.say".to_string()),
-            effects: vec![EffectKind::DispatchCapability],
-        },
+        ActionSummary::from_action(&action),
         DenyReason::MissingGrant,
     );
 
     assert_eq!(envelope.agent_id, Some(AgentId::new("agent1").unwrap()));
+    assert_eq!(
+        envelope.action.target.as_deref(),
+        Some("/workspace/secret.txt")
+    );
     let json = serde_json::to_value(&envelope).unwrap();
     assert_eq!(json["agent_id"], "agent1");
+    let serialized = serde_json::to_string(&json).unwrap();
+    assert!(serialized.contains("/workspace/secret.txt"));
+    assert!(!serialized.contains("/Users/alice"));
     assert!(json.get("host_path").is_none());
 }
 
@@ -290,7 +351,7 @@ fn principal_agent_serializes_as_first_class_principal() {
 }
 
 #[test]
-fn invocation_fingerprint_is_stable_and_input_redacted() {
+fn invocation_fingerprint_is_stable_and_input_hashed() {
     let ctx = sample_context();
     let capability = CapabilityId::new("echo.say").unwrap();
     let estimate = ResourceEstimate {
@@ -406,6 +467,99 @@ fn actions_and_decisions_serialize_with_stable_snake_case_tags() {
     };
     let json = serde_json::to_value(&decision).unwrap();
     assert_eq!(json, json!({"type":"deny","reason":"missing_grant"}));
+}
+
+#[test]
+fn action_summaries_use_stable_snake_case_targets() {
+    let network = ActionSummary::from_action(&Action::Network {
+        target: NetworkTarget {
+            scheme: NetworkScheme::Https,
+            host: "api.example.com".to_string(),
+            port: Some(443),
+        },
+        method: NetworkMethod::Post,
+        estimated_bytes: None,
+    });
+    assert_eq!(network.target.as_deref(), Some("post:api.example.com:443"));
+
+    let secret = ActionSummary::from_action(&Action::UseSecret {
+        handle: SecretHandle::new("google_oauth").unwrap(),
+        mode: SecretUseMode::InjectIntoRequest,
+    });
+    assert_eq!(
+        secret.target.as_deref(),
+        Some("google_oauth:inject_into_request")
+    );
+
+    let extension = ActionSummary::from_action(&Action::ExtensionLifecycle {
+        extension_id: ExtensionId::new("github").unwrap(),
+        operation: ExtensionLifecycleOperation::Install,
+    });
+    assert_eq!(extension.target.as_deref(), Some("github:install"));
+}
+
+#[test]
+fn obligations_are_unique_and_canonicalized() {
+    let reservation_id = ResourceReservationId::new();
+    let obligations = Obligations::new(vec![
+        Obligation::AuditAfter,
+        Obligation::ReserveResources { reservation_id },
+        Obligation::AuditBefore,
+    ])
+    .unwrap();
+
+    assert_eq!(
+        obligations
+            .as_slice()
+            .iter()
+            .map(Obligation::kind)
+            .collect::<Vec<_>>(),
+        vec![
+            ObligationKind::ReserveResources,
+            ObligationKind::AuditBefore,
+            ObligationKind::AuditAfter,
+        ]
+    );
+
+    assert!(Obligations::new(vec![Obligation::AuditBefore, Obligation::AuditBefore]).is_err());
+
+    let duplicate_json = json!([
+        {"type":"audit_before"},
+        {"type":"audit_before"}
+    ]);
+    assert!(serde_json::from_value::<Obligations>(duplicate_json).is_err());
+}
+
+#[test]
+fn privileged_runtime_and_trust_classes_cannot_be_self_asserted_from_json() {
+    assert_eq!(
+        serde_json::from_value::<RuntimeKind>(json!("wasm")).unwrap(),
+        RuntimeKind::Wasm
+    );
+    assert_eq!(
+        serde_json::from_value::<TrustClass>(json!("sandbox")).unwrap(),
+        TrustClass::Sandbox
+    );
+
+    assert!(serde_json::from_value::<RuntimeKind>(json!("first_party")).is_err());
+    assert!(serde_json::from_value::<RuntimeKind>(json!("system")).is_err());
+    assert!(serde_json::from_value::<TrustClass>(json!("first_party")).is_err());
+    assert!(serde_json::from_value::<TrustClass>(json!("system")).is_err());
+}
+
+#[test]
+fn system_principals_distinguish_host_runtime_from_named_services() {
+    assert_eq!(
+        serde_json::to_value(Principal::HostRuntime).unwrap(),
+        json!({"type":"host_runtime"})
+    );
+    assert_eq!(
+        serde_json::to_value(Principal::System(
+            SystemServiceId::new("heartbeat").unwrap()
+        ))
+        .unwrap(),
+        json!({"type":"system","id":"heartbeat"})
+    );
 }
 
 #[test]

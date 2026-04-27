@@ -99,8 +99,7 @@ fn validate_name_segment(kind: &'static str, value: &str) -> Result<(), HostApiE
 
 macro_rules! string_id {
     ($name:ident, $kind:literal, $validator:ident) => {
-        #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-        #[serde(transparent)]
+        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
         pub struct $name(String);
 
         impl $name {
@@ -122,6 +121,25 @@ macro_rules! string_id {
         impl std::fmt::Display for $name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.write_str(&self.0)
+            }
+        }
+
+        impl Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                serializer.serialize_str(&self.0)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                Self::new(value).map_err(serde::de::Error::custom)
             }
         }
     };
@@ -173,9 +191,13 @@ string_id!(MissionId, "mission", validate_scope_id);
 string_id!(ThreadId, "thread", validate_scope_id);
 string_id!(ExtensionId, "extension", validate_name_segment);
 string_id!(SecretHandle, "secret", validate_name_segment);
+string_id!(SystemServiceId, "system_service", validate_name_segment);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+/// Extension-prefixed capability identifier.
+///
+/// Capability IDs require at least two dot-separated segments and may use
+/// additional segments for namespacing, e.g. `github.issues.search`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CapabilityId(String);
 
 impl CapabilityId {
@@ -185,7 +207,7 @@ impl CapabilityId {
             return Err(HostApiError::invalid_id(
                 "capability",
                 value,
-                "must be '<extension>.<capability>'",
+                "must be '<extension>.<capability>[.<sub>...]'",
             ));
         }
         if value.split('.').count() < 2 || value.split('.').any(str::is_empty) {
@@ -213,6 +235,25 @@ impl CapabilityId {
 impl std::fmt::Display for CapabilityId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+impl Serialize for CapabilityId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for CapabilityId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
     }
 }
 

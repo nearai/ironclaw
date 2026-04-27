@@ -113,6 +113,13 @@ impl ResourceAccount {
         }
     }
 
+    /// Returns every account whose limit applies to this scope, from broadest to
+    /// narrowest.
+    ///
+    /// A reservation succeeds only if every account returned by this cascade
+    /// remains within its limit. Deeper accounts do not override shallower
+    /// accounts; tenant, user, project, agent, mission, and thread limits all
+    /// apply when present.
     pub fn cascade(scope: &ResourceScope) -> Vec<Self> {
         let mut accounts = vec![
             Self::tenant(scope.tenant_id.clone()),
@@ -277,7 +284,7 @@ impl ResourceTally {
     }
 
     fn add_assign(&mut self, other: &Self) {
-        self.usd += other.usd;
+        self.usd = self.usd.checked_add(other.usd).unwrap_or(Decimal::MAX);
         self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
         self.wall_clock_ms = self.wall_clock_ms.saturating_add(other.wall_clock_ms);
@@ -292,7 +299,11 @@ impl ResourceTally {
     }
 
     fn sub_assign(&mut self, other: &Self) {
-        self.usd -= other.usd;
+        self.usd = self
+            .usd
+            .checked_sub(other.usd)
+            .map(|value| value.max(Decimal::ZERO))
+            .unwrap_or(Decimal::ZERO);
         self.input_tokens = self.input_tokens.saturating_sub(other.input_tokens);
         self.output_tokens = self.output_tokens.saturating_sub(other.output_tokens);
         self.wall_clock_ms = self.wall_clock_ms.saturating_sub(other.wall_clock_ms);
@@ -550,6 +561,10 @@ impl ResourceGovernor for InMemoryResourceGovernor {
     }
 }
 
+/// Returns the first denied dimension in canonical resource order.
+///
+/// This intentionally reports one denial rather than aggregating all failed
+/// dimensions so callers have a deterministic, compact failure reason.
 fn check_limits(
     account: &ResourceAccount,
     limits: &ResourceLimits,
@@ -646,7 +661,14 @@ fn check_decimal(
     requested: Decimal,
 ) -> Option<ResourceDenial> {
     let limit = limit?;
-    if usage + reserved + requested > limit {
+    let exceeds = match usage
+        .checked_add(reserved)
+        .and_then(|subtotal| subtotal.checked_add(requested))
+    {
+        Some(total) => total > limit,
+        None => true,
+    };
+    if exceeds {
         Some(ResourceDenial {
             account: account.clone(),
             dimension,

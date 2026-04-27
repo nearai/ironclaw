@@ -61,6 +61,77 @@ fn reserve_with_id_uses_requested_identifier_and_rejects_duplicates() {
 }
 
 #[test]
+fn usd_tally_saturates_instead_of_panicking_on_decimal_overflow() {
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope("tenant1", "user1", Some("project1"));
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+
+    governor
+        .reserve(
+            scope.clone(),
+            ResourceEstimate {
+                usd: Some(rust_decimal::Decimal::MAX),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+    governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                usd: Some(dec!(1)),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        governor.reserved_for(&account).usd,
+        rust_decimal::Decimal::MAX
+    );
+}
+
+#[test]
+fn usd_limit_check_denies_instead_of_panicking_on_decimal_overflow() {
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope("tenant1", "user1", Some("project1"));
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor.set_limit(
+        account.clone(),
+        ResourceLimits {
+            max_usd: Some(rust_decimal::Decimal::MAX),
+            ..ResourceLimits::default()
+        },
+    );
+
+    governor
+        .reserve(
+            scope.clone(),
+            ResourceEstimate {
+                usd: Some(rust_decimal::Decimal::MAX),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+
+    let err = governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                usd: Some(dec!(1)),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ResourceError::LimitExceeded(denial)
+            if denial.account == account && denial.dimension == ResourceDimension::Usd
+    ));
+}
+
+#[test]
 fn reserve_denies_when_usd_limit_would_be_exceeded() {
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope("tenant1", "user1", Some("project1"));
@@ -275,6 +346,15 @@ fn reconcile_records_actual_usage_and_closes_reservation() {
         governor.reconcile(reservation.id, ResourceUsage::default()),
         Err(ResourceError::ReservationClosed { .. })
     ));
+    assert!(matches!(
+        governor.release(reservation.id),
+        Err(ResourceError::ReservationClosed {
+            status: ReservationStatus::Reconciled,
+            ..
+        })
+    ));
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(governor.usage_for(&account).usd, dec!(0.20));
 }
 
 #[test]

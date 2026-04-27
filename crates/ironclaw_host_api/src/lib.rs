@@ -38,6 +38,9 @@ pub mod resource;
 pub mod runtime;
 pub mod scope;
 
+// Flat re-exports are intentional: downstream Reborn service crates consume
+// `ironclaw_host_api` as a contract prelude, while module docs remain the
+// authoritative grouping for each vocabulary family.
 pub use action::*;
 pub use approval::*;
 pub use audit::*;

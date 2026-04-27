@@ -2,6 +2,7 @@
 name = "ironclaw_resources"
 version = "0.1.0"
 edition = "2024"
+# Keep in sync with the workspace-level package.rust-version.
 rust-version = "1.92"
 description = "Resource reservation governor for IronClaw Reborn"
 authors = ["NEAR AI <support@near.ai>"]

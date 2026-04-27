@@ -23,6 +23,16 @@ pub enum SecretUseMode {
     ReadRaw,
 }
 
+impl std::fmt::Display for SecretUseMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::InjectIntoRequest => "inject_into_request",
+            Self::InjectIntoEnvironment => "inject_into_environment",
+            Self::ReadRaw => "read_raw",
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkScheme {
@@ -39,6 +49,19 @@ pub enum NetworkMethod {
     Patch,
     Delete,
     Head,
+}
+
+impl std::fmt::Display for NetworkMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Get => "get",
+            Self::Post => "post",
+            Self::Put => "put",
+            Self::Patch => "patch",
+            Self::Delete => "delete",
+            Self::Head => "head",
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -70,6 +93,18 @@ pub enum ExtensionLifecycleOperation {
     Remove,
     Enable,
     Disable,
+}
+
+impl std::fmt::Display for ExtensionLifecycleOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Install => "install",
+            Self::Update => "update",
+            Self::Remove => "remove",
+            Self::Enable => "enable",
+            Self::Disable => "disable",
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

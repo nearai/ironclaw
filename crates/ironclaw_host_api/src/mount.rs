@@ -119,6 +119,13 @@ impl MountView {
         mount.target.join_tail(tail)
     }
 
+    /// Returns true when every child mount is present in the parent with the
+    /// same alias and exact same target plus no broader permissions.
+    ///
+    /// V1 intentionally does not treat a narrower child target (for example, a
+    /// child `/workspace -> /projects/p1/subdir`) as a subset of a parent
+    /// `/workspace -> /projects/p1`; callers must issue an explicit mount for
+    /// each delegated target.
     pub fn is_subset_of(&self, parent: &Self) -> bool {
         self.mounts.iter().all(|child| {
             parent.mounts.iter().any(|parent_mount| {

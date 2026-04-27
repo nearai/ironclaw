@@ -5,6 +5,10 @@
 //! [`TrustClass`] is an authority ceiling, not a grant. Even first-party and
 //! system contexts still need explicit mounts, capability grants, resource
 //! scopes, and audit obligations.
+//!
+//! Privileged runtime/trust variants are host-assigned only. They serialize for
+//! audit and durable trusted records, but plain serde deserialization rejects
+//! them so untrusted manifests cannot self-assert first-party or system status.
 
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +18,9 @@ pub enum RuntimeKind {
     Wasm,
     Mcp,
     Script,
+    #[serde(skip_deserializing)]
     FirstParty,
+    #[serde(skip_deserializing)]
     System,
 }
 
@@ -23,6 +29,8 @@ pub enum RuntimeKind {
 pub enum TrustClass {
     Sandbox,
     UserTrusted,
+    #[serde(skip_deserializing)]
     FirstParty,
+    #[serde(skip_deserializing)]
     System,
 }

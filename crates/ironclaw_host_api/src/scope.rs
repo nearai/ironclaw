@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AgentId, CapabilitySet, CorrelationId, ExtensionId, HostApiError, InvocationId, MissionId,
-    MountView, ProcessId, ProjectId, ResourceScope, RuntimeKind, TenantId, ThreadId, TrustClass,
-    UserId,
+    MountView, ProcessId, ProjectId, ResourceScope, RuntimeKind, SystemServiceId, TenantId,
+    ThreadId, TrustClass, UserId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -24,7 +24,10 @@ pub enum Principal {
     Mission(MissionId),
     Thread(ThreadId),
     Extension(ExtensionId),
-    System,
+    /// Host runtime internals acting on their own behalf. Never match this as a grantable userland principal.
+    HostRuntime,
+    /// Named trusted system service, such as heartbeat, routine engine, or migration runner.
+    System(SystemServiceId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -7,6 +7,7 @@
 //! [`MountView`](crate::MountView), such as `/workspace/README.md`. This split is
 //! a core containment invariant.
 
+use std::fmt;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -14,8 +15,14 @@ use serde::{Deserialize, Serialize};
 use crate::HostApiError;
 
 /// Physical host/backend path. This type is intentionally not serializable.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct HostPath(PathBuf);
+
+impl fmt::Debug for HostPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("HostPath(<redacted>)")
+    }
+}
 
 impl HostPath {
     pub fn from_path_buf(path: PathBuf) -> Self {
@@ -27,16 +34,13 @@ impl HostPath {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VirtualPath(String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ScopedPath(String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MountAlias(String);
 
 const VIRTUAL_ROOTS: &[&str] = &[
@@ -47,14 +51,84 @@ const VIRTUAL_ROOTS: &[&str] = &[
     "/memory",
 ];
 
+/// Common raw host-path prefixes rejected before scoped-path normalization.
+///
+/// This is a defense-in-depth heuristic for obvious host paths at the host API
+/// boundary. Authoritative containment still belongs to `ironclaw_filesystem`
+/// and backend-specific mount resolution; do not treat this list as the complete
+/// sandbox boundary.
 const RAW_HOST_PREFIXES: &[&str] = &[
     "/Users/",
     "/home/",
+    "/root/",
     "/etc/",
     "/var/",
     "/private/",
     "/Volumes/",
+    "/Library/",
+    "/usr/",
+    "/opt/",
+    "/tmp/", // safety: host-path prefix literal, not temp file creation
+    "/proc/",
+    "/sys/",
 ];
+
+impl Serialize for VirtualPath {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for VirtualPath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl Serialize for ScopedPath {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for ScopedPath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl Serialize for MountAlias {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for MountAlias {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
 
 impl VirtualPath {
     pub fn new(value: impl Into<String>) -> Result<Self, HostApiError> {

@@ -180,7 +180,7 @@ impl ActionSummary {
                 operation,
             } => Self::new(
                 "extension_lifecycle",
-                Some(format!("{}:{operation:?}", extension_id.as_str())),
+                Some(format!("{}:{operation}", extension_id.as_str())),
                 vec![EffectKind::ModifyExtension],
             ),
             Action::EmitExternalEffect { effect } => {
@@ -215,13 +215,13 @@ fn extension_from_principal(principal: &Principal) -> Option<ExtensionId> {
 
 fn network_target(method: &NetworkMethod, host: &str, port: Option<u16>) -> String {
     match port {
-        Some(port) => format!("{method:?}:{host}:{port}"),
-        None => format!("{method:?}:{host}"),
+        Some(port) => format!("{method}:{host}:{port}"),
+        None => format!("{method}:{host}"),
     }
 }
 
 fn secret_target(handle: &str, mode: &SecretUseMode) -> String {
-    format!("{handle}:{mode:?}")
+    format!("{handle}:{mode}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

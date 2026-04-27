@@ -2,6 +2,7 @@
 name = "ironclaw_host_api"
 version = "0.1.0"
 edition = "2024"
+# Keep in sync with the workspace-level package.rust-version.
 rust-version = "1.92"
 description = "Shared host API contracts for IronClaw Reborn"
 authors = ["NEAR AI <support@near.ai>"]
@@ -22,3 +23,4 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
 rust_decimal_macros = "1"
+static_assertions = "1"
