@@ -297,6 +297,10 @@ def build_gateway_env(
         "LLM_BACKEND": "openai_compatible",
         "LLM_BASE_URL": mock_llm_url,
         "LLM_MODEL": "mock-model",
+        # Even though the mock LLM ignores the API key, the
+        # openai_compatible provider refuses to instantiate without one.
+        # Without this the provider falls back to NearAI's DB default.
+        "LLM_API_KEY": "mock-api-key",
         "DATABASE_BACKEND": "libsql",
         "LIBSQL_PATH": str(db_path),
         "SECRETS_MASTER_KEY": secrets_master_key,
@@ -313,6 +317,38 @@ def build_gateway_env(
     if extra_env:
         env.update({key: value for key, value in extra_env.items() if value})
     return env
+
+
+async def _pin_mock_llm_settings(
+    base_url: str, gateway_token: str, mock_llm_url: str
+) -> None:
+    """Pin LLM backend/base_url/model via the settings API.
+
+    Required because the gateway's DB settings take priority over the
+    LLM_BACKEND / LLM_BASE_URL / LLM_MODEL env vars; the freshly-seeded
+    DB defaults llm_backend to `nearai`, which sends the agent into an
+    interactive auth flow that hangs in CI. See tests/e2e/CLAUDE.md.
+    """
+    import httpx  # local import: keep top-level import set unchanged
+
+    headers = {"Authorization": f"Bearer {gateway_token}"}
+    writes = [
+        ("llm_backend", "openai_compatible"),
+        ("openai_compatible_base_url", mock_llm_url),
+        ("selected_model", "mock-model"),
+    ]
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        for key, value in writes:
+            response = await client.put(
+                f"{base_url}/api/settings/{key}",
+                headers=headers,
+                json={"value": value},
+            )
+            if response.status_code not in (200, 201, 204):
+                raise CanaryError(
+                    f"Failed to pin LLM setting {key}: "
+                    f"{response.status_code} {response.text[:300]}"
+                )
 
 
 def _drain_to_file(stream: Any, path: Path) -> threading.Thread:
@@ -435,6 +471,15 @@ async def start_gateway_stack(
             _drain_to_file(gateway_proc.stdout, log_dir / "gateway.log")
         base_url = f"http://127.0.0.1:{gateway_port}"
         await wait_for_ready(f"{base_url}/api/health", timeout=60.0)
+
+        # Pin the LLM provider via the settings API. Setting LLM_BACKEND /
+        # LLM_BASE_URL / LLM_MODEL via env is not enough — IronClaw's DB
+        # setting takes priority over env, and the freshly-seeded DB
+        # defaults llm_backend to `nearai`, so the env config is ignored
+        # and the agent attempts an interactive NearAI auth flow that
+        # never completes in CI. Mirrors the pattern documented in
+        # tests/e2e/CLAUDE.md and used by test_v2_tool_activate_surface.py.
+        await _pin_mock_llm_settings(base_url, gateway_token, mock_llm_url)
         return GatewayStack(
             base_url=base_url,
             gateway_token=gateway_token,

@@ -163,8 +163,8 @@ BROWSER_CASES: dict[str, BrowserProviderCase] = {
         install_kind=None,
         install_url=None,
         trigger_prompt="check gmail unread",
-        expected_tool_name="gmail_tool",
-        expected_text="inbox",
+        expected_tool_name="gmail",
+        expected_text="gmail",
         auth_extension_name="gmail",
     ),
     "github": BrowserProviderCase(
