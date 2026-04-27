@@ -9,6 +9,7 @@ use ironclaw_filesystem::{
     DirEntry, FileStat, FilesystemError, FilesystemOperation, LocalFilesystem, RootFilesystem,
 };
 use ironclaw_host_api::*;
+use tokio::sync::Mutex as AsyncMutex;
 
 #[tokio::test]
 async fn in_memory_event_sink_records_runtime_events_in_order() {
@@ -83,6 +84,54 @@ async fn process_lifecycle_events_carry_process_identity_and_scope() {
         "failed at /tmp/secret-token.txt",
     );
     assert_eq!(unsafe_error.error_kind.as_deref(), Some("Unclassified"));
+}
+
+#[tokio::test]
+async fn jsonl_event_sink_uses_append_file_without_rewriting_existing_log() {
+    let fs = Arc::new(AppendOnlyFilesystem::new());
+    let path = scoped_runtime_event_log_path(&sample_scope(), "reborn-demo.jsonl").unwrap();
+    let sink = JsonlEventSink::new(Arc::clone(&fs), path);
+
+    sink.emit(RuntimeEvent::dispatch_requested(
+        sample_scope(),
+        CapabilityId::new("echo.say").unwrap(),
+    ))
+    .await
+    .unwrap();
+    sink.emit(RuntimeEvent::runtime_selected(
+        sample_scope(),
+        CapabilityId::new("echo.say").unwrap(),
+        ExtensionId::new("echo").unwrap(),
+        RuntimeKind::Wasm,
+    ))
+    .await
+    .unwrap();
+
+    assert_eq!(fs.write_count(), 0);
+    assert_eq!(fs.append_count(), 2);
+    let events = sink.read_events().await.unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].kind, RuntimeEventKind::DispatchRequested);
+    assert_eq!(events[1].kind, RuntimeEventKind::RuntimeSelected);
+}
+
+#[tokio::test]
+async fn jsonl_audit_sink_uses_append_file_without_rewriting_existing_log() {
+    let fs = Arc::new(AppendOnlyFilesystem::new());
+    let path = scoped_audit_log_path(&sample_scope(), "approval-audit.jsonl").unwrap();
+    let sink = JsonlAuditSink::new(Arc::clone(&fs), path);
+
+    sink.emit_audit(sample_approval_audit_envelope())
+        .await
+        .unwrap();
+    sink.emit_audit(sample_approval_audit_envelope())
+        .await
+        .unwrap();
+
+    assert_eq!(fs.write_count(), 0);
+    assert_eq!(fs.append_count(), 2);
+    let records = sink.read_records().await.unwrap();
+    assert_eq!(records.len(), 2);
 }
 
 #[tokio::test]
@@ -280,6 +329,77 @@ fn sample_approval_audit_envelope() -> AuditEnvelope {
         Principal::User(scope.user_id.clone()),
         "approved",
     )
+}
+
+#[derive(Debug)]
+struct AppendOnlyFilesystem {
+    bytes: AsyncMutex<Vec<u8>>,
+    writes: AtomicUsize,
+    appends: AtomicUsize,
+}
+
+impl AppendOnlyFilesystem {
+    fn new() -> Self {
+        Self {
+            bytes: AsyncMutex::new(Vec::new()),
+            writes: AtomicUsize::new(0),
+            appends: AtomicUsize::new(0),
+        }
+    }
+
+    fn write_count(&self) -> usize {
+        self.writes.load(Ordering::SeqCst)
+    }
+
+    fn append_count(&self) -> usize {
+        self.appends.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for AppendOnlyFilesystem {
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        let bytes = self.bytes.lock().await.clone();
+        if bytes.is_empty() {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ReadFile,
+                reason: "not found".to_string(),
+            });
+        }
+        Ok(bytes)
+    }
+
+    async fn write_file(&self, path: &VirtualPath, _bytes: &[u8]) -> Result<(), FilesystemError> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        Err(FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::WriteFile,
+            reason: "write_file disabled for append-only test".to_string(),
+        })
+    }
+
+    async fn append_file(&self, _path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        self.appends.fetch_add(1, Ordering::SeqCst);
+        self.bytes.lock().await.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        Err(FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::ListDir,
+            reason: "not implemented".to_string(),
+        })
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        Err(FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::Stat,
+            reason: "not implemented".to_string(),
+        })
+    }
 }
 
 #[derive(Debug)]

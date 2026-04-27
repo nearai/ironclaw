@@ -461,15 +461,15 @@ where
 
         let _guard = self.lock.lock().await;
 
-        let mut bytes = match self.filesystem.read_file(&self.path).await {
+        let bytes = match self.filesystem.read_file(&self.path).await {
             Ok(bytes) => bytes,
             Err(error) if is_not_found(&error) => Vec::new(),
             Err(error) => return Err(EventError::from(error)),
         };
         validate_jsonl::<RuntimeEvent>(&bytes)?;
-        bytes.extend_from_slice(&line);
-        bytes.push(b'\n');
-        self.filesystem.write_file(&self.path, &bytes).await?;
+        let mut entry = line;
+        entry.push(b'\n');
+        self.filesystem.append_file(&self.path, &entry).await?;
         Ok(())
     }
 }
@@ -524,15 +524,15 @@ where
 
         let _guard = self.lock.lock().await;
 
-        let mut bytes = match self.filesystem.read_file(&self.path).await {
+        let bytes = match self.filesystem.read_file(&self.path).await {
             Ok(bytes) => bytes,
             Err(error) if is_not_found(&error) => Vec::new(),
             Err(error) => return Err(EventError::from(error)),
         };
         validate_jsonl::<AuditEnvelope>(&bytes)?;
-        bytes.extend_from_slice(&line);
-        bytes.push(b'\n');
-        self.filesystem.write_file(&self.path, &bytes).await?;
+        let mut entry = line;
+        entry.push(b'\n');
+        self.filesystem.append_file(&self.path, &entry).await?;
         Ok(())
     }
 }
