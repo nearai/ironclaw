@@ -11,28 +11,33 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
-
 use tokio::sync::RwLock;
 use tracing::debug;
 
+#[cfg(test)]
+use ironclaw_engine::ModelToolSurface;
 use ironclaw_engine::{
-    ActionDef, ActionResult, CapabilityLease, CapabilityRegistry, CapabilitySummary,
-    EffectExecutor, EngineError, MountError, Store, ThreadExecutionContext, WorkspaceMounts,
+    ActionDef, ActionInventory, ActionResult, CapabilityLease, CapabilityRegistry,
+    CapabilitySummary, EffectExecutor, EngineError, MountError, Store, ThreadExecutionContext,
+    WorkspaceMounts,
 };
 use ironclaw_skills::SkillRegistry;
 
 use crate::auth::extension::{AuthCheckResult, AuthManager, LatentActionExecution, ToolReadiness};
 use crate::auth::oauth::sanitize_auth_url;
+use crate::bridge::action_discovery::ActionDiscovery;
 use crate::bridge::action_projector::ActionProjector;
 use crate::bridge::capability_projector::CapabilityProjector;
 use crate::bridge::router::synthetic_action_call_id;
 use crate::bridge::sandbox::{InterceptOutcome, maybe_intercept};
+use crate::bridge::tool_permissions::{ToolPermissionResolution, ToolPermissionSnapshot};
 use crate::context::JobContext;
 use crate::extensions::InstalledExtension;
+use crate::extensions::naming::extension_name_candidates;
 use crate::hooks::{HookEvent, HookOutcome, HookRegistry};
-use crate::tools::permissions::{PermissionState, effective_permission};
+use crate::tools::permissions::PermissionState;
 use crate::tools::rate_limiter::RateLimiter;
-use crate::tools::{ApprovalRequirement, ToolRegistry};
+use crate::tools::{ApprovalRequirement, Tool, ToolRegistry};
 use ironclaw_safety::SafetyLayer;
 
 /// Wraps the existing tool pipeline to implement the engine's `EffectExecutor`.
@@ -78,30 +83,26 @@ pub struct EffectBridgeAdapter {
     /// capabilities like `missions` are registered here in `router.rs` and
     /// would otherwise be invisible to the LLM despite having active leases.
     capability_registry: RwLock<Option<Arc<CapabilityRegistry>>>,
-    /// Short-lived cache for `list_capability_extensions` results. Keyed by
-    /// `user_id` with an expiry timestamp. Both `available_actions` and
-    /// `available_capabilities` are called in quick succession from the engine
-    /// loop; this cache eliminates the duplicate fetch.
-    extension_cache: RwLock<Option<ExtensionCacheEntry>>,
 }
 
-/// Cached extension list with a short TTL to deduplicate the fetch across
-/// `available_actions` and `available_capabilities` when called in sequence.
-struct ExtensionCacheEntry {
-    user_id: String,
-    fetched_at: Instant,
-    extensions: Vec<InstalledExtension>,
+struct ToolApprovalContext<'a> {
+    action_name: &'a str,
+    lookup_name: &'a str,
+    parameters: &'a serde_json::Value,
+    lease: &'a CapabilityLease,
+    context: &'a ThreadExecutionContext,
+    approval_already_granted: bool,
 }
 
-impl ExtensionCacheEntry {
-    /// Cache entries expire after 500ms — long enough to cover back-to-back
-    /// calls within a single system-prompt build, short enough to never serve
-    /// stale data across separate engine iterations.
-    const TTL_MS: u128 = 500;
-
-    fn is_valid_for(&self, user_id: &str) -> bool {
-        self.user_id == user_id && self.fetched_at.elapsed().as_millis() < Self::TTL_MS
-    }
+struct ToolInfoSnapshotContext<'a> {
+    action_name: &'a str,
+    canonical_action_name: &'a str,
+    lookup_name: &'a str,
+    parameters: &'a serde_json::Value,
+    lease: &'a CapabilityLease,
+    context: &'a ThreadExecutionContext,
+    approval_already_granted: bool,
+    started_at: &'a Instant,
 }
 
 impl EffectBridgeAdapter {
@@ -125,7 +126,6 @@ impl EffectBridgeAdapter {
             skill_registry: RwLock::new(None),
             workspace_mounts: RwLock::new(None),
             capability_registry: RwLock::new(None),
-            extension_cache: RwLock::new(None),
         }
     }
 
@@ -194,6 +194,17 @@ impl EffectBridgeAdapter {
         &self.tools
     }
 
+    /// Access the underlying safety layer.
+    ///
+    /// The bridge router uses this to redact verbose-only observability
+    /// events (notably `CodeExecuted`) through the leak detector before
+    /// broadcasting them on SSE. The engine crate emits those events
+    /// raw because it has no dependency on `ironclaw_safety`; the
+    /// scrubbing therefore happens at this adapter boundary.
+    pub fn safety(&self) -> &Arc<SafetyLayer> {
+        &self.safety
+    }
+
     /// Set the auth manager for pre-flight credential checks.
     pub async fn set_auth_manager(&self, mgr: Arc<AuthManager>) {
         *self.auth_manager.write().await = Some(mgr);
@@ -218,18 +229,6 @@ impl EffectBridgeAdapter {
         context: &ThreadExecutionContext,
     ) -> Option<Vec<InstalledExtension>> {
         let auth_manager = auth_manager?;
-
-        // Check cache first.
-        {
-            let cache = self.extension_cache.read().await;
-            if let Some(entry) = cache.as_ref()
-                && entry.is_valid_for(&context.user_id)
-            {
-                return Some(entry.extensions.clone());
-            }
-        }
-
-        // Cache miss — fetch from auth_manager.
         let extensions = match auth_manager
             .list_capability_extensions(&context.user_id)
             .await
@@ -244,17 +243,6 @@ impl EffectBridgeAdapter {
                 Vec::new()
             }
         };
-
-        // Populate cache for the sibling projector call.
-        {
-            let mut cache = self.extension_cache.write().await;
-            *cache = Some(ExtensionCacheEntry {
-                user_id: context.user_id.clone(),
-                fetched_at: Instant::now(),
-                extensions: extensions.clone(),
-            });
-        }
-
         Some(extensions)
     }
 
@@ -273,6 +261,262 @@ impl EffectBridgeAdapter {
                 .map(|ext| (ext.name.clone(), ext))
                 .collect(),
         )
+    }
+
+    async fn tool_activate_requires_install_approval(
+        &self,
+        lookup_name: &str,
+        parameters: &serde_json::Value,
+        context: &ThreadExecutionContext,
+    ) -> bool {
+        if !matches!(lookup_name, "tool_activate" | "tool-activate") {
+            return false;
+        }
+
+        let Some(requested_name) = parameters
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return false;
+        };
+
+        let auth_manager = self.auth_manager.read().await;
+        let Some(auth_manager) = auth_manager.as_ref() else {
+            return true;
+        };
+
+        let extensions = match auth_manager
+            .list_capability_extensions(&context.user_id)
+            .await
+        {
+            Ok(extensions) => extensions,
+            Err(error) => {
+                debug!(
+                    user_id = %context.user_id,
+                    extension_name = requested_name,
+                    error = %error,
+                    "failed to load extension inventory for tool_activate approval; requiring approval"
+                );
+                return true;
+            }
+        };
+
+        matching_extension_requires_install_approval(requested_name, &extensions).unwrap_or(false)
+    }
+
+    async fn resolved_user_permission_for_tool(
+        &self,
+        lookup_name: &str,
+        context: &ThreadExecutionContext,
+    ) -> ToolPermissionResolution {
+        ToolPermissionSnapshot::load(self.tools.as_ref(), &context.user_id)
+            .await
+            .resolve_permission(lookup_name)
+    }
+
+    fn apply_user_permission_override(
+        base_requirement: ApprovalRequirement,
+        explicit_user_permission: Option<PermissionState>,
+    ) -> ApprovalRequirement {
+        match explicit_user_permission {
+            Some(PermissionState::AskEachTime) => ApprovalRequirement::Always,
+            _ => base_requirement,
+        }
+    }
+
+    fn ensure_tool_not_disabled(
+        action_name: &str,
+        user_permission: ToolPermissionResolution,
+    ) -> Result<(), EngineError> {
+        if matches!(user_permission.effective, PermissionState::Disabled) {
+            return Err(EngineError::LeaseDenied {
+                reason: format!("Tool '{}' is disabled for this user.", action_name),
+            });
+        }
+        Ok(())
+    }
+
+    async fn effective_tool_approval_requirement(
+        &self,
+        lookup_name: &str,
+        tool: &dyn Tool,
+        parameters: &serde_json::Value,
+        context: &ThreadExecutionContext,
+        user_permission: ToolPermissionResolution,
+        include_install_approval: bool,
+    ) -> ApprovalRequirement {
+        let base_requirement = if include_install_approval
+            && self
+                .tool_activate_requires_install_approval(lookup_name, parameters, context)
+                .await
+        {
+            ApprovalRequirement::UnlessAutoApproved
+        } else {
+            tool.requires_approval(parameters)
+        };
+        Self::apply_user_permission_override(base_requirement, user_permission.explicit)
+    }
+
+    async fn enforce_tool_approval(
+        &self,
+        approval: &ToolApprovalContext<'_>,
+        tool: &dyn Tool,
+        user_permission: ToolPermissionResolution,
+        include_install_approval: bool,
+    ) -> Result<(), EngineError> {
+        let requirement = self
+            .effective_tool_approval_requirement(
+                approval.lookup_name,
+                tool,
+                approval.parameters,
+                approval.context,
+                user_permission,
+                include_install_approval,
+            )
+            .await;
+        match requirement {
+            ApprovalRequirement::Always => {
+                if !approval.approval_already_granted {
+                    return Err(Self::gate_paused(
+                        "approval",
+                        approval.action_name,
+                        approval.context.current_call_id.as_deref(),
+                        approval.parameters.clone(),
+                        ironclaw_engine::ResumeKind::Approval {
+                            allow_always: false,
+                        },
+                        None,
+                        Some(approval.lease.clone()),
+                    ));
+                }
+            }
+            ApprovalRequirement::UnlessAutoApproved => {
+                let is_approved = self.auto_approve_tools
+                    || self
+                        .auto_approved
+                        .read()
+                        .await
+                        .contains(approval.lookup_name)
+                    || matches!(user_permission.effective, PermissionState::AlwaysAllow);
+                if !is_approved && !approval.approval_already_granted {
+                    return Err(Self::gate_paused(
+                        "approval",
+                        approval.action_name,
+                        approval.context.current_call_id.as_deref(),
+                        approval.parameters.clone(),
+                        ironclaw_engine::ResumeKind::Approval { allow_always: true },
+                        None,
+                        Some(approval.lease.clone()),
+                    ));
+                }
+            }
+            ApprovalRequirement::Never => {}
+        }
+        Ok(())
+    }
+
+    fn snapshot_action_result(
+        context: &ThreadExecutionContext,
+        action_name: &str,
+        output: serde_json::Value,
+        is_error: bool,
+        started_at: &Instant,
+    ) -> ActionResult {
+        ActionResult {
+            call_id: context
+                .current_call_id
+                .clone()
+                .unwrap_or_else(|| synthetic_action_call_id(action_name)),
+            action_name: action_name.to_string(),
+            output,
+            is_error,
+            duration: started_at.elapsed(),
+        }
+    }
+
+    async fn execute_tool_info_from_snapshot(
+        &self,
+        tool_info: &ToolInfoSnapshotContext<'_>,
+    ) -> Result<ActionResult, EngineError> {
+        let resolved_tool = self.tools.get_resolved(tool_info.lookup_name).await;
+        let user_permission = self
+            .resolved_user_permission_for_tool(tool_info.lookup_name, tool_info.context)
+            .await;
+        Self::ensure_tool_not_disabled(tool_info.action_name, user_permission)?;
+
+        if let Some((_, tool)) = resolved_tool.as_ref() {
+            self.enforce_tool_approval(
+                &ToolApprovalContext {
+                    action_name: tool_info.action_name,
+                    lookup_name: tool_info.lookup_name,
+                    parameters: tool_info.parameters,
+                    lease: tool_info.lease,
+                    context: tool_info.context,
+                    approval_already_granted: tool_info.approval_already_granted,
+                },
+                tool.as_ref(),
+                user_permission,
+                false,
+            )
+            .await?;
+        }
+
+        let snapshot_result = tool_info
+            .context
+            .available_action_inventory_snapshot
+            .as_deref()
+            .map(|inventory| ActionDiscovery::tool_info(tool_info.parameters, inventory))
+            .or_else(|| {
+                tool_info
+                    .context
+                    .available_actions_snapshot
+                    .as_deref()
+                    .map(|actions| {
+                        ActionDiscovery::tool_info_from_actions(tool_info.parameters, actions)
+                    })
+            })
+            .unwrap_or(Ok(None));
+
+        match snapshot_result {
+            Ok(Some(output)) => Ok(Self::snapshot_action_result(
+                tool_info.context,
+                tool_info.canonical_action_name,
+                output.result,
+                false,
+                tool_info.started_at,
+            )),
+            Ok(None) => {
+                let requested = tool_info
+                    .parameters
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("<missing>");
+                let error_msg = format!(
+                    "tool_info: no callable or discoverable action named '{requested}' in this execution context"
+                );
+                let sanitized = self.safety.sanitize_tool_output("tool_info", &error_msg);
+                Ok(Self::snapshot_action_result(
+                    tool_info.context,
+                    tool_info.canonical_action_name,
+                    serde_json::json!({"error": sanitized.content}),
+                    true,
+                    tool_info.started_at,
+                ))
+            }
+            Err(error) => {
+                let error_msg = format!("Tool {} failed: {}", "tool_info", error);
+                let sanitized = self.safety.sanitize_tool_output("tool_info", &error_msg);
+                Ok(Self::snapshot_action_result(
+                    tool_info.context,
+                    tool_info.canonical_action_name,
+                    serde_json::json!({"error": sanitized.content}),
+                    true,
+                    tool_info.started_at,
+                ))
+            }
+        }
     }
 
     async fn sync_skill_install_result(
@@ -946,9 +1190,18 @@ impl EffectBridgeAdapter {
         approval_already_granted: bool,
     ) -> Result<ActionResult, EngineError> {
         let start = Instant::now();
+        let canonical_action_name = context
+            .available_actions_snapshot
+            .as_ref()
+            .and_then(|actions| ActionDiscovery::resolve(actions.as_ref(), action_name))
+            .map(|action| action.name.as_str())
+            .unwrap_or(action_name);
 
-        let resolved_name = self.tools.resolve_name(action_name).await;
-        let mut lookup_name = resolved_name.as_deref().unwrap_or(action_name).to_string();
+        let resolved_name = self.tools.resolve_name(canonical_action_name).await;
+        let mut lookup_name = resolved_name
+            .as_deref()
+            .unwrap_or(canonical_action_name)
+            .to_string();
 
         // ── Per-step call limit (prevent amplification loops) ──
         const MAX_CALLS_PER_STEP: u32 = 50;
@@ -965,13 +1218,28 @@ impl EffectBridgeAdapter {
         }
 
         if let Some(result) = self
-            .handle_mission_call(action_name, &parameters, context)
+            .handle_mission_call(canonical_action_name, &parameters, context)
             .await
         {
             return result.map(|mut r| {
                 r.duration = start.elapsed();
                 r
             });
+        }
+
+        if canonical_action_name == "tool_info" {
+            return self
+                .execute_tool_info_from_snapshot(&ToolInfoSnapshotContext {
+                    action_name,
+                    canonical_action_name,
+                    lookup_name: &lookup_name,
+                    parameters: &parameters,
+                    lease,
+                    context,
+                    approval_already_granted,
+                    started_at: &start,
+                })
+                .await;
         }
 
         if is_v1_only_tool(&lookup_name) {
@@ -997,7 +1265,7 @@ impl EffectBridgeAdapter {
         if resolved_name.is_none()
             && let Some(auth_mgr) = self.auth_manager.read().await.as_ref()
             && let Some(latent_execution) = auth_mgr
-                .execute_latent_extension_action(action_name, &context.user_id)
+                .execute_latent_extension_action(canonical_action_name, &context.user_id)
                 .await
         {
             match latent_execution {
@@ -1052,6 +1320,12 @@ impl EffectBridgeAdapter {
                 }
             }
         }
+
+        let resolved_tool = self.tools.get_resolved(&lookup_name).await;
+        let user_permission = self
+            .resolved_user_permission_for_tool(&lookup_name, context)
+            .await;
+        Self::ensure_tool_not_disabled(action_name, user_permission)?;
 
         if let Some(tool) = self.tools.get(&lookup_name).await
             && let Some(rl_config) = tool.rate_limit_config()
@@ -1168,71 +1442,21 @@ impl EffectBridgeAdapter {
             }
         }
 
-        if let Some((_, tool)) = self.tools.get_resolved(&lookup_name).await {
-            let user_permission = if let Some(db) = self.tools.database() {
-                match db.get_all_settings(&context.user_id).await {
-                    Ok(db_map) => {
-                        let settings = crate::settings::Settings::from_db_map(&db_map);
-                        Some(effective_permission(
-                            &lookup_name,
-                            &settings.tool_permissions,
-                        ))
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            user_id = %context.user_id,
-                            tool = %lookup_name,
-                            error = %error,
-                            "Failed to load tool permission overrides for engine v2"
-                        );
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-
-            if matches!(user_permission, Some(PermissionState::Disabled)) {
-                return Err(EngineError::LeaseDenied {
-                    reason: format!("Tool '{}' is disabled for this user.", action_name),
-                });
-            }
-
-            let requirement = tool.requires_approval(&parameters);
-            match requirement {
-                ApprovalRequirement::Always => {
-                    if !approval_already_granted {
-                        return Err(Self::gate_paused(
-                            "approval",
-                            action_name,
-                            context.current_call_id.as_deref(),
-                            parameters,
-                            ironclaw_engine::ResumeKind::Approval {
-                                allow_always: false,
-                            },
-                            None,
-                            Some(lease.clone()),
-                        ));
-                    }
-                }
-                ApprovalRequirement::UnlessAutoApproved => {
-                    let is_approved = self.auto_approve_tools
-                        || self.auto_approved.read().await.contains(&lookup_name)
-                        || matches!(user_permission, Some(PermissionState::AlwaysAllow));
-                    if !is_approved && !approval_already_granted {
-                        return Err(Self::gate_paused(
-                            "approval",
-                            action_name,
-                            context.current_call_id.as_deref(),
-                            parameters,
-                            ironclaw_engine::ResumeKind::Approval { allow_always: true },
-                            None,
-                            Some(lease.clone()),
-                        ));
-                    }
-                }
-                ApprovalRequirement::Never => {}
-            }
+        if let Some((_, tool)) = resolved_tool.as_ref() {
+            self.enforce_tool_approval(
+                &ToolApprovalContext {
+                    action_name,
+                    lookup_name: &lookup_name,
+                    parameters: &parameters,
+                    lease,
+                    context,
+                    approval_already_granted,
+                },
+                tool.as_ref(),
+                user_permission,
+                true,
+            )
+            .await?;
         }
 
         let redacted_params = if let Some(tool) = self.tools.get(&lookup_name).await {
@@ -1558,6 +1782,34 @@ impl EffectBridgeAdapter {
     }
 }
 
+fn extension_name_matches(extension_name: &str, requested_name: &str) -> bool {
+    let requested_candidates = extension_name_candidates(requested_name)
+        .into_iter()
+        .collect::<HashSet<_>>();
+    extension_name_candidates(extension_name)
+        .into_iter()
+        .any(|candidate| requested_candidates.contains(&candidate))
+}
+
+fn matching_extension_requires_install_approval(
+    requested_name: &str,
+    extensions: &[InstalledExtension],
+) -> Option<bool> {
+    let mut saw_match = false;
+
+    for extension in extensions {
+        if !extension_name_matches(&extension.name, requested_name) {
+            continue;
+        }
+        if extension.installed {
+            return Some(false);
+        }
+        saw_match = true;
+    }
+
+    saw_match.then_some(true)
+}
+
 #[async_trait::async_trait]
 impl EffectExecutor for EffectBridgeAdapter {
     async fn execute_action(
@@ -1576,12 +1828,23 @@ impl EffectExecutor for EffectBridgeAdapter {
         leases: &[CapabilityLease],
         context: &ThreadExecutionContext,
     ) -> Result<Vec<ActionDef>, EngineError> {
+        Ok(self
+            .available_action_inventory(leases, context)
+            .await?
+            .inline)
+    }
+
+    async fn available_action_inventory(
+        &self,
+        leases: &[CapabilityLease],
+        context: &ThreadExecutionContext,
+    ) -> Result<ActionInventory, EngineError> {
         let auth_manager = self.auth_manager.read().await.clone();
         let capability_registry = self.capability_registry.read().await.clone();
         let extensions = self
             .fetch_extension_map(auth_manager.as_deref(), context)
             .await;
-        ActionProjector::project(
+        ActionProjector::project_inventory(
             self.tools.as_ref(),
             auth_manager.as_deref(),
             capability_registry,
@@ -2320,6 +2583,7 @@ pub(crate) fn is_v1_auth_tool(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::context::JobContext;
+    use crate::extensions::ExtensionKind;
     use crate::tools::{Tool, ToolError, ToolOutput};
     use async_trait::async_trait;
 
@@ -2334,6 +2598,24 @@ mod tests {
             Arc::new(SafetyLayer::new(&config)),
             Arc::new(HookRegistry::default()),
         )
+    }
+
+    fn installed_extension(name: &str) -> InstalledExtension {
+        InstalledExtension {
+            name: name.to_string(),
+            kind: ExtensionKind::McpServer,
+            display_name: Some(name.to_string()),
+            description: Some(format!("{name} integration")),
+            url: None,
+            authenticated: true,
+            active: true,
+            tools: Vec::new(),
+            needs_setup: false,
+            has_auth: true,
+            installed: true,
+            activation_error: None,
+            version: None,
+        }
     }
 
     /// Verify that reset_call_count resets the counter to zero,
@@ -2464,6 +2746,8 @@ mod tests {
 
     struct AlwaysApprovalTestTool;
 
+    struct DefaultAllowNamedApprovalTestTool;
+
     #[async_trait]
     impl Tool for ApprovalTestTool {
         fn name(&self) -> &str {
@@ -2534,6 +2818,41 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl Tool for DefaultAllowNamedApprovalTestTool {
+        fn name(&self) -> &str {
+            "message"
+        }
+
+        fn description(&self) -> &str {
+            "Test tool named like a default-always-allow builtin"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "value": { "type": "string" }
+                }
+            })
+        }
+
+        async fn execute(
+            &self,
+            params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({ "echo": params }),
+                std::time::Duration::from_millis(1),
+            ))
+        }
+
+        fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+            ApprovalRequirement::UnlessAutoApproved
+        }
+    }
+
     fn lease() -> ironclaw_engine::CapabilityLease {
         ironclaw_engine::CapabilityLease {
             id: ironclaw_engine::types::capability::LeaseId::new(),
@@ -2563,7 +2882,608 @@ mod tests {
             source_channel: None,
             user_timezone: None,
             thread_goal: Some("test goal".to_string()),
+            available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         }
+    }
+
+    async fn make_tool_info_adapter_with_permission(
+        permission: crate::tools::permissions::PermissionState,
+    ) -> EffectBridgeAdapter {
+        let db_path = std::env::temp_dir().join(format!(
+            "ironclaw-tool-info-permissions-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db = crate::db::connect_from_config(&crate::config::DatabaseConfig::from_libsql_path(
+            db_path.to_str().expect("db path"),
+            None,
+            None,
+        ))
+        .await
+        .expect("db");
+        db.set_setting(
+            "test_user",
+            "tool_permissions.tool_info",
+            &serde_json::to_value(permission).expect("serialize permission"),
+        )
+        .await
+        .expect("save tool permission");
+
+        let tools = Arc::new(ToolRegistry::new().with_database(db));
+        tools.register_tool_info();
+        EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+    }
+
+    async fn make_approval_test_adapter_with_permission(
+        permission: Option<crate::tools::permissions::PermissionState>,
+    ) -> EffectBridgeAdapter {
+        let db_path = std::env::temp_dir().join(format!(
+            "ironclaw-approval-test-permissions-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db = crate::db::connect_from_config(&crate::config::DatabaseConfig::from_libsql_path(
+            db_path.to_str().expect("db path"),
+            None,
+            None,
+        ))
+        .await
+        .expect("db");
+        if let Some(permission) = permission {
+            db.set_setting(
+                "test_user",
+                "tool_permissions.approval_test",
+                &serde_json::to_value(permission).expect("serialize permission"),
+            )
+            .await
+            .expect("save tool permission");
+        }
+
+        let tools = Arc::new(ToolRegistry::new().with_database(db));
+        tools.register(Arc::new(ApprovalTestTool)).await;
+        EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+    }
+
+    async fn make_tool_info_registry_adapter() -> EffectBridgeAdapter {
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register_tool_info();
+        tools.register(Arc::new(ApprovalTestTool)).await;
+        EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+    }
+
+    async fn make_default_allow_named_adapter() -> EffectBridgeAdapter {
+        let tools = Arc::new(ToolRegistry::new());
+        tools
+            .register(Arc::new(DefaultAllowNamedApprovalTestTool))
+            .await;
+        EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+    }
+
+    async fn make_restart_adapter_with_permission(
+        permission: Option<crate::tools::permissions::PermissionState>,
+    ) -> EffectBridgeAdapter {
+        let db_path = std::env::temp_dir().join(format!(
+            "ironclaw-restart-permissions-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db = crate::db::connect_from_config(&crate::config::DatabaseConfig::from_libsql_path(
+            db_path.to_str().expect("db path"),
+            None,
+            None,
+        ))
+        .await
+        .expect("db");
+        if let Some(permission) = permission {
+            db.set_setting(
+                "test_user",
+                "tool_permissions.restart",
+                &serde_json::to_value(permission).expect("serialize permission"),
+            )
+            .await
+            .expect("save tool permission");
+        }
+
+        let tools = Arc::new(ToolRegistry::new().with_database(db));
+        tools
+            .register(Arc::new(crate::tools::builtin::RestartTool))
+            .await;
+        EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+    }
+
+    #[tokio::test]
+    async fn tool_info_reads_callable_action_snapshot_for_engine_native_actions() {
+        let adapter = make_adapter();
+        let mut ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_tool_info"));
+        ctx.available_actions_snapshot = Some(
+            vec![ActionDef {
+                name: "mission_create".to_string(),
+                description: "Create a mission".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "goal": {"type": "string"},
+                        "cadence": {"type": "string"}
+                    },
+                    "required": ["name", "goal", "cadence"]
+                }),
+                effects: vec![],
+                requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: Some(ironclaw_engine::ActionDiscoveryMetadata {
+                    name: "mission_create".to_string(),
+                    summary: Some(ironclaw_engine::ActionDiscoverySummary {
+                        always_required: vec![
+                            "name".to_string(),
+                            "goal".to_string(),
+                            "cadence".to_string(),
+                        ],
+                        conditional_requirements: vec![
+                            "Use this only for recurring or scheduled work".to_string(),
+                        ],
+                        notes: vec![],
+                        examples: vec![],
+                    }),
+                    schema_override: None,
+                }),
+            }]
+            .into(),
+        );
+
+        let result = adapter
+            .execute_action(
+                "tool_info",
+                serde_json::json!({"name": "mission_create", "detail": "summary"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("tool_info should succeed through callable action discovery");
+
+        assert!(!result.is_error);
+        assert_eq!(result.output["name"], serde_json::json!("mission_create"));
+        assert_eq!(
+            result.output["summary"]["always_required"],
+            serde_json::json!(["name", "goal", "cadence"])
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_info_rejects_actions_outside_callable_snapshot() {
+        let adapter = make_adapter();
+        let mut ctx = exec_ctx(
+            ironclaw_engine::ThreadId::new(),
+            Some("call_tool_info_registry"),
+        );
+        ctx.available_actions_snapshot = Some(
+            vec![ActionDef {
+                name: "mission_create".to_string(),
+                description: "Create a mission".to_string(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![],
+                requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
+            }]
+            .into(),
+        );
+
+        let result = adapter
+            .execute_action(
+                "tool_info",
+                serde_json::json!({"name": "echo", "detail": "summary"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("tool_info should return an error result for out-of-snapshot actions");
+
+        assert!(result.is_error);
+        assert_eq!(result.action_name, "tool_info");
+        assert!(
+            result.output["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no callable or discoverable action named 'echo'"),
+            "unexpected error output: {:?}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_info_rejects_registered_tools_when_snapshots_are_missing() {
+        let adapter = make_tool_info_registry_adapter().await;
+        let ctx = exec_ctx(
+            ironclaw_engine::ThreadId::new(),
+            Some("call_tool_info_without_snapshot"),
+        );
+
+        let result = adapter
+            .execute_action(
+                "tool_info",
+                serde_json::json!({"name": "approval_test", "detail": "summary"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("tool_info should return an error result without snapshots");
+
+        assert!(result.is_error);
+        assert_eq!(result.action_name, "tool_info");
+        assert!(
+            result.output["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no callable or discoverable action named 'approval_test'"),
+            "unexpected error output: {:?}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_info_reads_action_inventory_snapshot() {
+        let adapter = make_adapter();
+        let mut ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_tool_info"));
+        ctx.available_action_inventory_snapshot = Some(Arc::new(ActionInventory {
+            inline: vec![ActionDef {
+                name: "github_search".to_string(),
+                description: "Search GitHub".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"}
+                    },
+                    "required": ["query"]
+                }),
+                effects: vec![],
+                requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: Some(ironclaw_engine::ActionDiscoveryMetadata {
+                    name: "github_search".to_string(),
+                    summary: Some(ironclaw_engine::ActionDiscoverySummary {
+                        always_required: vec!["query".to_string()],
+                        conditional_requirements: vec![],
+                        notes: vec!["Schema available through tool_info".to_string()],
+                        examples: vec![],
+                    }),
+                    schema_override: None,
+                }),
+            }],
+            discoverable: Vec::new(),
+        }));
+
+        let result = adapter
+            .execute_action(
+                "tool_info",
+                serde_json::json!({"name": "github_search", "detail": "summary"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("tool_info should resolve action inventory discovery");
+
+        assert!(!result.is_error);
+        assert_eq!(result.output["name"], serde_json::json!("github_search"));
+        assert_eq!(
+            result.output["summary"]["always_required"],
+            serde_json::json!(["query"])
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_info_respects_disabled_permission_override() {
+        let adapter = make_tool_info_adapter_with_permission(
+            crate::tools::permissions::PermissionState::Disabled,
+        )
+        .await;
+        let mut ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_tool_info"));
+        ctx.available_action_inventory_snapshot = Some(Arc::new(ActionInventory {
+            inline: vec![ActionDef {
+                name: "github_search".to_string(),
+                description: "Search GitHub".to_string(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![],
+                requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
+            }],
+            discoverable: Vec::new(),
+        }));
+
+        let err = adapter
+            .execute_action(
+                "tool_info",
+                serde_json::json!({"name": "github_search"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect_err("disabled tool_info should be denied");
+
+        match err {
+            EngineError::LeaseDenied { reason } => {
+                assert!(reason.contains("Tool 'tool_info' is disabled"));
+            }
+            other => panic!("expected LeaseDenied, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_info_respects_ask_each_time_permission_override() {
+        let adapter = make_tool_info_adapter_with_permission(
+            crate::tools::permissions::PermissionState::AskEachTime,
+        )
+        .await;
+        let mut ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_tool_info"));
+        ctx.available_action_inventory_snapshot = Some(Arc::new(ActionInventory {
+            inline: vec![ActionDef {
+                name: "github_search".to_string(),
+                description: "Search GitHub".to_string(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![],
+                requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
+            }],
+            discoverable: Vec::new(),
+        }));
+
+        let err = adapter
+            .execute_action(
+                "tool_info",
+                serde_json::json!({"name": "github_search"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect_err("ask_each_time tool_info should gate for approval");
+
+        match err {
+            EngineError::GatePaused { gate_name, .. } => {
+                assert_eq!(gate_name, "approval");
+            }
+            other => panic!("expected GatePaused, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fallback_ask_each_time_does_not_override_unless_auto_approved_tools() {
+        let adapter = make_approval_test_adapter_with_permission(None)
+            .await
+            .with_global_auto_approve(true);
+
+        let result = adapter
+            .execute_action(
+                "approval_test",
+                serde_json::json!({"value": "x"}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_global_auto_approve_db_default"),
+                ),
+            )
+            .await
+            .expect("fallback ask_each_time should not override an unless_auto_approved tool");
+
+        assert!(!result.is_error);
+    }
+
+    #[tokio::test]
+    async fn always_allow_default_skips_unless_auto_approved_gates_without_override() {
+        let adapter = make_default_allow_named_adapter()
+            .await
+            .with_global_auto_approve(true);
+
+        let result = adapter
+            .execute_action(
+                "message",
+                serde_json::json!({"value": "x"}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_global_auto_approve_default_allow"),
+                ),
+            )
+            .await
+            .expect("always_allow default should bypass normal approval gate");
+
+        assert!(!result.is_error);
+    }
+
+    // This test intentionally serializes process-global env mutation across the
+    // async restart path to avoid cross-test leakage from restart env toggles.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn restart_uses_default_permission_floor_without_explicit_override() {
+        let _guard = crate::config::helpers::lock_env();
+        let original_in_docker = std::env::var_os("IRONCLAW_IN_DOCKER");
+        let original_disable_restart = std::env::var_os("IRONCLAW_DISABLE_RESTART");
+        // SAFETY: This test serializes env access with lock_env().
+        unsafe {
+            std::env::set_var("IRONCLAW_IN_DOCKER", "true");
+            std::env::set_var("IRONCLAW_DISABLE_RESTART", "true");
+        }
+
+        let adapter = make_restart_adapter_with_permission(None).await;
+
+        let err = adapter
+            .execute_action(
+                "restart",
+                serde_json::json!({"delay_secs": 1}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_restart_default_floor"),
+                ),
+            )
+            .await
+            .expect_err("restart should still pause for approval by default");
+
+        // SAFETY: This test serializes env access with lock_env().
+        unsafe {
+            if let Some(value) = original_in_docker {
+                std::env::set_var("IRONCLAW_IN_DOCKER", value);
+            } else {
+                std::env::remove_var("IRONCLAW_IN_DOCKER");
+            }
+            if let Some(value) = original_disable_restart {
+                std::env::set_var("IRONCLAW_DISABLE_RESTART", value);
+            } else {
+                std::env::remove_var("IRONCLAW_DISABLE_RESTART");
+            }
+        }
+
+        match err {
+            EngineError::GatePaused { gate_name, .. } => {
+                assert_eq!(gate_name, "approval");
+            }
+            other => panic!("expected GatePaused, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_always_allow_override_beats_ask_each_time_fallback() {
+        let adapter = make_approval_test_adapter_with_permission(Some(
+            crate::tools::permissions::PermissionState::AlwaysAllow,
+        ))
+        .await
+        .with_global_auto_approve(true);
+
+        let result = adapter
+            .execute_action(
+                "approval_test",
+                serde_json::json!({"value": "x"}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_global_auto_approve_db_always_allow"),
+                ),
+            )
+            .await
+            .expect("explicit always_allow should bypass ask_each_time fallback");
+
+        assert!(!result.is_error);
+    }
+
+    #[tokio::test]
+    async fn explicit_ask_each_time_override_beats_global_auto_approve() {
+        let adapter = make_approval_test_adapter_with_permission(Some(
+            crate::tools::permissions::PermissionState::AskEachTime,
+        ))
+        .await
+        .with_global_auto_approve(true);
+
+        let err = adapter
+            .execute_action(
+                "approval_test",
+                serde_json::json!({"value": "x"}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_global_auto_approve_db_override"),
+                ),
+            )
+            .await
+            .expect_err("explicit ask_each_time should still gate for approval");
+
+        match err {
+            EngineError::GatePaused { gate_name, .. } => {
+                assert_eq!(gate_name, "approval");
+            }
+            other => panic!("expected GatePaused, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_disabled_override_denies_tool_execution() {
+        let adapter = make_approval_test_adapter_with_permission(Some(
+            crate::tools::permissions::PermissionState::Disabled,
+        ))
+        .await
+        .with_global_auto_approve(true);
+
+        let err = adapter
+            .execute_action(
+                "approval_test",
+                serde_json::json!({"value": "x"}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_global_auto_approve_db_disabled"),
+                ),
+            )
+            .await
+            .expect_err("explicit disabled should deny execution");
+
+        match err {
+            EngineError::LeaseDenied { reason } => {
+                assert!(reason.contains("Tool 'approval_test' is disabled"));
+            }
+            other => panic!("expected LeaseDenied, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hyphenated_engine_native_action_uses_snapshot_canonical_name() {
+        let adapter = make_adapter_with_missions().await;
+        let mut ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_mission_alias"));
+        ctx.available_actions_snapshot =
+            Some(crate::bridge::engine_actions::mission_capability_actions().into());
+
+        let result = adapter
+            .execute_action(
+                "mission-create",
+                serde_json::json!({
+                    "name": "daily check",
+                    "goal": "check systems",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("hyphenated mission action should canonicalize through the snapshot");
+
+        assert!(!result.is_error, "got error: {}", result.output);
+        assert_eq!(result.action_name, "mission_create");
+        assert_eq!(
+            result.output.get("status").and_then(|value| value.as_str()),
+            Some("created")
+        );
     }
 
     #[tokio::test]
@@ -3444,6 +4364,8 @@ mod tests {
             thread_goal: Some(
                 "Summarize the product feedback for me right now. Do it immediately.".to_string(),
             ),
+            available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -3463,6 +4385,8 @@ mod tests {
             thread_goal: Some(
                 "Create a daily routine to summarize product feedback and run it now.".to_string(),
             ),
+            available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         assert!(!should_reject_immediate_mission_create(&ctx));
@@ -3480,6 +4404,8 @@ mod tests {
             source_channel: Some("gateway".to_string()),
             user_timezone: None,
             thread_goal: Some("Summarize every product feedback item right now.".to_string()),
+            available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -3497,6 +4423,8 @@ mod tests {
             source_channel: Some("gateway".to_string()),
             user_timezone: None,
             thread_goal: Some("Set up the product feedback summary right now.".to_string()),
+            available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -3517,6 +4445,8 @@ mod tests {
             source_channel: Some("gateway".to_string()),
             user_timezone: None,
             thread_goal: Some("Set up monitoring now.".to_string()),
+            available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         // Should NOT be rejected — "monitoring" implies scheduling intent.
@@ -3535,6 +4465,8 @@ mod tests {
             source_channel: None,
             user_timezone: None,
             thread_goal: Some("Summarize feedback immediately.".to_string()),
+            available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         assert!(!should_reject_immediate_mission_create(&ctx));
@@ -3757,6 +4689,8 @@ mod tests {
                 source_channel: Some("gateway".to_string()),
                 user_timezone: None,
                 thread_goal: Some(goal.to_string()),
+                available_actions_snapshot: None,
+                available_action_inventory_snapshot: None,
             }
         }
 
@@ -3962,6 +4896,52 @@ mod tests {
         assert!(!is_v1_auth_tool("tool_list"));
     }
 
+    #[test]
+    fn install_approval_prefers_installed_alias_over_registry_only_match() {
+        let installed = installed_extension("linear-server");
+        let registry_only = InstalledExtension {
+            installed: false,
+            active: false,
+            authenticated: false,
+            has_auth: true,
+            tools: Vec::new(),
+            ..installed_extension("linear_server")
+        };
+
+        let decision = matching_extension_requires_install_approval(
+            "linear_server",
+            &[registry_only, installed],
+        );
+
+        assert_eq!(decision, Some(false));
+    }
+
+    #[test]
+    fn install_approval_requires_confirmation_for_uninstalled_match() {
+        let registry_only = InstalledExtension {
+            installed: false,
+            active: false,
+            authenticated: false,
+            has_auth: true,
+            tools: Vec::new(),
+            ..installed_extension("web_search")
+        };
+
+        let decision = matching_extension_requires_install_approval("web_search", &[registry_only]);
+
+        assert_eq!(decision, Some(true));
+    }
+
+    #[test]
+    fn install_approval_ignores_unknown_extension_names() {
+        let decision = matching_extension_requires_install_approval(
+            "missing_tool",
+            &[installed_extension("web_search")],
+        );
+
+        assert_eq!(decision, None);
+    }
+
     // ── Pre-flight auth gate integration test ─────────────────
 
     #[tokio::test]
@@ -4038,6 +5018,8 @@ mod tests {
             source_channel: None,
             user_timezone: None,
             thread_goal: None,
+            available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         let result = adapter.execute_action("http", params, &lease, &ctx).await;
@@ -4110,7 +5092,8 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
-        );
+        )
+        .with_global_auto_approve(true);
 
         let lease = ironclaw_engine::CapabilityLease {
             id: ironclaw_engine::types::capability::LeaseId::new(),
@@ -4134,6 +5117,8 @@ mod tests {
             source_channel: None,
             user_timezone: None,
             thread_goal: None,
+            available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         let result = adapter
@@ -4167,6 +5152,188 @@ mod tests {
                 }
             }
             other => panic!("expected auth gate pause, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_activate_requires_approval_before_auto_installing_integration() {
+        use crate::extensions::{AuthHint, ExtensionKind, ExtensionSource, RegistryEntry};
+        use crate::secrets::InMemorySecretsStore;
+        use crate::secrets::SecretsCrypto;
+        use crate::tools::builtin::extension_tools::ToolActivateTool;
+        use crate::tools::mcp::process::McpProcessManager;
+        use crate::tools::mcp::session::McpSessionManager;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+
+        let tools = Arc::new(ToolRegistry::new());
+        let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            Arc::clone(&secrets),
+            Arc::clone(&tools),
+            None,
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+            "test_user".to_string(),
+            None,
+            vec![RegistryEntry {
+                name: "web_search".to_string(),
+                display_name: "Web Search".to_string(),
+                kind: ExtensionKind::WasmTool,
+                description: "Search the web".to_string(),
+                keywords: vec!["search".into(), "web".into()],
+                source: ExtensionSource::WasmDownload {
+                    wasm_url: "https://example.com/web_search.wasm".to_string(),
+                    capabilities_url: None,
+                },
+                fallback_source: None,
+                auth_hint: AuthHint::CapabilitiesAuth,
+                version: None,
+            }],
+        ));
+        tools
+            .register(Arc::new(ToolActivateTool::new(Arc::clone(&ext_mgr))))
+            .await;
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        adapter
+            .set_auth_manager(Arc::new(AuthManager::new(
+                secrets,
+                None,
+                Some(ext_mgr),
+                Some(Arc::clone(&tools)),
+            )))
+            .await;
+
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_activate"));
+        let result = adapter
+            .execute_action(
+                "tool_activate",
+                serde_json::json!({"name": "web_search"}),
+                &lease(),
+                &ctx,
+            )
+            .await;
+
+        match result {
+            Err(EngineError::GatePaused {
+                gate_name,
+                action_name,
+                resume_kind,
+                ..
+            }) => {
+                assert_eq!(gate_name, "approval");
+                assert_eq!(action_name, "tool_activate");
+                match *resume_kind {
+                    ironclaw_engine::ResumeKind::Approval { allow_always } => {
+                        assert!(allow_always);
+                    }
+                    other => panic!("expected approval resume kind, got {other:?}"),
+                }
+            }
+            other => panic!("expected approval gate pause, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_activate_requires_approval_when_install_state_is_unavailable() {
+        use crate::extensions::{AuthHint, ExtensionKind, ExtensionSource, RegistryEntry};
+        use crate::secrets::InMemorySecretsStore;
+        use crate::secrets::SecretsCrypto;
+        use crate::tools::builtin::extension_tools::ToolActivateTool;
+        use crate::tools::mcp::process::McpProcessManager;
+        use crate::tools::mcp::session::McpSessionManager;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+
+        let tools = Arc::new(ToolRegistry::new());
+        let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            Arc::clone(&secrets),
+            Arc::clone(&tools),
+            None,
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+            "test_user".to_string(),
+            None,
+            vec![RegistryEntry {
+                name: "web_search".to_string(),
+                display_name: "Web Search".to_string(),
+                kind: ExtensionKind::WasmTool,
+                description: "Search the web".to_string(),
+                keywords: vec!["search".into(), "web".into()],
+                source: ExtensionSource::WasmDownload {
+                    wasm_url: "https://example.com/web_search.wasm".to_string(),
+                    capabilities_url: None,
+                },
+                fallback_source: None,
+                auth_hint: AuthHint::CapabilitiesAuth,
+                version: None,
+            }],
+        ));
+        tools
+            .register(Arc::new(ToolActivateTool::new(Arc::clone(&ext_mgr))))
+            .await;
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_activate"));
+        let result = adapter
+            .execute_action(
+                "tool_activate",
+                serde_json::json!({"name": "web_search"}),
+                &lease(),
+                &ctx,
+            )
+            .await;
+
+        match result {
+            Err(EngineError::GatePaused {
+                gate_name,
+                action_name,
+                resume_kind,
+                ..
+            }) => {
+                assert_eq!(gate_name, "approval");
+                assert_eq!(action_name, "tool_activate");
+                match *resume_kind {
+                    ironclaw_engine::ResumeKind::Approval { allow_always } => {
+                        assert!(allow_always);
+                    }
+                    other => panic!("expected approval resume kind, got {other:?}"),
+                }
+            }
+            other => panic!("expected approval gate pause, got {other:?}"),
         }
     }
 
@@ -4244,6 +5411,8 @@ mod tests {
             source_channel: None,
             user_timezone: None,
             thread_goal: None,
+            available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         let result = adapter
@@ -4332,7 +5501,92 @@ mod tests {
             .available_actions(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
             .await
             .expect("actions");
-        assert!(!actions.iter().any(|action| action.name == "latent_tool"));
+        assert!(
+            !actions.iter().any(|action| action.name == "latent_tool"),
+            "latent WASM tool should stay out of model-facing available_actions; got: {:?}",
+            actions.iter().map(|a| &a.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn available_capabilities_include_latent_provider_activation_entry() {
+        use crate::secrets::InMemorySecretsStore;
+        use crate::secrets::SecretsCrypto;
+        use crate::tools::mcp::process::McpProcessManager;
+        use crate::tools::mcp::session::McpSessionManager;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("tools")).expect("tools dir");
+        std::fs::write(
+            dir.path().join("tools").join("latent_tool.wasm"),
+            b"fake-wasm",
+        )
+        .expect("write wasm");
+        std::fs::write(
+            dir.path()
+                .join("tools")
+                .join("latent_tool.capabilities.json"),
+            r#"{"description":"latent adapter test"}"#,
+        )
+        .expect("write capabilities");
+
+        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+
+        let tools = Arc::new(ToolRegistry::new());
+        let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            Arc::clone(&secrets),
+            Arc::clone(&tools),
+            None,
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+            "test_user".to_string(),
+            None,
+            vec![],
+        ));
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        adapter
+            .set_auth_manager(Arc::new(AuthManager::new(
+                secrets,
+                None,
+                Some(ext_mgr),
+                Some(Arc::clone(&tools)),
+            )))
+            .await;
+
+        let result = adapter
+            .available_capabilities(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
+            .await;
+
+        match result {
+            Ok(capabilities) => {
+                let latent = capabilities
+                    .into_iter()
+                    .find(|summary| summary.name == "latent_tool")
+                    .expect("latent tool should surface as an activatable capability");
+                assert!(matches!(
+                    latent.status,
+                    ironclaw_engine::CapabilityStatus::Inactive
+                        | ironclaw_engine::CapabilityStatus::AvailableNotInstalled
+                ));
+                assert_eq!(latent.action_preview, vec!["latent_tool".to_string()]);
+            }
+            other => panic!("expected latent capability background entry, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -4430,15 +5684,262 @@ mod tests {
         assert!(!actions.iter().any(|action| action.name == "linear_search"));
     }
 
-    // NeedsAuth provider tool preservation is tested directly in
-    // action_projector::tests::needs_auth_provider_tools_remain_in_available_actions
-    // where the extension map can be constructed with correct NeedsAuth status.
-    // An EffectBridgeAdapter-level test would require a real WASM module to
-    // produce installed=true + authenticated=false; fake-wasm files produce
-    // installed=false (AvailableNotInstalled), making the test unreliable.
+    struct ProviderActionTool {
+        name: String,
+        description: String,
+        provider_extension: String,
+        parameters_schema: serde_json::Value,
+    }
+
+    struct ProviderFixture {
+        adapter: EffectBridgeAdapter,
+        _dir: tempfile::TempDir,
+    }
+
+    #[async_trait]
+    impl crate::tools::Tool for ProviderActionTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn description(&self) -> &str {
+            &self.description
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            self.parameters_schema.clone()
+        }
+
+        async fn execute(
+            &self,
+            _: serde_json::Value,
+            _: &crate::context::JobContext,
+        ) -> Result<crate::tools::ToolOutput, crate::tools::ToolError> {
+            Ok(crate::tools::ToolOutput::success(
+                serde_json::json!({}),
+                std::time::Duration::from_millis(1),
+            ))
+        }
+
+        fn provider_extension(&self) -> Option<&str> {
+            Some(&self.provider_extension)
+        }
+    }
+
+    async fn make_adapter_with_installed_provider_fixture(
+        provider_name: &str,
+        action_name: &str,
+        capabilities: serde_json::Value,
+        parameters_schema: serde_json::Value,
+    ) -> ProviderFixture {
+        use crate::secrets::InMemorySecretsStore;
+        use crate::secrets::SecretsCrypto;
+        use crate::tools::mcp::process::McpProcessManager;
+        use crate::tools::mcp::session::McpSessionManager;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let dir_path = dir.path().to_path_buf();
+        std::fs::create_dir_all(dir_path.join("tools")).expect("tools dir");
+        std::fs::write(
+            dir_path.join("tools").join(format!("{provider_name}.wasm")),
+            b"fake-wasm",
+        )
+        .expect("write wasm");
+        std::fs::write(
+            dir_path
+                .join("tools")
+                .join(format!("{provider_name}.capabilities.json")),
+            serde_json::to_vec(&capabilities).expect("serialize capabilities"),
+        )
+        .expect("write capabilities");
+
+        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools
+            .register(Arc::new(ProviderActionTool {
+                name: action_name.to_string(),
+                description: format!("{action_name} test action"),
+                provider_extension: provider_name.to_string(),
+                parameters_schema,
+            }))
+            .await;
+
+        let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            Arc::clone(&secrets),
+            Arc::clone(&tools),
+            None,
+            None,
+            dir_path.join("tools"),
+            dir_path.join("channels"),
+            None,
+            "test_user".to_string(),
+            None,
+            vec![],
+        ));
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        adapter
+            .set_auth_manager(Arc::new(AuthManager::new(
+                secrets,
+                None,
+                Some(ext_mgr),
+                Some(Arc::clone(&tools)),
+            )))
+            .await;
+
+        ProviderFixture { adapter, _dir: dir }
+    }
 
     #[tokio::test]
-    async fn available_capabilities_projects_inactive_provider_background() {
+    async fn available_actions_omit_installed_needs_auth_provider_action() {
+        let fixture = make_adapter_with_installed_provider_fixture(
+            "gmail",
+            "gmail_send",
+            serde_json::json!({
+                "auth": {
+                    "secret_name": "google_oauth_token",
+                    "display_name": "Google",
+                    "oauth": {
+                        "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+                        "token_url": "https://oauth2.googleapis.com/token",
+                        "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
+                        "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
+                        "scopes": ["https://www.googleapis.com/auth/gmail.send"],
+                        "use_pkce": false,
+                        "extra_params": {
+                            "access_type": "offline",
+                            "prompt": "consent"
+                        }
+                    }
+                }
+            }),
+            serde_json::json!({"type": "object"}),
+        )
+        .await;
+
+        let actions = fixture
+            .adapter
+            .available_actions(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
+            .await
+            .expect("actions");
+        assert!(!actions.iter().any(|action| action.name == "gmail_send"));
+    }
+
+    #[tokio::test]
+    async fn available_actions_omit_installed_needs_setup_provider_action() {
+        let fixture = make_adapter_with_installed_provider_fixture(
+            "notion",
+            "notion_search",
+            serde_json::json!({
+                "setup": {
+                    "required_secrets": [
+                        {
+                            "name": "notion_api_key",
+                            "prompt": "Provide your Notion API key"
+                        }
+                    ]
+                }
+            }),
+            serde_json::json!({"type": "object"}),
+        )
+        .await;
+
+        let actions = fixture
+            .adapter
+            .available_actions(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
+            .await
+            .expect("actions");
+        assert!(!actions.iter().any(|action| action.name == "notion_search"));
+    }
+
+    #[tokio::test]
+    async fn available_actions_omit_installed_inactive_provider_action() {
+        let fixture = make_adapter_with_installed_provider_fixture(
+            "github",
+            "github_search",
+            serde_json::json!({
+                "description": "GitHub provider fixture"
+            }),
+            serde_json::json!({"type": "object"}),
+        )
+        .await;
+
+        let actions = fixture
+            .adapter
+            .available_actions(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
+            .await
+            .expect("actions");
+        assert!(!actions.iter().any(|action| action.name == "github_search"));
+    }
+
+    #[tokio::test]
+    async fn available_action_inventory_keeps_provider_actions_inline_callable() {
+        let fixture = make_adapter_with_installed_provider_fixture(
+            "gmail",
+            "gmail",
+            serde_json::json!({
+                "description": "Gmail provider fixture"
+            }),
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+            }),
+        )
+        .await;
+
+        let base_ctx = exec_ctx(ironclaw_engine::ThreadId::new(), None);
+        let inventory = fixture
+            .adapter
+            .available_action_inventory(&[], &base_ctx)
+            .await
+            .expect("inventory");
+
+        assert!(
+            inventory.inline.iter().any(|action| action.name == "gmail"),
+            "provider action should stay inline-callable"
+        );
+        let gmail = inventory
+            .inline
+            .iter()
+            .find(|action| action.name == "gmail")
+            .expect("provider action should be inline");
+        assert_eq!(gmail.description, "gmail test action");
+        assert_eq!(
+            gmail.parameters_schema,
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+            })
+        );
+
+        let actions = fixture
+            .adapter
+            .available_actions(&[], &base_ctx)
+            .await
+            .expect("actions");
+        assert!(
+            actions.iter().any(|action| action.name == "gmail"),
+            "provider action must remain callable in the provider surface"
+        );
+    }
+
+    #[tokio::test]
+    async fn available_capabilities_include_latent_provider_background() {
         use crate::secrets::InMemorySecretsStore;
         use crate::secrets::SecretsCrypto;
         use crate::tools::mcp::process::McpProcessManager;
@@ -4507,6 +6008,8 @@ mod tests {
             source_channel: None,
             user_timezone: None,
             thread_goal: None,
+            available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         let capabilities = adapter
@@ -4514,10 +6017,12 @@ mod tests {
             .await
             .expect("capabilities");
 
-        assert!(capabilities.iter().any(|summary| {
-            summary.name == "latent_tool"
-                && summary.status == ironclaw_engine::CapabilityStatus::Inactive
-        }));
+        assert!(
+            capabilities
+                .iter()
+                .any(|summary| summary.name == "latent_tool"),
+            "latent provider tool should appear in capability background when it is activatable"
+        );
     }
 
     #[tokio::test]
@@ -5763,29 +7268,7 @@ Use this skill to set up a Pika meeting.
         ironclaw_engine::Capability {
             name: "missions".into(),
             description: "Mission lifecycle".into(),
-            actions: vec![
-                ActionDef {
-                    name: "mission_create".into(),
-                    description: "Create a mission".into(),
-                    parameters_schema: serde_json::json!({"type": "object"}),
-                    effects: vec![],
-                    requires_approval: false,
-                },
-                ActionDef {
-                    name: "mission_list".into(),
-                    description: "List missions".into(),
-                    parameters_schema: serde_json::json!({"type": "object"}),
-                    effects: vec![],
-                    requires_approval: false,
-                },
-                ActionDef {
-                    name: "mission_complete".into(),
-                    description: "Complete a mission".into(),
-                    parameters_schema: serde_json::json!({"type": "object"}),
-                    effects: vec![],
-                    requires_approval: false,
-                },
-            ],
+            actions: crate::bridge::engine_actions::mission_capability_actions(),
             knowledge: vec![],
             policies: vec![],
         }
@@ -5834,6 +7317,33 @@ Use this skill to set up a Pika meeting.
                 "expected {expected} in advertised actions, got: {names:?}"
             );
         }
+
+        let mission_create = actions
+            .iter()
+            .find(|action| action.name == "mission_create")
+            .expect("mission_create should be advertised");
+        assert_eq!(
+            mission_create.parameters_schema["required"],
+            serde_json::json!(["name", "goal", "cadence"])
+        );
+        let create_summary = mission_create
+            .discovery_summary()
+            .expect("mission_create should carry curated discovery guidance");
+        assert_eq!(
+            create_summary.always_required,
+            vec![
+                "name".to_string(),
+                "goal".to_string(),
+                "cadence".to_string()
+            ]
+        );
+
+        let mission_list = actions
+            .iter()
+            .find(|action| action.name == "mission_list")
+            .expect("mission_list should be advertised");
+        assert!(mission_list.discovery.is_none());
+        assert!(mission_list.discovery_summary().is_none());
     }
 
     #[tokio::test]
@@ -5989,6 +7499,8 @@ Use this skill to set up a Pika meeting.
                     parameters_schema: serde_json::json!({"type": "object"}),
                     effects: vec![],
                     requires_approval: false,
+                    model_tool_surface: ModelToolSurface::FullSchema,
+                    discovery: None,
                 },
                 ActionDef {
                     name: "tool_auth".into(), // v1 auth tool
@@ -5996,6 +7508,8 @@ Use this skill to set up a Pika meeting.
                     parameters_schema: serde_json::json!({"type": "object"}),
                     effects: vec![],
                     requires_approval: false,
+                    model_tool_surface: ModelToolSurface::FullSchema,
+                    discovery: None,
                 },
                 ActionDef {
                     name: "safe_action".into(),
@@ -6003,6 +7517,8 @@ Use this skill to set up a Pika meeting.
                     parameters_schema: serde_json::json!({"type": "object"}),
                     effects: vec![],
                     requires_approval: false,
+                    model_tool_surface: ModelToolSurface::FullSchema,
+                    discovery: None,
                 },
             ],
             knowledge: vec![],

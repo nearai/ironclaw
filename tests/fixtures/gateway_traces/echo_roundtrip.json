@@ -1,0 +1,13 @@
+{
+  "name": "echo_roundtrip",
+  "operations": [
+    {
+      "tool_name": "echo",
+      "params": { "message": "hello from the trace runner" },
+      "expected": {
+        "kind": "success",
+        "assertions": { "contains_text": "hello from the trace runner" }
+      }
+    }
+  ]
+}

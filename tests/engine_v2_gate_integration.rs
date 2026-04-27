@@ -18,10 +18,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use tokio::sync::RwLock;
 
-use ironclaw_engine::types::capability::{EffectType, LeaseId};
+use ironclaw_engine::types::capability::{EffectType, LeaseId, ModelToolSurface};
 use ironclaw_engine::{
-    ActionDef, ActionResult, Capability, CapabilityLease, CapabilityRegistry, DocId,
-    EffectExecutor, EngineError, GrantedActions, LeaseManager, LlmBackend, LlmCallConfig,
+    ActionDef, ActionInventory, ActionResult, Capability, CapabilityLease, CapabilityRegistry,
+    DocId, EffectExecutor, EngineError, GrantedActions, LeaseManager, LlmBackend, LlmCallConfig,
     LlmOutput, LlmResponse, MemoryDoc, Mission, MissionId, MissionStatus, PolicyEngine, Project,
     ProjectId, ResumeKind, Step, Store, Thread, ThreadConfig, ThreadEvent, ThreadId, ThreadManager,
     ThreadMessage, ThreadOutcome, ThreadState, ThreadType, TokenUsage,
@@ -69,6 +69,54 @@ impl LlmBackend for ScriptedLlm {
     }
     fn model_name(&self) -> &str {
         "scripted-mock"
+    }
+}
+
+struct ActionCapturingScriptedLlm {
+    responses: std::sync::Mutex<Vec<LlmOutput>>,
+    seen_action_names: std::sync::Mutex<Vec<Vec<String>>>,
+}
+
+impl ActionCapturingScriptedLlm {
+    fn new(responses: Vec<LlmOutput>) -> Arc<Self> {
+        Arc::new(Self {
+            responses: std::sync::Mutex::new(responses),
+            seen_action_names: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn seen_action_names(&self) -> Vec<Vec<String>> {
+        self.seen_action_names.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmBackend for ActionCapturingScriptedLlm {
+    async fn complete(
+        &self,
+        _messages: &[ThreadMessage],
+        actions: &[ActionDef],
+        _config: &LlmCallConfig,
+    ) -> Result<LlmOutput, EngineError> {
+        self.seen_action_names.lock().unwrap().push(
+            actions
+                .iter()
+                .map(|action| action.name.clone())
+                .collect::<Vec<_>>(),
+        );
+        let mut queue = self.responses.lock().unwrap();
+        if queue.is_empty() {
+            Ok(LlmOutput {
+                response: LlmResponse::Text("done".into()),
+                usage: TokenUsage::default(),
+            })
+        } else {
+            Ok(queue.remove(0))
+        }
+    }
+
+    fn model_name(&self) -> &str {
+        "action-capturing-scripted-mock"
     }
 }
 
@@ -245,6 +293,8 @@ impl EffectExecutor for InstallThenAliasEffects {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             },
             ActionDef {
                 name: "create-issue".into(),
@@ -252,6 +302,8 @@ impl EffectExecutor for InstallThenAliasEffects {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             },
         ])
     }
@@ -368,6 +420,8 @@ impl EffectExecutor for GateMockEffects {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             },
             ActionDef {
                 name: "echo".into(),
@@ -375,6 +429,8 @@ impl EffectExecutor for GateMockEffects {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::ReadLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             },
             ActionDef {
                 name: "tool_install".into(),
@@ -382,8 +438,117 @@ impl EffectExecutor for GateMockEffects {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             },
         ])
+    }
+
+    async fn available_capabilities(
+        &self,
+        _leases: &[CapabilityLease],
+        _context: &ironclaw_engine::ThreadExecutionContext,
+    ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, EngineError> {
+        Ok(vec![])
+    }
+}
+
+struct ToolInfoCallableEffects;
+
+#[async_trait::async_trait]
+impl EffectExecutor for ToolInfoCallableEffects {
+    async fn execute_action(
+        &self,
+        action_name: &str,
+        parameters: serde_json::Value,
+        _lease: &CapabilityLease,
+        _context: &ironclaw_engine::ThreadExecutionContext,
+    ) -> Result<ActionResult, EngineError> {
+        let output = match action_name {
+            "tool_info" => serde_json::json!({
+                "name": "gmail",
+                "description": "Gmail tool",
+                "parameters": ["query"],
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"}
+                    },
+                    "required": ["query"]
+                }
+            }),
+            "gmail" => serde_json::json!({
+                "status": "ok",
+                "result": "gmail called",
+                "params": parameters
+            }),
+            other => serde_json::json!({
+                "status": "ok",
+                "result": format!("{other} called")
+            }),
+        };
+
+        Ok(ActionResult {
+            call_id: String::new(),
+            action_name: action_name.to_string(),
+            output,
+            is_error: false,
+            duration: Duration::from_millis(1),
+        })
+    }
+
+    async fn available_actions(
+        &self,
+        leases: &[CapabilityLease],
+        context: &ironclaw_engine::ThreadExecutionContext,
+    ) -> Result<Vec<ActionDef>, EngineError> {
+        Ok(self
+            .available_action_inventory(leases, context)
+            .await?
+            .inline)
+    }
+
+    async fn available_action_inventory(
+        &self,
+        _leases: &[CapabilityLease],
+        _context: &ironclaw_engine::ThreadExecutionContext,
+    ) -> Result<ActionInventory, EngineError> {
+        let tool_info = ActionDef {
+            name: "tool_info".into(),
+            description: "Inspect a tool".into(),
+            parameters_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "detail": {"type": "string"}
+                },
+                "required": ["name"]
+            }),
+            effects: vec![EffectType::ReadLocal],
+            requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
+            discovery: None,
+        };
+        let gmail = ActionDef {
+            name: "gmail".into(),
+            description: "Gmail tool".into(),
+            parameters_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"}
+                },
+                "required": ["query"]
+            }),
+            effects: vec![EffectType::ReadExternal],
+            requires_approval: false,
+            model_tool_surface: ModelToolSurface::CompactToolInfo,
+            discovery: None,
+        };
+
+        Ok(ActionInventory {
+            inline: vec![gmail, tool_info],
+            discoverable: Vec::new(),
+        })
     }
 
     async fn available_capabilities(
@@ -593,6 +758,8 @@ fn make_caps(require_approval: bool) -> CapabilityRegistry {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: require_approval,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             },
             ActionDef {
                 name: "echo".into(),
@@ -600,6 +767,8 @@ fn make_caps(require_approval: bool) -> CapabilityRegistry {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::ReadLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             },
             ActionDef {
                 name: "tool_install".into(),
@@ -607,6 +776,8 @@ fn make_caps(require_approval: bool) -> CapabilityRegistry {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: require_approval,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             },
         ],
         knowledge: vec![],
@@ -626,6 +797,8 @@ fn make_caps_with_approval_tool() -> CapabilityRegistry {
             parameters_schema: serde_json::json!({"type": "object"}),
             effects: vec![EffectType::WriteExternal],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
+            discovery: None,
         }],
         knowledge: vec![],
         policies: vec![],
@@ -645,6 +818,8 @@ fn make_caps_with_install_and_alias_followup() -> CapabilityRegistry {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             },
             ActionDef {
                 name: "create_issue".into(),
@@ -652,6 +827,8 @@ fn make_caps_with_install_and_alias_followup() -> CapabilityRegistry {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::CompactToolInfo,
+                discovery: None,
             },
         ],
         knowledge: vec![],
@@ -912,6 +1089,78 @@ async fn gate_paused_thread_resumes_to_completion() {
 }
 
 #[tokio::test]
+async fn tool_info_does_not_gate_callable_tool_into_next_llm_callable_set() {
+    let project_id = ProjectId::new();
+    let effects: Arc<dyn EffectExecutor> = Arc::new(ToolInfoCallableEffects);
+    let llm = ActionCapturingScriptedLlm::new(vec![
+        LlmOutput {
+            response: LlmResponse::ActionCalls {
+                calls: vec![ironclaw_engine::ActionCall {
+                    id: "call_tool_info_1".into(),
+                    action_name: "tool_info".into(),
+                    parameters: serde_json::json!({
+                        "name": "gmail",
+                        "detail": "schema"
+                    }),
+                }],
+                content: None,
+            },
+            usage: TokenUsage::default(),
+        },
+        LlmOutput {
+            response: LlmResponse::Text("done".into()),
+            usage: TokenUsage::default(),
+        },
+    ]);
+
+    let store = TestStore::new();
+    let mgr = ThreadManager::new(
+        llm.clone(),
+        effects,
+        store.clone() as Arc<dyn Store>,
+        Arc::new(make_caps(false)),
+        Arc::new(LeaseManager::new()),
+        Arc::new(PolicyEngine::new()),
+    );
+
+    let tid = mgr
+        .spawn_thread(
+            "inspect the gmail tool and continue",
+            ThreadType::Foreground,
+            project_id,
+            ThreadConfig::default(),
+            None,
+            "test-user",
+        )
+        .await
+        .expect("spawn_thread");
+
+    let outcome = mgr.join_thread(tid).await.expect("join");
+    assert!(matches!(outcome, ThreadOutcome::Completed { .. }));
+
+    let seen_action_names = llm.seen_action_names();
+    assert!(
+        seen_action_names.len() >= 2,
+        "expected at least two LLM calls, got {seen_action_names:?}"
+    );
+    assert!(
+        seen_action_names[0].contains(&"tool_info".to_string()),
+        "tool_info should be callable on the first step: {:?}",
+        seen_action_names[0]
+    );
+    assert!(
+        seen_action_names[0].contains(&"gmail".to_string()),
+        "gmail should already be callable on the first step: {:?}",
+        seen_action_names[0]
+    );
+    assert!(
+        seen_action_names[1].contains(&"gmail".to_string()),
+        "gmail should remain callable on the next step after tool_info: {:?}",
+        seen_action_names[1]
+    );
+}
+
+#[tokio::test]
 async fn approval_resolution_executes_pending_call_directly() {
     let project_id = ProjectId::new();
     let tools = Arc::new(ToolRegistry::new());
@@ -1005,6 +1254,8 @@ async fn approval_resolution_executes_pending_call_directly() {
         source_channel: None,
         user_timezone: None,
         thread_goal: Some(thread.goal.clone()),
+        available_actions_snapshot: None,
+        available_action_inventory_snapshot: None,
     };
 
     let tool_result = effects
@@ -1141,6 +1392,8 @@ async fn auth_resolution_retries_same_pending_action_without_second_pause() {
         source_channel: None,
         user_timezone: None,
         thread_goal: Some(thread.goal.clone()),
+        available_actions_snapshot: None,
+        available_action_inventory_snapshot: None,
     };
 
     effects.mark_authenticated("http").await;
@@ -1252,6 +1505,8 @@ async fn approval_chains_directly_into_auth_for_install_flow() {
         source_channel: None,
         user_timezone: None,
         thread_goal: Some(thread.goal.clone()),
+        available_actions_snapshot: None,
+        available_action_inventory_snapshot: None,
     };
 
     effects.mark_approved("tool_install").await;
@@ -1393,6 +1648,8 @@ async fn install_auth_resume_followed_by_aliased_tool_call_completes_without_han
         source_channel: None,
         user_timezone: None,
         thread_goal: Some(thread.goal.clone()),
+        available_actions_snapshot: None,
+        available_action_inventory_snapshot: None,
     };
 
     effects.mark_authenticated("tool_install").await;
@@ -1749,6 +2006,8 @@ async fn lease_planner_mission_excludes_denylisted() {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::ReadLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             },
             ActionDef {
                 name: "routine_create".into(),
@@ -1756,6 +2015,8 @@ async fn lease_planner_mission_excludes_denylisted() {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::WriteLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::CompactToolInfo,
+                discovery: None,
             },
         ],
         knowledge: vec![],
@@ -1895,6 +2156,8 @@ async fn lease_gate_denies_without_lease() {
         parameters_schema: serde_json::json!({}),
         effects: vec![EffectType::WriteLocal],
         requires_approval: true,
+        model_tool_surface: ModelToolSurface::CompactToolInfo,
+        discovery: None,
     };
     let auto = std::collections::HashSet::new();
     let params = serde_json::json!({});
@@ -1941,6 +2204,8 @@ async fn lease_gate_allows_with_valid_lease() {
         parameters_schema: serde_json::json!({}),
         effects: vec![EffectType::WriteLocal],
         requires_approval: true,
+        model_tool_surface: ModelToolSurface::CompactToolInfo,
+        discovery: None,
     };
     let auto = std::collections::HashSet::new();
     let params = serde_json::json!({});
@@ -2011,6 +2276,8 @@ async fn pipeline_first_deny_wins() {
         parameters_schema: serde_json::json!({}),
         effects: vec![],
         requires_approval: false,
+        model_tool_surface: ModelToolSurface::CompactToolInfo,
+        discovery: None,
     };
     let auto = std::collections::HashSet::new();
     let params = serde_json::json!({});
@@ -2102,6 +2369,8 @@ async fn auto_approve_mode_still_pauses_always_tools() {
         parameters_schema: serde_json::json!({}),
         effects: vec![EffectType::WriteExternal],
         requires_approval: true, // This maps to Always in the real system
+        model_tool_surface: ModelToolSurface::CompactToolInfo,
+        discovery: None,
     };
     let auto = std::collections::HashSet::new();
     let params = serde_json::json!({});

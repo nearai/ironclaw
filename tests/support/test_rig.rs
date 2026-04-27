@@ -243,6 +243,43 @@ impl TestRig {
         self.channel.send_incoming(msg).await;
     }
 
+    /// Resolve a pending auth gate by submitting a typed
+    /// `Submission::GateAuthResolution`.
+    ///
+    /// The `request_id` must be a `Uuid` matching the `request_id` field on
+    /// a previously-emitted `StatusUpdate::AuthRequired`. Use
+    /// `wait_for_auth_required` to observe it before calling this.
+    pub async fn send_gate_auth_resolution(
+        &self,
+        request_id: uuid::Uuid,
+        resolution: ironclaw::agent::submission::AuthGateResolution,
+    ) {
+        let submission = ironclaw::agent::submission::Submission::GateAuthResolution {
+            request_id,
+            resolution,
+        };
+        let msg = ironclaw::channels::IncomingMessage::new(
+            self.channel.channel_name(),
+            self.channel.user_id(),
+            "",
+        )
+        .with_structured_submission(submission);
+        self.channel.send_incoming(msg).await;
+    }
+
+    /// Resolve an OAuth-style gate by submitting a typed
+    /// `Submission::ExternalCallback`.
+    pub async fn send_external_callback(&self, request_id: uuid::Uuid) {
+        let submission = ironclaw::agent::submission::Submission::ExternalCallback { request_id };
+        let msg = ironclaw::channels::IncomingMessage::new(
+            self.channel.channel_name(),
+            self.channel.user_id(),
+            "",
+        )
+        .with_structured_submission(submission);
+        self.channel.send_incoming(msg).await;
+    }
+
     /// Return all message lists that were sent to the LLM provider.
     ///
     /// Only available when the rig was built with a `TraceLlm` (i.e., via `.with_trace()`).
@@ -670,6 +707,7 @@ pub struct TestRigBuilder {
     http_exchanges: Vec<HttpExchange>,
     http_interceptor_override: Option<Arc<dyn HttpInterceptor>>,
     extra_tools: Vec<Arc<dyn Tool>>,
+    test_tool_overrides: Vec<Arc<dyn Tool>>,
     wasm_tools: Vec<WasmToolSpec>,
     keep_bootstrap: bool,
     engine_v2: bool,
@@ -698,6 +736,7 @@ impl TestRigBuilder {
             http_exchanges: Vec::new(),
             http_interceptor_override: None,
             extra_tools: Vec::new(),
+            test_tool_overrides: Vec::new(),
             wasm_tools: Vec::new(),
             keep_bootstrap: false,
             engine_v2: false,
@@ -822,6 +861,18 @@ impl TestRigBuilder {
         self
     }
 
+    /// Replace a built-in or test tool by name after the normal registry
+    /// setup pass has completed.
+    ///
+    /// Unlike `with_extra_tools`, these overrides are applied at the end of
+    /// `build()` via `ToolRegistry::register_sync`, so a probe stub can
+    /// intentionally replace an earlier built-in registration (e.g.
+    /// `tool_activate`, `tool_auth`) for gate testing.
+    pub fn with_test_tool_override(mut self, tool: Arc<dyn Tool>) -> Self {
+        self.test_tool_overrides.push(tool);
+        self
+    }
+
     /// Enable prompt injection detection in the safety layer.
     ///
     /// When enabled, tool outputs are scanned for injection patterns
@@ -918,6 +969,7 @@ impl TestRigBuilder {
             http_exchanges: explicit_http_exchanges,
             http_interceptor_override,
             extra_tools,
+            test_tool_overrides,
             wasm_tools,
             keep_bootstrap,
             engine_v2,
@@ -1190,6 +1242,14 @@ impl TestRigBuilder {
             // Register any extra test-specific tools.
             for tool in extra_tools {
                 components.tools.register(tool).await;
+            }
+
+            // Apply test-only tool replacements. Runs after the normal
+            // registration pass (including AppBuilder's built-in
+            // registrations) so these stubs take precedence over any
+            // protected tool registered earlier.
+            for tool in test_tool_overrides {
+                components.tools.register_sync(tool);
             }
 
             // Register WASM tools with the shared HTTP interceptor.

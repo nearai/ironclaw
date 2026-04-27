@@ -1,0 +1,52 @@
+{
+  "model_name": "coverage-approval-always",
+  "expects": {
+    "tools_used": ["needs_approval_probe"],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
+  "turns": [
+    {
+      "user_input": "Run the gated probe twice",
+      "steps": [
+        {
+          "request_hint": { "last_user_message_contains": "gated probe" },
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_probe_always_1",
+                "name": "needs_approval_probe",
+                "arguments": { "value": "first" }
+              }
+            ],
+            "input_tokens": 60,
+            "output_tokens": 20
+          }
+        },
+        {
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_probe_always_2",
+                "name": "needs_approval_probe",
+                "arguments": { "value": "second" }
+              }
+            ],
+            "input_tokens": 100,
+            "output_tokens": 20
+          }
+        },
+        {
+          "response": {
+            "type": "text",
+            "content": "Both calls completed after you allowed-always.",
+            "input_tokens": 140,
+            "output_tokens": 15
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -65,6 +65,21 @@ pub struct OrchestratorResult {
     pub tokens_used: TokenUsage,
 }
 
+fn apply_snapshot_inventory(
+    exec_ctx: &mut ThreadExecutionContext,
+    inventory: Option<Arc<crate::types::capability::ActionInventory>>,
+) -> Arc<[crate::types::capability::ActionDef]> {
+    let available_actions: Arc<[crate::types::capability::ActionDef]> = inventory
+        .as_ref()
+        .map(|inventory| inventory.inline.clone().into())
+        .unwrap_or_else(|| Arc::from([]));
+    if let Some(inventory) = inventory {
+        exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
+        exec_ctx.available_action_inventory_snapshot = Some(inventory);
+    }
+    available_actions
+}
+
 fn normalize_pause_outcome(
     thread: &mut Thread,
     outcome: &ThreadOutcome,
@@ -429,6 +444,7 @@ pub async fn execute_orchestrator(
     event_tx: Option<&tokio::sync::broadcast::Sender<ThreadEvent>>,
     retrieval: Option<&RetrievalEngine>,
     store: Option<&Arc<dyn Store>>,
+    platform_info: Option<&crate::executor::prompt::PlatformInfo>,
     persisted_state: &serde_json::Value,
 ) -> Result<OrchestratorResult, EngineError> {
     let mut total_tokens = TokenUsage::default();
@@ -463,7 +479,11 @@ pub async fn execute_orchestrator(
     let tracker = LimitedTracker::new(orchestrator_limits());
 
     let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        runner.start(input_values, tracker, PrintWriter::Collect(&mut stdout))
+        runner.start(
+            input_values,
+            tracker,
+            PrintWriter::CollectString(&mut stdout),
+        )
     }));
 
     let mut progress = match run_result {
@@ -530,6 +550,7 @@ pub async fn execute_orchestrator(
                                 effects,
                                 leases,
                                 store,
+                                platform_info,
                             },
                             &mut total_tokens,
                         )
@@ -605,7 +626,7 @@ pub async fn execute_orchestrator(
 
                 // Resume the orchestrator VM
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    call.resume(ext_result, PrintWriter::Collect(&mut stdout))
+                    call.resume(ext_result, PrintWriter::CollectString(&mut stdout))
                 })) {
                     Ok(Ok(p)) => progress = p,
                     Ok(Err(e)) => {
@@ -635,7 +656,7 @@ pub async fn execute_orchestrator(
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     lookup.resume(
                         NameLookupResult::Undefined,
-                        PrintWriter::Collect(&mut stdout),
+                        PrintWriter::CollectString(&mut stdout),
                     )
                 })) {
                     Ok(Ok(p)) => progress = p,
@@ -676,6 +697,7 @@ struct LlmCompleteDeps<'a> {
     effects: &'a Arc<dyn EffectExecutor>,
     leases: &'a Arc<LeaseManager>,
     store: Option<&'a Arc<dyn Store>>,
+    platform_info: Option<&'a crate::executor::prompt::PlatformInfo>,
 }
 
 /// Handle `__llm_complete__(messages, actions, config)`.
@@ -694,7 +716,7 @@ async fn handle_llm_complete(
 
     let explicit_messages = args.first().map(monty_to_json).filter(|v| !v.is_null());
     let explicit_config = args.get(2).map(monty_to_json).filter(|v| !v.is_null());
-    let messages = explicit_messages
+    let mut messages = explicit_messages
         .as_ref()
         .and_then(json_to_thread_messages)
         .unwrap_or_else(|| thread.messages.clone());
@@ -718,6 +740,17 @@ async fn handle_llm_complete(
         .available_actions(&active_leases, &actions_context)
         .await
         .unwrap_or_default();
+    refresh_llm_messages_for_current_surface(
+        &mut messages,
+        thread,
+        deps.effects,
+        deps.store,
+        deps.platform_info,
+        &active_leases,
+        &actions_context,
+        &actions,
+    )
+    .await;
 
     let config = LlmCallConfig {
         max_tokens: explicit_config
@@ -783,6 +816,50 @@ async fn handle_llm_complete(
             Some(format!("LLM call failed: {e}")),
         )),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn refresh_llm_messages_for_current_surface(
+    messages: &mut Vec<ThreadMessage>,
+    thread: &Thread,
+    effects: &Arc<dyn EffectExecutor>,
+    store: Option<&Arc<dyn Store>>,
+    platform_info: Option<&crate::executor::prompt::PlatformInfo>,
+    active_leases: &[crate::types::capability::CapabilityLease],
+    actions_context: &ThreadExecutionContext,
+    actions: &[crate::types::capability::ActionDef],
+) {
+    if !messages.iter().any(|message| {
+        message.role == crate::types::message::MessageRole::System
+            && crate::executor::prompt::is_codeact_system_prompt(&message.content)
+    }) {
+        return;
+    }
+
+    let capabilities = match effects
+        .available_capabilities(active_leases, actions_context)
+        .await
+    {
+        Ok(capabilities) => capabilities,
+        Err(error) => {
+            debug!(
+                thread_id = %thread.id,
+                "failed to load capabilities for llm_complete prompt refresh: {error}"
+            );
+            Vec::new()
+        }
+    };
+
+    let system_prompt = crate::executor::prompt::build_codeact_system_prompt(
+        &capabilities,
+        actions,
+        store,
+        thread.project_id,
+        platform_info,
+    )
+    .await;
+
+    crate::executor::prompt::upsert_codeact_system_prompt(messages, system_prompt);
 }
 
 /// Handle `__execute_code_step__(code, state)`.
@@ -896,6 +973,40 @@ async fn handle_execute_code_step(
                 }
                 thread.events.push(instrumentation_event);
             }
+
+            // Always emit CodeExecuted so debug observers see the exact code
+            // and stdout, regardless of success/failure. The in-context chat
+            // summary is too lossy for diagnostics. Kept separate from
+            // CodeExecutionFailed (which carries the failure classifier) and
+            // the per-action events already broadcast above.
+            //
+            // Cap code, stdout, and return_value at `CODE_EXECUTED_MAX_BYTES`
+            // each before emission so a step that prints or returns a large
+            // blob cannot bloat persisted thread events or flood the SSE
+            // broadcast buffer. Byte-based (not `chars().count()`) to keep
+            // this O(1) even for very large payloads. `tail_chars` elsewhere
+            // in this file is left alone because its callers already run
+            // inside pre-bounded inputs (`OUTPUT_TRUNCATE_LEN`, 500-char
+            // error slices) where chars-vs-bytes is not a perf concern.
+            const CODE_EXECUTED_MAX_BYTES: usize = 8_000;
+            let code_executed_event = ThreadEvent::new(
+                thread.id,
+                EventKind::CodeExecuted {
+                    step_id: exec_ctx.step_id,
+                    code: tail_utf8_bytes(&code, CODE_EXECUTED_MAX_BYTES),
+                    stdout: tail_utf8_bytes(&result.stdout, CODE_EXECUTED_MAX_BYTES),
+                    return_value: bounded_return_value(
+                        &result.return_value,
+                        CODE_EXECUTED_MAX_BYTES,
+                    ),
+                    duration_ms: code_start.elapsed().as_millis() as u64,
+                },
+            );
+            if let Some(tx) = event_tx {
+                let _ = tx.send(code_executed_event.clone());
+            }
+            thread.events.push(code_executed_event);
+
             thread.updated_at = chrono::Utc::now();
 
             let action_results: Vec<serde_json::Value> = result
@@ -980,7 +1091,23 @@ async fn handle_execute_action(
 
     let call_id = extract_string_kwarg(kwargs, "call_id").unwrap_or_default();
 
-    let exec_ctx = thread_execution_context(thread, StepId::new(), Some(call_id.clone()));
+    let mut exec_ctx = thread_execution_context(thread, StepId::new(), Some(call_id.clone()));
+    let active_leases = leases.active_for_thread(thread.id).await;
+    let inventory = match effects
+        .available_action_inventory(&active_leases, &exec_ctx)
+        .await
+    {
+        Ok(inventory) => Some(Arc::new(inventory)),
+        Err(error) => {
+            debug!(
+                thread_id = %thread.id,
+                action = %name,
+                "failed to load action inventory for orchestrator action execution: {error}"
+            );
+            None
+        }
+    };
+    let available_actions = apply_snapshot_inventory(&mut exec_ctx, inventory);
 
     // Helper: emit event only. The orchestrator owns transcript recording.
     let emit_and_record = |thread: &mut Thread,
@@ -997,7 +1124,34 @@ async fn handle_execute_action(
         thread.updated_at = chrono::Utc::now();
     };
 
-    // 1. Find lease for this action
+    // 1. Find the action definition from the callable inventory.
+    let action_def = available_actions.iter().find(|a| a.matches_name(&name));
+    if exec_ctx.available_actions_snapshot.is_some() && action_def.is_none() {
+        let error = format!("action '{name}' is not callable in this execution context");
+        let output = serde_json::json!({"error": &error});
+        emit_and_record(
+            thread,
+            event_tx,
+            EventKind::ActionFailed {
+                step_id: exec_ctx.step_id,
+                action_name: name.clone(),
+                call_id: call_id.clone(),
+                error,
+                duration_ms: 0,
+                params_summary: summarize_params(&name, &params),
+            },
+            &call_id,
+            &name,
+            &output,
+        );
+        let result = serde_json::json!({
+            "output": output,
+            "is_error": true,
+        });
+        return ExtFunctionResult::Return(json_to_monty(&result));
+    }
+
+    // 2. Find lease for this action
     let lease = match leases.find_lease_for_action(thread.id, &name).await {
         Some(l) => l,
         None => {
@@ -1026,14 +1180,12 @@ async fn handle_execute_action(
         }
     };
 
-    // 2. Check policy
-    let action_def = effects
-        .available_actions(std::slice::from_ref(&lease), &exec_ctx)
-        .await
-        .ok()
-        .and_then(|actions| actions.into_iter().find(|a| a.name == name));
+    let canonical_name = action_def
+        .as_ref()
+        .map(|action| action.name.clone())
+        .unwrap_or_else(|| name.clone());
 
-    if let Some(ref ad) = action_def {
+    if let Some(ad) = action_def {
         match policy.evaluate(ad, &lease, &[]) {
             crate::capability::policy::PolicyDecision::Deny { reason } => {
                 let output = serde_json::json!({"error": format!("Denied: {reason}")});
@@ -1129,10 +1281,10 @@ async fn handle_execute_action(
     };
 
     // 4. Execute
-    let ps = summarize_params(&name, &params);
+    let ps = summarize_params(&canonical_name, &params);
     let execution_start = std::time::Instant::now();
     match effects
-        .execute_action(&name, params, &lease, &exec_ctx)
+        .execute_action(&canonical_name, params, &lease, &exec_ctx)
         .await
     {
         Ok(r) => {
@@ -1323,6 +1475,26 @@ async fn handle_execute_actions_parallel(
     }
 
     let step_id = StepId::new();
+    let actions_context = thread_execution_context(thread, step_id, None);
+    let active_leases = leases.active_for_thread(thread.id).await;
+    let inventory = match effects
+        .available_action_inventory(&active_leases, &actions_context)
+        .await
+    {
+        Ok(inventory) => Some(Arc::new(inventory)),
+        Err(error) => {
+            debug!(
+                thread_id = %thread.id,
+                step_id = ?step_id,
+                "failed to load action inventory for orchestrator parallel execution: {error}"
+            );
+            None
+        }
+    };
+    let available_actions: Arc<[crate::types::capability::ActionDef]> = inventory
+        .as_ref()
+        .map(|inventory| inventory.inline.clone().into())
+        .unwrap_or_else(|| Arc::from([]));
 
     // ── Phase 1: Preflight (sequential) ─────────────────────────
     // Check leases and policies. Denied → error result. Approval → interrupt.
@@ -1341,6 +1513,42 @@ async fn handle_execute_actions_parallel(
     let mut preflight: Vec<Option<PfOutcome>> = Vec::with_capacity(parsed.len());
 
     for pc in &parsed {
+        // Find the action definition from the callable inventory.
+        let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
+        if let Some(ref inventory) = inventory {
+            exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
+            exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(inventory));
+        }
+        let action_def = available_actions
+            .iter()
+            .find(|a| a.matches_name(&pc.name))
+            .cloned();
+        if inventory.is_some() && action_def.is_none() {
+            let error = format!(
+                "action '{}' is not callable in this execution context",
+                pc.name
+            );
+            let output = serde_json::json!({"error": &error});
+            let result_json = serde_json::json!({
+                "output": &output,
+                "is_error": true,
+            });
+            let event = EventKind::ActionFailed {
+                step_id,
+                action_name: pc.name.clone(),
+                call_id: pc.call_id.clone(),
+                error,
+                duration_ms: 0,
+                params_summary: summarize_params(&pc.name, &pc.params),
+            };
+            preflight.push(Some(PfOutcome::Error {
+                result_json,
+                event,
+                output,
+            }));
+            continue;
+        }
+
         // Find lease
         let lease = match leases.find_lease_for_action(thread.id, &pc.name).await {
             Some(l) => l,
@@ -1369,12 +1577,10 @@ async fn handle_execute_actions_parallel(
         };
 
         // Check policy
-        let exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
-        let action_def = effects
-            .available_actions(std::slice::from_ref(&lease), &exec_ctx)
-            .await
-            .ok()
-            .and_then(|actions| actions.into_iter().find(|a| a.name == pc.name));
+        let action_name = action_def
+            .as_ref()
+            .map(|action| action.name.clone())
+            .unwrap_or_else(|| pc.name.clone());
 
         if let Some(ref ad) = action_def {
             match policy.evaluate(ad, &lease, &[]) {
@@ -1386,7 +1592,7 @@ async fn handle_execute_actions_parallel(
                     });
                     let event = EventKind::ActionFailed {
                         step_id,
-                        action_name: pc.name.clone(),
+                        action_name: action_name.clone(),
                         call_id: pc.call_id.clone(),
                         error: reason,
                         duration_ms: 0,
@@ -1505,7 +1711,6 @@ async fn handle_execute_actions_parallel(
     let mut slot_results: Vec<Option<serde_json::Value>> = vec![None; parsed.len()];
     let mut slot_events: Vec<Option<EventKind>> = vec![None; parsed.len()];
     let mut slot_outputs: Vec<Option<serde_json::Value>> = vec![None; parsed.len()];
-
     // Separate runnable from errors
     let mut runnable: Vec<(usize, crate::types::capability::CapabilityLease)> = Vec::new();
     for (idx, pf) in preflight.into_iter().enumerate() {
@@ -1530,11 +1735,20 @@ async fn handle_execute_actions_parallel(
         // Single call: execute directly
         let (idx, lease) = runnable.into_iter().next().unwrap(); // safety: len()==1 checked above
         let pc = &parsed[idx];
-        let exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
-        let ps = summarize_params(&pc.name, &pc.params);
+        let action_name = available_actions
+            .iter()
+            .find(|action| action.matches_name(&pc.name))
+            .map(|action| action.name.clone())
+            .unwrap_or_else(|| pc.name.clone());
+        let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
+        if let Some(ref inventory) = inventory {
+            exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
+            exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(inventory));
+        }
+        let ps = summarize_params(&action_name, &pc.params);
         let (result_json, event, output) = execute_single_action(
             effects,
-            &pc.name,
+            &action_name,
             pc.params.clone(),
             &pc.call_id,
             &lease,
@@ -1555,12 +1769,20 @@ async fn handle_execute_actions_parallel(
         // Capture once outside the loop — the thread's metadata is stable
         // for the duration of the parallel batch.
         for (idx, lease) in runnable {
-            let pc_name = parsed[idx].name.clone();
+            let pc_name = available_actions
+                .iter()
+                .find(|action| action.matches_name(&parsed[idx].name))
+                .map(|action| action.name.clone())
+                .unwrap_or_else(|| parsed[idx].name.clone());
             let pc_params = parsed[idx].params.clone();
             let pc_call_id = parsed[idx].call_id.clone();
             let effects = effects.clone();
             let lease = lease.clone();
-            let exec_ctx = thread_execution_context(thread, step_id, Some(pc_call_id.clone()));
+            let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc_call_id.clone()));
+            if let Some(ref inventory) = inventory {
+                exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
+                exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(inventory));
+            }
             let ps = summarize_params(&pc_name, &pc_params);
 
             join_set.spawn(async move {
@@ -2390,6 +2612,50 @@ fn tail_chars(s: &str, n: usize) -> String {
     }
 }
 
+/// Return the last `max_bytes` bytes of `s`, adjusted forward to the
+/// next UTF-8 character boundary so the slice is always valid UTF-8.
+///
+/// Byte-based (unlike [`tail_chars`]) to stay O(1)+boundary-walk on
+/// large payloads. Used by the `CodeExecuted` emission path where
+/// `code`/`stdout` can be arbitrarily large, so `chars().count()` on
+/// every step would be measurable overhead.
+fn tail_utf8_bytes(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_owned();
+    }
+    let mut start = s.len() - max_bytes;
+    // Advance past mid-codepoint bytes. At most 3 iterations because
+    // UTF-8 codepoints are ≤ 4 bytes.
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    s[start..].to_owned() // safety: `start` is validated by `is_char_boundary`
+}
+
+/// Bound the serialized size of a CodeAct return value before emission.
+///
+/// - `Null` → `None` (no change — a null return is nothing to surface).
+/// - `String` → tail-truncated via [`tail_utf8_bytes`].
+/// - Other (`Array`, `Object`, `Number`, `Bool`) → serialized length
+///   checked; returned intact if ≤ `max_bytes`, dropped otherwise.
+///
+/// Dropping (rather than truncating arbitrary JSON) is deliberate: a
+/// truncated `Array` / `Object` is unparseable on the frontend and
+/// provides no diagnostic value. Observers see a `None` return value
+/// and know the payload was omitted for size, not that it was `null`.
+fn bounded_return_value(value: &serde_json::Value, max_bytes: usize) -> Option<serde_json::Value> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) => {
+            Some(serde_json::Value::String(tail_utf8_bytes(s, max_bytes)))
+        }
+        other => match serde_json::to_vec(other) {
+            Ok(buf) if buf.len() <= max_bytes => Some(other.clone()),
+            _ => None,
+        },
+    }
+}
+
 /// Build a PII-safe summary of an `action_calls` JSON value for log output.
 ///
 /// The action_calls payload contains tool parameters, which can carry user
@@ -2660,6 +2926,65 @@ mod tests {
     use crate::types::memory::{DocType, MemoryDoc};
     use crate::types::project::ProjectId;
 
+    // ── CodeExecuted payload bounding ────────────────────────────
+
+    #[test]
+    fn tail_utf8_bytes_returns_input_when_already_small() {
+        assert_eq!(tail_utf8_bytes("hello", 100), "hello");
+    }
+
+    #[test]
+    fn tail_utf8_bytes_tails_ascii_at_byte_boundary() {
+        let s: String = "abcdefghij".repeat(100); // 1_000 bytes
+        let out = tail_utf8_bytes(&s, 50);
+        assert_eq!(out.len(), 50);
+        assert!(s.ends_with(&out));
+    }
+
+    #[test]
+    fn tail_utf8_bytes_advances_past_multibyte_split() {
+        // 4-byte emoji followed by ASCII; cut position lands mid-codepoint.
+        let s = format!("{}abcde", "🐍".repeat(10)); // 40 bytes of emoji + 5 ASCII = 45 bytes
+        let out = tail_utf8_bytes(&s, 9);
+        // The walk-forward must have landed on a char boundary; the
+        // resulting &str must be valid UTF-8 (implicit — String construction
+        // would panic otherwise) and end with the original tail.
+        assert!(s.ends_with(&out));
+        assert!(out.len() <= 9);
+    }
+
+    #[test]
+    fn bounded_return_value_drops_null() {
+        assert_eq!(bounded_return_value(&serde_json::Value::Null, 100), None);
+    }
+
+    #[test]
+    fn bounded_return_value_truncates_large_string() {
+        let big = "x".repeat(50_000);
+        let v = serde_json::Value::String(big);
+        let out = bounded_return_value(&v, 100).expect("string retained");
+        let s = out.as_str().expect("string variant");
+        assert_eq!(s.len(), 100);
+    }
+
+    #[test]
+    fn bounded_return_value_retains_small_structured() {
+        let v = serde_json::json!({"ok": true, "count": 42});
+        assert_eq!(bounded_return_value(&v, 1_000), Some(v));
+    }
+
+    #[test]
+    fn bounded_return_value_drops_oversized_structured() {
+        // A 10k-element array serializes well past 8 KiB.
+        let items: Vec<_> = (0..10_000).collect();
+        let v = serde_json::json!(items);
+        assert_eq!(
+            bounded_return_value(&v, 8_000),
+            None,
+            "oversized structured return_value should be dropped, not truncated"
+        );
+    }
+
     // ── Orchestrator budget / error mapping ─────────────────────
 
     #[test]
@@ -2861,7 +3186,7 @@ mod tests {
         let tracker = LimitedTracker::new(ResourceLimits::new().max_allocations(500_000));
 
         let mut progress = runner
-            .start(vec![], tracker, PrintWriter::Collect(&mut stdout))
+            .start(vec![], tracker, PrintWriter::CollectString(&mut stdout))
             .expect("Failed to start orchestrator test");
 
         loop {
@@ -2872,7 +3197,7 @@ mod tests {
                         let val = call.args.first().cloned().unwrap_or(MontyObject::None);
                         let _ = call.resume(
                             ExtFunctionResult::Return(MontyObject::None),
-                            PrintWriter::Collect(&mut stdout),
+                            PrintWriter::CollectString(&mut stdout),
                         );
                         return val;
                     }
@@ -2881,14 +3206,14 @@ mod tests {
                         _ => ExtFunctionResult::Return(MontyObject::None),
                     };
                     progress = call
-                        .resume(ext_result, PrintWriter::Collect(&mut stdout))
+                        .resume(ext_result, PrintWriter::CollectString(&mut stdout))
                         .expect("resume failed");
                 }
                 RunProgress::NameLookup(lookup) => {
                     progress = lookup
                         .resume(
                             NameLookupResult::Undefined,
-                            PrintWriter::Collect(&mut stdout),
+                            PrintWriter::CollectString(&mut stdout),
                         )
                         .expect("name lookup resume failed");
                 }
@@ -3698,6 +4023,131 @@ mod tests {
         }
     }
 
+    struct PromptCapturingLlm {
+        captured_messages: tokio::sync::Mutex<Vec<Vec<ThreadMessage>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmBackend for PromptCapturingLlm {
+        fn model_name(&self) -> &str {
+            "prompt-capturing"
+        }
+
+        async fn complete(
+            &self,
+            messages: &[ThreadMessage],
+            _actions: &[crate::types::capability::ActionDef],
+            _config: &LlmCallConfig,
+        ) -> Result<crate::traits::llm::LlmOutput, EngineError> {
+            self.captured_messages.lock().await.push(messages.to_vec());
+            Ok(crate::traits::llm::LlmOutput {
+                response: crate::types::step::LlmResponse::Text("ok".into()),
+                usage: crate::types::step::TokenUsage::default(),
+            })
+        }
+    }
+
+    struct CompactActionEffects;
+
+    #[async_trait::async_trait]
+    impl EffectExecutor for CompactActionEffects {
+        async fn execute_action(
+            &self,
+            _: &str,
+            _: serde_json::Value,
+            _: &crate::types::capability::CapabilityLease,
+            _: &ThreadExecutionContext,
+        ) -> Result<crate::types::step::ActionResult, EngineError> {
+            Ok(crate::types::step::ActionResult {
+                call_id: String::new(),
+                action_name: String::new(),
+                output: serde_json::json!({}),
+                is_error: false,
+                duration: std::time::Duration::from_millis(1),
+            })
+        }
+
+        async fn available_actions(
+            &self,
+            _: &[crate::types::capability::CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::ActionDef>, EngineError> {
+            Ok(vec![crate::types::capability::ActionDef {
+                name: "gmail_send".into(),
+                description: "Send Gmail".into(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "to": {"type": "string"},
+                        "body": {"type": "string"}
+                    }
+                }),
+                effects: vec![crate::types::capability::EffectType::WriteExternal],
+                requires_approval: false,
+                model_tool_surface: crate::types::capability::ModelToolSurface::CompactToolInfo,
+                discovery: None,
+            }])
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[crate::types::capability::CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
+            Ok(vec![])
+        }
+    }
+
+    struct InventoryErrorEffects;
+
+    #[async_trait::async_trait]
+    impl EffectExecutor for InventoryErrorEffects {
+        async fn execute_action(
+            &self,
+            action_name: &str,
+            _: serde_json::Value,
+            _: &crate::types::capability::CapabilityLease,
+            ctx: &ThreadExecutionContext,
+        ) -> Result<crate::types::step::ActionResult, EngineError> {
+            Ok(crate::types::step::ActionResult {
+                call_id: String::new(),
+                action_name: action_name.to_string(),
+                output: serde_json::json!({
+                    "has_action_snapshot": ctx.available_actions_snapshot.is_some(),
+                    "has_inventory_snapshot": ctx.available_action_inventory_snapshot.is_some(),
+                }),
+                is_error: false,
+                duration: std::time::Duration::from_millis(1),
+            })
+        }
+
+        async fn available_actions(
+            &self,
+            _: &[crate::types::capability::CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::ActionDef>, EngineError> {
+            Ok(vec![])
+        }
+
+        async fn available_action_inventory(
+            &self,
+            _: &[crate::types::capability::CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<crate::types::capability::ActionInventory, EngineError> {
+            Err(EngineError::Effect {
+                reason: "inventory failed".into(),
+            })
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[crate::types::capability::CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
+            Ok(vec![])
+        }
+    }
+
     #[tokio::test]
     async fn llm_complete_forwards_model_from_explicit_config() {
         let concrete = Arc::new(ModelCapturingLlm {
@@ -3733,6 +4183,7 @@ mod tests {
                 effects: &effects,
                 leases: &leases,
                 store: Some(&store),
+                platform_info: None,
             },
             &mut total_tokens,
         )
@@ -3777,6 +4228,7 @@ mod tests {
                 effects: &effects,
                 leases: &leases,
                 store: Some(&store),
+                platform_info: None,
             },
             &mut total_tokens,
         )
@@ -3785,6 +4237,121 @@ mod tests {
         let captured = concrete.captured.lock().await;
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0], None);
+    }
+
+    #[tokio::test]
+    async fn llm_complete_refreshes_codeact_prompt_with_current_compact_actions() {
+        let concrete = Arc::new(PromptCapturingLlm {
+            captured_messages: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let llm: Arc<dyn LlmBackend> = Arc::clone(&concrete) as Arc<dyn LlmBackend>;
+        let effects: Arc<dyn EffectExecutor> = Arc::new(CompactActionEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let store: Arc<dyn Store> = Arc::new(crate::tests::InMemoryStore::with_docs(vec![]));
+
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+        thread.messages = vec![
+            ThreadMessage::system(
+                crate::executor::prompt::build_codeact_system_prompt_with_docs(&[], &[], &[], None),
+            ),
+            ThreadMessage::user("use gmail"),
+        ];
+        leases
+            .grant(
+                thread.id,
+                "tools",
+                crate::types::capability::GrantedActions::All,
+                None,
+                None,
+            )
+            .await
+            .expect("grant tool lease");
+
+        let mut total_tokens = TokenUsage::default();
+        let result = handle_llm_complete(
+            &[],
+            &[],
+            &mut thread,
+            LlmCompleteDeps {
+                llm: &llm,
+                effects: &effects,
+                leases: &leases,
+                store: Some(&store),
+                platform_info: None,
+            },
+            &mut total_tokens,
+        )
+        .await;
+
+        assert!(matches!(result, ExtFunctionResult::Return(_)));
+        let captured = concrete.captured_messages.lock().await;
+        let system_prompt = &captured[0][0].content;
+        assert!(system_prompt.contains("## Enabled Tools"));
+        assert!(system_prompt.contains("`gmail_send`"));
+    }
+
+    #[tokio::test]
+    async fn execute_action_does_not_set_empty_snapshots_when_inventory_fetch_fails() {
+        let effects: Arc<dyn EffectExecutor> = Arc::new(InventoryErrorEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+
+        let mut thread = Thread::new(
+            "test action inventory fallback",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        leases
+            .grant(
+                thread.id,
+                "tools",
+                crate::types::capability::GrantedActions::All,
+                None,
+                None,
+            )
+            .await
+            .expect("grant lease");
+
+        let result = handle_execute_action(
+            &[
+                MontyObject::String("echo".into()),
+                json_to_monty(&serde_json::json!({})),
+            ],
+            &[(
+                MontyObject::String("call_id".into()),
+                MontyObject::String("call-1".into()),
+            )],
+            &mut thread,
+            &effects,
+            &leases,
+            &policy,
+            None,
+        )
+        .await;
+
+        let ExtFunctionResult::Return(obj) = result else {
+            panic!("handle_execute_action did not return a value");
+        };
+        let json = monty_to_json(&obj);
+        assert_eq!(json["is_error"], serde_json::json!(false));
+        assert_eq!(
+            json["output"],
+            serde_json::json!({
+                "has_action_snapshot": false,
+                "has_inventory_snapshot": false,
+            })
+        );
     }
 
     // ── Python ↔ Rust ActionCall round-trip ───────────────────────────────
