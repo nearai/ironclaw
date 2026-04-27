@@ -11,6 +11,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -314,6 +315,30 @@ def build_gateway_env(
     return env
 
 
+def _drain_to_file(stream: Any, path: Path) -> threading.Thread:
+    """Drain a subprocess stdout/stderr stream to a file in a daemon thread.
+
+    Without this, ``subprocess.Popen(stdout=PIPE)`` deadlocks: the kernel
+    pipe buffer (64 KiB on Linux, varies on macOS) fills under sustained
+    log output and the child blocks on its next write. That manifests on
+    CI as IronClaw freezing mid-request — locally the pipe fills more
+    slowly so the symptom is masked. See PR #2978-ish (this fix).
+    """
+
+    def _drain() -> None:
+        try:
+            with path.open("a", encoding="utf-8", errors="replace") as fh:
+                for line in stream:
+                    fh.write(line)
+                    fh.flush()
+        except Exception:  # noqa: BLE001
+            pass
+
+    thread = threading.Thread(target=_drain, daemon=True)
+    thread.start()
+    return thread
+
+
 async def start_gateway_stack(
     *,
     venv_dir: Path,
@@ -323,6 +348,7 @@ async def start_gateway_stack(
     gateway_token_prefix: str,
     extra_gateway_env: dict[str, str] | None = None,
     oauth_proxy: bool = False,
+    log_dir: Path | None = None,
 ) -> GatewayStack:
     secrets_master_key = secrets_master_key or generate_secrets_master_key()
     python = venv_python(venv_dir)
@@ -357,6 +383,14 @@ async def start_gateway_stack(
         )
         mock_llm_url = f"http://127.0.0.1:{match.group(1)}"
         await wait_for_ready(f"{mock_llm_url}/v1/models", timeout=30.0)
+
+        # Now that the port-discovery line has been consumed, drain the
+        # rest of mock_llm.py's stdout to a log file so the pipe never
+        # fills (64 KiB pipe buffers on Linux deadlock the child once
+        # full).
+        if log_dir is not None and mock_llm_proc.stdout is not None:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            _drain_to_file(mock_llm_proc.stdout, log_dir / "mock_llm.log")
 
         if oauth_proxy:
             proxy_env = {
@@ -393,6 +427,12 @@ async def start_gateway_stack(
             bufsize=1,
             env=env,
         )
+        # Same deadlock guard as mock_llm above — drain ironclaw's
+        # stdout/stderr so a chatty `RUST_LOG=info` doesn't fill the pipe
+        # buffer and freeze the request handler mid-response.
+        if log_dir is not None and gateway_proc.stdout is not None:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            _drain_to_file(gateway_proc.stdout, log_dir / "gateway.log")
         base_url = f"http://127.0.0.1:{gateway_port}"
         await wait_for_ready(f"{base_url}/api/health", timeout=60.0)
         return GatewayStack(

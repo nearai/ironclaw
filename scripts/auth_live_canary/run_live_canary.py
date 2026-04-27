@@ -1136,6 +1136,7 @@ async def async_main(args: argparse.Namespace) -> int:
         gateway_token_prefix=mode_cfg["gateway_token_prefix"],
         extra_gateway_env=extra_gateway_env,
         oauth_proxy=(args.mode == "seeded"),
+        log_dir=args.output_dir,
     )
     try:
         if args.mode == "seeded":
