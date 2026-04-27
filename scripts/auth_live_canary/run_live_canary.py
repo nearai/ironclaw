@@ -561,6 +561,54 @@ async def handle_google_popup(popup: Any, case_key: str) -> None:
 
     await popup.wait_for_load_state("domcontentloaded", timeout=30000)
 
+    # Account picker — when storage_state carries a logged-in session,
+    # Google often lands on "Choose an account" instead of jumping straight
+    # to consent. Try a sequence of selectors so we cope with Google's UI
+    # changes; the picker rows are sometimes div[role="link"], sometimes
+    # role="button", and the text node is sometimes a child of the
+    # clickable element. Clicking an email-looking child works because
+    # Playwright bubbles the click to the nearest interactive ancestor.
+    try:
+        await popup.get_by_text(
+            re.compile(r"Choose an account", re.I)
+        ).first.wait_for(state="visible", timeout=5000)
+        print("[auth-canary] account picker detected, attempting click", flush=True)
+        # Strategies, in order — first that produces a visible match wins.
+        candidates = []
+        if username:
+            candidates.append(popup.get_by_text(username, exact=False).first)
+            candidates.append(
+                popup.locator(f'[data-identifier="{username}"]').first
+            )
+        # Generic: click any visible text matching an email pattern that
+        # isn't "Use another account".
+        candidates.append(
+            popup.locator(
+                "xpath=//*[contains(text(), '@') "
+                "and not(contains(translate(text(), 'USE ANOTHER ACCOUNT', "
+                "'use another account'), 'use another account'))]"
+            ).first
+        )
+        for idx, candidate in enumerate(candidates):
+            try:
+                await candidate.wait_for(state="visible", timeout=3000)
+                await candidate.click(timeout=3000)
+                print(
+                    f"[auth-canary] account picker: clicked candidate {idx}",
+                    flush=True,
+                )
+                await popup.wait_for_load_state("domcontentloaded", timeout=15000)
+                break
+            except Exception as exc:
+                print(
+                    f"[auth-canary] account picker candidate {idx} skipped: {exc}",
+                    flush=True,
+                )
+                continue
+    except Exception:
+        # No picker visible — proceed to email/password/consent.
+        pass
+
     if username:
         email_input = popup.locator('input[type="email"]').first
         try:
@@ -770,13 +818,18 @@ async def browser_oauth_probe(
                 },
             )
         )
+        # Case-insensitive substring match on the assistant text — real LLM
+        # responses vary in capitalization ("Inbox" vs "inbox", "Gmail" vs
+        # "gmail") and the canary's value is in confirming the tool ran and
+        # the response references it, not in matching exact wording.
         results.append(
             ProbeResult(
                 provider=case.key,
                 mode="browser_chat",
                 success=(
                     case.expected_tool_name in tool_names
-                    and case.expected_text in chat_result.get("text", "")
+                    and case.expected_text.lower()
+                    in chat_result.get("text", "").lower()
                 ),
                 latency_ms=latency_ms,
                 details={
