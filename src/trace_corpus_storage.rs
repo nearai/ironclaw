@@ -775,6 +775,12 @@ pub trait TraceCorpusStore: Send + Sync {
         mirror: TraceExportManifestMirrorWrite,
     ) -> Result<TraceExportManifestRecord, DatabaseError>;
 
+    async fn delete_trace_export_manifest_mirror(
+        &self,
+        tenant_id: &str,
+        export_manifest_id: Uuid,
+    ) -> Result<(), DatabaseError>;
+
     async fn list_trace_export_manifests(
         &self,
         tenant_id: &str,

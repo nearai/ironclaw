@@ -3791,10 +3791,10 @@ async fn dataset_replay_handler(
         enforce_db_mirror_write_result(state.as_ref(), "replay export manifest", mirror_result)
             .map_err(internal_error)?;
     }
-    append_audit_event_with_db_mirror(
+    let audit_result = append_audit_event_with_db_mirror(
         state.as_ref(),
         &tenant,
-        audit_event,
+        audit_event.clone(),
         StorageTraceAuditAction::Export,
         StorageTraceAuditSafeMetadata::Export {
             artifact_kind: StorageTraceObjectArtifactKind::ExportArtifact,
@@ -3802,8 +3802,25 @@ async fn dataset_replay_handler(
             item_count: items.len().min(u32::MAX as usize) as u32,
         },
     )
-    .await
-    .map_err(internal_error)?;
+    .await;
+    if let Err(error) = audit_result {
+        if state.require_db_mirror_writes {
+            let manifest_path =
+                export_artifact_dir(&state.root, &tenant.tenant_id, manifest.export_id)
+                    .join("manifest.json");
+            remove_file_if_exists(&manifest_path).map_err(internal_error)?;
+            rollback_db_export_manifest_publication(
+                state.as_ref(),
+                &tenant.tenant_id,
+                manifest.export_id,
+            )
+            .await
+            .map_err(internal_error)?;
+            remove_audit_event_by_id(&state.root, &tenant.tenant_id, audit_event.event_id)
+                .map_err(internal_error)?;
+        }
+        return Err(internal_error(error));
+    }
     Ok(Json(TraceReplayDatasetExport {
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
@@ -4126,6 +4143,7 @@ async fn run_benchmark_conversion(
     );
     let artifact_path = benchmark_artifact_path(&state.root, &tenant.tenant_id, conversion_id);
     let provenance_path = benchmark_provenance_path(&state.root, &tenant.tenant_id, conversion_id);
+    let mut required_artifact_object_ref_material = None;
     if state.require_db_mirror_writes {
         let artifact_object_ref_material = if state.db_mirror.is_some() {
             Some(
@@ -4165,6 +4183,7 @@ async fn run_benchmark_conversion(
         }
         enforce_db_mirror_write_result(state, "benchmark provenance", mirror_result)
             .map_err(internal_error)?;
+        required_artifact_object_ref_material = artifact_object_ref_material;
         if !state.object_primary_derived_exports {
             write_benchmark_artifact(&state.root, &tenant.tenant_id, &artifact)
                 .map_err(internal_error)?;
@@ -4207,10 +4226,10 @@ async fn run_benchmark_conversion(
         enforce_db_mirror_write_result(state, "benchmark provenance", mirror_result)
             .map_err(internal_error)?;
     }
-    append_audit_event_with_db_mirror(
+    let audit_result = append_audit_event_with_db_mirror(
         state,
         tenant,
-        audit_event,
+        audit_event.clone(),
         StorageTraceAuditAction::BenchmarkConvert,
         StorageTraceAuditSafeMetadata::Export {
             artifact_kind: StorageTraceObjectArtifactKind::BenchmarkArtifact,
@@ -4218,8 +4237,25 @@ async fn run_benchmark_conversion(
             item_count: artifact.item_count.min(u32::MAX as usize) as u32,
         },
     )
-    .await
-    .map_err(internal_error)?;
+    .await;
+    if let Err(error) = audit_result {
+        if state.require_db_mirror_writes {
+            cleanup_export_artifact_publication(
+                state,
+                &tenant.tenant_id,
+                TraceArtifactKind::BenchmarkConversion,
+                required_artifact_object_ref_material.as_ref(),
+                &[artifact_path.clone(), provenance_path.clone()],
+            )
+            .map_err(internal_error)?;
+            rollback_db_export_manifest_publication(state, &tenant.tenant_id, conversion_id)
+                .await
+                .map_err(internal_error)?;
+            remove_audit_event_by_id(&state.root, &tenant.tenant_id, audit_event.event_id)
+                .map_err(internal_error)?;
+        }
+        return Err(internal_error(error));
+    }
     append_automatic_utility_credit_events_once(
         state,
         tenant,
@@ -4461,6 +4497,7 @@ async fn ranker_training_candidates_handler(
         source_item_list_hash.clone(),
     );
     let provenance_path = ranker_provenance_path(&state.root, &tenant.tenant_id, export_id);
+    let mut required_artifact_object_ref_material = None;
     if state.require_db_mirror_writes {
         let artifact_object_ref_material = if state.db_mirror.is_some() {
             Some(
@@ -4505,6 +4542,7 @@ async fn ranker_training_candidates_handler(
             mirror_result,
         )
         .map_err(internal_error)?;
+        required_artifact_object_ref_material = artifact_object_ref_material;
         if !state.object_primary_derived_exports {
             write_export_provenance(&provenance_path, &provenance).map_err(internal_error)?;
         }
@@ -4548,10 +4586,10 @@ async fn ranker_training_candidates_handler(
         )
         .map_err(internal_error)?;
     }
-    append_audit_event_with_db_mirror(
+    let audit_result = append_audit_event_with_db_mirror(
         state.as_ref(),
         &tenant,
-        audit_event,
+        audit_event.clone(),
         StorageTraceAuditAction::Export,
         StorageTraceAuditSafeMetadata::Export {
             artifact_kind: StorageTraceObjectArtifactKind::ExportArtifact,
@@ -4559,8 +4597,25 @@ async fn ranker_training_candidates_handler(
             item_count: candidates.len().min(u32::MAX as usize) as u32,
         },
     )
-    .await
-    .map_err(internal_error)?;
+    .await;
+    if let Err(error) = audit_result {
+        if state.require_db_mirror_writes {
+            cleanup_export_artifact_publication(
+                state.as_ref(),
+                &tenant.tenant_id,
+                TraceArtifactKind::RankerTrainingExport,
+                required_artifact_object_ref_material.as_ref(),
+                std::slice::from_ref(&provenance_path),
+            )
+            .map_err(internal_error)?;
+            rollback_db_export_manifest_publication(state.as_ref(), &tenant.tenant_id, export_id)
+                .await
+                .map_err(internal_error)?;
+            remove_audit_event_by_id(&state.root, &tenant.tenant_id, audit_event.event_id)
+                .map_err(internal_error)?;
+        }
+        return Err(internal_error(error));
+    }
     append_automatic_utility_credit_events_once(
         state.as_ref(),
         &tenant,
@@ -4668,6 +4723,7 @@ async fn ranker_training_pairs_handler(
         source_item_list_hash.clone(),
     );
     let provenance_path = ranker_provenance_path(&state.root, &tenant.tenant_id, export_id);
+    let mut required_artifact_object_ref_material = None;
     if state.require_db_mirror_writes {
         let artifact_object_ref_material = if state.db_mirror.is_some() {
             Some(
@@ -4708,6 +4764,7 @@ async fn ranker_training_pairs_handler(
         }
         enforce_db_mirror_write_result(state.as_ref(), "ranker pair provenance", mirror_result)
             .map_err(internal_error)?;
+        required_artifact_object_ref_material = artifact_object_ref_material;
         if !state.object_primary_derived_exports {
             write_export_provenance(&provenance_path, &provenance).map_err(internal_error)?;
         }
@@ -4747,10 +4804,10 @@ async fn ranker_training_pairs_handler(
         enforce_db_mirror_write_result(state.as_ref(), "ranker pair provenance", mirror_result)
             .map_err(internal_error)?;
     }
-    append_audit_event_with_db_mirror(
+    let audit_result = append_audit_event_with_db_mirror(
         state.as_ref(),
         &tenant,
-        audit_event,
+        audit_event.clone(),
         StorageTraceAuditAction::Export,
         StorageTraceAuditSafeMetadata::Export {
             artifact_kind: StorageTraceObjectArtifactKind::ExportArtifact,
@@ -4758,8 +4815,25 @@ async fn ranker_training_pairs_handler(
             item_count: pairs.len().min(u32::MAX as usize) as u32,
         },
     )
-    .await
-    .map_err(internal_error)?;
+    .await;
+    if let Err(error) = audit_result {
+        if state.require_db_mirror_writes {
+            cleanup_export_artifact_publication(
+                state.as_ref(),
+                &tenant.tenant_id,
+                TraceArtifactKind::RankerTrainingExport,
+                required_artifact_object_ref_material.as_ref(),
+                std::slice::from_ref(&provenance_path),
+            )
+            .map_err(internal_error)?;
+            rollback_db_export_manifest_publication(state.as_ref(), &tenant.tenant_id, export_id)
+                .await
+                .map_err(internal_error)?;
+            remove_audit_event_by_id(&state.root, &tenant.tenant_id, audit_event.event_id)
+                .map_err(internal_error)?;
+        }
+        return Err(internal_error(error));
+    }
     let pair_credit_sources = pairs
         .iter()
         .flat_map(|pair| {
@@ -9213,6 +9287,21 @@ fn cleanup_export_artifact_publication(
     };
     store.delete_artifact(&tenant_ref, &receipt)?;
     Ok(())
+}
+
+async fn rollback_db_export_manifest_publication(
+    state: &AppState,
+    tenant_id: &str,
+    export_manifest_id: Uuid,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    db.delete_trace_export_manifest_mirror(tenant_id, export_manifest_id)
+        .await
+        .with_context(|| {
+            format!("failed to roll back trace export manifest publication {export_manifest_id}")
+        })
 }
 
 fn remove_file_if_exists(path: &Path) -> anyhow::Result<bool> {
@@ -18937,6 +19026,128 @@ mod tests {
         assert!(
             !tenant_root.join("benchmarks").exists(),
             "failed atomic export mirror must not publish file artifacts"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn required_db_mirror_writes_roll_back_export_publication_on_audit_failure() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-required-export-audit.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_required_db_mirror_writes(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let conn = db.connect().await.expect("connect to mirror");
+        conn.execute("DROP TABLE trace_audit_events", ())
+            .await
+            .expect("drop mirrored audit events table");
+        let tenant_root = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"));
+
+        let replay_error = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("required_db_audit_replay".to_string()),
+                consent_scope: Some("debugging-evaluation".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect_err("required DB replay export audit failure rolls back publication");
+        assert_eq!(replay_error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            regular_file_set(&tenant_root.join("exports")).is_empty(),
+            "failed replay audit mirror must not leave file replay manifest artifacts"
+        );
+        assert_eq!(
+            libsql_count(&conn, "SELECT COUNT(*) FROM trace_export_manifests")
+                .await
+                .expect("manifest count after replay audit failure"),
+            0
+        );
+        assert_eq!(
+            libsql_count(&conn, "SELECT COUNT(*) FROM trace_export_manifest_items")
+                .await
+                .expect("manifest item count after replay audit failure"),
+            0
+        );
+
+        let benchmark_error = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("required_db_audit_benchmark".to_string()),
+                consent_scope: Some("debugging-evaluation".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect_err("required DB benchmark audit failure rolls back publication");
+        assert_eq!(benchmark_error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            regular_file_set(&tenant_root.join("benchmarks")).is_empty(),
+            "failed benchmark audit mirror must not leave artifact/provenance files"
+        );
+        assert_eq!(
+            libsql_count(&conn, "SELECT COUNT(*) FROM trace_export_manifests")
+                .await
+                .expect("manifest count after benchmark audit failure"),
+            0
+        );
+        assert_eq!(
+            libsql_count(&conn, "SELECT COUNT(*) FROM trace_export_manifest_items")
+                .await
+                .expect("manifest item count after benchmark audit failure"),
+            0
+        );
+
+        let ranker_error = ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("required_db_audit_ranker".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect_err("required DB ranker audit failure rolls back publication");
+        assert_eq!(ranker_error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            regular_file_set(&tenant_root.join("ranker_exports")).is_empty(),
+            "failed ranker audit mirror must not leave provenance files"
+        );
+        assert_eq!(
+            libsql_count(&conn, "SELECT COUNT(*) FROM trace_export_manifests")
+                .await
+                .expect("manifest count after ranker audit failure"),
+            0
+        );
+        assert_eq!(
+            libsql_count(&conn, "SELECT COUNT(*) FROM trace_export_manifest_items")
+                .await
+                .expect("manifest item count after ranker audit failure"),
+            0
         );
     }
 

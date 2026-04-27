@@ -1746,6 +1746,43 @@ impl TraceCorpusStore for LibSqlBackend {
         Ok(record)
     }
 
+    async fn delete_trace_export_manifest_mirror(
+        &self,
+        tenant_id: &str,
+        export_manifest_id: Uuid,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        let tx = conn
+            .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        tx.execute(
+            "DELETE FROM trace_export_manifest_items
+             WHERE tenant_id = ?1 AND export_manifest_id = ?2",
+            libsql::params![tenant_id, export_manifest_id.to_string()],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        tx.execute(
+            "DELETE FROM trace_object_refs
+             WHERE tenant_id = ?1 AND created_by_job_id = ?2",
+            libsql::params![tenant_id, export_manifest_id.to_string()],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        tx.execute(
+            "DELETE FROM trace_export_manifests
+             WHERE tenant_id = ?1 AND export_manifest_id = ?2",
+            libsql::params![tenant_id, export_manifest_id.to_string()],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
+
     async fn list_trace_export_manifests(
         &self,
         tenant_id: &str,

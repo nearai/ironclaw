@@ -10,12 +10,12 @@ mod libsql_trace_corpus_store {
         TraceCorpusStatus, TraceCorpusStore, TraceCreditEventType, TraceCreditEventWrite,
         TraceCreditSettlementState, TraceDerivedRecordWrite, TraceDerivedStatus,
         TraceExportManifestItemInvalidationReason, TraceExportManifestItemWrite,
-        TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefWrite,
-        TraceRetentionJobItemAction, TraceRetentionJobItemStatus, TraceRetentionJobItemWrite,
-        TraceRetentionJobStatus, TraceRetentionJobWrite, TraceReviewLeaseAuditAction,
-        TraceSubmissionWrite, TraceTenantPolicyWrite, TraceTombstoneWrite,
-        TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
-        TraceWorkerKind,
+        TraceExportManifestMirrorWrite, TraceExportManifestWrite, TraceObjectArtifactKind,
+        TraceObjectRefWrite, TraceRetentionJobItemAction, TraceRetentionJobItemStatus,
+        TraceRetentionJobItemWrite, TraceRetentionJobStatus, TraceRetentionJobWrite,
+        TraceReviewLeaseAuditAction, TraceSubmissionWrite, TraceTenantPolicyWrite,
+        TraceTombstoneWrite, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
+        TraceVectorEntryWrite, TraceWorkerKind,
     };
     use uuid::Uuid;
 
@@ -1209,6 +1209,135 @@ mod libsql_trace_corpus_store {
             .expect("list beta manifest items");
         assert_eq!(beta_items.len(), 1);
         assert!(beta_items[0].source_invalidated_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn libsql_store_rolls_back_export_manifest_mirror_when_item_ref_is_invalid() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let db_path = temp_dir.path().join("trace-export-manifest-mirror.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("create libsql backend");
+        backend.run_migrations().await.expect("run migrations");
+
+        let tenant_id = "tenant-alpha";
+        let submission_id = Uuid::new_v4();
+        let trace_id = Uuid::new_v4();
+        let mut submission = sample_submission(tenant_id, submission_id);
+        submission.trace_id = trace_id;
+        backend
+            .upsert_trace_submission(submission)
+            .await
+            .expect("insert submission");
+
+        let export_id = Uuid::new_v4();
+        let object_ref_id = Uuid::new_v4();
+        let derived_id = Uuid::new_v4();
+        let missing_derived_id = Uuid::new_v4();
+        backend
+            .append_trace_derived_record(TraceDerivedRecordWrite {
+                tenant_id: tenant_id.to_string(),
+                derived_id,
+                submission_id,
+                trace_id,
+                status: TraceDerivedStatus::Current,
+                worker_kind: TraceWorkerKind::Summary,
+                worker_version: "summary-worker-v1".to_string(),
+                input_object_ref: None,
+                input_hash: "sha256:input".to_string(),
+                output_object_ref: None,
+                canonical_summary: Some("Tenant alpha summary.".to_string()),
+                canonical_summary_hash: Some("sha256:alpha-summary".to_string()),
+                summary_model: "summary-model-v1".to_string(),
+                task_success: Some("success".to_string()),
+                privacy_risk: Some("low".to_string()),
+                event_count: Some(2),
+                tool_sequence: vec!["memory_search".to_string()],
+                tool_categories: vec!["memory".to_string()],
+                coverage_tags: vec!["tool:memory_search".to_string()],
+                duplicate_score: Some(0.1),
+                novelty_score: Some(0.4),
+                cluster_id: Some("cluster:alpha".to_string()),
+            })
+            .await
+            .expect("insert valid derived record");
+
+        let error = backend
+            .upsert_trace_export_manifest_mirror(TraceExportManifestMirrorWrite {
+                manifest: TraceExportManifestWrite {
+                    tenant_id: tenant_id.to_string(),
+                    export_manifest_id: export_id,
+                    artifact_kind: TraceObjectArtifactKind::BenchmarkArtifact,
+                    purpose_code: Some("atomic_mirror_failure".to_string()),
+                    audit_event_id: Some(Uuid::new_v4()),
+                    source_submission_ids: vec![submission_id],
+                    source_submission_ids_hash: "sha256:atomic-sources".to_string(),
+                    item_count: 2,
+                    generated_at: Utc::now(),
+                },
+                object_refs: vec![TraceObjectRefWrite {
+                    tenant_id: tenant_id.to_string(),
+                    object_ref_id,
+                    submission_id,
+                    artifact_kind: TraceObjectArtifactKind::BenchmarkArtifact,
+                    object_store: "trace_commons_file_store".to_string(),
+                    object_key: "tenants/tenant-alpha/benchmarks/export/artifact.json".to_string(),
+                    content_sha256: "sha256:artifact".to_string(),
+                    encryption_key_ref: "tenant:tenant-alpha".to_string(),
+                    size_bytes: 128,
+                    compression: None,
+                    created_by_job_id: Some(export_id),
+                }],
+                items: vec![
+                    TraceExportManifestItemWrite {
+                        tenant_id: tenant_id.to_string(),
+                        export_manifest_id: export_id,
+                        submission_id,
+                        trace_id,
+                        derived_id: Some(derived_id),
+                        object_ref_id: Some(object_ref_id),
+                        vector_entry_id: None,
+                        source_status_at_export: TraceCorpusStatus::Accepted,
+                        source_hash_at_export: "sha256:valid-source".to_string(),
+                    },
+                    TraceExportManifestItemWrite {
+                        tenant_id: tenant_id.to_string(),
+                        export_manifest_id: export_id,
+                        submission_id,
+                        trace_id,
+                        derived_id: Some(missing_derived_id),
+                        object_ref_id: Some(object_ref_id),
+                        vector_entry_id: None,
+                        source_status_at_export: TraceCorpusStatus::Accepted,
+                        source_hash_at_export: "sha256:invalid-source".to_string(),
+                    },
+                ],
+            })
+            .await
+            .expect_err("invalid item ref rolls back whole export mirror");
+        assert!(
+            matches!(error, ironclaw::error::DatabaseError::NotFound { .. }),
+            "unexpected mirror error: {error}"
+        );
+
+        let manifests = backend
+            .list_trace_export_manifests(tenant_id)
+            .await
+            .expect("list manifests after failed mirror");
+        assert!(manifests.is_empty());
+        let items = backend
+            .list_trace_export_manifest_items(tenant_id, export_id)
+            .await
+            .expect("list manifest items after failed mirror");
+        assert!(items.is_empty());
+        let object_refs = backend
+            .list_trace_object_refs(tenant_id, submission_id)
+            .await
+            .expect("list object refs after failed mirror");
+        assert!(
+            object_refs.is_empty(),
+            "failed mirror must roll back staged export object refs"
+        );
     }
 
     #[tokio::test]

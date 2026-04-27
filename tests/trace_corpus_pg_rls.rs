@@ -173,6 +173,7 @@ fn sample_credit_event(
 struct RawTraceRlsIds {
     submission_id: Uuid,
     object_ref_id: Uuid,
+    export_manifest_id: Uuid,
     credit_event_id: Uuid,
     tombstone_id: Uuid,
 }
@@ -181,6 +182,8 @@ struct RawTraceRlsIds {
 struct RawTraceRlsCounts {
     submissions: i64,
     object_refs: i64,
+    export_manifests: i64,
+    export_manifest_items: i64,
     credit_events: i64,
     tombstones: i64,
 }
@@ -190,6 +193,8 @@ impl RawTraceRlsCounts {
         Self {
             submissions: count,
             object_refs: count,
+            export_manifests: count,
+            export_manifest_items: count,
             credit_events: count,
             tombstones: count,
         }
@@ -296,11 +301,14 @@ async fn raw_trace_rls_counts(
             "SELECT
                 (SELECT COUNT(*) FROM trace_submissions WHERE submission_id = $1) AS submissions,
                 (SELECT COUNT(*) FROM trace_object_refs WHERE object_ref_id = $2) AS object_refs,
-                (SELECT COUNT(*) FROM trace_credit_ledger WHERE credit_event_id = $3) AS credit_events,
-                (SELECT COUNT(*) FROM trace_tombstones WHERE tombstone_id = $4) AS tombstones",
+                (SELECT COUNT(*) FROM trace_export_manifests WHERE export_manifest_id = $3) AS export_manifests,
+                (SELECT COUNT(*) FROM trace_export_manifest_items WHERE export_manifest_id = $3) AS export_manifest_items,
+                (SELECT COUNT(*) FROM trace_credit_ledger WHERE credit_event_id = $4) AS credit_events,
+                (SELECT COUNT(*) FROM trace_tombstones WHERE tombstone_id = $5) AS tombstones",
             &[
                 &ids.submission_id,
                 &ids.object_ref_id,
+                &ids.export_manifest_id,
                 &ids.credit_event_id,
                 &ids.tombstone_id,
             ],
@@ -311,6 +319,8 @@ async fn raw_trace_rls_counts(
     RawTraceRlsCounts {
         submissions: row.get("submissions"),
         object_refs: row.get("object_refs"),
+        export_manifests: row.get("export_manifests"),
+        export_manifest_items: row.get("export_manifest_items"),
         credit_events: row.get("credit_events"),
         tombstones: row.get("tombstones"),
     }
@@ -796,6 +806,65 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
         .await
         .expect("append tenant B object ref");
 
+    let tenant_a_export_manifest_id = Uuid::new_v4();
+    backend
+        .upsert_trace_export_manifest(TraceExportManifestWrite {
+            tenant_id: tenant_a.clone(),
+            export_manifest_id: tenant_a_export_manifest_id,
+            artifact_kind: TraceObjectArtifactKind::ExportArtifact,
+            purpose_code: Some("rls_replay_dataset".to_string()),
+            audit_event_id: Some(Uuid::new_v4()),
+            source_submission_ids: vec![tenant_a_submission_id],
+            source_submission_ids_hash: format!("sha256:{tenant_a}:sources"),
+            item_count: 1,
+            generated_at: Utc::now(),
+        })
+        .await
+        .expect("append tenant A export manifest");
+    backend
+        .upsert_trace_export_manifest_item(TraceExportManifestItemWrite {
+            tenant_id: tenant_a.clone(),
+            export_manifest_id: tenant_a_export_manifest_id,
+            submission_id: tenant_a_submission_id,
+            trace_id: tenant_a_trace_id,
+            derived_id: None,
+            object_ref_id: Some(tenant_a_object_ref_id),
+            vector_entry_id: None,
+            source_status_at_export: TraceCorpusStatus::Accepted,
+            source_hash_at_export: format!("sha256:{tenant_a}:source"),
+        })
+        .await
+        .expect("append tenant A export manifest item");
+    let tenant_b_export_manifest_id = Uuid::new_v4();
+    backend
+        .upsert_trace_export_manifest(TraceExportManifestWrite {
+            tenant_id: tenant_b.clone(),
+            export_manifest_id: tenant_b_export_manifest_id,
+            artifact_kind: TraceObjectArtifactKind::ExportArtifact,
+            purpose_code: Some("rls_replay_dataset".to_string()),
+            audit_event_id: Some(Uuid::new_v4()),
+            source_submission_ids: vec![tenant_b_submission_id],
+            source_submission_ids_hash: format!("sha256:{tenant_b}:sources"),
+            item_count: 1,
+            generated_at: Utc::now(),
+        })
+        .await
+        .expect("append tenant B export manifest");
+    backend
+        .upsert_trace_export_manifest_item(TraceExportManifestItemWrite {
+            tenant_id: tenant_b.clone(),
+            export_manifest_id: tenant_b_export_manifest_id,
+            submission_id: tenant_b_submission_id,
+            trace_id: tenant_b_trace_id,
+            derived_id: None,
+            object_ref_id: Some(tenant_b_object_ref_id),
+            vector_entry_id: None,
+            source_status_at_export: TraceCorpusStatus::Accepted,
+            source_hash_at_export: format!("sha256:{tenant_b}:source"),
+        })
+        .await
+        .expect("append tenant B export manifest item");
+
     let tenant_a_credit_event_id = Uuid::new_v4();
     backend
         .append_trace_credit_event(sample_credit_event(
@@ -898,12 +967,14 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
             RawTraceRlsIds {
                 submission_id: tenant_a_submission_id,
                 object_ref_id: tenant_a_object_ref_id,
+                export_manifest_id: tenant_a_export_manifest_id,
                 credit_event_id: tenant_a_credit_event_id,
                 tombstone_id: tenant_a_tombstone_id,
             },
             RawTraceRlsIds {
                 submission_id: tenant_b_submission_id,
                 object_ref_id: tenant_b_object_ref_id,
+                export_manifest_id: tenant_b_export_manifest_id,
                 credit_event_id: tenant_b_credit_event_id,
                 tombstone_id: tenant_b_tombstone_id,
             },

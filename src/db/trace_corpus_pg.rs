@@ -1551,6 +1551,38 @@ impl TraceCorpusStore for PgBackend {
         Ok(record)
     }
 
+    async fn delete_trace_export_manifest_mirror(
+        &self,
+        tenant_id: &str,
+        export_manifest_id: Uuid,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        tx.execute(
+            "DELETE FROM trace_export_manifest_items
+             WHERE tenant_id = $1 AND export_manifest_id = $2",
+            &[&tenant_id, &export_manifest_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.execute(
+            "DELETE FROM trace_object_refs
+             WHERE tenant_id = $1 AND created_by_job_id = $2",
+            &[&tenant_id, &export_manifest_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.execute(
+            "DELETE FROM trace_export_manifests
+             WHERE tenant_id = $1 AND export_manifest_id = $2",
+            &[&tenant_id, &export_manifest_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
     async fn list_trace_export_manifests(
         &self,
         tenant_id: &str,
