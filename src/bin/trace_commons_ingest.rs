@@ -72,6 +72,8 @@ use ironclaw::trace_corpus_storage::{
     TraceRevocationPropagationTarget as StorageTraceRevocationPropagationTarget,
     TraceSubmissionRecord as StorageTraceSubmissionRecord,
     TraceSubmissionWrite as StorageTraceSubmissionWrite,
+    TraceTenantAccessGrantRecord as StorageTraceTenantAccessGrantRecord,
+    TraceTenantAccessGrantRole as StorageTraceTenantAccessGrantRole,
     TraceTenantPolicyRecord as StorageTraceTenantPolicyRecord,
     TraceTenantPolicyWrite as StorageTraceTenantPolicyWrite,
     TraceTombstoneRecord as StorageTraceTombstoneRecord,
@@ -175,6 +177,8 @@ const TRACE_COMMONS_SIGNED_TOKEN_REQUIRE_JTI: &str = "TRACE_COMMONS_SIGNED_TOKEN
 const TRACE_COMMONS_REQUIRE_EDDSA_SIGNED_TOKENS: &str = "TRACE_COMMONS_REQUIRE_EDDSA_SIGNED_TOKENS";
 const TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS: &str =
     "TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS";
+const TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS: &str =
+    "TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS";
 const TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR: &str =
     "TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR";
 const TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR: &str =
@@ -214,6 +218,7 @@ struct AppState {
     managed_eddsa_keyset_refresh: Option<TraceCommonsManagedEddsaKeysetRefreshConfig>,
     require_eddsa_signed_tokens: bool,
     require_managed_eddsa_signed_tokens: bool,
+    require_tenant_access_grants: bool,
     tenant_policies: Arc<BTreeMap<String, TenantSubmissionPolicy>>,
     require_tenant_submission_policy: bool,
     db_mirror: Option<Arc<dyn Database>>,
@@ -1267,6 +1272,12 @@ impl AppState {
                 "TRACE_COMMONS_DB_TENANT_POLICY_READS requires TRACE_COMMONS_DB_DUAL_WRITE"
             );
         }
+        let require_tenant_access_grants = env_truthy(TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS);
+        if require_tenant_access_grants && db_mirror.is_none() {
+            anyhow::bail!(
+                "{TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS} requires TRACE_COMMONS_DB_DUAL_WRITE"
+            );
+        }
         let require_db_mirror_writes = env_truthy("TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES");
         if require_db_mirror_writes && db_mirror.is_none() {
             anyhow::bail!(
@@ -1414,6 +1425,7 @@ impl AppState {
             managed_eddsa_keyset_refresh,
             require_eddsa_signed_tokens,
             require_managed_eddsa_signed_tokens,
+            require_tenant_access_grants,
             tenant_policies: Arc::new(tenant_policies),
             require_tenant_submission_policy,
             db_mirror,
@@ -3263,6 +3275,7 @@ struct TraceCommonsConfigStatusResponse {
     signed_token_require_jti: bool,
     require_eddsa_signed_tokens: bool,
     require_managed_eddsa_signed_tokens: bool,
+    require_tenant_access_grants: bool,
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
     db_reviewer_require_object_refs: bool,
@@ -3369,6 +3382,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .is_some_and(|verifier| verifier.require_jti),
         require_eddsa_signed_tokens: state.require_eddsa_signed_tokens,
         require_managed_eddsa_signed_tokens: state.require_managed_eddsa_signed_tokens,
+        require_tenant_access_grants: state.require_tenant_access_grants,
         db_contributor_reads: state.db_contributor_reads,
         db_reviewer_reads: state.db_reviewer_reads,
         db_reviewer_require_object_refs: state.db_reviewer_require_object_refs,
@@ -3590,7 +3604,11 @@ async fn submit_trace_handler(
     headers: HeaderMap,
     Json(mut envelope): Json<TraceContributionEnvelope>,
 ) -> ApiResult<Json<TraceSubmissionReceipt>> {
-    let tenant = authenticate_ctx(state.as_ref(), &headers)?;
+    let tenant = authorize_tenant_access_grant_ctx(
+        state.as_ref(),
+        authenticate_ctx(state.as_ref(), &headers)?,
+    )
+    .await?;
     validate_envelope(&envelope)?;
 
     if let Some(existing) = tenant
@@ -8162,6 +8180,122 @@ fn enforce_signed_claim_submission_restrictions(
         }
     }
 
+    Ok(())
+}
+
+async fn authorize_tenant_access_grant_ctx(
+    state: &AppState,
+    tenant: TenantCtx,
+) -> ApiResult<TenantCtx> {
+    authorize_tenant_access_grant(state, tenant.auth)
+        .await
+        .map(TenantCtx::from_auth)
+}
+
+async fn authorize_tenant_access_grant(
+    state: &AppState,
+    mut auth: TenantAuth,
+) -> ApiResult<TenantAuth> {
+    if !state.require_tenant_access_grants {
+        return Ok(auth);
+    }
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| internal_error("tenant access grant enforcement requires DB mirror"))?;
+    let grants = db
+        .list_active_trace_tenant_access_grants_for_principal(
+            &auth.tenant_id,
+            &auth.principal_ref,
+            Utc::now(),
+        )
+        .await
+        .map_err(internal_error)?;
+    let expected_role = trace_tenant_access_grant_role_for_token(auth.role);
+    let mut matching_grants = grants
+        .iter()
+        .filter(|grant| grant.role == expected_role)
+        .peekable();
+    if matching_grants.peek().is_none() {
+        tracing::warn!(
+            tenant_id = %auth.tenant_id,
+            principal_ref = %auth.principal_ref,
+            role = auth.role.storage_name(),
+            "Trace Commons rejected request without active tenant access grant"
+        );
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "active tenant access grant required",
+        ));
+    }
+
+    for grant in matching_grants {
+        apply_tenant_access_grant_scope(&mut auth, grant)?;
+    }
+    Ok(auth)
+}
+
+fn trace_tenant_access_grant_role_for_token(role: TokenRole) -> StorageTraceTenantAccessGrantRole {
+    match role {
+        TokenRole::Contributor => StorageTraceTenantAccessGrantRole::Contributor,
+        TokenRole::Reviewer => StorageTraceTenantAccessGrantRole::Reviewer,
+        TokenRole::Admin => StorageTraceTenantAccessGrantRole::Admin,
+        TokenRole::ExportWorker => StorageTraceTenantAccessGrantRole::ExportWorker,
+        TokenRole::RetentionWorker => StorageTraceTenantAccessGrantRole::RetentionWorker,
+        TokenRole::VectorWorker => StorageTraceTenantAccessGrantRole::VectorWorker,
+        TokenRole::BenchmarkWorker => StorageTraceTenantAccessGrantRole::BenchmarkWorker,
+        TokenRole::UtilityWorker => StorageTraceTenantAccessGrantRole::UtilityWorker,
+        TokenRole::ProcessEvalWorker => StorageTraceTenantAccessGrantRole::ProcessEvalWorker,
+        TokenRole::RevocationWorker => StorageTraceTenantAccessGrantRole::RevocationWorker,
+    }
+}
+
+fn apply_tenant_access_grant_scope(
+    auth: &mut TenantAuth,
+    grant: &StorageTraceTenantAccessGrantRecord,
+) -> ApiResult<()> {
+    let grant_scopes = parse_storage_policy_values::<ConsentScope>(
+        &grant.allowed_consent_scopes,
+        "tenant_access_grant.allowed_consent_scopes",
+    )
+    .map_err(internal_error)?;
+    restrict_effective_allowlist(
+        &mut auth.allowed_consent_scopes,
+        grant_scopes,
+        "tenant access grant consent scope intersection is empty",
+    )?;
+
+    let grant_uses = parse_storage_policy_values::<TraceAllowedUse>(
+        &grant.allowed_uses,
+        "tenant_access_grant.allowed_uses",
+    )
+    .map_err(internal_error)?;
+    restrict_effective_allowlist(
+        &mut auth.allowed_uses,
+        grant_uses,
+        "tenant access grant allowed-use intersection is empty",
+    )
+}
+
+fn restrict_effective_allowlist<T>(
+    current: &mut BTreeSet<T>,
+    grant_values: BTreeSet<T>,
+    empty_message: &'static str,
+) -> ApiResult<()>
+where
+    T: Ord + Clone,
+{
+    if grant_values.is_empty() {
+        return Ok(());
+    }
+    if current.is_empty() {
+        *current = grant_values;
+        return Ok(());
+    }
+    *current = current.intersection(&grant_values).cloned().collect();
+    if current.is_empty() {
+        return Err(api_error(StatusCode::FORBIDDEN, empty_message));
+    }
     Ok(())
 }
 
@@ -18427,7 +18561,10 @@ mod tests {
     use ironclaw::trace_contribution::{
         DeterministicTraceRedactor, RecordedTraceContributionOptions, TraceRedactor,
     };
-    use ironclaw::trace_corpus_storage::{TraceCorpusStore, TraceRevocationPropagationItemWrite};
+    use ironclaw::trace_corpus_storage::{
+        TraceCorpusStore, TraceRevocationPropagationItemWrite, TraceTenantAccessGrantRole,
+        TraceTenantAccessGrantStatus, TraceTenantAccessGrantWrite,
+    };
 
     fn test_state(root: PathBuf) -> Arc<AppState> {
         test_state_with_options(root, None, None, false, false, false, false)
@@ -18470,6 +18607,7 @@ mod tests {
             managed_eddsa_keyset_refresh: None,
             require_eddsa_signed_tokens: false,
             require_managed_eddsa_signed_tokens: false,
+            require_tenant_access_grants: false,
             tenant_policies: Arc::new(BTreeMap::new()),
             require_tenant_submission_policy: false,
             db_mirror,
@@ -19029,6 +19167,7 @@ mod tests {
             managed_eddsa_keyset_refresh: None,
             require_eddsa_signed_tokens: false,
             require_managed_eddsa_signed_tokens: false,
+            require_tenant_access_grants: false,
             tenant_policies: Arc::new(tenant_policies),
             require_tenant_submission_policy,
             db_mirror,
@@ -19091,6 +19230,7 @@ mod tests {
             managed_eddsa_keyset_refresh: None,
             require_eddsa_signed_tokens: false,
             require_managed_eddsa_signed_tokens: false,
+            require_tenant_access_grants: false,
             tenant_policies: Arc::new(BTreeMap::new()),
             require_tenant_submission_policy: false,
             db_mirror: Some(db_mirror),
@@ -19139,6 +19279,7 @@ mod tests {
             managed_eddsa_keyset_refresh: None,
             require_eddsa_signed_tokens: false,
             require_managed_eddsa_signed_tokens: false,
+            require_tenant_access_grants: false,
             tenant_policies: Arc::new(BTreeMap::new()),
             require_tenant_submission_policy: false,
             db_mirror: Some(db_mirror),
@@ -19184,6 +19325,7 @@ mod tests {
             managed_eddsa_keyset_refresh: None,
             require_eddsa_signed_tokens: false,
             require_managed_eddsa_signed_tokens: false,
+            require_tenant_access_grants: false,
             tenant_policies: Arc::new(BTreeMap::new()),
             require_tenant_submission_policy: false,
             db_mirror: Some(db_mirror),
@@ -20964,6 +21106,109 @@ mod tests {
                 .expect("other tenant policy reads")
                 .is_none()
         );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn tenant_access_grants_authorize_and_scope_submit_tokens() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-tenant-access-authz.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+
+        let mut state = test_state_with_db(temp.path().to_path_buf(), Some(db.clone()));
+        Arc::make_mut(&mut state).require_tenant_access_grants = true;
+
+        let mut allowed = sample_envelope().await;
+        make_metadata_only_low_risk(&mut allowed);
+        allowed.consent.scopes = vec![ConsentScope::DebuggingEvaluation];
+        allowed.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
+        allowed.trace_card.allowed_uses = vec![TraceAllowedUse::Debugging];
+
+        let missing_grant_error = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(allowed.clone()),
+        )
+        .await
+        .expect_err("tenant access grants are required before submit");
+        assert_eq!(missing_grant_error.0, StatusCode::FORBIDDEN);
+
+        db.upsert_trace_tenant_access_grant(TraceTenantAccessGrantWrite {
+            tenant_id: "tenant-a".to_string(),
+            grant_id: Uuid::new_v4(),
+            principal_ref: principal_storage_ref("token-a"),
+            role: TraceTenantAccessGrantRole::Admin,
+            status: TraceTenantAccessGrantStatus::Active,
+            allowed_consent_scopes: vec!["debugging_evaluation".to_string()],
+            allowed_uses: vec!["debugging".to_string()],
+            issuer: Some("https://issuer.near.com".to_string()),
+            audience: Some("trace-commons".to_string()),
+            subject: Some("tenant-a-agent".to_string()),
+            issued_at: Utc::now() - Duration::minutes(5),
+            expires_at: Some(Utc::now() + Duration::minutes(30)),
+            revoked_at: None,
+            created_by_principal_ref: Some("issuer:near.com".to_string()),
+            revoked_by_principal_ref: None,
+            reason: Some("admin grant cannot upgrade contributor token".to_string()),
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("wrong-role tenant access grant writes");
+        let wrong_role_grant_error = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(allowed.clone()),
+        )
+        .await
+        .expect_err("tenant access grants cannot upgrade token role");
+        assert_eq!(wrong_role_grant_error.0, StatusCode::FORBIDDEN);
+
+        db.upsert_trace_tenant_access_grant(TraceTenantAccessGrantWrite {
+            tenant_id: "tenant-a".to_string(),
+            grant_id: Uuid::new_v4(),
+            principal_ref: principal_storage_ref("token-a"),
+            role: TraceTenantAccessGrantRole::Contributor,
+            status: TraceTenantAccessGrantStatus::Active,
+            allowed_consent_scopes: vec!["debugging_evaluation".to_string()],
+            allowed_uses: vec!["debugging".to_string()],
+            issuer: Some("https://issuer.near.com".to_string()),
+            audience: Some("trace-commons".to_string()),
+            subject: Some("tenant-a-agent".to_string()),
+            issued_at: Utc::now() - Duration::minutes(5),
+            expires_at: Some(Utc::now() + Duration::minutes(30)),
+            revoked_at: None,
+            created_by_principal_ref: Some("issuer:near.com".to_string()),
+            revoked_by_principal_ref: None,
+            reason: Some("hosted tenant verified".to_string()),
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("tenant access grant writes");
+
+        let Json(receipt) =
+            submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(allowed))
+                .await
+                .expect("active tenant access grant allows matching submit");
+        assert_eq!(receipt.status, "accepted");
+
+        let mut disallowed = sample_envelope().await;
+        make_metadata_only_low_risk(&mut disallowed);
+        disallowed.consent.scopes = vec![ConsentScope::ModelTraining];
+        disallowed.trace_card.consent_scope = ConsentScope::ModelTraining;
+        disallowed.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let disallowed_error =
+            submit_trace_handler(State(state), auth_headers("token-a"), Json(disallowed))
+                .await
+                .expect_err("tenant access grant scopes/uses restrict submissions");
+        assert_eq!(disallowed_error.0, StatusCode::FORBIDDEN);
     }
 
     #[cfg(feature = "libsql")]
@@ -29257,6 +29502,7 @@ mod tests {
             managed_eddsa_keyset_refresh: None,
             require_eddsa_signed_tokens: false,
             require_managed_eddsa_signed_tokens: false,
+            require_tenant_access_grants: false,
             tenant_policies: Arc::new(BTreeMap::new()),
             require_tenant_submission_policy: false,
             db_mirror: None,
