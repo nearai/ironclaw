@@ -528,7 +528,7 @@ pub fn pid_lock_path() -> PathBuf {
 pub struct PidLock {
     path: PathBuf,
     /// Held open to maintain the OS-level exclusive lock.
-    _file: std::fs::File,
+    file: std::fs::File,
 }
 
 /// Errors from PID lock acquisition.
@@ -539,6 +539,14 @@ pub enum PidLockError {
     #[error("Failed to acquire PID lock: {0}")]
     Io(#[from] std::io::Error),
 }
+
+#[cfg(unix)]
+const ORPHANED_IRONCLAW_LOCK_RETRY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+#[cfg(unix)]
+const ORPHANED_IRONCLAW_LOCK_RETRY_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(50);
+#[cfg(unix)]
+const ORPHANED_IRONCLAW_SIGKILL_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl PidLock {
     /// Try to acquire the PID lock.
@@ -553,9 +561,15 @@ impl PidLock {
 
     /// Acquire at a specific path (for testing).
     fn acquire_at(path: PathBuf) -> Result<Self, PidLockError> {
+        Self::acquire_at_inner(&path, true)
+    }
+
+    fn acquire_at_inner(
+        path: &std::path::Path,
+        cleanup_orphaned_tui: bool,
+    ) -> Result<Self, PidLockError> {
         use fs4::FileExt;
         use std::fs::OpenOptions;
-        use std::io::Write;
 
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
@@ -568,35 +582,279 @@ impl PidLock {
             .write(true)
             .create(true)
             .truncate(false)
-            .open(&path)?;
+            .open(path)?;
 
         // Try non-blocking exclusive lock — if another process holds it,
         // this fails immediately instead of blocking.
         if let Err(e) = file.try_lock_exclusive() {
             if e.kind() == std::io::ErrorKind::WouldBlock {
                 // Lock held by another process — read its PID for the error message
-                let pid = std::fs::read_to_string(&path)
+                let lock_info = std::fs::read_to_string(path)
                     .ok()
-                    .and_then(|s| s.trim().parse::<u32>().ok())
-                    .unwrap_or(0);
-                return Err(PidLockError::AlreadyRunning { pid });
+                    .and_then(|s| parse_pid_lock_info(&s))
+                    .unwrap_or_default();
+                if cleanup_orphaned_tui && terminate_orphaned_ironclaw(&lock_info)? {
+                    drop(file);
+                    return Self::acquire_after_orphan_cleanup(path, lock_info.pid);
+                }
+                return Err(PidLockError::AlreadyRunning { pid: lock_info.pid });
             }
             // Other errors (permissions, unsupported filesystem, etc.)
             return Err(PidLockError::Io(e));
         }
 
         // We hold the exclusive lock — write our PID
-        file.set_len(0)?; // truncate
-        write!(file, "{}", std::process::id())?;
+        write_pid_lock_info(&mut file, PidLockProcessKind::Unknown)?;
 
-        Ok(PidLock { path, _file: file })
+        Ok(PidLock {
+            path: path.to_path_buf(),
+            file,
+        })
+    }
+
+    /// Mark the lock holder as an attached interactive TUI session.
+    ///
+    /// Orphan cleanup is intentionally limited to this explicit runtime kind:
+    /// a service-managed `ironclaw run` process can also be parented to PID 1,
+    /// so PPID alone is not safe enough to authorize termination.
+    #[cfg(unix)]
+    pub fn mark_interactive_tui(&mut self) -> std::io::Result<()> {
+        write_pid_lock_info(&mut self.file, PidLockProcessKind::InteractiveTui)
+    }
+
+    #[cfg(unix)]
+    fn acquire_after_orphan_cleanup(
+        path: &std::path::Path,
+        orphan_pid: u32,
+    ) -> Result<Self, PidLockError> {
+        let started = std::time::Instant::now();
+        let mut sent_sigkill = false;
+
+        loop {
+            match Self::acquire_at_inner(path, false) {
+                Err(PidLockError::AlreadyRunning { pid })
+                    if pid == orphan_pid
+                        && started.elapsed() < ORPHANED_IRONCLAW_LOCK_RETRY_TIMEOUT =>
+                {
+                    if !sent_sigkill
+                        && started.elapsed() >= ORPHANED_IRONCLAW_SIGKILL_AFTER
+                        && is_orphaned_ironclaw_process(orphan_pid)?
+                    {
+                        signal_process(orphan_pid, "-KILL")?;
+                        sent_sigkill = true;
+                    }
+                    std::thread::sleep(ORPHANED_IRONCLAW_LOCK_RETRY_INTERVAL);
+                }
+                result => return result,
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn acquire_after_orphan_cleanup(
+        path: &std::path::Path,
+        _orphan_pid: u32,
+    ) -> Result<Self, PidLockError> {
+        Self::acquire_at_inner(path, false)
     }
 }
 
 impl Drop for PidLock {
     fn drop(&mut self) {
-        // Remove the PID file; the OS-level lock is released when _file is dropped.
+        // Remove the PID file; the OS-level lock is released when file is dropped.
         let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcessInfo {
+    pid: u32,
+    ppid: u32,
+    command: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PidLockProcessKind {
+    Unknown,
+    InteractiveTui,
+}
+
+impl PidLockProcessKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::InteractiveTui => "interactive_tui",
+        }
+    }
+
+    fn from_str(value: &str) -> Self {
+        match value {
+            "interactive_tui" => Self::InteractiveTui,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PidLockInfo {
+    pid: u32,
+    process_kind: PidLockProcessKind,
+}
+
+impl Default for PidLockInfo {
+    fn default() -> Self {
+        Self {
+            pid: 0,
+            process_kind: PidLockProcessKind::Unknown,
+        }
+    }
+}
+
+fn write_pid_lock_info(
+    file: &mut std::fs::File,
+    process_kind: PidLockProcessKind,
+) -> std::io::Result<()> {
+    use std::io::{Seek, Write};
+
+    file.set_len(0)?;
+    file.seek(std::io::SeekFrom::Start(0))?;
+    writeln!(file, "pid={}", std::process::id())?;
+    writeln!(file, "kind={}", process_kind.as_str())?;
+    Ok(())
+}
+
+fn parse_pid_lock_info(contents: &str) -> Option<PidLockInfo> {
+    let trimmed = contents.trim();
+    if let Ok(pid) = trimmed.parse::<u32>() {
+        return Some(PidLockInfo {
+            pid,
+            process_kind: PidLockProcessKind::Unknown,
+        });
+    }
+
+    let mut pid = None;
+    let mut process_kind = PidLockProcessKind::Unknown;
+    for line in contents.lines().map(str::trim) {
+        if let Some(value) = line.strip_prefix("pid=") {
+            pid = value.trim().parse::<u32>().ok();
+        } else if let Some(value) = line.strip_prefix("kind=") {
+            process_kind = PidLockProcessKind::from_str(value.trim());
+        }
+    }
+
+    pid.map(|pid| PidLockInfo { pid, process_kind })
+}
+
+#[cfg(unix)]
+fn read_process_info(pid: u32) -> std::io::Result<Option<ProcessInfo>> {
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "ppid=", "-o", "comm="])
+        .output()?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let Some(line) = stdout.lines().find(|line| !line.trim().is_empty()) else {
+        return Ok(None);
+    };
+
+    let Some((ppid, command)) = parse_process_info_line(line) else {
+        return Ok(None);
+    };
+
+    Ok(Some(ProcessInfo { pid, ppid, command }))
+}
+
+#[cfg(unix)]
+fn parse_process_info_line(line: &str) -> Option<(u32, String)> {
+    let trimmed = line.trim();
+    let split_at = trimmed.find(char::is_whitespace)?;
+    let ppid = trimmed[..split_at].trim().parse().ok()?;
+    let command = trimmed[split_at..].trim().to_string();
+    if command.is_empty() {
+        None
+    } else {
+        Some((ppid, command))
+    }
+}
+
+#[cfg(unix)]
+fn is_orphaned_ironclaw_process(pid: u32) -> std::io::Result<bool> {
+    Ok(read_process_info(pid)?
+        .as_ref()
+        .is_some_and(|info| is_orphaned_ironclaw_process_info(std::process::id(), info)))
+}
+
+#[cfg(unix)]
+fn is_orphaned_ironclaw_process_info(current_pid: u32, info: &ProcessInfo) -> bool {
+    if info.pid == current_pid || info.ppid != 1 {
+        return false;
+    }
+
+    std::path::Path::new(&info.command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "ironclaw")
+}
+
+#[cfg(unix)]
+fn terminate_orphaned_ironclaw(lock_info: &PidLockInfo) -> std::io::Result<bool> {
+    if !should_terminate_orphaned_ironclaw(std::process::id(), lock_info, None)? {
+        return Ok(false);
+    }
+
+    let pid = lock_info.pid;
+    tracing::warn!(
+        pid,
+        "Terminating orphaned IronClaw process that still holds the PID lock"
+    );
+    signal_process(pid, "-TERM")?;
+    Ok(true)
+}
+
+#[cfg(not(unix))]
+fn terminate_orphaned_ironclaw(_lock_info: &PidLockInfo) -> std::io::Result<bool> {
+    Ok(false)
+}
+
+#[cfg(unix)]
+fn should_terminate_orphaned_ironclaw(
+    current_pid: u32,
+    lock_info: &PidLockInfo,
+    process_info: Option<&ProcessInfo>,
+) -> std::io::Result<bool> {
+    if lock_info.pid == 0 || lock_info.process_kind != PidLockProcessKind::InteractiveTui {
+        return Ok(false);
+    }
+
+    let owned_info;
+    let info = if let Some(process_info) = process_info {
+        process_info
+    } else {
+        owned_info = read_process_info(lock_info.pid)?;
+        let Some(ref process_info) = owned_info else {
+            return Ok(false);
+        };
+        process_info
+    };
+
+    Ok(info.pid == lock_info.pid && is_orphaned_ironclaw_process_info(current_pid, info))
+}
+
+#[cfg(unix)]
+fn signal_process(pid: u32, signal: &str) -> std::io::Result<()> {
+    let status = std::process::Command::new("kill")
+        .args([signal, &pid.to_string()])
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "kill {signal} {pid} exited with {status}"
+        )))
     }
 }
 
@@ -1202,7 +1460,10 @@ INJECTED="pwned"#;
 
         // PID file should contain our PID
         let contents = std::fs::read_to_string(&pid_path).unwrap();
-        assert_eq!(contents.trim().parse::<u32>().unwrap(), std::process::id());
+        assert_eq!(
+            parse_pid_lock_info(&contents).unwrap().pid,
+            std::process::id()
+        );
 
         // Drop should remove the file
         drop(lock);
@@ -1253,7 +1514,10 @@ INJECTED="pwned"#;
         // Should succeed because no OS lock is held on the file
         let lock = PidLock::acquire_at(pid_path.clone()).unwrap();
         let contents = std::fs::read_to_string(&pid_path).unwrap();
-        assert_eq!(contents.trim().parse::<u32>().unwrap(), std::process::id());
+        assert_eq!(
+            parse_pid_lock_info(&contents).unwrap().pid,
+            std::process::id()
+        );
         drop(lock);
     }
 
@@ -1278,6 +1542,102 @@ INJECTED="pwned"#;
         let lock = PidLock::acquire_at(pid_path.clone()).unwrap();
         assert!(pid_path.exists());
         drop(lock);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_info_line_parser_handles_ps_output() {
+        let parsed = parse_process_info_line("    1 /Users/rc/.cargo/bin/ironclaw").unwrap();
+        assert_eq!(parsed, (1, "/Users/rc/.cargo/bin/ironclaw".to_string()));
+    }
+
+    #[test]
+    fn pid_lock_info_parser_supports_legacy_and_metadata_formats() {
+        assert_eq!(
+            parse_pid_lock_info("12345\n"),
+            Some(PidLockInfo {
+                pid: 12345,
+                process_kind: PidLockProcessKind::Unknown,
+            })
+        );
+        assert_eq!(
+            parse_pid_lock_info("pid=12345\nkind=interactive_tui\n"),
+            Some(PidLockInfo {
+                pid: 12345,
+                process_kind: PidLockProcessKind::InteractiveTui,
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphaned_ironclaw_detection_is_conservative() {
+        let current_pid = 42;
+        assert!(is_orphaned_ironclaw_process_info(
+            current_pid,
+            &ProcessInfo {
+                pid: 123,
+                ppid: 1,
+                command: "/Users/rc/.cargo/bin/ironclaw".to_string(),
+            }
+        ));
+        assert!(!is_orphaned_ironclaw_process_info(
+            current_pid,
+            &ProcessInfo {
+                pid: current_pid,
+                ppid: 1,
+                command: "ironclaw".to_string(),
+            }
+        ));
+        assert!(!is_orphaned_ironclaw_process_info(
+            current_pid,
+            &ProcessInfo {
+                pid: 123,
+                ppid: 999,
+                command: "ironclaw".to_string(),
+            }
+        ));
+        assert!(!is_orphaned_ironclaw_process_info(
+            current_pid,
+            &ProcessInfo {
+                pid: 123,
+                ppid: 1,
+                command: "not-ironclaw".to_string(),
+            }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphan_cleanup_requires_interactive_tui_lock_metadata() {
+        let process = ProcessInfo {
+            pid: 123,
+            ppid: 1,
+            command: "/Users/rc/.cargo/bin/ironclaw".to_string(),
+        };
+
+        assert!(
+            should_terminate_orphaned_ironclaw(
+                42,
+                &PidLockInfo {
+                    pid: 123,
+                    process_kind: PidLockProcessKind::InteractiveTui,
+                },
+                Some(&process),
+            )
+            .unwrap()
+        );
+        assert!(
+            !should_terminate_orphaned_ironclaw(
+                42,
+                &PidLockInfo {
+                    pid: 123,
+                    process_kind: PidLockProcessKind::Unknown,
+                },
+                Some(&process),
+            )
+            .unwrap()
+        );
     }
 
     #[test]
