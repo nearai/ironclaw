@@ -9,6 +9,7 @@
 #   make rebuild-no-t3n  – build without sidecar then restart
 #   make down            – stop containers, keep volumes
 #   make wipe            – stop containers AND delete all volumes (full reset)
+#   make wipe-all        – wipe + delete built images (forces full rebuild)
 #   make restart         – restart only the t3claw service
 #   make logs            – follow t3claw logs
 #   make shell           – open a shell inside the running container
@@ -35,7 +36,7 @@ COMPOSE     := docker compose --profile app --profile mcp
 COMPOSE_CORE := docker compose --profile app
 SERVICE := t3claw
 
-.PHONY: up build rebuild up-no-t3n build-no-t3n rebuild-no-t3n build-sidecar pull-sidecar down wipe restart logs shell status help
+.PHONY: up build rebuild up-no-t3n build-no-t3n rebuild-no-t3n build-sidecar pull-sidecar down wipe wipe-all restart logs shell status help
 
 ## Start the full stack (detached). Builds images if they don't exist yet.
 up:
@@ -95,6 +96,12 @@ wipe:
 	@echo "This will delete all volumes (database, workspace, etc.). Press Ctrl-C to cancel."
 	@sleep 3
 	$(COMPOSE) down -v
+
+## Nuclear reset: delete all volumes AND locally-built images. Forces a full rebuild next time.
+wipe-all:
+	@echo "This will delete all volumes AND built images. Press Ctrl-C to cancel."
+	@sleep 3
+	$(COMPOSE) down -v --rmi local
 
 ## Restart only the t3claw service (e.g. after a config change).
 restart:
