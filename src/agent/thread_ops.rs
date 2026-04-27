@@ -3390,6 +3390,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
             }],
             last_credit_notice_at: None,
+            credit_notice_state: crate::trace_contribution::TraceCreditNoticeState::default(),
         };
         let path = crate::trace_contribution::trace_contribution_dir_for_scope(Some(user_id))
             .join("submissions.json");

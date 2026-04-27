@@ -17,11 +17,13 @@ use crate::trace_contribution::{
     ConsentScope, CreditSummary, DeterministicTraceRedactor, RecordedTraceContributionOptions,
     StandingTraceContributionPolicy, TraceChannel, TraceContributionAcceptance,
     TraceContributionEnvelope, TraceCreditEvent, TraceCreditEventKind, TraceRedactor,
-    TraceSubmissionStatusUpdate, estimate_initial_credit, fetch_trace_submission_statuses,
+    TraceSubmissionStatusUpdate, acknowledge_trace_credit_notice_for_scope,
+    estimate_initial_credit, fetch_trace_submission_statuses,
     flush_trace_contribution_queue_for_scope, mark_trace_credit_notice_due_for_scope,
     preflight_trace_contribution_policy, privacy_filter_adapter_from_env,
-    read_local_trace_records_for_scope, read_trace_policy_for_scope, trace_credit_summary,
-    trace_queue_diagnostics_for_scope, trace_submission_status_endpoint,
+    read_local_trace_records_for_scope, read_trace_policy_for_scope,
+    snooze_trace_credit_notice_for_scope, trace_credit_summary, trace_queue_diagnostics_for_scope,
+    trace_submission_status_endpoint,
 };
 
 #[derive(Subcommand, Debug, Clone)]
@@ -152,6 +154,14 @@ pub enum TracesCommand {
         /// Local tenant/user trace scope to check for a due periodic notice
         #[arg(long, requires = "notice")]
         notice_scope: Option<String>,
+
+        /// Acknowledge the current credit notice until credit changes again
+        #[arg(long, requires = "notice", conflicts_with = "snooze_hours")]
+        ack: bool,
+
+        /// Snooze the current credit notice for this many hours
+        #[arg(long, requires = "notice", conflicts_with = "ack")]
+        snooze_hours: Option<u32>,
     },
 
     /// Submit an already-previewed redacted contribution envelope
@@ -1482,7 +1492,9 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
             json,
             notice,
             notice_scope,
-        } => show_credit(json, notice, notice_scope.as_deref()).await,
+            ack,
+            snooze_hours,
+        } => show_credit(json, notice, notice_scope.as_deref(), ack, snooze_hours).await,
         TracesCommand::Submit {
             envelope,
             endpoint,
@@ -4822,9 +4834,15 @@ async fn list_submissions(json: bool, summary: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn show_credit(json: bool, notice: bool, notice_scope: Option<&str>) -> anyhow::Result<()> {
+async fn show_credit(
+    json: bool,
+    notice: bool,
+    notice_scope: Option<&str>,
+    ack: bool,
+    snooze_hours: Option<u32>,
+) -> anyhow::Result<()> {
     if notice {
-        return show_credit_notice(json, notice_scope);
+        return show_credit_notice(json, notice_scope, ack, snooze_hours);
     }
 
     let policy = read_policy()?;
@@ -4846,8 +4864,19 @@ async fn show_credit(json: bool, notice: bool, notice_scope: Option<&str>) -> an
     Ok(())
 }
 
-fn show_credit_notice(json: bool, scope: Option<&str>) -> anyhow::Result<()> {
-    let notice = mark_trace_credit_notice_due_for_scope(scope)?;
+fn show_credit_notice(
+    json: bool,
+    scope: Option<&str>,
+    ack: bool,
+    snooze_hours: Option<u32>,
+) -> anyhow::Result<()> {
+    let notice = if ack {
+        acknowledge_trace_credit_notice_for_scope(scope)?
+    } else if let Some(hours) = snooze_hours {
+        snooze_trace_credit_notice_for_scope(scope, chrono::Duration::hours(i64::from(hours)))?
+    } else {
+        mark_trace_credit_notice_due_for_scope(scope)?
+    };
     if json {
         println!(
             "{}",
@@ -4862,9 +4891,17 @@ fn show_credit_notice(json: bool, scope: Option<&str>) -> anyhow::Result<()> {
         return Ok(());
     };
 
-    println!("{}", credit_notice_message(&summary));
-    for explanation in summary.recent_explanations.iter().take(3) {
-        println!("  - {explanation}");
+    if ack {
+        println!("Acknowledged trace contribution credit notice.");
+        print_credit_summary_fields(&summary, "  ");
+    } else if let Some(hours) = snooze_hours {
+        println!("Snoozed trace contribution credit notice for {hours} hour(s).");
+        print_credit_summary_fields(&summary, "  ");
+    } else {
+        println!("{}", credit_notice_message(&summary));
+        for explanation in summary.recent_explanations.iter().take(3) {
+            println!("  - {explanation}");
+        }
     }
     Ok(())
 }
@@ -5446,6 +5483,8 @@ mod tests {
             json,
             notice,
             notice_scope,
+            ack,
+            snooze_hours,
         } = unwrap_traces_command(cli)
         else {
             panic!("expected traces credit command");
@@ -5454,6 +5493,46 @@ mod tests {
         assert!(!json);
         assert!(notice);
         assert_eq!(notice_scope.as_deref(), Some("tenant-a:user-alice"));
+        assert!(!ack);
+        assert_eq!(snooze_hours, None);
+    }
+
+    #[test]
+    fn credit_notice_action_flags_parse_through_cli() {
+        let ack_cli = parse_cli(["ironclaw", "traces", "credit", "--notice", "--ack"]);
+        let TracesCommand::Credit {
+            notice: ack_notice,
+            ack,
+            snooze_hours,
+            ..
+        } = unwrap_traces_command(ack_cli)
+        else {
+            panic!("expected traces credit command");
+        };
+        assert!(ack_notice);
+        assert!(ack);
+        assert_eq!(snooze_hours, None);
+
+        let snooze_cli = parse_cli([
+            "ironclaw",
+            "traces",
+            "credit",
+            "--notice",
+            "--snooze-hours",
+            "24",
+        ]);
+        let TracesCommand::Credit {
+            notice: snooze_notice,
+            ack,
+            snooze_hours,
+            ..
+        } = unwrap_traces_command(snooze_cli)
+        else {
+            panic!("expected traces credit command");
+        };
+        assert!(snooze_notice);
+        assert!(!ack);
+        assert_eq!(snooze_hours, Some(24));
     }
 
     #[test]

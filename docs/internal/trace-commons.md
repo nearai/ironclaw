@@ -43,6 +43,10 @@ ironclaw traces flush-queue
 # See local credit totals and recent explanations.
 ironclaw traces credit
 
+# Acknowledge or snooze a due periodic credit notice.
+ironclaw traces credit --notice --ack
+ironclaw traces credit --notice --snooze-hours 24
+
 # Disable autonomous contribution.
 ironclaw traces opt-out
 ```
@@ -461,7 +465,7 @@ The runtime can call the same queue and flush behavior later after a task comple
 
 `ironclaw traces queue-status` reports local autonomous queue readiness without reading trace bodies: opt-in state, endpoint presence, bearer-token environment availability, capture toggles, selected-tool count, queued and held counts, typed retry/manual-review/policy hold counts, the next scheduled retry time, sanitized held-reason counts, and the same local credit summary used by `credit`. The authenticated web API exposes a narrower scoped queue status through `/api/traces/queue-status`, returning queued/held counts and sanitized held queue entries for the current user only.
 
-`ironclaw traces credit --notice` and `/api/traces/credit-notice` mark a due periodic credit notice without exposing central corpus rows. Notice summaries include pending/final totals, delayed ledger deltas, credit-event counts, and recent safe explanations when the local notice interval is due.
+`ironclaw traces credit --notice` and `GET /api/traces/credit-notice` mark a due periodic credit notice without exposing central corpus rows. Notice summaries include pending/final totals, delayed ledger deltas, credit-event counts, and recent safe explanations when the local notice interval is due. Opted-in clients can acknowledge the current notice until the local credit fingerprint changes (`ironclaw traces credit --notice --ack` or `POST /api/traces/credit-notice` with `{"action":"acknowledge"}`), or snooze it for a bounded period (`--snooze-hours N` or `{"action":"snooze","snooze_hours":N}`). The local fingerprint is a hash over submission ids, lifecycle/status, credit totals, and credit-event metadata, not over explanation text or trace bodies.
 
 The agent runtime also schedules an autonomous post-turn contribution pass after a response is persisted or a turn fails. It reads the authenticated user's scoped policy, verifies the thread still belongs to that user, captures the most recent turns from durable conversation history, locally redacts the envelope, queues it, and flushes eligible queued envelopes. If the flush produces a due credit notice, the agent sends a status update back through the originating channel. Independently, the long-running agent loop starts a periodic Trace Commons queue worker that scans the owner and active DB users, flushes opted-in scoped queues, honors typed retry backoff, and broadcasts any due credit notice it returns instead of silently consuming notice state.
 
@@ -518,6 +522,7 @@ Protected web API endpoints:
 - `POST /api/traces/flush`
 - `GET /api/traces/credit`
 - `GET /api/traces/credit-notice`
+- `POST /api/traces/credit-notice`
 - `GET /api/traces/queue-status`
 - `GET /api/traces/submissions`
 - `POST /api/traces/submissions/{submission_id}/revoke`
@@ -529,7 +534,7 @@ The web settings panel includes a Trace Commons tab for standing opt-in, autonom
 | Area | Status | Maintainer notes |
 |------|--------|------------------|
 | Local opt-in policy and opt-out | Implemented MVP | CLI and scoped web/runtime policy files exist; submit token stays in environment. |
-| Local preview, queue, flush, and credit display | Implemented MVP | CLI and web paths use local redacted envelopes and local submission metadata; `ironclaw traces queue-status` reports scoped policy readiness, bearer-token environment presence, queued/held counts, typed retry/manual-review/policy hold counts, next retry time, sanitized held-reason counts, and the local credit summary, while authenticated web activity exposes scoped queue/held counts and reloads persisted held queue reasons plus accepted/quarantined/rejected and delayed-credit report fields for the current user scope. |
+| Local preview, queue, flush, and credit display | Implemented MVP | CLI and web paths use local redacted envelopes and local submission metadata; `ironclaw traces queue-status` reports scoped policy readiness, bearer-token environment presence, queued/held counts, typed retry/manual-review/policy hold counts, next retry time, sanitized held-reason counts, and the local credit summary, while authenticated web activity exposes scoped queue/held counts and reloads persisted held queue reasons plus accepted/quarantined/rejected and delayed-credit report fields for the current user scope. Periodic credit notices can be acknowledged until credit changes or snoozed for a bounded number of hours through both CLI and authenticated web actions. |
 | Deterministic local redaction | Implemented MVP | Includes generic secret/path scrubbing, stable placeholders, tool-aware payload handling, and Privacy Filter safe projection. |
 | Privacy Filter sidecar integration | Implemented MVP | Local command/stdin/stdout path exists with safe output projection, non-fatal fallback, minimal child environment, stderr hashing, IO limits, and canary tests. Production container sandboxing and stricter output contracts remain. |
 | Autonomous post-turn and periodic contribution | Implemented MVP | Runtime queues/flushed scoped envelopes after persisted or failed turns only when the scoped standing policy is enabled, has an ingestion endpoint, and the current redacted envelope is eligible for autonomous submission. Ineligible current traces are skipped instead of written as held queue files, while existing queue flushes and periodic credit-notice sync still run. A periodic agent-loop worker also flushes opted-in owner/active-user queues, stores retryable submission failures as typed redacted sidecars with capped exponential backoff, skips retry-held envelopes until due, and broadcasts returned credit notices. |

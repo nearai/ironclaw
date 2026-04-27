@@ -16,17 +16,19 @@ use crate::channels::web::server::GatewayState;
 use crate::trace_contribution::{
     ConsentScope, CreditSummary, DeterministicTraceRedactor, LocalTraceSubmissionRecord,
     RawTraceContribution, RecordedTraceContributionOptions, StandingTraceContributionPolicy,
-    TraceChannel, TraceContributionAcceptance, TraceContributionEnvelope,
-    TraceContributionPolicyRejection, TraceCreditReport, TraceQueueDiagnostics,
-    TraceQueueFlushReport, TraceQueueHold, TraceRedactor, apply_credit_estimate_to_envelope,
+    TRACE_CREDIT_NOTICE_MAX_SNOOZE_HOURS, TraceChannel, TraceContributionAcceptance,
+    TraceContributionEnvelope, TraceContributionPolicyRejection, TraceCreditReport,
+    TraceQueueDiagnostics, TraceQueueFlushReport, TraceQueueHold, TraceRedactor,
+    acknowledge_trace_credit_notice_for_scope, apply_credit_estimate_to_envelope,
     capture_turns_from_conversation_messages, flush_trace_contribution_queue_for_scope,
     local_pseudonymous_contributor_id, local_pseudonymous_tenant_scope_ref,
     mark_trace_credit_notice_due_for_scope, preflight_trace_contribution_policy,
     queue_trace_envelope_for_scope, queued_trace_envelope_paths_for_scope,
     read_local_trace_records_for_scope, read_trace_policy_for_scope,
     read_trace_queue_holds_for_scope, revoke_trace_submission_for_scope,
-    sync_remote_trace_submission_records_for_scope, trace_credit_report, trace_credit_summary,
-    trace_queue_diagnostics_for_scope, write_trace_policy_for_scope,
+    snooze_trace_credit_notice_for_scope, sync_remote_trace_submission_records_for_scope,
+    trace_credit_report, trace_credit_summary, trace_queue_diagnostics_for_scope,
+    write_trace_policy_for_scope,
 };
 
 #[derive(Debug, Deserialize)]
@@ -115,6 +117,19 @@ pub struct TraceCreditResponse {
 #[derive(Debug, Serialize)]
 pub struct TraceCreditNoticeResponse {
     pub credit_notice: Option<CreditSummary>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceCreditNoticeAction {
+    Acknowledge,
+    Snooze,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TraceCreditNoticeActionRequest {
+    pub action: TraceCreditNoticeAction,
+    pub snooze_hours: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -360,6 +375,38 @@ pub async fn traces_credit_notice_handler(
     }
     let credit_notice = mark_trace_credit_notice_due_for_scope(Some(user.user_id.as_str()))
         .map_err(internal_error)?;
+    Ok(Json(TraceCreditNoticeResponse { credit_notice }))
+}
+
+pub async fn traces_credit_notice_action_handler(
+    AuthenticatedUser(user): AuthenticatedUser,
+    Json(body): Json<TraceCreditNoticeActionRequest>,
+) -> Result<Json<TraceCreditNoticeResponse>, (StatusCode, String)> {
+    let scope = Some(user.user_id.as_str());
+    let credit_notice = match body.action {
+        TraceCreditNoticeAction::Acknowledge => {
+            acknowledge_trace_credit_notice_for_scope(scope).map_err(internal_error)?
+        }
+        TraceCreditNoticeAction::Snooze => {
+            let hours = body.snooze_hours.ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "snooze_hours is required for snooze credit notice action".to_string(),
+                )
+            })?;
+            if hours == 0 || hours > TRACE_CREDIT_NOTICE_MAX_SNOOZE_HOURS {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "snooze_hours must be between 1 and {}",
+                        TRACE_CREDIT_NOTICE_MAX_SNOOZE_HOURS
+                    ),
+                ));
+            }
+            snooze_trace_credit_notice_for_scope(scope, chrono::Duration::hours(i64::from(hours)))
+                .map_err(internal_error)?
+        }
+    };
     Ok(Json(TraceCreditNoticeResponse { credit_notice }))
 }
 
@@ -612,6 +659,7 @@ mod tests {
                 created_at: Utc::now(),
             }],
             last_credit_notice_at: None,
+            credit_notice_state: crate::trace_contribution::TraceCreditNoticeState::default(),
         }
     }
 
@@ -659,6 +707,90 @@ mod tests {
                 .iter()
                 .all(|reason| !reason.contains("99.0"))
         );
+    }
+
+    #[tokio::test]
+    async fn traces_credit_notice_action_acknowledges_authenticated_user_only() {
+        let user_id = format!("trace-web-credit-ack-user-{}", Uuid::new_v4());
+        let other_user_id = format!("trace-web-credit-ack-other-{}", Uuid::new_v4());
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+            credit_notice_interval_hours: 168,
+            ..Default::default()
+        };
+        write_trace_policy_for_scope(Some(&user_id), &policy).expect("user policy writes");
+        write_trace_policy_for_scope(Some(&other_user_id), &policy).expect("other policy writes");
+        write_trace_records(&user_id, &[submitted_record(2.0)]);
+        write_trace_records(&other_user_id, &[submitted_record(99.0)]);
+
+        let Json(response) = traces_credit_notice_action_handler(
+            AuthenticatedUser(UserIdentity {
+                user_id: user_id.clone(),
+                role: "member".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Json(TraceCreditNoticeActionRequest {
+                action: TraceCreditNoticeAction::Acknowledge,
+                snooze_hours: None,
+            }),
+        )
+        .await
+        .expect("credit notice action succeeds");
+
+        assert_eq!(
+            response
+                .credit_notice
+                .expect("ack returns current credit summary")
+                .pending_credit,
+            2.0
+        );
+        let Json(after_ack) = traces_credit_notice_handler(AuthenticatedUser(UserIdentity {
+            user_id: user_id.clone(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        }))
+        .await
+        .expect("credit notice handler succeeds");
+        assert_eq!(after_ack.credit_notice, None);
+
+        let other_due =
+            crate::trace_contribution::trace_credit_notice_due_for_scope(Some(&other_user_id))
+                .expect("other notice due check succeeds")
+                .expect("other user notice remains due");
+        assert_eq!(other_due.pending_credit, 99.0);
+    }
+
+    #[tokio::test]
+    async fn traces_credit_notice_action_rejects_zero_snooze_hours() {
+        let user_id = format!("trace-web-credit-snooze-bad-user-{}", Uuid::new_v4());
+        write_trace_policy_for_scope(
+            Some(&user_id),
+            &StandingTraceContributionPolicy {
+                enabled: true,
+                ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                credit_notice_interval_hours: 168,
+                ..Default::default()
+            },
+        )
+        .expect("policy writes");
+        write_trace_records(&user_id, &[submitted_record(2.0)]);
+
+        let error = traces_credit_notice_action_handler(
+            AuthenticatedUser(UserIdentity {
+                user_id,
+                role: "member".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Json(TraceCreditNoticeActionRequest {
+                action: TraceCreditNoticeAction::Snooze,
+                snooze_hours: Some(0),
+            }),
+        )
+        .await
+        .expect_err("zero-hour snooze should be rejected");
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

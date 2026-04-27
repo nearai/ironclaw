@@ -34,6 +34,7 @@ pub const PRIVACY_FILTER_CANARY_VERSION: &str = "trace-privacy-filter-canary-v1"
 pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES: usize = 1024 * 1024;
 pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDOUT_BYTES: usize = 1024 * 1024;
 pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDERR_BYTES: usize = 64 * 1024;
+pub const TRACE_CREDIT_NOTICE_MAX_SNOOZE_HOURS: u32 = 24 * 365;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceContributionEnvelope {
@@ -3480,6 +3481,29 @@ pub struct LocalTraceSubmissionRecord {
     pub credit_events: Vec<TraceCreditEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_credit_notice_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "TraceCreditNoticeState::is_empty")]
+    pub credit_notice_state: TraceCreditNoticeState,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceCreditNoticeState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_presented_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acknowledged_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snoozed_until: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+}
+
+impl TraceCreditNoticeState {
+    pub fn is_empty(&self) -> bool {
+        self.last_presented_at.is_none()
+            && self.acknowledged_at.is_none()
+            && self.snoozed_until.is_none()
+            && self.fingerprint.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -3489,6 +3513,17 @@ pub enum LocalTraceSubmissionStatus {
     Revoked,
     Expired,
     Purged,
+}
+
+impl LocalTraceSubmissionStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Submitted => "submitted",
+            Self::Revoked => "revoked",
+            Self::Expired => "expired",
+            Self::Purged => "purged",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -3716,7 +3751,77 @@ pub fn mark_trace_credit_notice_due_for_scope(
     if !policy.enabled || policy.credit_notice_interval_hours == 0 {
         return Ok(None);
     }
-    mark_trace_credit_noticed_if_due_unlocked(scope, policy.credit_notice_interval_hours)
+    mark_trace_credit_noticed_if_due_at_unlocked(
+        scope,
+        policy.credit_notice_interval_hours,
+        Utc::now(),
+    )
+}
+
+pub fn trace_credit_notice_due_for_scope(
+    scope: Option<&str>,
+) -> anyhow::Result<Option<CreditSummary>> {
+    let _guard = lock_trace_scope_for_mutation_blocking(scope);
+    let policy = read_trace_policy_for_scope(scope)?;
+    if !policy.enabled || policy.credit_notice_interval_hours == 0 {
+        return Ok(None);
+    }
+    trace_credit_notice_due_for_scope_at_unlocked(
+        scope,
+        policy.credit_notice_interval_hours,
+        Utc::now(),
+    )
+}
+
+pub fn acknowledge_trace_credit_notice_for_scope(
+    scope: Option<&str>,
+) -> anyhow::Result<Option<CreditSummary>> {
+    let _guard = lock_trace_scope_for_mutation_blocking(scope);
+    let policy = read_trace_policy_for_scope(scope)?;
+    if !policy.enabled || policy.credit_notice_interval_hours == 0 {
+        return Ok(None);
+    }
+    acknowledge_trace_credit_notice_for_scope_at_unlocked(scope, Utc::now())
+}
+
+pub fn snooze_trace_credit_notice_for_scope(
+    scope: Option<&str>,
+    duration: chrono::Duration,
+) -> anyhow::Result<Option<CreditSummary>> {
+    let now = Utc::now();
+    if duration <= chrono::Duration::zero() {
+        anyhow::bail!("trace credit notice snooze duration must be positive");
+    }
+    if duration > chrono::Duration::hours(i64::from(TRACE_CREDIT_NOTICE_MAX_SNOOZE_HOURS)) {
+        anyhow::bail!(
+            "trace credit notice snooze duration must be at most {} hours",
+            TRACE_CREDIT_NOTICE_MAX_SNOOZE_HOURS
+        );
+    }
+    let snoozed_until = now
+        .checked_add_signed(duration)
+        .ok_or_else(|| anyhow::anyhow!("trace credit notice snooze deadline is out of range"))?;
+    snooze_trace_credit_notice_for_scope_until_at(scope, snoozed_until, now)
+}
+
+pub fn snooze_trace_credit_notice_for_scope_until(
+    scope: Option<&str>,
+    snoozed_until: DateTime<Utc>,
+) -> anyhow::Result<Option<CreditSummary>> {
+    snooze_trace_credit_notice_for_scope_until_at(scope, snoozed_until, Utc::now())
+}
+
+fn snooze_trace_credit_notice_for_scope_until_at(
+    scope: Option<&str>,
+    snoozed_until: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Option<CreditSummary>> {
+    let _guard = lock_trace_scope_for_mutation_blocking(scope);
+    let policy = read_trace_policy_for_scope(scope)?;
+    if !policy.enabled || policy.credit_notice_interval_hours == 0 {
+        return Ok(None);
+    }
+    snooze_trace_credit_notice_for_scope_until_at_unlocked(scope, snoozed_until, now)
 }
 
 pub fn queue_trace_envelope_for_scope(
@@ -3964,6 +4069,7 @@ fn record_submitted_trace_envelope_for_scope_unlocked(
                 created_at: Utc::now(),
             }],
             last_credit_notice_at: None,
+            credit_notice_state: TraceCreditNoticeState::default(),
         },
     )
 }
@@ -4312,6 +4418,7 @@ fn apply_remote_trace_submission_statuses_for_scope_unlocked(
 
         if status_changed || credit_changed || explanation_changed {
             record.last_credit_notice_at = None;
+            record.credit_notice_state = TraceCreditNoticeState::default();
             let sync_reason = if update.credit_points_ledger.abs() > f32::EPSILON {
                 format!(
                     "Server status synced as {}; delayed ledger credit now {:+.2}.",
@@ -4632,6 +4739,7 @@ fn mark_local_trace_revoked_for_scope_unlocked(
         if record.submission_id == submission_id {
             record.status = LocalTraceSubmissionStatus::Revoked;
             record.revoked_at = Some(now);
+            record.credit_notice_state = TraceCreditNoticeState::default();
             found = true;
         }
     }
@@ -4651,6 +4759,7 @@ fn mark_local_trace_revoked_for_scope_unlocked(
             credit_explanation: Vec::new(),
             credit_events: Vec::new(),
             last_credit_notice_at: None,
+            credit_notice_state: TraceCreditNoticeState::default(),
         });
     }
     write_local_trace_records_for_scope(scope, &records)
@@ -4662,49 +4771,237 @@ fn mark_trace_credit_noticed_if_due(
     interval_hours: u32,
 ) -> anyhow::Result<Option<CreditSummary>> {
     let _guard = lock_trace_scope_for_mutation_blocking(scope);
-    mark_trace_credit_noticed_if_due_unlocked(scope, interval_hours)
+    mark_trace_credit_noticed_if_due_at_unlocked(scope, interval_hours, Utc::now())
 }
 
 fn mark_trace_credit_noticed_if_due_unlocked(
     scope: Option<&str>,
     interval_hours: u32,
 ) -> anyhow::Result<Option<CreditSummary>> {
+    mark_trace_credit_noticed_if_due_at_unlocked(scope, interval_hours, Utc::now())
+}
+
+#[cfg(test)]
+fn trace_credit_notice_due_for_scope_at(
+    scope: Option<&str>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Option<CreditSummary>> {
+    let _guard = lock_trace_scope_for_mutation_blocking(scope);
+    let policy = read_trace_policy_for_scope(scope)?;
+    if !policy.enabled || policy.credit_notice_interval_hours == 0 {
+        return Ok(None);
+    }
+    trace_credit_notice_due_for_scope_at_unlocked(scope, policy.credit_notice_interval_hours, now)
+}
+
+fn trace_credit_notice_due_for_scope_at_unlocked(
+    scope: Option<&str>,
+    interval_hours: u32,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Option<CreditSummary>> {
+    if interval_hours == 0 {
+        return Ok(None);
+    }
+
+    let records = read_local_trace_records_for_scope(scope)?;
+    Ok(
+        trace_credit_notice_due_for_records(&records, interval_hours, now)
+            .map(|(summary, _fingerprint)| summary),
+    )
+}
+
+fn mark_trace_credit_noticed_if_due_at_unlocked(
+    scope: Option<&str>,
+    interval_hours: u32,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Option<CreditSummary>> {
     if interval_hours == 0 {
         return Ok(None);
     }
 
     let mut records = read_local_trace_records_for_scope(scope)?;
-    if records
-        .iter()
-        .all(|record| !trace_record_noticeable(record))
-    {
+    let Some((summary, fingerprint)) =
+        trace_credit_notice_due_for_records(&records, interval_hours, now)
+    else {
         return Ok(None);
-    }
+    };
 
-    let now = Utc::now();
-    let interval = chrono::Duration::hours(i64::from(interval_hours));
-    let notice_due = records
-        .iter()
-        .filter(|record| trace_record_noticeable(record))
-        .any(|record| {
-            record
-                .last_credit_notice_at
-                .map(|last_notice| now.signed_duration_since(last_notice) >= interval)
-                .unwrap_or(true)
-        });
-
-    if !notice_due {
-        return Ok(None);
-    }
-
-    let summary = trace_credit_summary(&records);
     for record in &mut records {
         if trace_record_noticeable(record) {
             record.last_credit_notice_at = Some(now);
+            record.credit_notice_state = TraceCreditNoticeState {
+                last_presented_at: Some(now),
+                acknowledged_at: None,
+                snoozed_until: None,
+                fingerprint: Some(fingerprint.clone()),
+            };
         }
     }
     write_local_trace_records_for_scope(scope, &records)?;
     Ok(Some(summary))
+}
+
+fn acknowledge_trace_credit_notice_for_scope_at_unlocked(
+    scope: Option<&str>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Option<CreditSummary>> {
+    let mut records = read_local_trace_records_for_scope(scope)?;
+    let Some(fingerprint) = trace_credit_notice_fingerprint(&records) else {
+        return Ok(None);
+    };
+    let summary = trace_credit_summary(&records);
+    for record in &mut records {
+        if trace_record_noticeable(record) {
+            record.credit_notice_state = TraceCreditNoticeState {
+                last_presented_at: record
+                    .credit_notice_state
+                    .last_presented_at
+                    .or(record.last_credit_notice_at)
+                    .or(Some(now)),
+                acknowledged_at: Some(now),
+                snoozed_until: None,
+                fingerprint: Some(fingerprint.clone()),
+            };
+        }
+    }
+    write_local_trace_records_for_scope(scope, &records)?;
+    Ok(Some(summary))
+}
+
+fn snooze_trace_credit_notice_for_scope_until_at_unlocked(
+    scope: Option<&str>,
+    snoozed_until: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Option<CreditSummary>> {
+    let mut records = read_local_trace_records_for_scope(scope)?;
+    let Some(fingerprint) = trace_credit_notice_fingerprint(&records) else {
+        return Ok(None);
+    };
+    let summary = trace_credit_summary(&records);
+    for record in &mut records {
+        if trace_record_noticeable(record) {
+            record.credit_notice_state = TraceCreditNoticeState {
+                last_presented_at: record
+                    .credit_notice_state
+                    .last_presented_at
+                    .or(record.last_credit_notice_at)
+                    .or(Some(now)),
+                acknowledged_at: None,
+                snoozed_until: Some(snoozed_until),
+                fingerprint: Some(fingerprint.clone()),
+            };
+        }
+    }
+    write_local_trace_records_for_scope(scope, &records)?;
+    Ok(Some(summary))
+}
+
+fn trace_credit_notice_due_for_records(
+    records: &[LocalTraceSubmissionRecord],
+    interval_hours: u32,
+    now: DateTime<Utc>,
+) -> Option<(CreditSummary, String)> {
+    let fingerprint = trace_credit_notice_fingerprint(records)?;
+    let noticeable = records
+        .iter()
+        .filter(|record| trace_record_noticeable(record))
+        .collect::<Vec<_>>();
+    if noticeable.is_empty() {
+        return None;
+    }
+
+    let all_acknowledged = noticeable.iter().all(|record| {
+        record.credit_notice_state.fingerprint.as_deref() == Some(fingerprint.as_str())
+            && record.credit_notice_state.acknowledged_at.is_some()
+    });
+    if all_acknowledged {
+        return None;
+    }
+
+    let all_snoozed = noticeable.iter().all(|record| {
+        record.credit_notice_state.fingerprint.as_deref() == Some(fingerprint.as_str())
+            && record
+                .credit_notice_state
+                .snoozed_until
+                .is_some_and(|snoozed_until| snoozed_until > now)
+    });
+    if all_snoozed {
+        return None;
+    }
+
+    let interval = chrono::Duration::hours(i64::from(interval_hours));
+    let notice_due = noticeable.iter().any(|record| {
+        if record.credit_notice_state.fingerprint.as_deref() != Some(fingerprint.as_str()) {
+            return record
+                .last_credit_notice_at
+                .map(|last_notice| now.signed_duration_since(last_notice) >= interval)
+                .unwrap_or(true);
+        }
+        if record
+            .credit_notice_state
+            .snoozed_until
+            .is_some_and(|snoozed_until| snoozed_until <= now)
+        {
+            return true;
+        }
+        record
+            .credit_notice_state
+            .last_presented_at
+            .or(record.last_credit_notice_at)
+            .map(|last_notice| now.signed_duration_since(last_notice) >= interval)
+            .unwrap_or(true)
+    });
+
+    if notice_due {
+        Some((trace_credit_summary(records), fingerprint))
+    } else {
+        None
+    }
+}
+
+fn trace_credit_notice_fingerprint(records: &[LocalTraceSubmissionRecord]) -> Option<String> {
+    let mut parts = Vec::new();
+    for record in records
+        .iter()
+        .filter(|record| trace_record_noticeable(record))
+    {
+        let mut events = record
+            .credit_events
+            .iter()
+            .map(|event| {
+                format!(
+                    "{}:{:?}:{:.6}:{}",
+                    event.event_id,
+                    event.kind,
+                    event.points_delta,
+                    event.created_at.timestamp_millis()
+                )
+            })
+            .collect::<Vec<_>>();
+        events.sort();
+        parts.push(format!(
+            "{}|{}|{}|{:.6}|{}|{}",
+            record.submission_id,
+            record.status.as_str(),
+            record.server_status.as_deref().unwrap_or_default(),
+            record.credit_points_pending,
+            record
+                .credit_points_final
+                .map(|points| format!("{points:.6}"))
+                .unwrap_or_default(),
+            events.join(",")
+        ));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    parts.sort();
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update(part.as_bytes());
+        hasher.update(b"\n");
+    }
+    Some(format!("sha256:{}", hex::encode(&hasher.finalize()[..16])))
 }
 
 fn sanitized_trace_submission_failure_reason(error: &anyhow::Error) -> (String, String) {
@@ -5986,6 +6283,7 @@ mod tests {
             credit_explanation,
             credit_events: Vec::new(),
             last_credit_notice_at,
+            credit_notice_state: TraceCreditNoticeState::default(),
         }
     }
 
@@ -6229,6 +6527,169 @@ mod tests {
     }
 
     #[test]
+    fn credit_notice_acknowledge_suppresses_same_fingerprint_until_credit_changes() {
+        let scope = format!("trace-credit-ack-test-{}", Uuid::new_v4());
+        write_trace_policy_for_scope(
+            Some(&scope),
+            &StandingTraceContributionPolicy {
+                enabled: true,
+                ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                credit_notice_interval_hours: 168,
+                ..Default::default()
+            },
+        )
+        .expect("policy writes");
+        let record = submitted_credit_record(
+            1.0,
+            Some(1.0),
+            None,
+            vec!["Accepted after privacy checks.".to_string()],
+        );
+        let submission_id = record.submission_id;
+        let trace_id = record.trace_id;
+        write_local_trace_records_for_scope(Some(&scope), &[record]).expect("record writes");
+
+        let due = trace_credit_notice_due_for_scope(Some(&scope))
+            .expect("notice due check succeeds")
+            .expect("notice starts due");
+        assert_eq!(due.final_credit, 1.0);
+        let records = read_local_trace_records_for_scope(Some(&scope)).expect("records read");
+        assert!(records[0].last_credit_notice_at.is_none());
+        assert!(records[0].credit_notice_state.is_empty());
+
+        let acknowledged = acknowledge_trace_credit_notice_for_scope(Some(&scope))
+            .expect("acknowledge succeeds")
+            .expect("acknowledge returns the current summary");
+        assert_eq!(acknowledged.final_credit, 1.0);
+
+        let after_ack =
+            trace_credit_notice_due_for_scope(Some(&scope)).expect("notice due check succeeds");
+        assert_eq!(after_ack, None);
+        let records = read_local_trace_records_for_scope(Some(&scope)).expect("records read");
+        assert!(records[0].credit_notice_state.acknowledged_at.is_some());
+
+        let changed = apply_remote_trace_submission_statuses_for_scope(
+            Some(&scope),
+            &[TraceSubmissionStatusUpdate {
+                submission_id,
+                trace_id,
+                status: "accepted".to_string(),
+                credit_points_pending: 1.0,
+                credit_points_final: Some(2.0),
+                credit_points_ledger: 1.0,
+                credit_points_total: Some(2.0),
+                explanation: vec!["Accepted after privacy checks.".to_string()],
+                delayed_credit_explanations: vec!["Benchmark conversion bonus: +1.0.".to_string()],
+            }],
+        )
+        .expect("status sync applies");
+        assert_eq!(changed, 1);
+
+        let after_change = trace_credit_notice_due_for_scope(Some(&scope))
+            .expect("notice due check succeeds")
+            .expect("changed credit is due again");
+        assert_eq!(after_change.final_credit, 2.0);
+        assert_eq!(after_change.delayed_credit_delta, 1.0);
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[test]
+    fn credit_notice_snooze_suppresses_until_deadline() {
+        let scope = format!("trace-credit-snooze-test-{}", Uuid::new_v4());
+        write_trace_policy_for_scope(
+            Some(&scope),
+            &StandingTraceContributionPolicy {
+                enabled: true,
+                ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                credit_notice_interval_hours: 168,
+                ..Default::default()
+            },
+        )
+        .expect("policy writes");
+        write_local_trace_records_for_scope(
+            Some(&scope),
+            &[submitted_credit_record(
+                1.0,
+                Some(1.5),
+                None,
+                vec!["Delayed utility credit posted.".to_string()],
+            )],
+        )
+        .expect("record writes");
+        let now = Utc::now();
+        let snoozed_until = now + chrono::Duration::hours(24);
+
+        assert!(
+            trace_credit_notice_due_for_scope_at(Some(&scope), now)
+                .expect("notice due check succeeds")
+                .is_some()
+        );
+        let snoozed =
+            snooze_trace_credit_notice_for_scope_until_at(Some(&scope), snoozed_until, now)
+                .expect("snooze succeeds")
+                .expect("snooze returns the current summary");
+        assert_eq!(snoozed.final_credit, 1.5);
+
+        let records = read_local_trace_records_for_scope(Some(&scope)).expect("records read");
+        assert_eq!(
+            records[0].credit_notice_state.snoozed_until,
+            Some(snoozed_until)
+        );
+        assert_eq!(
+            trace_credit_notice_due_for_scope_at(Some(&scope), now + chrono::Duration::hours(1))
+                .expect("notice due check succeeds"),
+            None
+        );
+        assert!(
+            trace_credit_notice_due_for_scope_at(Some(&scope), now + chrono::Duration::hours(25))
+                .expect("notice due check succeeds")
+                .is_some()
+        );
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[test]
+    fn legacy_credit_notice_timestamp_suppresses_until_interval() {
+        let scope = format!("trace-credit-legacy-notice-test-{}", Uuid::new_v4());
+        write_trace_policy_for_scope(
+            Some(&scope),
+            &StandingTraceContributionPolicy {
+                enabled: true,
+                ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                credit_notice_interval_hours: 168,
+                ..Default::default()
+            },
+        )
+        .expect("policy writes");
+        let now = Utc::now();
+        write_local_trace_records_for_scope(
+            Some(&scope),
+            &[submitted_credit_record(
+                1.0,
+                Some(1.5),
+                Some(now),
+                vec!["Previously noticed before the state field existed.".to_string()],
+            )],
+        )
+        .expect("record writes");
+
+        assert_eq!(
+            trace_credit_notice_due_for_scope_at(Some(&scope), now + chrono::Duration::hours(1))
+                .expect("notice due check succeeds"),
+            None
+        );
+        assert!(
+            trace_credit_notice_due_for_scope_at(Some(&scope), now + chrono::Duration::hours(169))
+                .expect("notice due check succeeds")
+                .is_some()
+        );
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[test]
     fn delayed_credit_sync_resets_notice_and_notice_marks_records() {
         let scope = format!("trace-credit-sync-test-{}", Uuid::new_v4());
         let submission_id = Uuid::new_v4();
@@ -6260,6 +6721,7 @@ mod tests {
                 credit_explanation: vec!["Accepted locally.".to_string()],
                 credit_events: Vec::new(),
                 last_credit_notice_at: Some(Utc::now()),
+                credit_notice_state: TraceCreditNoticeState::default(),
             }],
         )
         .expect("local record writes");
@@ -6326,6 +6788,7 @@ mod tests {
                 credit_explanation: vec!["Previous credit explanation.".to_string()],
                 credit_events: Vec::new(),
                 last_credit_notice_at: Some(Utc::now()),
+                credit_notice_state: TraceCreditNoticeState::default(),
             }],
         )
         .expect("local record writes");
@@ -6383,6 +6846,7 @@ mod tests {
                 credit_explanation: vec!["Accepted locally.".to_string()],
                 credit_events: Vec::new(),
                 last_credit_notice_at: Some(Utc::now()),
+                credit_notice_state: TraceCreditNoticeState::default(),
             }],
         )
         .expect("local record writes");
@@ -6438,6 +6902,7 @@ mod tests {
                 credit_explanation: vec!["Accepted locally.".to_string()],
                 credit_events: Vec::new(),
                 last_credit_notice_at: Some(Utc::now()),
+                credit_notice_state: TraceCreditNoticeState::default(),
             }],
         )
         .expect("local record writes");
@@ -6511,6 +6976,7 @@ mod tests {
                     },
                 ],
                 last_credit_notice_at: None,
+                credit_notice_state: TraceCreditNoticeState::default(),
             },
             LocalTraceSubmissionRecord {
                 submission_id: quarantined_id,
@@ -6529,6 +6995,7 @@ mod tests {
                 ],
                 credit_events: Vec::new(),
                 last_credit_notice_at: None,
+                credit_notice_state: TraceCreditNoticeState::default(),
             },
             LocalTraceSubmissionRecord {
                 submission_id: rejected_id,
@@ -6545,6 +7012,7 @@ mod tests {
                 credit_explanation: vec!["Rejected during privacy review.".to_string()],
                 credit_events: Vec::new(),
                 last_credit_notice_at: None,
+                credit_notice_state: TraceCreditNoticeState::default(),
             },
         ];
 
@@ -6607,6 +7075,7 @@ mod tests {
             credit_explanation: vec!["Expired under retention policy.".to_string()],
             credit_events: Vec::new(),
             last_credit_notice_at: None,
+            credit_notice_state: TraceCreditNoticeState::default(),
         };
 
         let summary = trace_credit_summary(&[record]);
@@ -6665,6 +7134,7 @@ mod tests {
                 credit_explanation: vec!["Delayed utility credit posted.".to_string()],
                 credit_events: Vec::new(),
                 last_credit_notice_at: None,
+                credit_notice_state: TraceCreditNoticeState::default(),
             }],
         )
         .expect("local record writes");
@@ -6816,6 +7286,7 @@ mod tests {
                 credit_explanation: vec!["Delayed utility credit posted.".to_string()],
                 credit_events: Vec::new(),
                 last_credit_notice_at: None,
+                credit_notice_state: TraceCreditNoticeState::default(),
             }],
         )
         .expect("local record writes");
