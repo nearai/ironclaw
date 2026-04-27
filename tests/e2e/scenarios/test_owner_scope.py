@@ -31,6 +31,16 @@ async def _send_and_get_response(
     """Send a chat message and return the newest assistant response text."""
     chat_input = page.locator(SEL["chat_input"])
     await chat_input.wait_for(state="visible", timeout=5000)
+    if await chat_input.evaluate("el => !!el.disabled"):
+        await page.keyboard.press("Control+n")
+        await page.wait_for_function(
+            """selector => {
+                const input = document.querySelector(selector);
+                return !!input && !input.disabled;
+            }""",
+            arg=SEL["chat_input"],
+            timeout=10000,
+        )
 
     assistant_sel = SEL["message_assistant"]
     before_count = await page.locator(assistant_sel).count()

@@ -30,6 +30,11 @@
         "optional": false
       }
     ],
+    "secret_config_mappings": [
+      { "config_key": "app_id", "secret_name": "feishu_app_id" },
+      { "config_key": "app_secret", "secret_name": "feishu_app_secret" },
+      { "config_key": "verification_token", "secret_name": "feishu_verification_token" }
+    ],
     "setup_url": "https://open.feishu.cn/app"
   },
   "capabilities": {

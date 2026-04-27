@@ -15,6 +15,7 @@ use super::{AppState, TuiWidget};
 const KEYBINDINGS: &[(&str, &str)] = &[
     ("F1", "Toggle this help"),
     ("Enter", "Submit message"),
+    ("Shift-Enter", "Insert newline"),
     ("Ctrl-C", "Quit"),
     ("Ctrl-B", "Toggle sidebar"),
     ("Ctrl-L", "Toggle logs"),

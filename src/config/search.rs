@@ -1,4 +1,6 @@
-use crate::config::helpers::{db_first_option, db_first_or_default, parse_optional_env};
+use crate::config::helpers::{
+    db_first_option, db_first_or_default, parse_bool_env, parse_optional_env,
+};
 use crate::error::ConfigError;
 use crate::settings::Settings;
 use crate::workspace::FusionStrategy;
@@ -20,6 +22,8 @@ pub struct WorkspaceSearchConfig {
     /// [`Default`] uses 0.5. When the configuration is resolved, per-strategy
     /// defaults are applied: 0.5 (RRF) or 0.7 (weighted).
     pub vector_weight: f32,
+    /// Whether reasoning-augmented recall is enabled for memory search.
+    pub reasoning_enabled: bool,
 }
 
 impl Default for WorkspaceSearchConfig {
@@ -29,6 +33,7 @@ impl Default for WorkspaceSearchConfig {
             rrf_k: 60,
             fts_weight: 0.5,
             vector_weight: 0.5,
+            reasoning_enabled: false,
         }
     }
 }
@@ -70,6 +75,11 @@ impl WorkspaceSearchConfig {
         let vector_weight = db_first_option(&ss.vector_weight, "SEARCH_VECTOR_WEIGHT")?
             .unwrap_or(parse_optional_env("SEARCH_VECTOR_WEIGHT", default_vec)?);
 
+        let reasoning_enabled = match &ss.reasoning_enabled {
+            Some(val) => *val,
+            None => parse_bool_env("SEARCH_REASONING_ENABLED", false)?,
+        };
+
         if !fts_weight.is_finite() || fts_weight < 0.0 {
             return Err(ConfigError::InvalidValue {
                 key: "SEARCH_FTS_WEIGHT".to_string(),
@@ -97,6 +107,7 @@ impl WorkspaceSearchConfig {
             rrf_k,
             fts_weight,
             vector_weight,
+            reasoning_enabled,
         })
     }
 }
@@ -113,6 +124,7 @@ mod tests {
             std::env::remove_var("SEARCH_RRF_K");
             std::env::remove_var("SEARCH_FTS_WEIGHT");
             std::env::remove_var("SEARCH_VECTOR_WEIGHT");
+            std::env::remove_var("SEARCH_REASONING_ENABLED");
         }
     }
 
@@ -251,6 +263,52 @@ mod tests {
         let settings = Settings::default();
         let config = WorkspaceSearchConfig::resolve(&settings).expect("should resolve");
         assert_eq!(config.fusion_strategy, FusionStrategy::Rrf);
+
+        clear_search_env();
+    }
+
+    #[test]
+    fn reasoning_enabled_defaults_to_false() {
+        let _guard = lock_env();
+        clear_search_env();
+
+        let settings = Settings::default();
+        let config = WorkspaceSearchConfig::resolve(&settings).expect("should resolve");
+        assert!(!config.reasoning_enabled);
+    }
+
+    #[test]
+    fn reasoning_enabled_from_env() {
+        let _guard = lock_env();
+        clear_search_env();
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("SEARCH_REASONING_ENABLED", "true");
+        }
+
+        let settings = Settings::default();
+        let config = WorkspaceSearchConfig::resolve(&settings).expect("should resolve");
+        assert!(config.reasoning_enabled);
+
+        clear_search_env();
+    }
+
+    #[test]
+    fn reasoning_enabled_db_overrides_env() {
+        let _guard = lock_env();
+        clear_search_env();
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("SEARCH_REASONING_ENABLED", "true");
+        }
+
+        let mut settings = Settings::default();
+        settings.search.reasoning_enabled = Some(false);
+
+        let config = WorkspaceSearchConfig::resolve(&settings).expect("should resolve");
+        assert!(!config.reasoning_enabled);
 
         clear_search_env();
     }

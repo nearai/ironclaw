@@ -271,6 +271,19 @@ impl Mission {
             MissionStatus::Completed | MissionStatus::Failed
         )
     }
+
+    /// Whether the mission is event-driven (fires in response to external
+    /// stimuli rather than on a fixed schedule). Event-driven missions may
+    /// legitimately re-fire after completion — each event is a fresh
+    /// investigation.
+    pub fn is_event_driven(&self) -> bool {
+        matches!(
+            self.cadence,
+            MissionCadence::OnSystemEvent { .. }
+                | MissionCadence::OnEvent { .. }
+                | MissionCadence::Webhook { .. }
+        )
+    }
 }
 
 /// Normalize a cron expression to the 7-field format expected by the `cron` crate.

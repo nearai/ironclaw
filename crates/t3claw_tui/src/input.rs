@@ -9,8 +9,10 @@ use crate::widgets::LogLevelFilter;
 pub enum InputAction {
     /// Submit the current input text to the agent.
     Submit,
-    /// Quit the TUI.
-    Quit,
+    /// Insert a newline into the input (Shift+Enter / Alt+Enter / Ctrl+J).
+    InsertNewline,
+    /// Clear non-empty input or quit if input is already empty.
+    ClearOrQuit,
     /// Toggle sidebar visibility.
     ToggleSidebar,
     /// Toggle between Conversation and Logs tabs.
@@ -124,7 +126,11 @@ pub fn map_key(
 
     match (key.code, key.modifiers) {
         (KeyCode::Enter, KeyModifiers::NONE) => InputAction::Submit,
-        (KeyCode::Char('c'), KeyModifiers::CONTROL) => InputAction::Quit,
+        (KeyCode::Enter, KeyModifiers::SHIFT) | (KeyCode::Enter, KeyModifiers::ALT) => {
+            InputAction::InsertNewline
+        }
+        (KeyCode::Char('j'), KeyModifiers::CONTROL) => InputAction::InsertNewline,
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => InputAction::ClearOrQuit,
         (KeyCode::Char('b'), KeyModifiers::CONTROL) => InputAction::ToggleSidebar,
         (KeyCode::Char('l'), KeyModifiers::CONTROL) => InputAction::ToggleLogs,
         (KeyCode::Char('f'), KeyModifiers::CONTROL) => InputAction::SearchToggle,
@@ -149,7 +155,7 @@ pub fn map_key(
 /// Map key events when the help overlay is active.
 fn map_help_key(key: KeyEvent) -> InputAction {
     match (key.code, key.modifiers) {
-        (KeyCode::Char('c'), KeyModifiers::CONTROL) => InputAction::Quit,
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => InputAction::ClearOrQuit,
         (KeyCode::Esc, _) | (KeyCode::F(1), _) => InputAction::ToggleHelp,
         _ => InputAction::Forward,
     }
@@ -158,7 +164,7 @@ fn map_help_key(key: KeyEvent) -> InputAction {
 /// Map key events when the tool detail modal is active.
 fn map_tool_detail_key(key: KeyEvent) -> InputAction {
     match (key.code, key.modifiers) {
-        (KeyCode::Char('c'), KeyModifiers::CONTROL) => InputAction::Quit,
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => InputAction::ClearOrQuit,
         (KeyCode::Esc, _) => InputAction::ToolDetailClose,
         (KeyCode::PageUp, _) | (KeyCode::Up, _) => InputAction::ToolDetailScrollUp,
         (KeyCode::PageDown, _) | (KeyCode::Down, _) => InputAction::ToolDetailScrollDown,
@@ -184,7 +190,7 @@ fn map_log_filter_key(key: KeyEvent) -> Option<InputAction> {
 /// Map key events when the search bar is active.
 fn map_search_key(key: KeyEvent) -> InputAction {
     match (key.code, key.modifiers) {
-        (KeyCode::Char('c'), KeyModifiers::CONTROL) => InputAction::Quit,
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => InputAction::ClearOrQuit,
         (KeyCode::Esc, _) => InputAction::SearchToggle,
         (KeyCode::Enter, KeyModifiers::NONE) => InputAction::SearchNext,
         (KeyCode::Enter, KeyModifiers::SHIFT) => InputAction::SearchPrev,
@@ -199,7 +205,7 @@ fn map_palette_key(key: KeyEvent) -> InputAction {
         KeyCode::Down => InputAction::PaletteDown,
         KeyCode::Enter | KeyCode::Tab => InputAction::PaletteSelect,
         KeyCode::Esc => InputAction::PaletteClose,
-        KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => InputAction::Quit,
+        KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => InputAction::ClearOrQuit,
         _ => InputAction::Forward,
     }
 }
@@ -211,7 +217,7 @@ fn map_thread_picker_key(key: KeyEvent) -> InputAction {
         KeyCode::Down | KeyCode::Char('j') => InputAction::ThreadPickerDown,
         KeyCode::Enter => InputAction::ThreadPickerSelect,
         KeyCode::Esc => InputAction::ThreadPickerClose,
-        KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => InputAction::Quit,
+        KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => InputAction::ClearOrQuit,
         _ => InputAction::Forward,
     }
 }
@@ -283,9 +289,9 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_quits() {
+    fn ctrl_c_clears_or_quits() {
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(map_default(key), InputAction::Quit);
+        assert_eq!(map_default(key), InputAction::ClearOrQuit);
     }
 
     #[test]
@@ -417,9 +423,9 @@ mod tests {
     }
 
     #[test]
-    fn search_ctrl_c_quits() {
+    fn search_ctrl_c_clears_or_quits() {
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(map_search(key), InputAction::Quit);
+        assert_eq!(map_search(key), InputAction::ClearOrQuit);
     }
 
     #[test]
@@ -500,9 +506,9 @@ mod tests {
     }
 
     #[test]
-    fn thread_picker_ctrl_c_quits() {
+    fn thread_picker_ctrl_c_clears_or_quits() {
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(map_thread_picker(key), InputAction::Quit);
+        assert_eq!(map_thread_picker(key), InputAction::ClearOrQuit);
     }
 
     #[test]

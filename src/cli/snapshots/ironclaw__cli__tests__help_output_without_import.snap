@@ -8,8 +8,8 @@ Usage: ironclaw [OPTIONS] [COMMAND]
 
 Commands:
   run         Run the AI agent
-  onboard     Run interactive setup wizard
-  config      Manage app configs
+  onboard     Run interactive setup wizard (start here if new to IronClaw)
+  config      Manage app configuration settings
   tool        Manage WASM tools
   registry    Browse/install extensions
   channels    Manage channels
@@ -22,11 +22,11 @@ Commands:
   skills      Manage skills
   hooks       Manage lifecycle hooks
   models      Manage LLM providers and models
-  doctor      Run diagnostics
+  doctor      Run diagnostics (check if everything is configured correctly)
   logs        View and manage gateway logs
   status      Show system status
   completion  Generate completions
-  login       Authenticate with a provider
+  login       Authenticate with a provider (re-login)
   acp         Manage ACP agents
   help        Print this message or the help of the given subcommand(s)
 

@@ -34,6 +34,7 @@ trace_*.json
 # Local Claude Code settings (machine-specific, should not be committed)
 .claude/settings.local.json
 .worktrees/
+.ironclaw/
 
 # Python cache
 __pycache__/
@@ -41,3 +42,5 @@ __pycache__/
 *.pyo
 *.pyd
 engine_trace_*.json
+tests/fixtures/llm_traces/live/github_dev_workflow_full_loop.json
+tests/fixtures/llm_traces/live/github_dev_workflow_full_loop.log

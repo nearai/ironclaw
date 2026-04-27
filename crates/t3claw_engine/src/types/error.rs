@@ -65,6 +65,9 @@ pub enum EngineError {
     #[error("skill error: {reason}")]
     Skill { reason: String },
 
+    #[error("invalid input: {reason}")]
+    InvalidInput { reason: String },
+
     #[error("access denied: user '{user_id}' cannot access {entity}")]
     AccessDenied { user_id: String, entity: String },
 
@@ -76,6 +79,7 @@ pub enum EngineError {
         parameters: Box<serde_json::Value>,
         resume_kind: Box<crate::gate::ResumeKind>,
         resume_output: Option<Box<serde_json::Value>>,
+        paused_lease: Option<Box<crate::types::capability::CapabilityLease>>,
     },
 }
 

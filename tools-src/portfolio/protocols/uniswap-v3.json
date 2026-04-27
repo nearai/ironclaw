@@ -1,0 +1,22 @@
+{
+  "id": "uniswap-v3",
+  "name": "Uniswap v3",
+  "category": "dex-lp",
+  "match_protocol_ids": ["uniswap_v3", "uniswap-v3", "univ3", "uniswap"],
+  "chains": ["ethereum", "base", "arbitrum", "optimism", "polygon", "bnb", "celo"],
+  "contract_addrs_by_chain": {
+    "ethereum": ["0xc36442b4a4522e871399cd717abdd847ab11fe88"],
+    "base": ["0x03a520b32c04bf3beef7beb72e919cf822ed34f1"],
+    "arbitrum": ["0xc36442b4a4522e871399cd717abdd847ab11fe88"],
+    "optimism": ["0xc36442b4a4522e871399cd717abdd847ab11fe88"],
+    "polygon": ["0xc36442b4a4522e871399cd717abdd847ab11fe88"]
+  },
+  "base_risk_score": 3,
+  "liquidity_tier": "instant",
+  "withdrawal_delay_seconds": 0,
+  "yield_field": "fee_apy",
+  "audits": ["Trail of Bits", "ABDK"],
+  "tvl_floor_usd": 2000000000,
+  "oracle_deps": ["self"],
+  "notes": "Concentrated liquidity. APY depends heavily on price range. M2 ranks LP positions but does not auto-rebalance them — out-of-range warnings only."
+}

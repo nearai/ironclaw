@@ -14,9 +14,8 @@ mod tests {
 
     use t3claw::agent::SessionManager;
     use t3claw::channels::web::auth::{MultiAuthState, UserIdentity};
-    use t3claw::channels::web::server::{
-        GatewayState, PerUserRateLimiter, RateLimiter, start_server,
-    };
+    use t3claw::channels::web::platform::router::start_server;
+    use t3claw::channels::web::platform::state::{GatewayState, PerUserRateLimiter, RateLimiter};
     use t3claw::channels::web::sse::SseManager;
     use t3claw::channels::web::ws::WsConnectionTracker;
     use t3claw::db::Database;
@@ -64,12 +63,14 @@ mod tests {
             sse: Arc::new(SseManager::new()),
             workspace: None,
             workspace_pool: None,
+            multi_tenant_mode: true,
             session_manager: Some(session_manager),
             log_broadcaster: None,
             log_level_handle: None,
             extension_manager: None,
             tool_registry: None,
             store: Some(db),
+            settings_cache: None,
             job_manager: None,
             prompt_queue: None,
             scheduler: None,
@@ -77,6 +78,9 @@ mod tests {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: None,
+            llm_reload: None,
+            llm_session_manager: None,
+            config_toml_path: None,
             skill_registry: None,
             skill_catalog: None,
             auth_manager: None,
@@ -87,7 +91,7 @@ mod tests {
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
-            active_config: Default::default(),
+            active_config: Arc::new(tokio::sync::RwLock::new(Default::default())),
             secrets_store: None,
             db_auth: None,
             pairing_store: None,
@@ -310,7 +314,7 @@ mod tests {
 
         let resp = c
             .get(format!("http://{addr}/api/chat/threads"))
-            .header("Cookie", format!("t3claw_session={ALICE_TOKEN}"))
+            .header("Cookie", format!("ironclaw_session={ALICE_TOKEN}"))
             .send()
             .await
             .expect("cookie auth request");

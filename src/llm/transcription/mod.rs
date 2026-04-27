@@ -193,6 +193,7 @@ mod tests {
             size_bytes: Some(data.len() as u64),
             source_url: None,
             storage_key: None,
+            local_path: None,
             extracted_text: None,
             data,
             duration_secs: Some(5),

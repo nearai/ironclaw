@@ -1,0 +1,10 @@
+{
+  "id": "test-lending",
+  "name": "Test Lending",
+  "category": "lending",
+  "match_protocol_ids": ["test_lending"],
+  "base_risk_score": 2,
+  "liquidity_tier": "instant",
+  "withdrawal_delay_seconds": 0,
+  "yield_field": "supply_apy"
+}

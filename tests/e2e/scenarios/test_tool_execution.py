@@ -50,7 +50,13 @@ async def _wait_for_turn(
                 for tool_call in turn.get("tool_calls", []):
                     if tool_call.get("name") != tool_name:
                         continue
-                    preview = (tool_call.get("result_preview") or "").lower()
+                    # In-memory turns populate `result`; DB-hydrated turns
+                    # populate `result_preview`. Accept either — see PR #2555.
+                    preview = (
+                        tool_call.get("result_preview")
+                        or tool_call.get("result")
+                        or ""
+                    ).lower()
                     tool_ok = tool_call.get("has_result") is True and (
                         result_fragment is None or result_fragment.lower() in preview
                     )

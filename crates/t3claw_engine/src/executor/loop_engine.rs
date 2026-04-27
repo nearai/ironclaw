@@ -244,9 +244,9 @@ impl ExecutionLoop {
         // Load versioned Python orchestrator using pre-fetched docs.
         // Self-modification is disabled by default — only the compiled-in v0
         // runs unless explicitly opted in via ORCHESTRATOR_SELF_MODIFY=true.
-        let allow_self_modify = std::env::var("ORCHESTRATOR_SELF_MODIFY")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+        // The flag is read from the process-wide snapshot (set once on first
+        // call) so a runtime env mutation cannot flip the gate mid-task.
+        let allow_self_modify = crate::runtime::self_modify_enabled();
         let (orchestrator_code, orchestrator_version) =
             crate::executor::orchestrator::load_orchestrator_from_docs(
                 &system_docs,
@@ -1276,6 +1276,42 @@ mod tests {
         for (call_id, _name) in &fail_events {
             assert!(!call_id.is_empty(), "ActionFailed event must have call_id");
         }
+    }
+
+    #[tokio::test]
+    async fn failed_action_result_is_explicit_in_next_llm_message() {
+        let (mut exec, _tx) = make_loop(
+            vec![
+                action_response("test_tool", "call_failed_tool"),
+                text_response("I could not complete that."),
+            ],
+            vec![Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "test_tool".into(),
+                output: serde_json::json!({"error": "No lease for action 'test_tool'"}),
+                is_error: true,
+                duration: Duration::from_millis(1),
+            })],
+            ThreadConfig::default(),
+        )
+        .await;
+
+        exec.run().await.unwrap();
+
+        let action_results: Vec<_> = exec
+            .thread
+            .internal_messages
+            .iter()
+            .filter(|m| m.role == crate::types::message::MessageRole::ActionResult)
+            .collect();
+
+        assert!(
+            action_results.iter().any(|m| {
+                m.content.contains("[ACTION FAILED] test_tool:")
+                    && m.content.contains("No lease for action 'test_tool'")
+            }),
+            "failed ActionResult content should be explicit for the next LLM turn"
+        );
     }
 
     /// Verify the trace analyzer does NOT flag any issues on a clean

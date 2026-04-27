@@ -1,7 +1,7 @@
 //! CLI command for viewing and managing gateway logs.
 //!
 //! Provides access to gateway logs through three mechanisms:
-//! - Reading the gateway log file (`~/.t3claw/gateway.log`)
+//! - Reading the gateway log file (`~/.ironclaw/gateway.log`)
 //! - Streaming live logs via the gateway's SSE endpoint (`/api/logs/events`)
 //! - Getting/setting the runtime log level via `/api/logs/level`
 
@@ -14,7 +14,7 @@ use clap::Args;
 #[derive(Args, Debug, Clone)]
 #[command(
     about = "View and manage gateway logs",
-    long_about = "Tail gateway logs, stream live output, or adjust log level.\nExamples:\n  t3claw logs                          # Show last 200 lines\n  t3claw logs --follow                 # Stream live logs via SSE\n  t3claw logs --limit 50 --json        # Last 50 lines as JSON\n  t3claw logs --level                  # Show current log level\n  t3claw logs --level debug            # Set log level to debug"
+    long_about = "Tail gateway logs, stream live output, or adjust log level.\nExamples:\n  ironclaw logs                          # Show last 200 lines\n  ironclaw logs --follow                 # Stream live logs via SSE\n  ironclaw logs --limit 50 --json        # Last 50 lines as JSON\n  ironclaw logs --level                  # Show current log level\n  ironclaw logs --level debug            # Set log level to debug\n  ironclaw logs --grep ERROR             # Filter lines matching 'ERROR'\n  ironclaw logs -g 'timeout|refused' --context 3  # Regex with context"
 )]
 pub struct LogsCommand {
     /// Stream live logs from the running gateway via SSE.
@@ -54,6 +54,18 @@ pub struct LogsCommand {
     /// With a value (trace|debug|info|warn|error), sets the level.
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     pub level: Option<String>,
+
+    /// Filter output by regex pattern (conflicts with --follow)
+    #[arg(long, short = 'g', conflicts_with = "follow")]
+    pub grep: Option<String>,
+
+    /// Ignore case when filtering (requires --grep)
+    #[arg(long, requires = "grep")]
+    pub ignore_case: bool,
+
+    /// Show N lines of context around matches (requires --grep)
+    #[arg(long, requires = "grep", default_value = "0")]
+    pub context: usize,
 }
 
 /// Resolved gateway connection parameters.
@@ -84,7 +96,7 @@ pub async fn run_logs_command(cmd: LogsCommand, config_path: Option<&Path>) -> a
 
 // ── Show log file ────────────────────────────────────────────────────────
 
-/// Read the last N lines from `~/.t3claw/gateway.log`.
+/// Read the last N lines from `~/.ironclaw/gateway.log`.
 ///
 /// Uses a reverse-scan strategy: seeks to the end of the file and reads
 /// backwards in chunks to find the last `limit` newlines, so memory usage
@@ -95,15 +107,24 @@ fn cmd_show(cmd: &LogsCommand) -> anyhow::Result<()> {
         anyhow::bail!(
             "No gateway log file found at {}.\n\
              The log file is created when the gateway runs in background mode \
-             (e.g. `t3claw gateway start`).",
+             (e.g. `ironclaw gateway start`).",
             log_path.display()
         );
     }
 
-    let lines = tail_file(&log_path, cmd.limit)?;
+    let mut lines = tail_file(&log_path, cmd.limit)?;
+
+    // Apply grep filtering if requested
+    if let Some(ref pattern) = cmd.grep {
+        lines = filter_lines(lines, pattern, cmd.ignore_case, cmd.context)?;
+    }
 
     if lines.is_empty() {
-        println!("(log file is empty)");
+        if cmd.grep.is_some() {
+            println!("(no matching log entries)");
+        } else {
+            println!("(log file is empty)");
+        }
         return Ok(());
     }
 
@@ -119,6 +140,47 @@ fn cmd_show(cmd: &LogsCommand) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Filter lines by regex pattern, optionally with context.
+fn filter_lines(
+    lines: Vec<String>,
+    pattern: &str,
+    ignore_case: bool,
+    context: usize,
+) -> anyhow::Result<Vec<String>> {
+    use regex::RegexBuilder;
+
+    let re = RegexBuilder::new(pattern)
+        .case_insensitive(ignore_case)
+        .build()
+        .map_err(|e| anyhow::anyhow!("Invalid regex pattern '{}': {}", pattern, e))?;
+
+    if context == 0 {
+        // Simple filtering: only matching lines
+        Ok(lines.into_iter().filter(|line| re.is_match(line)).collect())
+    } else {
+        // With context: add N lines before/after each match
+        let mut result_indices = std::collections::BTreeSet::new();
+
+        // Find matching indices and add context
+        for (i, line) in lines.iter().enumerate() {
+            if re.is_match(line) {
+                // Add context range
+                let start = i.saturating_sub(context);
+                let end = i.saturating_add(context).saturating_add(1).min(lines.len());
+                for j in start..end {
+                    result_indices.insert(j);
+                }
+            }
+        }
+
+        // Collect lines in order
+        Ok(result_indices
+            .into_iter()
+            .map(|i| lines[i].clone())
+            .collect())
+    }
 }
 
 /// Read the last `n` lines from a file by scanning backwards from EOF.
@@ -197,7 +259,7 @@ async fn cmd_follow(cmd: &LogsCommand, params: &GatewayParams) -> anyhow::Result
         .map_err(|e| {
             anyhow::anyhow!(
                 "Failed to connect to gateway at {url}: {e}\n\
-                 Is the gateway running? Try `t3claw gateway status`."
+                 Is the gateway running? Try `ironclaw gateway status`."
             )
         })?;
 
@@ -264,7 +326,7 @@ async fn cmd_get_level(cmd: &LogsCommand, params: &GatewayParams) -> anyhow::Res
         .map_err(|e| {
             anyhow::anyhow!(
                 "Failed to connect to gateway at {url}: {e}\n\
-                 Is the gateway running? Try `t3claw gateway status`."
+                 Is the gateway running? Try `ironclaw gateway status`."
             )
         })?;
 
@@ -330,7 +392,7 @@ async fn cmd_set_level(
         .map_err(|e| {
             anyhow::anyhow!(
                 "Failed to connect to gateway at {url}: {e}\n\
-                 Is the gateway running? Try `t3claw gateway status`."
+                 Is the gateway running? Try `ironclaw gateway status`."
             )
         })?;
 
@@ -412,7 +474,7 @@ async fn resolve_gateway_params(
 /// propagated — the user asked for a specific file and deserves a clear
 /// failure when it is missing, unreadable, or malformed.  When no path
 /// was given we fall back to env-only resolution and silently return
-/// `None` on failure so that `t3claw logs` works without any config.
+/// `None` on failure so that `ironclaw logs` works without any config.
 async fn load_gateway_config(
     config_path: Option<&Path>,
 ) -> anyhow::Result<Option<crate::config::GatewayConfig>> {
@@ -526,6 +588,9 @@ mod tests {
             token: None,
             timeout: 5000,
             level: None,
+            grep: None,
+            ignore_case: false,
+            context: 0,
         };
         // Should not panic
         print_log_entry(&entry, &cmd);
@@ -583,5 +648,110 @@ mod tests {
 
         let result = tail_file(&path, 2).unwrap();
         assert_eq!(result, vec!["line2", "line3"]);
+    }
+
+    // ── New tests for --grep functionality ─────────────────────────────
+
+    #[test]
+    fn test_filter_lines_exact_match() -> anyhow::Result<()> {
+        let lines = vec![
+            "INFO: started".to_string(),
+            "ERROR: failed".to_string(),
+            "DEBUG: test".to_string(),
+        ];
+
+        let filtered = filter_lines(lines, "ERROR", false, 0)?;
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0], "ERROR: failed");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_filter_lines_ignore_case() -> anyhow::Result<()> {
+        let lines = vec![
+            "ERROR: fail".to_string(),
+            "error: also fail".to_string(),
+            "INFO: ok".to_string(),
+        ];
+
+        let filtered = filter_lines(lines, "error", true, 0)?;
+        assert_eq!(filtered.len(), 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_filter_lines_regex() -> anyhow::Result<()> {
+        let lines = vec![
+            "timeout after 5s".to_string(),
+            "connection refused".to_string(),
+            "ok".to_string(),
+        ];
+
+        let filtered = filter_lines(lines, "timeout|refused", false, 0)?;
+        assert_eq!(filtered.len(), 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_filter_lines_with_context() -> anyhow::Result<()> {
+        let lines = vec![
+            "line 1".to_string(),
+            "ERROR: panic".to_string(), // match
+            "line 3".to_string(),
+            "line 4".to_string(),
+            "ERROR: crash".to_string(), // match
+            "line 6".to_string(),
+        ];
+
+        let filtered = filter_lines(lines, "ERROR", false, 1)?;
+        // Should include: line 1, ERROR: panic, line 3, line 4, ERROR: crash, line 6
+        // (with deduplication for overlapping context)
+        assert_eq!(filtered.len(), 6);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_filter_lines_with_non_overlapping_context() -> anyhow::Result<()> {
+        // Create 10 lines: "line 0" .. "line 9"
+        let mut lines: Vec<String> = (0..10).map(|i| format!("line {}", i)).collect();
+
+        // Patch in matches at indices 1 and 8 (far apart)
+        lines[1] = "ERROR: first".to_string();
+        lines[8] = "ERROR: second".to_string();
+
+        // Filter with context=1:
+        // - Match at index 1 → window [0,1,2]
+        // - Match at index 8 → window [7,8,9]
+        // Total: 6 unique lines (no overlap between groups)
+        let filtered = filter_lines(lines, "ERROR", false, 1)?;
+
+        assert_eq!(filtered.len(), 6);
+        assert_eq!(filtered[0], "line 0"); // start of first group
+        assert_eq!(filtered[2], "line 2"); // end of first group
+        assert_eq!(filtered[3], "line 7"); // start of second group
+        assert_eq!(filtered[5], "line 9"); // end of second group
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_filter_lines_no_matches() -> anyhow::Result<()> {
+        let lines = vec!["INFO: ok".to_string(), "DEBUG: test".to_string()];
+
+        let filtered = filter_lines(lines, "ERROR", false, 0)?;
+        assert!(filtered.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_filter_lines_invalid_regex() {
+        let lines = vec!["test".to_string()];
+        let result = filter_lines(lines, "[invalid", false, 0);
+        assert!(result.unwrap_err().to_string().contains("Invalid regex"));
     }
 }

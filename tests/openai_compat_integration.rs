@@ -9,7 +9,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 
-use t3claw::channels::web::server::{GatewayState, start_server};
+use t3claw::channels::web::platform::router::start_server;
+
+use t3claw::channels::web::platform::state::GatewayState;
 use t3claw::channels::web::sse::SseManager;
 use t3claw::channels::web::ws::WsConnectionTracker;
 use t3claw::error::LlmError;
@@ -195,12 +197,14 @@ async fn start_test_server_with_provider(
         sse: Arc::new(SseManager::new()),
         workspace: None,
         workspace_pool: None,
+        multi_tenant_mode: false,
         session_manager: None,
         log_broadcaster: None,
         log_level_handle: None,
         extension_manager: None,
         tool_registry: None,
         store: None,
+        settings_cache: None,
         job_manager: None,
         prompt_queue: None,
         scheduler: None,
@@ -208,17 +212,26 @@ async fn start_test_server_with_provider(
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: Some(llm_provider),
+        llm_reload: None,
+        llm_session_manager: None,
+        config_toml_path: None,
         skill_registry: None,
         skill_catalog: None,
         auth_manager: None,
-        chat_rate_limiter: t3claw::channels::web::server::PerUserRateLimiter::new(30, 60),
-        oauth_rate_limiter: t3claw::channels::web::server::PerUserRateLimiter::new(20, 60),
-        webhook_rate_limiter: t3claw::channels::web::server::RateLimiter::new(10, 60),
+        chat_rate_limiter: t3claw::channels::web::platform::state::PerUserRateLimiter::new(
+            30, 60,
+        ),
+        oauth_rate_limiter: t3claw::channels::web::platform::state::PerUserRateLimiter::new(
+            20, 60,
+        ),
+        webhook_rate_limiter: t3claw::channels::web::platform::state::RateLimiter::new(10, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
-        active_config: t3claw::channels::web::server::ActiveConfigSnapshot::default(),
+        active_config: Arc::new(tokio::sync::RwLock::new(
+            t3claw::channels::web::platform::state::ActiveConfigSnapshot::default(),
+        )),
         secrets_store: None,
         db_auth: None,
         pairing_store: None,
@@ -395,10 +408,10 @@ async fn test_chat_completions_streaming() {
     // Check simulated streaming header
     assert_eq!(
         resp.headers()
-            .get("x-t3claw-streaming")
+            .get("x-ironclaw-streaming")
             .and_then(|v| v.to_str().ok()),
         Some("simulated"),
-        "Expected x-t3claw-streaming: simulated header"
+        "Expected x-ironclaw-streaming: simulated header"
     );
 
     let text = resp.text().await.unwrap();
@@ -707,12 +720,14 @@ async fn test_no_llm_provider_returns_503() {
         sse: Arc::new(SseManager::new()),
         workspace: None,
         workspace_pool: None,
+        multi_tenant_mode: false,
         session_manager: None,
         log_broadcaster: None,
         log_level_handle: None,
         extension_manager: None,
         tool_registry: None,
         store: None,
+        settings_cache: None,
         job_manager: None,
         prompt_queue: None,
         scheduler: None,
@@ -720,17 +735,26 @@ async fn test_no_llm_provider_returns_503() {
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None, // No LLM!
+        llm_reload: None,
+        llm_session_manager: None,
+        config_toml_path: None,
         skill_registry: None,
         skill_catalog: None,
         auth_manager: None,
-        chat_rate_limiter: t3claw::channels::web::server::PerUserRateLimiter::new(30, 60),
-        oauth_rate_limiter: t3claw::channels::web::server::PerUserRateLimiter::new(20, 60),
-        webhook_rate_limiter: t3claw::channels::web::server::RateLimiter::new(10, 60),
+        chat_rate_limiter: t3claw::channels::web::platform::state::PerUserRateLimiter::new(
+            30, 60,
+        ),
+        oauth_rate_limiter: t3claw::channels::web::platform::state::PerUserRateLimiter::new(
+            20, 60,
+        ),
+        webhook_rate_limiter: t3claw::channels::web::platform::state::RateLimiter::new(10, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
-        active_config: t3claw::channels::web::server::ActiveConfigSnapshot::default(),
+        active_config: Arc::new(tokio::sync::RwLock::new(
+            t3claw::channels::web::platform::state::ActiveConfigSnapshot::default(),
+        )),
         secrets_store: None,
         db_auth: None,
         pairing_store: None,

@@ -104,9 +104,9 @@ Run the forcing questions, then score:
 
 User says: "prioritize my backlog" or "what should we build next?"
 
-1. Read `commitments/open/` for items tagged as features
-2. Read `commitments/parked-ideas/` for candidate ideas
-3. Read `commitments/tech-debt/` for debt items that could be packaged as improvements
+1. Read `projects/commitments/open/` for items tagged as features
+2. Read `projects/commitments/parked-ideas/` for candidate ideas
+3. Read `projects/commitments/tech-debt/` for debt items that could be packaged as improvements
 4. For each, run a quick score (skip forcing questions, use available context)
 5. Present ranked:
 
@@ -156,7 +156,7 @@ User says: "analyze this feedback" or "what are users telling us?"
 
 ## Integration with commitments
 
-- Features promoted from this analysis → create commitment in `commitments/open/` with `tags: [product, prioritized]`
+- Features promoted from this analysis → create commitment in `projects/commitments/open/` with `tags: [product, prioritized]`
 - Killed features → dismiss from parked ideas with rationale
 - Investigate items → create signal with `obligation_type: research`
 - Decisions made during prioritization → capture via `decision-capture` skill

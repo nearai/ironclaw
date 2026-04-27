@@ -1,0 +1,104 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Cross-chain DeFi portfolio discovery, ranked rebalancing proposals, and unsigned NEAR Intent construction. Single tool with three operations: scan, propose, build_intent.",
+  "discovery_summary": {
+    "always_required": [
+      "action"
+    ],
+    "conditional_requirements": [
+      "`scan` requires `addresses` (list of wallet addresses).",
+      "`propose` requires `positions` (output of `scan`). `strategies` is optional — defaults to the bundled strategies (stablecoin-yield-floor, lending-health-guard, lp-impermanent-loss-watch, near-staking-yield, near-lending-yield, near-lp-yield) when omitted or empty. `config` is optional.",
+      "`build_intent` requires `plan` (a MovementPlan from a Proposal). `config` and `solver` are optional; `solver` defaults to `fixture`."
+    ],
+    "notes": [
+      "All operations are read-only and produce no signed payloads. The agent never holds private keys.",
+      "Scan supports historical queries via the optional `at` field (block per chain or timestamp).",
+      "Sources: `fixture` (embedded test data), `dune` (EVM via Dune Sim), `near` (NEAR via FastNEAR+Intear), `auto` (detect per address).",
+      "Use `tool_info(name: \"portfolio\", detail: \"schema\")` for the full schema before guessing fields."
+    ],
+    "examples": [
+      {
+        "action": "scan",
+        "addresses": ["0x1234567890abcdef1234567890abcdef12345678"],
+        "chains": "*",
+        "source": "fixture"
+      },
+      {
+        "action": "propose",
+        "positions": [],
+        "strategies": [],
+        "config": { "floor_apy": 0.04, "max_risk_score": 3 }
+      }
+    ]
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "api.sim.dune.com",
+          "path_prefix": "/v1/evm/",
+          "methods": ["GET"]
+        },
+        {
+          "host": "api.fastnear.com",
+          "path_prefix": "/v1/account/",
+          "methods": ["GET"]
+        },
+        {
+          "host": "prices.intear.tech",
+          "path_prefix": "/",
+          "methods": ["GET"]
+        },
+        {
+          "host": "solver-relay.chaindefuser.com",
+          "path_prefix": "/rpc",
+          "methods": ["POST"]
+        }
+      ],
+      "credentials": {
+        "dune_api_key": {
+          "secret_name": "dune_api_key",
+          "location": {
+            "type": "header",
+            "name": "X-Sim-Api-Key"
+          },
+          "host_patterns": ["api.sim.dune.com"],
+          "optional": true
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 30,
+        "requests_per_hour": 1000
+      }
+    },
+    "secrets": {
+      "allowed_names": [
+        "dune_api_key"
+      ]
+    }
+  },
+  "auth": {
+    "secret_name": "dune_api_key",
+    "display_name": "Dune Analytics",
+    "instructions": "Create a Dune Sim API key at dune.com/settings/api and paste it here. Only needed for EVM address scans; NEAR scans work without it.",
+    "setup_url": "https://dune.com/settings/api",
+    "token_hint": "Starts with a string of alphanumeric characters",
+    "env_var": "DUNE_API_KEY",
+    "optional": true
+  },
+  "setup": {
+    "optional_secrets": [
+      {
+        "name": "dune_api_key",
+        "prompt": "Dune Sim API key (dune.com/settings/api). Required for EVM scans, not needed for NEAR."
+      }
+    ]
+  },
+  "config": {
+    "default_source": "auto",
+    "default_floor_apy": 0.04,
+    "default_max_risk_score": 3,
+    "default_max_slippage_bps": 50
+  }
+}

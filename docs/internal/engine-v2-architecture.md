@@ -116,7 +116,15 @@ The bridge connects the engine to existing T3Claw infrastructure:
 
 ### Enabling Engine v2
 
-Set `ENGINE_V2=true` environment variable. The router in `src/bridge/router.rs` intercepts messages and routes them through the engine instead of the v1 agent loop.
+Set `ENGINE_V2=true` in the environment. Without it, IronClaw keeps using the legacy v1 agent loop. The router in `src/bridge/router.rs` intercepts messages and routes them through the engine instead of the v1 agent loop.
+
+```bash
+# Installed binary
+ENGINE_V2=true ironclaw
+
+# Run from source
+ENGINE_V2=true cargo run
+```
 
 For trace debugging set `T3CLAW_RECORD_TRACE=1`. Engine v2 reuses the host crate's `RecordingLlm` (see `src/llm/recording.rs`) — the engine's `LlmBackend` is wired to the same provider chain, so LLM interactions are captured in the standard `trace_*.json` fixture file (configurable via `T3CLAW_TRACE_OUTPUT`). There is no separate engine trace file.
 

@@ -21,7 +21,6 @@ activation:
     - repetitive
     - notifications
     - digest
-    - summary
     - review daily
     - weekly review
   patterns:
@@ -51,6 +50,8 @@ Suggest a routine when you notice:
 - The user asks you to do something that sounds periodic
 - You've learned enough about the user to propose a relevant automation
 - The user has installed extensions that enable new monitoring capabilities
+
+Do not suggest or create a routine when the user asks for a one-time answer or says to do something now, right now, immediately, or ASAP without also asking for scheduling or recurrence.
 
 ## How to Suggest
 

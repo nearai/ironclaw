@@ -167,11 +167,10 @@ pub fn select_many(prompt: &str, options: &[(&str, bool)]) -> io::Result<Vec<usi
                     KeyCode::Up => {
                         cursor_pos = cursor_pos.saturating_sub(1);
                     }
-                    KeyCode::Down => {
-                        if cursor_pos < options.len() - 1 {
-                            cursor_pos += 1;
-                        }
+                    KeyCode::Down if cursor_pos < options.len() - 1 => {
+                        cursor_pos += 1;
                     }
+                    KeyCode::Down => {}
                     KeyCode::Char(' ') => {
                         selected[cursor_pos] = !selected[cursor_pos];
                     }
@@ -250,13 +249,12 @@ fn read_secret_line() -> io::Result<SecretString> {
                 KeyCode::Enter => {
                     break;
                 }
-                KeyCode::Backspace => {
-                    if !input.is_empty() {
-                        input.pop();
-                        execute!(stdout, Print("\x08 \x08"))?;
-                        stdout.flush()?;
-                    }
+                KeyCode::Backspace if !input.is_empty() => {
+                    input.pop();
+                    execute!(stdout, Print("\x08 \x08"))?;
+                    stdout.flush()?;
                 }
+                KeyCode::Backspace => {}
                 KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                     return Err(io::Error::new(io::ErrorKind::Interrupted, "Ctrl-C"));
                 }

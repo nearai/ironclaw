@@ -10,10 +10,9 @@ use clap::{Args, Subcommand};
 
 use crate::config::Config;
 use crate::db::Database;
-use crate::secrets::{CreateSecretParams, SecretsStore};
+use crate::secrets::SecretsStore;
 use crate::tools::mcp::{
-    LocalMcpAuthConfig, McpClient, McpProcessManager, McpServerConfig, McpSessionManager,
-    OAuthConfig,
+    McpClient, McpProcessManager, McpServerConfig, McpSessionManager, OAuthConfig,
     auth::{authorize_mcp_server, is_authenticated},
     config::{self, EffectiveTransport, McpServersFile},
     factory::create_client_from_config,
@@ -71,14 +70,6 @@ pub struct McpAddArgs {
     /// Server description
     #[arg(long)]
     pub description: Option<String>,
-
-    /// Browser URL for a one-time local setup step on stdio/unix transports.
-    #[arg(long)]
-    pub local_auth_url: Option<String>,
-
-    /// Instructions shown when users must complete a one-time local setup step.
-    #[arg(long)]
-    pub local_auth_instructions: Option<String>,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -148,25 +139,6 @@ fn parse_env_var(s: &str) -> Result<(String, String), String> {
     Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
 }
 
-const T3N_MCP_NAME: &str = "t3n-mcp";
-const T3N_LOGIN_URL: &str = "https://staging.network.terminal3.io/login";
-const T3N_LOCAL_AUTH_INSTRUCTIONS: &str = "Sign in to Trinity or create your account, then grant the agent permission to manage your Trinity profile and data.";
-
-fn builtin_local_auth_defaults(name: &str, transport: &str) -> Option<LocalMcpAuthConfig> {
-    let is_local_transport = matches!(transport, "stdio" | "unix");
-    if is_local_transport && name.eq_ignore_ascii_case(T3N_MCP_NAME) {
-        Some(
-            LocalMcpAuthConfig::new(T3N_LOCAL_AUTH_INSTRUCTIONS)
-                .with_auth_url(T3N_LOGIN_URL)
-                .with_completion_message(
-                    "Trinity setup confirmed. T3Claw can now use this MCP server.",
-                ),
-        )
-    } else {
-        None
-    }
-}
-
 /// Run an MCP command.
 pub async fn run_mcp_command(cmd: McpCommand) -> anyhow::Result<()> {
     match cmd {
@@ -207,8 +179,6 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
         token_url,
         scopes,
         description,
-        local_auth_url,
-        local_auth_instructions,
     } = args;
 
     let transport_lower = transport.to_lowercase();
@@ -251,26 +221,6 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
         config = config.with_description(desc);
     }
 
-    let local_auth = if local_auth_url.is_some() || local_auth_instructions.is_some() {
-        let instructions = local_auth_instructions.unwrap_or_else(|| {
-            format!(
-                "Complete the required setup for '{}' before T3Claw uses this MCP server.",
-                name
-            )
-        });
-        let local_auth = LocalMcpAuthConfig::new(instructions);
-        Some(if let Some(url) = local_auth_url {
-            local_auth.with_auth_url(url)
-        } else {
-            local_auth
-        })
-    } else {
-        builtin_local_auth_defaults(&name, &transport_lower)
-    };
-    if let Some(local_auth) = local_auth {
-        config = config.with_local_auth(local_auth);
-    }
-
     // Track if auth is required
     let requires_auth = client_id.is_some();
 
@@ -300,7 +250,6 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
     // Validate
     config.validate()?;
     let has_custom_auth_header = config.has_custom_auth_header();
-    let has_local_auth = config.local_auth.is_some();
 
     // Save (DB if available, else disk)
     let (db, owner_id) = connect_db().await;
@@ -331,13 +280,7 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
 
     if requires_auth && !has_custom_auth_header {
         println!();
-        println!("  Run 't3claw mcp auth {}' to authenticate.", name);
-    }
-    if has_local_auth {
-        println!();
-        println!(
-            "  This server has a one-time local setup step. T3Claw will direct users to the configured page when access is needed."
-        );
+        println!("  Run 'ironclaw mcp auth {}' to authenticate.", name);
     }
 
     println!();
@@ -371,7 +314,7 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
         println!("  No MCP servers configured.");
         println!();
         println!("  Add a server with:");
-        println!("    t3claw mcp add <name> <url> [--client-id <id>]");
+        println!("    ironclaw mcp add <name> <url> [--client-id <id>]");
         println!();
         return Ok(());
     }
@@ -479,7 +422,7 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
     if server.has_custom_auth_header() {
         println!();
         println!(
-            "  Server '{}' is configured with an Authorization header, so 't3claw mcp auth' is not used for this configuration.",
+            "  Server '{}' is configured with an Authorization header, so 'ironclaw mcp auth' is not used for this configuration.",
             name
         );
         println!("  Update or remove that header if you want to switch auth methods.");
@@ -489,82 +432,6 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
 
     // Initialize secrets store
     let secrets = get_secrets_store().await?;
-
-    if server.is_local_transport() {
-        if let Some(local_auth) = &server.local_auth {
-            if let Some(secret_name) = server.local_auth_completion_secret_name()
-                && secrets
-                    .exists(&user_id, &secret_name)
-                    .await
-                    .unwrap_or(false)
-            {
-                println!();
-                println!(
-                    "  Server '{}' is already marked ready for '{}'.",
-                    name, user_id
-                );
-                println!();
-                return Ok(());
-            }
-
-            println!();
-            println!("╔════════════════════════════════════════════════════════════════╗");
-            println!("║  {:^62}║", format!("{} Setup", name.to_uppercase()));
-            println!("╚════════════════════════════════════════════════════════════════╝");
-            println!();
-            println!("  {}", local_auth.instructions.trim());
-            if let Some(url) = &local_auth.auth_url {
-                println!();
-                println!("  Open:");
-                println!("    {}", url);
-            }
-            println!();
-            print!("  Type 'done' when this has been completed: ");
-            std::io::stdout().flush()?;
-
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input)?;
-            let normalized = input.trim().to_ascii_lowercase();
-            if !matches!(
-                normalized.as_str(),
-                "done" | "ready" | "complete" | "completed" | "authorised" | "authorized"
-            ) {
-                anyhow::bail!(
-                    "Setup not confirmed. Complete the external step, then run 't3claw mcp auth {}' again.",
-                    name
-                );
-            }
-
-            let secret_name = server
-                .local_auth_completion_secret_name()
-                .ok_or_else(|| anyhow::anyhow!("Local auth marker is not configured"))?;
-            secrets
-                .create(
-                    &user_id,
-                    CreateSecretParams::new(&secret_name, "confirmed").with_provider(name.clone()),
-                )
-                .await?;
-
-            println!();
-            println!(
-                "  ✓ {}",
-                local_auth
-                    .completion_message
-                    .as_deref()
-                    .unwrap_or("Setup confirmed. T3Claw can now use this MCP server.")
-            );
-            println!();
-            return Ok(());
-        }
-
-        println!();
-        println!(
-            "  Server '{}' uses a local transport and does not require MCP authentication.",
-            name
-        );
-        println!();
-        return Ok(());
-    }
 
     // Check if already authenticated
     if is_authenticated(&server, &secrets, &user_id).await {
@@ -608,9 +475,9 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
             println!("  The server may require a different authentication method,");
             println!("  or you may need to configure OAuth manually:");
             println!();
-            println!("    t3claw mcp remove {}", name);
+            println!("    ironclaw mcp remove {}", name);
             println!(
-                "    t3claw mcp add {} {} --client-id YOUR_CLIENT_ID",
+                "    ironclaw mcp add {} {} --client-id YOUR_CLIENT_ID",
                 name, server.url
             );
             println!();
@@ -664,7 +531,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
         // OAuth configured but no tokens - need to authenticate
         println!();
         println!(
-            "  ✗ Not authenticated. Run 't3claw mcp auth {}' first.",
+            "  ✗ Not authenticated. Run 'ironclaw mcp auth {}' first.",
             name
         );
         println!();
@@ -701,12 +568,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
                         };
                         println!("    • {}{}", tool.name, approval);
                         if !tool.description.is_empty() {
-                            // Truncate long descriptions
-                            let desc = if tool.description.len() > 60 {
-                                format!("{}...", &tool.description[..57])
-                            } else {
-                                tool.description.clone()
-                            };
+                            let desc = truncate_description(&tool.description);
                             println!("      {}", desc);
                         }
                     }
@@ -725,7 +587,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
                     println!(
                         "  ✗ Authentication failed (token may be expired). Try re-authenticating:"
                     );
-                    println!("    t3claw mcp auth {}", name);
+                    println!("    ironclaw mcp auth {}", name);
                 } else if server.has_custom_auth_header() {
                     println!("  ✗ Authentication failed.");
                     println!();
@@ -736,7 +598,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
                     // No tokens - server requires auth
                     println!("  ✗ Server requires authentication.");
                     println!();
-                    println!("  Run 't3claw mcp auth {}' to authenticate.", name);
+                    println!("  Run 'ironclaw mcp auth {}' to authenticate.", name);
                 }
             } else {
                 println!("  ✗ Connection failed: {}", e);
@@ -814,6 +676,16 @@ async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Syn
     crate::cli::init_secrets_store().await
 }
 
+/// Truncate a description to at most 57 display chars, appending "..." if needed.
+/// Uses char-safe boundary to avoid panicking on multi-byte UTF-8.
+fn truncate_description(s: &str) -> String {
+    if s.len() <= 60 {
+        return s.to_string();
+    }
+    let end = crate::util::floor_char_boundary(s, 57);
+    format!("{}...", &s[..end])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -876,28 +748,45 @@ mod tests {
     }
 
     #[test]
-    fn test_builtin_local_auth_defaults_seed_trinity_guidance_for_local_transport() {
-        let local_auth = builtin_local_auth_defaults("t3n-mcp", "unix").expect("local_auth");
-        assert_eq!(
-            local_auth.auth_url.as_deref(),
-            Some("https://staging.network.terminal3.io/login")
-        );
-        assert!(
-            local_auth
-                .instructions
-                .contains("grant the agent permission"),
-            "expected Trinity permission guidance, got: {}",
-            local_auth.instructions
-        );
-        assert_eq!(
-            local_auth.completion_message.as_deref(),
-            Some("Trinity setup confirmed. T3Claw can now use this MCP server.")
-        );
+    fn test_truncate_description_ascii() {
+        let short = "short description";
+        assert_eq!(truncate_description(short), short);
+
+        let exactly_60 = "a".repeat(60);
+        assert_eq!(truncate_description(&exactly_60), exactly_60);
+
+        let long = "a".repeat(80);
+        let truncated = truncate_description(&long);
+        assert!(truncated.ends_with("..."));
+        assert!(truncated.len() <= 60);
     }
 
     #[test]
-    fn test_builtin_local_auth_defaults_skip_http_transport() {
-        assert!(builtin_local_auth_defaults("t3n-mcp", "http").is_none());
-        assert!(builtin_local_auth_defaults("other-server", "unix").is_none());
+    fn test_truncate_description_cjk_no_panic() {
+        // CJK chars are 3 bytes each; 20 chars = 60 bytes
+        let cjk = "这是一个很长的工具描述用来测试多字节字符截断是否会导致恐慌问题的文本";
+        assert!(cjk.len() > 60);
+        let truncated = truncate_description(cjk);
+        assert!(truncated.ends_with("..."));
+        // Must be valid UTF-8 (no panic, no split char)
+        assert!(truncated.is_char_boundary(truncated.len()));
+    }
+
+    #[test]
+    fn test_truncate_description_emoji_no_panic() {
+        // Emoji are 4 bytes each; 16 emojis = 64 bytes
+        let emoji = "🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥";
+        assert!(emoji.len() > 60);
+        let truncated = truncate_description(emoji);
+        assert!(truncated.ends_with("..."));
+    }
+
+    #[test]
+    fn test_truncate_description_mixed_boundary() {
+        // ASCII + CJK boundary at exactly byte 57
+        let mixed = format!("{}{}", "a".repeat(56), "描述很长的文本需要截断");
+        assert!(mixed.len() > 60);
+        let truncated = truncate_description(&mixed);
+        assert!(truncated.ends_with("..."));
     }
 }

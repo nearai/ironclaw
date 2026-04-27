@@ -41,16 +41,16 @@ memory. Do not just acknowledge or summarize a delegation.
 
 Execution order is mandatory:
 1. Check for an existing matching commitment
-2. If needed, write or update the commitment in `commitments/open/`
+2. If needed, write or update the commitment in `projects/commitments/open/`
 3. Only then confirm what was tracked
 
 Never say "tracked", "saved", or "I'll flag it" unless the corresponding
 `memory_write` succeeded.
 
 **Action:**
-1. Check if a matching commitment already exists in `commitments/open/` via `memory_search`
+1. Check if a matching commitment already exists in `projects/commitments/open/` via `memory_search`
 2. If it exists: update the frontmatter — set `delegated_to: <person/team>`, `status: waiting`
-3. If it doesn't exist: create a new commitment in `commitments/open/` with:
+3. If it doesn't exist: create a new commitment in `projects/commitments/open/` with:
 
 ```
 ---
@@ -80,8 +80,8 @@ tags: [delegation]
 User says: "Sarah got back to me about the deployment" or "legal approved the contract."
 
 **Action:**
-1. Find the matching commitment via `memory_search` or `memory_tree("commitments/open/")`
-2. If the delegation is resolved: update status and move to `commitments/resolved/`
+1. Find the matching commitment via `memory_search` or `memory_tree("projects/commitments/open/")`
+2. If the delegation is resolved: update status and move to `projects/commitments/resolved/`
 3. If partially resolved: update the Progress section, keep status as `open` or `waiting`
 4. Confirm the update
 

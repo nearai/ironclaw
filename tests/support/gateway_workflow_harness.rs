@@ -15,9 +15,8 @@ use t3claw::app::{AppBuilder, AppBuilderFlags};
 use t3claw::channels::IncomingMessage;
 use t3claw::channels::web::auth::MultiAuthState;
 use t3claw::channels::web::log_layer::LogBroadcaster;
-use t3claw::channels::web::server::{
-    GatewayState, PerUserRateLimiter, RateLimiter, start_server,
-};
+use t3claw::channels::web::platform::router::start_server;
+use t3claw::channels::web::platform::state::{GatewayState, PerUserRateLimiter, RateLimiter};
 use t3claw::channels::web::sse::SseManager;
 use t3claw::channels::web::ws::WsConnectionTracker;
 use t3claw::config::{Config, RegistryProviderConfig, RoutineConfig};
@@ -217,12 +216,14 @@ impl GatewayWorkflowHarness {
             sse: Arc::new(SseManager::new()),
             workspace: components.workspace.clone(),
             workspace_pool: None,
+            multi_tenant_mode: false,
             session_manager: Some(Arc::clone(&agent_session_manager)),
             log_broadcaster: None,
             log_level_handle: None,
             extension_manager: components.extension_manager.clone(),
             tool_registry: Some(Arc::clone(&components.tools)),
             store: components.db.clone(),
+            settings_cache: None,
             job_manager: None,
             prompt_queue: None,
             scheduler: Some(scheduler_slot.clone()),
@@ -230,6 +231,9 @@ impl GatewayWorkflowHarness {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: Some(Arc::clone(&components.llm)),
+            llm_reload: None,
+            llm_session_manager: None,
+            config_toml_path: None,
             skill_registry: components.skill_registry.clone(),
             skill_catalog: components.skill_catalog.clone(),
             auth_manager: None,
@@ -240,7 +244,9 @@ impl GatewayWorkflowHarness {
             cost_guard: Some(Arc::clone(&components.cost_guard)),
             routine_engine: Arc::clone(&routine_slot),
             startup_time: Instant::now(),
-            active_config: t3claw::channels::web::server::ActiveConfigSnapshot::default(),
+            active_config: Arc::new(tokio::sync::RwLock::new(
+                t3claw::channels::web::platform::state::ActiveConfigSnapshot::default(),
+            )),
             secrets_store: None,
             db_auth: None,
             pairing_store: None,
@@ -261,6 +267,7 @@ impl GatewayWorkflowHarness {
             AgentDeps {
                 owner_id: components.config.owner_id.clone(),
                 store: components.db,
+                settings_store: components.settings_store,
                 llm: components.llm,
                 cheap_llm: components.cheap_llm,
                 safety: components.safety,
@@ -281,9 +288,7 @@ impl GatewayWorkflowHarness {
                     t3claw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
                 builder: None,
                 llm_backend: "nearai".to_string(),
-                tenant_rates: std::sync::Arc::new(t3claw::tenant::TenantRateRegistry::new(
-                    4, 3,
-                )),
+                tenant_rates: std::sync::Arc::new(t3claw::tenant::TenantRateRegistry::new(4, 3)),
             },
             channels,
             None,

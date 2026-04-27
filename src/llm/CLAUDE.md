@@ -25,7 +25,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `costs.rs` | Static per-model cost table (OpenAI, Anthropic, local/Ollama heuristics) |
 | `rig_adapter.rs` | Adapter bridging rig-core `CompletionModel` → `LlmProvider`; used by OpenAI, Anthropic, Ollama, Tinfoil |
 | `smart_routing.rs` | `SmartRoutingProvider` — 13-dimension complexity scorer routes cheap vs primary model |
-| `recording.rs` | `RecordingLlm` — trace capture for E2E replay testing (`T3CLAW_RECORD_TRACE`) |
+| `recording.rs` | `RecordingLlm` — trace capture for E2E replay testing (`IRONCLAW_RECORD_TRACE`) |
 | `bedrock.rs` | AWS Bedrock provider via native Converse API (feature-gated: `--features bedrock`) |
 
 ## Provider Selection
@@ -46,8 +46,8 @@ Set via `LLM_BACKEND` env var:
 
 Codex auth reuse:
 - Set `LLM_USE_CODEX_AUTH=true` to load credentials from `~/.codex/auth.json` (override with `CODEX_AUTH_PATH`).
-- If Codex is logged in with API-key mode, T3Claw uses the standard OpenAI endpoint.
-- If Codex is logged in with ChatGPT OAuth mode, T3Claw routes to the private `chatgpt.com/backend-api/codex` Responses API via `codex_chatgpt.rs`.
+- If Codex is logged in with API-key mode, IronClaw uses the standard OpenAI endpoint.
+- If Codex is logged in with ChatGPT OAuth mode, IronClaw routes to the private `chatgpt.com/backend-api/codex` Responses API via `codex_chatgpt.rs`.
 - ChatGPT mode supports one automatic 401 refresh using the refresh token persisted in `auth.json`.
 
 ## AWS Bedrock Provider
@@ -85,12 +85,14 @@ ID, migrate to it immediately. Advanced users can override headers via
 ## NEAR AI Provider Gotchas
 
 **Dual auth modes:**
-- **Session token** (default): `NEARAI_SESSION_TOKEN=sess_...`, base URL = `https://private.near.ai`. Tokens are persisted to `~/.t3claw/session.json` (mode 0600) and optionally to the DB `settings` table (`nearai.session_token`). On 401 responses where the body contains "session" + "expired"/"invalid", `NearAiChatProvider` calls `session.handle_auth_failure()` which triggers the interactive OAuth login flow and retries once. Plain `AuthFailed` 401s are not retried.
+- **Session token** (default): `NEARAI_SESSION_TOKEN=sess_...`, base URL = `https://private.near.ai`. Tokens are persisted to `~/.ironclaw/session.json` (mode 0600) and optionally to the DB `settings` table (`nearai.session_token`). On 401 responses where the body contains "session" + "expired"/"invalid", `NearAiChatProvider` calls `session.handle_auth_failure()` which triggers the interactive OAuth login flow and retries once. Plain `AuthFailed` 401s are not retried.
 - **API key**: Set `NEARAI_API_KEY` (from `cloud.near.ai`), base URL defaults to `https://cloud-api.near.ai`. 401s with API key auth are immediately returned as `LlmError::AuthFailed` — no renewal.
 
 **Session renewal is interactive:** When `SessionExpired` triggers renewal, it blocks and prompts the user in the terminal (GitHub/Google OAuth or manual API key entry). This is unsuitable for headless/hosted deployments — set `NEARAI_SESSION_TOKEN` env var instead.
 
 **Tool message flattening:** NEAR AI's API doesn't support `role: "tool"` messages in the standard format. `nearai_chat.rs` defaults `flatten_tool_messages = true`, converting tool results to user messages with `[Tool result from <name>]: <content>` format. Use `NearAiChatProvider::new_with_flatten(..., false)` to disable for compliant endpoints.
+
+**Tool schema normalization:** `nearai_chat.rs` applies the same `normalize_schema_strict()` boundary normalization as `RigAdapter::convert_tools` and `openai_codex_provider.rs` before sending tool definitions. Top-level `oneOf`/`anyOf`/`allOf`/`enum`/`not` schemas are flattened into a permissive object envelope so providers that reject those shapes do not fail with HTTP 400.
 
 **Pricing auto-fetch:** On startup, `NearAiChatProvider` fires a background task to fetch per-model pricing from `/v1/model/list`. If the fetch fails, it silently falls back to `costs::model_cost()` / `costs::default_cost()`. Pricing is stored in-memory only.
 
@@ -109,7 +111,7 @@ Closed (normal)
 
 **Transient vs non-transient errors:** Only `RequestFailed`, `RateLimited`, `InvalidResponse`, `SessionExpired`, `SessionRenewalFailed`, `Http`, and `Io` count toward the threshold. `AuthFailed`, `ContextLengthExceeded`, `ModelNotAvailable`, and `Json` errors never trip the breaker — they indicate caller problems, not backend degradation.
 
-Configure via `NearAiConfig` fields: `circuit_breaker_threshold` (None = disabled), `circuit_breaker_recovery_secs` (default: 30).
+Configure via `LlmConfig` fields: `circuit_breaker_threshold` (env: `LLM_CIRCUIT_BREAKER_THRESHOLD`, falls back to `CIRCUIT_BREAKER_THRESHOLD`; None = disabled), `circuit_breaker_recovery_secs` (env: `LLM_CIRCUIT_BREAKER_RECOVERY_SECS`; default: 30).
 
 The circuit breaker wraps the entire provider chain. When open, it immediately returns `LlmError::RequestFailed` with a message including remaining cooldown seconds. The `FailoverProvider` sitting outside can then try a fallback model.
 
@@ -127,7 +129,7 @@ The circuit breaker wraps the entire provider chain. When open, it immediately r
 
 **Backoff schedule:** base 1s doubled per attempt with ±25% jitter, minimum floor 100ms. Attempt 0: ~1s, attempt 1: ~2s, attempt 2: ~4s. For `RateLimited`, uses the `retry_after` duration from the error (provider-supplied) instead of backoff.
 
-Configure via `NearAiConfig.max_retries` (env: `NEARAI_MAX_RETRIES`; default: 3). Set to 0 to disable.
+Configure via `LlmConfig.max_retries` (env: `LLM_MAX_RETRIES`, falls back to `NEARAI_MAX_RETRIES`; default: 3). Set to 0 to disable.
 
 ## LlmProvider Trait
 
@@ -168,7 +170,7 @@ To add a new provider:
 
 `CachedProvider` in `response_cache.rs` caches `complete()` responses. `complete_with_tools()` is never cached (side effects). Cache key is SHA-256 of `(model_name, messages_json, max_tokens, temperature, stop_sequences)`. LRU eviction when `max_entries` is reached; TTL-based expiry on access.
 
-**Defaults:** TTL = 1 hour, max entries = 1000. Configure via `NearAiConfig` fields: `response_cache_enabled` (env: `NEARAI_RESPONSE_CACHE_ENABLED`), `response_cache_ttl_secs`, `response_cache_max_entries`. Cache is in-memory only — evicted on restart.
+**Defaults:** TTL = 1 hour, max entries = 1000. Configure via `LlmConfig` fields: `response_cache_enabled` (env: `LLM_RESPONSE_CACHE_ENABLED`, falls back to `RESPONSE_CACHE_ENABLED`), `response_cache_ttl_secs` (env: `LLM_RESPONSE_CACHE_TTL_SECS`), `response_cache_max_entries` (env: `LLM_RESPONSE_CACHE_MAX_ENTRIES`). Cache is in-memory only — evicted on restart.
 
 ## OpenAI-Compatible Custom Headers
 
@@ -178,7 +180,7 @@ Set `LLM_EXTRA_HEADERS=Key:Value,Key2:Value2` to inject headers into every reque
 
 Uses the Responses API at `chatgpt.com/backend-api/codex/responses` with ChatGPT subscription OAuth tokens (zero API cost — billing through subscription).
 
-**Auth flow:** Device code OAuth via `auth.openai.com/api/accounts/deviceauth/*` endpoints. On first run, displays a code for the user to enter at a URL. Tokens are persisted to `~/.t3claw/openai_codex_session.json` (mode 0600) and auto-refreshed before expiry.
+**Auth flow:** Device code OAuth via `auth.openai.com/api/accounts/deviceauth/*` endpoints. On first run, displays a code for the user to enter at a URL. Tokens are persisted to `~/.ironclaw/openai_codex_session.json` (mode 0600) and auto-refreshed before expiry.
 
 **Provider chain:** `OpenAiCodexProvider` → `TokenRefreshingProvider` (pre-emptive refresh + retry on 401) → standard decorator chain. The `TokenRefreshingProvider` intercepts `AuthFailed`/`SessionExpired` errors, refreshes the OAuth token, and retries once.
 
@@ -201,9 +203,9 @@ Raw provider
   → RetryProvider           (per-provider backoff; wraps both primary and fallback)
   → SmartRoutingProvider    (cheap/primary split when NEARAI_CHEAP_MODEL is set)
   → FailoverProvider        (fallback model; only when NEARAI_FALLBACK_MODEL is set)
-  → CircuitBreakerProvider  (fast-fail; only when NEARAI_CIRCUIT_BREAKER_THRESHOLD is set)
-  → CachedProvider          (response cache; only when NEARAI_RESPONSE_CACHE_ENABLED=true)
-  → RecordingLlm            (trace capture; only when T3CLAW_RECORD_TRACE is set)
+  → CircuitBreakerProvider  (fast-fail; only when LLM_CIRCUIT_BREAKER_THRESHOLD is set)
+  → CachedProvider          (response cache; only when LLM_RESPONSE_CACHE_ENABLED=true)
+  → RecordingLlm            (trace capture; only when IRONCLAW_RECORD_TRACE is set)
 ```
 
 `build_provider_chain()` also returns a separate standalone cheap LLM provider (for heartbeat/evaluation tasks — not part of the decorator chain).
@@ -238,4 +240,4 @@ No streaming support. All providers use non-streaming (blocking) Chat Completion
 
 ## Trace Recording
 
-Set `T3CLAW_RECORD_TRACE=1` to enable live trace recording via `RecordingLlm`. Traces are JSON files containing: memory snapshot, HTTP exchanges from tools, and LLM steps (user inputs, text responses, tool call responses). Replay these in E2E tests via `TraceLlm`. Configure output path with `T3CLAW_TRACE_OUTPUT` (default: `trace_{timestamp}.json`).
+Set `IRONCLAW_RECORD_TRACE=1` to enable live trace recording via `RecordingLlm`. Traces are JSON files containing: memory snapshot, HTTP exchanges from tools, and LLM steps (user inputs, text responses, tool call responses). Replay these in E2E tests via `TraceLlm`. Configure output path with `IRONCLAW_TRACE_OUTPUT` (default: `trace_{timestamp}.json`).

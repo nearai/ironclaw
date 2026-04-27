@@ -683,7 +683,7 @@ pub async fn connect_docker() -> Result<Docker> {
 }
 
 #[cfg(unix)]
-fn unix_socket_candidates() -> Vec<PathBuf> {
+pub(crate) fn unix_socket_candidates() -> Vec<PathBuf> {
     unix_socket_candidates_from_env(
         std::env::var_os("HOME").map(PathBuf::from),
         std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),

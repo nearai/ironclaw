@@ -1,0 +1,59 @@
+---
+source: tests/e2e_engine_v2.rs
+assertion_line: 528
+---
+response_count: 1
+has_final_response: true
+tool_calls:
+  - name: echo
+    success: true
+events:
+  - kind: thinking
+    message: processing...
+  - kind: thinking
+    message: calling llm...
+  - kind: thinking
+    message: step complete — 100 in / 30 out tokens
+  - kind: tool_started
+    name: echo
+  - kind: tool_completed
+    name: echo
+    success: true
+    error: ~
+  - kind: thinking
+    message: calling llm...
+  - kind: thinking
+    message: step complete — 150 in / 15 out tokens
+  - kind: status
+    message: done
+  - kind: other
+    variant: Other
+event_kind_counts:
+  Other: 1
+  Status: 1
+  Thinking: 5
+  ToolCompleted: 1
+  ToolStarted: 1
+llm_call_count: 2
+safety_warning_count: 0
+engine_threads:
+  - final_state: Done
+    step_count: 2
+    message_roles:
+      - System
+      - User
+      - Assistant
+    event_kinds:
+      - MessageAdded
+      - StateChanged
+      - StepStarted
+      - StepCompleted
+      - ActionExecuted
+      - StepStarted
+      - StepCompleted
+      - StateChanged
+      - MessageAdded
+      - StateChanged
+    issues:
+      - severity: info
+        category: mixed_mode

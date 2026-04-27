@@ -1562,7 +1562,7 @@ pub struct JobPromptTool {
     context_manager: Arc<ContextManager>,
 }
 
-/// Type alias matching `crate::channels::web::server::PromptQueue`.
+/// Type alias matching `crate::channels::web::platform::state::PromptQueue`.
 pub type PromptQueue = Arc<
     tokio::sync::Mutex<
         std::collections::HashMap<

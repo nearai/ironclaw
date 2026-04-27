@@ -200,6 +200,15 @@ impl LeaseManager {
     /// - Child leases inherit the parent's expiry (never outlive parent).
     /// - Child leases inherit the parent's remaining budget.
     /// - Expired parent leases yield no child leases.
+    ///
+    /// **Budget note:** `max_uses` is a point-in-time snapshot of
+    /// `parent.uses_remaining`. Parent and child budgets are independent after
+    /// derivation — the parent can keep consuming its own lease. This means the
+    /// combined usage (parent + child) may exceed the parent's original
+    /// `max_uses`. This is intentional: the child gets an at-spawn budget
+    /// rather than a shared atomic counter, which avoids cross-thread
+    /// contention. Callers needing strict global budgets should use
+    /// time-based expiry or cost-based limits at the thread level.
     pub async fn derive_child_leases(
         &self,
         parent_thread_id: ThreadId,

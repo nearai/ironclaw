@@ -1,0 +1,24 @@
+{
+  "id": "compound-v3",
+  "name": "Compound v3",
+  "category": "lending",
+  "match_protocol_ids": ["compound_v3", "compound-v3", "comet", "compound"],
+  "chains": ["ethereum", "base", "arbitrum", "polygon"],
+  "contract_addrs_by_chain": {
+    "ethereum": ["0xc3d688b66703497daa19211eedff47f25384cdc3"],
+    "base": ["0xb125e6687d4313864e53df431d5425969c15eb2f"],
+    "arbitrum": ["0xa5edbdd9646f8dff606d7448e414884c7d905dca"],
+    "polygon": ["0xf25212e676d1f7f89cd72ffee66158f541246445"]
+  },
+  "base_risk_score": 2,
+  "liquidity_tier": "instant",
+  "withdrawal_delay_seconds": 0,
+  "yield_field": "supply_apy",
+  "audits": ["OpenZeppelin", "ChainSecurity"],
+  "tvl_floor_usd": 500000000,
+  "oracle_deps": ["Chainlink"],
+  "health_metric": {
+    "name": "borrow_collateralization",
+    "danger_threshold": 1.05
+  }
+}

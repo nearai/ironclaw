@@ -204,6 +204,7 @@ mod test_channel_tests {
                     error: None,
                     parameters: None,
                     call_id: None,
+                    duration_ms: None,
                 },
                 &metadata,
             )
@@ -329,6 +330,7 @@ mod test_channel_tests {
                     error: None,
                     parameters: None,
                     call_id: None,
+                    duration_ms: None,
                 },
                 &serde_json::Value::Null,
             )

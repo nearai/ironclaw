@@ -7,13 +7,12 @@ import uuid
 import httpx
 import pytest
 
-from helpers import AUTH_TOKEN, SEL, api_post, signed_http_webhook_headers
+from helpers import AUTH_TOKEN, SEL, api_post, ensure_writable_chat_input, signed_http_webhook_headers
 
 
 async def _send_chat_message(page, message: str) -> None:
     """Send a chat message and wait for the assistant turn to appear."""
-    chat_input = page.locator(SEL["chat_input"])
-    await chat_input.wait_for(state="visible", timeout=5000)
+    chat_input = await ensure_writable_chat_input(page)
     assistant_messages = page.locator(SEL["message_assistant"])
     before_count = await assistant_messages.count()
 

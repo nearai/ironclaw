@@ -578,11 +578,22 @@ impl ToolRegistry {
     ///
     /// Memory tools require a workspace resolver for persistence. Call this after
     /// `register_builtin_tools()` if you have a workspace available.
+    ///
+    /// Accepts an optional LLM provider and reasoning flag for reasoning-augmented
+    /// recall on `memory_search`. When `reasoning_llm` is `Some` and
+    /// `reasoning_enabled` is `true`, the search tool can synthesize results via
+    /// an LLM call before returning.
     pub fn register_memory_tools_with_resolver(
         &self,
         resolver: Arc<dyn crate::tools::builtin::memory::WorkspaceResolver>,
+        reasoning_llm: Option<Arc<dyn crate::llm::LlmProvider>>,
+        reasoning_enabled: bool,
     ) {
-        self.register_sync(Arc::new(MemorySearchTool::new(Arc::clone(&resolver))));
+        self.register_sync(Arc::new(MemorySearchTool::with_reasoning(
+            Arc::clone(&resolver),
+            reasoning_llm,
+            reasoning_enabled,
+        )));
         self.register_sync(Arc::new(MemoryWriteTool::new(Arc::clone(&resolver))));
         self.register_sync(Arc::new(MemoryReadTool::new(Arc::clone(&resolver))));
         self.register_sync(Arc::new(MemoryTreeTool::new(resolver)));

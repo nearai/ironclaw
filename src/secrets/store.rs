@@ -18,6 +18,13 @@ use uuid::Uuid;
 use crate::secrets::crypto::SecretsCrypto;
 use crate::secrets::types::{CreateSecretParams, DecryptedSecret, Secret, SecretError, SecretRef};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretConsumeResult {
+    Matched,
+    Mismatched,
+    NotFound,
+}
+
 /// Trait for secret storage operations.
 ///
 /// Allows for different implementations (PostgreSQL, in-memory for testing).
@@ -40,8 +47,48 @@ pub trait SecretsStore: Send + Sync {
         name: &str,
     ) -> Result<DecryptedSecret, SecretError>;
 
+    /// Atomically consume a secret only when its decrypted plaintext matches
+    /// the provided expected value.
+    ///
+    /// Backends should override this to eliminate read-then-delete races.
+    async fn consume_if_matches(
+        &self,
+        user_id: &str,
+        name: &str,
+        expected_value: &str,
+    ) -> Result<SecretConsumeResult, SecretError> {
+        match self.get_decrypted(user_id, name).await {
+            Ok(secret) => {
+                if secret.expose() != expected_value {
+                    return Ok(SecretConsumeResult::Mismatched);
+                }
+                self.delete(user_id, name).await?;
+                Ok(SecretConsumeResult::Matched)
+            }
+            Err(SecretError::NotFound(_)) => Ok(SecretConsumeResult::NotFound),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Check if a secret exists.
     async fn exists(&self, user_id: &str, name: &str) -> Result<bool, SecretError>;
+
+    /// Returns `true` if the store contains at least one secret across
+    /// all users.
+    ///
+    /// Used as a startup safety gate: if IronClaw auto-generated a
+    /// fresh master key because neither `SECRETS_MASTER_KEY` nor a
+    /// keychain entry was available, but the secrets table is already
+    /// populated, those rows were encrypted with a different key and
+    /// cannot be decrypted. Failing loudly beats silently shadowing
+    /// unrecoverable data.
+    ///
+    /// Default implementation returns `Ok(false)` so test doubles and
+    /// ephemeral stores don't need to implement it. Durable backends
+    /// (PostgreSQL, libSQL) MUST override.
+    async fn any_exist(&self) -> Result<bool, SecretError> {
+        Ok(false)
+    }
 
     /// List all secret references for a user (no values).
     async fn list(&self, user_id: &str) -> Result<Vec<SecretRef>, SecretError>;
@@ -176,6 +223,69 @@ impl SecretsStore for PostgresSecretsStore {
             .decrypt(&secret.encrypted_value, &secret.key_salt)
     }
 
+    async fn consume_if_matches(
+        &self,
+        user_id: &str,
+        name: &str,
+        expected_value: &str,
+    ) -> Result<SecretConsumeResult, SecretError> {
+        let name = name.to_lowercase();
+        let mut client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| SecretError::Database(e.to_string()))?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|e| SecretError::Database(e.to_string()))?;
+
+        let row = tx
+            .query_opt(
+                r#"
+                SELECT id, user_id, name, encrypted_value, key_salt, provider, expires_at,
+                       last_used_at, usage_count, created_at, updated_at
+                FROM secrets
+                WHERE user_id = $1 AND name = $2
+                FOR UPDATE
+                "#,
+                &[&user_id, &name],
+            )
+            .await
+            .map_err(|e| SecretError::Database(e.to_string()))?;
+
+        let Some(row) = row else {
+            return Ok(SecretConsumeResult::NotFound);
+        };
+
+        let secret = row_to_secret(&row);
+        if let Some(expires_at) = secret.expires_at
+            && expires_at < Utc::now()
+        {
+            return Err(SecretError::Expired);
+        }
+
+        let decrypted = self
+            .crypto
+            .decrypt(&secret.encrypted_value, &secret.key_salt)?;
+        if decrypted.expose() != expected_value {
+            return Ok(SecretConsumeResult::Mismatched);
+        }
+
+        tx.execute(
+            "DELETE FROM secrets WHERE user_id = $1 AND name = $2",
+            &[&user_id, &name],
+        )
+        .await
+        .map_err(|e| SecretError::Database(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| SecretError::Database(e.to_string()))?;
+
+        Ok(SecretConsumeResult::Matched)
+    }
+
     async fn exists(&self, user_id: &str, name: &str) -> Result<bool, SecretError> {
         let name = name.to_lowercase();
         let client = self
@@ -189,6 +299,21 @@ impl SecretsStore for PostgresSecretsStore {
                 "SELECT EXISTS(SELECT 1 FROM secrets WHERE user_id = $1 AND name = $2)",
                 &[&user_id, &name],
             )
+            .await
+            .map_err(|e| SecretError::Database(e.to_string()))?;
+
+        Ok(row.get(0))
+    }
+
+    async fn any_exist(&self) -> Result<bool, SecretError> {
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| SecretError::Database(e.to_string()))?;
+
+        let row = client
+            .query_one("SELECT EXISTS(SELECT 1 FROM secrets)", &[])
             .await
             .map_err(|e| SecretError::Database(e.to_string()))?;
 
@@ -465,6 +590,82 @@ impl SecretsStore for LibSqlSecretsStore {
             .decrypt(&secret.encrypted_value, &secret.key_salt)
     }
 
+    async fn consume_if_matches(
+        &self,
+        user_id: &str,
+        name: &str,
+        expected_value: &str,
+    ) -> Result<SecretConsumeResult, SecretError> {
+        let name = name.to_lowercase();
+        let conn = self.connect().await?;
+
+        // safety: BEGIN IMMEDIATE acquires a write lock up front so the
+        // compare-and-delete flow cannot race with another callback.
+        conn.execute("BEGIN IMMEDIATE", ())
+            .await
+            .map_err(|e| SecretError::Database(e.to_string()))?;
+
+        let result = async {
+            let mut rows = conn
+                .query(
+                    r#"
+                    SELECT id, user_id, name, encrypted_value, key_salt, provider, expires_at,
+                           last_used_at, usage_count, created_at, updated_at
+                    FROM secrets
+                    WHERE user_id = ?1 AND name = ?2
+                    "#,
+                    libsql::params![user_id, name.as_str()],
+                )
+                .await
+                .map_err(|e| SecretError::Database(e.to_string()))?;
+
+            let Some(row) = rows
+                .next()
+                .await
+                .map_err(|e| SecretError::Database(e.to_string()))?
+            else {
+                return Ok(SecretConsumeResult::NotFound);
+            };
+
+            let secret = libsql_row_to_secret(&row)?;
+            if let Some(expires_at) = secret.expires_at
+                && expires_at < Utc::now()
+            {
+                return Err(SecretError::Expired);
+            }
+
+            let decrypted = self
+                .crypto
+                .decrypt(&secret.encrypted_value, &secret.key_salt)?;
+            if decrypted.expose() != expected_value {
+                return Ok(SecretConsumeResult::Mismatched);
+            }
+
+            conn.execute(
+                "DELETE FROM secrets WHERE user_id = ?1 AND name = ?2",
+                libsql::params![user_id, name.as_str()],
+            )
+            .await
+            .map_err(|e| SecretError::Database(e.to_string()))?;
+
+            Ok(SecretConsumeResult::Matched)
+        }
+        .await;
+
+        match result {
+            Ok(outcome) => {
+                conn.execute("COMMIT", ())
+                    .await
+                    .map_err(|e| SecretError::Database(e.to_string()))?;
+                Ok(outcome)
+            }
+            Err(e) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(e)
+            }
+        }
+    }
+
     async fn exists(&self, user_id: &str, name: &str) -> Result<bool, SecretError> {
         let name = name.to_lowercase();
         let conn = self.connect().await?;
@@ -473,6 +674,20 @@ impl SecretsStore for LibSqlSecretsStore {
                 "SELECT 1 FROM secrets WHERE user_id = ?1 AND name = ?2",
                 libsql::params![user_id, name.as_str()],
             )
+            .await
+            .map_err(|e| SecretError::Database(e.to_string()))?;
+
+        Ok(rows
+            .next()
+            .await
+            .map_err(|e| SecretError::Database(e.to_string()))?
+            .is_some())
+    }
+
+    async fn any_exist(&self) -> Result<bool, SecretError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query("SELECT 1 FROM secrets LIMIT 1", libsql::params![])
             .await
             .map_err(|e| SecretError::Database(e.to_string()))?;
 
@@ -659,6 +874,7 @@ pub mod in_memory {
     use uuid::Uuid;
 
     use crate::secrets::crypto::SecretsCrypto;
+    use crate::secrets::store::SecretConsumeResult;
     use crate::secrets::store::SecretsStore;
     use crate::secrets::types::{
         CreateSecretParams, DecryptedSecret, Secret, SecretError, SecretRef,
@@ -739,12 +955,46 @@ pub mod in_memory {
                 .decrypt(&secret.encrypted_value, &secret.key_salt)
         }
 
+        async fn consume_if_matches(
+            &self,
+            user_id: &str,
+            name: &str,
+            expected_value: &str,
+        ) -> Result<SecretConsumeResult, SecretError> {
+            let name = name.to_lowercase();
+            let mut secrets = self.secrets.write().await;
+            let key = (user_id.to_string(), name.clone());
+            let Some(secret) = secrets.get(&key).cloned() else {
+                return Ok(SecretConsumeResult::NotFound);
+            };
+
+            if let Some(expires_at) = secret.expires_at
+                && expires_at < Utc::now()
+            {
+                return Err(SecretError::Expired);
+            }
+
+            let decrypted = self
+                .crypto
+                .decrypt(&secret.encrypted_value, &secret.key_salt)?;
+            if decrypted.expose() != expected_value {
+                return Ok(SecretConsumeResult::Mismatched);
+            }
+
+            secrets.remove(&key);
+            Ok(SecretConsumeResult::Matched)
+        }
+
         async fn exists(&self, user_id: &str, name: &str) -> Result<bool, SecretError> {
             Ok(self
                 .secrets
                 .read()
                 .await
                 .contains_key(&(user_id.to_string(), name.to_lowercase())))
+        }
+
+        async fn any_exist(&self) -> Result<bool, SecretError> {
+            Ok(!self.secrets.read().await.is_empty())
         }
 
         async fn list(&self, user_id: &str) -> Result<Vec<SecretRef>, SecretError> {
@@ -802,7 +1052,7 @@ pub mod in_memory {
 
 #[cfg(test)]
 mod tests {
-    use crate::secrets::store::SecretsStore;
+    use crate::secrets::store::{SecretConsumeResult, SecretsStore};
     use crate::secrets::types::CreateSecretParams;
     use crate::testing::credentials::{
         TEST_OPENAI_API_KEY_SHORT, TEST_SECRET_VALUE, TEST_STRIPE_KEY, test_secrets_store,
@@ -833,6 +1083,29 @@ mod tests {
         assert!(store.exists("user1", "my_secret").await.unwrap());
     }
 
+    /// `any_exist` backs the startup safety gate: if IronClaw
+    /// auto-generates a master key and the store is already populated,
+    /// those rows were encrypted with a different key and startup must
+    /// fail. The predicate must report the global store state, not
+    /// scoped to a user.
+    #[tokio::test]
+    async fn any_exist_reflects_global_store_state() {
+        let store = test_store();
+        assert!(
+            !store.any_exist().await.unwrap(),
+            "empty store must report no rows"
+        );
+
+        store
+            .create("user_a", CreateSecretParams::new("k", "v"))
+            .await
+            .unwrap();
+        assert!(
+            store.any_exist().await.unwrap(),
+            "store with a row must report rows present, even for a different user"
+        );
+    }
+
     #[tokio::test]
     async fn test_delete() {
         let store = test_store();
@@ -843,6 +1116,28 @@ mod tests {
 
         store.delete("user1", "to_delete").await.unwrap();
         assert!(!store.exists("user1", "to_delete").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_consume_if_matches_deletes_only_on_match() {
+        let store = test_store();
+        let params = CreateSecretParams::new("oauth_state", "expected-nonce");
+
+        store.create("user1", params).await.unwrap();
+
+        let mismatched = store
+            .consume_if_matches("user1", "oauth_state", "wrong-nonce")
+            .await
+            .unwrap();
+        assert_eq!(mismatched, SecretConsumeResult::Mismatched);
+        assert!(store.exists("user1", "oauth_state").await.unwrap());
+
+        let matched = store
+            .consume_if_matches("user1", "oauth_state", "expected-nonce")
+            .await
+            .unwrap();
+        assert_eq!(matched, SecretConsumeResult::Matched);
+        assert!(!store.exists("user1", "oauth_state").await.unwrap());
     }
 
     #[tokio::test]

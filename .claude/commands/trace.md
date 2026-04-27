@@ -35,9 +35,9 @@ StatusUpdate variant (channel.rs)
     → WebChannel::send_status() (web/mod.rs) maps to SseEvent
       → broadcast via tokio::broadcast channel
     → SSE endpoint streams events (web/server.rs)
-      → Browser EventSource listener (app.js)
-        → DOM update function
-        → CSS styling (style.css)
+      → Browser EventSource listener (js/core/sse.js)
+        → DOM update function (js/surfaces/<surface>.js or js/core/<module>.js)
+        → CSS styling (styles/surfaces/<surface>.css or styles/components/*.css)
 ```
 
 ### Tool Flow (tool definition to execution)
@@ -72,7 +72,7 @@ Tool trait impl (tools/builtin/*.rs or tools/mcp/client.rs or tools/wasm/wrapper
 | Channel trait | `src/channels/channel.rs` | `Channel`, `StatusUpdate`, `IncomingMessage` |
 | Web gateway | `src/channels/web/mod.rs` | `send_status`, `send_response` |
 | Web server | `src/channels/web/server.rs` | Route handlers, SSE endpoints |
-| Web frontend | `src/channels/web/static/app.js` | SSE listeners, DOM builders |
+| Web frontend | `crates/ironclaw_gateway/static/js/` (core/ + surfaces/) | SSE listeners in `core/sse.js`; DOM builders per surface |
 | Tool registry | `src/tools/registry.rs` | `tool_definitions`, `get`, `register` |
 | MCP tools | `src/tools/mcp/client.rs` | `McpToolWrapper`, `list_tools`, `call_tool` |
 | MCP protocol | `src/tools/mcp/protocol.rs` | `McpTool`, `inputSchema` |

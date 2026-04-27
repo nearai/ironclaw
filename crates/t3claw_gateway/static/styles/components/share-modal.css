@@ -1,0 +1,102 @@
+/* Share modal */
+.share-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+}
+.share-modal {
+  background: var(--bg-primary, #1a1a2e);
+  border: 1px solid var(--border, #333);
+  border-radius: 12px;
+  padding: 24px;
+  width: 420px;
+  max-width: 92vw;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.share-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+.share-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary, #eee);
+}
+.share-close {
+  background: none;
+  border: none;
+  color: var(--text-muted, #888);
+  font-size: 22px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+.share-close:hover {
+  color: var(--text-primary, #eee);
+}
+.share-preview {
+  margin-bottom: 20px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #111;
+}
+.share-card-img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.share-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+.share-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  border: 1px solid var(--border, #333);
+  background: var(--bg-secondary, #222);
+  color: var(--text-primary, #ddd);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, transform 0.1s;
+}
+.share-btn:hover {
+  background: var(--bg-tertiary, #333);
+  transform: translateY(-1px);
+}
+.share-btn:active {
+  transform: translateY(0);
+}
+.share-x:hover { color: #1da1f2; }
+.share-linkedin:hover { color: #0077b5; }
+.share-facebook:hover { color: #1877f2; }
+.share-toast {
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted, #888);
+  margin-top: 12px;
+  height: 20px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.share-toast.visible {
+  opacity: 1;
+}
+@media (max-width: 768px) {
+  .share-overlay { align-items: flex-end; }
+  .share-modal {
+    width: 100%;
+    max-width: 100%;
+    border-radius: 12px 12px 0 0;
+  }
+}

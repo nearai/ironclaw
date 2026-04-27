@@ -47,6 +47,9 @@
         "messages_per_minute": 100,
         "messages_per_hour": 5000
       },
+      "durable_workspace_paths": [
+        "state/active_threads"
+      ],
       "webhook": {
         "hmac_secret_name": "slack_signing_secret"
       }

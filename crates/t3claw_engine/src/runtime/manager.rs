@@ -396,17 +396,6 @@ impl ThreadManager {
         }
     }
 
-    /// Send a stop signal without ownership check (system operations).
-    pub async fn stop_thread_system(&self, thread_id: ThreadId) -> Result<(), EngineError> {
-        let running = self.running.read().await;
-        if let Some(rt) = running.get(&thread_id) {
-            let _ = rt.signal_tx.send(ThreadSignal::Stop).await;
-            Ok(())
-        } else {
-            Err(EngineError::ThreadNotFound(thread_id))
-        }
-    }
-
     /// Inject a user message into a running thread.
     pub async fn inject_message(
         &self,
@@ -423,24 +412,6 @@ impl ThreadManager {
                 entity: format!("thread {thread_id}"),
             });
         }
-        let running = self.running.read().await;
-        if let Some(rt) = running.get(&thread_id) {
-            let _ = rt
-                .signal_tx
-                .send(ThreadSignal::InjectMessage(message))
-                .await;
-            Ok(())
-        } else {
-            Err(EngineError::ThreadNotFound(thread_id))
-        }
-    }
-
-    /// Inject a message without ownership check (system operations).
-    pub async fn inject_message_system(
-        &self,
-        thread_id: ThreadId,
-        message: ThreadMessage,
-    ) -> Result<(), EngineError> {
         let running = self.running.read().await;
         if let Some(rt) = running.get(&thread_id) {
             let _ = rt
@@ -905,6 +876,9 @@ mod tests {
             _: ProjectId,
             _: &str,
         ) -> Result<Vec<MemoryDoc>, EngineError> {
+            Ok(vec![])
+        }
+        async fn list_memory_docs_by_owner(&self, _: &str) -> Result<Vec<MemoryDoc>, EngineError> {
             Ok(vec![])
         }
         async fn save_lease(&self, lease: &CapabilityLease) -> Result<(), EngineError> {

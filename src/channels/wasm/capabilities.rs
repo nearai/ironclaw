@@ -41,6 +41,13 @@ pub struct ChannelCapabilities {
     /// Example: "channels/slack/" means writes to "state.json" become "channels/slack/state.json".
     pub workspace_prefix: String,
 
+    /// Workspace paths that are safe to persist across restarts.
+    ///
+    /// Paths are stored with the channel prefix already applied.
+    /// This allowlist exists so we do not accidentally persist secrets or
+    /// short-lived tokens that some channels keep in their callback workspace.
+    pub durable_workspace_paths: Vec<String>,
+
     /// Rate limiting for emit_message calls.
     pub emit_rate_limit: EmitRateLimitConfig,
 
@@ -59,6 +66,7 @@ impl Default for ChannelCapabilities {
             allow_polling: false,
             min_poll_interval_ms: MIN_POLL_INTERVAL_MS,
             workspace_prefix: String::new(),
+            durable_workspace_paths: Vec::new(),
             emit_rate_limit: EmitRateLimitConfig::default(),
             max_message_size: 64 * 1024, // 64 KB
             callback_timeout: Duration::from_secs(30),
@@ -85,6 +93,15 @@ impl ChannelCapabilities {
     pub fn with_polling(mut self, min_interval_ms: u32) -> Self {
         self.allow_polling = true;
         self.min_poll_interval_ms = min_interval_ms.max(MIN_POLL_INTERVAL_MS);
+        self
+    }
+
+    /// Set workspace paths that are safe to persist across restarts.
+    pub fn with_durable_workspace_paths(mut self, paths: Vec<String>) -> Self {
+        self.durable_workspace_paths = paths
+            .into_iter()
+            .map(|path| self.prefix_workspace_path(&path))
+            .collect();
         self
     }
 
@@ -131,6 +148,13 @@ impl ChannelCapabilities {
         } else {
             format!("{}{}", self.workspace_prefix, path)
         }
+    }
+
+    /// Returns true if the fully-prefixed workspace path is restart-durable.
+    pub fn is_durable_workspace_path(&self, full_path: &str) -> bool {
+        self.durable_workspace_paths
+            .iter()
+            .any(|path| path == full_path)
     }
 
     /// Check if a workspace path is valid for this channel.
@@ -297,6 +321,19 @@ mod tests {
         // Block null bytes
         let result = caps.validate_workspace_path("file\0.txt");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_durable_workspace_paths_are_prefixed() {
+        let caps = ChannelCapabilities::for_channel("slack")
+            .with_durable_workspace_paths(vec!["state/active_threads".to_string()]);
+
+        assert_eq!(
+            caps.durable_workspace_paths,
+            vec!["channels/slack/state/active_threads".to_string()]
+        );
+        assert!(caps.is_durable_workspace_path("channels/slack/state/active_threads"));
+        assert!(!caps.is_durable_workspace_path("channels/slack/state/owner_id"));
     }
 
     #[test]

@@ -64,15 +64,15 @@ This skill is only successful if the decision is actually persisted. Do not
 just summarize or acknowledge the decision.
 
 Execution order is mandatory:
-1. Call `memory_write` for `commitments/decisions/<date>-<slug>.md`
-2. If applicable, call `memory_write` for a follow-on commitment in `commitments/open/`
+1. Call `memory_write` for `projects/commitments/decisions/<date>-<slug>.md`
+2. If applicable, call `memory_write` for a follow-on commitment in `projects/commitments/open/`
 3. If applicable, call `memory_write` for `context/intel/<slug>.md`
 4. Only then confirm to the user what was recorded
 
 Never say a decision was "captured", "recorded", or "saved" unless the
 corresponding `memory_write` call succeeded.
 
-Write to `commitments/decisions/<date>-<slug>.md` via `memory_write`:
+Write to `projects/commitments/decisions/<date>-<slug>.md` via `memory_write`:
 
 ```
 ---
@@ -104,7 +104,7 @@ tags: [<relevant tags>]
 
 ## Follow-through
 
-1. If the decision creates an obligation (e.g., "we decided to migrate by Q2"), also create a commitment in `commitments/open/` following the commitment schema.
+1. If the decision creates an obligation (e.g., "we decided to migrate by Q2"), also create a commitment in `projects/commitments/open/` following the commitment schema.
 2. Write an intelligence MemoryDoc to `context/intel/<slug>.md` with a brief summary: "Decided X on <date>. Rationale: <reason>." This makes the decision searchable as durable knowledge.
 
 For explicit requests like "record this decision", "log this decision", or

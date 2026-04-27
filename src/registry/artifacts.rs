@@ -251,12 +251,48 @@ pub async fn install_wasm_files(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::MutexGuard;
+
     use tempfile::TempDir;
 
     use super::*;
 
+    struct ScopedTargetDirEnv {
+        original: Option<String>,
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    impl ScopedTargetDirEnv {
+        fn clear() -> Self {
+            let guard = crate::config::helpers::lock_env();
+            let original = std::env::var("CARGO_TARGET_DIR").ok();
+            // SAFETY: Under ENV_MUTEX, no concurrent env access.
+            unsafe {
+                std::env::remove_var("CARGO_TARGET_DIR");
+            }
+            Self {
+                original,
+                _guard: guard,
+            }
+        }
+    }
+
+    impl Drop for ScopedTargetDirEnv {
+        fn drop(&mut self) {
+            // SAFETY: Under ENV_MUTEX (still held by _guard), no concurrent env access.
+            unsafe {
+                if let Some(ref value) = self.original {
+                    std::env::set_var("CARGO_TARGET_DIR", value);
+                } else {
+                    std::env::remove_var("CARGO_TARGET_DIR");
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_resolve_target_dir_default() {
+        let _env = ScopedTargetDirEnv::clear();
         // When CARGO_TARGET_DIR is not set, should return <crate_dir>/target
         let dir = Path::new("/some/crate");
         let result = resolve_target_dir(dir);
@@ -265,12 +301,14 @@ mod tests {
 
     #[test]
     fn test_find_wasm_artifact_not_found() {
+        let _env = ScopedTargetDirEnv::clear();
         let dir = TempDir::new().unwrap();
         assert!(find_wasm_artifact(dir.path(), "nonexistent", "release").is_none());
     }
 
     #[test]
     fn test_find_wasm_artifact_found() {
+        let _env = ScopedTargetDirEnv::clear();
         let dir = TempDir::new().unwrap();
         let target_base = resolve_target_dir(dir.path());
         let wasm_dir = target_base.join("wasm32-wasip2/release");
@@ -284,6 +322,7 @@ mod tests {
 
     #[test]
     fn test_find_wasm_artifact_hyphen_to_underscore() {
+        let _env = ScopedTargetDirEnv::clear();
         let dir = TempDir::new().unwrap();
         let target_base = resolve_target_dir(dir.path());
         let wasm_dir = target_base.join("wasm32-wasip1/release");
@@ -297,6 +336,7 @@ mod tests {
 
     #[test]
     fn test_find_any_wasm_artifact_found() {
+        let _env = ScopedTargetDirEnv::clear();
         let dir = TempDir::new().unwrap();
         let target_base = resolve_target_dir(dir.path());
         let wasm_dir = target_base.join("wasm32-wasip2/release");
@@ -309,6 +349,7 @@ mod tests {
 
     #[test]
     fn test_find_any_wasm_artifact_not_found() {
+        let _env = ScopedTargetDirEnv::clear();
         let dir = TempDir::new().unwrap();
         assert!(find_any_wasm_artifact(dir.path(), "release").is_none());
     }

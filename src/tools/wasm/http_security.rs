@@ -262,7 +262,10 @@ mod tests {
             pin_host_resolution: true,
         };
 
+        // Disable proxy so reqwest uses the pinned DNS resolution directly
+        // rather than routing through an egress proxy that resolves on its own.
         let client = super::ssrf_safe_client_builder_for_target(&target)
+            .no_proxy()
             .build()
             .unwrap();
         let response = client

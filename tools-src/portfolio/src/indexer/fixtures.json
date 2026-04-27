@@ -1,0 +1,64 @@
+{
+  "addresses": {
+    "0x1111111111111111111111111111111111111111": [
+      {
+        "chain": "base",
+        "protocol_id": "test_lending",
+        "position_type": "supply",
+        "address": "0x1111111111111111111111111111111111111111",
+        "token_balances": [
+          {
+            "symbol": "USDC",
+            "address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            "chain": "base",
+            "amount": "5000.000000",
+            "value_usd": "5000.00"
+          }
+        ],
+        "debt_balances": [],
+        "reward_balances": [],
+        "raw_metadata": {
+          "supply_apy": 0.032,
+          "borrow_apy": 0.0,
+          "pool_contract": "0x0000000000000000000000000000000000000abc"
+        },
+        "block_number": 12000000,
+        "fetched_at": 1712822400
+      }
+    ],
+    "0x2222222222222222222222222222222222222222": [
+      {
+        "chain": "ethereum",
+        "protocol_id": "aave_v3",
+        "position_type": "supply",
+        "address": "0x2222222222222222222222222222222222222222",
+        "token_balances": [
+          {
+            "symbol": "USDC",
+            "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+            "chain": "ethereum",
+            "amount": "6000.000000",
+            "value_usd": "6000.00"
+          }
+        ],
+        "debt_balances": [
+          {
+            "symbol": "WETH",
+            "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "chain": "ethereum",
+            "amount": "1.3",
+            "value_usd": "4680.00"
+          }
+        ],
+        "reward_balances": [],
+        "raw_metadata": {
+          "supply_apy": 0.038,
+          "borrow_apy": 0.062,
+          "health_factor": 1.15
+        },
+        "block_number": 19500000,
+        "fetched_at": 1712822400
+      }
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "quote_id": "q-hostile-1",
+  "quote_version": "near-intents/1",
+  "legs": [
+    {
+      "id": "swap-0",
+      "kind": "swap",
+      "chain": "base",
+      "near_intent_payload": {"op": "swap", "note": "min_out deliberately too low"},
+      "min_out": {
+        "symbol": "USDC",
+        "chain": "base",
+        "amount": "4000.00",
+        "value_usd": "4000.00"
+      },
+      "quoted_by": "hostile-solver"
+    }
+  ],
+  "total_cost_usd": "0.50",
+  "expires_at_unix": 1800000000
+}

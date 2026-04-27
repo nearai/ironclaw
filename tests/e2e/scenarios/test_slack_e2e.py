@@ -9,9 +9,11 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import time
 
 import httpx
+import pytest
 
 from helpers import api_post, auth_headers
 
@@ -23,6 +25,7 @@ SIGNING_SECRET = "e2e-test-slack-signing-secret"
 OWNER_USER_ID = "U42OWNER"
 # Bot user ID (used to detect self-messages and strip mentions).
 BOT_USER_ID = "UBOTUSER"
+PAIRING_CODE_RE = re.compile(r"approve slack ([A-Z0-9]+)|`([A-Z0-9]+)`")
 
 
 # -- helpers ---------------------------------------------------------------
@@ -65,6 +68,7 @@ def _patch_slack_capabilities_for_testing(channels_dir: str):
 
     1. Add files.slack.com to HTTP allowlist for file download tests.
     2. Add files.slack.com to credential host_patterns.
+    3. Bind the test Slack owner so DM tests do not depend on pairing state.
     """
     cap_path = os.path.join(channels_dir, "slack.capabilities.json")
     assert os.path.exists(cap_path), (
@@ -90,12 +94,15 @@ def _patch_slack_capabilities_for_testing(channels_dir: str):
     if "files.slack.com" not in host_patterns:
         host_patterns.append("files.slack.com")
 
+    config = caps.setdefault("config", {})
+    config["owner_id"] = OWNER_USER_ID
+
     with open(cap_path, "w") as f:
         json.dump(caps, f, indent=2)
 
 
 async def activate_slack(
-    base_url: str, fake_slack_url: str, channels_dir: str
+    base_url: str, http_url: str, fake_slack_url: str, channels_dir: str
 ) -> None:
     """Install (if needed) and set up the Slack channel.
 
@@ -126,6 +133,57 @@ async def activate_slack(
     assert body.get("activated") or body.get("success"), (
         f"Slack setup failed: {body}"
     )
+
+    # Complete DM pairing so subsequent Slack webhook tests exercise the real
+    # chat path instead of the pairing prompt path.
+    await reset_fake_slack(fake_slack_url)
+    pairing_resp = await post_slack_webhook(
+        http_url,
+        build_slack_dm_event(OWNER_USER_ID, "hello"),
+    )
+    assert pairing_resp.status_code == 200
+    messages = await wait_for_sent_messages(fake_slack_url, min_count=1, timeout=30)
+    code = extract_pairing_code(messages)
+    if code:
+        await approve_slack_pairing(base_url, code)
+    await reset_fake_slack(fake_slack_url)
+
+
+def extract_pairing_code(messages: list[dict]) -> str | None:
+    """Extract a pairing code from Slack reply text."""
+    for message in reversed(messages):
+        text = message.get("text", "")
+        match = PAIRING_CODE_RE.search(text)
+        if match:
+            return match.group(1) or match.group(2)
+    return None
+
+
+async def approve_slack_pairing(base_url: str, code: str) -> None:
+    """Approve a Slack pairing code through the web API."""
+    async with httpx.AsyncClient() as c:
+        response = await c.post(
+            f"{base_url}/api/pairing/slack/approve",
+            headers=auth_headers(),
+            json={"code": code},
+            timeout=10,
+        )
+    response.raise_for_status()
+    body = response.json()
+    assert body.get("success"), f"Slack pairing approval failed: {body}"
+
+
+@pytest.fixture
+async def active_slack(slack_e2e_server):
+    """Ensure Slack is installed, configured, and clean for each test."""
+    base_url = slack_e2e_server["base_url"]
+    http_url = slack_e2e_server["http_url"]
+    fake_slack_url = slack_e2e_server["fake_slack_url"]
+    channels_dir = slack_e2e_server["channels_dir"]
+
+    await activate_slack(base_url, http_url, fake_slack_url, channels_dir)
+    await reset_fake_slack(fake_slack_url)
+    return slack_e2e_server
 
 
 def build_slack_dm_event(
@@ -254,18 +312,10 @@ async def get_api_calls(fake_slack_url: str) -> list[dict]:
 # -- tests -----------------------------------------------------------------
 
 
-async def test_slack_setup_and_dm_roundtrip(slack_e2e_server):
+async def test_slack_setup_and_dm_roundtrip(active_slack):
     """Full DM round-trip: setup -> webhook -> mock LLM -> chat.postMessage."""
-    base_url = slack_e2e_server["base_url"]
-    http_url = slack_e2e_server["http_url"]
-    fake_slack_url = slack_e2e_server["fake_slack_url"]
-    channels_dir = slack_e2e_server["channels_dir"]
-
-    # Reset fake API and activate the Slack channel
-    await activate_slack(base_url, fake_slack_url, channels_dir)
-
-    # Clear fake API state to only capture round-trip messages
-    await reset_fake_slack(fake_slack_url)
+    http_url = active_slack["http_url"]
+    fake_slack_url = active_slack["fake_slack_url"]
 
     # POST a DM webhook event as the verified owner
     payload = build_slack_dm_event(OWNER_USER_ID, "hello")
@@ -276,15 +326,14 @@ async def test_slack_setup_and_dm_roundtrip(slack_e2e_server):
     messages = await wait_for_sent_messages(fake_slack_url, min_count=1, timeout=30)
     reply_text = messages[-1].get("text", "")
     assert reply_text, f"Empty reply text. All sent messages: {messages}"
+    assert "Hello! How can I help you today?" in reply_text
     assert messages[-1]["channel"] == f"D{OWNER_USER_ID}"
 
 
-async def test_slack_app_mention_roundtrip(slack_e2e_server):
+async def test_slack_app_mention_roundtrip(active_slack):
     """app_mention in channel -> reply with correct channel + thread_ts."""
-    http_url = slack_e2e_server["http_url"]
-    fake_slack_url = slack_e2e_server["fake_slack_url"]
-
-    await reset_fake_slack(fake_slack_url)
+    http_url = active_slack["http_url"]
+    fake_slack_url = active_slack["fake_slack_url"]
 
     ts = f"{time.time():.6f}"
     payload = build_slack_mention_event(
@@ -303,9 +352,9 @@ async def test_slack_app_mention_roundtrip(slack_e2e_server):
     assert reply.get("thread_ts") == ts or reply.get("thread_ts") is not None
 
 
-async def test_slack_url_verification_challenge(slack_e2e_server):
+async def test_slack_url_verification_challenge(active_slack):
     """url_verification event -> response contains challenge echo."""
-    http_url = slack_e2e_server["http_url"]
+    http_url = active_slack["http_url"]
 
     challenge_value = "test-challenge-token-12345"
     payload = {
@@ -314,14 +363,7 @@ async def test_slack_url_verification_challenge(slack_e2e_server):
         "challenge": challenge_value,
     }
 
-    # url_verification doesn't use HMAC signing
-    async with httpx.AsyncClient() as c:
-        resp = await c.post(
-            f"{http_url}/webhook/slack",
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=10,
-        )
+    resp = await post_slack_webhook(http_url, payload)
 
     assert resp.status_code == 200
     body = resp.text
@@ -331,12 +373,10 @@ async def test_slack_url_verification_challenge(slack_e2e_server):
     )
 
 
-async def test_slack_unauthorized_user_rejected(slack_e2e_server):
+async def test_slack_unauthorized_user_rejected(active_slack):
     """A webhook from a non-owner user should not produce a chat.postMessage reply."""
-    http_url = slack_e2e_server["http_url"]
-    fake_slack_url = slack_e2e_server["fake_slack_url"]
-
-    await reset_fake_slack(fake_slack_url)
+    http_url = active_slack["http_url"]
+    fake_slack_url = active_slack["fake_slack_url"]
 
     # Send a DM from a different user (not the owner)
     payload = build_slack_dm_event("U99STRANGER", "hello from stranger")
@@ -358,9 +398,9 @@ async def test_slack_unauthorized_user_rejected(slack_e2e_server):
         )
 
 
-async def test_slack_invalid_hmac_signature_rejected(slack_e2e_server):
+async def test_slack_invalid_hmac_signature_rejected(active_slack):
     """Webhook with wrong HMAC signature is rejected."""
-    http_url = slack_e2e_server["http_url"]
+    http_url = active_slack["http_url"]
 
     payload = build_slack_dm_event(OWNER_USER_ID, "should be rejected")
     resp = await post_slack_webhook(
@@ -371,9 +411,9 @@ async def test_slack_invalid_hmac_signature_rejected(slack_e2e_server):
     )
 
 
-async def test_slack_missing_hmac_headers_rejected(slack_e2e_server):
+async def test_slack_missing_hmac_headers_rejected(active_slack):
     """Webhook with no signature headers is rejected."""
-    http_url = slack_e2e_server["http_url"]
+    http_url = active_slack["http_url"]
 
     payload = build_slack_dm_event(OWNER_USER_ID, "should be rejected")
     # signing_secret=None means no HMAC headers are sent
@@ -383,12 +423,10 @@ async def test_slack_missing_hmac_headers_rejected(slack_e2e_server):
     )
 
 
-async def test_slack_bot_message_ignored(slack_e2e_server):
+async def test_slack_bot_message_ignored(active_slack):
     """Event with bot_id is silently dropped (no reply)."""
-    http_url = slack_e2e_server["http_url"]
-    fake_slack_url = slack_e2e_server["fake_slack_url"]
-
-    await reset_fake_slack(fake_slack_url)
+    http_url = active_slack["http_url"]
+    fake_slack_url = active_slack["fake_slack_url"]
 
     payload = build_slack_dm_event(
         OWNER_USER_ID,
@@ -407,12 +445,10 @@ async def test_slack_bot_message_ignored(slack_e2e_server):
     )
 
 
-async def test_slack_message_subtype_ignored(slack_e2e_server):
+async def test_slack_message_subtype_ignored(active_slack):
     """Event with subtype is silently dropped (no reply)."""
-    http_url = slack_e2e_server["http_url"]
-    fake_slack_url = slack_e2e_server["fake_slack_url"]
-
-    await reset_fake_slack(fake_slack_url)
+    http_url = active_slack["http_url"]
+    fake_slack_url = active_slack["fake_slack_url"]
 
     payload = build_slack_dm_event(
         OWNER_USER_ID,
@@ -431,12 +467,10 @@ async def test_slack_message_subtype_ignored(slack_e2e_server):
     )
 
 
-async def test_slack_bot_mention_stripped(slack_e2e_server):
+async def test_slack_bot_mention_stripped(active_slack):
     """<@UBOTUSER> hello -> LLM sees 'hello' (mention stripped)."""
-    http_url = slack_e2e_server["http_url"]
-    fake_slack_url = slack_e2e_server["fake_slack_url"]
-
-    await reset_fake_slack(fake_slack_url)
+    http_url = active_slack["http_url"]
+    fake_slack_url = active_slack["fake_slack_url"]
 
     payload = build_slack_mention_event(
         OWNER_USER_ID,
@@ -452,12 +486,10 @@ async def test_slack_bot_mention_stripped(slack_e2e_server):
     assert len(messages) >= 1, f"Expected a reply, got: {messages}"
 
 
-async def test_slack_thread_reply_includes_thread_ts(slack_e2e_server):
+async def test_slack_thread_reply_includes_thread_ts(active_slack):
     """DM with thread_ts -> reply includes thread_ts in chat.postMessage."""
-    http_url = slack_e2e_server["http_url"]
-    fake_slack_url = slack_e2e_server["fake_slack_url"]
-
-    await reset_fake_slack(fake_slack_url)
+    http_url = active_slack["http_url"]
+    fake_slack_url = active_slack["fake_slack_url"]
 
     thread_ts = "1234567890.000001"
     payload = build_slack_dm_event(
@@ -475,12 +507,10 @@ async def test_slack_thread_reply_includes_thread_ts(slack_e2e_server):
     )
 
 
-async def test_slack_malformed_payload_resilience(slack_e2e_server):
+async def test_slack_malformed_payload_resilience(active_slack):
     """Bad JSON -> 200/400 (not 500), bot still works after."""
-    http_url = slack_e2e_server["http_url"]
-    fake_slack_url = slack_e2e_server["fake_slack_url"]
-
-    await reset_fake_slack(fake_slack_url)
+    http_url = active_slack["http_url"]
+    fake_slack_url = active_slack["fake_slack_url"]
 
     # Send a completely malformed payload
     body_bytes = b'{"not_a_valid_slack_event": true}'
@@ -524,12 +554,10 @@ async def test_slack_malformed_payload_resilience(slack_e2e_server):
     )
 
 
-async def test_slack_file_attachment_with_dm(slack_e2e_server):
+async def test_slack_file_attachment_with_dm(active_slack):
     """DM with files array -> file download attempted, message still processed."""
-    http_url = slack_e2e_server["http_url"]
-    fake_slack_url = slack_e2e_server["fake_slack_url"]
-
-    await reset_fake_slack(fake_slack_url)
+    http_url = active_slack["http_url"]
+    fake_slack_url = active_slack["fake_slack_url"]
 
     payload = build_slack_dm_event(
         OWNER_USER_ID,

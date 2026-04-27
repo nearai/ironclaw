@@ -48,13 +48,14 @@ HEADED=1 pytest scenarios/
 | File | What it tests |
 |------|--------------|
 | `test_connection.py` | Gateway reachability, tab navigation, auth rejection (no token shows auth screen) |
-| `test_chat.py` | Send message via browser UI, verify streamed response from mock LLM; also tests empty-message suppression |
+| `test_chat.py` | Send message via browser UI, verify streamed response from mock LLM, attachment upload/thread rendering, and empty-message suppression |
 | `test_html_injection.py` | XSS vectors injected directly via `page.evaluate("addMessage('assistant', ...)")` are sanitized by `renderMarkdown`; user messages are shown as escaped plain text |
 | `test_skills.py` | Skills tab UI visibility, ClawHub search (skipped if registry unreachable), install + remove lifecycle |
 | `test_sse_reconnect.py` | SSE reconnect basics plus keepalive comments, multi-tab fanout, restart recovery/history rebuild, stale reconnect IDs, and connection-limit handling |
 | `test_tool_approval.py` | Approval card appears, buttons disable on approve/deny, parameters toggle via `page.evaluate("showApproval(...)")`; the waiting-approval regression uses a real HTTP tool call |
 | `test_extension_uninstall_cleanup.py` | Real install/setup/remove coverage for WASM tools, WASM channels, OAuth-backed shared Google tools, and MCP servers; verifies uninstall deletes stored secrets from the libSQL `secrets` table while preserving shared credentials until the last referencing extension is removed |
 | `test_oauth_refresh.py` | Hosted Gmail OAuth regression: complete setup via `/oauth/callback`, expire the stored access token in libSQL, trigger a real `gmail` tool call through `/api/chat/send`, and verify refresh goes through the mock `/oauth/refresh` proxy without forwarding `client_secret` |
+| `test_dom_resource_limits.py` | DOM pruning at MAX_DOM_MESSAGES cap, no setInterval timer leaks across SSE reconnect cycles, streaming message preservation during pruning |
 
 ## `helpers.py`
 

@@ -47,15 +47,23 @@ def _forward_coverage_env(env: dict):
 
 
 async def _stop_process(proc, sig=signal.SIGINT, timeout=5):
+    async def _drain_pipes():
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=1)
+        except (asyncio.TimeoutError, ValueError):
+            pass
+
     try:
         proc.send_signal(sig)
     except ProcessLookupError:
+        await _drain_pipes()
         return
     try:
         await asyncio.wait_for(proc.wait(), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
+    await _drain_pipes()
 
 
 # ---------------------------------------------------------------------------
@@ -260,31 +268,52 @@ async def v2_server(ironclaw_binary, mock_llm_server, mock_api):
                 await _stop_process(proc, sig=signal.SIGTERM, timeout=5)
 
 
+@pytest.fixture(autouse=True)
+async def _pin_mock_github_api_url(mock_llm_server, mock_api):
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{mock_llm_server}/__mock/set_github_api_url",
+            json={"url": mock_api["url"]},
+        )
+        response.raise_for_status()
+    yield
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 async def _wait_for_auth_prompt(base_url, thread_id, *, timeout=45.0):
-    auth_indicators = ["paste your token", "token below", "authentication required for"]
+    """Poll until the thread is gate-paused for authentication via pending_gate."""
     for _ in range(int(timeout * 2)):
         r = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}", timeout=15)
         r.raise_for_status()
-        turns = r.json().get("turns", [])
-        if turns:
-            last = (turns[-1].get("response") or "").lower()
-            if last and any(ind in last for ind in auth_indicators):
-                return r.json()
+        history = r.json()
+        pending = history.get("pending_gate")
+        if isinstance(pending, dict):
+            resume_kind = pending.get("resume_kind") or {}
+            gate_name = (pending.get("gate_name") or "").lower()
+            if gate_name == "authentication" or (
+                isinstance(resume_kind, dict) and "Authentication" in resume_kind
+            ):
+                return history
         await asyncio.sleep(0.5)
 
     last = ""
+    pending_snapshot = None
     try:
         r = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}", timeout=15)
-        turns = r.json().get("turns", [])
+        payload = r.json()
+        turns = payload.get("turns", [])
         if turns:
             last = turns[-1].get("response") or "(None)"
+        pending_snapshot = payload.get("pending_gate")
     except Exception:
         pass
-    raise AssertionError(f"Timed out waiting for auth prompt. Last response: {last[:500]}")
+    raise AssertionError(
+        f"Timed out waiting for auth prompt. "
+        f"Last response: {last[:500]}. pending_gate: {pending_snapshot}"
+    )
 
 
 async def _wait_for_response(base_url, thread_id, *, timeout=45.0, expect_substring=None):
