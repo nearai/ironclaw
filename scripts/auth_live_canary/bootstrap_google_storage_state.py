@@ -55,13 +55,45 @@ def parse_args() -> argparse.Namespace:
         default="https://accounts.google.com/",
         help="URL to land on before manual login (default: accounts.google.com).",
     )
+    parser.add_argument(
+        "--browser",
+        choices=("firefox", "chrome", "chromium"),
+        default="firefox",
+        help=(
+            "Which browser to launch for the manual login. Default 'firefox' "
+            "is most reliable for Google sign-in — Playwright Firefox uses "
+            "Marionette which Google's anti-automation detector is less "
+            "aggressive about. 'chrome' uses the system Google Chrome install "
+            "(may still trip Google's 'browser may not be secure' block). "
+            "'chromium' uses the Playwright-bundled Chrome for Testing build "
+            "(Google reliably blocks this for sign-in)."
+        ),
+    )
     return parser.parse_args()
 
 
-async def capture_storage_state(output: Path, start_url: str) -> None:
+async def capture_storage_state(output: Path, start_url: str, browser_kind: str) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False)
+        if browser_kind == "firefox":
+            browser_type = p.firefox
+            launch_kwargs: dict = {"headless": False}
+        elif browser_kind == "chrome":
+            browser_type = p.chromium
+            launch_kwargs = {"headless": False, "channel": "chrome"}
+        else:  # "chromium"
+            browser_type = p.chromium
+            launch_kwargs = {"headless": False}
+        try:
+            browser = await browser_type.launch(**launch_kwargs)
+        except Exception as exc:
+            raise SystemExit(
+                f"Failed to launch {browser_kind!r}: {exc}\n"
+                f"For 'firefox', run: tests/e2e/.venv/bin/python -m playwright install firefox\n"
+                f"For 'chrome', install Google Chrome from https://www.google.com/chrome/\n"
+                f"To bypass and use Playwright's bundled Chromium (Google likely "
+                f"blocks sign-in), pass --browser chromium."
+            ) from exc
         context = await browser.new_context(viewport={"width": 1280, "height": 720})
         page = await context.new_page()
         await page.goto(start_url)
@@ -87,7 +119,7 @@ async def capture_storage_state(output: Path, start_url: str) -> None:
 
 def main() -> int:
     args = parse_args()
-    asyncio.run(capture_storage_state(args.output, args.start_url))
+    asyncio.run(capture_storage_state(args.output, args.start_url, args.browser))
     return 0
 
 

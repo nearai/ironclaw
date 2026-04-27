@@ -580,14 +580,24 @@ async def handle_google_popup(popup: Any, case_key: str) -> None:
             candidates.append(
                 popup.locator(f'[data-identifier="{username}"]').first
             )
-        # Generic: click any visible text matching an email pattern that
-        # isn't "Use another account".
+        # Generic fallback when no username is configured: pick the first
+        # visible interactive element (link/button) whose accessible text
+        # looks like an email address. Filtering by ARIA role excludes
+        # spurious matches against `<style>` blocks (CSS at-rules contain
+        # `@`) and other non-clickable text nodes that would otherwise
+        # match a naive `:has-text` filter.
+        email_pattern = re.compile(r"\S+@\S+\.\S+")
         candidates.append(
-            popup.locator(
-                "xpath=//*[contains(text(), '@') "
-                "and not(contains(translate(text(), 'USE ANOTHER ACCOUNT', "
-                "'use another account'), 'use another account'))]"
-            ).first
+            popup.get_by_role("link")
+            .filter(has_text=email_pattern)
+            .filter(has_not_text=re.compile(r"Use another account", re.I))
+            .first
+        )
+        candidates.append(
+            popup.get_by_role("button")
+            .filter(has_text=email_pattern)
+            .filter(has_not_text=re.compile(r"Use another account", re.I))
+            .first
         )
         for idx, candidate in enumerate(candidates):
             try:
