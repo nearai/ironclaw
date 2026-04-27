@@ -211,7 +211,7 @@ async fn streams_partition_by_tenant_user_agent() {
 }
 
 #[tokio::test]
-async fn read_empty_stream_returns_echoed_cursor() {
+async fn read_empty_stream_at_origin_returns_empty_replay() {
     let log = InMemoryDurableEventLog::new();
     let scope = local_scope("nobody", None);
     let stream = EventStreamKey::from_scope(&scope);
@@ -223,12 +223,119 @@ async fn read_empty_stream_returns_echoed_cursor() {
     assert!(replay.entries.is_empty());
     assert_eq!(replay.next_cursor, EventCursor::origin());
 
+    // Origin cursor is equivalent to None — also empty, not a gap.
     let replay = log
-        .read_after_cursor(&stream, Some(EventCursor::new(42)), 10)
+        .read_after_cursor(&stream, Some(EventCursor::origin()), 10)
         .await
-        .expect("replay empty with cursor");
+        .expect("origin cursor on empty stream");
     assert!(replay.entries.is_empty());
-    assert_eq!(replay.next_cursor, EventCursor::new(42));
+    assert_eq!(replay.next_cursor, EventCursor::origin());
+}
+
+#[tokio::test]
+async fn future_cursor_on_empty_stream_returns_replay_gap() {
+    // A consumer holding a non-origin cursor for a stream that does not
+    // exist locally must not silently lose events 1..cursor when the stream
+    // begins. Surface a ReplayGap so the consumer is forced to rebase.
+    let log = InMemoryDurableEventLog::new();
+    let scope = local_scope("nobody", None);
+    let stream = EventStreamKey::from_scope(&scope);
+
+    let result = log
+        .read_after_cursor(&stream, Some(EventCursor::new(42)), 10)
+        .await;
+    match result {
+        Err(EventError::ReplayGap {
+            requested,
+            earliest,
+        }) => {
+            assert_eq!(requested, EventCursor::new(42));
+            assert_eq!(earliest, EventCursor::origin());
+        }
+        other => panic!("expected ReplayGap, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn future_cursor_beyond_head_returns_replay_gap() {
+    let log = InMemoryDurableEventLog::new();
+    let scope = local_scope("alice", Some("default"));
+    let stream = EventStreamKey::from_scope(&scope);
+
+    // Append two records, then ask for replay after cursor 99.
+    log.append(RuntimeEvent::dispatch_requested(
+        scope.clone(),
+        capability_id(),
+    ))
+    .await
+    .expect("append 1");
+    log.append(RuntimeEvent::dispatch_requested(
+        scope.clone(),
+        capability_id(),
+    ))
+    .await
+    .expect("append 2");
+
+    let result = log
+        .read_after_cursor(&stream, Some(EventCursor::new(99)), 10)
+        .await;
+    match result {
+        Err(EventError::ReplayGap {
+            requested,
+            earliest,
+        }) => {
+            assert_eq!(requested, EventCursor::new(99));
+            assert_eq!(earliest, EventCursor::new(2));
+        }
+        other => panic!("expected ReplayGap, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn replay_gap_after_truncation_forces_snapshot_rebase() {
+    // Retention drops entries up to and including the supplied cursor and
+    // advances the earliest-retained marker. A reader still holding a
+    // pre-retention cursor must see ReplayGap, not silent loss.
+    let log = InMemoryDurableEventLog::new();
+    let scope = local_scope("alice", Some("default"));
+    let stream = EventStreamKey::from_scope(&scope);
+
+    for _ in 0..5 {
+        log.append(RuntimeEvent::dispatch_requested(
+            scope.clone(),
+            capability_id(),
+        ))
+        .await
+        .expect("append");
+    }
+
+    log.truncate_before_or_at(&stream, EventCursor::new(3))
+        .expect("truncate");
+
+    // Reading from origin (or any cursor before the new earliest_retained)
+    // must surface a gap with earliest = 4 (one past the truncated cursor).
+    let result = log
+        .read_after_cursor(&stream, Some(EventCursor::new(0)), 10)
+        .await;
+    match result {
+        Err(EventError::ReplayGap {
+            requested,
+            earliest,
+        }) => {
+            assert_eq!(requested, EventCursor::new(0));
+            assert_eq!(earliest, EventCursor::new(4));
+        }
+        other => panic!("expected ReplayGap, got {other:?}"),
+    }
+
+    // Reading after the truncation point continues to work with the live
+    // tail.
+    let replay = log
+        .read_after_cursor(&stream, Some(EventCursor::new(4)), 10)
+        .await
+        .expect("post-truncation replay");
+    assert_eq!(replay.entries.len(), 1);
+    assert_eq!(replay.entries[0].cursor, EventCursor::new(5));
 }
 
 #[tokio::test]
@@ -279,11 +386,62 @@ async fn dispatch_failed_preserves_safe_classification_token() {
 
 #[tokio::test]
 async fn sanitize_error_kind_collapses_long_or_unsafe_input() {
+    // Empty / free-form / path-like / oversized → Unclassified.
     assert_eq!(sanitize_error_kind(""), "Unclassified");
     assert_eq!(sanitize_error_kind("hello world"), "Unclassified"); // space
     assert_eq!(sanitize_error_kind("path/like/value"), "Unclassified"); // slash
-    assert_eq!(sanitize_error_kind("a".repeat(129)), "Unclassified"); // length
-    assert_eq!(sanitize_error_kind("ok_value-1.2:tag"), "ok_value-1.2:tag");
+    assert_eq!(sanitize_error_kind("a".repeat(65)), "Unclassified"); // overall length
+    assert_eq!(sanitize_error_kind("MissingRuntime"), "Unclassified"); // mixed case
+    // Token-shaped values must collapse: API key shapes, JWT-ish tokens, and
+    // long random segments should not survive even though they look ASCII.
+    assert_eq!(
+        sanitize_error_kind("xkey_demo_abcdefghijklmnopqrstuvwxyz"),
+        "Unclassified"
+    ); // long random segment
+    assert_eq!(
+        sanitize_error_kind("aa.bb.aaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        "Unclassified"
+    ); // segment > 24 bytes
+    assert_eq!(sanitize_error_kind("1leading_digit"), "Unclassified"); // leading digit
+    assert_eq!(sanitize_error_kind("_leading_underscore"), "Unclassified");
+    assert_eq!(sanitize_error_kind("a-with-dash"), "Unclassified"); // dashes no longer accepted
+    // Stable classification tokens survive.
+    assert_eq!(
+        sanitize_error_kind("missing_runtime_backend"),
+        "missing_runtime_backend"
+    );
+    assert_eq!(
+        sanitize_error_kind("wasm.host_http_denied"),
+        "wasm.host_http_denied"
+    );
+    assert_eq!(sanitize_error_kind("dispatch:timeout"), "dispatch:timeout");
+}
+
+#[tokio::test]
+async fn deserialize_runtime_event_resanitizes_error_kind() {
+    // A hand-rolled or replayed JSONL record could otherwise smuggle a raw
+    // value into error_kind. The deserializer must re-run the redaction
+    // guard so the field cannot bypass sanitization.
+    let scope = local_scope("alice", Some("default"));
+    let serialized = {
+        let event = RuntimeEvent::dispatch_failed(
+            scope,
+            capability_id(),
+            Some(extension_id()),
+            Some(RuntimeKind::Wasm),
+            "missing_runtime_backend",
+        );
+        serde_json::to_value(&event).expect("serialize")
+    };
+
+    // Mutate error_kind to a token-shaped raw secret.
+    let mut payload = serialized;
+    payload["error_kind"] =
+        serde_json::Value::String("xkey_demo_abcdefghijklmnopqrstuvwxyz".to_string());
+    let raw = serde_json::to_vec(&payload).expect("re-serialize");
+
+    let parsed: RuntimeEvent = serde_json::from_slice(&raw).expect("deserialize");
+    assert_eq!(parsed.error_kind.as_deref(), Some("Unclassified"));
 }
 
 #[tokio::test]
@@ -434,6 +592,51 @@ async fn approval_audit_records_partition_by_stream_key() {
     assert_eq!(bob_replay.entries.len(), 1);
     assert_eq!(alice_replay.entries[0].cursor, EventCursor::new(1));
     assert_eq!(bob_replay.entries[0].cursor, EventCursor::new(1));
+}
+
+#[tokio::test]
+async fn approval_audit_envelope_serialization_excludes_raw_reason_and_fingerprint() {
+    // Build an approval request whose `reason` is a unique sentinel string
+    // and whose `invocation_fingerprint` is a unique sentinel value. The
+    // serialized AuditEnvelope produced by `approval_resolved` must not
+    // contain either, per `events.md` §3 / approvals contract redaction.
+    let scope = local_scope("alice", Some("default"));
+    let secret_reason = "REASON_SENTINEL_b9c4e2f7df184ab09a77";
+    let request = ApprovalRequest {
+        id: ApprovalRequestId::new(),
+        correlation_id: CorrelationId::new(),
+        requested_by: Principal::User(scope.user_id.clone()),
+        action: Box::new(Action::Dispatch {
+            capability: capability_id(),
+            estimated_resources: ResourceEstimate::default(),
+        }),
+        invocation_fingerprint: None, // typed shape; the assertion still
+        // proves the envelope did not invent one
+        reason: secret_reason.to_string(),
+        reusable_scope: None,
+    };
+
+    let envelope = AuditEnvelope::approval_resolved(
+        &scope,
+        &request,
+        Principal::User(scope.user_id.clone()),
+        "approved",
+    );
+
+    let serialized = serde_json::to_string(&envelope).expect("serialize");
+
+    assert!(
+        !serialized.contains(secret_reason),
+        "audit envelope must not carry raw approval reason; got: {serialized}"
+    );
+    assert!(
+        !serialized.contains("invocation_fingerprint"),
+        "audit envelope must not carry invocation_fingerprint; got: {serialized}"
+    );
+    // The envelope should still record the typed decision and request id so
+    // operators can correlate it with the originating approval.
+    assert!(serialized.contains("\"kind\":\"approved\""));
+    assert!(serialized.contains(&request.id.to_string()));
 }
 
 #[tokio::test]

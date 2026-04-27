@@ -92,8 +92,12 @@ pub enum RuntimeEventKind {
 /// Redacted runtime event payload.
 ///
 /// All optional fields are absent unless meaningful for the event kind.
-/// `error_kind` is constrained by [`sanitize_error_kind`] so detail-like
-/// values (raw error text, paths, secrets) cannot leak through.
+/// `error_kind` is constrained by [`sanitize_error_kind`] both at construction
+/// time (through the typed `dispatch_failed` / `process_failed` constructors)
+/// and at deserialization time (a custom serde hook re-runs the sanitizer on
+/// any inbound JSONL/wire payload), so a JSONL replay or a hand-built record
+/// cannot smuggle raw error text, paths, or token-shaped secrets through this
+/// field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeEvent {
     pub event_id: RuntimeEventId,
@@ -105,7 +109,18 @@ pub struct RuntimeEvent {
     pub runtime: Option<RuntimeKind>,
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_error_kind")]
     pub error_kind: Option<String>,
+}
+
+/// Re-runs [`sanitize_error_kind`] on any inbound `error_kind` value so a
+/// hand-rolled or replayed JSONL record cannot bypass the redaction guard.
+fn deserialize_error_kind<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    Ok(raw.map(sanitize_error_kind))
 }
 
 impl RuntimeEvent {
@@ -282,22 +297,66 @@ struct RuntimeEventPayload {
     error_kind: Option<String>,
 }
 
+/// Stable token written to `RuntimeEvent.error_kind` whenever a caller-supplied
+/// value fails redaction.
+pub const UNCLASSIFIED_ERROR_KIND: &str = "Unclassified";
+
+const MAX_ERROR_KIND_LEN: usize = 64;
+const MAX_ERROR_KIND_SEGMENT_LEN: usize = 24;
+
 /// Collapse any error_kind value that does not match the stable classification
 /// shape into the single `Unclassified` token. This is the redaction guard
 /// that keeps raw error messages, paths, and stringified secrets out of
 /// durable runtime events.
+///
+/// Accepts only `lower_snake_case` identifiers with optional `.` or `:`
+/// separators (e.g. `missing_runtime_backend`, `wasm.host_http_denied`,
+/// `dispatch:timeout`). Rejects anything that resembles a path, free-form
+/// error text, JWT, base64 token, or API key:
+///
+/// - empty string;
+/// - longer than 64 bytes overall, or any dot/colon-separated segment longer
+///   than 24 bytes (defeats long random tokens);
+/// - characters outside `[a-z0-9_]` for body content, or `[._:]` separators;
+/// - leading character that is not a lowercase ASCII letter (defeats
+///   numeric-prefixed tokens, leading underscores, leading separators).
 pub fn sanitize_error_kind(error_kind: impl Into<String>) -> String {
-    let error_kind = error_kind.into();
-    let is_safe = !error_kind.is_empty()
-        && error_kind.len() <= 128
-        && error_kind
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'));
-    if is_safe {
-        error_kind
+    let value = error_kind.into();
+    if is_safe_error_kind(&value) {
+        value
     } else {
-        "Unclassified".to_string()
+        UNCLASSIFIED_ERROR_KIND.to_string()
     }
+}
+
+fn is_safe_error_kind(value: &str) -> bool {
+    if value.is_empty() || value.len() > MAX_ERROR_KIND_LEN {
+        return false;
+    }
+    let first = value.as_bytes()[0];
+    if !first.is_ascii_lowercase() {
+        return false;
+    }
+    if value
+        .bytes()
+        .any(|byte| !is_error_kind_char(byte) && !matches!(byte, b'.' | b':'))
+    {
+        return false;
+    }
+    for segment in value.split(['.', ':']) {
+        if segment.is_empty() || segment.len() > MAX_ERROR_KIND_SEGMENT_LEN {
+            return false;
+        }
+        let segment_first = segment.as_bytes()[0];
+        if !segment_first.is_ascii_lowercase() {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_error_kind_char(byte: u8) -> bool {
+    byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
 }
 
 // -----------------------------------------------------------------------------
@@ -368,10 +427,11 @@ impl Default for EventCursor {
 /// requesting consumer's stream key. Deeper scope filtering (project,
 /// mission, thread, process, invocation) is applied as a read-side filter on
 /// the matching stream rather than as a separate cursor.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EventStreamKey {
     pub tenant_id: TenantId,
     pub user_id: UserId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<AgentId>,
 }
 
@@ -400,7 +460,7 @@ impl EventStreamKey {
 }
 
 /// One replayed record and its durable cursor.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventLogEntry<T> {
     pub cursor: EventCursor,
     pub record: T,
@@ -411,7 +471,7 @@ pub struct EventLogEntry<T> {
 /// `next_cursor` is suitable for the next `read_after_cursor` call. When
 /// `entries` is empty, `next_cursor` echoes the requested cursor so the
 /// consumer can resume cleanly.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventReplay<T> {
     pub entries: Vec<EventLogEntry<T>>,
     pub next_cursor: EventCursor,
@@ -423,9 +483,21 @@ pub struct EventReplay<T> {
 
 /// Async event sink used by runtime/composition services.
 ///
-/// Best-effort observability. Sink failures are surfaced to the caller, which
-/// is expected to log/ignore them rather than alter runtime outcomes; see
-/// `events.md` §7.
+/// **Best-effort observability.** The contract requires that a sink failure
+/// **must not** change runtime outcomes. The trait returns `Result` so
+/// implementations can surface diagnostics to a separate observer/log,
+/// **never** so callers can `?`-propagate the error and short-circuit the
+/// surrounding workflow.
+///
+/// Callers (dispatcher, process manager, host runtime) must:
+///
+/// 1. invoke `emit(...).await`;
+/// 2. record any returned error to a diagnostics channel of their choice;
+/// 3. continue with their original success/failure result.
+///
+/// A type-level enforcement of this contract (no-fail emit + separate
+/// fallible diagnostics surface) is a deliberate follow-up; see the
+/// "best-effort sink contract" follow-up issue.
 #[async_trait]
 pub trait EventSink: Send + Sync {
     async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError>;
@@ -433,8 +505,10 @@ pub trait EventSink: Send + Sync {
 
 /// Async audit sink used by control-plane services.
 ///
-/// Best-effort observability. Sink failures must not change approval
-/// resolution outcomes; see `events.md` §3.
+/// **Best-effort observability.** Same contract as [`EventSink`]: a sink
+/// failure must not change approval resolution outcomes. The trait returns
+/// `Result` so implementations can surface diagnostics, never so callers can
+/// short-circuit on a sink error.
 #[async_trait]
 pub trait AuditSink: Send + Sync {
     async fn emit_audit(&self, record: AuditEnvelope) -> Result<(), EventError>;
@@ -556,17 +630,34 @@ impl<T> Default for StreamState<T> {
 }
 
 impl<T: Clone> StreamState<T> {
-    fn append(&mut self, record: T) -> EventLogEntry<T> {
-        self.next_cursor += 1;
+    fn append(&mut self, record: T) -> Result<EventLogEntry<T>, EventError> {
+        let next = self
+            .next_cursor
+            .checked_add(1)
+            .ok_or_else(|| EventError::DurableLog {
+                reason: "event cursor overflowed u64; durable log exhausted".to_string(),
+            })?;
+        self.next_cursor = next;
         let entry = EventLogEntry {
-            cursor: EventCursor::new(self.next_cursor),
+            cursor: EventCursor::new(next),
             record,
         };
         self.entries.push(entry.clone());
-        entry
+        Ok(entry)
     }
 
     fn read_after(&self, after: EventCursor, limit: usize) -> Result<EventReplay<T>, EventError> {
+        // A cursor that points beyond the current head is a contract
+        // violation, not a benign no-op: returning empty would silently lose
+        // every event 1..=head once it lands. Surface as ReplayGap so the
+        // caller is forced to request a snapshot/rebase and re-derive a
+        // cursor that belongs to this stream.
+        if after.as_u64() > self.next_cursor {
+            return Err(EventError::ReplayGap {
+                requested: after,
+                earliest: EventCursor::new(self.next_cursor),
+            });
+        }
         if self.earliest_retained > 0 && after.as_u64() < self.earliest_retained.saturating_sub(1) {
             return Err(EventError::ReplayGap {
                 requested: after,
@@ -589,6 +680,21 @@ impl<T: Clone> StreamState<T> {
             next_cursor,
         })
     }
+
+    /// Discard entries whose cursor is `<=` the supplied cursor and advance
+    /// `earliest_retained` so subsequent reads with stale cursors return
+    /// [`EventError::ReplayGap`]. Used by retention policies in production
+    /// backends and by tests that exercise the gap path.
+    fn truncate_before_or_at(&mut self, cursor: EventCursor) {
+        let bound = cursor.as_u64();
+        if bound == 0 {
+            return;
+        }
+        self.entries.retain(|entry| entry.cursor.as_u64() > bound);
+        if bound >= self.earliest_retained {
+            self.earliest_retained = bound + 1;
+        }
+    }
 }
 
 /// In-memory durable runtime event log with per-stream monotonic cursors.
@@ -601,6 +707,26 @@ impl InMemoryDurableEventLog {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Drop entries whose cursor is `<=` the supplied cursor for the given
+    /// stream and advance the stream's earliest-retained marker so subsequent
+    /// reads against older cursors return [`EventError::ReplayGap`].
+    ///
+    /// Production backends apply this from a retention policy. Tests use it
+    /// to exercise the gap path without coupling to a specific policy.
+    pub fn truncate_before_or_at(
+        &self,
+        stream: &EventStreamKey,
+        cursor: EventCursor,
+    ) -> Result<(), EventError> {
+        let mut streams = self.streams.lock().map_err(|_| EventError::DurableLog {
+            reason: "in-memory durable event log lock poisoned".to_string(),
+        })?;
+        if let Some(state) = streams.get_mut(stream) {
+            state.truncate_before_or_at(cursor);
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -611,7 +737,7 @@ impl DurableEventLog for InMemoryDurableEventLog {
             reason: "in-memory durable event log lock poisoned".to_string(),
         })?;
         let stream = streams.entry(key).or_default();
-        Ok(stream.append(event))
+        stream.append(event)
     }
 
     async fn read_after_cursor(
@@ -631,10 +757,23 @@ impl DurableEventLog for InMemoryDurableEventLog {
         })?;
         match streams.get(stream) {
             Some(state) => state.read_after(after, limit),
-            None => Ok(EventReplay {
-                entries: Vec::new(),
-                next_cursor: after,
-            }),
+            None => {
+                // An absent stream is at head-zero. Any cursor beyond origin
+                // is a foreign cursor that this stream has never issued, so
+                // surface a gap rather than silently echoing the cursor and
+                // hiding events 1..after if/when the stream starts.
+                if after.as_u64() > 0 {
+                    Err(EventError::ReplayGap {
+                        requested: after,
+                        earliest: EventCursor::origin(),
+                    })
+                } else {
+                    Ok(EventReplay {
+                        entries: Vec::new(),
+                        next_cursor: after,
+                    })
+                }
+            }
         }
     }
 }
@@ -648,6 +787,21 @@ pub struct InMemoryDurableAuditLog {
 impl InMemoryDurableAuditLog {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// See [`InMemoryDurableEventLog::truncate_before_or_at`].
+    pub fn truncate_before_or_at(
+        &self,
+        stream: &EventStreamKey,
+        cursor: EventCursor,
+    ) -> Result<(), EventError> {
+        let mut streams = self.streams.lock().map_err(|_| EventError::DurableLog {
+            reason: "in-memory durable audit log lock poisoned".to_string(),
+        })?;
+        if let Some(state) = streams.get_mut(stream) {
+            state.truncate_before_or_at(cursor);
+        }
+        Ok(())
     }
 }
 
@@ -666,7 +820,7 @@ impl DurableAuditLog for InMemoryDurableAuditLog {
             reason: "in-memory durable audit log lock poisoned".to_string(),
         })?;
         let stream = streams.entry(key).or_default();
-        Ok(stream.append(record))
+        stream.append(record)
     }
 
     async fn read_after_cursor(
@@ -686,10 +840,19 @@ impl DurableAuditLog for InMemoryDurableAuditLog {
         })?;
         match streams.get(stream) {
             Some(state) => state.read_after(after, limit),
-            None => Ok(EventReplay {
-                entries: Vec::new(),
-                next_cursor: after,
-            }),
+            None => {
+                if after.as_u64() > 0 {
+                    Err(EventError::ReplayGap {
+                        requested: after,
+                        earliest: EventCursor::origin(),
+                    })
+                } else {
+                    Ok(EventReplay {
+                        entries: Vec::new(),
+                        next_cursor: after,
+                    })
+                }
+            }
         }
     }
 }
