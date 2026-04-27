@@ -3,11 +3,11 @@ name = "t3claw_skills"
 version = "0.2.0"
 edition = "2024"
 rust-version = "1.92"
-description = "Skill selection, scoring, and management for IronClaw"
+description = "Skill selection, scoring, and management for T3Claw"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
-homepage = "https://github.com/nearai/ironclaw"
-repository = "https://github.com/nearai/ironclaw"
+homepage = "https://github.com/nearai/t3claw"
+repository = "https://github.com/nearai/t3claw"
 
 [package.metadata.dist]
 dist = false

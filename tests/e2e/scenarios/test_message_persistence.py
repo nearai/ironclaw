@@ -87,9 +87,9 @@ async def _wait_for_in_progress_turn(
     raise AssertionError(f"Timed out waiting for in-progress turn in thread {thread_id}")
 
 
-async def _reload_and_switch_to_thread(page, ironclaw_server, thread_id):
+async def _reload_and_switch_to_thread(page, t3claw_server, thread_id):
     """Reload the page and navigate back to the given thread."""
-    await page.goto(f"{ironclaw_server}/?token={AUTH_TOKEN}", timeout=15000)
+    await page.goto(f"{t3claw_server}/?token={AUTH_TOKEN}", timeout=15000)
     await page.wait_for_selector(SEL["auth_screen"], state="hidden", timeout=10000)
     await page.wait_for_function(
         "() => typeof sseHasConnectedBefore !== 'undefined' && sseHasConnectedBefore === true",
@@ -155,10 +155,10 @@ async def _start_thread_and_wait_for_in_progress(
 # ---------------------------------------------------------------------------
 
 
-async def test_message_persists_across_page_reload(page, ironclaw_server):
+async def test_message_persists_across_page_reload(page, t3claw_server):
     """Happy-path: send a message, reload the page, both user message and
     assistant response survive the full round-trip from the database."""
-    resp = await api_post(ironclaw_server, "/api/chat/thread/new")
+    resp = await api_post(t3claw_server, "/api/chat/thread/new")
     assert resp.status_code == 200, resp.text
     thread_id = resp.json()["id"]
 
@@ -171,8 +171,8 @@ async def test_message_persists_across_page_reload(page, ironclaw_server):
     assert result["role"] == "assistant"
     assert "4" in result["text"], result
 
-    await _wait_for_completed_turn(ironclaw_server, thread_id)
-    await _reload_and_switch_to_thread(page, ironclaw_server, thread_id)
+    await _wait_for_completed_turn(t3claw_server, thread_id)
+    await _reload_and_switch_to_thread(page, t3claw_server, thread_id)
 
     await page.locator(SEL["message_user"]).filter(
         has_text="What is 2+2?"
@@ -182,7 +182,7 @@ async def test_message_persists_across_page_reload(page, ironclaw_server):
         has_text="4"
     ).wait_for(state="visible", timeout=15000)
 
-    resp = await api_get(ironclaw_server, f"/api/chat/history?thread_id={thread_id}")
+    resp = await api_get(t3claw_server, f"/api/chat/history?thread_id={thread_id}")
     assert resp.status_code == 200, resp.text
     turns = resp.json()["turns"]
     user_turns = [t for t in turns if t.get("user_input")]
@@ -199,10 +199,10 @@ async def test_message_persists_across_page_reload(page, ironclaw_server):
 # ---------------------------------------------------------------------------
 
 
-async def test_tool_calls_rendered_as_activity_cards_after_reload(page, ironclaw_server):
+async def test_tool_calls_rendered_as_activity_cards_after_reload(page, t3claw_server):
     """After a tool call completes and the page reloads, the most recent turn
     should show rich activity cards (not the flat summary)."""
-    resp = await api_post(ironclaw_server, "/api/chat/thread/new")
+    resp = await api_post(t3claw_server, "/api/chat/thread/new")
     assert resp.status_code == 200, resp.text
     thread_id = resp.json()["id"]
 
@@ -214,8 +214,8 @@ async def test_tool_calls_rendered_as_activity_cards_after_reload(page, ironclaw
     result = await send_chat_and_wait_for_terminal_message(page, "echo hello world")
     assert result["role"] == "assistant"
 
-    await _wait_for_tool_in_history(ironclaw_server, thread_id, "echo")
-    await _reload_and_switch_to_thread(page, ironclaw_server, thread_id)
+    await _wait_for_tool_in_history(t3claw_server, thread_id, "echo")
+    await _reload_and_switch_to_thread(page, t3claw_server, thread_id)
 
     # Verify rich activity group (not flat summary)
     activity_group = page.locator(SEL["activity_group"])
@@ -227,10 +227,10 @@ async def test_tool_calls_rendered_as_activity_cards_after_reload(page, ironclaw
     assert await echo_card.get_attribute("data-status") == "success"
 
 
-async def test_tool_calls_expandable_after_reload(page, ironclaw_server):
+async def test_tool_calls_expandable_after_reload(page, t3claw_server):
     """Activity cards from history should be expandable — click summary to
     show cards, click card header to show output."""
-    resp = await api_post(ironclaw_server, "/api/chat/thread/new")
+    resp = await api_post(t3claw_server, "/api/chat/thread/new")
     assert resp.status_code == 200, resp.text
     thread_id = resp.json()["id"]
 
@@ -242,8 +242,8 @@ async def test_tool_calls_expandable_after_reload(page, ironclaw_server):
     result = await send_chat_and_wait_for_terminal_message(page, "echo expand test")
     assert result["role"] == "assistant"
 
-    await _wait_for_tool_in_history(ironclaw_server, thread_id, "echo")
-    await _reload_and_switch_to_thread(page, ironclaw_server, thread_id)
+    await _wait_for_tool_in_history(t3claw_server, thread_id, "echo")
+    await _reload_and_switch_to_thread(page, t3claw_server, thread_id)
 
     # Cards container should start hidden (group is collapsed)
     cards_container = page.locator(SEL["activity_cards_container"])
@@ -273,11 +273,11 @@ async def test_tool_calls_expandable_after_reload(page, ironclaw_server):
 # ---------------------------------------------------------------------------
 
 
-async def test_background_thread_shows_processing_indicator(page, ironclaw_server):
+async def test_background_thread_shows_processing_indicator(page, t3claw_server):
     """When a thread is processing in the background, its sidebar entry should
     show a processing spinner. The spinner disappears when processing completes."""
     # Create thread A and send a message that triggers a tool call
-    resp = await api_post(ironclaw_server, "/api/chat/thread/new")
+    resp = await api_post(t3claw_server, "/api/chat/thread/new")
     assert resp.status_code == 200, resp.text
     thread_a = resp.json()["id"]
 
@@ -297,7 +297,7 @@ async def test_background_thread_shows_processing_indicator(page, ironclaw_serve
     await chat_input.press("Enter")
 
     # Immediately switch to a new thread B
-    resp = await api_post(ironclaw_server, "/api/chat/thread/new")
+    resp = await api_post(t3claw_server, "/api/chat/thread/new")
     assert resp.status_code == 200, resp.text
     thread_b = resp.json()["id"]
 
@@ -317,7 +317,7 @@ async def test_background_thread_shows_processing_indicator(page, ironclaw_serve
         pass
 
     # Wait for thread A to complete in the background
-    await _wait_for_completed_turn(ironclaw_server, thread_a, timeout=30)
+    await _wait_for_completed_turn(t3claw_server, thread_a, timeout=30)
 
     # After completion, the processing spinner should be gone.
     # Give the debounced loadThreads a moment to fire.
@@ -335,12 +335,12 @@ async def test_background_thread_shows_processing_indicator(page, ironclaw_serve
     assert unread_count >= 1, "Expected unread badge on thread A after background completion"
 
 
-async def test_no_stale_processing_indicator_for_completed_thread(page, ironclaw_server):
+async def test_no_stale_processing_indicator_for_completed_thread(page, t3claw_server):
     """When returning to a thread after its in-flight turn has completed,
     the completed response should be shown and no stale Processing...
     thinking indicator should remain."""
     # Create thread A
-    resp = await api_post(ironclaw_server, "/api/chat/thread/new")
+    resp = await api_post(t3claw_server, "/api/chat/thread/new")
     assert resp.status_code == 200, resp.text
     thread_a = resp.json()["id"]
 
@@ -351,13 +351,13 @@ async def test_no_stale_processing_indicator_for_completed_thread(page, ironclaw
 
     # Send a message via API (don't wait for response — we want to catch mid-turn)
     await api_post(
-        ironclaw_server,
+        t3claw_server,
         "/api/chat/send",
         json={"content": "echo processing indicator test", "thread_id": thread_a},
     )
 
     # Switch to thread B immediately
-    resp = await api_post(ironclaw_server, "/api/chat/thread/new")
+    resp = await api_post(t3claw_server, "/api/chat/thread/new")
     assert resp.status_code == 200, resp.text
     thread_b = resp.json()["id"]
 
@@ -367,7 +367,7 @@ async def test_no_stale_processing_indicator_for_completed_thread(page, ironclaw
     )
 
     # Wait for thread A to complete so the turn is persisted with response
-    await _wait_for_completed_turn(ironclaw_server, thread_a, timeout=30)
+    await _wait_for_completed_turn(t3claw_server, thread_a, timeout=30)
 
     # Now switch back to thread A — should show the completed turn
     # (the "Processing..." indicator only shows for incomplete turns)
@@ -388,17 +388,17 @@ async def test_no_stale_processing_indicator_for_completed_thread(page, ironclaw
     )
 
 
-async def test_processing_indicator_shows_for_incomplete_turn(page, ironclaw_server):
+async def test_processing_indicator_shows_for_incomplete_turn(page, t3claw_server):
     """When switching to a thread whose last turn has no response yet,
     loadHistory shows the Processing... thinking indicator."""
     # Create thread A and send a message via API (not UI — avoids waiting)
-    resp = await api_post(ironclaw_server, "/api/chat/thread/new")
+    resp = await api_post(t3claw_server, "/api/chat/thread/new")
     assert resp.status_code == 200, resp.text
     thread_a = resp.json()["id"]
 
     # Send message — the agent loop will start processing
     await api_post(
-        ironclaw_server,
+        t3claw_server,
         "/api/chat/send",
         json={"content": "What is 2+2?", "thread_id": thread_a},
     )
@@ -409,7 +409,7 @@ async def test_processing_indicator_shows_for_incomplete_turn(page, ironclaw_ser
     found_processing = False
     while asyncio.get_running_loop().time() < deadline:
         resp = await api_get(
-            ironclaw_server, f"/api/chat/history?thread_id={thread_a}"
+            t3claw_server, f"/api/chat/history?thread_id={thread_a}"
         )
         turns = resp.json().get("turns", [])
         if turns and turns[-1].get("state") == "Processing":
@@ -424,7 +424,7 @@ async def test_processing_indicator_shows_for_incomplete_turn(page, ironclaw_ser
     if not found_processing:
         # Agent was too fast — we can't reliably test the indicator.
         # Verify the turn completed correctly instead.
-        await _wait_for_completed_turn(ironclaw_server, thread_a)
+        await _wait_for_completed_turn(t3claw_server, thread_a)
         return
 
     # Switch page to thread A while it's still Processing
@@ -438,7 +438,7 @@ async def test_processing_indicator_shows_for_incomplete_turn(page, ironclaw_ser
     await thinking.wait_for(state="visible", timeout=10000)
 
     # Wait for the turn to complete — indicator should disappear
-    await _wait_for_completed_turn(ironclaw_server, thread_a, timeout=30)
+    await _wait_for_completed_turn(t3claw_server, thread_a, timeout=30)
 
     # The assistant response should appear (live SSE renders it)
     await page.locator(SEL["message_assistant"]).wait_for(
@@ -446,14 +446,14 @@ async def test_processing_indicator_shows_for_incomplete_turn(page, ironclaw_ser
     )
 
 
-async def test_refresh_preserves_in_progress_turn(page, ironclaw_server):
+async def test_refresh_preserves_in_progress_turn(page, t3claw_server):
     """Refreshing mid-turn should rebuild the user message and processing state."""
     thread_id, _payload = await _start_thread_and_wait_for_in_progress(
-        ironclaw_server,
+        t3claw_server,
         "What is 2+2?",
     )
 
-    await _reload_and_switch_to_thread(page, ironclaw_server, thread_id)
+    await _reload_and_switch_to_thread(page, t3claw_server, thread_id)
 
     await page.locator(SEL["message_user"]).filter(
         has_text="What is 2+2?"
@@ -464,20 +464,20 @@ async def test_refresh_preserves_in_progress_turn(page, ironclaw_server):
     ) == 1
     await _wait_for_processing_or_response(page, "4")
 
-    await _wait_for_completed_turn(ironclaw_server, thread_id, timeout=30)
+    await _wait_for_completed_turn(t3claw_server, thread_id, timeout=30)
     await page.locator(SEL["message_assistant"]).filter(
         has_text="4"
     ).wait_for(state="visible", timeout=15000)
 
 
-async def test_switching_back_preserves_in_progress_turn(page, ironclaw_server):
+async def test_switching_back_preserves_in_progress_turn(page, t3claw_server):
     """Switching away and back mid-turn should rehydrate the running thread."""
     thread_a, _payload = await _start_thread_and_wait_for_in_progress(
-        ironclaw_server,
+        t3claw_server,
         "What is 2+2?",
     )
 
-    resp = await api_post(ironclaw_server, "/api/chat/thread/new")
+    resp = await api_post(t3claw_server, "/api/chat/thread/new")
     assert resp.status_code == 200, resp.text
     thread_b = resp.json()["id"]
 
@@ -500,7 +500,7 @@ async def test_switching_back_preserves_in_progress_turn(page, ironclaw_server):
     ) == 1
     await _wait_for_processing_or_response(page, "4")
 
-    await _wait_for_completed_turn(ironclaw_server, thread_a, timeout=30)
+    await _wait_for_completed_turn(t3claw_server, thread_a, timeout=30)
     await page.locator(SEL["message_assistant"]).filter(
         has_text="4"
     ).wait_for(state="visible", timeout=15000)
@@ -508,10 +508,10 @@ async def test_switching_back_preserves_in_progress_turn(page, ironclaw_server):
 
 async def test_sidebar_refresh_keeps_active_thread_outside_summary_window(
     page,
-    ironclaw_server,
+    t3claw_server,
 ):
     """Refreshing the sidebar must not retarget an older open thread."""
-    resp = await api_post(ironclaw_server, "/api/chat/thread/new")
+    resp = await api_post(t3claw_server, "/api/chat/thread/new")
     assert resp.status_code == 200, resp.text
     thread_a = resp.json()["id"]
 
@@ -522,7 +522,7 @@ async def test_sidebar_refresh_keeps_active_thread_outside_summary_window(
 
     latest_thread = None
     for _ in range(55):
-        resp = await api_post(ironclaw_server, "/api/chat/thread/new")
+        resp = await api_post(t3claw_server, "/api/chat/thread/new")
         assert resp.status_code == 200, resp.text
         latest_thread = resp.json()["id"]
 
@@ -538,13 +538,13 @@ async def test_sidebar_refresh_keeps_active_thread_outside_summary_window(
     )
     assert result["role"] == "assistant"
 
-    turns = await _wait_for_completed_turn(ironclaw_server, thread_a)
+    turns = await _wait_for_completed_turn(t3claw_server, thread_a)
     assert any(
         "Summary refresh should keep this thread" in (turn.get("user_input") or "")
         for turn in turns
     ), turns
 
-    resp = await api_get(ironclaw_server, f"/api/chat/history?thread_id={latest_thread}")
+    resp = await api_get(t3claw_server, f"/api/chat/history?thread_id={latest_thread}")
     assert resp.status_code == 200, resp.text
     assert not any(
         "Summary refresh should keep this thread" in (turn.get("user_input") or "")

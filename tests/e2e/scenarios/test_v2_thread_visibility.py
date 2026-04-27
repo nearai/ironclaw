@@ -28,9 +28,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from helpers import AUTH_TOKEN, api_get, api_post, wait_for_ready
 
 ROOT = Path(__file__).resolve().parent.parent.parent.parent
-_V2_VIS_DB_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-v2-visibility-e2e-")
+_V2_VIS_DB_TMPDIR = tempfile.TemporaryDirectory(prefix="t3claw-v2-visibility-e2e-")
 _V2_VIS_HOME_TMPDIR = tempfile.TemporaryDirectory(
-    prefix="ironclaw-v2-visibility-e2e-home-"
+    prefix="t3claw-v2-visibility-e2e-home-"
 )
 
 
@@ -55,10 +55,10 @@ async def _stop_process(proc, sig=signal.SIGINT, timeout=5):
 
 
 @pytest.fixture(scope="module")
-async def v2_visibility_server(ironclaw_binary, mock_llm_server):
-    """Start a dedicated ironclaw instance with ENGINE_V2=true."""
+async def v2_visibility_server(t3claw_binary, mock_llm_server):
+    """Start a dedicated t3claw instance with ENGINE_V2=true."""
     home_dir = _V2_VIS_HOME_TMPDIR.name
-    os.makedirs(os.path.join(home_dir, ".ironclaw"), exist_ok=True)
+    os.makedirs(os.path.join(home_dir, ".t3claw"), exist_ok=True)
 
     socks = []
     for _ in range(2):
@@ -73,8 +73,8 @@ async def v2_visibility_server(ironclaw_binary, mock_llm_server):
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": home_dir,
-        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
-        "RUST_LOG": "ironclaw=info",
+        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".t3claw"),
+        "RUST_LOG": "t3claw=info",
         "RUST_BACKTRACE": "1",
         "ENGINE_V2": "true",
         "GATEWAY_ENABLED": "true",
@@ -103,7 +103,7 @@ async def v2_visibility_server(ironclaw_binary, mock_llm_server):
     _forward_coverage_env(env)
 
     proc = await asyncio.create_subprocess_exec(
-        ironclaw_binary,
+        t3claw_binary,
         "--no-onboard",
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,

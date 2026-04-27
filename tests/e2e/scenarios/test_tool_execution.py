@@ -72,13 +72,13 @@ async def _wait_for_turn(
     )
 
 
-async def test_builtin_echo_tool(ironclaw_server):
+async def test_builtin_echo_tool(t3claw_server):
     """A chat request can execute the built-in echo tool and persist its result."""
-    thread_id = await _create_thread(ironclaw_server)
-    await _send_chat_message(ironclaw_server, thread_id, "echo hello world")
+    thread_id = await _create_thread(t3claw_server)
+    await _send_chat_message(t3claw_server, thread_id, "echo hello world")
 
     turn = await _wait_for_turn(
-        ironclaw_server,
+        t3claw_server,
         thread_id,
         tool_name="echo",
         result_fragment="hello world",
@@ -87,13 +87,13 @@ async def test_builtin_echo_tool(ironclaw_server):
     assert any(tc.get("name") == "echo" for tc in turn.get("tool_calls", [])), turn
 
 
-async def test_builtin_time_tool(ironclaw_server):
+async def test_builtin_time_tool(t3claw_server):
     """A chat request can execute the built-in time tool and persist its result."""
-    thread_id = await _create_thread(ironclaw_server)
-    await _send_chat_message(ironclaw_server, thread_id, "what time is it")
+    thread_id = await _create_thread(t3claw_server)
+    await _send_chat_message(t3claw_server, thread_id, "what time is it")
 
     turn = await _wait_for_turn(
-        ironclaw_server,
+        t3claw_server,
         thread_id,
         tool_name="time",
     )
@@ -101,13 +101,13 @@ async def test_builtin_time_tool(ironclaw_server):
     assert any(tc.get("name") == "time" for tc in turn.get("tool_calls", [])), turn
 
 
-async def test_non_tool_message_still_works(ironclaw_server):
+async def test_non_tool_message_still_works(t3claw_server):
     """Messages that do not trigger tools still get a normal assistant response."""
-    thread_id = await _create_thread(ironclaw_server)
-    await _send_chat_message(ironclaw_server, thread_id, "What is 2+2?")
+    thread_id = await _create_thread(t3claw_server)
+    await _send_chat_message(t3claw_server, thread_id, "What is 2+2?")
 
     turn = await _wait_for_turn(
-        ironclaw_server,
+        t3claw_server,
         thread_id,
         response_fragment="4",
         timeout=15.0,

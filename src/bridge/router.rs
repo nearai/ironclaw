@@ -81,7 +81,7 @@ fn bridge_outcome_for_failed_thread(error: &str, user_id: &str, channel: &str) -
     BridgeOutcome::Respond(crate::bridge::user_facing_errors::user_facing_thread_failure(error))
 }
 
-const PROJECT_ATTACHMENT_DIR: &str = ".ironclaw/attachments";
+const PROJECT_ATTACHMENT_DIR: &str = ".t3claw/attachments";
 
 #[derive(Debug, Clone)]
 struct AttachmentIndexNote {
@@ -4428,7 +4428,7 @@ async fn forward_event_to_channel(
                         StatusUpdate::AuthRequired {
                             extension_name: t3claw_common::ExtensionName::from_trusted(cred_name),
                             instructions: Some(
-                                "Store the credential with: ironclaw secret set <name> <value>"
+                                "Store the credential with: t3claw secret set <name> <value>"
                                     .into(),
                             ),
                             auth_url: None,
@@ -7682,14 +7682,14 @@ mod tests {
             assert!(
                 user_msg
                     .content
-                    .contains("project_path=\".ironclaw/attachments/alice/"),
+                    .contains("project_path=\".t3claw/attachments/alice/"),
                 "expected saved project path in user content, got: {}",
                 user_msg.content
             );
             assert!(
                 user_msg
                     .content
-                    .contains("Saved to project file: .ironclaw/attachments/alice/"),
+                    .contains("Saved to project file: .t3claw/attachments/alice/"),
                 "expected saved path hint in user content, got: {}",
                 user_msg.content
             );

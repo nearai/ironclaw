@@ -73,10 +73,10 @@ _WASM_CHANNEL = {
         "requires_pairing": True,
         "credential_title": "Configure credentials for Test Channel",
         "credential_instructions": "Enter the channel token to continue.",
-        "credential_next_step": "Next: send the channel any message to receive a pairing code, then paste it into IronClaw.",
+        "credential_next_step": "Next: send the channel any message to receive a pairing code, then paste it into T3Claw.",
         "setup_url": None,
         "pairing_title": "Claim ownership for Test Channel",
-        "pairing_instructions": "Send the channel any message to receive a pairing code, then paste it into IronClaw.",
+        "pairing_instructions": "Send the channel any message to receive a pairing code, then paste it into T3Claw.",
         "restart_instructions": "If you close this claim step, send another message in the channel to get a new pairing code.",
     },
 }
@@ -181,7 +181,7 @@ async def mock_ext_apis(page, *, installed=None, registry=None):
 
 async def open_channels_with_mock_role(
     browser,
-    ironclaw_server,
+    t3claw_server,
     *,
     role,
     installed,
@@ -237,7 +237,7 @@ async def open_channels_with_mock_role(
         await page.route("**/api/pairing/test-channel/approve", handle_pairing_approve)
 
     await page.goto(
-        f"{ironclaw_server}/?token={AUTH_TOKEN}",
+        f"{t3claw_server}/?token={AUTH_TOKEN}",
         wait_until="domcontentloaded",
         timeout=15000,
     )
@@ -439,11 +439,11 @@ async def test_wasm_channel_pairing_state(page):
     assert await card.locator(SEL["pairing_help"]).count() == 1
 
 
-async def test_wasm_channel_pairing_state_admin_shows_pending_requests(browser, ironclaw_server):
+async def test_wasm_channel_pairing_state_admin_shows_pending_requests(browser, t3claw_server):
     """Admins see pending pairing rows for channels awaiting pairing."""
     context, page, pairing_hits = await open_channels_with_mock_role(
         browser,
-        ironclaw_server,
+        t3claw_server,
         role="admin",
         installed=[_WASM_CHANNEL_PAIRING],
         pairing_requests=[{"code": "ABCD1234", "sender_id": "telegram-user-1"}],
@@ -466,11 +466,11 @@ async def test_wasm_channel_pairing_state_admin_shows_pending_requests(browser, 
         await context.close()
 
 
-async def test_wasm_channel_pairing_state_member_shows_claim_ui(browser, ironclaw_server):
+async def test_wasm_channel_pairing_state_member_shows_claim_ui(browser, t3claw_server):
     """Members see the claim-code UI and never fetch the admin pending list."""
     context, page, pairing_hits = await open_channels_with_mock_role(
         browser,
-        ironclaw_server,
+        t3claw_server,
         role="member",
         installed=[_WASM_CHANNEL_PAIRING],
     )
@@ -492,11 +492,11 @@ async def test_wasm_channel_pairing_state_member_shows_claim_ui(browser, ironcla
         await context.close()
 
 
-async def test_member_pairing_claim_submission_shows_success(browser, ironclaw_server):
+async def test_member_pairing_claim_submission_shows_success(browser, t3claw_server):
     """Submitting a claim code posts to the approve endpoint, clears the input, and shows a toast."""
     context, page, pairing_hits = await open_channels_with_mock_role(
         browser,
-        ironclaw_server,
+        t3claw_server,
         role="member",
         installed=[_WASM_CHANNEL_PAIRING],
         approve_response={"success": True},
@@ -516,11 +516,11 @@ async def test_member_pairing_claim_submission_shows_success(browser, ironclaw_s
         await context.close()
 
 
-async def test_member_pairing_claim_failure_shows_error(browser, ironclaw_server):
+async def test_member_pairing_claim_failure_shows_error(browser, t3claw_server):
     """Failed claim attempts show an error toast and leave the field available for retry."""
     context, page, pairing_hits = await open_channels_with_mock_role(
         browser,
-        ironclaw_server,
+        t3claw_server,
         role="member",
         installed=[_WASM_CHANNEL_PAIRING],
         approve_response={"success": False, "message": "Invalid pairing code"},
@@ -540,11 +540,11 @@ async def test_member_pairing_claim_failure_shows_error(browser, ironclaw_server
         await context.close()
 
 
-async def test_admin_pairing_manual_code_submit(browser, ironclaw_server):
+async def test_admin_pairing_manual_code_submit(browser, t3claw_server):
     """Admins can approve a pairing code directly from the manual entry row."""
     context, page, pairing_hits = await open_channels_with_mock_role(
         browser,
-        ironclaw_server,
+        t3claw_server,
         role="admin",
         installed=[_WASM_CHANNEL_PAIRING],
         pairing_requests=[],

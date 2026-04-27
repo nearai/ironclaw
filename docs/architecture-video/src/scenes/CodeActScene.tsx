@@ -91,8 +91,8 @@ export const CodeActScene: React.FC = () => {
           fontFamily: FONTS.mono,
         }}
       >
-        crates/ironclaw_engine/prompts/codeact_preamble.md &bull;
-        crates/ironclaw_engine/src/executor/orchestrator.rs
+        crates/t3claw_engine/prompts/codeact_preamble.md &bull;
+        crates/t3claw_engine/src/executor/orchestrator.rs
       </div>
 
       {/* Left: Python code */}

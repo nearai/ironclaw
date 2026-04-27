@@ -153,7 +153,7 @@ async def test_pending_message_survives_sse_reconnect(page):
         )
 
 
-async def test_in_progress_attachment_turn_survives_reload(page, ironclaw_server):
+async def test_in_progress_attachment_turn_survives_reload(page, t3claw_server):
     """Reloading during a durable in-progress attachment turn keeps its file card."""
     await _wait_for_connected(page, timeout=5000)
 
@@ -188,8 +188,8 @@ async def test_in_progress_attachment_turn_survives_reload(page, ironclaw_server
         timeout=5000,
     )
 
-    await _wait_for_in_progress_turn(ironclaw_server, thread_id, timeout=15.0)
-    await _reload_and_switch_to_thread(page, ironclaw_server, thread_id)
+    await _wait_for_in_progress_turn(t3claw_server, thread_id, timeout=15.0)
+    await _reload_and_switch_to_thread(page, t3claw_server, thread_id)
 
     await page.wait_for_function(
         """() => {
@@ -335,7 +335,7 @@ async def test_welcome_card_hidden_when_pending(page):
     assert not welcome_visible, "Welcome card should be hidden when pending messages exist"
 
 
-async def test_message_persists_across_page_reload(page, ironclaw_server):
+async def test_message_persists_across_page_reload(page, t3claw_server):
     """After full round-trip, message survives a page reload (DB persistence)."""
     result = await send_chat_and_wait_for_terminal_message(page, "Reload persistence test")
     assert result["role"] == "assistant"

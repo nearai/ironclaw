@@ -6,7 +6,7 @@
 //! cross-cutting layers (CORS, body-size limit, panic catch, static
 //! security headers, CSP).
 //!
-//! Per ironclaw#2599: route composition is the single coupling point
+//! Per ironclaw#ironclaw#2599: route composition is the single coupling point
 //! where platform meets features. Handlers themselves live in either
 //! `features/<slice>/` (migrated) or the transitional `handlers/*.rs`
 //! flat folder (not yet sliced). No feature handler lives in
@@ -65,7 +65,7 @@ use crate::channels::web::platform::static_files::{
     project_redirect_handler, theme_css_handler, theme_init_handler,
 };
 
-// Feature slices under `features/<slice>/`. As of ironclaw#2599 stage 4d,
+// Feature slices under `features/<slice>/`. As of ironclaw#ironclaw#2599 stage 4d,
 // every route composed below comes from one of these or from a
 // transitional `handlers/*.rs` file (auth, engine, frontend, llm,
 // memory, secrets, skills, system_prompt, tokens, tool_policy, users,

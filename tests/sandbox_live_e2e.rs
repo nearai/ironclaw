@@ -4,7 +4,7 @@
 //! `ContainerizedFilesystemBackend`, `ProjectSandboxManager`, Docker exec
 //! session, and the in-container `sandbox_daemon` — works under a real
 //! agent driving a real LLM. It is the manual-verification replacement:
-//! "clone ironclaw, rename to megaclaw, run cargo check" as a single
+//! "clone t3claw, rename to megaclaw, run cargo check" as a single
 //! asserted scenario.
 //!
 //! # Running
@@ -12,10 +12,10 @@
 //! **Live mode (real LLM + real Docker):**
 //! ```bash
 //! # 1) build the sandbox image once
-//! docker build -f crates/Dockerfile.sandbox -t ironclaw/sandbox:dev .
+//! docker build -f crates/Dockerfile.sandbox -t t3claw/sandbox:dev .
 //!
 //! # 2) run the test
-//! SANDBOX_ENABLED=true IRONCLAW_LIVE_TEST=1 \
+//! SANDBOX_ENABLED=true T3CLAW_LIVE_TEST=1 \
 //!   cargo test --features libsql --test sandbox_live_e2e -- --ignored --nocapture
 //! ```
 //!
@@ -64,13 +64,13 @@ mod sandbox_e2e_tests {
     /// only — replay mode has no judge provider.
     const JUDGE_CRITERIA: &str = "\
         The assistant reports that it (1) successfully cloned a repository \
-        into /project/repo, (2) renamed occurrences of 'ironclaw' to \
+        into /project/repo, (2) renamed occurrences of 't3claw' to \
         'megaclaw' in at least one file (typically Cargo.toml), and (3) \
         verified the rename by grepping for 'megaclaw' and finding it. \
         All three steps must be mentioned with concrete evidence \
         (command output, line number, or file path).";
 
-    /// Live/replay end-to-end: the agent is asked to clone ironclaw into the
+    /// Live/replay end-to-end: the agent is asked to clone t3claw into the
     /// sandbox, rename it to megaclaw, and run a cargo check. We assert that:
     ///
     /// 1. The `shell` tool was actually used (tool_calls_started recorded it),
@@ -78,7 +78,7 @@ mod sandbox_e2e_tests {
     /// 3. (live only) The LLM judge signs off on the scenario.
     ///
     /// What we *don't* assert (and why): the exact cargo check outcome.
-    /// Cloning the full ironclaw workspace and building it from scratch
+    /// Cloning the full t3claw workspace and building it from scratch
     /// inside a cold container is minutes of work with many non-deterministic
     /// network steps (crates.io, git submodules, rustup). The goal of this
     /// test is to prove the sandbox plumbing works end-to-end; cargo check's
@@ -87,7 +87,7 @@ mod sandbox_e2e_tests {
     /// assertion once the idle reaper lands.
     #[tokio::test]
     #[ignore] // Live tier: needs Docker + sandbox image + (in live mode) LLM keys
-    async fn sandbox_clones_ironclaw_and_renames_to_megaclaw() {
+    async fn sandbox_clones_t3claw_and_renames_to_megaclaw() {
         // Skip cleanly when the test environment can't run this scenario.
         // These are not failures — the test is opt-in and requires setup.
         if !docker_reachable().await {
@@ -97,7 +97,7 @@ mod sandbox_e2e_tests {
             );
         }
         let image = std::env::var("IRONCLAW_SANDBOX_IMAGE")
-            .unwrap_or_else(|_| "ironclaw/sandbox:dev".to_string());
+            .unwrap_or_else(|_| "t3claw/sandbox:dev".to_string());
         if !sandbox_image_present(&image).await {
             skip!(
                 "Sandbox image '{image}' not found locally. Build it once with:\n\
@@ -106,22 +106,22 @@ mod sandbox_e2e_tests {
         }
 
         // Replay mode needs a committed trace fixture; live mode needs LLM
-        // credentials in `~/.ironclaw/.env`. Skip cleanly when neither is
+        // credentials in `~/.t3claw/.env`. Skip cleanly when neither is
         // available so a dev running the test for the first time gets a
         // helpful hint instead of a panic deep inside the replay harness.
-        let live_mode = std::env::var("IRONCLAW_LIVE_TEST")
+        let live_mode = std::env::var("T3CLAW_LIVE_TEST")
             .ok()
             .filter(|v| !v.is_empty() && v != "0")
             .is_some();
         let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/llm_traces/live/sandbox_clones_ironclaw_to_megaclaw.json");
+            .join("tests/fixtures/llm_traces/live/sandbox_clones_t3claw_to_megaclaw.json");
         if !live_mode && !fixture.exists() {
             skip!(
-                "No trace fixture at {} and IRONCLAW_LIVE_TEST is not set. \
+                "No trace fixture at {} and T3CLAW_LIVE_TEST is not set. \
                  Record it once with:\n\n    \
-                 SANDBOX_ENABLED=true IRONCLAW_LIVE_TEST=1 \\\n    \
+                 SANDBOX_ENABLED=true T3CLAW_LIVE_TEST=1 \\\n    \
                    cargo test --features libsql --test sandbox_live_e2e -- --ignored --nocapture\n\n\
-                 (requires LLM credentials in ~/.ironclaw/.env)",
+                 (requires LLM credentials in ~/.t3claw/.env)",
                 fixture.display()
             );
         }
@@ -142,7 +142,7 @@ mod sandbox_e2e_tests {
             }
         }
 
-        let harness = LiveTestHarnessBuilder::new("sandbox_clones_ironclaw_to_megaclaw")
+        let harness = LiveTestHarnessBuilder::new("sandbox_clones_t3claw_to_megaclaw")
             .with_engine_v2(true)
             .with_auto_approve_tools(true)
             .with_max_tool_iterations(60)
@@ -163,10 +163,10 @@ mod sandbox_e2e_tests {
             1. Clone https://github.com/nearai/ironclaw into /project/repo \
             with a shallow clone: \
             `git clone --depth 1 https://github.com/nearai/ironclaw /project/repo`\n\
-            2. Rename the project from 'ironclaw' to 'megaclaw' in the \
+            2. Rename the project from 't3claw' to 'megaclaw' in the \
             top-level Cargo.toml by updating only the line that reads \
-            `name = \"ironclaw\"` to `name = \"megaclaw\"`. Use sed:\n   \
-            `sed -i 's/^name = \"ironclaw\"$/name = \"megaclaw\"/' /project/repo/Cargo.toml`\n\
+            `name = \"t3claw\"` to `name = \"megaclaw\"`. Use sed:\n   \
+            `sed -i 's/^name = \"t3claw\"$/name = \"megaclaw\"/' /project/repo/Cargo.toml`\n\
             3. Verify the rename by running \
             `grep -n 'name = \"megaclaw\"' /project/repo/Cargo.toml` and \
             confirm it prints the renamed line.\n\

@@ -53,7 +53,7 @@ impl SecretsConfig {
     ///    env var is unset, so setting `SECRETS_MASTER_KEY` explicitly
     ///    does not trigger a macOS Keychain Access dialog.
     /// 3. Auto-generate and persist: try keychain first, fall back to
-    ///    `~/.ironclaw/.env` as `SECRETS_MASTER_KEY=…`.
+    ///    `~/.t3claw/.env` as `SECRETS_MASTER_KEY=…`.
     ///
     /// Running this on every startup (not only onboarding) closes #1820:
     /// users who skipped or partially completed onboarding, or who run
@@ -63,7 +63,7 @@ impl SecretsConfig {
     ///
     /// Note on zeroization: generated hex keys flow through `String`
     /// before landing in `SecretString`. That intermediate is not
-    /// zeroized, but the key ultimately lives in `~/.ironclaw/.env`
+    /// zeroized, but the key ultimately lives in `~/.t3claw/.env`
     /// (0o600) in plaintext when the keychain is unavailable — the
     /// durable leak surface is the file, not heap fragments.
     pub(crate) async fn resolve() -> Result<Self, ConfigError> {
@@ -72,7 +72,7 @@ impl SecretsConfig {
 
     /// Testable variant of [`Self::resolve`] that writes its `.env`
     /// fallback to an explicit path. Production code calls
-    /// [`Self::resolve`], which targets `~/.ironclaw/.env`.
+    /// [`Self::resolve`], which targets `~/.t3claw/.env`.
     pub(crate) async fn resolve_with_env_path(env_path: &Path) -> Result<Self, ConfigError> {
         // Lazy keychain probe: only touch the OS keychain when the env
         // var is unset. Eager probing would trigger macOS Keychain
@@ -224,7 +224,7 @@ impl SecretsConfig {
 }
 
 /// Extract a valid 32-byte hex `SECRETS_MASTER_KEY` value from an
-/// ironclaw `.env` file. Returns `None` if the file is missing, the
+/// t3claw `.env` file. Returns `None` if the file is missing, the
 /// key isn't present, or the value isn't exactly 64 hex characters.
 /// Used for TOCTOU detection in [`SecretsConfig::auto_generate_and_persist`].
 fn read_secrets_master_key(env_path: &Path) -> Option<String> {

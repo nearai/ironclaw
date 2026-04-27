@@ -175,9 +175,9 @@ async def test_empty_message_not_sent(page):
     assert final_count == initial_count, "Empty message should not create new messages"
 
 
-async def test_slash_autocomplete_shows_commands_and_skills(page, ironclaw_server):
+async def test_slash_autocomplete_shows_commands_and_skills(page, t3claw_server):
     """Typing `/` should show built-in commands and installed skills in one menu."""
-    response = await api_get(ironclaw_server, "/api/skills", timeout=10)
+    response = await api_get(t3claw_server, "/api/skills", timeout=10)
     response.raise_for_status()
     skills = response.json().get("skills", [])
     assert skills, "Expected at least one installed skill for slash autocomplete"
@@ -310,7 +310,7 @@ async def test_turn_cost_event_does_not_render_message_badge(page):
     assert "$1.6296" not in badge_count["text"]
 
 
-async def test_gateway_attachment_flow_renders_thread_and_reaches_llm(page, ironclaw_server, mock_llm_server):
+async def test_gateway_attachment_flow_renders_thread_and_reaches_llm(page, t3claw_server, mock_llm_server):
     """Upload image/PDF/text/slides, render them in-thread, and verify the LLM payload."""
     attachment_input = page.locator(SEL["attachment_input"])
     chat_input = page.locator(SEL["chat_input"])
@@ -350,7 +350,7 @@ async def test_gateway_attachment_flow_renders_thread_and_reaches_llm(page, iron
     await chat_input.press("Enter")
 
     history = await _wait_for_thread_response(
-        ironclaw_server,
+        t3claw_server,
         thread_id,
         expected_user_input="Please review these attachments.",
         timeout=45.0,
@@ -393,11 +393,11 @@ async def test_gateway_attachment_flow_renders_thread_and_reaches_llm(page, iron
     assert "data:image/png;base64," in serialized, serialized[:1200]
 
 
-async def test_gateway_files_only_attachments_reload_from_history(page, ironclaw_server, mock_llm_server):
+async def test_gateway_files_only_attachments_reload_from_history(page, t3claw_server, mock_llm_server):
     """Files-only sends should persist and re-render from history without raw attachment markup."""
     thread_id = await _wait_for_current_thread_id(page)
     response = await api_post(
-        ironclaw_server,
+        t3claw_server,
         "/api/chat/send",
         json={
             "content": "",
@@ -422,7 +422,7 @@ async def test_gateway_files_only_attachments_reload_from_history(page, ironclaw
     response.raise_for_status()
 
     history = await _wait_for_thread_response(
-        ironclaw_server,
+        t3claw_server,
         thread_id,
         expected_user_input="files-only-notes.txt",
         timeout=45.0,
@@ -466,7 +466,7 @@ async def test_gateway_files_only_attachments_reload_from_history(page, ironclaw
     assert "Rendered from persisted history." in (last_turn.get("user_input") or "")
 
 
-async def test_gateway_attachment_unextractable_file_uses_placeholder(page, ironclaw_server, mock_llm_server):
+async def test_gateway_attachment_unextractable_file_uses_placeholder(page, t3claw_server, mock_llm_server):
     """Unsupported documents should still reach the backend with a fallback attachment marker."""
     attachment_input = page.locator(SEL["attachment_input"])
     chat_input = page.locator(SEL["chat_input"])
@@ -486,7 +486,7 @@ async def test_gateway_attachment_unextractable_file_uses_placeholder(page, iron
     await chat_input.press("Enter")
 
     history = await _wait_for_thread_response(
-        ironclaw_server,
+        t3claw_server,
         thread_id,
         expected_user_input="Please inspect this binary attachment.",
         timeout=45.0,

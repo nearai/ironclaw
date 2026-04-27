@@ -13,7 +13,7 @@ on:
         type: string
 
 env:
-  IMAGE_NAME: nearaidev/ironclaw
+  IMAGE_NAME: nearaidev/t3claw
 
 jobs:
   build:
@@ -47,7 +47,7 @@ jobs:
           SOURCE_REF: ${{ inputs.source_ref }}
           SOURCE_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          EXPECTED_REF="ironclaw-v${EXPECTED_TAG}"
+          EXPECTED_REF="t3claw-v${EXPECTED_TAG}"
           if [[ "${SOURCE_REF}" != "${EXPECTED_REF}" ]]; then
             echo "::error::Expected source_ref '${EXPECTED_REF}' for tag '${EXPECTED_TAG}', got '${SOURCE_REF}'"
             exit 1

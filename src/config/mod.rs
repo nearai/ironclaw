@@ -1127,7 +1127,7 @@ mod tests {
     }
 
     /// Return a path to a temporary empty TOML file so that tests do not
-    /// accidentally load the user's real `~/.ironclaw/config.toml`.
+    /// accidentally load the user's real `~/.t3claw/config.toml`.
     fn empty_toml_path() -> tempfile::NamedTempFile {
         tempfile::Builder::new()
             .suffix(".toml")

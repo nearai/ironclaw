@@ -1,6 +1,6 @@
 # Bridge Module
 
-Adapter layer between the engine v2 (`ironclaw_engine`) and the host
+Adapter layer between the engine v2 (`t3claw_engine`) and the host
 crate's execution, auth, LLM, and persistence surfaces. Channels,
 handlers, and tool runtimes must not re-implement auth or identity
 resolution — they call through these adapters.

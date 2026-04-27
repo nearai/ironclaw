@@ -231,7 +231,7 @@ def auth_headers(token: str = AUTH_TOKEN) -> dict[str, str]:
 
 
 async def api_get(base_url: str, path: str, *, token: str = AUTH_TOKEN, **kwargs) -> httpx.Response:
-    """Make an authenticated GET request to the ironclaw API."""
+    """Make an authenticated GET request to the t3claw API."""
     async with httpx.AsyncClient() as client:
         return await client.get(
             f"{base_url}{path}",
@@ -242,7 +242,7 @@ async def api_get(base_url: str, path: str, *, token: str = AUTH_TOKEN, **kwargs
 
 
 async def api_post(base_url: str, path: str, *, token: str = AUTH_TOKEN, **kwargs) -> httpx.Response:
-    """Make an authenticated POST request to the ironclaw API."""
+    """Make an authenticated POST request to the t3claw API."""
     async with httpx.AsyncClient() as client:
         return await client.post(
             f"{base_url}{path}",

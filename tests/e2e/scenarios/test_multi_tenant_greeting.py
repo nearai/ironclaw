@@ -69,50 +69,50 @@ async def _assert_single_greeting(page, expected_count: int = 1) -> None:
     )
 
 
-async def test_multi_tenant_initial_greeting_is_persisted_once(browser, ironclaw_server):
+async def test_multi_tenant_initial_greeting_is_persisted_once(browser, t3claw_server):
     alice_suffix = uuid.uuid4().hex[:8]
     bob_suffix = uuid.uuid4().hex[:8]
     charlie_suffix = uuid.uuid4().hex[:8]
 
     alice_token = await _create_user(
-        ironclaw_server,
+        t3claw_server,
         display_name="Alice Tenant",
         email=f"alice-tenant-{alice_suffix}@example.com",
     )
     bob_token = await _create_user(
-        ironclaw_server,
+        t3claw_server,
         display_name="Bob Tenant",
         email=f"bob-tenant-{bob_suffix}@example.com",
     )
     charlie_token = await _create_user(
-        ironclaw_server,
+        t3claw_server,
         display_name="Charlie Tenant",
         email=f"charlie-tenant-{charlie_suffix}@example.com",
     )
 
-    alice_context, alice_page = await _open_user_page(browser, ironclaw_server, alice_token)
+    alice_context, alice_page = await _open_user_page(browser, t3claw_server, alice_token)
     try:
         await _assert_single_greeting(alice_page)
-        alice_thread_id, alice_turns = await _assistant_history(ironclaw_server, alice_token)
+        alice_thread_id, alice_turns = await _assistant_history(t3claw_server, alice_token)
         assert len(alice_turns) == 1
         assert GREETING_MARKER in (alice_turns[0].get("response") or "").lower()
     finally:
         await alice_context.close()
 
-    bob_context, bob_page = await _open_user_page(browser, ironclaw_server, bob_token)
+    bob_context, bob_page = await _open_user_page(browser, t3claw_server, bob_token)
     try:
         await _assert_single_greeting(bob_page)
-        bob_thread_id, bob_turns = await _assistant_history(ironclaw_server, bob_token)
+        bob_thread_id, bob_turns = await _assistant_history(t3claw_server, bob_token)
         assert len(bob_turns) == 1
         assert GREETING_MARKER in (bob_turns[0].get("response") or "").lower()
     finally:
         await bob_context.close()
 
-    charlie_context, charlie_page = await _open_user_page(browser, ironclaw_server, charlie_token)
+    charlie_context, charlie_page = await _open_user_page(browser, t3claw_server, charlie_token)
     try:
         await _assert_single_greeting(charlie_page)
         charlie_thread_id, charlie_turns = await _assistant_history(
-            ironclaw_server, charlie_token
+            t3claw_server, charlie_token
         )
         assert len(charlie_turns) == 1
         assert GREETING_MARKER in (charlie_turns[0].get("response") or "").lower()
@@ -122,21 +122,21 @@ async def test_multi_tenant_initial_greeting_is_persisted_once(browser, ironclaw
     assert len({alice_thread_id, bob_thread_id, charlie_thread_id}) == 3
 
     alice_reload_context, alice_reload_page = await _open_user_page(
-        browser, ironclaw_server, alice_token
+        browser, t3claw_server, alice_token
     )
     try:
         await _assert_single_greeting(alice_reload_page)
-        _, alice_turns_after = await _assistant_history(ironclaw_server, alice_token)
+        _, alice_turns_after = await _assistant_history(t3claw_server, alice_token)
         assert len(alice_turns_after) == 1
     finally:
         await alice_reload_context.close()
 
     bob_reload_context, bob_reload_page = await _open_user_page(
-        browser, ironclaw_server, bob_token
+        browser, t3claw_server, bob_token
     )
     try:
         await _assert_single_greeting(bob_reload_page)
-        _, bob_turns_after = await _assistant_history(ironclaw_server, bob_token)
+        _, bob_turns_after = await _assistant_history(t3claw_server, bob_token)
         assert len(bob_turns_after) == 1
     finally:
         await bob_reload_context.close()

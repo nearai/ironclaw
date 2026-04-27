@@ -51,7 +51,7 @@ CANNED_RESPONSES = [
     # After the orchestrator sends its nudge, recover with a final completion.
     # The exact nudge prefix is "You said you would perform an action..." —
     # see `signals_tool_intent` + the nudge append in
-    # `crates/ironclaw_engine/orchestrator/default.py`. Match either the new
+    # `crates/t3claw_engine/orchestrator/default.py`. Match either the new
     # phrasing or the legacy "You expressed intent" so older deployments
     # still work.
     (re.compile(r"You said you would perform an action|You expressed intent", re.IGNORECASE),
@@ -238,13 +238,13 @@ TOOL_CALL_PATTERNS = [
     ),
     (
         re.compile(
-            r"create (?:an )?issue.*(?:nearai|ironclaw)|issue in nearai/ironclaw",
+            r"create (?:an )?issue.*(?:nearai|t3claw)|issue in nearai/t3claw",
             re.IGNORECASE,
         ),
         "http",
         lambda _: {
             "method": "POST",
-            "url": f"{_github_api_url}/repos/nearai/ironclaw/issues",
+            "url": f"{_github_api_url}/repos/nearai/t3claw/issues",
             "body": {
                 "title": "E2E auth flow test issue",
                 "body": "Created by the E2E mock LLM auth-flow scenario.",
@@ -252,11 +252,11 @@ TOOL_CALL_PATTERNS = [
         },
     ),
     (
-        re.compile(r"list.*issues.*(?:nearai|ironclaw)|github.*issues", re.IGNORECASE),
+        re.compile(r"list.*issues.*(?:nearai|t3claw)|github.*issues", re.IGNORECASE),
         "http",
         lambda _: {
             "method": "GET",
-            "url": f"{_github_api_url}/repos/nearai/ironclaw/issues?per_page=5",
+            "url": f"{_github_api_url}/repos/nearai/t3claw/issues?per_page=5",
         },
     ),
     # For max iterations test: always returns a tool call, never FINAL
@@ -340,7 +340,7 @@ TOOL_CALL_PATTERNS = [
     # 1. Move the top tab bar into a left side panel by writing the
     #    ``.system/gateway/custom.css`` overlay file. The CSS targets the
     #    real DOM nodes (`#app`, `.tab-bar`) defined in
-    #    ``crates/ironclaw_gateway/static/index.html``.
+    #    ``crates/t3claw_gateway/static/index.html``.
     (
         re.compile(r"customize:\s*move tab bar to left", re.IGNORECASE),
         "memory_write",
@@ -402,7 +402,7 @@ TOOL_CALL_PATTERNS = [
                     "append": False,
                     "force": True,
                     "content": (
-                "IronClaw.registerWidget({\n"
+                "T3Claw.registerWidget({\n"
                 "  id: 'skills-viewer',\n"
                 "  name: 'Skills',\n"
                 "  slot: 'tab',\n"
@@ -910,7 +910,7 @@ def _extract_tool_name(msg: dict) -> str:
     name = msg.get("name")
     if name:
         return name
-    # ironclaw wraps tool output as <tool_output name="...">
+    # t3claw wraps tool output as <tool_output name="...">
     content = msg.get("content", "")
     m = re.search(r'<tool_output\s+name="([^"]+)"', content)
     if m:
@@ -1403,7 +1403,7 @@ async def _stream_truncated_tool_call(
 async def oauth_exchange(request: web.Request) -> web.Response:
     """Mock OAuth token exchange proxy for E2E tests.
 
-    Accepts the generic hosted OAuth proxy contract used by IronClaw and
+    Accepts the generic hosted OAuth proxy contract used by T3Claw and
     returns a fake token response. MCP callback tests assert that provider-
     specific token params such as RFC 8707 `resource` are forwarded here.
     """
@@ -1621,7 +1621,7 @@ async def mcp_oauth_register(request: web.Request) -> web.Response:
     return web.json_response({
         "client_id": "mock-mcp-client-id",
         "client_secret": "mock-mcp-client-secret",
-        "client_name": body.get("client_name", "IronClaw"),
+        "client_name": body.get("client_name", "T3Claw"),
         "redirect_uris": body.get("redirect_uris", []),
     })
 

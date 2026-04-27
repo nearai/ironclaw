@@ -161,7 +161,7 @@ pub enum GeneratedKeySafetyError {
     /// with a previous key, so the new key cannot decrypt them and
     /// continuing would shadow unrecoverable data.
     #[error(
-        "Secrets store already contains encrypted data, but IronClaw auto-generated \
+        "Secrets store already contains encrypted data, but T3Claw auto-generated \
          a new master key because no SECRETS_MASTER_KEY env var and no OS-keychain \
          entry were available. The existing rows were encrypted with a different key \
          and cannot be decrypted. Restore the original key (set SECRETS_MASTER_KEY or \
@@ -211,7 +211,7 @@ pub async fn verify_generated_key_safe(
 /// when the safety gate rejects the freshly-generated key.
 ///
 /// Without this step, `auto_generate_and_persist` has already written
-/// the key to either the OS keychain or `~/.ironclaw/.env` by the
+/// the key to either the OS keychain or `~/.t3claw/.env` by the
 /// time the gate runs — and a subsequent restart would pick it up
 /// via the env-first/keychain probe as `generated = false`, skip the
 /// gate, and silently accept the wrong key against data it cannot

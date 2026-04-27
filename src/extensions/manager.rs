@@ -996,7 +996,7 @@ impl ExtensionManager {
     /// `activation_status` instead of relying on `ext.active` as a proxy.
     ///
     /// Returns false if no DB-backed pairing store is available — the noop
-    /// pairing store cannot have rows. See nearai/ironclaw#1921.
+    /// pairing store cannot have rows. See nearai/ironclaw#ironclaw#1921.
     pub async fn has_wasm_channel_pairing(&self, name: &str) -> bool {
         let rt_guard = self.channel_runtime.read().await;
         let Some(ref rt) = *rt_guard else {
@@ -1496,7 +1496,7 @@ impl ExtensionManager {
                     ))
                 }
                 ExtensionKind::AcpAgent => Err(ExtensionError::InstallFailed(
-                    "ACP agents are configured via 'ironclaw acp add', not the extension manager"
+                    "ACP agents are configured via 't3claw acp add', not the extension manager"
                         .to_string(),
                 )),
             }
@@ -1572,7 +1572,7 @@ impl ExtensionManager {
                 kind: ExtensionKind::AcpAgent,
                 tools_loaded: Vec::new(),
                 message: format!(
-                    "ACP agent '{}' is managed via 'ironclaw acp' commands",
+                    "ACP agent '{}' is managed via 't3claw acp' commands",
                     name
                 ),
             }),
@@ -2301,7 +2301,7 @@ impl ExtensionManager {
                     .await;
 
                 Ok(format!(
-                    "Removed channel '{}'. Restart IronClaw for the change to take effect.",
+                    "Removed channel '{}'. Restart T3Claw for the change to take effect.",
                     name
                 ))
             }
@@ -2379,9 +2379,9 @@ impl ExtensionManager {
                 Ok(format!("Removed channel relay '{}'", name))
             }
             ExtensionKind::AcpAgent => {
-                // ACP agents are managed via `ironclaw acp remove`
+                // ACP agents are managed via `t3claw acp remove`
                 Ok(format!(
-                    "ACP agent '{}' should be removed via 'ironclaw acp remove {}'",
+                    "ACP agent '{}' should be removed via 't3claw acp remove {}'",
                     name, name
                 ))
             }
@@ -3020,7 +3020,7 @@ impl ExtensionManager {
                 })
             }
             ExtensionKind::AcpAgent => Err(ExtensionError::InstallFailed(
-                "ACP agents are configured via 'ironclaw acp add', not the registry".to_string(),
+                "ACP agents are configured via 't3claw acp add', not the registry".to_string(),
             )),
         }
     }
@@ -3558,7 +3558,7 @@ impl ExtensionManager {
                 ExtensionError::InstallFailed(format!(
                     "'{}' requires building from source. Build artifact not found. \
                          Run `cargo component build --release` in {} first, \
-                         or use `ironclaw registry install {}`.",
+                         or use `t3claw registry install {}`.",
                     name,
                     resolved_dir.display(),
                     name,
@@ -6166,7 +6166,7 @@ impl ExtensionManager {
             ExtensionError::Config(e.to_string())
         })?;
 
-        // Generate CSRF nonce — IronClaw validates this on the callback to ensure
+        // Generate CSRF nonce — T3Claw validates this on the callback to ensure
         // the OAuth completion is legitimate. Channel-relay embeds it in the signed
         // state and appends it to the post-OAuth redirect URL.
         let state_nonce = uuid::Uuid::new_v4().to_string();
@@ -8423,7 +8423,7 @@ mod tests {
         );
     }
 
-    /// Regression for nearai/ironclaw#1921's sibling: registry-backed wasm
+    /// Regression for nearai/ironclaw#ironclaw#1921's sibling: registry-backed wasm
     /// tools that are not yet installed should appear as latent provider
     /// actions so the agent can request them by name and trigger
     /// auto-install. This pins the registry-discovery half of
@@ -9765,7 +9765,7 @@ mod tests {
         Ok(())
     }
 
-    /// Regression for nearai/ironclaw#1921 — caller-level coverage.
+    /// Regression for nearai/ironclaw#ironclaw#1921 — caller-level coverage.
     ///
     /// The web extensions list handler used to derive
     /// `activation_status` from `derive_activation_status(ext, has_owner_binding)`,
@@ -10888,7 +10888,7 @@ mod tests {
             Arc::new(InMemorySecretsStore::new(crypto));
         let tools = Arc::new(crate::tools::ToolRegistry::new());
         let mcp = Arc::new(McpSessionManager::new());
-        let dir = std::env::temp_dir().join("ironclaw-test-gateway-mode");
+        let dir = std::env::temp_dir().join("t3claw-test-gateway-mode");
 
         ExtensionManager::new(
             mcp,

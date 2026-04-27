@@ -8,7 +8,7 @@
 //!
 //! Handlers depend on this module directly. The older
 //! `crate::channels::web::server::*` path — and its back-compat shim in
-//! `src/channels/web/server.rs` — was removed in ironclaw#2599 stage 6.
+//! `src/channels/web/server.rs` — was removed in ironclaw#ironclaw#2599 stage 6.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

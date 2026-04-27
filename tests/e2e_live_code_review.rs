@@ -20,12 +20,12 @@
 //!
 //! **Live mode** (real LLM + real GitHub API, records/updates fixture):
 //! ```bash
-//! IRONCLAW_LIVE_TEST=1 cargo test --features libsql \
+//! T3CLAW_LIVE_TEST=1 cargo test --features libsql \
 //!     --test e2e_live_code_review -- --ignored --test-threads=1 --nocapture
 //! ```
 //!
 //! Live mode requires a `github_token` secret in the developer's
-//! `~/.ironclaw/ironclaw.db` (read scope is enough; the PR is public).
+//! `~/.t3claw/t3claw.db` (read scope is enough; the PR is public).
 //! Replay mode does not need any credentials — the trace fixture carries
 //! the LLM side and the harness stubs HTTP interactions recorded in the
 //! fixture.
@@ -43,7 +43,7 @@ mod code_review_test {
 
     const TEST_NAME: &str = "code_review_pr_2483";
     const REPO_OWNER: &str = "nearai";
-    const REPO_NAME: &str = "ironclaw";
+    const REPO_NAME: &str = "t3claw";
     const PR_NUMBER: u64 = 2483;
 
     fn repo_skills_dir() -> PathBuf {
@@ -97,7 +97,7 @@ mod code_review_test {
     /// always run (and the fixture gets recorded).
     fn should_run_test(test_name: &str) -> bool {
         if trace_fixture_path(test_name).exists()
-            || std::env::var("IRONCLAW_LIVE_TEST")
+            || std::env::var("T3CLAW_LIVE_TEST")
                 .ok()
                 .filter(|v| !v.is_empty() && v != "0")
                 .is_some()
@@ -268,7 +268,7 @@ mod code_review_test {
             "Response should reference PR #{PR_NUMBER}; got: {}",
             joined.chars().take(400).collect::<String>()
         );
-        let names_repo = lower.contains("nearai/ironclaw") || lower.contains("ironclaw");
+        let names_repo = lower.contains("nearai/ironclaw") || lower.contains("t3claw");
         assert!(
             names_repo,
             "Response should name the repo that was reviewed; got: {}",

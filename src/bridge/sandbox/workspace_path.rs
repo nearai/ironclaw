@@ -1,13 +1,13 @@
 //! Per-project host workspace directory resolution.
 //!
 //! Each engine v2 project gets a real directory on the host filesystem at
-//! `~/.ironclaw/projects/<user_id>/<project_id>/`. That's the directory the
+//! `~/.t3claw/projects/<user_id>/<project_id>/`. That's the directory the
 //! user can see, edit, and back up. It's also the bind-mount source for the
 //! per-project sandbox container's `/project/` mount.
 //!
 //! [`Project::workspace_path`] can override the default; otherwise the helpers
 //! in this module compute and create the standard path. The engine crate
-//! intentionally doesn't know about `~/.ironclaw` — that's a host-side concept
+//! intentionally doesn't know about `~/.t3claw` — that's a host-side concept
 //! kept here so the engine stays portable.
 
 use std::io;
@@ -24,7 +24,7 @@ pub const PROJECTS_SUBDIR: &str = "projects";
 ///
 /// If the project has an explicit `workspace_path` override, that is returned
 /// verbatim. Otherwise the default is
-/// `~/.ironclaw/projects/<user_id>/<project_id>/` — namespaced by user so
+/// `~/.t3claw/projects/<user_id>/<project_id>/` — namespaced by user so
 /// multi-tenant deployments never collide on disk.
 pub fn project_workspace_path(project: &Project) -> PathBuf {
     if let Some(ref explicit) = project.workspace_path {

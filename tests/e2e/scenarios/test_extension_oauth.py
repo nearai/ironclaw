@@ -50,13 +50,13 @@ async def _ensure_removed(base_url, name):
 # ── Section A: Install + OAuth Initiation ────────────────────────────────
 
 
-async def test_oauth_install_gmail(ironclaw_server):
+async def test_oauth_install_gmail(t3claw_server):
     """Install gmail from registry for OAuth testing."""
     global _gmail_installed
-    await _ensure_removed(ironclaw_server, "gmail")
+    await _ensure_removed(t3claw_server, "gmail")
 
     r = await api_post(
-        ironclaw_server,
+        t3claw_server,
         "/api/extensions/install",
         json={"name": "gmail"},
         timeout=180,
@@ -67,14 +67,14 @@ async def test_oauth_install_gmail(ironclaw_server):
     _gmail_installed = True
 
 
-async def test_oauth_configure_returns_auth_url(ironclaw_server):
+async def test_oauth_configure_returns_auth_url(t3claw_server):
     """Configure with empty secrets returns an OAuth auth_url."""
     global _auth_url, _csrf_state
     if not _gmail_installed:
         pytest.skip("gmail not installed")
 
     r = await api_post(
-        ironclaw_server,
+        t3claw_server,
         "/api/extensions/gmail/setup",
         json={"secrets": {}},
         timeout=30,
@@ -92,13 +92,13 @@ async def test_oauth_configure_returns_auth_url(ironclaw_server):
     _csrf_state = _extract_state(_auth_url)
 
 
-async def test_oauth_activate_returns_auth_url(ironclaw_server):
+async def test_oauth_activate_returns_auth_url(t3claw_server):
     """Activate on un-authenticated gmail returns auth_url."""
     if not _gmail_installed:
         pytest.skip("gmail not installed")
 
     r = await api_post(
-        ironclaw_server, "/api/extensions/gmail/activate", timeout=30
+        t3claw_server, "/api/extensions/gmail/activate", timeout=30
     )
     assert r.status_code == 200
     data = r.json()
@@ -110,7 +110,7 @@ async def test_oauth_activate_returns_auth_url(ironclaw_server):
 # ── Section B: Internal OAuth Round-Trip ─────────────────────────────────
 
 
-async def test_oauth_callback_exchanges_token(ironclaw_server):
+async def test_oauth_callback_exchanges_token(t3claw_server):
     """Simulate OAuth callback with mock code — verifies token exchange."""
     global _csrf_state
     if not _csrf_state:
@@ -119,7 +119,7 @@ async def test_oauth_callback_exchanges_token(ironclaw_server):
     # Re-configure to get a fresh pending flow (previous configure may have
     # been consumed by the activate test above)
     r = await api_post(
-        ironclaw_server,
+        t3claw_server,
         "/api/extensions/gmail/setup",
         json={"secrets": {}},
         timeout=30,
@@ -135,7 +135,7 @@ async def test_oauth_callback_exchanges_token(ironclaw_server):
     # stores the returned fake token.
     async with httpx.AsyncClient() as client:
         r = await client.get(
-            f"{ironclaw_server}/oauth/callback",
+            f"{t3claw_server}/oauth/callback",
             params={"code": "mock_auth_code", "state": _csrf_state},
             timeout=30,
             follow_redirects=True,
@@ -149,14 +149,14 @@ async def test_oauth_callback_exchanges_token(ironclaw_server):
     )
 
 
-async def test_oauth_callback_replay_rejected(ironclaw_server):
+async def test_oauth_callback_replay_rejected(t3claw_server):
     """Replaying the same callback is rejected (flow consumed on first use)."""
     if not _csrf_state:
         pytest.skip("No CSRF state")
 
     async with httpx.AsyncClient() as client:
         r = await client.get(
-            f"{ironclaw_server}/oauth/callback",
+            f"{t3claw_server}/oauth/callback",
             params={"code": "mock_auth_code", "state": _csrf_state},
             timeout=10,
             follow_redirects=True,
@@ -169,11 +169,11 @@ async def test_oauth_callback_replay_rejected(ironclaw_server):
     )
 
 
-async def test_oauth_callback_invalid_state(ironclaw_server):
+async def test_oauth_callback_invalid_state(t3claw_server):
     """Callback with bogus state is rejected."""
     async with httpx.AsyncClient() as client:
         r = await client.get(
-            f"{ironclaw_server}/oauth/callback",
+            f"{t3claw_server}/oauth/callback",
             params={"code": "x", "state": "totally-bogus-state-value"},
             timeout=10,
             follow_redirects=True,
@@ -185,24 +185,24 @@ async def test_oauth_callback_invalid_state(ironclaw_server):
     )
 
 
-async def test_oauth_extension_authenticated(ironclaw_server):
+async def test_oauth_extension_authenticated(t3claw_server):
     """After OAuth callback, gmail shows authenticated=True."""
     if not _gmail_installed:
         pytest.skip("gmail not installed")
 
-    ext = await _get_extension(ironclaw_server, "gmail")
+    ext = await _get_extension(t3claw_server, "gmail")
     assert ext is not None, "gmail not in extensions list"
     assert ext["authenticated"] is True, (
         f"gmail should be authenticated after OAuth callback: {ext}"
     )
 
 
-async def test_oauth_tools_registered(ironclaw_server):
+async def test_oauth_tools_registered(t3claw_server):
     """After OAuth authentication, gmail tools appear in tools endpoint."""
     if not _gmail_installed:
         pytest.skip("gmail not installed")
 
-    ext = await _get_extension(ironclaw_server, "gmail")
+    ext = await _get_extension(t3claw_server, "gmail")
     assert ext is not None
     # Check the extension's tools array
     tools = ext.get("tools", [])
@@ -211,13 +211,13 @@ async def test_oauth_tools_registered(ironclaw_server):
     )
 
 
-async def test_remove_during_pending_oauth_invalidates_callback(ironclaw_server):
+async def test_remove_during_pending_oauth_invalidates_callback(t3claw_server):
     """Removing an extension while OAuth is pending invalidates the callback state."""
     if not _gmail_installed:
         pytest.skip("gmail not installed")
 
     r = await api_post(
-        ironclaw_server,
+        t3claw_server,
         "/api/extensions/gmail/setup",
         json={"secrets": {}},
         timeout=30,
@@ -229,7 +229,7 @@ async def test_remove_during_pending_oauth_invalidates_callback(ironclaw_server)
     callback_state = _extract_state(auth_url)
 
     remove_r = await api_post(
-        ironclaw_server, "/api/extensions/gmail/remove", timeout=30
+        t3claw_server, "/api/extensions/gmail/remove", timeout=30
     )
     assert remove_r.status_code == 200
     assert remove_r.json().get("success") is True, (
@@ -238,7 +238,7 @@ async def test_remove_during_pending_oauth_invalidates_callback(ironclaw_server)
 
     async with httpx.AsyncClient() as client:
         callback_r = await client.get(
-            f"{ironclaw_server}/oauth/callback",
+            f"{t3claw_server}/oauth/callback",
             params={"code": "mock_auth_code", "state": callback_state},
             timeout=30,
             follow_redirects=True,
@@ -250,15 +250,15 @@ async def test_remove_during_pending_oauth_invalidates_callback(ironclaw_server)
         f"Callback after removal should fail: {callback_r.text[:500]}"
     )
 
-    ext = await _get_extension(ironclaw_server, "gmail")
+    ext = await _get_extension(t3claw_server, "gmail")
     assert ext is None, "gmail should remain removed after invalidated callback"
 
 
 # ── Section C: Cleanup ──────────────────────────────────────────────────
 
 
-async def test_cleanup_gmail(ironclaw_server):
+async def test_cleanup_gmail(t3claw_server):
     """Remove gmail (cleanup for other test files)."""
-    await _ensure_removed(ironclaw_server, "gmail")
-    ext = await _get_extension(ironclaw_server, "gmail")
+    await _ensure_removed(t3claw_server, "gmail")
+    ext = await _get_extension(t3claw_server, "gmail")
     assert ext is None, "gmail should be removed"

@@ -1291,7 +1291,7 @@ impl Tool for WasmToolWrapper {
         if !resolution.missing_required.is_empty() {
             return Err(ToolError::ExecutionFailed(format!(
                 "WASM tool '{}' requires credentials that are not configured for user '{}': {}. \
-                 Configure the missing credentials with `ironclaw secrets set` and re-run the tool.",
+                 Configure the missing credentials with `t3claw secrets set` and re-run the tool.",
                 self.name(),
                 credential_user_id,
                 resolution.missing_required.join(", ")

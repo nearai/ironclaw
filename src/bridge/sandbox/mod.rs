@@ -8,7 +8,7 @@
 //!
 //! See `docs/plans/2026-03-20-engine-v2-architecture.md` (Phase 8) and
 //! `docs/plans/2026-04-10-engine-v2-sandbox.md` for the full design rationale,
-//! including the cross-reference with nearai/ironclaw#1894.
+//! including the cross-reference with nearai/ironclaw#ironclaw#1894.
 //!
 //! # Scope
 //!

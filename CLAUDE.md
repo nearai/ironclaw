@@ -61,7 +61,7 @@ Current ownership:
 - `src/bridge/auth_manager.rs`: canonical auth-flow extension-name resolver
 - `src/bridge/router.rs`: auth gate display + submit routing
 - `src/channels/web/server.rs`: pending-gate/history rehydration
-- `crates/ironclaw_gateway/static/js/core/onboarding.js`: unified onboarding controller and configure-modal routing (previously in the monolithic `app.js`, now split — see `crates/ironclaw_gateway/src/assets.rs` for the concat order)
+- `crates/t3claw_gateway/static/js/core/onboarding.js`: unified onboarding controller and configure-modal routing (previously in the monolithic `app.js`, now split — see `crates/t3claw_gateway/src/assets.rs` for the concat order)
 
 Temporary compatibility boundary:
 
@@ -298,14 +298,14 @@ and migration status. The dispatcher itself lives in
 When `SANDBOX_ENABLED=true`, engine v2 routes the five filesystem/shell tools
 (`file_read`, `file_write`, `list_dir`, `apply_patch`, `shell`) for `/project/`
 paths through a per-project Docker container instead of the host filesystem.
-The host's directory at `~/.ironclaw/projects/<user_id>/<project_id>/` is bind-mounted at
+The host's directory at `~/.t3claw/projects/<user_id>/<project_id>/` is bind-mounted at
 `/project/` inside the container, and a `sandbox_daemon` binary inside the
 container speaks NDJSON over `docker exec -i`.
 
 When unset, the same code path uses a host-filesystem `MountBackend` —
 behavior is unchanged. See `docs/plans/2026-04-10-engine-v2-sandbox.md`.
 
-Build the sandbox image: `docker build -f crates/Dockerfile.sandbox -t ironclaw/sandbox:dev .`
+Build the sandbox image: `docker build -f crates/Dockerfile.sandbox -t t3claw/sandbox:dev .`
 
 ## Workspace & Memory
 

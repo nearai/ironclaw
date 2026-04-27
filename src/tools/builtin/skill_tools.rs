@@ -1131,7 +1131,7 @@ fn validate_resolved_addrs(host: &str, addrs: &[std::net::SocketAddr]) -> Result
 fn build_fetch_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
-        .user_agent("ironclaw/0.1")
+        .user_agent("t3claw/0.1")
         .redirect(reqwest::redirect::Policy::none())
 }
 
@@ -2236,7 +2236,7 @@ mod tests {
 
         let blob = super::parse_github_blob_ref(&parsed).expect("blob ref");
         assert_eq!(blob.owner, "nearai");
-        assert_eq!(blob.repo, "ironclaw");
+        assert_eq!(blob.repo, "t3claw");
         assert_eq!(
             blob.blob_segments,
             vec!["feature", "foo", "skills", "demo", "SKILL.md"]
@@ -2251,7 +2251,7 @@ mod tests {
 
         let repo = super::parse_github_repo_ref(&parsed).expect("repo ref");
         assert_eq!(repo.owner, "nearai");
-        assert_eq!(repo.repo, "ironclaw");
+        assert_eq!(repo.repo, "t3claw");
         assert_eq!(
             repo.tree_segments,
             Some(vec![

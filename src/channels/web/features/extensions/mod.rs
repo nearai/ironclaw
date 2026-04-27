@@ -2,7 +2,7 @@
 //!
 //! Owns the browser-facing extension lifecycle surface: list / readiness /
 //! tools / install / activate / remove / registry / setup / setup-submit.
-//! Migrated from `server.rs` in ironclaw#2599 stage 4d (final feature
+//! Migrated from `server.rs` in ironclaw#ironclaw#2599 stage 4d (final feature
 //! slice before the `server.rs` shim can be retired).
 //!
 //! # Identity boundary
@@ -42,7 +42,7 @@ use crate::channels::web::types::*;
 /// explicit owner_id in settings. Either is sufficient to upgrade an active
 /// channel from `Pairing` to `Active`.
 ///
-/// See nearai/ironclaw#1921 for the regression that motivated plumbing
+/// See nearai/ironclaw#ironclaw#1921 for the regression that motivated plumbing
 /// `has_paired` through here instead of hardcoding it to `false`.
 pub(crate) fn derive_activation_status(
     ext: &crate::extensions::InstalledExtension,
@@ -251,7 +251,7 @@ pub(crate) async fn extensions_install_handler(
     // URL-path handlers (`activate`, `remove`, `setup`, `setup_submit`)
     // already enforce. Rejects path-traversal, invalid characters, and
     // malformed slugs with a 400 before the value reaches registry
-    // lookup, filesystem path construction under `~/.ironclaw/extensions/`,
+    // lookup, filesystem path construction under `~/.t3claw/extensions/`,
     // or any downstream extension-manager call. The canonical form
     // (hyphens folded to underscores) is used everywhere the previous
     // raw `req.name` was read, keeping the error messages and registry
@@ -272,7 +272,7 @@ pub(crate) async fn extensions_install_handler(
                 crate::extensions::ExtensionSource::WasmBuildable { .. } => {
                     format!(
                         "'{name_str}' requires building from source. \
-                         Run `ironclaw registry install {name_str}` from the CLI."
+                         Run `t3claw registry install {name_str}` from the CLI."
                     )
                 }
                 _ => format!(
@@ -710,7 +710,7 @@ mod tests {
     ///
     /// Either `has_paired` or `has_owner_binding` is sufficient to upgrade
     /// from `Pairing` to `Active`. Pinning the four-cell matrix here means a
-    /// regression that drops one axis (the bug shape behind nearai/ironclaw#1921)
+    /// regression that drops one axis (the bug shape behind nearai/ironclaw#ironclaw#1921)
     /// trips at least two cells, not zero.
     #[test]
     fn derive_activation_status_truth_table_for_active_wasm_channel() {
@@ -733,7 +733,7 @@ mod tests {
         }
     }
 
-    /// Regression for nearai/ironclaw#1921 — caller-level coverage.
+    /// Regression for nearai/ironclaw#ironclaw#1921 — caller-level coverage.
     ///
     /// Before this fix the wrapper hardcoded the underlying classifier's
     /// `has_paired` axis to `false`, so a paired-but-not-owner-bound
@@ -747,7 +747,7 @@ mod tests {
             derive_activation_status(&ext, true, false),
             Some(ExtensionActivationStatus::Active),
             "a WASM channel with paired senders must report Active even when \
-             no owner binding is set (nearai/ironclaw#1921)"
+             no owner binding is set (nearai/ironclaw#ironclaw#1921)"
         );
     }
 
@@ -987,7 +987,7 @@ mod tests {
         // Each of these is the JSON-body `name` the handler now validates
         // through `ExtensionName::new`. Previously `req.name` was taken
         // verbatim into `ext_mgr.install(&req.name, ...)` which constructs
-        // filesystem paths under `~/.ironclaw/extensions/` — so path-traversal
+        // filesystem paths under `~/.t3claw/extensions/` — so path-traversal
         // / separators / control characters could silently reach the
         // filesystem layer before failing deep in the install pipeline.
         for bad in ["..", "../traversal", "slash/name", "BadCase", "has space"] {
@@ -1208,7 +1208,7 @@ mod tests {
         use tower::ServiceExt;
 
         // DB-backed manager so the install path does not fall back to the
-        // developer's real `~/.ironclaw/mcp-servers.json` (which would
+        // developer's real `~/.t3claw/mcp-servers.json` (which would
         // panic with `AlreadyInstalled("notion")` on dev machines that
         // already have a notion entry configured).
         let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir, _db_dir) = test_ext_mgr_with_db().await;
@@ -1323,7 +1323,7 @@ mod tests {
         assert_eq!(telegram["activation_status"], "installed");
     }
 
-    /// Caller-level wire-contract regression for nearai/ironclaw#2235.
+    /// Caller-level wire-contract regression for nearai/ironclaw#ironclaw#2235.
     ///
     /// The Settings → Extensions UI picks the WASM-channel fallback button
     /// label ("Setup" vs "Reconfigure") from `ExtensionInfo.authenticated`

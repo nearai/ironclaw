@@ -571,33 +571,33 @@ document.getElementById('provider-id').addEventListener('input', (e) => {
 // Provides a registration API for frontend widgets. Widgets are self-contained
 // components that plug into named slots in the UI (tabs, sidebar, status bar, etc.).
 //
-// Widget authors call IronClaw.registerWidget({ id, name, slot, init, ... })
+// Widget authors call T3Claw.registerWidget({ id, name, slot, init, ... })
 // from their module script. The init() function receives a container DOM element
-// and the IronClaw.api object for authenticated fetch, event subscription, etc.
+// and the T3Claw.api object for authenticated fetch, event subscription, etc.
 
-// Define `window.IronClaw` as a non-writable, non-configurable property
-// rather than `window.IronClaw = window.IronClaw || {}`. The `|| {}` form
-// would honor any pre-existing value on `window.IronClaw`, which in
+// Define `window.T3Claw` as a non-writable, non-configurable property
+// rather than `window.T3Claw = window.T3Claw || {}`. The `|| {}` form
+// would honor any pre-existing value on `window.T3Claw`, which in
 // principle could be set by an inline script that ran before app.js — a
 // hostile pre-init could install a fake `registerWidget` trap and
 // intercept every widget registration. In practice the gateway HTML
 // loads app.js before any deferred `type="module"` widget script and
-// has no inline scripts that touch `window.IronClaw`, so this is
+// has no inline scripts that touch `window.T3Claw`, so this is
 // defense-in-depth against future template changes (or a stray browser
 // extension), not a fix for an exploitable bug. Using
 // `Object.defineProperty` with `writable: false` / `configurable: false`
 // also locks the binding so a hostile widget can't replace the entire
-// `IronClaw` object after the fact — its only path is to mutate properties
+// `T3Claw` object after the fact — its only path is to mutate properties
 // on the fixed object, which is the same authority every other widget has.
-Object.defineProperty(window, 'IronClaw', {
+Object.defineProperty(window, 'T3Claw', {
   value: {},
   writable: false,
   configurable: false,
   enumerable: true,
 });
-IronClaw.widgets = new Map();
-IronClaw._widgetInitQueue = [];
-IronClaw._chatRenderers = [];
+T3Claw.widgets = new Map();
+T3Claw._widgetInitQueue = [];
+T3Claw._chatRenderers = [];
 
 /**
  * Register a widget component.
@@ -611,12 +611,12 @@ IronClaw._chatRenderers = [];
  * @param {Function} [def.deactivate] - Called when widget is hidden
  * @param {Function} [def.destroy] - Called when widget is removed
  */
-IronClaw.registerWidget = function(def) {
+T3Claw.registerWidget = function(def) {
   if (!def.id || !def.init) {
-    console.error('[IronClaw] Widget registration requires id and init:', def);
+    console.error('[T3Claw] Widget registration requires id and init:', def);
     return;
   }
-  IronClaw.widgets.set(def.id, def);
+  T3Claw.widgets.set(def.id, def);
 
   if (def.slot === 'tab') {
     _addWidgetTab(def);
@@ -635,14 +635,14 @@ IronClaw.registerWidget = function(def) {
  * @param {Function} def.render - (element, textContent) => void (mutate element in place)
  * @param {number} [def.priority=0] - Higher priority runs first
  */
-IronClaw.registerChatRenderer = function(def) {
+T3Claw.registerChatRenderer = function(def) {
   if (!def.id || !def.match || !def.render) {
-    console.error('[IronClaw] Chat renderer requires id, match, and render:', def);
+    console.error('[T3Claw] Chat renderer requires id, match, and render:', def);
     return;
   }
-  IronClaw._chatRenderers.push(def);
+  T3Claw._chatRenderers.push(def);
   // Sort by priority (higher first)
-  IronClaw._chatRenderers.sort(function(a, b) {
+  T3Claw._chatRenderers.sort(function(a, b) {
     return (b.priority || 0) - (a.priority || 0);
   });
 };
@@ -650,7 +650,7 @@ IronClaw.registerChatRenderer = function(def) {
 /**
  * API object exposed to widgets for safe interaction with the app.
  */
-IronClaw.api = {
+T3Claw.api = {
   /**
    * Authenticated fetch wrapper — injects the session token.
    *
@@ -671,13 +671,13 @@ IronClaw.api = {
       resolved = new URL(path, window.location.origin);
     } catch (e) {
       return Promise.reject(
-        new TypeError('IronClaw.api.fetch: invalid URL ' + JSON.stringify(path))
+        new TypeError('T3Claw.api.fetch: invalid URL ' + JSON.stringify(path))
       );
     }
     if (resolved.origin !== window.location.origin) {
       return Promise.reject(
         new TypeError(
-          'IronClaw.api.fetch: cross-origin requests are not allowed (got ' +
+          'T3Claw.api.fetch: cross-origin requests are not allowed (got ' +
           resolved.origin + ', expected ' + window.location.origin +
           '). Use a relative path or a same-origin absolute URL.'
         )
@@ -714,7 +714,7 @@ IronClaw.api = {
     if (!handlers || handlers.length === 0) return;
     for (var i = 0; i < handlers.length; i++) {
       try { handlers[i](data); } catch (e) {
-        console.error('[IronClaw] Widget event handler error (' + eventType + '):', e);
+        console.error('[T3Claw] Widget event handler error (' + eventType + '):', e);
       }
     }
   },
@@ -788,7 +788,7 @@ IronClaw.api = {
     }
 
     var text = opts.text || '';
-    var hashtags = opts.hashtags || 'DeFi,IronClaw';
+    var hashtags = opts.hashtags || 'DeFi,T3Claw';
     var encodedText = encodeURIComponent(text);
     var popupFeatures = 'noopener,noreferrer,width=550,height=';
 
@@ -853,7 +853,7 @@ IronClaw.api = {
     dlBtn.onclick = function() {
       var a = document.createElement('a');
       a.href = opts.imageDataUrl;
-      a.download = 'ironclaw-portfolio-gains.png';
+      a.download = 't3claw-portfolio-gains.png';
       a.click();
       showToast('Downloaded!');
     };

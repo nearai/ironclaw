@@ -1,4 +1,4 @@
-//! IronClaw - Main entry point.
+//! T3Claw - Main entry point.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -63,17 +63,17 @@ fn format_top_level_error(err: &anyhow::Error) {
     let hint = if lower.contains("database_url")
         || lower.contains("database") && lower.contains("not set")
     {
-        Some("run `ironclaw onboard` or set DATABASE_URL in .env")
+        Some("run `t3claw onboard` or set DATABASE_URL in .env")
     } else if lower.contains("connection refused") || lower.contains("connect error") {
         Some("check that the database server is running")
     } else if lower.contains("session") && lower.contains("not found") {
-        Some("run `ironclaw onboard` to set up authentication")
+        Some("run `t3claw onboard` to set up authentication")
     } else if lower.contains("secrets_master_key") {
-        Some("run `ironclaw onboard` or set SECRETS_MASTER_KEY in .env")
+        Some("run `t3claw onboard` or set SECRETS_MASTER_KEY in .env")
     } else if lower.contains("already running") {
         Some("stop the other instance or remove the stale PID file")
     } else if lower.contains("onboard") {
-        Some("run `ironclaw onboard` to complete setup")
+        Some("run `t3claw onboard` to complete setup")
     } else {
         None
     };
@@ -297,7 +297,7 @@ async fn async_main() -> anyhow::Result<()> {
                 );
             } else {
                 println!("Specify a provider to authenticate with:");
-                println!("  ironclaw login --openai-codex   (ChatGPT subscription)");
+                println!("  t3claw login --openai-codex   (ChatGPT subscription)");
             }
             return Ok(());
         }
@@ -338,7 +338,7 @@ async fn async_main() -> anyhow::Result<()> {
         Ok(lock) => Some(lock),
         Err(t3claw::bootstrap::PidLockError::AlreadyRunning { pid }) => {
             anyhow::bail!(
-                "Another IronClaw instance is already running (PID {}). \
+                "Another T3Claw instance is already running (PID {}). \
                  If this is incorrect, remove the stale PID file: {}",
                 pid,
                 t3claw::bootstrap::pid_lock_path().display()
@@ -387,7 +387,7 @@ async fn async_main() -> anyhow::Result<()> {
         Err(t3claw::error::ConfigError::MissingRequired { key, hint }) => {
             anyhow::bail!(
                 "Configuration error: Missing required setting '{}'. {}. \
-                 Run 'ironclaw onboard' to configure, or set the required environment variables.",
+                 Run 't3claw onboard' to configure, or set the required environment variables.",
                 key,
                 hint
             );
@@ -410,7 +410,7 @@ async fn async_main() -> anyhow::Result<()> {
         suppress_stderr,
     );
 
-    tracing::debug!("Starting IronClaw...");
+    tracing::debug!("Starting T3Claw...");
     tracing::debug!("Loaded configuration for agent: {}", config.agent.name);
     tracing::debug!("LLM backend: {}", config.llm.backend);
 

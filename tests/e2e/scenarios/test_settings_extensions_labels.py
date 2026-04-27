@@ -1,6 +1,6 @@
 """Scenario: Settings → Extensions fallback button label regression.
 
-Closes nearai/ironclaw#2235 — clicking the action button on an already-
+Closes nearai/t3claw#2235 — clicking the action button on an already-
 authenticated WASM channel previously re-prompted for credentials
 because the fallback branch labeled it "Reconfigure" unconditionally.
 The Settings UI now picks the label from `ext.authenticated`: "Setup"

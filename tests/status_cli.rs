@@ -13,12 +13,12 @@ fn status_lists_enabled_wasm_channel_names() {
     )
     .expect("write config");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_ironclaw"))
+    let output = Command::new(env!("CARGO_BIN_EXE_t3claw"))
         .arg("status")
-        .env("IRONCLAW_BASE_DIR", base_dir)
+        .env("T3CLAW_BASE_DIR", base_dir)
         .current_dir(base_dir)
         .output()
-        .expect("run ironclaw status");
+        .expect("run t3claw status");
 
     assert!(
         output.status.success(),

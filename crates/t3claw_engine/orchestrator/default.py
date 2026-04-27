@@ -356,7 +356,7 @@ def normalize_punctuation(text):
 def score_skill(skill, message_lower, message_original):
     """Score a skill against a user message. Returns 0 if vetoed.
 
-    Scoring is aligned with the v1 `ironclaw_skills::selector::score_skill`:
+    Scoring is aligned with the v1 `t3claw_skills::selector::score_skill`:
       - exclude_keyword veto: any match => score 0
       - keyword: exact word = 10, substring = 5 (cap 30)
       - tag: substring = 3 (cap 15)
@@ -479,7 +479,7 @@ def _skill_token_cost(skill, activation):
 def select_skills(skills, goal, max_candidates=3, max_tokens=6000):
     """Select relevant skills using deterministic scoring.
 
-    Mirrors the v1 Rust `ironclaw_skills::selector::prefilter_skills`:
+    Mirrors the v1 Rust `t3claw_skills::selector::prefilter_skills`:
 
     1. **Score** each skill against the message. Setup-marker exclusion
        happens upstream in Rust `handle_list_skills`, so by the time

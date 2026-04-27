@@ -239,8 +239,8 @@ document.addEventListener('click', function(e) {
 document.getElementById('user-logout-btn').addEventListener('click', function() {
   fetch('/auth/logout', { method: 'POST', credentials: 'include' })
     .finally(function() {
-      sessionStorage.removeItem('ironclaw_token');
-      sessionStorage.removeItem('ironclaw_oidc');
+      sessionStorage.removeItem('t3claw_token');
+      sessionStorage.removeItem('t3claw_oidc');
       window.location.reload();
     });
 });
@@ -462,7 +462,7 @@ function exportSettings() {
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
     a.href = url;
-    a.download = 'ironclaw-settings.json';
+    a.download = 't3claw-settings.json';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);

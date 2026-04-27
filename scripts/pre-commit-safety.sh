@@ -14,7 +14,7 @@
 #   7. Gateway/CLI handlers bypassing ToolDispatcher (must go through tools)
 #   8. CredentialName referenced in web-layer code (wrong identity at boundary)
 #
-# Also runs check-i18n-parity.sh when crates/ironclaw_gateway/static/i18n/*.js
+# Also runs check-i18n-parity.sh when crates/t3claw_gateway/static/i18n/*.js
 # files are staged, to ensure every language pack has the same key set.
 #
 # Suppress individual lines with an inline "// safety: <reason>" comment.
@@ -53,12 +53,12 @@ resolve_base_ref() {
 # Run before the .rs-focused checks so it fires even when no .rs files change.
 if git diff --cached --quiet 2>/dev/null; then
     HAS_STAGED_CHANGES=0
-    I18N_CHANGED=$(git diff --name-only -- 'crates/ironclaw_gateway/static/i18n/*.js' 2>/dev/null || true)
-    GATEWAY_APP_JS_CHANGED=$(git diff --name-only -- 'crates/ironclaw_gateway/static/js/' 2>/dev/null || true)
+    I18N_CHANGED=$(git diff --name-only -- 'crates/t3claw_gateway/static/i18n/*.js' 2>/dev/null || true)
+    GATEWAY_APP_JS_CHANGED=$(git diff --name-only -- 'crates/t3claw_gateway/static/js/' 2>/dev/null || true)
 else
     HAS_STAGED_CHANGES=1
-    I18N_CHANGED=$(git diff --cached --name-only -- 'crates/ironclaw_gateway/static/i18n/*.js' 2>/dev/null || true)
-    GATEWAY_APP_JS_CHANGED=$(git diff --cached --name-only -- 'crates/ironclaw_gateway/static/js/' 2>/dev/null || true)
+    I18N_CHANGED=$(git diff --cached --name-only -- 'crates/t3claw_gateway/static/i18n/*.js' 2>/dev/null || true)
+    GATEWAY_APP_JS_CHANGED=$(git diff --cached --name-only -- 'crates/t3claw_gateway/static/js/' 2>/dev/null || true)
 fi
 if [ -n "$I18N_CHANGED" ]; then
     # Resolve script location even when invoked via a symlink (the
@@ -88,7 +88,7 @@ fi
 # module leaves the auth shell visible and prevents bootstrap from running.
 # The monolithic `app.js` was split into per-surface/per-concern modules
 # under `static/js/` that are concatenated at compile time into a single
-# `APP_JS` constant (see `crates/ironclaw_gateway/src/assets.rs`). Cuts
+# `APP_JS` constant (see `crates/t3claw_gateway/src/assets.rs`). Cuts
 # land on top-level symbol boundaries, so each file is self-parseable —
 # a per-file `node --check` is sufficient.
 if [ -n "$GATEWAY_APP_JS_CHANGED" ]; then

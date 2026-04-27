@@ -14,7 +14,7 @@
 //! implementation simple.
 //!
 //! **Single-process coherence only.** The cache lives in-process memory.
-//! Settings changed by a separate process (e.g. `ironclaw config set` CLI,
+//! Settings changed by a separate process (e.g. `t3claw config set` CLI,
 //! direct SQL, another replica) are invisible until the cache entry expires
 //! (TTL) or the process receives SIGHUP (which calls [`CachedSettingsStore::flush`]).
 //!

@@ -41,9 +41,9 @@ ONE_BY_ONE_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7Z0QAAAABJRU5ErkJggg=="
 )
 VOICE_SAMPLE_OGG = b"OggS\x00\x02mock-voice-sample"
-_V2_DB_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-v2-e2e-")
-_V2_HOME_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-v2-e2e-home-")
-_V2_PENDING_GATES_PATH = Path(_V2_HOME_TMPDIR.name) / ".ironclaw" / "pending-gates.json"
+_V2_DB_TMPDIR = tempfile.TemporaryDirectory(prefix="t3claw-v2-e2e-")
+_V2_HOME_TMPDIR = tempfile.TemporaryDirectory(prefix="t3claw-v2-e2e-home-")
+_V2_PENDING_GATES_PATH = Path(_V2_HOME_TMPDIR.name) / ".t3claw" / "pending-gates.json"
 
 
 def _forward_coverage_env(env: dict):
@@ -139,7 +139,7 @@ async def _start_mock_api():
         return web.json_response({
             "total_count": 1,
             "items": [{
-                "full_name": "nearai/ironclaw",
+                "full_name": "nearai/t3claw",
                 "description": "AI assistant",
                 "stargazers_count": 42,
             }],
@@ -216,8 +216,8 @@ async def mock_api():
 
 
 @pytest.fixture(scope="module")
-async def v2_server(ironclaw_binary, mock_llm_server, mock_api):
-    """Start ironclaw with ENGINE_V2=true, HTTP_ALLOW_LOCALHOST, and a mock API."""
+async def v2_server(t3claw_binary, mock_llm_server, mock_api):
+    """Start t3claw with ENGINE_V2=true, HTTP_ALLOW_LOCALHOST, and a mock API."""
     mock_api_url = mock_api["url"]
     mock_api_host = mock_api_url.replace("http://", "")
 
@@ -230,7 +230,7 @@ async def v2_server(ironclaw_binary, mock_llm_server, mock_api):
         assert r.status_code == 200
 
     home_dir = _V2_HOME_TMPDIR.name
-    skills_dir = os.path.join(home_dir, ".ironclaw", "skills")
+    skills_dir = os.path.join(home_dir, ".t3claw", "skills")
     os.makedirs(skills_dir, exist_ok=True)
     _write_test_skill(skills_dir, mock_api_host)
 
@@ -248,8 +248,8 @@ async def v2_server(ironclaw_binary, mock_llm_server, mock_api):
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": home_dir,
-        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
-        "RUST_LOG": "ironclaw=debug",
+        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".t3claw"),
+        "RUST_LOG": "t3claw=debug",
         "RUST_BACKTRACE": "1",
         "ENGINE_V2": "true",
         "AGENT_AUTO_APPROVE_TOOLS": "true",
@@ -280,7 +280,7 @@ async def v2_server(ironclaw_binary, mock_llm_server, mock_api):
     _forward_coverage_env(env)
 
     proc = await asyncio.create_subprocess_exec(
-        ironclaw_binary, "--no-onboard",
+        t3claw_binary, "--no-onboard",
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -301,7 +301,7 @@ async def v2_server(ironclaw_binary, mock_llm_server, mock_api):
             except asyncio.TimeoutError:
                 pass
         pytest.fail(
-            f"v2 ironclaw server failed to start on port {gateway_port}.\n"
+            f"v2 t3claw server failed to start on port {gateway_port}.\n"
             f"stderr: {stderr_bytes.decode('utf-8', errors='replace')}"
         )
     finally:
@@ -324,12 +324,12 @@ async def _pin_mock_github_api_url(mock_llm_server, mock_api):
 
 
 @pytest.fixture(scope="module")
-async def v2_skill_install_server(ironclaw_binary, mock_llm_server):
+async def v2_skill_install_server(t3claw_binary, mock_llm_server):
     """Start an isolated ENGINE_V2 gateway for real GitHub skill-install E2E."""
-    db_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-v2-skill-install-db-")
-    home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-v2-skill-install-home-")
+    db_tmpdir = tempfile.TemporaryDirectory(prefix="t3claw-v2-skill-install-db-")
+    home_tmpdir = tempfile.TemporaryDirectory(prefix="t3claw-v2-skill-install-home-")
     home_dir = home_tmpdir.name
-    os.makedirs(os.path.join(home_dir, ".ironclaw"), exist_ok=True)
+    os.makedirs(os.path.join(home_dir, ".t3claw"), exist_ok=True)
 
     socks = []
     for _ in range(2):
@@ -344,8 +344,8 @@ async def v2_skill_install_server(ironclaw_binary, mock_llm_server):
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": home_dir,
-        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
-        "RUST_LOG": "ironclaw=debug",
+        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".t3claw"),
+        "RUST_LOG": "t3claw=debug",
         "RUST_BACKTRACE": "1",
         "ENGINE_V2": "true",
         "AGENT_AUTO_APPROVE_TOOLS": "false",
@@ -375,7 +375,7 @@ async def v2_skill_install_server(ironclaw_binary, mock_llm_server):
     _forward_coverage_env(env)
 
     proc = await asyncio.create_subprocess_exec(
-        ironclaw_binary, "--no-onboard",
+        t3claw_binary, "--no-onboard",
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -412,12 +412,12 @@ async def v2_skill_install_server(ironclaw_binary, mock_llm_server):
 
 
 @pytest.fixture
-async def v2_skill_install_server_isolated(ironclaw_binary, mock_llm_server):
+async def v2_skill_install_server_isolated(t3claw_binary, mock_llm_server):
     """Start a dedicated ENGINE_V2 gateway for tests that need isolated project state."""
-    db_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-v2-skill-install-db-")
-    home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-v2-skill-install-home-")
+    db_tmpdir = tempfile.TemporaryDirectory(prefix="t3claw-v2-skill-install-db-")
+    home_tmpdir = tempfile.TemporaryDirectory(prefix="t3claw-v2-skill-install-home-")
     home_dir = home_tmpdir.name
-    os.makedirs(os.path.join(home_dir, ".ironclaw"), exist_ok=True)
+    os.makedirs(os.path.join(home_dir, ".t3claw"), exist_ok=True)
 
     socks = []
     for _ in range(2):
@@ -432,8 +432,8 @@ async def v2_skill_install_server_isolated(ironclaw_binary, mock_llm_server):
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": home_dir,
-        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
-        "RUST_LOG": "ironclaw=debug",
+        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".t3claw"),
+        "RUST_LOG": "t3claw=debug",
         "RUST_BACKTRACE": "1",
         "ENGINE_V2": "true",
         "AGENT_AUTO_APPROVE_TOOLS": "false",
@@ -463,7 +463,7 @@ async def v2_skill_install_server_isolated(ironclaw_binary, mock_llm_server):
     _forward_coverage_env(env)
 
     proc = await asyncio.create_subprocess_exec(
-        ironclaw_binary, "--no-onboard",
+        t3claw_binary, "--no-onboard",
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -1019,7 +1019,7 @@ class TestV2EngineSkillActivation:
             v2_server,
             "/api/chat/send",
             json={
-                "content": "/github create an issue in nearai/ironclaw repo",
+                "content": "/github create an issue in nearai/t3claw repo",
                 "thread_id": thread_id,
             },
             timeout=30,
@@ -1076,7 +1076,7 @@ class TestV2EngineAttachments:
         assert "v2-hello.pdf" in user_input, user_input
         assert "v2-notes.txt" in user_input, user_input
         assert "<attachments>" in user_input, user_input
-        assert ".ironclaw/attachments/" in user_input, user_input
+        assert ".t3claw/attachments/" in user_input, user_input
 
         notes_path_match = re.search(r'project_path="([^"]*v2-notes\.txt)"', user_input)
         assert notes_path_match, user_input
@@ -1252,7 +1252,7 @@ class TestV2EngineSkillInstallFlow:
             goal_substring="Use this avatar for the call.",
             needles=[
                 "avatar.png",
-                ".ironclaw/attachments/",
+                ".t3claw/attachments/",
             ],
             timeout=90.0,
         )
@@ -1261,7 +1261,7 @@ class TestV2EngineSkillInstallFlow:
             goal_substring="Here is my audio sample.",
             needles=[
                 "voice.ogg",
-                ".ironclaw/attachments/",
+                ".t3claw/attachments/",
             ],
             timeout=90.0,
         )
@@ -1746,7 +1746,7 @@ class TestV2EngineAuthMainFlow:
             v2_server,
             "/api/chat/send",
             json={
-                "content": "list issues in nearai/ironclaw github repo",
+                "content": "list issues in nearai/t3claw github repo",
                 "thread_id": thread_id,
             },
             timeout=30,
@@ -1826,7 +1826,7 @@ class TestV2EngineAuthMainFlow:
             v2_server,
             "/api/chat/send",
             json={
-                "content": "list issues in nearai/ironclaw github repo",
+                "content": "list issues in nearai/t3claw github repo",
                 "thread_id": thread_id,
             },
             timeout=30,
@@ -1886,7 +1886,7 @@ class TestV2EngineAuthEdgeCases:
 
         await api_post(
             v2_server, "/api/chat/send",
-            json={"content": "list issues in nearai/ironclaw github repo", "thread_id": thread_id},
+            json={"content": "list issues in nearai/t3claw github repo", "thread_id": thread_id},
             timeout=30,
         )
 

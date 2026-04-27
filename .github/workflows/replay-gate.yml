@@ -16,7 +16,7 @@ name: Replay Snapshot Gate
 on:
   pull_request:
     paths:
-      - 'crates/ironclaw_engine/**'
+      - 'crates/t3claw_engine/**'
       - 'src/agent/**'
       - 'src/llm/**'
       - 'src/tools/builtin/**'

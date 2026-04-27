@@ -13,35 +13,35 @@ const PRIMITIVES = [
     replaces: "Session + Job + Routine + Sub-agent",
     desc: "Unit of work. Has state, config, messages, leases, events.",
     color: COLORS.primary,
-    file: "crates/ironclaw_engine/src/types/thread.rs",
+    file: "crates/t3claw_engine/src/types/thread.rs",
   },
   {
     name: "Step",
     replaces: "Turn + LLM Call + Tool Call",
     desc: "Unit of execution. LLM call + subsequent action executions.",
     color: COLORS.cyan,
-    file: "crates/ironclaw_engine/src/types/step.rs",
+    file: "crates/t3claw_engine/src/types/step.rs",
   },
   {
     name: "Capability",
     replaces: "Tool + Skill + Hook",
     desc: "Unit of effect with leases and policies.",
     color: COLORS.accent,
-    file: "crates/ironclaw_engine/src/capability/",
+    file: "crates/t3claw_engine/src/capability/",
   },
   {
     name: "MemoryDoc",
     replaces: "Summary + Lesson + Skill + Note",
     desc: "Durable knowledge. Injected into context on thread start.",
     color: COLORS.success,
-    file: "crates/ironclaw_engine/src/types/memory.rs",
+    file: "crates/t3claw_engine/src/types/memory.rs",
   },
   {
     name: "Project",
     replaces: "Workspace + Namespace",
     desc: "Context scope. Owns memory, threads, missions.",
     color: COLORS.purple,
-    file: "crates/ironclaw_engine/src/types/project.rs",
+    file: "crates/t3claw_engine/src/types/project.rs",
   },
 ];
 
@@ -82,7 +82,7 @@ export const PrimitivesScene: React.FC = () => {
           fontFamily: FONTS.mono,
         }}
       >
-        crates/ironclaw_engine/ &mdash; replaces ~10 v1 abstractions
+        crates/t3claw_engine/ &mdash; replaces ~10 v1 abstractions
       </div>
 
       <div

@@ -2,7 +2,7 @@
 // stacked view: totals → positions table → top suggestions →
 // pending intents. No build step, no framework.
 //
-// Reads the project ID from localStorage (`ironclaw.portfolio.projectId`)
+// Reads the project ID from localStorage (`t3claw.portfolio.projectId`)
 // or falls back to the literal "portfolio". Refreshes every 30s.
 //
 // The widget container is `<div data-widget="portfolio">` — all CSS
@@ -14,7 +14,7 @@
 
   var projectId =
     (typeof localStorage !== 'undefined' &&
-      localStorage.getItem('ironclaw.portfolio.projectId')) ||
+      localStorage.getItem('t3claw.portfolio.projectId')) ||
     'portfolio';
 
   var lastState = null;
@@ -222,7 +222,7 @@
         ? '<text x="440" y="180" font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="13" fill="#888" font-weight="500" letter-spacing="0.5">MOVES FOUND</text>' +
           '<text x="440" y="210" font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="28" fill="#f59e0b" font-weight="600">' + moves + '</text>'
         : '') +
-      '<text x="40" y="300" font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="12" fill="#555">Powered by IronClaw · ironclaw.ai</text>' +
+      '<text x="40" y="300" font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="12" fill="#555">Powered by T3Claw · t3claw.ai</text>' +
       '</svg>'
     );
   }

@@ -280,7 +280,7 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
 
     if requires_auth && !has_custom_auth_header {
         println!();
-        println!("  Run 'ironclaw mcp auth {}' to authenticate.", name);
+        println!("  Run 't3claw mcp auth {}' to authenticate.", name);
     }
 
     println!();
@@ -422,7 +422,7 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
     if server.has_custom_auth_header() {
         println!();
         println!(
-            "  Server '{}' is configured with an Authorization header, so 'ironclaw mcp auth' is not used for this configuration.",
+            "  Server '{}' is configured with an Authorization header, so 't3claw mcp auth' is not used for this configuration.",
             name
         );
         println!("  Update or remove that header if you want to switch auth methods.");
@@ -531,7 +531,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
         // OAuth configured but no tokens - need to authenticate
         println!();
         println!(
-            "  ✗ Not authenticated. Run 'ironclaw mcp auth {}' first.",
+            "  ✗ Not authenticated. Run 't3claw mcp auth {}' first.",
             name
         );
         println!();
@@ -598,7 +598,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
                     // No tokens - server requires auth
                     println!("  ✗ Server requires authentication.");
                     println!();
-                    println!("  Run 'ironclaw mcp auth {}' to authenticate.", name);
+                    println!("  Run 't3claw mcp auth {}' to authenticate.", name);
                 }
             } else {
                 println!("  ✗ Connection failed: {}", e);

@@ -11,7 +11,7 @@
 //! with the single, intentional exception of [`router`], which is the
 //! composition point. The router imports every feature handler it
 //! registers; that is its job. The "no back-edges" rule enforced by
-//! future CI (ironclaw#2599 stage 5) applies to every platform module
+//! future CI (ironclaw#ironclaw#2599 stage 5) applies to every platform module
 //! except `router`.
 //!
 //! See `src/channels/web/CLAUDE.md` for the staged migration plan.

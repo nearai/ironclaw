@@ -250,16 +250,16 @@ async def test_waiting_for_approval_message_no_error_prefix(page):
     )
 
 
-async def test_chat_reply_approve_resumes_pending_tool(ironclaw_server):
+async def test_chat_reply_approve_resumes_pending_tool(t3claw_server):
     """A plain chat reply of 'approve' should resume the pending tool call."""
-    thread_id = await _create_thread(ironclaw_server)
+    thread_id = await _create_thread(t3claw_server)
 
-    await _send_chat_message(ironclaw_server, thread_id, "make approval post approval-chat")
-    await _wait_for_history(ironclaw_server, thread_id, expect_pending=True)
+    await _send_chat_message(t3claw_server, thread_id, "make approval post approval-chat")
+    await _wait_for_history(t3claw_server, thread_id, expect_pending=True)
 
-    await _send_chat_message(ironclaw_server, thread_id, "approve")
+    await _send_chat_message(t3claw_server, thread_id, "approve")
     history = await _wait_for_history(
-        ironclaw_server,
+        t3claw_server,
         thread_id,
         expect_pending=False,
         response_fragment="The http tool returned:",
@@ -270,16 +270,16 @@ async def test_chat_reply_approve_resumes_pending_tool(ironclaw_server):
     assert history["turns"][-1]["response"] is not None
 
 
-async def test_chat_reply_deny_rejects_pending_tool(ironclaw_server):
+async def test_chat_reply_deny_rejects_pending_tool(t3claw_server):
     """A plain chat reply of 'deny' should reject the pending tool call."""
-    thread_id = await _create_thread(ironclaw_server)
+    thread_id = await _create_thread(t3claw_server)
 
-    await _send_chat_message(ironclaw_server, thread_id, "make approval post approval-denied")
-    await _wait_for_history(ironclaw_server, thread_id, expect_pending=True)
+    await _send_chat_message(t3claw_server, thread_id, "make approval post approval-denied")
+    await _wait_for_history(t3claw_server, thread_id, expect_pending=True)
 
-    await _send_chat_message(ironclaw_server, thread_id, "deny")
+    await _send_chat_message(t3claw_server, thread_id, "deny")
     history = await _wait_for_history(
-        ironclaw_server,
+        t3claw_server,
         thread_id,
         expect_pending=False,
         response_fragment="was rejected",
@@ -320,23 +320,23 @@ async def test_text_approval_resolves_real_tool_call(page):
     await card.wait_for(state="hidden", timeout=5000)
 
 
-async def test_slash_approve_is_thread_scoped_api(ironclaw_server):
+async def test_slash_approve_is_thread_scoped_api(t3claw_server):
     """Sending '/approve' in thread A must not resolve a pending gate in thread B."""
-    thread_a = await _create_thread(ironclaw_server)
-    thread_b = await _create_thread(ironclaw_server)
+    thread_a = await _create_thread(t3claw_server)
+    thread_b = await _create_thread(t3claw_server)
 
     await _send_chat_message(
-        ironclaw_server,
+        t3claw_server,
         thread_b,
         "make approval post slash-approve-thread-scope",
     )
-    await _wait_for_history(ironclaw_server, thread_b, expect_pending=True)
+    await _wait_for_history(t3claw_server, thread_b, expect_pending=True)
 
-    await _send_chat_message(ironclaw_server, thread_a, "/approve")
+    await _send_chat_message(t3claw_server, thread_a, "/approve")
     await asyncio.sleep(1.0)
 
     history_a = await _wait_for_history(
-        ironclaw_server,
+        t3claw_server,
         thread_a,
         expect_pending=False,
         timeout=5.0,
@@ -344,7 +344,7 @@ async def test_slash_approve_is_thread_scoped_api(ironclaw_server):
     assert history_a.get("pending_gate") is None
 
     history_b = await _wait_for_history(
-        ironclaw_server,
+        t3claw_server,
         thread_b,
         expect_pending=True,
         turn_count_at_least=1,
@@ -355,25 +355,25 @@ async def test_slash_approve_is_thread_scoped_api(ironclaw_server):
 
 # NOTE: This test permanently auto-approves the `http` tool for the session.
 # All tests that need the http approval gate to fire MUST run before this one.
-async def test_chat_reply_always_auto_approves_next_same_tool(ironclaw_server):
+async def test_chat_reply_always_auto_approves_next_same_tool(t3claw_server):
     """A plain chat reply of 'always' should auto-approve the same tool next time."""
-    thread_id = await _create_thread(ironclaw_server)
+    thread_id = await _create_thread(t3claw_server)
 
-    await _send_chat_message(ironclaw_server, thread_id, "make approval post approval-always-a")
-    await _wait_for_history(ironclaw_server, thread_id, expect_pending=True)
+    await _send_chat_message(t3claw_server, thread_id, "make approval post approval-always-a")
+    await _wait_for_history(t3claw_server, thread_id, expect_pending=True)
 
-    await _send_chat_message(ironclaw_server, thread_id, "always")
+    await _send_chat_message(t3claw_server, thread_id, "always")
     await _wait_for_history(
-        ironclaw_server,
+        t3claw_server,
         thread_id,
         expect_pending=False,
         response_fragment="The http tool returned:",
         turn_count_at_least=1,
     )
 
-    await _send_chat_message(ironclaw_server, thread_id, "make approval post approval-always-b")
+    await _send_chat_message(t3claw_server, thread_id, "make approval post approval-always-b")
     history = await _wait_for_history(
-        ironclaw_server,
+        t3claw_server,
         thread_id,
         expect_pending=False,
         response_fragment="The http tool returned:",
@@ -660,7 +660,7 @@ async def test_text_approval_resolves_real_tool_call(browser, managed_gateway_se
 # -- Regression: bare keywords without pending approval ----------------------
 
 
-async def test_bare_yes_treated_as_chat_when_no_approval_pending_api(ironclaw_server):
+async def test_bare_yes_treated_as_chat_when_no_approval_pending_api(t3claw_server):
     """Sending 'yes' via API when no approval is pending should reach the LLM.
 
     Regression test for the bug where SubmissionParser unconditionally converted
@@ -668,17 +668,17 @@ async def test_bare_yes_treated_as_chat_when_no_approval_pending_api(ironclaw_se
     backend to return 'No pending approval for this thread.' instead of routing
     the message as normal user input.
     """
-    thread_id = await _create_thread(ironclaw_server)
+    thread_id = await _create_thread(t3claw_server)
 
     # Send "yes" with no prior approval pending
-    await _send_chat_message(ironclaw_server, thread_id, "yes")
+    await _send_chat_message(t3claw_server, thread_id, "yes")
 
     # The LLM should process it as a regular message and produce a response.
     # The mock LLM returns "I understand your request." for unrecognized input.
     # Critically, the response must NOT be "No pending approval for this thread."
     # Wait for a non-null response (not just turn existence) to avoid flakiness.
     history = await _wait_for_history(
-        ironclaw_server,
+        t3claw_server,
         thread_id,
         turn_count_at_least=1,
         response_fragment="",  # any non-null response
@@ -692,14 +692,14 @@ async def test_bare_yes_treated_as_chat_when_no_approval_pending_api(ironclaw_se
     assert response_text, "Expected an LLM response for bare 'yes' input"
 
 
-async def test_bare_no_treated_as_chat_when_no_approval_pending_api(ironclaw_server):
+async def test_bare_no_treated_as_chat_when_no_approval_pending_api(t3claw_server):
     """Sending 'no' via API when no approval is pending should reach the LLM."""
-    thread_id = await _create_thread(ironclaw_server)
+    thread_id = await _create_thread(t3claw_server)
 
-    await _send_chat_message(ironclaw_server, thread_id, "no")
+    await _send_chat_message(t3claw_server, thread_id, "no")
 
     history = await _wait_for_history(
-        ironclaw_server,
+        t3claw_server,
         thread_id,
         turn_count_at_least=1,
         response_fragment="",  # any non-null response

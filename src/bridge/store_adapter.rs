@@ -2031,7 +2031,7 @@ mod tests {
     /// Parity test: the store adapter's `normalize_path` and the memory
     /// tool's `normalize_workspace_path` both sit on the orchestrator
     /// self-modify security boundary. They are independent copies of the
-    /// same normalization logic (one lives in the `ironclaw` bridge layer,
+    /// same normalization logic (one lives in the "t3claw" bridge layer,
     /// the other in a tool module) — if they ever diverge, a path-traversal
     /// or dot-segment bypass reopens on one side.
     ///

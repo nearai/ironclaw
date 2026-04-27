@@ -96,7 +96,7 @@ impl ProjectMounts {
 /// Builds a fresh [`ProjectMounts`] for a project on first access.
 ///
 /// Implemented by the bridge: in default mode, returns a
-/// `FilesystemBackend(~/.ironclaw/projects/<id>/)` registered at `/project/`.
+/// `FilesystemBackend(~/.t3claw/projects/<id>/)` registered at `/project/`.
 /// When a sandbox container is configured, returns a
 /// `ContainerizedFilesystemBackend` instead.
 #[async_trait]

@@ -2,7 +2,7 @@
 
 Tests that OAuth tokens stored globally under 'default' user are properly
 injected when WASM tools make HTTP requests. This validates the fix for:
-https://github.com/nearai/ironclaw/issues/999
+https://github.com/nearai/t3claw/issues/999
 
 Note: Full routine execution testing is limited because routines are disabled
 in the e2e test environment (ROUTINES_ENABLED=false in conftest.py). This test
@@ -16,7 +16,7 @@ from helpers import api_post, api_get
 import pytest
 
 
-async def test_oauth_credential_injection_after_gmail_auth(ironclaw_server):
+async def test_oauth_credential_injection_after_gmail_auth(t3claw_server):
     """Verify that after OAuth, tool HTTP requests include credentials.
 
     This is an indirect test: we verify that gmail shows as authenticated
@@ -31,14 +31,14 @@ async def test_oauth_credential_injection_after_gmail_auth(ironclaw_server):
 
     # First, ensure gmail is installed and authenticated
     # (Reuse from test_extension_oauth.py if running in sequence)
-    r = await api_get(ironclaw_server, "/api/extensions")
+    r = await api_get(t3claw_server, "/api/extensions")
     extensions = r.json().get("extensions", [])
     gmail = next((ext for ext in extensions if ext["name"] == "gmail"), None)
 
     if gmail is None:
         # Install gmail
         r = await api_post(
-            ironclaw_server,
+            t3claw_server,
             "/api/extensions/install",
             json={"name": "gmail"},
             timeout=180,
@@ -46,7 +46,7 @@ async def test_oauth_credential_injection_after_gmail_auth(ironclaw_server):
         assert r.status_code == 200, f"Failed to install gmail: {r.text}"
 
     # Verify gmail is authenticated (it should be if oauth flow completed)
-    r = await api_get(ironclaw_server, "/api/extensions")
+    r = await api_get(t3claw_server, "/api/extensions")
     extensions = r.json().get("extensions", [])
     gmail = next((ext for ext in extensions if ext["name"] == "gmail"), None)
     assert gmail is not None, "gmail not found in extensions"
@@ -65,7 +65,7 @@ async def test_oauth_credential_injection_after_gmail_auth(ironclaw_server):
         # 3. Verify no 403 "unregistered callers" error
 
 
-async def test_tool_registry_lists_authenticated_extensions(ironclaw_server):
+async def test_tool_registry_lists_authenticated_extensions(t3claw_server):
     """Verify authenticated extensions' tools are registered in tool registry.
 
     Tools from authenticated extensions should have credentials pre-injected
@@ -74,7 +74,7 @@ async def test_tool_registry_lists_authenticated_extensions(ironclaw_server):
     """
 
     # Get extensions list
-    r = await api_get(ironclaw_server, "/api/extensions")
+    r = await api_get(t3claw_server, "/api/extensions")
     extensions = r.json().get("extensions", [])
 
     # Authenticated extensions should appear
@@ -87,7 +87,7 @@ async def test_tool_registry_lists_authenticated_extensions(ironclaw_server):
         assert isinstance(ext["tools"], list)
 
 
-async def test_credential_fallback_documented_in_code(ironclaw_server):
+async def test_credential_fallback_documented_in_code(t3claw_server):
     """Verify the credential fallback fix is present.
 
     This is a documentation test that the bug fix for issue #999 is

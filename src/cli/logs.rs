@@ -1,7 +1,7 @@
 //! CLI command for viewing and managing gateway logs.
 //!
 //! Provides access to gateway logs through three mechanisms:
-//! - Reading the gateway log file (`~/.ironclaw/gateway.log`)
+//! - Reading the gateway log file (`~/.t3claw/gateway.log`)
 //! - Streaming live logs via the gateway's SSE endpoint (`/api/logs/events`)
 //! - Getting/setting the runtime log level via `/api/logs/level`
 
@@ -14,7 +14,7 @@ use clap::Args;
 #[derive(Args, Debug, Clone)]
 #[command(
     about = "View and manage gateway logs",
-    long_about = "Tail gateway logs, stream live output, or adjust log level.\nExamples:\n  ironclaw logs                          # Show last 200 lines\n  ironclaw logs --follow                 # Stream live logs via SSE\n  ironclaw logs --limit 50 --json        # Last 50 lines as JSON\n  ironclaw logs --level                  # Show current log level\n  ironclaw logs --level debug            # Set log level to debug\n  ironclaw logs --grep ERROR             # Filter lines matching 'ERROR'\n  ironclaw logs -g 'timeout|refused' --context 3  # Regex with context"
+    long_about = "Tail gateway logs, stream live output, or adjust log level.\nExamples:\n  t3claw logs                          # Show last 200 lines\n  t3claw logs --follow                 # Stream live logs via SSE\n  t3claw logs --limit 50 --json        # Last 50 lines as JSON\n  t3claw logs --level                  # Show current log level\n  t3claw logs --level debug            # Set log level to debug\n  t3claw logs --grep ERROR             # Filter lines matching 'ERROR'\n  t3claw logs -g 'timeout|refused' --context 3  # Regex with context"
 )]
 pub struct LogsCommand {
     /// Stream live logs from the running gateway via SSE.
@@ -96,7 +96,7 @@ pub async fn run_logs_command(cmd: LogsCommand, config_path: Option<&Path>) -> a
 
 // ── Show log file ────────────────────────────────────────────────────────
 
-/// Read the last N lines from `~/.ironclaw/gateway.log`.
+/// Read the last N lines from `~/.t3claw/gateway.log`.
 ///
 /// Uses a reverse-scan strategy: seeks to the end of the file and reads
 /// backwards in chunks to find the last `limit` newlines, so memory usage
@@ -107,7 +107,7 @@ fn cmd_show(cmd: &LogsCommand) -> anyhow::Result<()> {
         anyhow::bail!(
             "No gateway log file found at {}.\n\
              The log file is created when the gateway runs in background mode \
-             (e.g. `ironclaw gateway start`).",
+             (e.g. `t3claw gateway start`).",
             log_path.display()
         );
     }
@@ -259,7 +259,7 @@ async fn cmd_follow(cmd: &LogsCommand, params: &GatewayParams) -> anyhow::Result
         .map_err(|e| {
             anyhow::anyhow!(
                 "Failed to connect to gateway at {url}: {e}\n\
-                 Is the gateway running? Try `ironclaw gateway status`."
+                 Is the gateway running? Try `t3claw gateway status`."
             )
         })?;
 
@@ -326,7 +326,7 @@ async fn cmd_get_level(cmd: &LogsCommand, params: &GatewayParams) -> anyhow::Res
         .map_err(|e| {
             anyhow::anyhow!(
                 "Failed to connect to gateway at {url}: {e}\n\
-                 Is the gateway running? Try `ironclaw gateway status`."
+                 Is the gateway running? Try `t3claw gateway status`."
             )
         })?;
 
@@ -392,7 +392,7 @@ async fn cmd_set_level(
         .map_err(|e| {
             anyhow::anyhow!(
                 "Failed to connect to gateway at {url}: {e}\n\
-                 Is the gateway running? Try `ironclaw gateway status`."
+                 Is the gateway running? Try `t3claw gateway status`."
             )
         })?;
 
@@ -474,7 +474,7 @@ async fn resolve_gateway_params(
 /// propagated — the user asked for a specific file and deserves a clear
 /// failure when it is missing, unreadable, or malformed.  When no path
 /// was given we fall back to env-only resolution and silently return
-/// `None` on failure so that `ironclaw logs` works without any config.
+/// `None` on failure so that `t3claw logs` works without any config.
 async fn load_gateway_config(
     config_path: Option<&Path>,
 ) -> anyhow::Result<Option<crate::config::GatewayConfig>> {

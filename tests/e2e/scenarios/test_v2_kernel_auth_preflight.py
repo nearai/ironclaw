@@ -34,8 +34,8 @@ from helpers import api_get, api_post, AUTH_TOKEN, wait_for_ready
 # ---------------------------------------------------------------------------
 
 ROOT = Path(__file__).resolve().parent.parent.parent.parent
-_DB_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-preflight-e2e-")
-_HOME_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-preflight-e2e-home-")
+_DB_TMPDIR = tempfile.TemporaryDirectory(prefix="t3claw-preflight-e2e-")
+_HOME_TMPDIR = tempfile.TemporaryDirectory(prefix="t3claw-preflight-e2e-home-")
 
 
 def _forward_coverage_env(env: dict):
@@ -97,7 +97,7 @@ async def _start_mock_api():
         state["request_count"] += 1
         return web.json_response({
             "total_count": 1,
-            "items": [{"full_name": "nearai/ironclaw", "stargazers_count": 42}],
+            "items": [{"full_name": "nearai/t3claw", "stargazers_count": 42}],
         })
 
     async def handle_state(request: web.Request) -> web.Response:
@@ -168,8 +168,8 @@ async def mock_api():
 
 
 @pytest.fixture(scope="module")
-async def v2_server(ironclaw_binary, mock_llm_server, mock_api):
-    """Start ironclaw with ENGINE_V2=true and github skill for preflight testing."""
+async def v2_server(t3claw_binary, mock_llm_server, mock_api):
+    """Start t3claw with ENGINE_V2=true and github skill for preflight testing."""
     mock_api_url = mock_api["url"]
     mock_api_host = mock_api_url.replace("http://", "")
 
@@ -181,7 +181,7 @@ async def v2_server(ironclaw_binary, mock_llm_server, mock_api):
         )
 
     home_dir = _HOME_TMPDIR.name
-    skills_dir = os.path.join(home_dir, ".ironclaw", "skills")
+    skills_dir = os.path.join(home_dir, ".t3claw", "skills")
     os.makedirs(skills_dir, exist_ok=True)
     _write_github_skill(skills_dir, mock_api_host)
 
@@ -198,8 +198,8 @@ async def v2_server(ironclaw_binary, mock_llm_server, mock_api):
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": home_dir,
-        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
-        "RUST_LOG": "ironclaw=debug",
+        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".t3claw"),
+        "RUST_LOG": "t3claw=debug",
         "RUST_BACKTRACE": "1",
         "ENGINE_V2": "true",
         # Auto-approve tools so the preflight test doesn't get stuck on a
@@ -237,7 +237,7 @@ async def v2_server(ironclaw_binary, mock_llm_server, mock_api):
     stderr_fh = open(stderr_log, "w")
 
     proc = await asyncio.create_subprocess_exec(
-        ironclaw_binary, "--no-onboard",
+        t3claw_binary, "--no-onboard",
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=stderr_fh,
@@ -258,7 +258,7 @@ async def v2_server(ironclaw_binary, mock_llm_server, mock_api):
             except asyncio.TimeoutError:
                 pass
         pytest.fail(
-            f"v2 ironclaw server failed to start on port {gateway_port}.\n"
+            f"v2 t3claw server failed to start on port {gateway_port}.\n"
             f"stderr: {stderr_bytes.decode('utf-8', errors='replace')}"
         )
     finally:
@@ -363,7 +363,7 @@ class TestPreflightAuthGate:
             base_url,
             "/api/chat/send",
             json={
-                "content": "list issues in nearai/ironclaw github repo",
+                "content": "list issues in nearai/t3claw github repo",
                 "thread_id": thread_id,
             },
             timeout=30,
@@ -445,7 +445,7 @@ class TestPreflightAuthGate:
             v2_server["url"],
             "/api/chat/send",
             json={
-                "content": "list issues in nearai/ironclaw github repo",
+                "content": "list issues in nearai/t3claw github repo",
                 "thread_id": thread_id,
             },
             timeout=30,
@@ -487,7 +487,7 @@ class TestPreflightAuthGate:
             v2_server["url"],
             "/api/chat/send",
             json={
-                "content": "list issues in nearai/ironclaw github repo",
+                "content": "list issues in nearai/t3claw github repo",
                 "thread_id": thread_id,
             },
             timeout=30,

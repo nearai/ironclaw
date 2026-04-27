@@ -104,7 +104,7 @@ impl Tool for ToolSearchTool {
 
     fn description(&self) -> &str {
         "Search for available extensions to add new capabilities. Extensions include \
-         channels (Telegram, Slack, Discord — connect messaging platforms so IronClaw can \
+         channels (Telegram, Slack, Discord — connect messaging platforms so T3Claw can \
          receive and reply there), tools, and MCP servers. Use `tool_install` to install and \
          continue setup/activation when possible, and `tool_activate` only when an installed \
          extension still needs an explicit activation step. Use the `message` tool for proactive \
@@ -1126,8 +1126,8 @@ mod tests {
             Arc::new(ToolRegistry::new()),
             None,
             None,
-            std::env::temp_dir().join("ironclaw-test-tools"),
-            std::env::temp_dir().join("ironclaw-test-channels"),
+            std::env::temp_dir().join("t3claw-test-tools"),
+            std::env::temp_dir().join("t3claw-test-channels"),
             None,
             "test".to_string(),
             None,

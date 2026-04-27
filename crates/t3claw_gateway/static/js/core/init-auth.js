@@ -91,11 +91,11 @@ function authenticate() {
   // Test the token against the health-ish endpoint (chat/threads requires auth)
   apiFetch('/api/chat/threads')
     .then(() => {
-      sessionStorage.setItem('ironclaw_token', token);
+      sessionStorage.setItem('t3claw_token', token);
       initApp();
     })
     .catch(() => {
-      sessionStorage.removeItem('ironclaw_token');
+      sessionStorage.removeItem('t3claw_token');
       document.getElementById('auth-screen').style.display = '';
       document.getElementById('auth-screen').style.opacity = '';
       document.getElementById('app').style.display = 'none';
@@ -222,7 +222,7 @@ async function authenticateWithNear() {
 
     var signed = await wallet.signMessage({
       message: challenge.message,
-      recipient: challenge.recipient || 'ironclaw',
+      recipient: challenge.recipient || 't3claw',
       nonce: nonceBytes,
     });
 
@@ -249,7 +249,7 @@ async function authenticateWithNear() {
 
     // 5. Rely on the HttpOnly session cookie created by the backend.
     token = '';
-    sessionStorage.removeItem('ironclaw_token');
+    sessionStorage.removeItem('t3claw_token');
     initApp();
   } catch (err) {
     if (errEl) errEl.textContent = err.message || 'NEAR wallet login failed';
@@ -275,10 +275,10 @@ async function authenticateWithNear() {
     return;
   }
   // Restore OIDC proxy mode from session.
-  if (sessionStorage.getItem('ironclaw_oidc') === '1') {
+  if (sessionStorage.getItem('t3claw_oidc') === '1') {
     oidcProxyAuth = true;
   }
-  const saved = sessionStorage.getItem('ironclaw_token');
+  const saved = sessionStorage.getItem('t3claw_token');
   if (saved) {
     document.getElementById('token-input').value = saved;
     document.getElementById('auth-screen').style.display = 'none';
@@ -290,7 +290,7 @@ async function authenticateWithNear() {
   fetch('/api/gateway/status', { credentials: 'include' }).then(function(r) {
     if (r.ok) {
       oidcProxyAuth = true;
-      sessionStorage.setItem('ironclaw_oidc', '1');
+      sessionStorage.setItem('t3claw_oidc', '1');
       document.getElementById('auth-screen').style.display = 'none';
       document.getElementById('app').style.display = 'flex';
       initApp();

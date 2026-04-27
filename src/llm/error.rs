@@ -56,7 +56,7 @@ fn auth_guidance(provider: &str) -> String {
     let normalized = provider.to_lowercase();
     let (env_hint, extra) = match normalized.as_str() {
         "nearai" | "near_ai" | "near" => (
-            "Set NEARAI_API_KEY (from https://cloud.near.ai) or run `ironclaw onboard` to log in",
+            "Set NEARAI_API_KEY (from https://cloud.near.ai) or run `t3claw onboard` to log in",
             "",
         ),
         "openai" => (
@@ -81,9 +81,9 @@ fn auth_guidance(provider: &str) -> String {
             "Configure AWS credentials (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or AWS_PROFILE)",
             "",
         ),
-        "openai_codex" | "codex" => ("Run `ironclaw login --openai-codex` to authenticate", ""),
+        "openai_codex" | "codex" => ("Run `t3claw login --openai-codex` to authenticate", ""),
         "github_copilot" => (
-            "Set GITHUB_COPILOT_TOKEN or run `ironclaw onboard --step provider` to log in via device code",
+            "Set GITHUB_COPILOT_TOKEN or run `t3claw onboard --step provider` to log in via device code",
             "",
         ),
         _ => (
@@ -92,10 +92,10 @@ fn auth_guidance(provider: &str) -> String {
         ),
     };
     if extra.is_empty() {
-        format!("{env_hint}. Or run `ironclaw onboard --step provider` to configure interactively.")
+        format!("{env_hint}. Or run `t3claw onboard --step provider` to configure interactively.")
     } else {
         format!(
-            "{env_hint}. {extra} Or run `ironclaw onboard --step provider` to configure interactively."
+            "{env_hint}. {extra} Or run `t3claw onboard --step provider` to configure interactively."
         )
     }
 }
@@ -115,7 +115,7 @@ mod tests {
             "should mention the env var: {msg}"
         );
         assert!(
-            msg.contains("ironclaw onboard"),
+            msg.contains("t3claw onboard"),
             "should mention onboard command: {msg}"
         );
     }
@@ -143,7 +143,7 @@ mod tests {
             "should give generic guidance: {msg}"
         );
         assert!(
-            msg.contains("ironclaw onboard"),
+            msg.contains("t3claw onboard"),
             "should still mention onboard: {msg}"
         );
     }
@@ -183,7 +183,7 @@ mod tests {
     fn snapshot_auth_failed_nearai() {
         insta::assert_snapshot!(
             render_auth_failed("nearai"),
-            @"Authentication failed for provider 'nearai'. Set NEARAI_API_KEY (from https://cloud.near.ai) or run `ironclaw onboard` to log in. Or run `ironclaw onboard --step provider` to configure interactively."
+            @"Authentication failed for provider 'nearai'. Set NEARAI_API_KEY (from https://cloud.near.ai) or run `t3claw onboard` to log in. Or run `t3claw onboard --step provider` to configure interactively."
         );
     }
 
@@ -191,7 +191,7 @@ mod tests {
     fn snapshot_auth_failed_openai() {
         insta::assert_snapshot!(
             render_auth_failed("openai"),
-            @"Authentication failed for provider 'openai'. Set OPENAI_API_KEY (from https://platform.openai.com/api-keys). Or run `ironclaw onboard --step provider` to configure interactively."
+            @"Authentication failed for provider 'openai'. Set OPENAI_API_KEY (from https://platform.openai.com/api-keys). Or run `t3claw onboard --step provider` to configure interactively."
         );
     }
 
@@ -199,7 +199,7 @@ mod tests {
     fn snapshot_auth_failed_anthropic() {
         insta::assert_snapshot!(
             render_auth_failed("anthropic"),
-            @"Authentication failed for provider 'anthropic'. Set ANTHROPIC_API_KEY (from https://console.anthropic.com/settings/keys). Or run `ironclaw onboard --step provider` to configure interactively."
+            @"Authentication failed for provider 'anthropic'. Set ANTHROPIC_API_KEY (from https://console.anthropic.com/settings/keys). Or run `t3claw onboard --step provider` to configure interactively."
         );
     }
 
@@ -207,7 +207,7 @@ mod tests {
     fn snapshot_auth_failed_ollama() {
         insta::assert_snapshot!(
             render_auth_failed("ollama"),
-            @"Authentication failed for provider 'ollama'. Ensure Ollama is running locally (no API key needed). Set OLLAMA_BASE_URL if not at default http://localhost:11434. Or run `ironclaw onboard --step provider` to configure interactively."
+            @"Authentication failed for provider 'ollama'. Ensure Ollama is running locally (no API key needed). Set OLLAMA_BASE_URL if not at default http://localhost:11434. Or run `t3claw onboard --step provider` to configure interactively."
         );
     }
 
@@ -215,7 +215,7 @@ mod tests {
     fn snapshot_auth_failed_openai_compatible() {
         insta::assert_snapshot!(
             render_auth_failed("openai_compatible"),
-            @"Authentication failed for provider 'openai_compatible'. Set LLM_API_KEY and LLM_BASE_URL for your OpenAI-compatible endpoint. Or run `ironclaw onboard --step provider` to configure interactively."
+            @"Authentication failed for provider 'openai_compatible'. Set LLM_API_KEY and LLM_BASE_URL for your OpenAI-compatible endpoint. Or run `t3claw onboard --step provider` to configure interactively."
         );
     }
 
@@ -223,7 +223,7 @@ mod tests {
     fn snapshot_auth_failed_tinfoil() {
         insta::assert_snapshot!(
             render_auth_failed("tinfoil"),
-            @"Authentication failed for provider 'tinfoil'. Set TINFOIL_API_KEY. Or run `ironclaw onboard --step provider` to configure interactively."
+            @"Authentication failed for provider 'tinfoil'. Set TINFOIL_API_KEY. Or run `t3claw onboard --step provider` to configure interactively."
         );
     }
 
@@ -231,7 +231,7 @@ mod tests {
     fn snapshot_auth_failed_bedrock() {
         insta::assert_snapshot!(
             render_auth_failed("bedrock"),
-            @"Authentication failed for provider 'bedrock'. Configure AWS credentials (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or AWS_PROFILE). Or run `ironclaw onboard --step provider` to configure interactively."
+            @"Authentication failed for provider 'bedrock'. Configure AWS credentials (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or AWS_PROFILE). Or run `t3claw onboard --step provider` to configure interactively."
         );
     }
 
@@ -242,7 +242,7 @@ mod tests {
         // any change to the generic fallback is also deliberate.
         insta::assert_snapshot!(
             render_auth_failed("some_future_provider"),
-            @"Authentication failed for provider 'some_future_provider'. Check that the required API key environment variable is set for this provider. Or run `ironclaw onboard --step provider` to configure interactively."
+            @"Authentication failed for provider 'some_future_provider'. Check that the required API key environment variable is set for this provider. Or run `t3claw onboard --step provider` to configure interactively."
         );
     }
 }

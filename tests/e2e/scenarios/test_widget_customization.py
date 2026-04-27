@@ -14,7 +14,7 @@ Two flows are covered:
 
 2. **Workspace-data widget** — the agent writes a manifest + an
    ``index.js`` for a "Skills" widget that pulls workspace skills from
-   ``/api/skills`` via ``IronClaw.api.fetch`` and renders them in a rich,
+   ``/api/skills`` via ``T3Claw.api.fetch`` and renders them in a rich,
    editable list. The test asserts a new tab button appears, switches to it,
    and verifies the widget actually rendered into a panel marked with a
    stable ``data-testid``.
@@ -55,7 +55,7 @@ _CUSTOM_PATHS = [
 async def _wipe_customizations(base_url: str) -> None:
     """Clear any per-test customization files from the shared workspace.
 
-    The session-scoped ``ironclaw_server`` fixture is shared across every
+    The session-scoped ``t3claw_server`` fixture is shared across every
     test in the run, so anything we write into the workspace must be wiped
     before yielding back to the next test. ``memory_write`` accepts an empty
     body for non-layer paths, and the gateway's widget loader
@@ -111,19 +111,19 @@ async def _stop_proc(proc, *, timeout: float = 10.0) -> None:
 
 
 @pytest.fixture
-async def clean_customizations(ironclaw_server):
+async def clean_customizations(t3claw_server):
     """Wipe layout/widget files before *and* after each test in this module."""
-    await _wipe_customizations(ironclaw_server)
+    await _wipe_customizations(t3claw_server)
     yield
-    await _wipe_customizations(ironclaw_server)
+    await _wipe_customizations(t3claw_server)
 
 
 @pytest.fixture
-async def single_tenant_gateway_server(ironclaw_binary, mock_llm_server):
+async def single_tenant_gateway_server(t3claw_binary, mock_llm_server):
     """Dedicated gateway without a DB so `/style.css` can include custom CSS."""
-    home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-widget-single-tenant-home-")
+    home_tmpdir = tempfile.TemporaryDirectory(prefix="t3claw-widget-single-tenant-home-")
     home_dir = home_tmpdir.name
-    os.makedirs(os.path.join(home_dir, ".ironclaw"), exist_ok=True)
+    os.makedirs(os.path.join(home_dir, ".t3claw"), exist_ok=True)
 
     reserved = []
     for _ in range(2):
@@ -138,8 +138,8 @@ async def single_tenant_gateway_server(ironclaw_binary, mock_llm_server):
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": home_dir,
-        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
-        "RUST_LOG": "ironclaw=info",
+        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".t3claw"),
+        "RUST_LOG": "t3claw=info",
         "RUST_BACKTRACE": "1",
         "IRONCLAW_OWNER_ID": "e2e-widget-single-tenant",
         "GATEWAY_ENABLED": "true",
@@ -163,7 +163,7 @@ async def single_tenant_gateway_server(ironclaw_binary, mock_llm_server):
     }
 
     proc = await asyncio.create_subprocess_exec(
-        ironclaw_binary,
+        t3claw_binary,
         "--no-onboard",
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
@@ -236,7 +236,7 @@ async def _drive_chat_customization(page, prompt: str) -> None:
 
 
 async def test_chat_writes_custom_css_without_leaking_multi_tenant_style_bundle(
-    page, browser, ironclaw_server, clean_customizations
+    page, browser, t3claw_server, clean_customizations
 ):
     """Chat can write custom.css, but shared `/style.css` must stay base-only.
 
@@ -257,7 +257,7 @@ async def test_chat_writes_custom_css_without_leaking_multi_tenant_style_bundle(
     #    bypasses any client-side caching of the chat tab.
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.get(
-            f"{ironclaw_server}/api/memory/read",
+            f"{t3claw_server}/api/memory/read",
             headers=auth_headers(),
             params={"path": ".system/gateway/custom.css"},
         )
@@ -269,7 +269,7 @@ async def test_chat_writes_custom_css_without_leaking_multi_tenant_style_bundle(
     # 3. Re-open the gateway in a fresh browser context. In the shared E2E
     #    gateway, `/style.css` is the unauthenticated bootstrap sheet and
     #    must not include per-user custom.css.
-    context, pg = await _open_authed_page(browser, ironclaw_server)
+    context, pg = await _open_authed_page(browser, t3claw_server)
     try:
         await pg.locator(".tab-bar").wait_for(state="visible", timeout=10000)
 
@@ -278,7 +278,7 @@ async def test_chat_writes_custom_css_without_leaking_multi_tenant_style_bundle(
         #     this assertion proves `/style.css` did not leak it.
         async with httpx.AsyncClient(timeout=10) as client:
             css_resp = await client.get(
-                f"{ironclaw_server}/style.css",
+                f"{t3claw_server}/style.css",
                 headers=auth_headers(),
             )
             assert css_resp.status_code == 200
@@ -304,7 +304,7 @@ async def test_chat_writes_custom_css_without_leaking_multi_tenant_style_bundle(
 
 
 async def test_chat_adds_skills_viewer_widget_to_workspace_and_widgets_api(
-    page, browser, ironclaw_server, clean_customizations
+    page, browser, t3claw_server, clean_customizations
 ):
     """Chat can install a widget definition without mutating the shared shell.
 
@@ -326,7 +326,7 @@ async def test_chat_adds_skills_viewer_widget_to_workspace_and_widgets_api(
     # 2. Confirm both files actually landed in the workspace.
     async with httpx.AsyncClient(timeout=10) as client:
         manifest_resp = await client.get(
-            f"{ironclaw_server}/api/memory/read",
+            f"{t3claw_server}/api/memory/read",
             headers=auth_headers(),
             params={
                 "path": ".system/gateway/widgets/skills-viewer/manifest.json",
@@ -339,7 +339,7 @@ async def test_chat_adds_skills_viewer_widget_to_workspace_and_widgets_api(
         assert manifest["slot"] == "tab"
 
         index_resp = await client.get(
-            f"{ironclaw_server}/api/memory/read",
+            f"{t3claw_server}/api/memory/read",
             headers=auth_headers(),
             params={
                 "path": ".system/gateway/widgets/skills-viewer/index.js",
@@ -353,7 +353,7 @@ async def test_chat_adds_skills_viewer_widget_to_workspace_and_widgets_api(
         #     parses each manifest.json — so it doubles as an integration
         #     check on the FrontendBundle assembler.
         widgets_resp = await client.get(
-            f"{ironclaw_server}/api/frontend/widgets",
+            f"{t3claw_server}/api/frontend/widgets",
             headers=auth_headers(),
         )
         assert widgets_resp.status_code == 200, widgets_resp.text
@@ -362,7 +362,7 @@ async def test_chat_adds_skills_viewer_widget_to_workspace_and_widgets_api(
 
     # 3. Reload in a fresh context. The shared multi-tenant shell should not
     #    auto-inject per-user widgets into the base tab bar.
-    context, pg = await _open_authed_page(browser, ironclaw_server)
+    context, pg = await _open_authed_page(browser, t3claw_server)
     try:
         await pg.locator(".tab-bar").wait_for(state="visible", timeout=10000)
         widget_tab_btn = pg.locator('.tab-bar button[data-tab="skills-viewer"]')
@@ -375,7 +375,7 @@ async def test_chat_adds_skills_viewer_widget_to_workspace_and_widgets_api(
 
 
 async def test_layout_config_persists_without_mutating_shared_multi_tenant_shell(
-    browser, ironclaw_server, clean_customizations
+    browser, t3claw_server, clean_customizations
 ):
     """Layout writes persist, but the shared shell must not apply them globally."""
     # 1. Write a layout.json that exercises both flags. `tabs.hidden`
@@ -388,7 +388,7 @@ async def test_layout_config_persists_without_mutating_shared_multi_tenant_shell
     }
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(
-            f"{ironclaw_server}/api/memory/write",
+            f"{t3claw_server}/api/memory/write",
             headers=auth_headers(),
             json={
                 "path": ".system/gateway/layout.json",
@@ -405,7 +405,7 @@ async def test_layout_config_persists_without_mutating_shared_multi_tenant_shell
     #    though the shared shell does not auto-apply it.
     async with httpx.AsyncClient(timeout=10) as client:
         layout_resp = await client.get(
-            f"{ironclaw_server}/api/frontend/layout",
+            f"{t3claw_server}/api/frontend/layout",
             headers=auth_headers(),
         )
         assert layout_resp.status_code == 200, layout_resp.text
@@ -415,7 +415,7 @@ async def test_layout_config_persists_without_mutating_shared_multi_tenant_shell
 
     # 3. Reload in a fresh context. The shared multi-tenant shell should keep
     #    its default controls rather than applying one tenant's layout.json.
-    context, pg = await _open_authed_page(browser, ironclaw_server)
+    context, pg = await _open_authed_page(browser, t3claw_server)
     try:
         await pg.locator(".tab-bar").wait_for(state="visible", timeout=10000)
         routines_display = await pg.evaluate(
@@ -476,7 +476,7 @@ async def test_layout_config_persists_without_mutating_shared_multi_tenant_shell
 
 
 async def test_shared_index_keeps_static_csp_when_layout_is_per_user_only(
-    ironclaw_server, clean_customizations
+    t3claw_server, clean_customizations
 ):
     """Shared index should stay static even when per-user layout exists."""
     # 1. Write a layout that would force customized HTML in single-tenant
@@ -484,7 +484,7 @@ async def test_shared_index_keeps_static_csp_when_layout_is_per_user_only(
     layout = {"branding": {"title": "Acme AI"}}
     async with httpx.AsyncClient(timeout=10) as client:
         write = await client.post(
-            f"{ironclaw_server}/api/memory/write",
+            f"{t3claw_server}/api/memory/write",
             headers=auth_headers(),
             json={
                 "path": ".system/gateway/layout.json",
@@ -500,7 +500,7 @@ async def test_shared_index_keeps_static_csp_when_layout_is_per_user_only(
         # 2. Hit `/` directly. The bootstrap route stays on the static HTML/CSP
         #    path even though the authenticated layout API now has custom data.
         resp = await client.get(
-            f"{ironclaw_server}/?token={AUTH_TOKEN}",
+            f"{t3claw_server}/?token={AUTH_TOKEN}",
             headers=auth_headers(),
         )
     assert resp.status_code == 200, resp.text
@@ -508,7 +508,7 @@ async def test_shared_index_keeps_static_csp_when_layout_is_per_user_only(
     # 3. The authenticated layout API should expose the saved branding config.
     async with httpx.AsyncClient(timeout=10) as client:
         layout_resp = await client.get(
-            f"{ironclaw_server}/api/frontend/layout",
+            f"{t3claw_server}/api/frontend/layout",
             headers=auth_headers(),
         )
     assert layout_resp.status_code == 200, layout_resp.text

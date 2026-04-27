@@ -937,7 +937,7 @@ fn extract_oidc_email_claims(jwt: &str) -> (Option<String>, bool) {
 /// restrictions. Lives in the platform layer because OIDC validation
 /// inside `validate_oidc_jwt()` calls it before any feature handler
 /// runs — keeping the helper here avoids a `platform → handlers`
-/// back-edge that would otherwise violate the ironclaw#2599 layering
+/// back-edge that would otherwise violate the ironclaw#ironclaw#2599 layering
 /// rule (see `scripts/check_gateway_boundaries.py`).
 pub(crate) fn check_email_domain(
     email: Option<&str>,

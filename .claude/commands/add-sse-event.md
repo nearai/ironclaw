@@ -45,7 +45,7 @@ If the event carries structured data beyond a simple string, add a serializable 
 
 ## Step 4: Add frontend handler
 
-**File**: `crates/ironclaw_gateway/static/js/core/sse.js`
+**File**: `crates/t3claw_gateway/static/js/core/sse.js`
 
 In the `connectSSE()` function, add a new `eventSource.addEventListener()` for the snake_case event name. Parse the JSON data and call a handler function.
 
@@ -56,7 +56,7 @@ Create the handler function that updates the DOM. Put it in the split file that 
 
 ## Step 5: Add CSS if needed
 
-**File**: pick the matching surface under `crates/ironclaw_gateway/static/styles/surfaces/` (e.g. `chat.css` for chat UI, `jobs.css` for sandbox job cards) or `styles/components/` for cross-surface reusable pieces.
+**File**: pick the matching surface under `crates/t3claw_gateway/static/styles/surfaces/` (e.g. `chat.css` for chat UI, `jobs.css` for sandbox job cards) or `styles/components/` for cross-surface reusable pieces.
 
 If the event needs custom UI (cards, badges, etc.), add styles. Follow the existing naming conventions (`.approval-card`, `.log-entry`, etc.).
 

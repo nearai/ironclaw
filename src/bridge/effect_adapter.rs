@@ -1,6 +1,6 @@
 //! Effect bridge adapter — wraps `ToolRegistry` + `SafetyLayer` as `t3claw_engine::EffectExecutor`.
 //!
-//! This is the security boundary between the engine and existing IronClaw
+//! This is the security boundary between the engine and existing T3Claw
 //! infrastructure. All v1 security controls are enforced here:
 //! - Tool approval (requires_approval, auto-approve tracking)
 //! - Output sanitization (sanitize_tool_output + wrap_for_llm)
@@ -2789,7 +2789,7 @@ mod tests {
         );
     }
 
-    /// Regression for nearai/ironclaw#2206: a `tool_activate`/`tool_auth`
+    /// Regression for nearai/ironclaw#ironclaw#2206: a `tool_activate`/`tool_auth`
     /// extension result containing a non-https `auth_url` (e.g.
     /// `javascript:alert(1)`) must be sanitized to `None` before it reaches
     /// `ResumeKind::Authentication` and is forwarded onto the gate stream.

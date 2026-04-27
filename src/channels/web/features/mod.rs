@@ -9,7 +9,7 @@
 //! The older `handlers/` folder is a transitional fallback. Handlers
 //! will migrate into `features/<slice>/` incrementally — see
 //! `src/channels/web/CLAUDE.md` for the staged plan tracked in
-//! ironclaw#2599.
+//! ironclaw#ironclaw#2599.
 
 pub(crate) mod chat;
 pub(crate) mod debug;

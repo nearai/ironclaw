@@ -8,7 +8,7 @@ paths:
   - "src/channels/**"
   - "src/workspace/**"
   - "src/agent/**"
-  - "crates/ironclaw_engine/**"
+  - "crates/t3claw_engine/**"
 ---
 # Safety Layer & Sandbox Rules
 

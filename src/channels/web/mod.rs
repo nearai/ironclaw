@@ -1,4 +1,4 @@
-//! Web gateway channel for browser-based access to IronClaw.
+//! Web gateway channel for browser-based access to T3Claw.
 //!
 //! Provides a single-page web UI with:
 //! - Chat with the agent (via REST + SSE)
@@ -25,7 +25,7 @@ pub mod responses_api;
 pub mod types;
 pub(crate) mod util;
 
-// Backward-compat re-exports for the ironclaw#2599 migration. The auth,
+// Backward-compat re-exports for the ironclaw#ironclaw#2599 migration. The auth,
 // SSE, and WebSocket modules moved to `platform::*` in stage 3; every
 // existing `crate::channels::web::{auth,sse,ws}::...` call site
 // continues to resolve via these re-exports until a follow-up PR

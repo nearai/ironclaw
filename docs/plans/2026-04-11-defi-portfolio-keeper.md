@@ -3,13 +3,13 @@
 **Status**: draft
 **Owner**: tbd
 **Date**: 2026-04-11
-**Target**: user pastes a wallet address into chat → IronClaw discovers cross-chain DeFi positions, scores them, suggests improvements with projected Δ earnings, constructs unsigned NEAR Intents to execute, runs as a recurring mission, and projects a live widget. Extensible by user via custom scripts. Viral-ready.
+**Target**: user pastes a wallet address into chat → T3Claw discovers cross-chain DeFi positions, scores them, suggests improvements with projected Δ earnings, constructs unsigned NEAR Intents to execute, runs as a recurring mission, and projects a live widget. Extensible by user via custom scripts. Viral-ready.
 
 ---
 
 ## 0. Guiding principles
 
-1. **Nothing DeFi-specific is hardcoded in the IronClaw core.** All protocol and strategy knowledge lives as data (JSON/Markdown) embedded in the `portfolio` WASM tool or authored in the project workspace. Adding a new protocol or strategy is a PR to a data file, not to Rust.
+1. **Nothing DeFi-specific is hardcoded in the T3Claw core.** All protocol and strategy knowledge lives as data (JSON/Markdown) embedded in the `portfolio` WASM tool or authored in the project workspace. Adding a new protocol or strategy is a PR to a data file, not to Rust.
 2. **Agent never holds private keys.** The only execution path is the construction of *unsigned NEAR Intents*. Signing happens in the user's wallet (Phase 6).
 3. **NEAR Intents is the only movement primitive.** No raw EVM tx building. If a route isn't reachable via a solver, the suggestion is surfaced as an `unmet-route`, not built from scratch.
 4. **Project-scoped.** The whole capability lives under a v2-engine `Project`. Files, mission, memory docs, scripts, and widget state are all scoped to that project. A user can have many projects (`portfolio`, `portfolio-treasury`, `portfolio-dao`) that share the same skill/tool/registries.
@@ -173,7 +173,7 @@ src/
 ```
 
 **Why one tool, not four:**
-- All four internal stages share types. Splitting them into separate WASM tools means those types must live in a shared crate (`ironclaw_defi_types`) or be re-serialized at each boundary. Both are overhead without upside.
+- All four internal stages share types. Splitting them into separate WASM tools means those types must live in a shared crate (`t3claw_defi_types`) or be re-serialized at each boundary. Both are overhead without upside.
 - They are always co-installed. A user with `portfolio_indexer` but not `strategy_engine` is broken.
 - One capabilities file, one credentials scope, one version bump, one audit trail class.
 - Internal module boundaries still enforce clean separation — this is "small crates vs. workspace" at the WASM-tool scale, and the small-crates option wasn't earning its keep.
@@ -388,7 +388,7 @@ IntentLeg {
 
 ### 2.7 User-authored scripts (Monty/Python)
 
-The engine has Tier-1 Python scripting via Monty (`crates/ironclaw_engine/src/executor/scripting.rs`). Reuse it instead of building a macro system.
+The engine has Tier-1 Python scripting via Monty (`crates/t3claw_engine/src/executor/scripting.rs`). Reuse it instead of building a macro system.
 
 - **Location**: `projects/<id>/scripts/*.py`.
 - **Discovery**: skill lists available scripts in LLM context on each activation.
@@ -856,9 +856,9 @@ Each milestone ends with (a) green `cargo fmt && cargo clippy && cargo test --fe
 
 **Deliverables:**
 - `src/channels/web/money_center/` module: single "Money" tab aggregating all per-user money projects.
-- **NEAR wallet auto-login**: if the user is authenticated to IronClaw via a NEAR wallet, the Money Center picks up that session automatically — no second login, no second modal. This is the default path for NEAR-side signing.
+- **NEAR wallet auto-login**: if the user is authenticated to T3Claw via a NEAR wallet, the Money Center picks up that session automatically — no second login, no second modal. This is the default path for NEAR-side signing.
 - WalletConnect v2 integration for EVM chains (separate modal, only triggered when an EVM leg needs signing).
-- NEAR wallet selector integration as fallback for users whose IronClaw session isn't already NEAR-authenticated.
+- NEAR wallet selector integration as fallback for users whose T3Claw session isn't already NEAR-authenticated.
 - `portfolio_intent_submit` built-in tool (see §2.11).
 - Widget "Sign" action wired to the tool.
 - SSE events: `portfolio.intent.awaiting_signature`, `portfolio.intent.signed`, `portfolio.intent.submitted`, `portfolio.intent.failed`.
@@ -885,7 +885,7 @@ Decided (kept here so the rationale is visible):
 - **Auth model**: logged-in users only. No anonymous/ephemeral project flow in v1.
 - **Multi-wallet**: multiple addresses live in one default `portfolio` project. A separate project is created only when the user explicitly asks.
 - **Widget aggregation**: portfolio totals aggregate across all addresses in the project; widget has a per-address drill-down section.
-- **Money Center default sign-in**: if the user is NEAR-authenticated to IronClaw, the Money Center reuses that session automatically.
+- **Money Center default sign-in**: if the user is NEAR-authenticated to T3Claw, the Money Center reuses that session automatically.
 - **Learner mission**: folded into the keeper mission's goal for v1. Revisit as a standalone after-thread mission post-M5 once there's suggestion/outcome history.
 - **Bank/card integrations**: stubs only in M6.
 
@@ -968,7 +968,7 @@ No changes expected to:
 - `src/db/` (uses existing project/memory schema)
 - `src/tools/dispatch.rs` (new tool registers through existing path)
 - `src/tools/mcp/` (no MCP server used)
-- `crates/ironclaw_safety/` (new tool inherits the pipeline)
+- `crates/t3claw_safety/` (new tool inherits the pipeline)
 
 ## 11. Follow-on: event-driven supporting missions (post-M6)
 

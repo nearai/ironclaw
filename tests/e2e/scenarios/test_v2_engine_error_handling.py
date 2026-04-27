@@ -44,8 +44,8 @@ from helpers import api_get, api_post, AUTH_TOKEN, wait_for_ready
 # ---------------------------------------------------------------------------
 
 ROOT = Path(__file__).resolve().parent.parent.parent.parent
-_V2_ERR_DB_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-v2-err-e2e-")
-_V2_ERR_HOME_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-v2-err-e2e-home-")
+_V2_ERR_DB_TMPDIR = tempfile.TemporaryDirectory(prefix="t3claw-v2-err-e2e-")
+_V2_ERR_HOME_TMPDIR = tempfile.TemporaryDirectory(prefix="t3claw-v2-err-e2e-home-")
 
 
 def _forward_coverage_env(env: dict):
@@ -82,10 +82,10 @@ async def _stop_process(proc, sig=signal.SIGINT, timeout=5):
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="module")
-async def v2_error_server(ironclaw_binary, mock_llm_server):
-    """Start ironclaw with ENGINE_V2=true for error handling tests."""
+async def v2_error_server(t3claw_binary, mock_llm_server):
+    """Start t3claw with ENGINE_V2=true for error handling tests."""
     home_dir = _V2_ERR_HOME_TMPDIR.name
-    os.makedirs(os.path.join(home_dir, ".ironclaw"), exist_ok=True)
+    os.makedirs(os.path.join(home_dir, ".t3claw"), exist_ok=True)
 
     # Find two free ports
     socks = []
@@ -101,11 +101,11 @@ async def v2_error_server(ironclaw_binary, mock_llm_server):
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": home_dir,
-        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
+        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".t3claw"),
         # `info` instead of `debug` — debug logging through the orchestrator
         # makes 30 LLM-call iterations dramatically slower, enough that the
         # max-iterations test runs past its per-test pytest timeout.
-        "RUST_LOG": "ironclaw=info",
+        "RUST_LOG": "t3claw=info",
         "RUST_BACKTRACE": "1",
         "ENGINE_V2": "true",
         # Auto-approve so the loop-forever test doesn't have to round-trip
@@ -135,7 +135,7 @@ async def v2_error_server(ironclaw_binary, mock_llm_server):
     _forward_coverage_env(env)
 
     proc = await asyncio.create_subprocess_exec(
-        ironclaw_binary, "--no-onboard",
+        t3claw_binary, "--no-onboard",
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,

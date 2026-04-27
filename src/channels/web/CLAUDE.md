@@ -190,7 +190,7 @@ Current consolidation points:
 - `src/bridge/auth_manager.rs`: `resolve_extension_name_for_auth_flow(...)` — **canonical resolver, single source of truth**
 - `src/bridge/router.rs`: `resolve_auth_gate_extension_name(...)` — thin wrapper for gate display/submit
 - `src/channels/web/features/chat/mod.rs`: `pending_gate_extension_name(...)` — thin wrapper for history/pending-gate hydration
-- `crates/ironclaw_gateway/static/js/core/onboarding.js`: `handleOnboardingState(...)` as the canonical client entrypoint (the old monolithic `app.js` has been split into per-concern modules under `static/js/`; `APP_JS` in `crates/ironclaw_gateway/src/assets.rs` concatenates them at compile time)
+- `crates/t3claw_gateway/static/js/core/onboarding.js`: `handleOnboardingState(...)` as the canonical client entrypoint (the old monolithic `app.js` has been split into per-concern modules under `static/js/`; `APP_JS` in `crates/t3claw_gateway/src/assets.rs` concatenates them at compile time)
 
 All three of the backend wrappers above delegate to the canonical resolver
 or return `Option<ExtensionName>`; they must not duplicate its logic.

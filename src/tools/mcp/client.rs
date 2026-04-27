@@ -1513,7 +1513,7 @@ mod tests {
 
     // --- Regression: constructors validate caller-provided server names ---
     //
-    // Copilot review comments on PR nearai/ironclaw#2681 flagged that
+    // Copilot review comments on PR nearai/ironclaw#ironclaw#2681 flagged that
     // `new_with_transport`, `new_with_config`, and `new_authenticated`
     // used `McpServerName::from_trusted` on caller-provided input,
     // allowing invalid names to enter the typed field and diverge from

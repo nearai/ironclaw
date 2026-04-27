@@ -2,7 +2,7 @@
 
 ## Context
 
-IronClaw engine v2 (Phase 8 of `docs/plans/2026-03-20-engine-v2-architecture.md`) needs sandboxed execution for tools that touch the filesystem or run shell commands. Today the engine bridge (`src/bridge/effect_adapter.rs:1007`) executes every tool directly on the host with no isolation, even though the underlying engine has a `CapabilityLease` + `EffectType` model that was designed to enable this.
+T3Claw engine v2 (Phase 8 of `docs/plans/2026-03-20-engine-v2-architecture.md`) needs sandboxed execution for tools that touch the filesystem or run shell commands. Today the engine bridge (`src/bridge/effect_adapter.rs:1007`) executes every tool directly on the host with no isolation, even though the underlying engine has a `CapabilityLease` + `EffectType` model that was designed to enable this.
 
 The dominant risk is **accidental filesystem damage from LLM mistakes** — `rm -rf`, overwriting files, traversing into `~/.ssh` or `.env`, runaway shell processes. The engine's existing `base_dir` path validation in `src/tools/builtin/path_utils.rs:78` is the only line of defense and it's optional.
 
@@ -10,14 +10,14 @@ The intended outcome is a **persistent per-project workspace container** that:
 - Bind-mounts the project's user-facing files at `/project/` so they remain on the host (visible, backupable)
 - Owns its own writable filesystem layer where `cargo`, `pip`, `npm`, `apt`, downloaded artifacts, build caches and toolchains accumulate over time — turning the container into the project's "workspace computer"
 - Hosts a thin tool-execution daemon that runs `file_*`, `shell`, `list_dir`, `apply_patch` against the mounted project, while everything else (memory, network, LLM, secrets, orchestrator, Monty) stays on the host
-- Survives across IronClaw restarts (started/stopped, never `--rm` except on explicit user action) so the accumulated environment persists
+- Survives across T3Claw restarts (started/stopped, never `--rm` except on explicit user action) so the accumulated environment persists
 
 ## Cross-reference: Issue nearai/ironclaw#1894 (Unified Workspace VFS)
 
 Issue #1894 proposes a unified mount-table abstraction where the agent sees one filesystem and paths route through `MountBackend` variants (`Filesystem`, `Database`, future `S3`, `GitRemote`, etc.). The sandbox in this plan is **the storage backend for the `/project/` mount when isolation is enabled**, not a separate feature toggle. Concretely:
 
 - `/project/` (the agent-facing path prefix) is owned by a `MountBackend`
-- When sandbox is off: `MountBackend::Filesystem { root: ~/.ironclaw/projects/<id>/ }` — passthrough to host fs
+- When sandbox is off: `MountBackend::Filesystem { root: ~/.t3claw/projects/<id>/ }` — passthrough to host fs
 - When sandbox is on: `MountBackend::ContainerizedFilesystem { project_id }` — JSON-RPC to per-project daemon
 - The agent calls `file_read("/project/foo.txt")` either way — the backend swap is invisible to the agent and to the orchestrator
 
@@ -38,10 +38,10 @@ What this plan DOES that #1894 will reuse:
 
 ## Locked design decisions
 
-1. **Granularity**: One container per `Project` (`crates/ironclaw_engine/src/types/project.rs`). All threads in the same project — including sub-threads spawned by `rlm_query()` which inherit `project_id` at `crates/ironclaw_engine/src/runtime/manager.rs:505` — share the container.
+1. **Granularity**: One container per `Project` (`crates/t3claw_engine/src/types/project.rs`). All threads in the same project — including sub-threads spawned by `rlm_query()` which inherit `project_id` at `crates/t3claw_engine/src/runtime/manager.rs:505` — share the container.
 2. **Persistence**: Named container. `docker create` once, `docker start`/`stop` lifecycle, removed only on project deletion or explicit user reset. Container's own writable layer holds installed dependencies and accumulates over time.
-3. **Mount**: `~/.ironclaw/projects/<user_id>/<project_id>/` (host) → `/project/` (container) bind mount, read-write. Project's user files live here.
-4. **Daemon model**: Container PID 1 is a minimal init (`tini`). Tool-execution daemon is spawned via `docker exec -i sandbox_daemon` per IronClaw session. Daemon talks JSON-RPC over stdin/stdout to the host.
+3. **Mount**: `~/.t3claw/projects/<user_id>/<project_id>/` (host) → `/project/` (container) bind mount, read-write. Project's user files live here.
+4. **Daemon model**: Container PID 1 is a minimal init (`tini`). Tool-execution daemon is spawned via `docker exec -i sandbox_daemon` per T3Claw session. Daemon talks JSON-RPC over stdin/stdout to the host.
 5. **What's inside**: Only `file_read`, `file_write`, `list_dir`, `apply_patch`, `shell`. Each instantiated with `base_dir=/project/` so existing path validation enforces sandboxing. cwd defaults to `/project/`.
 6. **What's on host**: Everything else — `memory_*` (db-backed), `web_fetch`, `http`, `time`, `json`, `message`, `plan`, `system`, `tool_info`, secrets, all WASM tools, all MCP tools, all skill/extension management, the entire engine v2 orchestrator + Monty.
 7. **IPC**: NDJSON over stdin/stdout. One JSON request per line, one response per line. Request/response correlated by `id`. Container uses default Docker bridge networking so `git clone`, `cargo build`, `pip install`, etc. work. Outbound network restriction via the existing proxy (`src/sandbox/proxy/`) is a follow-up.
@@ -54,7 +54,7 @@ What this plan DOES that #1894 will reuse:
 
 ```
 Host filesystem                            Container filesystem
-~/.ironclaw/                               (anonymous writable layer, persists across stop/start)
+~/.t3claw/                               (anonymous writable layer, persists across stop/start)
   projects/                                /
     <project_id>/        <─── bind ──>    /project/        (user's files, shared with host)
       README.md                            /root/.cargo/    (cargo install state)
@@ -65,12 +65,12 @@ Host filesystem                            Container filesystem
                                            ...
 ```
 
-The user sees their files in `~/.ironclaw/projects/<user_id>/<project_id>/`. The container sees the same files at `/project/`. Anything the agent installs via `shell_exec` lives in the container's writable layer and persists for the project's lifetime.
+The user sees their files in `~/.t3claw/projects/<user_id>/<project_id>/`. The container sees the same files at `/project/`. Anything the agent installs via `shell_exec` lives in the container's writable layer and persists for the project's lifetime.
 
 ### Component layout
 
 ```
-Host process (IronClaw)                                Container (per project)
+Host process (T3Claw)                                Container (per project)
 ─────────────────────                                  ──────────────────────
 Engine v2                                              PID 1: tini (idle)
   └─ Python orchestrator (Monty)
@@ -96,7 +96,7 @@ For v1 of this plan, the routing is narrowly scoped: only the five sandboxed too
 ## Mount backend abstraction (minimal subset of #1894)
 
 ```rust
-// crates/ironclaw_engine/src/workspace/mount.rs (new)
+// crates/t3claw_engine/src/workspace/mount.rs (new)
 
 pub trait MountBackend: Send + Sync {
     async fn read(&self, rel_path: &Path) -> Result<Vec<u8>, MountError>;
@@ -122,7 +122,7 @@ Two backend implementations:
 ```rust
 // FilesystemBackend — passthrough to host filesystem
 pub struct FilesystemBackend {
-    root: PathBuf,  // e.g. ~/.ironclaw/projects/<id>/
+    root: PathBuf,  // e.g. ~/.t3claw/projects/<id>/
 }
 
 // ContainerizedFilesystemBackend — JSON-RPC to per-project daemon
@@ -168,8 +168,8 @@ pub struct ContainerizedFilesystemBackend {
                                                           remove
 ```
 
-- **create**: First sandboxed tool call from any thread in the project, OR explicit `project init`. Builds `~/.ironclaw/projects/<user_id>/<project_id>/` if missing. Runs `docker create --name ironclaw-sandbox-<project_id> --mount type=bind,source=<host>,target=/project ironclaw/sandbox:latest`. Cold path, ~1–2s.
-- **start**: Container exists but stopped. `docker start`. Warm path, ~200–500ms. Then `docker exec -i ironclaw-sandbox-<project_id> /usr/local/bin/sandbox_daemon` to attach a daemon process.
+- **create**: First sandboxed tool call from any thread in the project, OR explicit `project init`. Builds `~/.t3claw/projects/<user_id>/<project_id>/` if missing. Runs `docker create --name t3claw-sandbox-<project_id> --mount type=bind,source=<host>,target=/project t3claw/sandbox:latest`. Cold path, ~1–2s.
+- **start**: Container exists but stopped. `docker start`. Warm path, ~200–500ms. Then `docker exec -i t3claw-sandbox-<project_id> /usr/local/bin/sandbox_daemon` to attach a daemon process.
 - **stop**: Idle timeout (default 30 min after last tool call) or engine shutdown. Daemon receives `shutdown` method, flushes, exits cleanly. `docker stop` brings the container down. State on disk persists.
 - **remove**: Only on explicit project deletion or user-invoked "reset environment". `docker rm` deletes the writable layer. Bind-mounted host folder is left untouched (user files are not the sandbox's to delete).
 
@@ -181,14 +181,14 @@ Threads do not own containers. They use the project's container if it exists, la
 
 - **Container crash mid-call**: Detect via daemon stdin/stdout pipe close. Mark in-flight call as failed with `sandbox_error`. On next call, restart the container (it's stopped now) and spawn a fresh daemon.
 - **Daemon crash, container alive**: Same — restart daemon via `docker exec -i`. Container's accumulated state is preserved.
-- **Host restart**: On engine startup, scan for `ironclaw-sandbox-*` containers in stopped state. Leave them. Re-attach lazily on first tool call. Stale containers from deleted projects can be cleaned via a future `ironclaw doctor` subcommand.
+- **Host restart**: On engine startup, scan for `t3claw-sandbox-*` containers in stopped state. Leave them. Re-attach lazily on first tool call. Stale containers from deleted projects can be cleaned via a future `t3claw doctor` subcommand.
 
 ## Files and modules
 
 ### New code
 
-- `crates/ironclaw_engine/src/workspace/mount.rs` — `MountBackend` trait, `WorkspaceMounts`, `MountError`, `DirEntry`, `ShellOutput`. Minimal subset of #1894's mount-table types.
-- `crates/ironclaw_engine/src/types/project.rs` — add `workspace_path: Option<PathBuf>` field to `Project`. Accessor returns `~/.ironclaw/projects/<user_id>/<project_id>/` if unset.
+- `crates/t3claw_engine/src/workspace/mount.rs` — `MountBackend` trait, `WorkspaceMounts`, `MountError`, `DirEntry`, `ShellOutput`. Minimal subset of #1894's mount-table types.
+- `crates/t3claw_engine/src/types/project.rs` — add `workspace_path: Option<PathBuf>` field to `Project`. Accessor returns `~/.t3claw/projects/<user_id>/<project_id>/` if unset.
 - `src/bridge/sandbox/mod.rs` — new submodule of bridge. Public types: `ProjectSandboxManager`, `ContainerHandle`, `SandboxConfig`.
 - `src/bridge/sandbox/manager.rs` — `ProjectSandboxManager` owns `Arc<RwLock<HashMap<ProjectId, ContainerHandle>>>` plus an idle-timeout background task. Provides `dispatch(project_id, request) -> Response`.
 - `src/bridge/sandbox/handle.rs` — `ContainerHandle` wraps the `bollard::Container` + the active `docker exec` stream. Owns the request/response correlation map (`HashMap<RequestId, oneshot::Sender<Response>>`). Background reader task parses NDJSON from daemon stdout, looks up `id`, sends to the waiting oneshot.
@@ -214,21 +214,21 @@ Threads do not own containers. They use the project's container if it exists, la
 - `src/tools/builtin/shell.rs` — works as-is when constructed with `working_dir=/project/`
 - `src/tools/builtin/path_utils.rs:78` — existing `validate_path` enforces the sandbox at the tool layer
 - `src/tools/registry.rs` — used by the daemon to register the five sandbox tools
-- `crates/ironclaw_engine/src/runtime/manager.rs` — no changes; the engine doesn't need to know about sandboxes. All routing lives in the bridge.
+- `crates/t3claw_engine/src/runtime/manager.rs` — no changes; the engine doesn't need to know about sandboxes. All routing lives in the bridge.
 
 ## Edge cases addressed
 
 - **`shell_exec` cwd**: Daemon constructs the shell tool with `working_dir=/project/` so commands without an explicit `workdir` param run in the project root.
-- **Sub-threads via `rlm_query()`**: Inherit `project_id` (`crates/ironclaw_engine/src/runtime/manager.rs:505`), so they automatically use the parent project's container. No special case needed.
-- **Project folder doesn't exist on first call**: `lifecycle::ensure_project_dir(project_id)` creates `~/.ironclaw/projects/<user_id>/<project_id>/` with mode 0700 before `docker create`. Idempotent.
+- **Sub-threads via `rlm_query()`**: Inherit `project_id` (`crates/t3claw_engine/src/runtime/manager.rs:505`), so they automatically use the parent project's container. No special case needed.
+- **Project folder doesn't exist on first call**: `lifecycle::ensure_project_dir(project_id)` creates `~/.t3claw/projects/<user_id>/<project_id>/` with mode 0700 before `docker create`. Idempotent.
 - **Cold-start latency**: First sandboxed tool call to a stopped container pays ~500ms (start) + ~50ms (exec daemon). First call to a never-created project pays ~1–2s (create + start + image pull on first ever run). Acceptable; not in the hot path of conversational chat.
 - **Container crash distinction**: `ContainerHandle::dispatch` returns `EngineError::ToolError` with `code=sandbox_error` for IPC failures. The orchestrator can distinguish these from `code=tool_error`.
-- **Image management**: `ironclaw/sandbox:latest` built from `crates/Dockerfile.sandbox`. For local dev, `docker build -f crates/Dockerfile.sandbox -t ironclaw/sandbox:dev .` and use `IRONCLAW_SANDBOX_IMAGE=ironclaw/sandbox:dev`. v1 documents the manual command; CI publishing is future polish.
-- **Stale containers from deleted projects**: Out of scope for v1. Future `ironclaw doctor` subcommand.
-- **No project folder configured / sandbox disabled**: When `SANDBOX_ENABLED=false`, the `/project/` mount uses `FilesystemBackend(~/.ironclaw/projects/<id>/)` (or whatever the user configured). Tools still go through the mount table — same code path, different backend.
+- **Image management**: `t3claw/sandbox:latest` built from `crates/Dockerfile.sandbox`. For local dev, `docker build -f crates/Dockerfile.sandbox -t t3claw/sandbox:dev .` and use `IRONCLAW_SANDBOX_IMAGE=t3claw/sandbox:dev`. v1 documents the manual command; CI publishing is future polish.
+- **Stale containers from deleted projects**: Out of scope for v1. Future `t3claw doctor` subcommand.
+- **No project folder configured / sandbox disabled**: When `SANDBOX_ENABLED=false`, the `/project/` mount uses `FilesystemBackend(~/.t3claw/projects/<id>/)` (or whatever the user configured). Tools still go through the mount table — same code path, different backend.
 - **Resource limits**: Inherit defaults from `src/sandbox/config.rs::ResourceLimits` (memory, CPU shares). Configurable via `SandboxConfig::for_project(project_id)`.
 - **Concurrent threads dispatching to one container**: Daemon serializes in v1. The host-side `ContainerHandle` queues requests via a tokio `mpsc` channel; the writer task drains the queue and writes one request at a time, the reader task reads responses and resolves oneshots by id. Throughput is bounded but ordering is guaranteed.
-- **Two IronClaw processes accessing the same project container**: Single-user single-installation assumption for v1. Both would `docker exec -i` separate daemons against the same container — daemons don't share state, but they share the writable filesystem. Out of scope to fully solve; documented as "do not run two IronClaws against the same project".
+- **Two T3Claw processes accessing the same project container**: Single-user single-installation assumption for v1. Both would `docker exec -i` separate daemons against the same container — daemons don't share state, but they share the writable filesystem. Out of scope to fully solve; documented as "do not run two T3Claws against the same project".
 - **Daemon binary discovery**: Compiled into the container image at build time. Container image version pinned in `SandboxConfig`.
 - **Path semantics across backends**: `FilesystemBackend` and `ContainerizedFilesystemBackend` both treat `/project/foo.txt` as `foo.txt` relative to the mount root. Tool input passes through `Workspace::resolve_mount` which strips the `/project/` prefix before calling the backend. Tools never see absolute host paths or absolute container paths — they see relative paths inside the mount.
 - **What if the agent writes via `file_write` and then runs `shell ls`?** Both go through the same mount → same backend → same container (or same host fs). The shell sees the file because the bind mount is live.
@@ -239,7 +239,7 @@ Each phase is independently shippable and reviewable.
 
 ### Phase 1: Mount-backend abstraction (subset of #1894 Phase 1) — DONE (#2211)
 
-- Create `crates/ironclaw_engine/src/workspace/mount.rs` with `MountBackend` trait, `WorkspaceMounts`, `MountError`, `DirEntry`, `ShellOutput`.
+- Create `crates/t3claw_engine/src/workspace/mount.rs` with `MountBackend` trait, `WorkspaceMounts`, `MountError`, `DirEntry`, `ShellOutput`.
 - Create `src/bridge/sandbox/intercept.rs` with `maybe_intercept` and `SANDBOX_TOOL_NAMES`. (Originally planned as `src/bridge/workspace_filesystem.rs`; the actual location keeps the bridge-side glue colocated under `src/bridge/sandbox/`.)
 - Add `WorkspaceMounts` field to `EffectBridgeAdapter` via `set_workspace_mounts()` setter (consistent with existing optional collaborators like `set_http_interceptor`). Default is `None`; tests inject manually until Phase 6 wires the router.
 - Modify `EffectBridgeAdapter::execute_action_internal()` to detect `/project/` paths in input for the five sandbox-eligible tools and route through `WorkspaceMounts::resolve(path)`. Behavior is unchanged because the default backend slot is `None`.
@@ -248,8 +248,8 @@ Each phase is independently shippable and reviewable.
 
 ### Phase 2: Project workspace folder concept — DONE
 
-- Add `workspace_path: Option<PathBuf>` to `crates/ironclaw_engine/src/types/project.rs`.
-- Add accessor that defaults to `~/.ironclaw/projects/<user_id>/<project_id>/`.
+- Add `workspace_path: Option<PathBuf>` to `crates/t3claw_engine/src/types/project.rs`.
+- Add accessor that defaults to `~/.t3claw/projects/<user_id>/<project_id>/`.
 - Add `ensure_project_dir(&self) -> io::Result<PathBuf>` helper that creates the dir with mode 0700 if missing.
 - Migrate `HybridStore` to persist the new field.
 - Wire the per-project `FilesystemBackend(workspace_path)` into the mount table on thread spawn.
@@ -282,7 +282,7 @@ Each phase is independently shippable and reviewable.
 
 - In `src/bridge/router.rs`, when `SANDBOX_ENABLED=true`, register `ContainerizedFilesystemBackend(project_id)` for `/project/` instead of `FilesystemBackend`.
 - Surface IPC errors as `EngineError::ToolError` with `code=sandbox_error`.
-- End-to-end test with `ENGINE_V2=true SANDBOX_ENABLED=true`: spawn a thread, agent calls `shell_exec("echo hi > /project/test.txt")`, then `file_read("/project/test.txt")`, verify both go through the container and the host sees the file at `~/.ironclaw/projects/<project_id>/test.txt`.
+- End-to-end test with `ENGINE_V2=true SANDBOX_ENABLED=true`: spawn a thread, agent calls `shell_exec("echo hi > /project/test.txt")`, then `file_read("/project/test.txt")`, verify both go through the container and the host sees the file at `~/.t3claw/projects/<project_id>/test.txt`.
 
 ### Phase 7: Polish
 
@@ -290,7 +290,7 @@ Each phase is independently shippable and reviewable.
 - Cleanup of stopped container handles after extended idle.
 - Logs/metrics: tool dispatch latency, container start time, in-flight queue depth.
 - Test that `cargo install rg && rg foo` persists across container stop/start.
-- Documentation in `crates/ironclaw_engine/CLAUDE.md` and `docs/plans/2026-03-20-engine-v2-architecture.md` (mark Phase 8 as in progress).
+- Documentation in `crates/t3claw_engine/CLAUDE.md` and `docs/plans/2026-03-20-engine-v2-architecture.md` (mark Phase 8 as in progress).
 - Brief note in nearai/ironclaw#1894 about the partial mount-backend abstraction this lands.
 
 ## Verification
@@ -300,10 +300,10 @@ Each phase is independently shippable and reviewable.
 cargo fmt
 cargo clippy --all --benches --tests --examples --all-features
 cargo build --bin sandbox_daemon
-docker build -f crates/Dockerfile.sandbox -t ironclaw/sandbox:dev .
+docker build -f crates/Dockerfile.sandbox -t t3claw/sandbox:dev .
 
 # Unit tests for the mount backends and daemon (no Docker needed)
-cargo test -p ironclaw_engine workspace::
+cargo test -p t3claw_engine workspace::
 cargo test --lib bridge::sandbox
 cargo test --test engine_v2_sandbox_integration
 
@@ -312,8 +312,8 @@ cargo test --features integration sandbox_
 
 # End-to-end manual test
 ENGINE_V2=true SANDBOX_ENABLED=true \
-  IRONCLAW_SANDBOX_IMAGE=ironclaw/sandbox:dev \
-  RUST_LOG=ironclaw::bridge::sandbox=debug \
+  IRONCLAW_SANDBOX_IMAGE=t3claw/sandbox:dev \
+  RUST_LOG=t3claw::bridge::sandbox=debug \
   cargo run
 
 # In the REPL:
@@ -325,15 +325,15 @@ ENGINE_V2=true SANDBOX_ENABLED=true \
 #   "is ripgrep still installed? grep for hello again"
 
 # Verify on the host:
-ls ~/.ironclaw/projects/<project_id>/
-cat ~/.ironclaw/projects/<project_id>/foo.txt
+ls ~/.t3claw/projects/<project_id>/
+cat ~/.t3claw/projects/<project_id>/foo.txt
 
 # Verify the container persists:
-docker ps -a --filter name=ironclaw-sandbox
-docker exec -it ironclaw-sandbox-<project_id> ls /root/.cargo/bin/
+docker ps -a --filter name=t3claw-sandbox
+docker exec -it t3claw-sandbox-<project_id> ls /root/.cargo/bin/
 
 # Verify cleanup on idle (after 30 min or with shortened timeout)
-docker ps --filter name=ironclaw-sandbox  # should show "Exited"
+docker ps --filter name=t3claw-sandbox  # should show "Exited"
 ```
 
 ## Out of scope for v1 (future polish)
@@ -347,7 +347,7 @@ docker ps --filter name=ironclaw-sandbox  # should show "Exited"
 - "Reset project environment" CLI command
 - "Clone project environment" via `docker commit`
 - Custom `Dockerfile.<project_id>` for user-customized base images
-- `ironclaw doctor` cleanup of stale containers
+- `t3claw doctor` cleanup of stale containers
 - WASM channel sandboxing (Phase 8.3 — likely already transparent through the bridge, needs verification)
 - nearai/ironclaw#1894 Phase 2 (route `memory_*` through workspace mounts), Phase 3 (unify tool surface, rename to `read_file`/`write_file`/`list`/`search`), Phase 5 (dynamic mount expansion, future `S3`/`GitRemote` backends)
 - Hosted-mode db-backed `/project/` with `materialize()` / `sync_back()` for shell tool — only relevant when #1894's full mount-table model lands

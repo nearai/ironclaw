@@ -1,21 +1,21 @@
 # syntax=docker/dockerfile:1.6
 #
-# Per-project sandbox container image for IronClaw engine v2.
+# Per-project sandbox container image for T3Claw engine v2.
 #
 # This image is the running environment for one project's `/project/` mount.
 # It hosts the `sandbox_daemon` binary which speaks NDJSON over its stdin/
 # stdout to the host (`docker exec -i`). The container itself is started
-# once and kept alive across IronClaw restarts so installed dependencies
+# once and kept alive across T3Claw restarts so installed dependencies
 # (cargo, npm, apt) and build caches accumulate over the project's lifetime.
 #
 # Build:
 #
-#   docker build -f crates/Dockerfile.sandbox -t ironclaw/sandbox:dev .
+#   docker build -f crates/Dockerfile.sandbox -t t3claw/sandbox:dev .
 #
 # Run (host):
 #
 #   ENGINE_V2=true SANDBOX_ENABLED=true \
-#     IRONCLAW_SANDBOX_IMAGE=ironclaw/sandbox:dev \
+#     IRONCLAW_SANDBOX_IMAGE=t3claw/sandbox:dev \
 #     cargo run
 #
 # The host's `ProjectSandboxManager` (Phase 5) handles `docker create` /
@@ -35,7 +35,7 @@ FROM rust:${RUST_VERSION}-slim-bookworm AS builder
 WORKDIR /build
 
 # Cache deps independently of source. Python is required at *build time*
-# because the `ironclaw` crate pulls in `monty` → `pyo3`, whose build script
+# because the `t3claw` crate pulls in `monty` → `pyo3`, whose build script
 # probes for a Python 3 interpreter during compilation.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -86,10 +86,10 @@ WORKDIR /project
 
 # tini is PID 1; CMD blocks indefinitely so the container stays alive
 # without consuming CPU. The host launches the daemon via `docker exec -i`
-# whenever a new IronClaw session attaches to this project.
+# whenever a new T3Claw session attaches to this project.
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["sleep", "infinity"]
 
-LABEL org.opencontainers.image.title="ironclaw-sandbox" \
-      org.opencontainers.image.description="Per-project sandbox container for IronClaw engine v2" \
-      org.opencontainers.image.source="https://github.com/nearai/ironclaw"
+LABEL org.opencontainers.image.title="t3claw-sandbox" \
+      org.opencontainers.image.description="Per-project sandbox container for T3Claw engine v2" \
+      org.opencontainers.image.source="https://github.com/nearai/t3claw"

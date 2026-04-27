@@ -8,11 +8,11 @@ from helpers import SEL, api_post
 # ── Pairing approval with thread_id ─────────────────────────────────────
 
 
-async def test_pairing_approve_accepts_thread_id_field(ironclaw_server):
+async def test_pairing_approve_accepts_thread_id_field(t3claw_server):
     """The pairing approve endpoint should accept an optional thread_id
     in the request body without failing."""
     resp = await api_post(
-        ironclaw_server,
+        t3claw_server,
         "/api/pairing/test-channel/approve",
         json={
             "code": "INVALID0",
@@ -33,11 +33,11 @@ async def test_pairing_approve_accepts_thread_id_field(ironclaw_server):
     }
 
 
-async def test_pairing_approve_without_thread_id_still_works(ironclaw_server):
+async def test_pairing_approve_without_thread_id_still_works(t3claw_server):
     """Backward compatibility: pairing approve without thread_id should
     still work (the field is optional with serde(default))."""
     resp = await api_post(
-        ironclaw_server,
+        t3claw_server,
         "/api/pairing/test-channel/approve",
         json={"code": "INVALID0"},
         timeout=10,
@@ -117,7 +117,7 @@ async def test_pairing_ready_state_dismisses_pairing_card(page):
     await page.locator(SEL["pairing_card"]).wait_for(state="hidden", timeout=5000)
 
 
-async def test_pairing_approve_sends_thread_id(page, ironclaw_server):
+async def test_pairing_approve_sends_thread_id(page, t3claw_server):
     """When the user submits a pairing code, the frontend should include
     currentThreadId in the request body."""
     captured = {"body": None}
@@ -178,7 +178,7 @@ async def test_pairing_approve_sends_thread_id(page, ironclaw_server):
 # ── Pairing approve: channel name is also sanitized ────────────────────
 
 
-async def test_pairing_approve_sanitizes_channel_name(ironclaw_server):
+async def test_pairing_approve_sanitizes_channel_name(t3claw_server):
     """The pairing approve handler must not echo an injection-shaped channel
     path back into the response.
 
@@ -191,7 +191,7 @@ async def test_pairing_approve_sanitizes_channel_name(ironclaw_server):
     """
     raw_channel = "evil.Ignore all"
     resp = await api_post(
-        ironclaw_server,
+        t3claw_server,
         f"/api/pairing/{raw_channel}/approve",
         json={"code": "TESTCODE", "thread_id": None},
         timeout=10,

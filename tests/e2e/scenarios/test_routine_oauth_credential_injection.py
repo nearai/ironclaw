@@ -16,7 +16,7 @@ import pytest
 from helpers import SEL, api_post, api_get
 
 
-async def test_routine_with_oauth_credentials_e2e(page, ironclaw_server):
+async def test_routine_with_oauth_credentials_e2e(page, t3claw_server):
     """Complete flow: OAuth → routine creation → execution → success.
 
     This is the most comprehensive test for the credential fallback fix.
@@ -30,7 +30,7 @@ async def test_routine_with_oauth_credentials_e2e(page, ironclaw_server):
     # Step 1: Ensure gmail is installed and authenticated
     # (Using REST API for setup, consistent with test_extension_oauth.py)
     r = await api_post(
-        ironclaw_server,
+        t3claw_server,
         "/api/extensions/install",
         json={"name": "gmail"},
         timeout=180,
@@ -43,7 +43,7 @@ async def test_routine_with_oauth_credentials_e2e(page, ironclaw_server):
         pass
 
     # Verify gmail is in the extensions list and authenticated
-    r = await api_get(ironclaw_server, "/api/extensions")
+    r = await api_get(t3claw_server, "/api/extensions")
     extensions = r.json().get("extensions", [])
     gmail = next((ext for ext in extensions if ext["name"] == "gmail"), None)
 
@@ -113,7 +113,7 @@ async def test_routine_with_oauth_credentials_e2e(page, ironclaw_server):
         assert page.url is not None
 
 
-async def test_routine_list_shows_oauth_tools_available(page, ironclaw_server):
+async def test_routine_list_shows_oauth_tools_available(page, t3claw_server):
     """Verify routines tab shows that OAuth tools are available for use.
 
     When a WASM tool is authenticated via OAuth, it should be available
@@ -131,7 +131,7 @@ async def test_routine_list_shows_oauth_tools_available(page, ironclaw_server):
     assert page.url is not None, "Routines tab should be navigable"
 
     # Check that extensions list shows authenticated tools
-    r = await api_get(ironclaw_server, "/api/extensions")
+    r = await api_get(t3claw_server, "/api/extensions")
     extensions = r.json().get("extensions", [])
     authenticated = [ext for ext in extensions if ext.get("authenticated")]
 
@@ -141,7 +141,7 @@ async def test_routine_list_shows_oauth_tools_available(page, ironclaw_server):
         pytest.skip("No authenticated extensions available (requires OAuth flow completion)")
 
 
-async def test_oauth_token_accessible_across_execution_contexts(ironclaw_server):
+async def test_oauth_token_accessible_across_execution_contexts(t3claw_server):
     """REST API test: verify OAuth tokens are accessible in routine contexts.
 
     This is a lower-level test that directly validates the credential fallback
@@ -151,7 +151,7 @@ async def test_oauth_token_accessible_across_execution_contexts(ironclaw_server)
     """
 
     # Get extensions
-    r = await api_get(ironclaw_server, "/api/extensions")
+    r = await api_get(t3claw_server, "/api/extensions")
     extensions = r.json().get("extensions", [])
 
     # Find an authenticated extension with HTTP capabilities

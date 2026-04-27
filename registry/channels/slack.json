@@ -18,7 +18,7 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.26.0/channel-slack-0.3.1-wasm32-wasip2.tar.gz",
+      "url": "https://github.com/nearai/t3claw/releases/download/t3claw-v0.26.0/channel-slack-0.3.1-wasm32-wasip2.tar.gz",
       "sha256": "b5e0ffcf6cd849d885031db7ec86299c5b79c288e2fabe983ae18e7814110a45"
     }
   },

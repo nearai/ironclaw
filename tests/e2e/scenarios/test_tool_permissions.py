@@ -50,14 +50,14 @@ async def test_tools_tab_visible(page):
     assert count >= 1, f"Expected at least one tool-permission row, got {count}"
 
 
-async def test_tool_permission_toggle_persists(page, ironclaw_server):
+async def test_tool_permission_toggle_persists(page, t3claw_server):
     """Toggle a tool from AlwaysAllow → AskEachTime via UI; reload; confirm persisted."""
     headers = _headers()
 
     # Set echo to a known initial state via REST
     async with httpx.AsyncClient() as client:
         r = await client.put(
-            f"{ironclaw_server}/api/settings/tools/echo",
+            f"{t3claw_server}/api/settings/tools/echo",
             json={"state": "always_allow"},
             headers=headers,
             timeout=10,
@@ -100,7 +100,7 @@ async def test_tool_permission_toggle_persists(page, ironclaw_server):
     # Also confirm via REST that the state actually persisted
     async with httpx.AsyncClient() as client:
         r2 = await client.get(
-            f"{ironclaw_server}/api/settings/tools",
+            f"{t3claw_server}/api/settings/tools",
             headers=headers,
             timeout=10,
         )
@@ -115,7 +115,7 @@ async def test_tool_permission_toggle_persists(page, ironclaw_server):
     # Cleanup: restore echo to always_allow
     async with httpx.AsyncClient() as client:
         await client.put(
-            f"{ironclaw_server}/api/settings/tools/echo",
+            f"{t3claw_server}/api/settings/tools/echo",
             json={"state": "always_allow"},
             headers=headers,
             timeout=10,
@@ -142,14 +142,14 @@ async def test_locked_tool_shows_lock_icon(page):
     )
 
 
-async def test_always_approve_persists_across_sessions(browser, ironclaw_server):
+async def test_always_approve_persists_across_sessions(browser, t3claw_server):
     """PUT always_allow persists to DB; a fresh browser context confirms the state survives."""
     headers = _headers()
 
     # Set echo to always_allow via REST
     async with httpx.AsyncClient() as client:
         r = await client.put(
-            f"{ironclaw_server}/api/settings/tools/echo",
+            f"{t3claw_server}/api/settings/tools/echo",
             json={"state": "always_allow"},
             headers=headers,
             timeout=10,
@@ -160,13 +160,13 @@ async def test_always_approve_persists_across_sessions(browser, ironclaw_server)
     context = await browser.new_context(viewport={"width": 1280, "height": 720})
     try:
         pg = await context.new_page()
-        await pg.goto(f"{ironclaw_server}/?token={AUTH_TOKEN}")
+        await pg.goto(f"{t3claw_server}/?token={AUTH_TOKEN}")
         await pg.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
 
         # Verify via REST from the new session that the state persisted
         async with httpx.AsyncClient() as client:
             r2 = await client.get(
-                f"{ironclaw_server}/api/settings/tools",
+                f"{t3claw_server}/api/settings/tools",
                 headers=headers,
                 timeout=10,
             )
@@ -181,13 +181,13 @@ async def test_always_approve_persists_across_sessions(browser, ironclaw_server)
         await context.close()
 
 
-async def test_disabled_tool_state_is_persisted(ironclaw_server):
+async def test_disabled_tool_state_is_persisted(t3claw_server):
     """PUT disabled for echo → GET confirms disabled state."""
     headers = _headers()
 
     async with httpx.AsyncClient() as client:
         r = await client.put(
-            f"{ironclaw_server}/api/settings/tools/echo",
+            f"{t3claw_server}/api/settings/tools/echo",
             json={"state": "disabled"},
             headers=headers,
             timeout=10,
@@ -195,7 +195,7 @@ async def test_disabled_tool_state_is_persisted(ironclaw_server):
         assert r.status_code == 200, f"PUT /api/settings/tools/echo failed: {r.text}"
 
         r2 = await client.get(
-            f"{ironclaw_server}/api/settings/tools",
+            f"{t3claw_server}/api/settings/tools",
             headers=headers,
             timeout=10,
         )
@@ -210,20 +210,20 @@ async def test_disabled_tool_state_is_persisted(ironclaw_server):
     # Reset: restore to always_allow
     async with httpx.AsyncClient() as client:
         await client.put(
-            f"{ironclaw_server}/api/settings/tools/echo",
+            f"{t3claw_server}/api/settings/tools/echo",
             json={"state": "always_allow"},
             headers=headers,
             timeout=10,
         )
 
 
-async def test_locked_tool_put_returns_400(ironclaw_server):
+async def test_locked_tool_put_returns_400(t3claw_server):
     """PUT always_allow for tool_remove (locked) → 400."""
     headers = _headers()
 
     async with httpx.AsyncClient() as client:
         r = await client.put(
-            f"{ironclaw_server}/api/settings/tools/tool_remove",
+            f"{t3claw_server}/api/settings/tools/tool_remove",
             json={"state": "always_allow"},
             headers=headers,
             timeout=10,

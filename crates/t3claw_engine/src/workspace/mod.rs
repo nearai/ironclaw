@@ -6,7 +6,7 @@
 //! `/project/foo.txt`) to the backend that owns them.
 //!
 //! This is a deliberately small subset of the unified Workspace VFS proposed
-//! in nearai/ironclaw#1894. Engine v2's per-project sandbox needs the
+//! in nearai/ironclaw#ironclaw#1894. Engine v2's per-project sandbox needs the
 //! abstraction so that the same agent-facing path scheme works whether the
 //! `/project/` mount is served by the host filesystem (default) or by a
 //! containerized backend that dispatches into a per-project sandbox container
@@ -21,7 +21,7 @@
 //!   in the host crate because it needs Docker.
 //!
 //! The trait itself stays in the engine crate so both backends — and any
-//! future backends added by nearai/ironclaw#1894 — can implement the same
+//! future backends added by nearai/ironclaw#ironclaw#1894 — can implement the same
 //! interface without depending on host infrastructure.
 
 pub mod filesystem;

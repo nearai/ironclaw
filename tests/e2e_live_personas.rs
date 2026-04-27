@@ -30,7 +30,7 @@
 //! IRONCLAW_LIVE_TEST=1 cargo test --features libsql --test e2e_live_personas -- --ignored --test-threads=1
 //! ```
 //!
-//! Live mode requires `~/.ironclaw/.env` with valid LLM credentials and
+//! Live mode requires `~/.t3claw/.env` with valid LLM credentials and
 //! runs one test at a time to avoid concurrent API pressure.
 
 #[cfg(feature = "libsql")]

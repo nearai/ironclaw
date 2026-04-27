@@ -7,7 +7,7 @@ text and once inside the config card. After the fix (SubmissionResult::AuthPendi
 only onboarding_state is emitted; no response event accompanies it.
 
 This test:
-1. Starts an ironclaw instance with a GitHub skill + mock API (returns 401 without auth)
+1. Starts an t3claw instance with a GitHub skill + mock API (returns 401 without auth)
 2. Connects to the SSE stream
 3. Sends a chat message that triggers the GitHub skill → HTTP 401 → auth onboarding
 4. Collects SSE events and asserts:
@@ -33,8 +33,8 @@ from helpers import api_get, api_post, AUTH_TOKEN, sse_stream, wait_for_ready
 
 
 ROOT = Path(__file__).resolve().parent.parent.parent.parent
-_DB_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-auth-sse-e2e-")
-_HOME_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-auth-sse-e2e-home-")
+_DB_TMPDIR = tempfile.TemporaryDirectory(prefix="t3claw-auth-sse-e2e-")
+_HOME_TMPDIR = tempfile.TemporaryDirectory(prefix="t3claw-auth-sse-e2e-home-")
 
 
 def _forward_coverage_env(env: dict):
@@ -127,10 +127,10 @@ async def mock_api():
 
 
 @pytest.fixture(scope="module")
-async def auth_sse_server(ironclaw_binary, mock_llm_server, mock_api):
+async def auth_sse_server(t3claw_binary, mock_llm_server, mock_api):
     mock_api_host = mock_api.replace("http://", "")
     home_dir = _HOME_TMPDIR.name
-    skills_dir = os.path.join(home_dir, ".ironclaw", "skills")
+    skills_dir = os.path.join(home_dir, ".t3claw", "skills")
     os.makedirs(skills_dir, exist_ok=True)
     _write_skill(skills_dir, mock_api_host)
 
@@ -154,8 +154,8 @@ async def auth_sse_server(ironclaw_binary, mock_llm_server, mock_api):
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": home_dir,
-        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
-        "RUST_LOG": "ironclaw=debug",
+        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".t3claw"),
+        "RUST_LOG": "t3claw=debug",
         "RUST_BACKTRACE": "1",
         "ENGINE_V2": "true",
         "HTTP_ALLOW_LOCALHOST": "true",
@@ -184,7 +184,7 @@ async def auth_sse_server(ironclaw_binary, mock_llm_server, mock_api):
     _forward_coverage_env(env)
 
     proc = await asyncio.create_subprocess_exec(
-        ironclaw_binary, "--no-onboard",
+        t3claw_binary, "--no-onboard",
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -267,7 +267,7 @@ async def test_auth_required_sse_without_duplicate_response(auth_sse_server):
         base_url,
         "/api/chat/send",
         json={
-            "content": "list issues in nearai/ironclaw github repo",
+            "content": "list issues in nearai/t3claw github repo",
             "thread_id": thread_id,
         },
         timeout=30,

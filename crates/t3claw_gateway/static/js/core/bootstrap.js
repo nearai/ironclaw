@@ -1,4 +1,4 @@
-// IronClaw Web Gateway - Client
+// T3Claw Web Gateway - Client
 
 // --- Theme Management (dark / light / system) ---
 // Icon switching is handled by pure CSS via data-theme-mode on <html>.
@@ -10,7 +10,7 @@ function getSystemTheme() {
 const VALID_THEME_MODES = { dark: true, light: true, system: true };
 
 function getThemeMode() {
-  const stored = localStorage.getItem('ironclaw-theme');
+  const stored = localStorage.getItem('t3claw-theme');
   return (stored && VALID_THEME_MODES[stored]) ? stored : 'system';
 }
 
@@ -33,7 +33,7 @@ function toggleTheme() {
   const cycle = { dark: 'light', light: 'system', system: 'dark' };
   const current = getThemeMode();
   const next = cycle[current] || 'dark';
-  localStorage.setItem('ironclaw-theme', next);
+  localStorage.setItem('t3claw-theme', next);
   applyTheme(next);
 }
 
@@ -67,7 +67,7 @@ document.getElementById('settings-theme-toggle')?.addEventListener('click', () =
   toggleTheme();
   const btn = document.getElementById('settings-theme-toggle');
   if (btn) {
-    const mode = localStorage.getItem('ironclaw-theme') || 'system';
+    const mode = localStorage.getItem('t3claw-theme') || 'system';
     btn.textContent = I18n.t('theme.label', { mode: mode.charAt(0).toUpperCase() + mode.slice(1) });
   }
 });

@@ -3,17 +3,17 @@ paths:
   - "src/agent/**"
   - "src/tools/**"
   - "src/channels/web/**"
-  - "crates/ironclaw_engine/**"
+  - "crates/t3claw_engine/**"
 ---
 # Tool Evidence and Side-Effect Verification
 
-The most dangerous user-visible bug class is **claim/evidence drift**: the agent narrates "message sent" / "file attached" / "tool installed" with no corresponding side effect. The agent-facing half of this rule lives in `crates/ironclaw_engine/prompts/codeact_postamble.md` ("Claims in FINAL() need tool evidence"). This file documents the *target* code invariants that make the rule enforceable at the tool layer. Several of these are aspirational — where that's the case, it's called out inline so new contributors don't assume an enforcement mechanism exists.
+The most dangerous user-visible bug class is **claim/evidence drift**: the agent narrates "message sent" / "file attached" / "tool installed" with no corresponding side effect. The agent-facing half of this rule lives in `crates/t3claw_engine/prompts/codeact_postamble.md` ("Claims in FINAL() need tool evidence"). This file documents the *target* code invariants that make the rule enforceable at the tool layer. Several of these are aspirational — where that's the case, it's called out inline so new contributors don't assume an enforcement mechanism exists.
 
 ## Engine v2 Side-Effect Gate (target invariant)
 
 Engine v2 should classify user turns for side-effect intent (send / save / install / schedule / post / write / delete) and a model-final turn that lacks at least one successful tool call matching the intent should be rejected before it reaches the user — surfacing "action not performed" instead of the agent's narration.
 
-**Current state:** only a soft tool-intent *nudge* exists in `crates/ironclaw_engine/src/executor/loop_engine.rs`; there is no hard rejection gate. Adding one belongs on the engine roadmap. Until it lands, the prompt-side guidance in `codeact_postamble.md` is the primary defence. Reference: #2544, #2580, #2582, #2541, #2447.
+**Current state:** only a soft tool-intent *nudge* exists in `crates/t3claw_engine/src/executor/loop_engine.rs`; there is no hard rejection gate. Adding one belongs on the engine roadmap. Until it lands, the prompt-side guidance in `codeact_postamble.md` is the primary defence. Reference: #2544, #2580, #2582, #2541, #2447.
 
 ## Empty-Fast Outputs Are Errors (tool-author convention)
 

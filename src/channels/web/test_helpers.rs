@@ -10,7 +10,7 @@
 //! `test_gateway_state_with_store_and_session_manager` — are scoped to unit
 //! tests and are individually gated with `#[cfg(test)]`. They previously
 //! lived inside `server.rs::tests` where they were unreachable from other
-//! slice test modules; promoting them here (ironclaw#2599 stage-6
+//! slice test modules; promoting them here (ironclaw#ironclaw#2599 stage-6
 //! prerequisite) lets caller-level tests migrate out of `server.rs::tests`
 //! and into the feature slice they actually exercise (chat, oauth, pairing,
 //! extensions).
@@ -170,7 +170,7 @@ impl TestGatewayBuilder {
 
 // ---------------------------------------------------------------------------
 // Cross-slice positional builders used by unit tests in `server.rs::tests`
-// and (per the ironclaw#2599 stage-6 plan) the chat / extensions / oauth /
+// and (per the ironclaw#ironclaw#2599 stage-6 plan) the chat / extensions / oauth /
 // pairing slice test modules. Kept as `pub(crate)` free functions with
 // the same positional signatures they had when they lived in
 // `server.rs::tests`, so call sites migrate in later PRs without touching
@@ -382,7 +382,7 @@ pub(crate) async fn test_ext_mgr_with_db() -> (
     let (db, db_dir) = crate::testing::test_db().await;
 
     // Pre-seed an empty servers list so the DB-backed loader does not
-    // fall back to `~/.ironclaw/mcp-servers.json` on dev machines.
+    // fall back to `~/.t3claw/mcp-servers.json` on dev machines.
     let empty_servers = crate::tools::mcp::config::McpServersFile::default();
     crate::tools::mcp::config::save_mcp_servers_to_db(db.as_ref(), "test", &empty_servers)
         .await

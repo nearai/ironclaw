@@ -38,14 +38,14 @@ const BOOTSTRAP_GREETING_MARKER: &str = "always-on chief of staff";
 /// rig database from an existing libSQL file.
 ///
 /// Live tests use this to pull *only* the credentials they need (e.g. a
-/// Google OAuth token) out of the developer's real `~/.ironclaw/ironclaw.db`
+/// Google OAuth token) out of the developer's real `~/.t3claw/t3claw.db`
 /// without cloning the rest of the database. Memory, history, secrets the
 /// test didn't ask for — none of it crosses the boundary. The destination
 /// DB starts empty, the listed secret rows are inserted under the test
 /// rig's owner user, and the test must seed any other state itself.
 #[derive(Clone, Debug)]
 pub struct SeededSecretsConfig {
-    /// Path to the source libSQL file (typically `~/.ironclaw/ironclaw.db`).
+    /// Path to the source libSQL file (typically `~/.t3claw/t3claw.db`).
     pub source_path: std::path::PathBuf,
     /// User ID to filter the source rows on (typically the developer's
     /// owner_id from the live config).
@@ -739,7 +739,7 @@ impl TestRigBuilder {
     ///
     /// Live tests use this to pull just the credentials they need (e.g.
     /// `google_oauth_token`) out of the developer's real
-    /// `~/.ironclaw/ironclaw.db` so OAuth-backed flows work end-to-end —
+    /// `~/.t3claw/t3claw.db` so OAuth-backed flows work end-to-end —
     /// without cloning conversation history, workspace memory, or any
     /// secret the test didn't ask for. The destination DB starts empty;
     /// the listed rows are inserted under the test rig's owner user; any
@@ -1165,7 +1165,7 @@ impl TestRigBuilder {
             //
             // `AppBuilder::init_database()` re-resolves `config` from
             // DB/TOML/env, which clobbers `config.skills.local_dir` back
-            // to the default (`~/.ironclaw/skills/`). Any registry
+            // to the default (`~/.t3claw/skills/`). Any registry
             // `build_all()` already constructed therefore points at the
             // user's real skills dir, not the tempdir the test laid
             // down. Rebuild here from the in-scope `skills_dir` /

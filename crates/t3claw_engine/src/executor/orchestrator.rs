@@ -3195,7 +3195,7 @@ mod tests {
         assert!(matches!(outcome, ThreadOutcome::Stopped));
     }
 
-    /// Regression test for nearai/ironclaw#2084 — drives the private
+    /// Regression test for nearai/ironclaw#ironclaw#2084 — drives the private
     /// `handle_list_skills` call site end-to-end (not just the
     /// `list_skills_global` helper). This is the caller-level test required by
     /// `.claude/rules/testing.md` ("Test Through the Caller, Not Just the

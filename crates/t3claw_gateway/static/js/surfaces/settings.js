@@ -595,14 +595,14 @@ function loadChannelsStatus() {
       I18n.t('channels.cli'),
       I18n.t('channels.cliDesc'),
       enabledChannels.indexOf('cli') !== -1,
-      I18n.t('channels.runWith', { cmd: 'ironclaw run --cli' })
+      I18n.t('channels.runWith', { cmd: 't3claw run --cli' })
     ));
 
     builtinList.appendChild(renderBuiltinChannelCard(
       I18n.t('channels.repl'),
       I18n.t('channels.replDesc'),
       enabledChannels.indexOf('repl') !== -1,
-      I18n.t('channels.runWith', { cmd: 'ironclaw run --repl' })
+      I18n.t('channels.runWith', { cmd: 't3claw run --repl' })
     ));
 
     builtinSection.appendChild(builtinList);

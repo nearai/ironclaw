@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="ironclaw.png?v=2" alt="IronClaw" width="200"/>
+  <img src="ironclaw.png?v=2" alt="T3Claw" width="200"/>
 </p>
 
-<h1 align="center">IronClaw</h1>
+<h1 align="center">T3Claw</h1>
 
 <p align="center">
   <strong>Your secure personal AI assistant, always on your side</strong>
@@ -90,12 +90,12 @@ IronClaw is the AI assistant you can actually trust with your personal and profe
 
 ## Download or Build
 
-Visit [Releases page](https://github.com/nearai/ironclaw/releases/) to see the latest updates.
+Visit [Releases page](https://github.com/Terminal-3/t3-claw/releases/) to see the latest updates.
 
 <details>
   <summary>Install via Windows Installer (Windows)</summary>
 
-Download the [Windows Installer](https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-x86_64-pc-windows-msvc.msi) and run it.
+Download the [Windows Installer](https://github.com/Terminal-3/t3-claw/releases/latest/download/t3claw-x86_64-pc-windows-msvc.msi) and run it.
 
 </details>
 
@@ -103,7 +103,7 @@ Download the [Windows Installer](https://github.com/nearai/ironclaw/releases/lat
   <summary>Install via powershell script (Windows)</summary>
 
 ```sh
-irm https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.ps1 | iex
+irm https://github.com/Terminal-3/t3-claw/releases/latest/download/t3claw-installer.ps1 | iex
 ```
 
 </details>
@@ -112,7 +112,7 @@ irm https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-install
   <summary>Install via shell script (macOS, Linux, Windows/WSL)</summary>
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Terminal-3/t3-claw/releases/latest/download/t3claw-installer.sh | sh
 ```
 </details>
 
@@ -120,7 +120,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nearai/ironclaw/release
   <summary>Install via Homebrew (macOS/Linux)</summary>
 
 ```sh
-brew install ironclaw
+brew install t3claw
 ```
 
 </details>
@@ -132,8 +132,8 @@ Install it with `cargo`, just make sure you have [Rust](https://rustup.rs) insta
 
 ```bash
 # Clone the repository
-git clone https://github.com/nearai/ironclaw.git
-cd ironclaw
+git clone https://github.com/Terminal-3/t3-claw.git
+cd t3-claw
 
 # Build
 cargo build --release
@@ -150,10 +150,10 @@ For **full release** (after modifying channel sources), run `./scripts/build-all
 
 ```bash
 # Create database
-createdb ironclaw
+createdb t3claw
 
 # Enable pgvector
-psql ironclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
+psql t3claw -c "CREATE EXTENSION IF NOT EXISTS vector;"
 ```
 
 ## Configuration
@@ -161,13 +161,13 @@ psql ironclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
 Run the setup wizard to configure IronClaw:
 
 ```bash
-ironclaw onboard
+t3claw onboard
 ```
 
 The wizard handles database connection, NEAR AI authentication (via browser OAuth),
 and secrets encryption (using your system keychain). Settings are persisted in the
 connected database; bootstrap variables (e.g. `DATABASE_URL`, `LLM_BACKEND`) are
-written to `~/.ironclaw/.env` so they are available before the database connects.
+written to `~/.t3claw/.env` so they are available before the database connects.
 
 ### Alternative LLM Providers
 
@@ -290,7 +290,7 @@ Engine v2 is opt-in right now. If you want to run the new engine instead of the 
 
 ```bash
 # First-time setup (configures database, auth, etc.)
-ironclaw onboard
+t3claw onboard
 
 # Start interactive REPL
 cargo run
@@ -299,7 +299,7 @@ cargo run
 ENGINE_V2=true cargo run
 
 # Engine v2 with debug logging
-ENGINE_V2=true RUST_LOG=ironclaw=debug cargo run
+ENGINE_V2=true RUST_LOG=t3claw=debug cargo run
 ```
 
 ## Development
@@ -312,7 +312,7 @@ cargo fmt
 cargo clippy --all --benches --tests --examples --all-features
 
 # Run tests
-createdb ironclaw_test
+createdb t3claw_test
 cargo test
 
 # Run specific test

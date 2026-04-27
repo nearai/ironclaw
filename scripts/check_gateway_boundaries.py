@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enforce the ironclaw#2599 gateway platform/feature layering rule.
+"""Enforce the t3claw#2599 gateway platform/feature layering rule.
 
 The gateway platform layer (`src/channels/web/platform/`) must not depend on
 feature handlers (`src/channels/web/{features,handlers}/`). The only
@@ -20,7 +20,7 @@ type paths — comments and string literals are stripped first):
 
 - `crate::channels::web::handlers::` and `crate::channels::web::features::`
 - `crate::channels::web::server::` (retained as a defense-in-depth guard
-  after the `server.rs` shim was deleted in ironclaw#2599 stage 6, so any
+  after the `server.rs` shim was deleted in t3claw#2599 stage 6, so any
   accidental re-introduction of that path — whether a literal new
   `server.rs` or a stray import — gets rejected at CI rather than
   reviving the platform → feature back-edge)
@@ -74,7 +74,7 @@ EXEMPT_RELATIVE_PATHS = {"router.rs"}
 FORBIDDEN_PATTERNS = [
     re.compile(r"\bcrate::channels::web::handlers::"),
     re.compile(r"\bcrate::channels::web::features::"),
-    # The `server.rs` shim was deleted in ironclaw#2599 stage 6; this
+    # The `server.rs` shim was deleted in t3claw#2599 stage 6; this
     # pattern stays as a defense-in-depth guard against any accidental
     # re-introduction of the platform → feature back-edge it used to hide.
     re.compile(r"\bcrate::channels::web::server::"),
@@ -111,7 +111,7 @@ GROUPED_FORBIDDEN_SEGMENT = re.compile(r"\b(handlers|features|server)::")
 # the migration PR — the intent is for this list to shrink to zero, not
 # to grow.
 #
-# Empty as of ironclaw#2599 stage 4b: the `platform/static_files.rs` widget
+# Empty as of t3claw#2599 stage 4b: the `platform/static_files.rs` widget
 # helpers and all seven `ws.rs` → `server.rs` shim references were
 # relocated into `platform/` proper. The mechanism stays in place so a
 # future migration step can reintroduce narrowly-scoped entries without
@@ -581,7 +581,7 @@ class _Tests(unittest.TestCase):
 
     def test_detects_server_shim_back_edge(self) -> None:
         # Defense-in-depth: the `server.rs` shim was deleted in
-        # ironclaw#2599 stage 6, but this test stays as a guard. If a
+        # t3claw#2599 stage 6, but this test stays as a guard. If a
         # future change accidentally reintroduces `channels::web::server::`
         # — literally, or by re-creating a module by that name — the
         # platform → feature back-edge the shim used to hide comes back

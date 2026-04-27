@@ -293,17 +293,17 @@ mod tests {
         let mut att = make_attachment(AttachmentKind::Document);
         att.filename = Some("brief.txt".to_string());
         att.mime_type = "text/plain".to_string();
-        att.local_path = Some(".ironclaw/attachments/alice/project/2026-04-12/brief.txt".into());
+        att.local_path = Some(".t3claw/attachments/alice/project/2026-04-12/brief.txt".into());
         att.extracted_text = Some("Hello from disk".to_string());
 
         let result = augment_with_attachments("review", &[att]).unwrap();
         assert!(
             result.text.contains(
-                "project_path=\".ironclaw/attachments/alice/project/2026-04-12/brief.txt\""
+                "project_path=\".t3claw/attachments/alice/project/2026-04-12/brief.txt\""
             )
         );
         assert!(result.text.contains(
-            "Saved to project file: .ironclaw/attachments/alice/project/2026-04-12/brief.txt"
+            "Saved to project file: .t3claw/attachments/alice/project/2026-04-12/brief.txt"
         ));
         assert!(result.text.contains("Hello from disk"));
     }

@@ -314,7 +314,7 @@ mod tests {
 
         let resp = c
             .get(format!("http://{addr}/api/chat/threads"))
-            .header("Cookie", format!("ironclaw_session={ALICE_TOKEN}"))
+            .header("Cookie", format!("t3claw_session={ALICE_TOKEN}"))
             .send()
             .await
             .expect("cookie auth request");

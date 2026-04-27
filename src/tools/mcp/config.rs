@@ -1,7 +1,7 @@
 //! MCP server configuration.
 //!
 //! Stores configuration for connecting to hosted MCP servers.
-//! Configuration is persisted at ~/.ironclaw/mcp-servers.json.
+//! Configuration is persisted at ~/.t3claw/mcp-servers.json.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1653,7 +1653,7 @@ mod tests {
         );
     }
 
-    /// Regression for PR nearai/ironclaw#2681 review comment 3110617080.
+    /// Regression for PR nearai/ironclaw#ironclaw#2681 review comment 3110617080.
     ///
     /// Before the `McpServerName` newtype landed, `McpServerConfig::validate()`
     /// had no length cap. Delegating validation to `McpServerName::new` added

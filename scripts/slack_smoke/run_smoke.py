@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Local Slack smoke runner for pre-release validation.
 
-Runs a small set of real Slack flows against an already-running IronClaw
+Runs a small set of real Slack flows against an already-running T3Claw
 instance configured with the Slack channel.
 
 This script uses two Slack tokens:
@@ -197,7 +197,7 @@ def run_attachment_case(
 ) -> None:
     run_id = uuid.uuid4().hex[:8]
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as tmp:
-        tmp.write(f"ironclaw slack smoke attachment {run_id}\n")
+        tmp.write(f"t3claw slack smoke attachment {run_id}\n")
         attachment_path = Path(tmp.name)
 
     try:
@@ -319,7 +319,7 @@ def main() -> int:
     cfg = load_config()
 
     if cfg.healthcheck_url:
-        print(f"Checking IronClaw health at {cfg.healthcheck_url} ...")
+        print(f"Checking T3Claw health at {cfg.healthcheck_url} ...")
         asyncio.run(check_health(cfg.healthcheck_url))
 
     selected_cases = tuple(args.case or ())

@@ -159,12 +159,12 @@ async def _toggle_routine(base_url: str, routine_id: str, enabled: bool) -> dict
 
 
 @pytest.mark.asyncio
-async def test_create_event_trigger_routine(page, ironclaw_server):
+async def test_create_event_trigger_routine(page, t3claw_server):
     """Event routines can be created through the supported chat flow."""
     name = f"evt-{uuid.uuid4().hex[:8]}"
     routine = await _create_event_routine(
         page,
-        ironclaw_server,
+        t3claw_server,
         name=name,
         pattern="test|demo",
     )
@@ -177,14 +177,14 @@ async def test_create_event_trigger_routine(page, ironclaw_server):
 @pytest.mark.asyncio
 async def test_event_trigger_fires_on_matching_message(
     page,
-    ironclaw_server,
+    t3claw_server,
     http_channel_server,
 ):
     """Matching HTTP-channel messages create routine runs."""
     name = f"evt-{uuid.uuid4().hex[:8]}"
     routine = await _create_event_routine(
         page,
-        ironclaw_server,
+        t3claw_server,
         name=name,
         pattern="urgent|critical|alert",
     )
@@ -196,11 +196,11 @@ async def test_event_trigger_fires_on_matching_message(
     assert response["status"] == "accepted"
 
     await _wait_for_run_count(
-        ironclaw_server,
+        t3claw_server,
         routine["id"],
         expected_at_least=1,
     )
-    completed_run = await _wait_for_completed_run(ironclaw_server, routine["id"])
+    completed_run = await _wait_for_completed_run(t3claw_server, routine["id"])
 
     assert completed_run["status"].lower() == "attention"
     assert completed_run["trigger_type"] == "event"
@@ -209,14 +209,14 @@ async def test_event_trigger_fires_on_matching_message(
 @pytest.mark.asyncio
 async def test_event_trigger_skips_non_matching_message(
     page,
-    ironclaw_server,
+    t3claw_server,
     http_channel_server,
 ):
     """Non-matching messages do not create routine runs."""
     name = f"evt-{uuid.uuid4().hex[:8]}"
     routine = await _create_event_routine(
         page,
-        ironclaw_server,
+        t3claw_server,
         name=name,
         pattern="urgent|critical|alert",
     )
@@ -227,13 +227,13 @@ async def test_event_trigger_skips_non_matching_message(
     )
     await asyncio.sleep(2)
 
-    assert await _get_routine_runs(ironclaw_server, routine["id"]) == []
+    assert await _get_routine_runs(t3claw_server, routine["id"]) == []
 
 
 @pytest.mark.asyncio
 async def test_multiple_routines_fire_on_matching_message(
     page,
-    ironclaw_server,
+    t3claw_server,
     http_channel_server,
 ):
     """A single matching message can fire multiple event routines."""
@@ -243,7 +243,7 @@ async def test_multiple_routines_fire_on_matching_message(
         routines.append(
             await _create_event_routine(
                 page,
-                ironclaw_server,
+                t3claw_server,
                 name=name,
                 pattern="error|warning|alert",
             )
@@ -256,31 +256,31 @@ async def test_multiple_routines_fire_on_matching_message(
 
     for routine in routines:
         await _wait_for_run_count(
-            ironclaw_server,
+            t3claw_server,
             routine["id"],
             expected_at_least=1,
         )
-        completed_run = await _wait_for_completed_run(ironclaw_server, routine["id"])
+        completed_run = await _wait_for_completed_run(t3claw_server, routine["id"])
         assert completed_run["status"].lower() == "attention"
 
 
 @pytest.mark.asyncio
 async def test_channel_filter_applied_correctly(
     page,
-    ironclaw_server,
+    t3claw_server,
     http_channel_server,
 ):
     """Channel filters prevent HTTP messages from firing non-HTTP routines."""
     http_routine = await _create_event_routine(
         page,
-        ironclaw_server,
+        t3claw_server,
         name=f"evt-{uuid.uuid4().hex[:8]}",
         pattern="alert",
         channel="http",
     )
     telegram_routine = await _create_event_routine(
         page,
-        ironclaw_server,
+        t3claw_server,
         name=f"evt-{uuid.uuid4().hex[:8]}",
         pattern="alert",
         channel="telegram",
@@ -292,13 +292,13 @@ async def test_channel_filter_applied_correctly(
     )
 
     await _wait_for_run_count(
-        ironclaw_server,
+        t3claw_server,
         http_routine["id"],
         expected_at_least=1,
     )
-    http_run = await _wait_for_completed_run(ironclaw_server, http_routine["id"])
+    http_run = await _wait_for_completed_run(t3claw_server, http_routine["id"])
     await asyncio.sleep(2)
-    telegram_runs = await _get_routine_runs(ironclaw_server, telegram_routine["id"])
+    telegram_runs = await _get_routine_runs(t3claw_server, telegram_routine["id"])
 
     assert http_run["status"].lower() == "attention"
     assert telegram_runs == []
@@ -307,13 +307,13 @@ async def test_channel_filter_applied_correctly(
 @pytest.mark.asyncio
 async def test_routine_execution_history_is_available(
     page,
-    ironclaw_server,
+    t3claw_server,
     http_channel_server,
 ):
     """Routine run history is exposed by the routines runs API."""
     routine = await _create_event_routine(
         page,
-        ironclaw_server,
+        t3claw_server,
         name=f"evt-{uuid.uuid4().hex[:8]}",
         pattern="history",
     )
@@ -324,11 +324,11 @@ async def test_routine_execution_history_is_available(
     )
 
     await _wait_for_run_count(
-        ironclaw_server,
+        t3claw_server,
         routine["id"],
         expected_at_least=1,
     )
-    completed_run = await _wait_for_completed_run(ironclaw_server, routine["id"])
+    completed_run = await _wait_for_completed_run(t3claw_server, routine["id"])
 
     assert completed_run["id"]
     assert completed_run["started_at"]
@@ -338,13 +338,13 @@ async def test_routine_execution_history_is_available(
 @pytest.mark.asyncio
 async def test_event_trigger_respects_cooldown(
     page,
-    ironclaw_server,
+    t3claw_server,
     http_channel_server,
 ):
     """Rapid matching events should not re-fire a routine within cooldown."""
     routine = await _create_event_routine(
         page,
-        ironclaw_server,
+        t3claw_server,
         name=f"evt-{uuid.uuid4().hex[:8]}",
         pattern="alert",
         cooldown_secs=30,
@@ -356,11 +356,11 @@ async def test_event_trigger_respects_cooldown(
         wait_for_response=False,
     )
     await _wait_for_run_count(
-        ironclaw_server,
+        t3claw_server,
         routine["id"],
         expected_at_least=1,
     )
-    first_run = await _wait_for_completed_run(ironclaw_server, routine["id"])
+    first_run = await _wait_for_completed_run(t3claw_server, routine["id"])
     assert first_run["status"].lower() == "attention"
 
     await _post_http_message(
@@ -370,25 +370,25 @@ async def test_event_trigger_respects_cooldown(
     )
     await asyncio.sleep(2)
 
-    runs = await _get_routine_runs(ironclaw_server, routine["id"])
+    runs = await _get_routine_runs(t3claw_server, routine["id"])
     assert len(runs) == 1, f"Cooldown should suppress duplicate fire, got runs={runs}"
 
 
 @pytest.mark.asyncio
 async def test_event_routine_can_be_paused_and_resumed(
     page,
-    ironclaw_server,
+    t3claw_server,
     http_channel_server,
 ):
     """Disabled routines should not fire until they are re-enabled."""
     routine = await _create_event_routine(
         page,
-        ironclaw_server,
+        t3claw_server,
         name=f"evt-{uuid.uuid4().hex[:8]}",
         pattern="resume",
     )
 
-    disabled = await _toggle_routine(ironclaw_server, routine["id"], False)
+    disabled = await _toggle_routine(t3claw_server, routine["id"], False)
     assert disabled["status"] == "disabled"
 
     await _post_http_message(
@@ -397,9 +397,9 @@ async def test_event_routine_can_be_paused_and_resumed(
         wait_for_response=False,
     )
     await asyncio.sleep(2)
-    assert await _get_routine_runs(ironclaw_server, routine["id"]) == []
+    assert await _get_routine_runs(t3claw_server, routine["id"]) == []
 
-    enabled = await _toggle_routine(ironclaw_server, routine["id"], True)
+    enabled = await _toggle_routine(t3claw_server, routine["id"], True)
     assert enabled["status"] == "enabled"
 
     await _post_http_message(
@@ -408,9 +408,9 @@ async def test_event_routine_can_be_paused_and_resumed(
         wait_for_response=False,
     )
     await _wait_for_run_count(
-        ironclaw_server,
+        t3claw_server,
         routine["id"],
         expected_at_least=1,
     )
-    completed_run = await _wait_for_completed_run(ironclaw_server, routine["id"])
+    completed_run = await _wait_for_completed_run(t3claw_server, routine["id"])
     assert completed_run["status"].lower() == "attention"

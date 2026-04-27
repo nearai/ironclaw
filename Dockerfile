@@ -1,4 +1,4 @@
-# Multi-stage Dockerfile for the IronClaw agent (cloud deployment).
+# Multi-stage Dockerfile for the T3Claw agent (cloud deployment).
 #
 # Uses cargo-chef for dependency caching — only rebuilds deps when
 # Cargo.toml/Cargo.lock change, not on every source edit.
@@ -8,10 +8,10 @@
 # database reopen), so we use glibc.
 #
 # Build:
-#   docker build --platform linux/amd64 --target runtime -t ironclaw:latest .
+#   docker build --platform linux/amd64 --target runtime -t t3claw:latest .
 #
 # Run:
-#   docker run --env-file .env -p 3000:3000 ironclaw:latest
+#   docker run --env-file .env -p 3000:3000 t3claw:latest
 
 # Stage 1: Install cargo-chef
 FROM rust:1.92-bookworm AS chef
@@ -49,7 +49,7 @@ ENV CARGO_PROFILE_DIST_PANIC=abort \
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --profile dist --recipe-path recipe.json
 
-# Stage 4: Build the actual binary (only recompiles ironclaw source)
+# Stage 4: Build the actual binary (only recompiles t3claw source)
 FROM deps AS builder
 
 COPY Cargo.toml Cargo.lock ./
@@ -65,7 +65,7 @@ COPY wit/ wit/
 COPY providers.json providers.json
 COPY profiles/ profiles/
 
-RUN cargo build --profile dist --bin ironclaw
+RUN cargo build --profile dist --bin t3claw
 
 # Stage 4b: Build all WASM extensions from source (only used by runtime-staging)
 #
@@ -125,30 +125,30 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw
+COPY --from=builder /app/target/dist/t3claw /usr/local/bin/t3claw
 COPY --from=builder /app/migrations /app/migrations
 
 # Non-root user
-ENV HOME=/home/ironclaw
-RUN useradd -m -d /home/ironclaw -u 1000 ironclaw \
-    && mkdir -p /home/ironclaw/.ironclaw \
-    && chown -R ironclaw:ironclaw /home/ironclaw
-WORKDIR /home/ironclaw
+ENV HOME=/home/t3claw
+RUN useradd -m -d /home/t3claw -u 1000 t3claw \
+    && mkdir -p /home/t3claw/.t3claw \
+    && chown -R t3claw:t3claw /home/t3claw
+WORKDIR /home/t3claw
 
 EXPOSE 3000
 
-ENV RUST_LOG=ironclaw=info
+ENV RUST_LOG=t3claw=info
 
-ENTRYPOINT ["ironclaw"]
+ENTRYPOINT ["t3claw"]
 
 # Stage 5b: Production runtime (no pre-bundled extensions)
 FROM runtime-base AS runtime
-USER ironclaw
+USER t3claw
 
 # Stage 5c: Staging runtime (with pre-built WASM extensions)
 # Last stage = default target. Railway doesn't support --target, so this
 # must be last for Railway deploys. CI uses explicit --target flags.
 FROM runtime-base AS runtime-staging
-COPY --from=wasm-builder --chown=ironclaw:ironclaw /app/wasm-bundles/tools/ /home/ironclaw/.ironclaw/tools/
-COPY --from=wasm-builder --chown=ironclaw:ironclaw /app/wasm-bundles/channels/ /home/ironclaw/.ironclaw/channels/
-USER ironclaw
+COPY --from=wasm-builder --chown=t3claw:t3claw /app/wasm-bundles/tools/ /home/t3claw/.t3claw/tools/
+COPY --from=wasm-builder --chown=t3claw:t3claw /app/wasm-bundles/channels/ /home/t3claw/.t3claw/channels/
+USER t3claw

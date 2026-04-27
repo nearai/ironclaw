@@ -275,7 +275,7 @@ mod attachment_tests {
                 .and_then(|rest| rest.split('"').next())
                 .expect("project_path attribute");
             assert!(
-                project_path.contains(".ironclaw/attachments/"),
+                project_path.contains(".t3claw/attachments/"),
                 "missing persisted attachment path for {channel}: {}",
                 last_user_msg.content
             );

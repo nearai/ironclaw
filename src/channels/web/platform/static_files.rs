@@ -914,7 +914,7 @@ async fn verify_project_ownership(state: &GatewayState, project_id: &str, user_i
     }
 }
 
-/// Shared logic: resolve the file inside `~/.ironclaw/projects/{project_id}/`,
+/// Shared logic: resolve the file inside `~/.t3claw/projects/{project_id}/`,
 /// guard against path traversal, and stream the content with the right MIME type.
 async fn serve_project_file(project_id: &str, path: &str) -> axum::response::Response {
     // Reject project_id values that could escape the projects directory.
@@ -957,7 +957,7 @@ async fn serve_project_file(project_id: &str, path: &str) -> axum::response::Res
 // Tests for these helpers live alongside the route-level handler tests in
 // `src/channels/web/server.rs` (for now), where the full `GatewayState`
 // fixture is already in scope. They will migrate here once `server.rs` is
-// further trimmed in the next ironclaw#2599 increment.
+// further trimmed in the next ironclaw#ironclaw#2599 increment.
 
 #[cfg(test)]
 mod tests {

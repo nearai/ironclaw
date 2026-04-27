@@ -238,7 +238,7 @@ async def _seed_mock_llm_api_url(mock_llm_server: str, mock_api_url: str) -> Non
 
 
 async def _start_auth_matrix_server(
-    ironclaw_binary: str,
+    t3claw_binary: str,
     mock_llm_server: str,
     mock_api_url: str,
     *,
@@ -252,11 +252,11 @@ async def _start_auth_matrix_server(
         reserved.append(sock)
 
     if existing_paths is None:
-        db_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-auth-matrix-db-")
-        home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-auth-matrix-home-")
-        tools_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-auth-matrix-tools-")
+        db_tmpdir = tempfile.TemporaryDirectory(prefix="t3claw-auth-matrix-db-")
+        home_tmpdir = tempfile.TemporaryDirectory(prefix="t3claw-auth-matrix-home-")
+        tools_tmpdir = tempfile.TemporaryDirectory(prefix="t3claw-auth-matrix-tools-")
         channels_tmpdir = tempfile.TemporaryDirectory(
-            prefix="ironclaw-auth-matrix-channels-"
+            prefix="t3claw-auth-matrix-channels-"
         )
         db_path = os.path.join(db_tmpdir.name, "auth-matrix.db")
         home_dir = home_tmpdir.name
@@ -277,7 +277,7 @@ async def _start_auth_matrix_server(
         for sock in reserved:
             sock.close()
 
-        skills_dir = os.path.join(home_dir, ".ironclaw", "skills")
+        skills_dir = os.path.join(home_dir, ".t3claw", "skills")
         os.makedirs(skills_dir, exist_ok=True)
         _write_google_skill(skills_dir, mock_api_url.replace("http://", ""))
         _write_oauth_wasm_channel(channels_dir)
@@ -285,9 +285,9 @@ async def _start_auth_matrix_server(
         env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": home_dir,
-            "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
+            "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".t3claw"),
             "IRONCLAW_OWNER_ID": TEST_USER_ID,
-            "RUST_LOG": "ironclaw=info",
+            "RUST_LOG": "t3claw=info",
             "RUST_BACKTRACE": "1",
             "ENGINE_V2": "true",
             "HTTP_ALLOW_LOCALHOST": "true",
@@ -326,7 +326,7 @@ async def _start_auth_matrix_server(
         _forward_coverage_env(env)
 
         proc = await asyncio.create_subprocess_exec(
-            ironclaw_binary,
+            t3claw_binary,
             "--no-onboard",
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
@@ -344,7 +344,7 @@ async def _start_auth_matrix_server(
                 "gateway_user_id": TEST_USER_ID,
                 "mock_llm_url": mock_llm_server,
                 "mock_api_url": mock_api_url,
-                "ironclaw_binary": ironclaw_binary,
+                "t3claw_binary": t3claw_binary,
                 "exchange_url": exchange_url,
                 "home_dir": home_dir,
                 "tools_dir": tools_dir,
@@ -382,7 +382,7 @@ async def _shutdown_auth_matrix_server(server: dict, *, cleanup: bool = True) ->
 async def _restart_auth_matrix_server(server: dict) -> dict:
     await _shutdown_auth_matrix_server(server, cleanup=False)
     return await _start_auth_matrix_server(
-        server["ironclaw_binary"],
+        server["t3claw_binary"],
         server["mock_llm_url"],
         server["mock_api_url"],
         exchange_url=server["exchange_url"],
@@ -397,12 +397,12 @@ async def _restart_auth_matrix_server(server: dict) -> dict:
 
 
 async def _start_auth_matrix_repl(
-    ironclaw_binary: str,
+    t3claw_binary: str,
     mock_llm_server: str,
     mock_api_url: str,
 ) -> dict:
-    db_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-auth-matrix-repl-db-")
-    home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-auth-matrix-repl-home-")
+    db_tmpdir = tempfile.TemporaryDirectory(prefix="t3claw-auth-matrix-repl-db-")
+    home_tmpdir = tempfile.TemporaryDirectory(prefix="t3claw-auth-matrix-repl-home-")
     master_fd, slave_fd = pty.openpty()
     port_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     port_sock.bind(("127.0.0.1", 0))
@@ -411,7 +411,7 @@ async def _start_auth_matrix_repl(
 
     try:
         home_dir = home_tmpdir.name
-        skills_dir = os.path.join(home_dir, ".ironclaw", "skills")
+        skills_dir = os.path.join(home_dir, ".t3claw", "skills")
         os.makedirs(skills_dir, exist_ok=True)
         _write_google_skill(skills_dir, mock_api_url.replace("http://", ""))
         await _seed_mock_llm_api_url(mock_llm_server, mock_api_url)
@@ -419,9 +419,9 @@ async def _start_auth_matrix_repl(
         env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": home_dir,
-            "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
+            "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".t3claw"),
             "IRONCLAW_OWNER_ID": TEST_USER_ID,
-            "RUST_LOG": "ironclaw=info",
+            "RUST_LOG": "t3claw=info",
             "RUST_BACKTRACE": "1",
             "TERM": os.environ.get("TERM", "xterm-256color"),
             "ENGINE_V2": "true",
@@ -448,7 +448,7 @@ async def _start_auth_matrix_repl(
         _forward_coverage_env(env)
 
         proc = await asyncio.create_subprocess_exec(
-            ironclaw_binary,
+            t3claw_binary,
             "--no-onboard",
             stdin=slave_fd,
             stdout=slave_fd,
@@ -465,7 +465,7 @@ async def _start_auth_matrix_repl(
             "tmpdirs": [db_tmpdir, home_tmpdir],
             "mock_api_url": mock_api_url,
         }
-        await _read_repl_until(repl, r"IronClaw|›", timeout=30.0)
+        await _read_repl_until(repl, r"T3Claw|›", timeout=30.0)
         return repl
     except Exception:
         try:
@@ -498,10 +498,10 @@ async def _shutdown_auth_matrix_repl(repl: dict) -> None:
 
 
 @pytest.fixture
-async def auth_matrix_server(ironclaw_binary, mock_llm_server):
+async def auth_matrix_server(t3claw_binary, mock_llm_server):
     mock_api = await _start_mock_google_api()
     server = await _start_auth_matrix_server(
-        ironclaw_binary,
+        t3claw_binary,
         mock_llm_server,
         mock_api["base_url"],
         exchange_url=mock_llm_server,
@@ -514,10 +514,10 @@ async def auth_matrix_server(ironclaw_binary, mock_llm_server):
 
 
 @pytest.fixture
-async def auth_matrix_exchange_failure_server(ironclaw_binary, mock_llm_server):
+async def auth_matrix_exchange_failure_server(t3claw_binary, mock_llm_server):
     mock_api = await _start_mock_google_api()
     server = await _start_auth_matrix_server(
-        ironclaw_binary,
+        t3claw_binary,
         mock_llm_server,
         mock_api["base_url"],
         exchange_url="http://127.0.0.1:1",
@@ -530,10 +530,10 @@ async def auth_matrix_exchange_failure_server(ironclaw_binary, mock_llm_server):
 
 
 @pytest.fixture
-async def auth_matrix_repl(ironclaw_binary, mock_llm_server):
+async def auth_matrix_repl(t3claw_binary, mock_llm_server):
     mock_api = await _start_mock_google_api()
     repl = await _start_auth_matrix_repl(
-        ironclaw_binary,
+        t3claw_binary,
         mock_llm_server,
         mock_api["base_url"],
     )

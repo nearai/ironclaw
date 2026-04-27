@@ -19,7 +19,7 @@ pub struct ChannelsConfig {
     pub gateway: Option<GatewayConfig>,
     pub signal: Option<SignalConfig>,
     pub tui: Option<TuiChannelConfig>,
-    /// Directory containing WASM channel modules (default: ~/.ironclaw/channels/).
+    /// Directory containing WASM channel modules (default: ~/.t3claw/channels/).
     pub wasm_channels_dir: std::path::PathBuf,
     /// Whether WASM channels are enabled.
     pub wasm_channels_enabled: bool,
@@ -456,7 +456,7 @@ impl ChannelsConfig {
 /// other modules that need to construct a gateway URL.
 pub const DEFAULT_GATEWAY_PORT: u16 = 3000;
 
-/// Get the default channels directory (~/.ironclaw/channels/).
+/// Get the default channels directory (~/.t3claw/channels/).
 fn default_channels_dir() -> PathBuf {
     t3claw_base_dir().join("channels")
 }

@@ -3,7 +3,7 @@
 //! Owns the browser-facing chat surface end-to-end: message ingress, gate
 //! resolution, thread management, history playback, SSE event stream, and
 //! the WebSocket upgrade. This is the biggest slice extracted so far
-//! (ironclaw#2599 stage 4c) — prior stages (oauth, pairing, status, logs)
+//! (ironclaw#ironclaw#2599 stage 4c) — prior stages (oauth, pairing, status, logs)
 //! left chat in `server.rs` because the gate-flow and SSE/WS reconnect
 //! surfaces needed the widest review window.
 //!
@@ -1210,7 +1210,7 @@ fn summary_live_state(summary: &crate::history::ConversationSummary) -> Option<S
 // `test_gateway_state_with_store_and_session_manager`,
 // `test_gateway_state_with_dependencies`) now live in
 // `crate::channels::web::test_helpers` as `pub(crate)` functions, so
-// stage 6 of ironclaw#2599 can migrate the caller-level tests into this
+// stage 6 of ironclaw#ironclaw#2599 can migrate the caller-level tests into this
 // module alongside the helpers without an API change.
 
 #[cfg(test)]

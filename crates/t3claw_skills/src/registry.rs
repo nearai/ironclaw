@@ -219,7 +219,7 @@ pub struct InstalledSkillMetadata {
     pub source_subdir: Option<String>,
 }
 
-const INSTALL_METADATA_FILE: &str = ".ironclaw-install.json";
+const INSTALL_METADATA_FILE: &str = ".t3claw-install.json";
 
 fn validate_install_relative_path(path: &Path) -> Result<PathBuf, SkillRegistryError> {
     if path.as_os_str().is_empty() || path.is_absolute() {

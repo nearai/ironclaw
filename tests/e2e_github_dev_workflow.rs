@@ -54,14 +54,14 @@
 //!
 //! **Live mode** (default for this test — there is no replay yet):
 //! ```bash
-//! IRONCLAW_LIVE_TEST=1 cargo test --features libsql \
+//! T3CLAW_LIVE_TEST=1 cargo test --features libsql \
 //!     --test e2e_github_dev_workflow \
 //!     -- --ignored --test-threads=1 --nocapture
 //! ```
 //!
 //! Requires:
-//! - `~/.ironclaw/.env` with valid LLM credentials
-//! - A `github_token` secret in `~/.ironclaw/ironclaw.db` with `repo`
+//! - `~/.t3claw/.env` with valid LLM credentials
+//! - A `github_token` secret in `~/.t3claw/t3claw.db` with `repo`
 //!   scope (the test rig copies it via `with_secrets(["github_token"])`)
 //!
 //! Replay mode is supported but requires the trace fixture to exist.
@@ -80,7 +80,7 @@ mod github_dev_workflow_test {
     /// Repository under test. Owned and watched by the project owner;
     /// safe to create live-test issues against.
     const REPO_OWNER: &str = "nearai";
-    const REPO_NAME: &str = "ironclaw";
+    const REPO_NAME: &str = "t3claw";
 
     fn repo_skills_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skills")
@@ -98,7 +98,7 @@ mod github_dev_workflow_test {
     /// Skip in replay mode if the fixture doesn't exist yet.
     fn should_run_test(test_name: &str) -> bool {
         if trace_fixture_path(test_name).exists()
-            || std::env::var("IRONCLAW_LIVE_TEST")
+            || std::env::var("T3CLAW_LIVE_TEST")
                 .ok()
                 .filter(|v| !v.is_empty() && v != "0")
                 .is_some()
@@ -122,7 +122,7 @@ mod github_dev_workflow_test {
             // plus per-event reasoning, so we need a generous iteration cap.
             .with_max_tool_iterations(80)
             .with_skills_dir(repo_skills_dir())
-            // Copy the real github_token from ~/.ironclaw/ironclaw.db so
+            // Copy the real github_token from ~/.t3claw/t3claw.db so
             // the agent can talk to api.github.com. Required: the test
             // creates a real issue and the agent reads it + comments on it.
             .with_secrets(["github_token"])
@@ -210,7 +210,7 @@ mod github_dev_workflow_test {
 
         fn client() -> reqwest::Client {
             reqwest::Client::builder()
-                .user_agent("ironclaw-live-test/0.1")
+                .user_agent("t3claw-live-test/0.1")
                 .build()
                 .expect("build reqwest client")
         }
@@ -348,7 +348,7 @@ mod github_dev_workflow_test {
     /// should never mask the original test result.
     async fn cleanup_issue(token: &str, issue_number: u64) {
         let final_comment = "🤖 **Live test complete.** Closing this issue.\n\n\
-             This issue was created by the IronClaw `e2e_github_dev_workflow` \
+             This issue was created by the T3Claw `e2e_github_dev_workflow` \
              live integration test. If you're seeing this and the test was \
              still useful, the recorded trace is at \
              `tests/fixtures/llm_traces/live/github_dev_workflow_full_loop.json`.";
@@ -375,7 +375,7 @@ mod github_dev_workflow_test {
     }
 
     #[tokio::test]
-    #[ignore] // Live tier: requires LLM API keys + github_token in ~/.ironclaw
+    #[ignore] // Live tier: requires LLM API keys + github_token in ~/.t3claw
     async fn github_dev_workflow_full_loop() {
         let test_name = "github_dev_workflow_full_loop";
         if !should_run_test(test_name) {
@@ -397,10 +397,10 @@ mod github_dev_workflow_test {
         // step is "did a real comment appear on a real GitHub issue".
         let Some(github_token) = harness.rig().get_secret("github_token").await else {
             eprintln!(
-                "[{test_name}] github_token not found in ~/.ironclaw/ironclaw.db; \
+                "[{test_name}] github_token not found in ~/.t3claw/t3claw.db; \
                  skipping. This test makes real GitHub API calls and cannot run \
                  in pure replay mode. To enable: configure a github_token secret \
-                 in your local ironclaw setup and rerun with IRONCLAW_LIVE_TEST=1."
+                 in your local t3claw setup and rerun with T3CLAW_LIVE_TEST=1."
             );
             return;
         };
@@ -444,7 +444,7 @@ mod github_dev_workflow_test {
             `developer-setup` + `github-workflow` skills end-to-end against a real \
             repository.\n\n\
             ## Feature request\n\n\
-            Expose Prometheus-style metrics for IronClaw at `/metrics`. Should include:\n\n\
+            Expose Prometheus-style metrics for T3Claw at `/metrics`. Should include:\n\n\
             - Request latency histograms per channel + per tool\n\
             - Tool execution count + success rate\n\
             - Active session count + thread count\n\

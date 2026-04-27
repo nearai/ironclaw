@@ -3,11 +3,11 @@ name = "t3claw_engine"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
-description = "Unified thread-capability-CodeAct execution engine for IronClaw"
+description = "Unified thread-capability-CodeAct execution engine for T3Claw"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
-homepage = "https://github.com/nearai/ironclaw"
-repository = "https://github.com/nearai/ironclaw"
+homepage = "https://github.com/nearai/t3claw"
+repository = "https://github.com/nearai/t3claw"
 publish = false
 
 [package.metadata.dist]

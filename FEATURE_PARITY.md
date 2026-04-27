@@ -1,6 +1,6 @@
-# IronClaw ↔ OpenClaw Feature Parity Matrix
+# T3Claw ↔ OpenClaw Feature Parity Matrix
 
-This document tracks feature parity between IronClaw (Rust implementation) and OpenClaw (TypeScript reference implementation). Use this to coordinate work across developers.
+This document tracks feature parity between T3Claw (Rust implementation) and OpenClaw (TypeScript reference implementation). Use this to coordinate work across developers.
 
 **Legend:**
 
@@ -17,7 +17,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## 1. Architecture
 
-| Feature | OpenClaw | IronClaw | Notes |
+| Feature | OpenClaw | T3Claw | Notes |
 |---------|----------|----------|-------|
 | Hub-and-spoke architecture | ✅ | ✅ | Web gateway as central hub |
 | WebSocket control plane | ✅ | ✅ | Gateway with WebSocket + SSE |
@@ -32,7 +32,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## 2. Gateway System
 
-| Feature | OpenClaw | IronClaw | Notes |
+| Feature | OpenClaw | T3Claw | Notes |
 |---------|----------|----------|-------|
 | Gateway control plane | ✅ | ✅ | Web gateway with 40+ API endpoints |
 | HTTP endpoints for Control UI | ✅ | ✅ | Web dashboard with chat, memory, jobs, logs, extensions |
@@ -62,12 +62,12 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## 3. Messaging Channels
 
-| Channel | OpenClaw | IronClaw | Priority | Notes |
+| Channel | OpenClaw | T3Claw | Priority | Notes |
 |---------|----------|----------|----------|-------|
 | CLI/TUI | ✅ | ✅ | - | Ratatui-based TUI |
 | HTTP webhook | ✅ | ✅ | - | axum with secret validation |
 | REPL (simple) | ✅ | ✅ | - | For testing |
-| WASM channels | ❌ | ✅ | - | IronClaw innovation; host resolves owner scope vs sender identity |
+| WASM channels | ❌ | ✅ | - | T3Claw innovation; host resolves owner scope vs sender identity |
 | WhatsApp | ✅ | ❌ | P1 | Baileys (Web), same-phone mode with echo detection |
 | Telegram | ✅ | ✅ | - | WASM channel(MTProto), polling-first setup, DM pairing, caption, /start, bot_username, DM topics, web/UI ownership claim flow, owner-scoped persistence |
 | Discord | ✅ | 🚧 | P2 | Gateway `MESSAGE_CREATE` intake restored via websocket queue + WASM poll; Gateway DMs now respect pairing; thread parent binding inheritance and reply/thread parity still incomplete |
@@ -88,7 +88,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ### Telegram-Specific Features (since Feb 2025)
 
-| Feature | OpenClaw | IronClaw | Notes |
+| Feature | OpenClaw | T3Claw | Notes |
 |---------|----------|----------|-------|
 | Forum topic creation | ✅ | ❌ | Create topics in forum groups |
 | channel_post support | ✅ | ❌ | Bot-to-bot communication |
@@ -101,7 +101,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ### Discord-Specific Features (since Feb 2025)
 
-| Feature | OpenClaw | IronClaw | Notes |
+| Feature | OpenClaw | T3Claw | Notes |
 |---------|----------|----------|-------|
 | Forwarded attachment downloads | ✅ | ❌ | Fetch media from forwarded messages |
 | Faster reaction state machine | ✅ | ❌ | Watchdog + debounce |
@@ -109,7 +109,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ### Slack-Specific Features (since Feb 2025)
 
-| Feature | OpenClaw | IronClaw | Notes |
+| Feature | OpenClaw | T3Claw | Notes |
 |---------|----------|----------|-------|
 | Streaming draft replies | ✅ | ❌ | Partial replies via draft message updates |
 | Configurable stream modes | ✅ | ❌ | Per-channel stream behavior |
@@ -118,23 +118,23 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ### Mattermost-Specific Features (since Mar 2026)
 
-| Feature | OpenClaw | IronClaw | Notes |
+| Feature | OpenClaw | T3Claw | Notes |
 |---------|----------|----------|-------|
 | Interactive buttons | ✅ | ❌ | Clickable message buttons with signed callback flow |
 | Interactive model picker | ✅ | ❌ | In-channel provider/model chooser |
 
 ### Feishu/Lark-Specific Features (since Mar 2026)
 
-| Feature | OpenClaw | IronClaw | Notes |
+| Feature | OpenClaw | T3Claw | Notes |
 |---------|----------|----------|-------|
 | Doc/table actions | ✅ | ❌ | `feishu_doc` supports tables, positional insert, color_text, image upload, and file upload |
 | Rich-text embedded media extraction | ✅ | ❌ | Pull video/media attachments from post messages |
 
 ### Channel Features
 
-| Feature | OpenClaw | IronClaw | Notes |
+| Feature | OpenClaw | T3Claw | Notes |
 |---------|----------|----------|-------|
-| DM pairing codes | ✅ | ✅ | `ironclaw pairing list/approve`, host APIs |
+| DM pairing codes | ✅ | ✅ | `t3claw pairing list/approve`, host APIs |
 | Allowlist/blocklist | ✅ | 🚧 | `allow_from` + pairing store + hardened command/group allowlists |
 | Self-message bypass | ✅ | ❌ | Own messages skip pairing |
 | Mention-based activation | ✅ | ✅ | bot_username + respond_to_all_group_messages |
@@ -152,7 +152,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## 4. CLI Commands
 
-| Command | OpenClaw | IronClaw | Priority | Notes |
+| Command | OpenClaw | T3Claw | Priority | Notes |
 |---------|----------|----------|----------|-------|
 | `run` (agent) | ✅ | ✅ | - | Default command |
 | `tool install/list/remove` | ✅ | ✅ | - | WASM tools |
@@ -190,9 +190,9 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## 5. Agent System
 
-| Feature | OpenClaw | IronClaw | Notes |
+| Feature | OpenClaw | T3Claw | Notes |
 |---------|----------|----------|-------|
-| Pi agent runtime | ✅ | ➖ | IronClaw uses custom runtime |
+| Pi agent runtime | ✅ | ➖ | T3Claw uses custom runtime |
 | RPC-based execution | ✅ | ✅ | Orchestrator/worker pattern |
 | Multi-provider failover | ✅ | ✅ | `FailoverProvider` tries providers sequentially on retryable errors |
 | Per-sender sessions | ✅ | ✅ | |
@@ -233,7 +233,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## 6. Model & Provider Support
 
-| Provider | OpenClaw | IronClaw | Priority | Notes |
+| Provider | OpenClaw | T3Claw | Priority | Notes |
 |----------|----------|----------|----------|-------|
 | NEAR AI | ✅ | ✅ | - | Primary provider |
 | Anthropic (Claude) | ✅ | 🚧 | - | Via NEAR AI proxy; Opus 4.5, Sonnet 4, Sonnet 4.6, adaptive thinking default |
@@ -246,7 +246,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Cloudflare Workers AI | ✅ | ✅ | P3 | Via `cloudflare` adapter |
 | NVIDIA API | ✅ | ✅ | P3 | Via `nvidia` adapter and `providers.json` |
 | OpenRouter | ✅ | ✅ | - | Via OpenAI-compatible provider (RigAdapter) |
-| Tinfoil | ❌ | ✅ | - | Private inference provider (IronClaw-only) |
+| Tinfoil | ❌ | ✅ | - | Private inference provider (T3Claw-only) |
 | OpenAI-compatible | ❌ | ✅ | - | Generic OpenAI-compatible endpoint (RigAdapter); OpenAI-style image inputs default missing `image_url.detail` to `auto` |
 | GitHub Copilot | ✅ | ✅ | - | Dedicated provider with OAuth token exchange (`GithubCopilotProvider`) |
 | Ollama (local) | ✅ | ✅ | - | via `rig::providers::ollama` (full support) |
@@ -258,7 +258,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ### Model Features
 
-| Feature | OpenClaw | IronClaw | Notes |
+| Feature | OpenClaw | T3Claw | Notes |
 |---------|----------|----------|-------|
 | Auto-discovery | ✅ | ❌ | |
 | Failover chains | ✅ | ✅ | `FailoverProvider` with configurable `fallback_model` |
@@ -274,7 +274,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## 7. Media Handling
 
-| Feature | OpenClaw | IronClaw | Priority | Notes |
+| Feature | OpenClaw | T3Claw | Priority | Notes |
 |---------|----------|----------|----------|-------|
 | Image processing (Sharp) | ✅ | ❌ | P2 | Resize, format convert |
 | Configurable image resize dims | ✅ | ❌ | P2 | Per-agent dimension config |
@@ -297,12 +297,12 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## 8. Plugin & Extension System
 
-| Feature | OpenClaw | IronClaw | Notes |
+| Feature | OpenClaw | T3Claw | Notes |
 |---------|----------|----------|-------|
 | Dynamic loading | ✅ | ✅ | WASM modules |
 | Manifest validation | ✅ | ✅ | WASM metadata |
 | HTTP path registration | ✅ | ❌ | Plugin routes |
-| Workspace-relative install | ✅ | ✅ | ~/.ironclaw/tools/ |
+| Workspace-relative install | ✅ | ✅ | ~/.t3claw/tools/ |
 | Channel plugins | ✅ | ✅ | WASM channels |
 | Auth plugins | ✅ | ❌ | |
 | Memory plugins | ✅ | ❌ | Custom backends + selectable memory slot |
@@ -322,7 +322,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## 9. Configuration System
 
-| Feature | OpenClaw | IronClaw | Notes |
+| Feature | OpenClaw | T3Claw | Notes |
 |---------|----------|----------|-------|
 | Primary config file | ✅ `~/.openclaw/openclaw.json` | ✅ `.env` | Different formats |
 | JSON5 support | ✅ | ❌ | Comments, trailing commas |
@@ -331,7 +331,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Config validation/schema | ✅ | ✅ | Type-safe Config struct + `openclaw config validate` |
 | Hot-reload | ✅ | ❌ | |
 | Legacy migration | ✅ | ➖ | |
-| State directory | ✅ `~/.openclaw-state/` | ✅ `~/.ironclaw/` | |
+| State directory | ✅ `~/.openclaw-state/` | ✅ `~/.t3claw/` | |
 | Credentials directory | ✅ | ✅ | Session files |
 | Full model compat fields in schema | ✅ | ❌ | pi-ai model compat exposed in config |
 
@@ -341,7 +341,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## 10. Memory & Knowledge System
 
-| Feature | OpenClaw | IronClaw | Notes |
+| Feature | OpenClaw | T3Claw | Notes |
 |---------|----------|----------|-------|
 | Vector memory | ✅ | ✅ | pgvector |
 | Session-based memory | ✅ | ✅ | |
@@ -353,7 +353,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Bedrock embeddings | ❌ | ✅ | Reuses Bedrock region/profile auth for Titan Text Embeddings V2 |
 | Gemini embeddings | ✅ | ❌ | |
 | Local embeddings | ✅ | ❌ | |
-| SQLite-vec backend | ✅ | ❌ | IronClaw uses PostgreSQL |
+| SQLite-vec backend | ✅ | ❌ | T3Claw uses PostgreSQL |
 | LanceDB backend | ✅ | ❌ | Configurable auto-capture max length |
 | QMD backend | ✅ | ❌ | |
 | Atomic reindexing | ✅ | ✅ | |
@@ -371,7 +371,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## 11. Mobile Apps
 
-| Feature | OpenClaw | IronClaw | Priority | Notes |
+| Feature | OpenClaw | T3Claw | Priority | Notes |
 |---------|----------|----------|----------|-------|
 | iOS app (SwiftUI) | ✅ | 🚫 | - | Out of scope initially |
 | Android app (Kotlin) | ✅ | 🚫 | - | Out of scope initially |
@@ -392,7 +392,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## 12. macOS App
 
-| Feature | OpenClaw | IronClaw | Priority | Notes |
+| Feature | OpenClaw | T3Claw | Priority | Notes |
 |---------|----------|----------|----------|-------|
 | SwiftUI native app | ✅ | 🚫 | - | Out of scope |
 | Menu bar presence | ✅ | 🚫 | - | Animated menubar icon |
@@ -413,7 +413,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## 13. Web Interface
 
-| Feature | OpenClaw | IronClaw | Priority | Notes |
+| Feature | OpenClaw | T3Claw | Priority | Notes |
 |---------|----------|----------|----------|-------|
 | Control UI Dashboard | ✅ | ✅ | - | Web gateway with chat, memory, jobs, logs, extensions |
 | Channel status view | ✅ | 🚧 | P2 | Gateway status widget, full channel view pending |
@@ -433,7 +433,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## 14. Automation
 
-| Feature | OpenClaw | IronClaw | Priority | Notes |
+| Feature | OpenClaw | T3Claw | Priority | Notes |
 |---------|----------|----------|----------|-------|
 | Cron jobs | ✅ | ✅ | - | Routines with cron trigger |
 | Per-job model fallback override | ✅ | ❌ | P2 | `payload.fallbacks` overrides agent-level fallbacks |
@@ -467,14 +467,14 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## 15. Security Features
 
-| Feature | OpenClaw | IronClaw | Notes |
+| Feature | OpenClaw | T3Claw | Notes |
 |---------|----------|----------|-------|
 | Gateway token auth | ✅ | ✅ | Bearer token auth on web gateway |
 | Device pairing | ✅ | ❌ | |
 | Tailscale identity | ✅ | ❌ | |
 | Trusted-proxy auth | ✅ | ❌ | Header-based reverse proxy auth |
 | OAuth flows | ✅ | 🚧 | NEAR AI OAuth + Gemini OAuth (PKCE, S256) + hosted extension/MCP OAuth broker; external auth-proxy rollout still pending |
-| DM pairing verification | ✅ | ✅ | ironclaw pairing approve, host APIs |
+| DM pairing verification | ✅ | ✅ | t3claw pairing approve, host APIs |
 | Allowlist/blocklist | ✅ | 🚧 | allow_from + pairing store |
 | Per-group tool policies | ✅ | ❌ | |
 | Exec approvals | ✅ | ✅ | TUI overlay |
@@ -485,7 +485,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Loopback-first | ✅ | 🚧 | HTTP binds 0.0.0.0 |
 | Docker sandbox | ✅ | ✅ | Orchestrator/worker containers |
 | Podman support | ✅ | ❌ | Alternative to Docker |
-| WASM sandbox | ❌ | ✅ | IronClaw innovation |
+| WASM sandbox | ❌ | ✅ | T3Claw innovation |
 | Sandbox env sanitization | ✅ | 🚧 | Shell tool scrubs env vars (secret detection); docker container env sanitization partial |
 | Tool policies | ✅ | ✅ | |
 | Elevated mode | ✅ | ❌ | |
@@ -507,7 +507,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## 16. Development & Build System
 
-| Feature | OpenClaw | IronClaw | Notes |
+| Feature | OpenClaw | T3Claw | Notes |
 |---------|----------|----------|-------|
 | Primary language | TypeScript | Rust | Different ecosystems |
 | Build tool | tsdown | cargo | |
@@ -533,7 +533,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 - ✅ TUI channel with approval overlays
 - ✅ HTTP webhook channel
-- ✅ DM pairing (ironclaw pairing list/approve, host APIs)
+- ✅ DM pairing (t3claw pairing list/approve, host APIs)
 - ✅ WASM tool sandbox
 - ✅ Workspace/memory with hybrid search + embeddings batching
 - ✅ Prompt injection defense
@@ -607,7 +607,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## Deviations from OpenClaw
 
-IronClaw intentionally differs from OpenClaw in these ways:
+T3Claw intentionally differs from OpenClaw in these ways:
 
 1. **Rust vs TypeScript**: Native performance, memory safety, single binary distribution
 2. **WASM sandbox vs Docker**: Lighter weight, faster startup, capability-based security
@@ -615,7 +615,7 @@ IronClaw intentionally differs from OpenClaw in these ways:
 4. **NEAR AI focus**: Primary provider with session-based auth
 5. **No mobile/desktop apps**: Focus on server-side and CLI initially
 6. **WASM channels**: Novel extension mechanism not in OpenClaw
-7. **Tinfoil private inference**: IronClaw-only provider for private/encrypted inference
+7. **Tinfoil private inference**: T3Claw-only provider for private/encrypted inference
 8. **GitHub WASM tool**: Native GitHub integration as WASM tool
 9. **Prompt-based skills**: Different approach than OpenClaw capability bundles (trust gating, attenuation)
 

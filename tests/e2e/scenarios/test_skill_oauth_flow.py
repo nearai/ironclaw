@@ -202,9 +202,9 @@ class TestSkillCredentialRegistration:
     """Verify that skill credentials from YAML frontmatter are registered."""
 
     @pytest.mark.asyncio
-    async def test_github_skill_loaded(self, ironclaw_server):
+    async def test_github_skill_loaded(self, t3claw_server):
         """The github skill should be loaded with credential specs."""
-        r = await api_get(ironclaw_server, "/api/skills", timeout=10)
+        r = await api_get(t3claw_server, "/api/skills", timeout=10)
         assert r.status_code == 200
         skills = r.json()
 
@@ -215,25 +215,25 @@ class TestSkillCredentialRegistration:
         )
 
     @pytest.mark.asyncio
-    async def test_no_github_token_initially(self, ironclaw_server):
+    async def test_no_github_token_initially(self, t3claw_server):
         """No github_token should exist before authentication."""
         # Create a thread and ask for secrets
         thread_r = await api_post(
-            ironclaw_server, "/api/chat/thread/new", timeout=15
+            t3claw_server, "/api/chat/thread/new", timeout=15
         )
         assert thread_r.status_code == 200
         thread_id = thread_r.json()["id"]
 
         # Send a message that will trigger secret_list
         await api_post(
-            ironclaw_server,
+            t3claw_server,
             "/api/chat/send",
             json={"content": "list my secrets", "thread_id": thread_id},
             timeout=30,
         )
 
         history = await _wait_for_response(
-            ironclaw_server, thread_id, timeout=30
+            t3claw_server, thread_id, timeout=30
         )
         # Should show 0 secrets or not contain github_token
         last_response = history["turns"][-1].get("response", "")
@@ -244,20 +244,20 @@ class TestAuthenticationRequiredFlow:
     """Test the full authentication_required → token → retry flow."""
 
     @pytest.mark.asyncio
-    async def test_http_tool_returns_auth_required(self, ironclaw_server):
+    async def test_http_tool_returns_auth_required(self, t3claw_server):
         """When github_token is not stored, http calls to api.github.com
         should return authentication_required error."""
         thread_r = await api_post(
-            ironclaw_server, "/api/chat/thread/new", timeout=15
+            t3claw_server, "/api/chat/thread/new", timeout=15
         )
         thread_id = thread_r.json()["id"]
 
         # Send a message that triggers the github skill
         await api_post(
-            ironclaw_server,
+            t3claw_server,
             "/api/chat/send",
             json={
-                "content": "create an issue in nearai/ironclaw github repo",
+                "content": "create an issue in nearai/t3claw github repo",
                 "thread_id": thread_id,
             },
             timeout=30,
@@ -265,7 +265,7 @@ class TestAuthenticationRequiredFlow:
 
         # The response should mention authentication_required or credential
         history = await _wait_for_response(
-            ironclaw_server, thread_id, timeout=45
+            t3claw_server, thread_id, timeout=45
         )
         last_response = history["turns"][-1].get("response", "")
         auth_indicators = [
@@ -289,19 +289,19 @@ class TestTokenSubmissionAndRetry:
     """Test that submitting a token stores it and retries the request."""
 
     @pytest.mark.asyncio
-    async def test_guided_auth_flow(self, ironclaw_server):
+    async def test_guided_auth_flow(self, t3claw_server):
         """Full flow: request → auth onboarding → paste token → stored → retry."""
         thread_r = await api_post(
-            ironclaw_server, "/api/chat/thread/new", timeout=15
+            t3claw_server, "/api/chat/thread/new", timeout=15
         )
         thread_id = thread_r.json()["id"]
 
         # Step 1: Send a message that needs github auth
         await api_post(
-            ironclaw_server,
+            t3claw_server,
             "/api/chat/send",
             json={
-                "content": "create an issue in nearai/ironclaw to track oauth testing",
+                "content": "create an issue in nearai/t3claw to track oauth testing",
                 "thread_id": thread_id,
             },
             timeout=30,
@@ -309,7 +309,7 @@ class TestTokenSubmissionAndRetry:
 
         # Step 2: Wait for auth prompt
         history = await _wait_for_response(
-            ironclaw_server, thread_id, timeout=45
+            t3claw_server, thread_id, timeout=45
         )
         last_response = history["turns"][-1].get("response", "")
 
@@ -326,7 +326,7 @@ class TestTokenSubmissionAndRetry:
 
         # Step 3: Submit a fake token (the mock LLM won't actually call GitHub)
         await api_post(
-            ironclaw_server,
+            t3claw_server,
             "/api/chat/send",
             json={
                 "content": "ghp_fake_test_token_for_e2e_oauth_flow_42",
@@ -337,7 +337,7 @@ class TestTokenSubmissionAndRetry:
 
         # Step 4: Wait for the response (either retry or confirmation)
         history2 = await _wait_for_response(
-            ironclaw_server, thread_id, timeout=45
+            t3claw_server, thread_id, timeout=45
         )
 
         # Step 5: Verify the token was stored — the response should either
@@ -362,11 +362,11 @@ class TestSSEAuthEvents:
     """Test that auth events are emitted via SSE for web gateway."""
 
     @pytest.mark.asyncio
-    async def test_auth_required_sse_event(self, ironclaw_server):
+    async def test_auth_required_sse_event(self, t3claw_server):
         """Auth onboarding SSE event should be emitted when credential is missing."""
         # Connect to SSE stream
         thread_r = await api_post(
-            ironclaw_server, "/api/chat/thread/new", timeout=15
+            t3claw_server, "/api/chat/thread/new", timeout=15
         )
         thread_id = thread_r.json()["id"]
 
@@ -374,7 +374,7 @@ class TestSSEAuthEvents:
 
         async def collect_sse_events():
             """Collect SSE events in the background."""
-            url = f"{ironclaw_server}/api/chat/events?token={AUTH_TOKEN}"
+            url = f"{t3claw_server}/api/chat/events?token={AUTH_TOKEN}"
             async with httpx.AsyncClient() as client:
                 async with client.stream("GET", url, timeout=30) as resp:
                     async for line in resp.aiter_lines():
@@ -396,10 +396,10 @@ class TestSSEAuthEvents:
 
         # Send a message that triggers auth
         await api_post(
-            ironclaw_server,
+            t3claw_server,
             "/api/chat/send",
             json={
-                "content": "show github issues for nearai/ironclaw",
+                "content": "show github issues for nearai/t3claw",
                 "thread_id": thread_id,
             },
             timeout=30,
@@ -457,14 +457,14 @@ class TestCredentialIsolation:
     """Test that credentials are scoped per user."""
 
     @pytest.mark.asyncio
-    async def test_different_users_isolated(self, ironclaw_server):
+    async def test_different_users_isolated(self, t3claw_server):
         """Tokens stored by one user should not be accessible to another."""
         # This tests the SecretsStore isolation at the API level.
         # In multi-tenant mode, each user has their own credential namespace.
 
         # Store a token for the default user (via the auth flow or direct API)
         # For now, just verify the secrets list is empty for a fresh user
-        r = await api_get(ironclaw_server, "/api/extensions", timeout=10)
+        r = await api_get(t3claw_server, "/api/extensions", timeout=10)
         assert r.status_code == 200
 
         # The secrets store is user-scoped — this test verifies the

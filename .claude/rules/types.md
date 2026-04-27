@@ -43,7 +43,7 @@ turned each into a compile error.
 ## Extension/Auth identity invariant
 
 See `CLAUDE.md` → "Extension/Auth Invariants" for routing rules. The
-types live in `crates/ironclaw_common/src/identity.rs`:
+types live in `crates/t3claw_common/src/identity.rs`:
 
 - [`CredentialName`] — backend secret identity (e.g.
   `telegram_bot_token`, `google_oauth_token`). Used for secrets-store
@@ -184,7 +184,7 @@ bodies. References: PR #2683, PR #2702.
 
 ## Applies to
 
-`src/**`, `crates/**`, `tests/**`. Any code inside the IronClaw
+`src/**`, `crates/**`, `tests/**`. Any code inside the T3Claw
 workspace. The rule doesn't apply to wire payloads (which are `String`
 by virtue of JSON), log lines, or error messages — those *are* the
 boundary.

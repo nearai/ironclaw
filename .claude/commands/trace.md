@@ -72,7 +72,7 @@ Tool trait impl (tools/builtin/*.rs or tools/mcp/client.rs or tools/wasm/wrapper
 | Channel trait | `src/channels/channel.rs` | `Channel`, `StatusUpdate`, `IncomingMessage` |
 | Web gateway | `src/channels/web/mod.rs` | `send_status`, `send_response` |
 | Web server | `src/channels/web/server.rs` | Route handlers, SSE endpoints |
-| Web frontend | `crates/ironclaw_gateway/static/js/` (core/ + surfaces/) | SSE listeners in `core/sse.js`; DOM builders per surface |
+| Web frontend | `crates/t3claw_gateway/static/js/` (core/ + surfaces/) | SSE listeners in `core/sse.js`; DOM builders per surface |
 | Tool registry | `src/tools/registry.rs` | `tool_definitions`, `get`, `register` |
 | MCP tools | `src/tools/mcp/client.rs` | `McpToolWrapper`, `list_tools`, `call_tool` |
 | MCP protocol | `src/tools/mcp/protocol.rs` | `McpTool`, `inputSchema` |

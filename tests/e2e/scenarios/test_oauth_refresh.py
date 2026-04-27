@@ -1,6 +1,6 @@
 """Hosted OAuth refresh HTTP regression test.
 
-Runs a real ironclaw binary in hosted mode, expires a stored Gmail access
+Runs a real t3claw binary in hosted mode, expires a stored Gmail access
 token in the libSQL database, triggers a real gmail tool call through the
 chat API, and verifies that refresh uses the hosted proxy endpoint.
 """

@@ -110,14 +110,14 @@ async def test_plan_status_shows_progress(page):
     assert result_count >= 1, "Completed step should have a result"
 
 
-async def test_plan_list_via_api(ironclaw_server):
+async def test_plan_list_via_api(t3claw_server):
     """API: /plan list returns a response via chat send."""
     headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
 
     # Create thread
     async with __import__("httpx").AsyncClient() as client:
         thread_r = await client.post(
-            f"{ironclaw_server}/api/chat/thread/new",
+            f"{t3claw_server}/api/chat/thread/new",
             headers=headers,
             timeout=15,
         )
@@ -126,7 +126,7 @@ async def test_plan_list_via_api(ironclaw_server):
 
         # Send plan list command
         send_r = await client.post(
-            f"{ironclaw_server}/api/chat/send",
+            f"{t3claw_server}/api/chat/send",
             headers=headers,
             json={"content": "/plan list", "thread_id": thread_id},
             timeout=30,
@@ -137,7 +137,7 @@ async def test_plan_list_via_api(ironclaw_server):
         response_text = ""
         for _ in range(60):
             r = await client.get(
-                f"{ironclaw_server}/api/chat/history",
+                f"{t3claw_server}/api/chat/history",
                 headers=headers,
                 params={"thread_id": thread_id},
                 timeout=15,

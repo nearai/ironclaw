@@ -1,4 +1,4 @@
-/* IronClaw Admin Panel */
+/* T3Claw Admin Panel */
 
 // TODO(#1968): Inline style attributes throughout this file bypass the
 // theme token system in admin.css. Migrate to CSS classes that reference
@@ -144,7 +144,7 @@
     token = '';
     oidcProxyAuth = false;
     currentProfile = null;
-    sessionStorage.removeItem('ironclaw_token');
+    sessionStorage.removeItem('t3claw_token');
     showAuth();
   }
 
@@ -164,7 +164,7 @@
       // 'self' only (no inline scripts), (3) migration to httpOnly cookies
       // needs server-side session management (larger effort, tracked for
       // follow-up).
-      sessionStorage.setItem('ironclaw_token', t);
+      sessionStorage.setItem('t3claw_token', t);
       showApp();
       route();
       return true;
@@ -176,7 +176,7 @@
 
   function autoAuth() {
     // Check sessionStorage
-    var saved = sessionStorage.getItem('ironclaw_token');
+    var saved = sessionStorage.getItem('t3claw_token');
     if (saved) {
       authenticate(saved).catch(function () { showAuth(); });
       return;

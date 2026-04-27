@@ -3,7 +3,7 @@
 //! Wraps `bollard` calls to `docker create` / `docker start` / `docker stop`
 //! / `docker rm` so the rest of the bridge can speak in `(project_id)`
 //! terms instead of container ids. Naming is deterministic
-//! (`ironclaw-sandbox-<project_id>`) so multiple IronClaw runs against the
+//! (`t3claw-sandbox-<project_id>`) so multiple T3Claw runs against the
 //! same project re-use the same container — that's how installed
 //! dependencies and build caches accumulate over the project's lifetime.
 
@@ -20,7 +20,7 @@ use t3claw_engine::{MountError, ProjectId};
 use tracing::{debug, warn};
 
 /// Default image. Override with `IRONCLAW_SANDBOX_IMAGE`.
-pub const DEFAULT_IMAGE: &str = "ironclaw/sandbox:dev";
+pub const DEFAULT_IMAGE: &str = "t3claw/sandbox:dev";
 
 /// Stop timeout in seconds before SIGKILL.
 #[allow(dead_code)]
@@ -33,7 +33,7 @@ pub fn sandbox_image() -> String {
 
 /// Build the deterministic container name for a project.
 pub fn container_name_for(project_id: ProjectId) -> String {
-    format!("ironclaw-sandbox-{}", project_id.0)
+    format!("t3claw-sandbox-{}", project_id.0)
 }
 
 /// Ensure that a container exists and is running for `project_id`. Creates
@@ -199,6 +199,6 @@ mod tests {
         let n1 = container_name_for(pid);
         let n2 = container_name_for(pid);
         assert_eq!(n1, n2);
-        assert!(n1.starts_with("ironclaw-sandbox-"));
+        assert!(n1.starts_with("t3claw-sandbox-"));
     }
 }

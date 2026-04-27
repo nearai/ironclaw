@@ -41,9 +41,9 @@ async def _extract_oauth_params(auth_url: str) -> dict:
     return params
 
 
-async def _get_extension(ironclaw_server, name):
+async def _get_extension(t3claw_server, name):
     """Get a specific extension from the extensions list, or None."""
-    r = await api_get(ironclaw_server, "/api/extensions")
+    r = await api_get(t3claw_server, "/api/extensions")
     for ext in r.json().get("extensions", []):
         if ext["name"] == name:
             return ext
@@ -51,21 +51,21 @@ async def _get_extension(ironclaw_server, name):
 
 
 @pytest.fixture
-async def installed_gmail(ironclaw_server):
+async def installed_gmail(t3claw_server):
     """Installs the 'gmail' extension before a test and removes it after.
 
     This fixture handles the setup and teardown of the Gmail extension,
     ensuring a clean state for each test.
     """
     # Ensure Gmail is not installed before test
-    ext = await _get_extension(ironclaw_server, "gmail")
+    ext = await _get_extension(t3claw_server, "gmail")
     if ext:
-        r = await api_post(ironclaw_server, "/api/extensions/gmail/remove", timeout=30)
+        r = await api_post(t3claw_server, "/api/extensions/gmail/remove", timeout=30)
         assert r.status_code == 200
 
     # Install Gmail
     r = await api_post(
-        ironclaw_server,
+        t3claw_server,
         "/api/extensions/install",
         json={"name": "gmail"},
         timeout=180,
@@ -76,18 +76,18 @@ async def installed_gmail(ironclaw_server):
     yield
 
     # Teardown: remove gmail
-    r = await api_post(ironclaw_server, "/api/extensions/gmail/remove", timeout=30)
+    r = await api_post(t3claw_server, "/api/extensions/gmail/remove", timeout=30)
     assert r.status_code == 200, f"Gmail removal failed: {r.text}"
 
 
 @pytest.fixture
-async def auth_url(ironclaw_server, installed_gmail):
+async def auth_url(t3claw_server, installed_gmail):
     """Generate and return an OAuth auth URL.
 
     Requires Gmail to be installed (depends on installed_gmail fixture).
     """
     r = await api_post(
-        ironclaw_server,
+        t3claw_server,
         "/api/extensions/gmail/setup",
         json={"secrets": {}},
         timeout=30,
@@ -183,11 +183,11 @@ async def test_oauth_url_is_valid_google_oauth(auth_url):
     assert parsed.path == "/o/oauth2/v2/auth", "Must use Google OAuth 2.0 endpoint"
 
 
-async def test_oauth_url_state_is_unique(ironclaw_server, installed_gmail, oauth_params, auth_url):
+async def test_oauth_url_state_is_unique(t3claw_server, installed_gmail, oauth_params, auth_url):
     """Verify CSRF state is present and unique per request."""
     # Get a new OAuth URL
     r = await api_post(
-        ironclaw_server,
+        t3claw_server,
         "/api/extensions/gmail/setup",
         json={"secrets": {}},
         timeout=30,

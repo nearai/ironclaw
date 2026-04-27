@@ -177,15 +177,15 @@ async def test_search_filters_extension_cards(page):
     assert await hidden.count() == 1
 
 
-async def test_search_filters_user_rows(page, ironclaw_server):
+async def test_search_filters_user_rows(page, t3claw_server):
     """Search filters user table rows in the Users subtab."""
     # Seed two users via the admin API
-    await api_post(ironclaw_server, "/api/admin/users", json={
+    await api_post(t3claw_server, "/api/admin/users", json={
         "display_name": "Alice Searchtest",
         "email": "alice-searchtest@example.test",
         "role": "member",
     })
-    await api_post(ironclaw_server, "/api/admin/users", json={
+    await api_post(t3claw_server, "/api/admin/users", json={
         "display_name": "Bob Searchtest",
         "email": "bob-searchtest@example.test",
         "role": "member",

@@ -1,6 +1,6 @@
 ---
 name: architecture-video
-description: Generate or update the IronClaw architecture overview video using Remotion. Use when asked to update, regenerate, or modify the architecture video, add/remove scenes, or reflect codebase changes in the video.
+description: Generate or update the T3Claw architecture overview video using Remotion. Use when asked to update, regenerate, or modify the architecture video, add/remove scenes, or reflect codebase changes in the video.
 ---
 
 # Architecture Video Generator
@@ -21,7 +21,7 @@ Generates and maintains the animated architecture overview video in `docs/archit
 Read these files to understand the current system architecture:
 
 - `CLAUDE.md` — top-level project structure, module specs, key traits, principles
-- `crates/ironclaw_engine/CLAUDE.md` — engine v2 primitives, execution loop, CodeAct
+- `crates/t3claw_engine/CLAUDE.md` — engine v2 primitives, execution loop, CodeAct
 - `src/agent/CLAUDE.md` — agent loop architecture
 - `src/llm/CLAUDE.md` — LLM provider architecture
 - `src/db/CLAUDE.md` — database dual-backend architecture
@@ -30,7 +30,7 @@ Read these files to understand the current system architecture:
 
 ### 2. Read current video scenes
 
-Read `docs/architecture-video/src/IronClawArchitecture.tsx` to understand current scene order, durations, and transitions. Then read individual scenes in `docs/architecture-video/src/scenes/` to see what's already covered.
+Read `docs/architecture-video/src/T3ClawArchitecture.tsx` to understand current scene order, durations, and transitions. Then read individual scenes in `docs/architecture-video/src/scenes/` to see what's already covered.
 
 ### 3. Identify gaps
 
@@ -48,7 +48,7 @@ docs/architecture-video/
 ├── remotion.config.ts        # Build config
 ├── src/
 │   ├── Root.tsx              # Remotion entry — registers the composition
-│   ├── IronClawArchitecture.tsx  # Main composition — scene order + transitions
+│   ├── T3ClawArchitecture.tsx  # Main composition — scene order + transitions
 │   ├── theme.ts              # Color palette + font constants
 │   ├── components/
 │   │   └── Code.tsx          # Syntax-highlighted code block component
@@ -73,7 +73,7 @@ Render script: `scripts/render-architecture-video.sh`
 
 | # | Scene | File | Duration | Content |
 |---|-------|------|----------|---------|
-| 1 | Title | TitleScene.tsx | 4s | Animated IronClaw logo + tagline |
+| 1 | Title | TitleScene.tsx | 4s | Animated T3Claw logo + tagline |
 | 2 | Five Primitives | PrimitivesScene.tsx | 8s | Thread / Step / Capability / MemoryDoc / Project |
 | 3 | Execution Loop | ExecutionLoopScene.tsx | 8s | 7-step ExecutionLoop::run() pipeline |
 | 4 | CodeAct | CodeActScene.tsx | 10s | Python code → host fns → suspend/resume flow |
@@ -172,10 +172,10 @@ import { COLORS, FONTS } from "../theme";
 
 1. Create `src/scenes/MyNewScene.tsx` following existing patterns
 2. Export the component
-3. Import in `IronClawArchitecture.tsx`
+3. Import in `T3ClawArchitecture.tsx`
 4. Add to the `SCENES` array with duration and transition type
 5. `TOTAL_DURATION` auto-computes from the array
-6. Verify with: `npx remotion still IronClawArchitecture --scale=0.25 --frame=<N>`
+6. Verify with: `npx remotion still T3ClawArchitecture --scale=0.25 --frame=<N>`
 
 ### Scene template
 
@@ -227,7 +227,7 @@ export const MyNewScene: React.FC = () => {
 After making changes:
 
 1. **Type check:** `cd docs/architecture-video && npx tsc --noEmit`
-2. **Spot check frames:** `npx remotion still IronClawArchitecture --scale=0.25 --frame=<N>`
+2. **Spot check frames:** `npx remotion still T3ClawArchitecture --scale=0.25 --frame=<N>`
    - At 30fps, frame N corresponds to time N/30 seconds
    - Check at least one frame per modified scene
 3. **Full render:** `./scripts/render-architecture-video.sh [output-path]`

@@ -89,7 +89,7 @@ pub struct Project {
     /// default path (see the bridge's `project_workspace_path` helper). The
     /// engine crate intentionally stores only the override and not the
     /// resolved default, because resolving the default depends on the host's
-    /// base directory (`~/.ironclaw`) which lives outside this crate.
+    /// base directory (`~/.t3claw`) which lives outside this crate.
     #[serde(default)]
     pub workspace_path: Option<PathBuf>,
     pub created_at: DateTime<Utc>,

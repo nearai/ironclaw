@@ -116,11 +116,11 @@ The bridge connects the engine to existing T3Claw infrastructure:
 
 ### Enabling Engine v2
 
-Set `ENGINE_V2=true` in the environment. Without it, IronClaw keeps using the legacy v1 agent loop. The router in `src/bridge/router.rs` intercepts messages and routes them through the engine instead of the v1 agent loop.
+Set `ENGINE_V2=true` in the environment. Without it, T3Claw keeps using the legacy v1 agent loop. The router in `src/bridge/router.rs` intercepts messages and routes them through the engine instead of the v1 agent loop.
 
 ```bash
 # Installed binary
-ENGINE_V2=true ironclaw
+ENGINE_V2=true t3claw
 
 # Run from source
 ENGINE_V2=true cargo run

@@ -137,30 +137,30 @@ async def _wait_for_job_terminal(
 
 # -- Tests --------------------------------------------------------------------
 
-async def test_full_job_routine_completes_with_tools(page, ironclaw_server):
+async def test_full_job_routine_completes_with_tools(page, t3claw_server):
     """A full_job routine should plan, execute tools, and complete."""
     name = f"fjob-{uuid.uuid4().hex[:8]}"
 
     # Step 1: Create full_job routine via chat
     await _send_chat_message(
-        ironclaw_server,
+        t3claw_server,
         f"create full-job owner routine {name}",
         expected_fragment=name,
     )
-    routine = await _wait_for_routine(ironclaw_server, name)
+    routine = await _wait_for_routine(t3claw_server, name)
 
     assert routine["id"]
     assert routine["action_type"] == "full_job"
 
     # Step 2: Trigger the routine
-    resp = await api_post(ironclaw_server, f"/api/routines/{routine['id']}/trigger")
+    resp = await api_post(t3claw_server, f"/api/routines/{routine['id']}/trigger")
     resp.raise_for_status()
     trigger_data = resp.json()
     assert trigger_data["status"] == "triggered"
 
     # Step 3: Wait for the run to complete
     completed_run = await _wait_for_completed_run(
-        ironclaw_server, routine["id"], timeout=60
+        t3claw_server, routine["id"], timeout=60
     )
 
     # The run should have succeeded (not failed)
@@ -174,23 +174,23 @@ async def test_full_job_routine_completes_with_tools(page, ironclaw_server):
     success_states = {"completed", "submitted", "accepted"}
     if completed_run.get("job_id"):
         job = await _wait_for_job_terminal(
-            ironclaw_server, completed_run["job_id"], timeout=30
+            t3claw_server, completed_run["job_id"], timeout=30
         )
         assert job["state"].lower() in success_states, (
             f"Expected job state in {success_states}, got '{job['state']}'"
         )
 
 
-async def test_cron_routine_appears_and_can_be_manually_triggered(page, ironclaw_server):
+async def test_cron_routine_appears_and_can_be_manually_triggered(page, t3claw_server):
     """Cron routines should expose schedule metadata and support manual trigger."""
     name = f"cron-{uuid.uuid4().hex[:8]}"
 
     await _send_chat_message(
-        ironclaw_server,
+        t3claw_server,
         f"create cron owner routine {name}",
         expected_fragment=name,
     )
-    routine = await _wait_for_routine(ironclaw_server, name)
+    routine = await _wait_for_routine(t3claw_server, name)
 
     assert routine["trigger_type"] == "cron"
     assert routine["trigger_raw"] == "0 */5 * * * * *"
@@ -202,35 +202,35 @@ async def test_cron_routine_appears_and_can_be_manually_triggered(page, ironclaw
     trigger_cell_text = await row.locator("td").nth(1).inner_text()
     assert trigger_cell_text.strip() == routine["trigger_summary"]
 
-    resp = await api_post(ironclaw_server, f"/api/routines/{routine['id']}/trigger")
+    resp = await api_post(t3claw_server, f"/api/routines/{routine['id']}/trigger")
     resp.raise_for_status()
     assert resp.json()["status"] == "triggered"
 
-    completed_run = await _wait_for_completed_run(ironclaw_server, routine["id"])
+    completed_run = await _wait_for_completed_run(t3claw_server, routine["id"])
     assert completed_run["trigger_type"] == "manual"
     assert completed_run["status"].lower() == "attention"
 
 
-async def test_failed_routine_is_visible_in_ui(page, ironclaw_server):
+async def test_failed_routine_is_visible_in_ui(page, t3claw_server):
     """A failed routine should surface failed state and error text in the UI."""
     name = f"fail-{uuid.uuid4().hex[:8]}"
     failure_reason = "Response contained no message or tool call"
 
     await _send_chat_message(
-        ironclaw_server,
+        t3claw_server,
         f"create failing lightweight owner routine {name}",
         expected_fragment=name,
     )
-    routine = await _wait_for_routine(ironclaw_server, name)
+    routine = await _wait_for_routine(t3claw_server, name)
 
     trigger_response = await api_post(
-        ironclaw_server,
+        t3claw_server,
         f"/api/routines/{routine['id']}/trigger",
     )
     trigger_response.raise_for_status()
     assert trigger_response.json()["status"] == "triggered"
 
-    failed_run = await _wait_for_completed_run(ironclaw_server, routine["id"], timeout=60)
+    failed_run = await _wait_for_completed_run(t3claw_server, routine["id"], timeout=60)
     assert failed_run["status"].lower() == "failed", failed_run
     assert failure_reason in failed_run["result_summary"]
 

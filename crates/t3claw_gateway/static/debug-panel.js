@@ -1,4 +1,4 @@
-/* Debug Inspector Panel — IronClaw Web Gateway */
+/* Debug Inspector Panel — T3Claw Web Gateway */
 
 (function () {
   'use strict';
@@ -7,8 +7,8 @@
 
   const MAX_ACTIVITY = 1000;
   const STATS_POLL_INTERVAL = 30000;
-  const SESSION_TAB_KEY = 'ironclaw_debug_tab';
-  const SESSION_OPEN_KEY = 'ironclaw_debug_open';
+  const SESSION_TAB_KEY = 't3claw_debug_tab';
+  const SESSION_OPEN_KEY = 't3claw_debug_open';
 
   // ── State ──
 

@@ -124,7 +124,7 @@ jobs:
         # static/js/ that are concatenated at compile time into APP_JS.
         # Cuts land on top-level symbol boundaries, so each file is
         # self-parseable — a per-file node --check is sufficient.
-        find crates/ironclaw_gateway/static/js -type f -name '*.js' \
+        find crates/t3claw_gateway/static/js -type f -name '*.js' \
           -exec node --check {} +
 
   deny-check:

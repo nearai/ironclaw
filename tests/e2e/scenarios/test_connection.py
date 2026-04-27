@@ -32,11 +32,11 @@ async def test_tab_navigation(page):
     await chat_input.wait_for(state="visible", timeout=5000)
 
 
-async def test_auth_rejection(page, ironclaw_server):
+async def test_auth_rejection(page, t3claw_server):
     """Navigating without a token shows the auth screen."""
     # Open a new page without the token
     new_page = await page.context.new_page()
-    await new_page.goto(ironclaw_server)
+    await new_page.goto(t3claw_server)
     auth_screen = new_page.locator(SEL["auth_screen"])
     await auth_screen.wait_for(state="visible", timeout=10000)
     await new_page.close()

@@ -34,7 +34,7 @@ done
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SNAP_DIR="$ROOT/tests/snapshots"
-EVENT_RS="$ROOT/crates/ironclaw_engine/src/types/event.rs"
+EVENT_RS="$ROOT/crates/t3claw_engine/src/types/event.rs"
 
 if [ ! -d "$SNAP_DIR" ]; then
   echo "No tests/snapshots directory yet — skipping coverage gate."

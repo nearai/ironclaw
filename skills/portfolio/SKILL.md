@@ -259,7 +259,7 @@ via `memory_write`. Source files ship with this skill under
 - `.system/gateway/widgets/portfolio/index.js`
 - `.system/gateway/widgets/portfolio/style.css`
 
-Set `localStorage.ironclaw.portfolio.projectId` to the project id
+Set `localStorage.t3claw.portfolio.projectId` to the project id
 so the widget reads the right state file. The widget polls
 `projects/<id>/widgets/state.json` every 30 seconds.
 
