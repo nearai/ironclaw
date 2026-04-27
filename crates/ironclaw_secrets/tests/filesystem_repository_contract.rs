@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::{
-    HostPath, InvocationId, MissionId, ProjectId, ResourceScope, SecretHandle, TenantId, ThreadId,
-    UserId, VirtualPath,
+    AgentId, HostPath, InvocationId, MissionId, ProjectId, ResourceScope, SecretHandle, TenantId,
+    ThreadId, UserId, VirtualPath,
 };
 use ironclaw_secrets::{
     EncryptedSecretRepository, EncryptedSecretStore, FilesystemEncryptedSecretRepository,
@@ -69,6 +69,85 @@ async fn filesystem_secret_repository_survives_new_store_instance_over_same_root
     let material = reader.consume(&scope, lease.id).await.unwrap();
 
     assert_eq!(material.expose_secret(), "persisted-secret");
+}
+
+#[tokio::test]
+async fn filesystem_secret_repository_partitions_records_by_agent_scope() {
+    let storage = tempdir().unwrap();
+    let root = local_engine_root(storage.path());
+    let repository = Arc::new(FilesystemEncryptedSecretRepository::new(root));
+    let store = EncryptedSecretStore::new(repository.clone(), crypto());
+    let agent_a = sample_scope_with_agent("tenant-a", "user-a", Some("agent-a"), Some("project-a"));
+    let agent_b = sample_scope_with_agent("tenant-a", "user-a", Some("agent-b"), Some("project-a"));
+    let no_agent = sample_scope_with_agent("tenant-a", "user-a", None, Some("project-a"));
+    let handle = SecretHandle::new("shared_token").unwrap();
+
+    assert_eq!(
+        repository.record_path(&agent_a, &handle).unwrap().as_str(),
+        "/engine/tenants/tenant-a/users/user-a/agents/agent-a/projects/project-a/secrets/shared_token.json"
+    );
+    assert_eq!(
+        repository.record_path(&no_agent, &handle).unwrap().as_str(),
+        "/engine/tenants/tenant-a/users/user-a/agents/_none/projects/project-a/secrets/shared_token.json"
+    );
+
+    store
+        .put(
+            agent_a.clone(),
+            handle.clone(),
+            SecretMaterial::from("agent-a-secret"),
+        )
+        .await
+        .unwrap();
+    store
+        .put(
+            agent_b.clone(),
+            handle.clone(),
+            SecretMaterial::from("agent-b-secret"),
+        )
+        .await
+        .unwrap();
+    store
+        .put(
+            no_agent.clone(),
+            handle.clone(),
+            SecretMaterial::from("no-agent-secret"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(repository.list(&agent_a).await.unwrap().len(), 1);
+    assert_eq!(repository.list(&agent_b).await.unwrap().len(), 1);
+    assert_eq!(repository.list(&no_agent).await.unwrap().len(), 1);
+
+    let agent_a_lease = store.lease_once(&agent_a, &handle).await.unwrap();
+    let agent_b_lease = store.lease_once(&agent_b, &handle).await.unwrap();
+    let no_agent_lease = store.lease_once(&no_agent, &handle).await.unwrap();
+
+    assert_eq!(
+        store
+            .consume(&agent_a, agent_a_lease.id)
+            .await
+            .unwrap()
+            .expose_secret(),
+        "agent-a-secret"
+    );
+    assert_eq!(
+        store
+            .consume(&agent_b, agent_b_lease.id)
+            .await
+            .unwrap()
+            .expose_secret(),
+        "agent-b-secret"
+    );
+    assert_eq!(
+        store
+            .consume(&no_agent, no_agent_lease.id)
+            .await
+            .unwrap()
+            .expose_secret(),
+        "no-agent-secret"
+    );
 }
 
 #[tokio::test]
@@ -145,6 +224,44 @@ async fn filesystem_secret_repository_any_exist_ignores_unrelated_engine_json() 
     .unwrap();
 
     assert!(!repository.any_exist().await.unwrap());
+}
+
+#[tokio::test]
+async fn filesystem_secret_repository_reads_legacy_no_agent_paths() {
+    let storage = tempdir().unwrap();
+    let root = local_engine_root(storage.path());
+    let repository = Arc::new(FilesystemEncryptedSecretRepository::new(root.clone()));
+    let store = EncryptedSecretStore::new(repository.clone(), crypto());
+    let scope = sample_scope("tenant-a", "user-a", Some("project-a"));
+    let handle = SecretHandle::new("legacy_token").unwrap();
+
+    store
+        .put(
+            scope.clone(),
+            handle.clone(),
+            SecretMaterial::from("legacy-secret"),
+        )
+        .await
+        .unwrap();
+    let canonical_path = repository.record_path(&scope, &handle).unwrap();
+    let legacy_path = VirtualPath::new(
+        "/engine/tenants/tenant-a/users/user-a/projects/project-a/secrets/legacy_token.json",
+    )
+    .unwrap();
+    let bytes = root.read_file(&canonical_path).await.unwrap();
+    root.write_file(&legacy_path, &bytes).await.unwrap();
+    root.delete(&canonical_path).await.unwrap();
+
+    assert!(repository.get(&scope, &handle).await.unwrap().is_some());
+    assert_eq!(repository.list(&scope).await.unwrap().len(), 1);
+
+    let reader = EncryptedSecretStore::new(repository.clone(), crypto());
+    let lease = reader.lease_once(&scope, &handle).await.unwrap();
+    let material = reader.consume(&scope, lease.id).await.unwrap();
+    assert_eq!(material.expose_secret(), "legacy-secret");
+
+    assert!(repository.delete(&scope, &handle).await.unwrap());
+    assert!(repository.get(&scope, &handle).await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -229,10 +346,19 @@ fn crypto() -> SecretsCrypto {
 }
 
 fn sample_scope(tenant: &str, user: &str, project: Option<&str>) -> ResourceScope {
+    sample_scope_with_agent(tenant, user, None, project)
+}
+
+fn sample_scope_with_agent(
+    tenant: &str,
+    user: &str,
+    agent: Option<&str>,
+    project: Option<&str>,
+) -> ResourceScope {
     ResourceScope {
         tenant_id: TenantId::new(tenant).unwrap(),
         user_id: UserId::new(user).unwrap(),
-        agent_id: None,
+        agent_id: agent.map(|agent| AgentId::new(agent).unwrap()),
         project_id: project.map(|project| ProjectId::new(project).unwrap()),
         mission_id: Some(MissionId::new("mission-a").unwrap()),
         thread_id: Some(ThreadId::new("thread-a").unwrap()),

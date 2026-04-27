@@ -17,7 +17,7 @@ use chrono::Utc;
 use hkdf::Hkdf;
 use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    ProjectId, ResourceScope, SecretHandle, TenantId, Timestamp, UserId, VirtualPath,
+    AgentId, ProjectId, ResourceScope, SecretHandle, TenantId, Timestamp, UserId, VirtualPath,
 };
 pub use secrecy::{ExposeSecret, SecretString as SecretMaterial};
 use serde::{Deserialize, Serialize};
@@ -334,6 +334,21 @@ where
         secret_scope_root(scope)
     }
 
+    fn legacy_scope_root(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Option<VirtualPath>, SecretStoreError> {
+        legacy_secret_scope_root(scope).transpose()
+    }
+
+    fn lookup_paths(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<Vec<VirtualPath>, SecretStoreError> {
+        secret_lookup_paths(scope, handle)
+    }
+
     async fn read_wrapper(
         &self,
         path: &VirtualPath,
@@ -400,6 +415,19 @@ where
         Ok(records)
     }
 
+    async fn first_active_record(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<Option<(VirtualPath, EncryptedSecretRecord)>, SecretStoreError> {
+        for path in self.lookup_paths(scope, handle)? {
+            if let Some(record) = self.read_active_record(&path).await? {
+                return Ok(Some((path, record)));
+            }
+        }
+        Ok(None)
+    }
+
     async fn any_active_record_under(&self, root: &VirtualPath) -> Result<bool, SecretStoreError> {
         let entries = match self.filesystem.list_dir(root).await {
             Ok(entries) => entries,
@@ -436,13 +464,18 @@ fn secrets_root_path() -> Result<VirtualPath, SecretStoreError> {
 }
 
 fn secret_scope_root(scope: &ResourceScope) -> Result<VirtualPath, SecretStoreError> {
+    let agent_id = scope
+        .agent_id
+        .as_ref()
+        .map(AgentId::as_str)
+        .unwrap_or("_none");
     let project_id = scope
         .project_id
         .as_ref()
         .map(ProjectId::as_str)
         .unwrap_or("_none");
     VirtualPath::new(format!(
-        "/engine/tenants/{}/users/{}/projects/{project_id}/secrets",
+        "/engine/tenants/{}/users/{}/agents/{agent_id}/projects/{project_id}/secrets",
         scope.tenant_id.as_str(),
         scope.user_id.as_str()
     ))
@@ -456,6 +489,49 @@ fn secret_record_path(
     let root = secret_scope_root(scope)?;
     VirtualPath::new(format!("{}/{}.json", root.as_str(), handle.as_str()))
         .map_err(secret_path_error)
+}
+
+fn legacy_secret_scope_root(
+    scope: &ResourceScope,
+) -> Option<Result<VirtualPath, SecretStoreError>> {
+    if scope.agent_id.is_some() {
+        return None;
+    }
+    let project_id = scope
+        .project_id
+        .as_ref()
+        .map(ProjectId::as_str)
+        .unwrap_or("_none");
+    Some(
+        VirtualPath::new(format!(
+            "/engine/tenants/{}/users/{}/projects/{project_id}/secrets",
+            scope.tenant_id.as_str(),
+            scope.user_id.as_str()
+        ))
+        .map_err(secret_path_error),
+    )
+}
+
+fn legacy_secret_record_path(
+    scope: &ResourceScope,
+    handle: &SecretHandle,
+) -> Option<Result<VirtualPath, SecretStoreError>> {
+    legacy_secret_scope_root(scope).map(|root| {
+        let root = root?;
+        VirtualPath::new(format!("{}/{}.json", root.as_str(), handle.as_str()))
+            .map_err(secret_path_error)
+    })
+}
+
+fn secret_lookup_paths(
+    scope: &ResourceScope,
+    handle: &SecretHandle,
+) -> Result<Vec<VirtualPath>, SecretStoreError> {
+    let mut paths = vec![secret_record_path(scope, handle)?];
+    if let Some(legacy_path) = legacy_secret_record_path(scope, handle) {
+        paths.push(legacy_path?);
+    }
+    Ok(paths)
 }
 
 fn secret_path_error(error: ironclaw_host_api::HostApiError) -> SecretStoreError {
@@ -502,7 +578,10 @@ where
         mut record: EncryptedSecretRecord,
     ) -> Result<EncryptedSecretRecord, SecretStoreError> {
         let path = self.record_path(&record.metadata.scope, &record.metadata.handle)?;
-        if let Some(existing) = self.read_active_record(&path).await? {
+        if let Some((_existing_path, existing)) = self
+            .first_active_record(&record.metadata.scope, &record.metadata.handle)
+            .await?
+        {
             record.metadata.id = existing.metadata.id;
             record.metadata.created_at = existing.metadata.created_at;
             record.metadata.usage_count = existing.metadata.usage_count;
@@ -524,8 +603,10 @@ where
         scope: &ResourceScope,
         handle: &SecretHandle,
     ) -> Result<Option<EncryptedSecretRecord>, SecretStoreError> {
-        let path = self.record_path(scope, handle)?;
-        self.read_active_record(&path).await
+        Ok(self
+            .first_active_record(scope, handle)
+            .await?
+            .map(|(_path, record)| record))
     }
 
     async fn list(
@@ -533,7 +614,18 @@ where
         scope: &ResourceScope,
     ) -> Result<Vec<EncryptedSecretRecord>, SecretStoreError> {
         let root = self.scope_root(scope)?;
-        self.active_records_under(&root).await
+        let mut records = self.active_records_under(&root).await?;
+        if let Some(legacy_root) = self.legacy_scope_root(scope)? {
+            for record in self.active_records_under(&legacy_root).await? {
+                if !records
+                    .iter()
+                    .any(|existing| existing.metadata.handle == record.metadata.handle)
+                {
+                    records.push(record);
+                }
+            }
+        }
+        Ok(records)
     }
 
     async fn delete(
@@ -541,19 +633,21 @@ where
         scope: &ResourceScope,
         handle: &SecretHandle,
     ) -> Result<bool, SecretStoreError> {
-        let path = self.record_path(scope, handle)?;
-        let Some(record) = self.read_active_record(&path).await? else {
-            return Ok(false);
-        };
-        self.write_wrapper(
-            &path,
-            &FilesystemSecretRecord {
-                deleted: true,
-                record,
-            },
-        )
-        .await?;
-        Ok(true)
+        let mut deleted = false;
+        for path in self.lookup_paths(scope, handle)? {
+            if let Some(record) = self.read_active_record(&path).await? {
+                self.write_wrapper(
+                    &path,
+                    &FilesystemSecretRecord {
+                        deleted: true,
+                        record,
+                    },
+                )
+                .await?;
+                deleted = true;
+            }
+        }
+        Ok(deleted)
     }
 
     async fn any_exist(&self) -> Result<bool, SecretStoreError> {
@@ -566,13 +660,13 @@ where
         handle: &SecretHandle,
         used_at: Timestamp,
     ) -> Result<EncryptedSecretRecord, SecretStoreError> {
-        let path = self.record_path(scope, handle)?;
-        let mut record = self.read_active_record(&path).await?.ok_or_else(|| {
-            SecretStoreError::UnknownSecret {
-                scope: Box::new(scope.clone()),
-                handle: handle.clone(),
-            }
-        })?;
+        let (path, mut record) =
+            self.first_active_record(scope, handle)
+                .await?
+                .ok_or_else(|| SecretStoreError::UnknownSecret {
+                    scope: Box::new(scope.clone()),
+                    handle: handle.clone(),
+                })?;
         record.metadata.usage_count += 1;
         record.metadata.last_used_at = Some(used_at);
         record.metadata.updated_at = used_at;
@@ -1001,6 +1095,7 @@ struct SecretState {
 struct SecretKey {
     tenant_id: TenantId,
     user_id: UserId,
+    agent_id: Option<AgentId>,
     project_id: Option<ProjectId>,
     handle: SecretHandle,
 }
@@ -1010,6 +1105,7 @@ impl SecretKey {
         Self {
             tenant_id: scope.tenant_id.clone(),
             user_id: scope.user_id.clone(),
+            agent_id: scope.agent_id.clone(),
             project_id: scope.project_id.clone(),
             handle: handle.clone(),
         }
@@ -1018,6 +1114,7 @@ impl SecretKey {
     fn matches_scope(&self, scope: &ResourceScope) -> bool {
         self.tenant_id == scope.tenant_id
             && self.user_id == scope.user_id
+            && self.agent_id == scope.agent_id
             && self.project_id == scope.project_id
     }
 }
@@ -1026,6 +1123,7 @@ impl SecretKey {
 struct SecretLeaseKey {
     tenant_id: TenantId,
     user_id: UserId,
+    agent_id: Option<AgentId>,
     project_id: Option<ProjectId>,
     lease_id: SecretLeaseId,
 }
@@ -1035,6 +1133,7 @@ impl SecretLeaseKey {
         Self {
             tenant_id: scope.tenant_id.clone(),
             user_id: scope.user_id.clone(),
+            agent_id: scope.agent_id.clone(),
             project_id: scope.project_id.clone(),
             lease_id,
         }
@@ -1043,6 +1142,7 @@ impl SecretLeaseKey {
     fn matches_scope(&self, scope: &ResourceScope) -> bool {
         self.tenant_id == scope.tenant_id
             && self.user_id == scope.user_id
+            && self.agent_id == scope.agent_id
             && self.project_id == scope.project_id
     }
 }

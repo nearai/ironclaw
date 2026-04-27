@@ -93,12 +93,12 @@ Rules:
 
 ## 4. Scope and isolation
 
-All operations receive a `ResourceScope`. Implementations key secrets and leases by tenant/user/project plus `SecretHandle` or `SecretLeaseId`.
+All operations receive a `ResourceScope`. Implementations key secrets and leases by tenant/user/agent/project plus `SecretHandle` or `SecretLeaseId`.
 
 Rules:
 
 - no global handle lookup
-- the same `SecretHandle` in another tenant/user/project is a distinct secret
+- the same `SecretHandle` in another tenant/user/agent/project is a distinct secret
 - cross-scope lease consumption returns `UnknownLease`
 - missing secrets return `UnknownSecret` and do not create leases
 - consumed leases cannot be consumed again
@@ -111,10 +111,10 @@ This is the minimum shape needed before wiring secret lease consumption into obl
 
 ## 5. Filesystem-backed repository
 
-`FilesystemEncryptedSecretRepository<F>` implements `EncryptedSecretRepository` for any `F: RootFilesystem`. It stores redacted JSON records under tenant/user/project-scoped virtual paths:
+`FilesystemEncryptedSecretRepository<F>` implements `EncryptedSecretRepository` for any `F: RootFilesystem`. It stores redacted JSON records under tenant/user/agent/project-scoped virtual paths:
 
 ```text
-/engine/tenants/{tenant_id}/users/{user_id}/projects/{project_id-or-_none}/secrets/{handle}.json
+/engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/projects/{project_id-or-_none}/secrets/{handle}.json
 ```
 
 Repository records contain only metadata, ciphertext, salt, and a small tombstone flag used for delete semantics on filesystems that do not expose physical deletion yet. `list`, `get`, `record_usage`, `delete`, and `any_exist` operate through `RootFilesystem` only. There are no direct PostgreSQL/libSQL dependencies in the repository; DB durability is supplied by composing this repository with `PostgresRootFilesystem` or `LibSqlRootFilesystem` from `ironclaw_filesystem`.
@@ -176,7 +176,7 @@ The crate tests cover:
 
 - metadata returns no raw secret material
 - one-shot leases consume exactly once
-- same-handle secrets are tenant/user/project isolated
+- same-handle secrets are tenant/user/agent/project isolated
 - missing secrets fail without creating leases
 - credential mapping constructors carry handles and host patterns but no secret material
 - encrypted store persists ciphertext rather than plaintext
@@ -186,7 +186,7 @@ The crate tests cover:
 - successful consume records usage metadata
 - filesystem-backed repository stores encrypted JSON without plaintext
 - filesystem-backed repository survives new store instances over the same root filesystem
-- filesystem-backed repository isolates tenant/user/project scopes and lists only visible records
+- filesystem-backed repository isolates tenant/user/agent/project scopes and lists only visible records
 - filesystem-backed repository ignores unrelated engine JSON when scanning for active secret records
 - filesystem-backed repository records usage and tombstones deletes without plaintext
 - filesystem-backed repository has feature-gated type contracts for libSQL and PostgreSQL `RootFilesystem` backends without direct SQL adapters in this crate

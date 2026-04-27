@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use ironclaw_host_api::{
-    InvocationId, MissionId, ProjectId, ResourceScope, SecretHandle, TenantId, ThreadId, UserId,
+    AgentId, InvocationId, MissionId, ProjectId, ResourceScope, SecretHandle, TenantId, ThreadId,
+    UserId,
 };
 use ironclaw_secrets::{
     EncryptedSecretRepository, EncryptedSecretStore, InMemoryEncryptedSecretRepository,
@@ -158,6 +159,81 @@ async fn encrypted_secret_store_records_usage_after_successful_consume() {
 }
 
 #[tokio::test]
+async fn encrypted_secret_store_isolates_same_handle_between_agents_and_leases() {
+    let (store, repository) = encrypted_store(MASTER_KEY);
+    let agent_a = sample_scope_with_agent("tenant-a", "user-a", Some("agent-a"));
+    let agent_b = sample_scope_with_agent("tenant-a", "user-a", Some("agent-b"));
+    let no_agent = sample_scope_with_agent("tenant-a", "user-a", None);
+    let handle = SecretHandle::new("shared_name").unwrap();
+
+    store
+        .put(
+            agent_a.clone(),
+            handle.clone(),
+            SecretMaterial::from("agent-a-secret"),
+        )
+        .await
+        .unwrap();
+    store
+        .put(
+            agent_b.clone(),
+            handle.clone(),
+            SecretMaterial::from("agent-b-secret"),
+        )
+        .await
+        .unwrap();
+    store
+        .put(
+            no_agent.clone(),
+            handle.clone(),
+            SecretMaterial::from("no-agent-secret"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(repository.list(&agent_a).await.unwrap().len(), 1);
+    assert_eq!(repository.list(&agent_b).await.unwrap().len(), 1);
+    assert_eq!(repository.list(&no_agent).await.unwrap().len(), 1);
+
+    let agent_a_lease = store.lease_once(&agent_a, &handle).await.unwrap();
+    assert!(
+        store
+            .consume(&agent_b, agent_a_lease.id)
+            .await
+            .unwrap_err()
+            .is_unknown_lease()
+    );
+    assert_eq!(
+        store
+            .consume(&agent_a, agent_a_lease.id)
+            .await
+            .unwrap()
+            .expose_secret(),
+        "agent-a-secret"
+    );
+
+    let agent_b_lease = store.lease_once(&agent_b, &handle).await.unwrap();
+    assert_eq!(
+        store
+            .consume(&agent_b, agent_b_lease.id)
+            .await
+            .unwrap()
+            .expose_secret(),
+        "agent-b-secret"
+    );
+
+    let no_agent_lease = store.lease_once(&no_agent, &handle).await.unwrap();
+    assert_eq!(
+        store
+            .consume(&no_agent, no_agent_lease.id)
+            .await
+            .unwrap()
+            .expose_secret(),
+        "no-agent-secret"
+    );
+}
+
+#[tokio::test]
 async fn encrypted_secret_store_isolates_same_handle_between_tenants() {
     let (store, _repository) = encrypted_store(MASTER_KEY);
     let tenant_a = sample_scope("tenant-a", "user-a");
@@ -218,10 +294,14 @@ fn crypto(master_key: &str) -> SecretsCrypto {
 }
 
 fn sample_scope(tenant: &str, user: &str) -> ResourceScope {
+    sample_scope_with_agent(tenant, user, None)
+}
+
+fn sample_scope_with_agent(tenant: &str, user: &str, agent: Option<&str>) -> ResourceScope {
     ResourceScope {
         tenant_id: TenantId::new(tenant).unwrap(),
         user_id: UserId::new(user).unwrap(),
-        agent_id: None,
+        agent_id: agent.map(|agent| AgentId::new(agent).unwrap()),
         project_id: Some(ProjectId::new("project-a").unwrap()),
         mission_id: Some(MissionId::new("mission-a").unwrap()),
         thread_id: Some(ThreadId::new("thread-a").unwrap()),
