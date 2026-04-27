@@ -1,12 +1,13 @@
 #![cfg(any(feature = "libsql", feature = "postgres"))]
 
-use ironclaw_filesystem::{FileType, FilesystemError, FilesystemOperation, RootFilesystem};
-use ironclaw_host_api::VirtualPath;
+use ironclaw_filesystem::RootFilesystem;
 
-#[cfg(feature = "libsql")]
-use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "postgres")]
 use ironclaw_filesystem::PostgresRootFilesystem;
+#[cfg(feature = "libsql")]
+use ironclaw_filesystem::{FileType, FilesystemError, FilesystemOperation, LibSqlRootFilesystem};
+#[cfg(feature = "libsql")]
+use ironclaw_host_api::VirtualPath;
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
@@ -67,6 +68,35 @@ async fn libsql_root_filesystem_lists_direct_children_sorted_with_virtual_paths(
         ]
     );
     assert_eq!(entries[1].file_type, FileType::Directory);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_root_filesystem_appends_deletes_and_creates_directories() {
+    let filesystem = libsql_root().await;
+    let dir = VirtualPath::new("/engine/tenants/t1/users/u1/logs").unwrap();
+    let path = VirtualPath::new("/engine/tenants/t1/users/u1/logs/events.jsonl").unwrap();
+
+    filesystem.create_dir_all(&dir).await.unwrap();
+    assert_eq!(
+        filesystem.stat(&dir).await.unwrap().file_type,
+        FileType::Directory
+    );
+    assert!(filesystem.list_dir(&dir).await.unwrap().is_empty());
+
+    filesystem.append_file(&path, b"one\n").await.unwrap();
+    filesystem.append_file(&path, b"two\n").await.unwrap();
+    assert_eq!(filesystem.read_file(&path).await.unwrap(), b"one\ntwo\n");
+
+    filesystem.delete(&path).await.unwrap();
+    let err = filesystem.read_file(&path).await.unwrap_err();
+    assert!(matches!(
+        err,
+        FilesystemError::Backend {
+            operation: FilesystemOperation::ReadFile,
+            ..
+        }
+    ));
 }
 
 #[cfg(feature = "libsql")]

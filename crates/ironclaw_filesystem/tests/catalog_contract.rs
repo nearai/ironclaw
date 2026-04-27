@@ -117,10 +117,26 @@ async fn composite_routes_filesystem_operations_to_matching_backend() {
     )
     .await
     .unwrap();
+    root.append_file(
+        &VirtualPath::new("/memory/notes/new.md").unwrap(),
+        b" appended",
+    )
+    .await
+    .unwrap();
     assert_eq!(
         std::fs::read(memory_dir.path().join("notes/new.md")).unwrap(),
-        b"new memory"
+        b"new memory appended"
     );
+
+    root.create_dir_all(&VirtualPath::new("/projects/generated/deep").unwrap())
+        .await
+        .unwrap();
+    assert!(project_dir.path().join("generated/deep").is_dir());
+
+    root.delete(&VirtualPath::new("/memory/notes/new.md").unwrap())
+        .await
+        .unwrap();
+    assert!(!memory_dir.path().join("notes/new.md").exists());
 }
 
 #[tokio::test]
@@ -239,6 +255,7 @@ fn descriptor(
         capabilities: BackendCapabilities {
             read: true,
             write: true,
+            append: true,
             list: true,
             stat: true,
             delete: false,

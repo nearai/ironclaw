@@ -6,6 +6,7 @@
 //! operation against a trusted root filesystem namespace addressed by
 //! [`VirtualPath`]. Backend implementations alone touch raw host paths.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,6 +22,7 @@ pub enum FilesystemOperation {
     MountLocal,
     ReadFile,
     WriteFile,
+    AppendFile,
     ListDir,
     Stat,
     Delete,
@@ -33,6 +35,7 @@ impl std::fmt::Display for FilesystemOperation {
             Self::MountLocal => "mount_local",
             Self::ReadFile => "read_file",
             Self::WriteFile => "write_file",
+            Self::AppendFile => "append_file",
             Self::ListDir => "list_dir",
             Self::Stat => "stat",
             Self::Delete => "delete",
@@ -177,6 +180,7 @@ pub enum IndexPolicy {
 pub struct BackendCapabilities {
     pub read: bool,
     pub write: bool,
+    pub append: bool,
     pub list: bool,
     pub stat: bool,
     pub delete: bool,
@@ -335,12 +339,30 @@ impl RootFilesystem for CompositeRootFilesystem {
             .await
     }
 
+    async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        self.matching_mount(path)?
+            .backend
+            .append_file(path, bytes)
+            .await
+    }
+
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
         self.matching_mount(path)?.backend.list_dir(path).await
     }
 
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         self.matching_mount(path)?.backend.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.matching_mount(path)?.backend.delete(path).await
+    }
+
+    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.matching_mount(path)?
+            .backend
+            .create_dir_all(path)
+            .await
     }
 }
 
@@ -353,11 +375,38 @@ pub trait RootFilesystem: Send + Sync {
     /// Writes bytes to a canonical virtual path while preserving backend containment.
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError>;
 
+    /// Appends bytes to a canonical virtual path. Backends that do not support append must fail closed before side effects.
+    async fn append_file(&self, path: &VirtualPath, _bytes: &[u8]) -> Result<(), FilesystemError> {
+        Err(FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::AppendFile,
+            reason: "append_file is not supported by this backend".to_string(),
+        })
+    }
+
     /// Lists direct children of a canonical virtual directory; callers must handle pagination/backends in future implementations without bypassing scope.
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError>;
 
     /// Returns metadata for a canonical virtual path without revealing raw host paths.
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError>;
+
+    /// Deletes a canonical virtual file or directory. Backends that do not support delete must fail closed before side effects.
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        Err(FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::Delete,
+            reason: "delete is not supported by this backend".to_string(),
+        })
+    }
+
+    /// Creates a canonical virtual directory and any missing parents. Backends that do not support directories must fail closed before side effects.
+    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        Err(FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::CreateDirAll,
+            reason: "create_dir_all is not supported by this backend".to_string(),
+        })
+    }
 }
 
 /// Invocation-scoped filesystem view over [`ScopedPath`] values.
@@ -389,6 +438,15 @@ where
         self.root.write_file(&virtual_path, bytes).await
     }
 
+    pub async fn append_file(
+        &self,
+        path: &ScopedPath,
+        bytes: &[u8],
+    ) -> Result<(), FilesystemError> {
+        let virtual_path = self.resolve_with_permission(path, FilesystemOperation::AppendFile)?;
+        self.root.append_file(&virtual_path, bytes).await
+    }
+
     pub async fn list_dir(&self, path: &ScopedPath) -> Result<Vec<DirEntry>, FilesystemError> {
         let virtual_path = self.resolve_with_permission(path, FilesystemOperation::ListDir)?;
         self.root.list_dir(&virtual_path).await
@@ -397,6 +455,16 @@ where
     pub async fn stat(&self, path: &ScopedPath) -> Result<FileStat, FilesystemError> {
         let virtual_path = self.resolve_with_permission(path, FilesystemOperation::Stat)?;
         self.root.stat(&virtual_path).await
+    }
+
+    pub async fn delete(&self, path: &ScopedPath) -> Result<(), FilesystemError> {
+        let virtual_path = self.resolve_with_permission(path, FilesystemOperation::Delete)?;
+        self.root.delete(&virtual_path).await
+    }
+
+    pub async fn create_dir_all(&self, path: &ScopedPath) -> Result<(), FilesystemError> {
+        let virtual_path = self.resolve_with_permission(path, FilesystemOperation::CreateDirAll)?;
+        self.root.create_dir_all(&virtual_path).await
     }
 
     fn resolve_with_permission(
@@ -439,6 +507,7 @@ fn operation_allowed(permissions: &MountPermissions, operation: FilesystemOperat
     match operation {
         FilesystemOperation::ReadFile => permissions.read,
         FilesystemOperation::WriteFile => permissions.write,
+        FilesystemOperation::AppendFile => permissions.write,
         FilesystemOperation::ListDir => permissions.list,
         FilesystemOperation::Stat => permissions.read || permissions.list,
         FilesystemOperation::Delete => permissions.delete,
@@ -516,14 +585,18 @@ impl LocalFilesystem {
         Ok(canonical)
     }
 
-    fn resolve_for_write(&self, path: &VirtualPath) -> Result<PathBuf, FilesystemError> {
+    fn resolve_for_write(
+        &self,
+        path: &VirtualPath,
+        operation: FilesystemOperation,
+    ) -> Result<PathBuf, FilesystemError> {
         let (mount, joined) = self.resolve_joined(path)?;
 
         if joined.exists() {
             let canonical =
                 std::fs::canonicalize(&joined).map_err(|error| FilesystemError::Backend {
                     path: path.clone(),
-                    operation: FilesystemOperation::WriteFile,
+                    operation,
                     reason: io_reason(error),
                 })?;
             ensure_contained(path, mount, &canonical, true)?;
@@ -533,6 +606,7 @@ impl LocalFilesystem {
         let parent = joined
             .parent()
             .ok_or_else(|| FilesystemError::PathOutsideMount { path: path.clone() })?;
+        ensure_existing_ancestor_contained(path, mount, parent, operation)?;
         std::fs::create_dir_all(parent).map_err(|error| FilesystemError::Backend {
             path: path.clone(),
             operation: FilesystemOperation::CreateDirAll,
@@ -549,6 +623,29 @@ impl LocalFilesystem {
         // existing symlink in the parent chain caused the escape.
         ensure_contained(path, mount, &canonical_parent, true)?;
         Ok(joined)
+    }
+
+    fn resolve_for_create_dir_all(&self, path: &VirtualPath) -> Result<PathBuf, FilesystemError> {
+        let (mount, joined) = self.resolve_joined(path)?;
+        ensure_existing_ancestor_contained(
+            path,
+            mount,
+            &joined,
+            FilesystemOperation::CreateDirAll,
+        )?;
+        std::fs::create_dir_all(&joined).map_err(|error| FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::CreateDirAll,
+            reason: io_reason(error),
+        })?;
+        let canonical =
+            std::fs::canonicalize(&joined).map_err(|error| FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::CreateDirAll,
+                reason: io_reason(error),
+            })?;
+        ensure_contained(path, mount, &canonical, true)?;
+        Ok(canonical)
     }
 
     fn resolve_joined(
@@ -590,12 +687,31 @@ impl RootFilesystem for LocalFilesystem {
     }
 
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
-        let resolved = self.resolve_for_write(path)?;
+        let resolved = self.resolve_for_write(path, FilesystemOperation::WriteFile)?;
         std::fs::write(resolved, bytes).map_err(|error| FilesystemError::Backend {
             path: path.clone(),
             operation: FilesystemOperation::WriteFile,
             reason: io_reason(error),
         })
+    }
+
+    async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        let resolved = self.resolve_for_write(path, FilesystemOperation::AppendFile)?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(resolved)
+            .map_err(|error| FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::AppendFile,
+                reason: io_reason(error),
+            })?;
+        file.write_all(bytes)
+            .map_err(|error| FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::AppendFile,
+                reason: io_reason(error),
+            })
     }
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
@@ -642,10 +758,55 @@ impl RootFilesystem for LocalFilesystem {
             len: metadata.len(),
         })
     }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        let resolved = self.resolve_existing(path, FilesystemOperation::Delete)?;
+        let metadata = std::fs::metadata(&resolved).map_err(|error| FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::Delete,
+            reason: io_reason(error),
+        })?;
+        if metadata.is_dir() {
+            std::fs::remove_dir_all(resolved)
+        } else {
+            std::fs::remove_file(resolved)
+        }
+        .map_err(|error| FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::Delete,
+            reason: io_reason(error),
+        })
+    }
+
+    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.resolve_for_create_dir_all(path).map(|_| ())
+    }
 }
 
 fn virtual_prefix_matches(prefix: &str, path: &str) -> bool {
     path == prefix || path.starts_with(&format!("{prefix}/"))
+}
+
+fn ensure_existing_ancestor_contained(
+    virtual_path: &VirtualPath,
+    mount: &LocalMount,
+    candidate: &Path,
+    operation: FilesystemOperation,
+) -> Result<(), FilesystemError> {
+    let mut ancestor = candidate;
+    while !ancestor.exists() {
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| FilesystemError::PathOutsideMount {
+                path: virtual_path.clone(),
+            })?;
+    }
+    let canonical = std::fs::canonicalize(ancestor).map_err(|error| FilesystemError::Backend {
+        path: virtual_path.clone(),
+        operation,
+        reason: io_reason(error),
+    })?;
+    ensure_contained(virtual_path, mount, &canonical, true)
 }
 
 fn ensure_contained(
@@ -729,13 +890,23 @@ impl RootFilesystem for PostgresRootFilesystem {
         let client = self.client().await?;
         let row = client
             .query_opt(
-                "SELECT contents FROM root_filesystem_entries WHERE path = $1",
+                "SELECT contents, is_dir FROM root_filesystem_entries WHERE path = $1",
                 &[&path.as_str()],
             )
             .await
             .map_err(|error| db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
-        row.map(|row| row.get("contents"))
-            .ok_or_else(|| not_found(path.clone(), FilesystemOperation::ReadFile))
+        let Some(row) = row else {
+            return Err(not_found(path.clone(), FilesystemOperation::ReadFile));
+        };
+        let is_dir: bool = row.get("is_dir");
+        if is_dir {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ReadFile,
+                reason: "is a directory".to_string(),
+            });
+        }
+        Ok(row.get("contents"))
     }
 
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
@@ -743,10 +914,11 @@ impl RootFilesystem for PostgresRootFilesystem {
         client
             .execute(
                 r#"
-                INSERT INTO root_filesystem_entries (path, contents)
-                VALUES ($1, $2)
+                INSERT INTO root_filesystem_entries (path, contents, is_dir)
+                VALUES ($1, $2, FALSE)
                 ON CONFLICT (path) DO UPDATE SET
                     contents = EXCLUDED.contents,
+                    is_dir = FALSE,
                     updated_at = NOW()
                 "#,
                 &[&path.as_str(), &bytes],
@@ -756,8 +928,38 @@ impl RootFilesystem for PostgresRootFilesystem {
         Ok(())
     }
 
+    async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        let client = self.client().await?;
+        if matches!(
+            self.exact_entry(path).await?,
+            Some((_, FileType::Directory))
+        ) {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::AppendFile,
+                reason: "cannot append to a directory".to_string(),
+            });
+        }
+        client
+            .execute(
+                r#"
+                INSERT INTO root_filesystem_entries (path, contents, is_dir)
+                VALUES ($1, $2, FALSE)
+                ON CONFLICT (path) DO UPDATE SET
+                    contents = root_filesystem_entries.contents || EXCLUDED.contents,
+                    is_dir = FALSE,
+                    updated_at = NOW()
+                "#,
+                &[&path.as_str(), &bytes],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::AppendFile, error))?;
+        Ok(())
+    }
+
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        if self.exact_file_len(path).await?.is_some() {
+        let exact_entry = self.exact_entry(path).await?;
+        if matches!(exact_entry, Some((_, FileType::File))) {
             return Err(FilesystemError::Backend {
                 path: path.clone(),
                 operation: FilesystemOperation::ListDir,
@@ -765,21 +967,25 @@ impl RootFilesystem for PostgresRootFilesystem {
             });
         }
         let rows = self.all_paths().await?;
-        direct_children(path, rows)
+        let children = direct_children(path, rows);
+        if matches!(exact_entry, Some((_, FileType::Directory))) && is_not_found(&children) {
+            return Ok(Vec::new());
+        }
+        children
     }
 
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        if let Some(len) = self.exact_file_len(path).await? {
+        if let Some((len, file_type)) = self.exact_entry(path).await? {
             return Ok(FileStat {
                 path: path.clone(),
-                file_type: FileType::File,
+                file_type,
                 len,
             });
         }
         let rows = self.all_paths().await?;
         if rows
             .iter()
-            .any(|(child_path, _)| virtual_prefix_matches(path.as_str(), child_path.as_str()))
+            .any(|(child_path, _, _)| virtual_prefix_matches(path.as_str(), child_path.as_str()))
         {
             return Ok(FileStat {
                 path: path.clone(),
@@ -789,30 +995,83 @@ impl RootFilesystem for PostgresRootFilesystem {
         }
         Err(not_found(path.clone(), FilesystemOperation::Stat))
     }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        let client = self.client().await?;
+        client
+            .execute(
+                "DELETE FROM root_filesystem_entries WHERE path = $1 OR path LIKE $2",
+                &[
+                    &path.as_str(),
+                    &format!("{}/%", path.as_str().trim_end_matches('/')),
+                ],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::Delete, error))?;
+        Ok(())
+    }
+
+    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        let client = self.client().await?;
+        for prefix in virtual_path_prefixes(path)? {
+            if matches!(self.exact_entry(&prefix).await?, Some((_, FileType::File))) {
+                return Err(FilesystemError::Backend {
+                    path: prefix,
+                    operation: FilesystemOperation::CreateDirAll,
+                    reason: "file exists where directory is required".to_string(),
+                });
+            }
+            client
+                .execute(
+                    r#"
+                    INSERT INTO root_filesystem_entries (path, contents, is_dir)
+                    VALUES ($1, '\\x'::bytea, TRUE)
+                    ON CONFLICT (path) DO NOTHING
+                    "#,
+                    &[&prefix.as_str()],
+                )
+                .await
+                .map_err(|error| {
+                    db_error(path.clone(), FilesystemOperation::CreateDirAll, error)
+                })?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(feature = "postgres")]
 impl PostgresRootFilesystem {
-    async fn exact_file_len(&self, path: &VirtualPath) -> Result<Option<u64>, FilesystemError> {
+    async fn exact_entry(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<Option<(u64, FileType)>, FilesystemError> {
         let client = self.client().await?;
         let row = client
             .query_opt(
-                "SELECT OCTET_LENGTH(contents) AS len FROM root_filesystem_entries WHERE path = $1",
+                "SELECT OCTET_LENGTH(contents) AS len, is_dir FROM root_filesystem_entries WHERE path = $1",
                 &[&path.as_str()],
             )
             .await
             .map_err(|error| db_error(path.clone(), FilesystemOperation::Stat, error))?;
         Ok(row.map(|row| {
             let len: i32 = row.get("len");
-            len.max(0) as u64
+            let is_dir: bool = row.get("is_dir");
+            (
+                if is_dir { 0 } else { len.max(0) as u64 },
+                if is_dir {
+                    FileType::Directory
+                } else {
+                    FileType::File
+                },
+            )
         }))
     }
 
-    async fn all_paths(&self) -> Result<Vec<(VirtualPath, u64)>, FilesystemError> {
+    async fn all_paths(&self) -> Result<Vec<(VirtualPath, u64, FileType)>, FilesystemError> {
         let client = self.client().await?;
         let rows = client
             .query(
-                "SELECT path, OCTET_LENGTH(contents) AS len FROM root_filesystem_entries ORDER BY path",
+                "SELECT path, OCTET_LENGTH(contents) AS len, is_dir FROM root_filesystem_entries ORDER BY path",
                 &[],
             )
             .await
@@ -827,7 +1086,16 @@ impl PostgresRootFilesystem {
             .map(|row| {
                 let path: String = row.get("path");
                 let len: i32 = row.get("len");
-                Ok((VirtualPath::new(path)?, len.max(0) as u64))
+                let is_dir: bool = row.get("is_dir");
+                Ok((
+                    VirtualPath::new(path)?,
+                    if is_dir { 0 } else { len.max(0) as u64 },
+                    if is_dir {
+                        FileType::Directory
+                    } else {
+                        FileType::File
+                    },
+                ))
             })
             .collect()
     }
@@ -837,10 +1105,15 @@ impl PostgresRootFilesystem {
 const POSTGRES_ROOT_FILESYSTEM_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS root_filesystem_entries (
     path TEXT PRIMARY KEY CHECK (path LIKE '/%'),
-    contents BYTEA NOT NULL,
+    contents BYTEA NOT NULL DEFAULT '\\x',
+    is_dir BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE root_filesystem_entries
+    ADD COLUMN IF NOT EXISTS is_dir BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE root_filesystem_entries
+    ALTER COLUMN contents SET DEFAULT '\\x';
 CREATE INDEX IF NOT EXISTS idx_root_filesystem_entries_path
     ON root_filesystem_entries(path);
 "#;
@@ -868,6 +1141,7 @@ impl LibSqlRootFilesystem {
                     error,
                 )
             })?;
+        ensure_libsql_root_is_dir_column(&conn).await?;
         Ok(())
     }
 
@@ -896,7 +1170,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT contents FROM root_filesystem_entries WHERE path = ?1",
+                "SELECT contents, is_dir FROM root_filesystem_entries WHERE path = ?1",
                 libsql::params![path.as_str()],
             )
             .await
@@ -908,6 +1182,16 @@ impl RootFilesystem for LibSqlRootFilesystem {
         else {
             return Err(not_found(path.clone(), FilesystemOperation::ReadFile));
         };
+        let is_dir: i64 = row
+            .get(1)
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+        if is_dir != 0 {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ReadFile,
+                reason: "is a directory".to_string(),
+            });
+        }
         row.get(0)
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))
     }
@@ -916,10 +1200,11 @@ impl RootFilesystem for LibSqlRootFilesystem {
         let conn = self.connect().await?;
         conn.execute(
             r#"
-            INSERT INTO root_filesystem_entries (path, contents, updated_at)
-            VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            INSERT INTO root_filesystem_entries (path, contents, is_dir, updated_at)
+            VALUES (?1, ?2, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
             ON CONFLICT (path) DO UPDATE SET
                 contents = excluded.contents,
+                is_dir = 0,
                 updated_at = excluded.updated_at
             "#,
             libsql::params![path.as_str(), libsql::Value::Blob(bytes.to_vec())],
@@ -929,8 +1214,29 @@ impl RootFilesystem for LibSqlRootFilesystem {
         Ok(())
     }
 
+    async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        if matches!(
+            self.exact_entry(path).await?,
+            Some((_, FileType::Directory))
+        ) {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::AppendFile,
+                reason: "cannot append to a directory".to_string(),
+            });
+        }
+        let mut contents = match self.read_file(path).await {
+            Ok(contents) => contents,
+            Err(FilesystemError::Backend { reason, .. }) if reason == "not found" => Vec::new(),
+            Err(error) => return Err(error),
+        };
+        contents.extend_from_slice(bytes);
+        self.write_file(path, &contents).await
+    }
+
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        if self.exact_file_len(path).await?.is_some() {
+        let exact_entry = self.exact_entry(path).await?;
+        if matches!(exact_entry, Some((_, FileType::File))) {
             return Err(FilesystemError::Backend {
                 path: path.clone(),
                 operation: FilesystemOperation::ListDir,
@@ -938,21 +1244,25 @@ impl RootFilesystem for LibSqlRootFilesystem {
             });
         }
         let rows = self.all_paths().await?;
-        direct_children(path, rows)
+        let children = direct_children(path, rows);
+        if matches!(exact_entry, Some((_, FileType::Directory))) && is_not_found(&children) {
+            return Ok(Vec::new());
+        }
+        children
     }
 
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        if let Some(len) = self.exact_file_len(path).await? {
+        if let Some((len, file_type)) = self.exact_entry(path).await? {
             return Ok(FileStat {
                 path: path.clone(),
-                file_type: FileType::File,
+                file_type,
                 len,
             });
         }
         let rows = self.all_paths().await?;
         if rows
             .iter()
-            .any(|(child_path, _)| virtual_prefix_matches(path.as_str(), child_path.as_str()))
+            .any(|(child_path, _, _)| virtual_prefix_matches(path.as_str(), child_path.as_str()))
         {
             return Ok(FileStat {
                 path: path.clone(),
@@ -962,15 +1272,104 @@ impl RootFilesystem for LibSqlRootFilesystem {
         }
         Err(not_found(path.clone(), FilesystemOperation::Stat))
     }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        let conn = self.connect().await?;
+        conn.execute(
+            "DELETE FROM root_filesystem_entries WHERE path = ?1 OR path LIKE ?2",
+            libsql::params![
+                path.as_str(),
+                format!("{}/%", path.as_str().trim_end_matches('/'))
+            ],
+        )
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
+        Ok(())
+    }
+
+    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        let conn = self.connect().await?;
+        for prefix in virtual_path_prefixes(path)? {
+            if matches!(self.exact_entry(&prefix).await?, Some((_, FileType::File))) {
+                return Err(FilesystemError::Backend {
+                    path: prefix,
+                    operation: FilesystemOperation::CreateDirAll,
+                    reason: "file exists where directory is required".to_string(),
+                });
+            }
+            conn.execute(
+                r#"
+                INSERT INTO root_filesystem_entries (path, contents, is_dir, updated_at)
+                VALUES (?1, X'', 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                ON CONFLICT (path) DO NOTHING
+                "#,
+                libsql::params![prefix.as_str()],
+            )
+            .await
+            .map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::CreateDirAll, error)
+            })?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "libsql")]
+async fn ensure_libsql_root_is_dir_column(
+    conn: &libsql::Connection,
+) -> Result<(), FilesystemError> {
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM pragma_table_info('root_filesystem_entries') WHERE name = 'is_dir'",
+            (),
+        )
+        .await
+        .map_err(|error| {
+            libsql_db_error(
+                valid_engine_path(),
+                FilesystemOperation::CreateDirAll,
+                error,
+            )
+        })?;
+    if rows
+        .next()
+        .await
+        .map_err(|error| {
+            libsql_db_error(
+                valid_engine_path(),
+                FilesystemOperation::CreateDirAll,
+                error,
+            )
+        })?
+        .is_some()
+    {
+        return Ok(());
+    }
+    conn.execute(
+        "ALTER TABLE root_filesystem_entries ADD COLUMN is_dir INTEGER NOT NULL DEFAULT 0 CHECK (is_dir IN (0, 1))",
+        (),
+    )
+    .await
+    .map_err(|error| {
+        libsql_db_error(
+            valid_engine_path(),
+            FilesystemOperation::CreateDirAll,
+            error,
+        )
+    })?;
+    Ok(())
 }
 
 #[cfg(feature = "libsql")]
 impl LibSqlRootFilesystem {
-    async fn exact_file_len(&self, path: &VirtualPath) -> Result<Option<u64>, FilesystemError> {
+    async fn exact_entry(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<Option<(u64, FileType)>, FilesystemError> {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT length(contents) FROM root_filesystem_entries WHERE path = ?1",
+                "SELECT length(contents), is_dir FROM root_filesystem_entries WHERE path = ?1",
                 libsql::params![path.as_str()],
             )
             .await
@@ -979,14 +1378,25 @@ impl LibSqlRootFilesystem {
             .next()
             .await
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Stat, error))?;
-        Ok(row.map(|row| row.get::<i64>(0).unwrap_or(0).max(0) as u64))
+        Ok(row.map(|row| {
+            let len = row.get::<i64>(0).unwrap_or(0).max(0) as u64;
+            let is_dir = row.get::<i64>(1).unwrap_or(0) != 0;
+            (
+                if is_dir { 0 } else { len },
+                if is_dir {
+                    FileType::Directory
+                } else {
+                    FileType::File
+                },
+            )
+        }))
     }
 
-    async fn all_paths(&self) -> Result<Vec<(VirtualPath, u64)>, FilesystemError> {
+    async fn all_paths(&self) -> Result<Vec<(VirtualPath, u64, FileType)>, FilesystemError> {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT path, length(contents) FROM root_filesystem_entries ORDER BY path",
+                "SELECT path, length(contents), is_dir FROM root_filesystem_entries ORDER BY path",
                 (),
             )
             .await
@@ -1001,7 +1411,16 @@ impl LibSqlRootFilesystem {
                 libsql_db_error(valid_engine_path(), FilesystemOperation::ListDir, error)
             })?;
             let len = row.get::<i64>(1).unwrap_or(0).max(0) as u64;
-            paths.push((VirtualPath::new(path)?, len));
+            let is_dir = row.get::<i64>(2).unwrap_or(0) != 0;
+            paths.push((
+                VirtualPath::new(path)?,
+                if is_dir { 0 } else { len },
+                if is_dir {
+                    FileType::Directory
+                } else {
+                    FileType::File
+                },
+            ));
         }
         Ok(paths)
     }
@@ -1011,7 +1430,8 @@ impl LibSqlRootFilesystem {
 const LIBSQL_ROOT_FILESYSTEM_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS root_filesystem_entries (
     path TEXT PRIMARY KEY,
-    contents BLOB NOT NULL,
+    contents BLOB NOT NULL DEFAULT X'',
+    is_dir INTEGER NOT NULL DEFAULT 0 CHECK (is_dir IN (0, 1)),
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
@@ -1020,13 +1440,28 @@ CREATE INDEX IF NOT EXISTS idx_root_filesystem_entries_path
 "#;
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
+fn virtual_path_prefixes(path: &VirtualPath) -> Result<Vec<VirtualPath>, HostApiError> {
+    let mut prefixes = Vec::new();
+    let mut current = String::new();
+    for segment in path.as_str().trim_matches('/').split('/') {
+        if segment.is_empty() {
+            continue;
+        }
+        current.push('/');
+        current.push_str(segment);
+        prefixes.push(VirtualPath::new(current.clone())?);
+    }
+    Ok(prefixes)
+}
+
+#[cfg(any(feature = "postgres", feature = "libsql"))]
 fn direct_children(
     parent: &VirtualPath,
-    rows: Vec<(VirtualPath, u64)>,
+    rows: Vec<(VirtualPath, u64, FileType)>,
 ) -> Result<Vec<DirEntry>, FilesystemError> {
     let mut entries = std::collections::BTreeMap::<String, DirEntry>::new();
     let prefix = format!("{}/", parent.as_str().trim_end_matches('/'));
-    for (path, _len) in rows {
+    for (path, _len, row_file_type) in rows {
         let Some(tail) = path.as_str().strip_prefix(&prefix) else {
             continue;
         };
@@ -1036,7 +1471,7 @@ fn direct_children(
         let (name, file_type) = if let Some((directory, _rest)) = tail.split_once('/') {
             (directory.to_string(), FileType::Directory)
         } else {
-            (tail.to_string(), FileType::File)
+            (tail.to_string(), row_file_type)
         };
         let entry_path = VirtualPath::new(format!(
             "{}/{}",
@@ -1062,6 +1497,14 @@ fn not_found(path: VirtualPath, operation: FilesystemOperation) -> FilesystemErr
         operation,
         reason: "not found".to_string(),
     }
+}
+
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+fn is_not_found<T>(result: &Result<T, FilesystemError>) -> bool {
+    matches!(
+        result,
+        Err(FilesystemError::Backend { reason, .. }) if reason == "not found"
+    )
 }
 
 #[cfg(feature = "postgres")]

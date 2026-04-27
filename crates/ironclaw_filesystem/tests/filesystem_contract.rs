@@ -80,6 +80,105 @@ async fn scoped_write_is_denied_on_read_only_mount() {
 }
 
 #[tokio::test]
+async fn scoped_append_requires_write_permission_and_appends_bytes() {
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("project1")).unwrap();
+    std::fs::write(storage.path().join("project1/log.jsonl"), b"one\n").unwrap();
+
+    let read_only = scoped_project_fs(storage.path(), MountPermissions::read_only());
+    let err = read_only
+        .append_file(
+            &ScopedPath::new("/workspace/log.jsonl").unwrap(),
+            b"denied\n",
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        FilesystemError::PermissionDenied {
+            operation: FilesystemOperation::AppendFile,
+            ..
+        }
+    ));
+
+    let writable = scoped_project_fs(storage.path(), MountPermissions::read_write());
+    writable
+        .append_file(&ScopedPath::new("/workspace/log.jsonl").unwrap(), b"two\n")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read(storage.path().join("project1/log.jsonl")).unwrap(),
+        b"one\ntwo\n"
+    );
+}
+
+#[tokio::test]
+async fn scoped_delete_requires_delete_permission_and_removes_file() {
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("project1")).unwrap();
+    std::fs::write(storage.path().join("project1/generated.txt"), b"delete me").unwrap();
+
+    let no_delete = scoped_project_fs(storage.path(), MountPermissions::read_write());
+    let err = no_delete
+        .delete(&ScopedPath::new("/workspace/generated.txt").unwrap())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        FilesystemError::PermissionDenied {
+            operation: FilesystemOperation::Delete,
+            ..
+        }
+    ));
+    assert!(storage.path().join("project1/generated.txt").exists());
+
+    let can_delete = scoped_project_fs(
+        storage.path(),
+        MountPermissions {
+            read: true,
+            write: true,
+            delete: true,
+            list: true,
+            execute: false,
+        },
+    );
+    can_delete
+        .delete(&ScopedPath::new("/workspace/generated.txt").unwrap())
+        .await
+        .unwrap();
+
+    assert!(!storage.path().join("project1/generated.txt").exists());
+}
+
+#[tokio::test]
+async fn scoped_create_dir_all_requires_write_permission() {
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("project1")).unwrap();
+
+    let read_only = scoped_project_fs(storage.path(), MountPermissions::read_only());
+    let err = read_only
+        .create_dir_all(&ScopedPath::new("/workspace/generated/deep").unwrap())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        FilesystemError::PermissionDenied {
+            operation: FilesystemOperation::CreateDirAll,
+            ..
+        }
+    ));
+
+    let writable = scoped_project_fs(storage.path(), MountPermissions::read_write());
+    writable
+        .create_dir_all(&ScopedPath::new("/workspace/generated/deep").unwrap())
+        .await
+        .unwrap();
+
+    assert!(storage.path().join("project1/generated/deep").is_dir());
+}
+
+#[tokio::test]
 async fn list_requires_list_permission_through_scoped_api() {
     let storage = tempdir().unwrap();
     std::fs::create_dir_all(storage.path().join("project1/src")).unwrap();

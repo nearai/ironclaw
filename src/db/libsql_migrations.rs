@@ -291,7 +291,8 @@ CREATE INDEX IF NOT EXISTS idx_heartbeat_user ON heartbeat_state(user_id);
 
 CREATE TABLE IF NOT EXISTS root_filesystem_entries (
     path TEXT PRIMARY KEY,
-    contents BLOB NOT NULL,
+    contents BLOB NOT NULL DEFAULT X'',
+    is_dir INTEGER NOT NULL DEFAULT 0 CHECK (is_dir IN (0, 1)),
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
@@ -1018,6 +1019,14 @@ CREATE INDEX IF NOT EXISTS idx_root_filesystem_entries_path
     ON root_filesystem_entries(path);
 "#,
     ),
+    (
+        26,
+        "root_filesystem_entries_directories",
+        r#"
+ALTER TABLE root_filesystem_entries
+    ADD COLUMN is_dir INTEGER NOT NULL DEFAULT 0 CHECK (is_dir IN (0, 1));
+"#,
+    ),
 ];
 
 /// Migrations whose ADD COLUMN should be skipped when the column already
@@ -1028,6 +1037,7 @@ const IDEMPOTENT_ADD_COLUMN_MIGRATIONS: &[(i64, &str, &str)] = &[
     (18, "wasm_tools", "scope"),
     (18, "dynamic_tools", "scope"),
     (22, "agent_jobs", "restart_params"),
+    (26, "root_filesystem_entries", "is_dir"),
 ];
 
 /// Check whether `table` already contains `column` via `pragma_table_info`.
