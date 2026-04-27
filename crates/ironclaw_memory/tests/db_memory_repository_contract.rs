@@ -4,10 +4,10 @@ use async_trait::async_trait;
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::VirtualPath;
 use ironclaw_memory::{
-    ChunkConfig, ChunkingMemoryDocumentIndexer, DocumentMetadata, MemoryBackend,
-    MemoryBackendCapabilities, MemoryBackendFilesystemAdapter, MemoryContext,
-    MemoryDocumentFilesystem, MemoryDocumentPath, MemoryDocumentRepository, MemoryDocumentScope,
-    MemorySearchRequest, RepositoryMemoryBackend,
+    ChunkConfig, ChunkingMemoryDocumentIndexer, DocumentMetadata, EmbeddingError,
+    EmbeddingProvider, FusionStrategy, MemoryBackend, MemoryBackendCapabilities,
+    MemoryBackendFilesystemAdapter, MemoryContext, MemoryDocumentFilesystem, MemoryDocumentPath,
+    MemoryDocumentRepository, MemoryDocumentScope, MemorySearchRequest, RepositoryMemoryBackend,
 };
 
 #[cfg(feature = "libsql")]
@@ -325,6 +325,153 @@ async fn libsql_repository_backend_validates_schema_from_config_before_write() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn libsql_chunking_indexer_stores_provider_embeddings_with_chunks() {
+    let (db, _dir) = libsql_db().await;
+    let repository = std::sync::Arc::new(LibSqlMemoryDocumentRepository::new(db.clone()));
+    repository.run_migrations().await.unwrap();
+    let provider = std::sync::Arc::new(DeterministicEmbeddingProvider::default());
+    let indexer = std::sync::Arc::new(
+        ChunkingMemoryDocumentIndexer::new(repository.clone())
+            .with_chunk_config(ChunkConfig {
+                chunk_size: 2,
+                overlap_percent: 0.0,
+                min_chunk_size: 1,
+            })
+            .with_embedding_provider(provider.clone()),
+    );
+    let backend =
+        std::sync::Arc::new(RepositoryMemoryBackend::new(repository).with_indexer(indexer));
+    let filesystem = MemoryBackendFilesystemAdapter::new(backend);
+    let path =
+        VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/embeddings.md")
+            .unwrap();
+
+    filesystem
+        .write_file(&path, b"hybrid-vector words unrelated words")
+        .await
+        .unwrap();
+
+    let conn = db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT content, embedding FROM memory_chunks ORDER BY chunk_index",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut stored = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        let content = row.get::<String>(0).unwrap();
+        let embedding = decode_test_embedding(&row.get::<Vec<u8>>(1).unwrap());
+        stored.push((content, embedding));
+    }
+
+    assert_eq!(
+        stored,
+        vec![
+            ("hybrid-vector words".to_string(), vec![1.0, 0.0, 0.0]),
+            ("unrelated words".to_string(), vec![0.0, 1.0, 0.0]),
+        ]
+    );
+    assert_eq!(
+        provider.calls(),
+        vec![
+            "hybrid-vector words".to_string(),
+            "unrelated words".to_string(),
+        ]
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_repository_backend_hybrid_search_fuses_full_text_and_vector_results() {
+    let (db, _dir) = libsql_db().await;
+    let repository = std::sync::Arc::new(LibSqlMemoryDocumentRepository::new(db));
+    repository.run_migrations().await.unwrap();
+    let provider = std::sync::Arc::new(DeterministicEmbeddingProvider::default());
+    let indexer = std::sync::Arc::new(
+        ChunkingMemoryDocumentIndexer::new(repository.clone())
+            .with_embedding_provider(provider.clone()),
+    );
+    let backend = RepositoryMemoryBackend::new(repository)
+        .with_indexer(indexer)
+        .with_embedding_provider(provider)
+        .with_capabilities(MemoryBackendCapabilities {
+            file_documents: true,
+            full_text_search: true,
+            vector_search: true,
+            embeddings: true,
+            ..MemoryBackendCapabilities::default()
+        });
+    let context = MemoryContext::new(MemoryDocumentScope::new("tenant-a", "alice", None).unwrap());
+
+    for (relative_path, content) in [
+        ("notes/hybrid.md", b"literal hybrid-vector".as_slice()),
+        ("notes/fts-only.md", b"literal unrelated".as_slice()),
+        ("notes/vector-only.md", b"semantic-only".as_slice()),
+    ] {
+        let path = MemoryDocumentPath::new("tenant-a", "alice", None, relative_path).unwrap();
+        backend
+            .write_document(&context, &path, content)
+            .await
+            .unwrap();
+    }
+
+    let results = backend
+        .search(
+            &context,
+            MemorySearchRequest::new("literal")
+                .unwrap()
+                .with_limit(3)
+                .with_fusion_strategy(FusionStrategy::Rrf),
+        )
+        .await
+        .unwrap();
+
+    let paths = results
+        .iter()
+        .map(|result| result.path.relative_path().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(paths[0], "notes/hybrid.md");
+    assert!(results[0].is_hybrid());
+    assert!(paths.contains(&"notes/fts-only.md".to_string()));
+    assert!(paths.contains(&"notes/vector-only.md".to_string()));
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_repository_backend_fails_closed_for_unsupported_vector_search() {
+    let (db, _dir) = libsql_db().await;
+    let repository = std::sync::Arc::new(LibSqlMemoryDocumentRepository::new(db));
+    repository.run_migrations().await.unwrap();
+    let backend =
+        RepositoryMemoryBackend::new(repository).with_capabilities(MemoryBackendCapabilities {
+            file_documents: true,
+            full_text_search: true,
+            vector_search: false,
+            ..MemoryBackendCapabilities::default()
+        });
+    let context = MemoryContext::new(MemoryDocumentScope::new("tenant-a", "alice", None).unwrap());
+
+    let err = backend
+        .search(
+            &context,
+            MemorySearchRequest::new("literal")
+                .unwrap()
+                .with_full_text(false)
+                .with_query_embedding(vec![1.0, 0.0, 0.0]),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("memory backend does not support vector search")
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn libsql_repository_backend_searches_indexed_chunks() {
     let (db, _dir) = libsql_db().await;
     let repository = std::sync::Arc::new(LibSqlMemoryDocumentRepository::new(db));
@@ -438,6 +585,46 @@ async fn libsql_db() -> (std::sync::Arc<libsql::Database>, tempfile::TempDir) {
     let db_path = dir.path().join("memory.db");
     let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
     (db, dir)
+}
+
+#[derive(Default)]
+struct DeterministicEmbeddingProvider {
+    calls: std::sync::Mutex<Vec<String>>,
+}
+
+impl DeterministicEmbeddingProvider {
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for DeterministicEmbeddingProvider {
+    fn dimension(&self) -> usize {
+        3
+    }
+
+    fn model_name(&self) -> &str {
+        "deterministic-test-embedding"
+    }
+
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
+        self.calls.lock().unwrap().push(text.to_string());
+        if text == "literal" || text.contains("hybrid-vector") || text.contains("semantic-only") {
+            Ok(vec![1.0, 0.0, 0.0])
+        } else if text.contains("unrelated") {
+            Ok(vec![0.0, 1.0, 0.0])
+        } else {
+            Ok(vec![0.0, 0.0, 1.0])
+        }
+    }
+}
+
+fn decode_test_embedding(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect()
 }
 
 #[allow(dead_code)]

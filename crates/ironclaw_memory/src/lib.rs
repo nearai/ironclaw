@@ -188,6 +188,57 @@ pub struct MemoryWriteOptions {
     pub changed_by: Option<String>,
 }
 
+/// Error returned by memory embedding providers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmbeddingError {
+    ProviderUnavailable { reason: String },
+    InvalidVector { expected: usize, actual: usize },
+    TextTooLong { length: usize, max: usize },
+}
+
+impl std::fmt::Display for EmbeddingError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EmbeddingError::ProviderUnavailable { reason } => {
+                write!(formatter, "embedding provider unavailable: {reason}")
+            }
+            EmbeddingError::InvalidVector { expected, actual } => {
+                write!(
+                    formatter,
+                    "embedding vector dimension mismatch: expected {expected}, got {actual}"
+                )
+            }
+            EmbeddingError::TextTooLong { length, max } => {
+                write!(formatter, "embedding input too long: {length} > {max}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for EmbeddingError {}
+
+/// Memory-owned embedding-provider seam.
+///
+/// Concrete HTTP/provider integrations belong outside this core crate and can
+/// implement this trait after resolving credentials/network policy at the host
+/// boundary.
+#[async_trait]
+pub trait EmbeddingProvider: Send + Sync {
+    fn dimension(&self) -> usize;
+
+    fn model_name(&self) -> &str;
+
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError>;
+
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+        let mut embeddings = Vec::with_capacity(texts.len());
+        for text in texts {
+            embeddings.push(self.embed(text).await?);
+        }
+        Ok(embeddings)
+    }
+}
+
 struct ParsedMemoryPath {
     scope: MemoryDocumentScope,
     relative_path: Option<String>,
@@ -456,13 +507,30 @@ impl MemoryContext {
     }
 }
 
+/// Strategy used to fuse full-text and vector search result ranks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FusionStrategy {
+    /// Reciprocal Rank Fusion, matching the current workspace default.
+    #[default]
+    Rrf,
+    /// Weighted rank-derived score fusion.
+    WeightedScore,
+}
+
 /// Search request passed to memory backends that expose search APIs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MemorySearchRequest {
     query: String,
     limit: usize,
+    pre_fusion_limit: usize,
     full_text: bool,
     vector: bool,
+    query_embedding: Option<Vec<f32>>,
+    fusion_strategy: FusionStrategy,
+    rrf_k: u32,
+    min_score: f32,
+    full_text_weight: f32,
+    vector_weight: f32,
 }
 
 impl MemorySearchRequest {
@@ -478,13 +546,25 @@ impl MemorySearchRequest {
         Ok(Self {
             query,
             limit: 20,
+            pre_fusion_limit: 50,
             full_text: true,
             vector: true,
+            query_embedding: None,
+            fusion_strategy: FusionStrategy::default(),
+            rrf_k: 60,
+            min_score: 0.0,
+            full_text_weight: 0.5,
+            vector_weight: 0.5,
         })
     }
 
     pub fn with_limit(mut self, limit: usize) -> Self {
         self.limit = limit.max(1);
+        self
+    }
+
+    pub fn with_pre_fusion_limit(mut self, limit: usize) -> Self {
+        self.pre_fusion_limit = limit.max(self.limit).max(1);
         self
     }
 
@@ -498,12 +578,52 @@ impl MemorySearchRequest {
         self
     }
 
+    pub fn with_query_embedding(mut self, embedding: Vec<f32>) -> Self {
+        self.query_embedding = Some(embedding);
+        self
+    }
+
+    pub fn with_fusion_strategy(mut self, strategy: FusionStrategy) -> Self {
+        self.fusion_strategy = strategy;
+        self
+    }
+
+    pub fn with_rrf_k(mut self, k: u32) -> Self {
+        self.rrf_k = k;
+        self
+    }
+
+    pub fn with_min_score(mut self, score: f32) -> Self {
+        if score.is_finite() {
+            self.min_score = score.clamp(0.0, 1.0);
+        }
+        self
+    }
+
+    pub fn with_full_text_weight(mut self, weight: f32) -> Self {
+        if weight.is_finite() && weight >= 0.0 {
+            self.full_text_weight = weight;
+        }
+        self
+    }
+
+    pub fn with_vector_weight(mut self, weight: f32) -> Self {
+        if weight.is_finite() && weight >= 0.0 {
+            self.vector_weight = weight;
+        }
+        self
+    }
+
     pub fn query(&self) -> &str {
         &self.query
     }
 
     pub fn limit(&self) -> usize {
         self.limit
+    }
+
+    pub fn pre_fusion_limit(&self) -> usize {
+        self.pre_fusion_limit
     }
 
     pub fn full_text(&self) -> bool {
@@ -513,6 +633,30 @@ impl MemorySearchRequest {
     pub fn vector(&self) -> bool {
         self.vector
     }
+
+    pub fn query_embedding(&self) -> Option<&[f32]> {
+        self.query_embedding.as_deref()
+    }
+
+    pub fn fusion_strategy(&self) -> FusionStrategy {
+        self.fusion_strategy
+    }
+
+    pub fn rrf_k(&self) -> u32 {
+        self.rrf_k
+    }
+
+    pub fn min_score(&self) -> f32 {
+        self.min_score
+    }
+
+    pub fn full_text_weight(&self) -> f32 {
+        self.full_text_weight
+    }
+
+    pub fn vector_weight(&self) -> f32 {
+        self.vector_weight
+    }
 }
 
 /// Search result returned by memory backends that expose search APIs.
@@ -521,6 +665,22 @@ pub struct MemorySearchResult {
     pub path: MemoryDocumentPath,
     pub score: f32,
     pub snippet: String,
+    pub full_text_rank: Option<u32>,
+    pub vector_rank: Option<u32>,
+}
+
+impl MemorySearchResult {
+    pub fn from_full_text(&self) -> bool {
+        self.full_text_rank.is_some()
+    }
+
+    pub fn from_vector(&self) -> bool {
+        self.vector_rank.is_some()
+    }
+
+    pub fn is_hybrid(&self) -> bool {
+        self.full_text_rank.is_some() && self.vector_rank.is_some()
+    }
 }
 
 /// Pluggable memory backend contract.
@@ -730,6 +890,7 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
 pub struct RepositoryMemoryBackend<R> {
     repository: Arc<R>,
     indexer: Option<Arc<dyn MemoryDocumentIndexer>>,
+    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     capabilities: MemoryBackendCapabilities,
 }
 
@@ -741,6 +902,7 @@ where
         Self {
             repository,
             indexer: None,
+            embedding_provider: None,
             capabilities: MemoryBackendCapabilities {
                 file_documents: true,
                 metadata: true,
@@ -755,6 +917,14 @@ where
         I: MemoryDocumentIndexer + 'static,
     {
         self.indexer = Some(indexer);
+        self
+    }
+
+    pub fn with_embedding_provider<P>(mut self, provider: Arc<P>) -> Self
+    where
+        P: EmbeddingProvider + 'static,
+    {
+        self.embedding_provider = Some(provider);
         self
     }
 
@@ -824,13 +994,54 @@ where
         context: &MemoryContext,
         request: MemorySearchRequest,
     ) -> Result<Vec<MemorySearchResult>, FilesystemError> {
-        if !self.capabilities.full_text_search && !self.capabilities.vector_search {
+        if (request.full_text() || request.vector())
+            && !self.capabilities.full_text_search
+            && !self.capabilities.vector_search
+        {
             return Err(memory_backend_unsupported(
                 context.scope(),
                 FilesystemOperation::ReadFile,
                 "memory backend does not support search",
             ));
         }
+        if request.full_text() && !self.capabilities.full_text_search {
+            return Err(memory_backend_unsupported(
+                context.scope(),
+                FilesystemOperation::ReadFile,
+                "memory backend does not support full-text search",
+            ));
+        }
+        if request.vector()
+            && !self.capabilities.vector_search
+            && (request.query_embedding().is_some() || !request.full_text())
+        {
+            return Err(memory_backend_unsupported(
+                context.scope(),
+                FilesystemOperation::ReadFile,
+                "memory backend does not support vector search",
+            ));
+        }
+        if !request.full_text()
+            && (!request.vector()
+                || (request.query_embedding().is_none() && self.embedding_provider.is_none()))
+        {
+            return Err(memory_backend_unsupported(
+                context.scope(),
+                FilesystemOperation::ReadFile,
+                "memory backend does not support search",
+            ));
+        }
+
+        let mut request = request;
+        if request.vector()
+            && self.capabilities.vector_search
+            && request.query_embedding().is_none()
+            && let Some(provider) = &self.embedding_provider
+        {
+            let embedding = embed_text(provider.as_ref(), context.scope(), request.query()).await?;
+            request = request.with_query_embedding(embedding);
+        }
+
         self.repository
             .search_documents(context.scope(), &request)
             .await
@@ -950,10 +1161,241 @@ pub fn content_sha256(content: &str) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
+async fn build_chunk_writes(
+    path: &MemoryDocumentPath,
+    chunk_texts: Vec<String>,
+    embedding_provider: Option<&dyn EmbeddingProvider>,
+) -> Result<Vec<MemoryChunkWrite>, FilesystemError> {
+    let Some(provider) = embedding_provider else {
+        return Ok(chunk_texts
+            .into_iter()
+            .map(|content| MemoryChunkWrite {
+                content,
+                embedding: None,
+            })
+            .collect());
+    };
+    let embeddings = provider.embed_batch(&chunk_texts).await.map_err(|error| {
+        embedding_filesystem_error(
+            path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+            FilesystemOperation::WriteFile,
+            error,
+        )
+    })?;
+    if embeddings.len() != chunk_texts.len() {
+        return Err(memory_error(
+            path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+            FilesystemOperation::WriteFile,
+            format!(
+                "embedding provider returned {} embeddings for {} chunks",
+                embeddings.len(),
+                chunk_texts.len()
+            ),
+        ));
+    }
+    let expected_dimension = provider.dimension();
+    chunk_texts
+        .into_iter()
+        .zip(embeddings.into_iter())
+        .map(|(content, embedding)| {
+            validate_embedding_dimension(expected_dimension, embedding.len()).map_err(|error| {
+                embedding_filesystem_error(
+                    path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+                    FilesystemOperation::WriteFile,
+                    error,
+                )
+            })?;
+            Ok(MemoryChunkWrite {
+                content,
+                embedding: Some(embedding),
+            })
+        })
+        .collect()
+}
+
+async fn embed_text(
+    provider: &dyn EmbeddingProvider,
+    scope: &MemoryDocumentScope,
+    text: &str,
+) -> Result<Vec<f32>, FilesystemError> {
+    let embedding = provider.embed(text).await.map_err(|error| {
+        embedding_filesystem_error(
+            scope
+                .virtual_prefix()
+                .unwrap_or_else(|_| valid_memory_path()),
+            FilesystemOperation::ReadFile,
+            error,
+        )
+    })?;
+    validate_embedding_dimension(provider.dimension(), embedding.len()).map_err(|error| {
+        embedding_filesystem_error(
+            scope
+                .virtual_prefix()
+                .unwrap_or_else(|_| valid_memory_path()),
+            FilesystemOperation::ReadFile,
+            error,
+        )
+    })?;
+    Ok(embedding)
+}
+
+fn validate_embedding_dimension(expected: usize, actual: usize) -> Result<(), EmbeddingError> {
+    if expected == 0 || actual != expected {
+        Err(EmbeddingError::InvalidVector { expected, actual })
+    } else {
+        Ok(())
+    }
+}
+
+fn embedding_filesystem_error(
+    path: VirtualPath,
+    operation: FilesystemOperation,
+    error: EmbeddingError,
+) -> FilesystemError {
+    memory_error(path, operation, error.to_string())
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+#[derive(Debug, Clone)]
+struct RankedMemorySearchResult {
+    chunk_key: String,
+    path: MemoryDocumentPath,
+    snippet: String,
+    rank: u32,
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn fuse_memory_search_results(
+    full_text_results: Vec<RankedMemorySearchResult>,
+    vector_results: Vec<RankedMemorySearchResult>,
+    request: &MemorySearchRequest,
+) -> Vec<MemorySearchResult> {
+    #[derive(Debug)]
+    struct ResultAccumulator {
+        path: MemoryDocumentPath,
+        snippet: String,
+        score: f32,
+        full_text_rank: Option<u32>,
+        vector_rank: Option<u32>,
+    }
+
+    let mut results = HashMap::<String, ResultAccumulator>::new();
+    for result in full_text_results {
+        let score = match request.fusion_strategy() {
+            FusionStrategy::Rrf => 1.0 / (request.rrf_k() as f32 + result.rank as f32),
+            FusionStrategy::WeightedScore => request.full_text_weight() / result.rank as f32,
+        };
+        results
+            .entry(result.chunk_key)
+            .and_modify(|existing| {
+                existing.score += score;
+                existing.full_text_rank = Some(result.rank);
+            })
+            .or_insert(ResultAccumulator {
+                path: result.path,
+                snippet: result.snippet,
+                score,
+                full_text_rank: Some(result.rank),
+                vector_rank: None,
+            });
+    }
+    for result in vector_results {
+        let score = match request.fusion_strategy() {
+            FusionStrategy::Rrf => 1.0 / (request.rrf_k() as f32 + result.rank as f32),
+            FusionStrategy::WeightedScore => request.vector_weight() / result.rank as f32,
+        };
+        results
+            .entry(result.chunk_key)
+            .and_modify(|existing| {
+                existing.score += score;
+                existing.vector_rank = Some(result.rank);
+            })
+            .or_insert(ResultAccumulator {
+                path: result.path,
+                snippet: result.snippet,
+                score,
+                full_text_rank: None,
+                vector_rank: Some(result.rank),
+            });
+    }
+
+    let mut fused = results
+        .into_values()
+        .map(|result| MemorySearchResult {
+            path: result.path,
+            score: result.score,
+            snippet: result.snippet,
+            full_text_rank: result.full_text_rank,
+            vector_rank: result.vector_rank,
+        })
+        .collect::<Vec<_>>();
+    if let Some(max_score) = fused.iter().map(|result| result.score).reduce(f32::max)
+        && max_score > 0.0
+    {
+        for result in &mut fused {
+            result.score /= max_score;
+        }
+    }
+    if request.min_score() > 0.0 {
+        fused.retain(|result| result.score >= request.min_score());
+    }
+    fused.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.path.relative_path().cmp(right.path.relative_path()))
+    });
+    fused.truncate(request.limit());
+    fused
+}
+
+#[cfg(feature = "libsql")]
+fn encode_embedding_blob(embedding: &[f32]) -> Vec<u8> {
+    embedding
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
+}
+
+#[cfg(feature = "libsql")]
+fn decode_embedding_blob(bytes: &[u8]) -> Option<Vec<f32>> {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(std::mem::size_of::<f32>()) {
+        return None;
+    }
+    Some(
+        bytes
+            .chunks_exact(std::mem::size_of::<f32>())
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect(),
+    )
+}
+
+#[cfg(feature = "libsql")]
+fn cosine_similarity(left: &[f32], right: &[f32]) -> Option<f32> {
+    if left.len() != right.len() || left.is_empty() {
+        return None;
+    }
+    let mut dot = 0.0;
+    let mut left_norm = 0.0;
+    let mut right_norm = 0.0;
+    for (left, right) in left.iter().zip(right.iter()) {
+        dot += left * right;
+        left_norm += left * left;
+        right_norm += right * right;
+    }
+    if left_norm <= 0.0 || right_norm <= 0.0 {
+        return None;
+    }
+    let score = dot / (left_norm.sqrt() * right_norm.sqrt());
+    if score.is_finite() { Some(score) } else { None }
+}
+
 /// Memory document indexer that chunks documents and updates DB-backed chunk rows.
 pub struct ChunkingMemoryDocumentIndexer<R> {
     repository: Arc<R>,
     chunk_config: ChunkConfig,
+    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
 }
 
 impl<R> ChunkingMemoryDocumentIndexer<R>
@@ -964,11 +1406,20 @@ where
         Self {
             repository,
             chunk_config: ChunkConfig::default(),
+            embedding_provider: None,
         }
     }
 
     pub fn with_chunk_config(mut self, chunk_config: ChunkConfig) -> Self {
         self.chunk_config = chunk_config;
+        self
+    }
+
+    pub fn with_embedding_provider<P>(mut self, provider: Arc<P>) -> Self
+    where
+        P: EmbeddingProvider + 'static,
+    {
+        self.embedding_provider = Some(provider);
         self
     }
 }
@@ -994,13 +1445,9 @@ where
             return self.repository.delete_document_chunks(path).await;
         }
         let content_hash_at_read = content_sha256(content);
-        let chunks = chunk_document(content, self.chunk_config.clone())
-            .into_iter()
-            .map(|content| MemoryChunkWrite {
-                content,
-                embedding: None,
-            })
-            .collect::<Vec<_>>();
+        let chunk_texts = chunk_document(content, self.chunk_config.clone());
+        let chunks =
+            build_chunk_writes(path, chunk_texts, self.embedding_provider.as_deref()).await?;
         if chunks.is_empty() {
             self.repository.delete_document_chunks(path).await
         } else {
@@ -1664,75 +2111,253 @@ impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
         scope: &MemoryDocumentScope,
         request: &MemorySearchRequest,
     ) -> Result<Vec<MemorySearchResult>, FilesystemError> {
-        if !request.full_text() {
-            return Ok(Vec::new());
-        }
-        let Some(fts_query) = escape_fts5_query(request.query()) else {
-            return Ok(Vec::new());
-        };
         let virtual_path = scope
             .virtual_prefix()
             .unwrap_or_else(|_| valid_memory_path());
         let conn = self
             .connect(virtual_path.clone(), FilesystemOperation::ReadFile)
             .await?;
-        let owner_key = scoped_memory_owner_key(scope);
-        let mut rows = conn
-            .query(
-                r#"
-                SELECT d.path, c.content
-                FROM memory_chunks_fts fts
-                JOIN memory_chunks c ON c._rowid = fts.rowid
-                JOIN memory_documents d ON d.id = c.document_id
-                WHERE d.user_id = ?1 AND d.agent_id IS NULL
-                  AND memory_chunks_fts MATCH ?2
-                ORDER BY rank
-                LIMIT ?3
-                "#,
-                libsql::params![owner_key, fts_query, request.limit() as i64],
-            )
-            .await
-            .map_err(|error| {
-                memory_error(
-                    virtual_path.clone(),
-                    FilesystemOperation::ReadFile,
-                    error.to_string(),
-                )
-            })?;
-        let mut results = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|error| {
+        let full_text_results = if request.full_text() {
+            libsql_full_text_search_ranked(&conn, scope, request, &virtual_path).await?
+        } else {
+            Vec::new()
+        };
+        let vector_results = if request.vector() {
+            if let Some(embedding) = request.query_embedding() {
+                libsql_vector_search_ranked(&conn, scope, request, embedding, &virtual_path).await?
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+        Ok(fuse_memory_search_results(
+            full_text_results,
+            vector_results,
+            request,
+        ))
+    }
+}
+
+#[cfg(feature = "libsql")]
+async fn libsql_full_text_search_ranked(
+    conn: &libsql::Connection,
+    scope: &MemoryDocumentScope,
+    request: &MemorySearchRequest,
+    virtual_path: &VirtualPath,
+) -> Result<Vec<RankedMemorySearchResult>, FilesystemError> {
+    let Some(fts_query) = escape_fts5_query(request.query()) else {
+        return Ok(Vec::new());
+    };
+    let owner_key = scoped_memory_owner_key(scope);
+    let mut rows = if let Some(project_id) = scope.project_id() {
+        conn.query(
+            r#"
+            SELECT c.id, d.path, c.content
+            FROM memory_chunks_fts fts
+            JOIN memory_chunks c ON c._rowid = fts.rowid
+            JOIN memory_documents d ON d.id = c.document_id
+            WHERE d.user_id = ?1 AND d.agent_id IS NULL
+              AND d.path LIKE ?2
+              AND memory_chunks_fts MATCH ?3
+            ORDER BY rank
+            LIMIT ?4
+            "#,
+            libsql::params![
+                owner_key,
+                format!("projects/{project_id}/%"),
+                fts_query,
+                request.pre_fusion_limit() as i64
+            ],
+        )
+        .await
+    } else {
+        conn.query(
+            r#"
+            SELECT c.id, d.path, c.content
+            FROM memory_chunks_fts fts
+            JOIN memory_chunks c ON c._rowid = fts.rowid
+            JOIN memory_documents d ON d.id = c.document_id
+            WHERE d.user_id = ?1 AND d.agent_id IS NULL
+              AND d.path NOT LIKE 'projects/%'
+              AND memory_chunks_fts MATCH ?2
+            ORDER BY rank
+            LIMIT ?3
+            "#,
+            libsql::params![owner_key, fts_query, request.pre_fusion_limit() as i64],
+        )
+        .await
+    }
+    .map_err(|error| {
+        memory_error(
+            virtual_path.clone(),
+            FilesystemOperation::ReadFile,
+            error.to_string(),
+        )
+    })?;
+
+    let mut results = Vec::new();
+    while let Some(row) = rows.next().await.map_err(|error| {
+        memory_error(
+            virtual_path.clone(),
+            FilesystemOperation::ReadFile,
+            error.to_string(),
+        )
+    })? {
+        let chunk_key: String = row.get(0).map_err(|error| {
             memory_error(
                 virtual_path.clone(),
                 FilesystemOperation::ReadFile,
                 error.to_string(),
             )
-        })? {
-            let db_path: String = row.get(0).map_err(|error| {
-                memory_error(
-                    virtual_path.clone(),
-                    FilesystemOperation::ReadFile,
-                    error.to_string(),
-                )
-            })?;
-            let Some(path) = memory_document_from_db_path(scope, &db_path) else {
-                continue;
-            };
-            let snippet: String = row.get(1).map_err(|error| {
-                memory_error(
-                    virtual_path.clone(),
-                    FilesystemOperation::ReadFile,
-                    error.to_string(),
-                )
-            })?;
-            let score = 1.0 / (results.len() as f32 + 1.0);
-            results.push(MemorySearchResult {
-                path,
-                score,
-                snippet,
-            });
-        }
-        Ok(results)
+        })?;
+        let db_path: String = row.get(1).map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::ReadFile,
+                error.to_string(),
+            )
+        })?;
+        let Some(path) = memory_document_from_db_path(scope, &db_path) else {
+            continue;
+        };
+        let snippet: String = row.get(2).map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::ReadFile,
+                error.to_string(),
+            )
+        })?;
+        results.push(RankedMemorySearchResult {
+            chunk_key,
+            path,
+            snippet,
+            rank: results.len() as u32 + 1,
+        });
     }
+    Ok(results)
+}
+
+#[cfg(feature = "libsql")]
+async fn libsql_vector_search_ranked(
+    conn: &libsql::Connection,
+    scope: &MemoryDocumentScope,
+    request: &MemorySearchRequest,
+    query_embedding: &[f32],
+    virtual_path: &VirtualPath,
+) -> Result<Vec<RankedMemorySearchResult>, FilesystemError> {
+    let owner_key = scoped_memory_owner_key(scope);
+    let mut rows = if let Some(project_id) = scope.project_id() {
+        conn.query(
+            r#"
+            SELECT c.id, d.path, c.content, c.embedding
+            FROM memory_chunks c
+            JOIN memory_documents d ON d.id = c.document_id
+            WHERE d.user_id = ?1 AND d.agent_id IS NULL
+              AND d.path LIKE ?2
+              AND c.embedding IS NOT NULL
+            "#,
+            libsql::params![owner_key, format!("projects/{project_id}/%")],
+        )
+        .await
+    } else {
+        conn.query(
+            r#"
+            SELECT c.id, d.path, c.content, c.embedding
+            FROM memory_chunks c
+            JOIN memory_documents d ON d.id = c.document_id
+            WHERE d.user_id = ?1 AND d.agent_id IS NULL
+              AND d.path NOT LIKE 'projects/%'
+              AND c.embedding IS NOT NULL
+            "#,
+            libsql::params![owner_key],
+        )
+        .await
+    }
+    .map_err(|error| {
+        memory_error(
+            virtual_path.clone(),
+            FilesystemOperation::ReadFile,
+            error.to_string(),
+        )
+    })?;
+
+    let mut scored = Vec::<(f32, RankedMemorySearchResult)>::new();
+    while let Some(row) = rows.next().await.map_err(|error| {
+        memory_error(
+            virtual_path.clone(),
+            FilesystemOperation::ReadFile,
+            error.to_string(),
+        )
+    })? {
+        let chunk_key: String = row.get(0).map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::ReadFile,
+                error.to_string(),
+            )
+        })?;
+        let db_path: String = row.get(1).map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::ReadFile,
+                error.to_string(),
+            )
+        })?;
+        let Some(path) = memory_document_from_db_path(scope, &db_path) else {
+            continue;
+        };
+        let snippet: String = row.get(2).map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::ReadFile,
+                error.to_string(),
+            )
+        })?;
+        let embedding_blob: Vec<u8> = row.get(3).map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::ReadFile,
+                error.to_string(),
+            )
+        })?;
+        let Some(embedding) = decode_embedding_blob(&embedding_blob) else {
+            continue;
+        };
+        let Some(score) = cosine_similarity(query_embedding, &embedding) else {
+            continue;
+        };
+        scored.push((
+            score,
+            RankedMemorySearchResult {
+                chunk_key,
+                path,
+                snippet,
+                rank: 0,
+            },
+        ));
+    }
+    scored.sort_by(|left, right| {
+        right
+            .0
+            .partial_cmp(&left.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                left.1
+                    .path
+                    .relative_path()
+                    .cmp(right.1.path.relative_path())
+            })
+    });
+    scored.truncate(request.pre_fusion_limit());
+    Ok(scored
+        .into_iter()
+        .enumerate()
+        .map(|(index, (_score, mut result))| {
+            result.rank = index as u32 + 1;
+            result
+        })
+        .collect())
 }
 
 #[cfg(feature = "libsql")]
@@ -1780,14 +2405,10 @@ impl MemoryDocumentIndexRepository for LibSqlMemoryDocumentRepository {
             )
         })?;
         for (index, chunk) in chunks.iter().enumerate() {
-            let embedding_blob = chunk.embedding.as_ref().map(|embedding| {
-                libsql::Value::Blob(
-                    embedding
-                        .iter()
-                        .flat_map(|value| value.to_le_bytes())
-                        .collect(),
-                )
-            });
+            let embedding_blob = chunk
+                .embedding
+                .as_ref()
+                .map(|embedding| libsql::Value::Blob(encode_embedding_blob(embedding)));
             tx.execute(
                 r#"
                 INSERT INTO memory_chunks (id, document_id, chunk_index, content, embedding)
@@ -2347,46 +2968,170 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
         scope: &MemoryDocumentScope,
         request: &MemorySearchRequest,
     ) -> Result<Vec<MemorySearchResult>, FilesystemError> {
-        if !request.full_text() {
-            return Ok(Vec::new());
-        }
         let virtual_path = scope
             .virtual_prefix()
             .unwrap_or_else(|_| valid_memory_path());
         let client = self
             .client(virtual_path.clone(), FilesystemOperation::ReadFile)
             .await?;
-        let owner_key = scoped_memory_owner_key(scope);
-        let rows = client
+        let full_text_results = if request.full_text() {
+            postgres_full_text_search_ranked(&client, scope, request, &virtual_path).await?
+        } else {
+            Vec::new()
+        };
+        let vector_results = if request.vector() {
+            if let Some(embedding) = request.query_embedding() {
+                postgres_vector_search_ranked(&client, scope, request, embedding, &virtual_path)
+                    .await?
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+        Ok(fuse_memory_search_results(
+            full_text_results,
+            vector_results,
+            request,
+        ))
+    }
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_full_text_search_ranked(
+    client: &deadpool_postgres::Object,
+    scope: &MemoryDocumentScope,
+    request: &MemorySearchRequest,
+    virtual_path: &VirtualPath,
+) -> Result<Vec<RankedMemorySearchResult>, FilesystemError> {
+    let owner_key = scoped_memory_owner_key(scope);
+    let limit = request.pre_fusion_limit() as i64;
+    let rows = if let Some(project_id) = scope.project_id() {
+        client
             .query(
                 r#"
-                SELECT d.path, c.content, ts_rank_cd(c.content_tsv, plainto_tsquery('english', $2)) as rank
+                SELECT c.id, d.path, c.content, ts_rank_cd(c.content_tsv, plainto_tsquery('english', $2)) AS rank
                 FROM memory_chunks c
                 JOIN memory_documents d ON d.id = c.document_id
                 WHERE d.user_id = $1 AND d.agent_id IS NULL
+                  AND d.path LIKE $3
+                  AND c.content_tsv @@ plainto_tsquery('english', $2)
+                ORDER BY rank DESC
+                LIMIT $4
+                "#,
+                &[&owner_key, &request.query(), &format!("projects/{project_id}/%"), &limit],
+            )
+            .await
+    } else {
+        client
+            .query(
+                r#"
+                SELECT c.id, d.path, c.content, ts_rank_cd(c.content_tsv, plainto_tsquery('english', $2)) AS rank
+                FROM memory_chunks c
+                JOIN memory_documents d ON d.id = c.document_id
+                WHERE d.user_id = $1 AND d.agent_id IS NULL
+                  AND d.path NOT LIKE 'projects/%'
                   AND c.content_tsv @@ plainto_tsquery('english', $2)
                 ORDER BY rank DESC
                 LIMIT $3
                 "#,
-                &[&owner_key, &request.query(), &(request.limit() as i64)],
+                &[&owner_key, &request.query(), &limit],
             )
             .await
-            .map_err(|error| memory_error(virtual_path, FilesystemOperation::ReadFile, error.to_string()))?;
-        Ok(rows
-            .into_iter()
-            .filter_map(|row| {
-                let db_path: String = row.get("path");
-                let path = memory_document_from_db_path(scope, &db_path)?;
-                let snippet: String = row.get("content");
-                let score: f32 = row.try_get::<_, f32>("rank").unwrap_or(0.0);
-                Some(MemorySearchResult {
-                    path,
-                    score,
-                    snippet,
-                })
-            })
-            .collect())
     }
+    .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::ReadFile, error.to_string()))?;
+
+    Ok(rows
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            let chunk_id: uuid::Uuid = row.get("id");
+            let db_path: String = row.get("path");
+            let path = memory_document_from_db_path(scope, &db_path)?;
+            let snippet: String = row.get("content");
+            Some(RankedMemorySearchResult {
+                chunk_key: chunk_id.to_string(),
+                path,
+                snippet,
+                rank: index as u32 + 1,
+            })
+        })
+        .collect())
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_vector_search_ranked(
+    client: &deadpool_postgres::Object,
+    scope: &MemoryDocumentScope,
+    request: &MemorySearchRequest,
+    query_embedding: &[f32],
+    virtual_path: &VirtualPath,
+) -> Result<Vec<RankedMemorySearchResult>, FilesystemError> {
+    let owner_key = scoped_memory_owner_key(scope);
+    let limit = request.pre_fusion_limit() as i64;
+    let query_vector = pgvector::Vector::from(query_embedding.to_vec());
+    let rows = if let Some(project_id) = scope.project_id() {
+        client
+            .query(
+                r#"
+                SELECT c.id, d.path, c.content
+                FROM memory_chunks c
+                JOIN memory_documents d ON d.id = c.document_id
+                WHERE d.user_id = $1 AND d.agent_id IS NULL
+                  AND d.path LIKE $2
+                  AND c.embedding IS NOT NULL
+                ORDER BY c.embedding <=> $3
+                LIMIT $4
+                "#,
+                &[
+                    &owner_key,
+                    &format!("projects/{project_id}/%"),
+                    &query_vector,
+                    &limit,
+                ],
+            )
+            .await
+    } else {
+        client
+            .query(
+                r#"
+                SELECT c.id, d.path, c.content
+                FROM memory_chunks c
+                JOIN memory_documents d ON d.id = c.document_id
+                WHERE d.user_id = $1 AND d.agent_id IS NULL
+                  AND d.path NOT LIKE 'projects/%'
+                  AND c.embedding IS NOT NULL
+                ORDER BY c.embedding <=> $2
+                LIMIT $3
+                "#,
+                &[&owner_key, &query_vector, &limit],
+            )
+            .await
+    }
+    .map_err(|error| {
+        memory_error(
+            virtual_path.clone(),
+            FilesystemOperation::ReadFile,
+            error.to_string(),
+        )
+    })?;
+
+    Ok(rows
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            let chunk_id: uuid::Uuid = row.get("id");
+            let db_path: String = row.get("path");
+            let path = memory_document_from_db_path(scope, &db_path)?;
+            let snippet: String = row.get("content");
+            Some(RankedMemorySearchResult {
+                chunk_key: chunk_id.to_string(),
+                path,
+                snippet,
+                rank: index as u32 + 1,
+            })
+        })
+        .collect())
 }
 
 #[cfg(feature = "postgres")]
