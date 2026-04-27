@@ -64,6 +64,24 @@ along with:
 The runner will seed the token into the clean DB, then backdate its expiry so
 the first Google-backed probe has to refresh.
 
+### Browser-consent Google challenge bypass
+
+When running `--mode browser` against Google, Google's risk engine will often
+interrupt the Playwright login with a "Verify it's you" challenge that
+`handle_google_popup` cannot solve. Bootstrap a `storage_state.json` once, and
+the canary will skip the login (and the challenge) on subsequent runs:
+
+```bash
+python3 scripts/auth_live_canary/bootstrap_google_storage_state.py
+# log into the dedicated test Google account in the window that opens,
+# solve any challenges, then press Enter
+
+export AUTH_BROWSER_GOOGLE_STORAGE_STATE_PATH=~/.ironclaw/auth-canary/google_storage_state.json
+unset AUTH_BROWSER_GOOGLE_USERNAME AUTH_BROWSER_GOOGLE_PASSWORD
+```
+
+Re-run the bootstrap if browser-mode failures suggest the session has decayed.
+
 ## Usage
 
 From the repo root:
