@@ -4146,6 +4146,15 @@ impl TraceUploadClaimContext {
             allowed_uses: Vec::new(),
         }
     }
+
+    fn for_submission_id(submission_id: Uuid) -> Self {
+        Self {
+            trace_id: None,
+            submission_id: Some(submission_id),
+            consent_scopes: Vec::new(),
+            allowed_uses: Vec::new(),
+        }
+    }
 }
 
 #[async_trait]
@@ -5096,6 +5105,20 @@ pub async fn fetch_trace_submission_statuses(
     .await
 }
 
+pub async fn fetch_trace_submission_statuses_with_policy(
+    status_endpoint: &str,
+    policy: &StandingTraceContributionPolicy,
+    submission_ids: &[Uuid],
+) -> anyhow::Result<Vec<TraceSubmissionStatusUpdate>> {
+    fetch_trace_submission_statuses_with_credential_provider(
+        status_endpoint,
+        policy,
+        &DefaultTraceUploadCredentialProvider,
+        submission_ids,
+    )
+    .await
+}
+
 async fn fetch_trace_submission_statuses_with_credential_provider(
     status_endpoint: &str,
     policy: &StandingTraceContributionPolicy,
@@ -5435,29 +5458,116 @@ pub async fn revoke_trace_submission_for_scope(
     endpoint: Option<&str>,
     bearer_token_env: &str,
 ) -> anyhow::Result<()> {
+    let provider = StaticEnvTraceUploadCredentialProvider { bearer_token_env };
+    let policy = StandingTraceContributionPolicy {
+        bearer_token_env: bearer_token_env.to_string(),
+        ..Default::default()
+    };
+    revoke_trace_submission_for_scope_with_credential_provider(
+        scope,
+        submission_id,
+        endpoint,
+        &policy,
+        &provider,
+    )
+    .await
+}
+
+pub async fn revoke_trace_submission_for_scope_with_policy(
+    scope: Option<&str>,
+    submission_id: Uuid,
+    endpoint: Option<&str>,
+    policy: &StandingTraceContributionPolicy,
+) -> anyhow::Result<()> {
+    revoke_trace_submission_for_scope_with_credential_provider(
+        scope,
+        submission_id,
+        endpoint,
+        policy,
+        &DefaultTraceUploadCredentialProvider,
+    )
+    .await
+}
+
+async fn revoke_trace_submission_for_scope_with_credential_provider(
+    scope: Option<&str>,
+    submission_id: Uuid,
+    endpoint: Option<&str>,
+    policy: &StandingTraceContributionPolicy,
+    provider: &dyn TraceUploadCredentialProvider,
+) -> anyhow::Result<()> {
     if let Some(endpoint) = endpoint {
-        let token = std::env::var(bearer_token_env).map_err(|_| {
-            anyhow::anyhow!(
-                "{} is not set; refusing to call revocation API without credentials",
-                bearer_token_env
-            )
-        })?;
-        let response = reqwest::Client::new()
-            .delete(endpoint)
-            .bearer_auth(token)
-            .json(&serde_json::json!({ "submission_id": submission_id }))
-            .send()
-            .await
-            .map_err(|e| anyhow::Error::new(e).context("trace revocation request failed"))?;
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        if !status.is_success() {
-            anyhow::bail!("trace revocation rejected by {}: {}", status, body);
-        }
+        revoke_trace_submission_at_endpoint_with_credential_provider(
+            submission_id,
+            endpoint,
+            policy,
+            provider,
+        )
+        .await?;
     }
 
     let _guard = lock_trace_scope_for_mutation(scope).await;
     mark_local_trace_revoked_for_scope_unlocked(scope, submission_id)
+}
+
+pub async fn revoke_trace_submission_at_endpoint_with_policy(
+    submission_id: Uuid,
+    endpoint: &str,
+    policy: &StandingTraceContributionPolicy,
+) -> anyhow::Result<()> {
+    revoke_trace_submission_at_endpoint_with_credential_provider(
+        submission_id,
+        endpoint,
+        policy,
+        &DefaultTraceUploadCredentialProvider,
+    )
+    .await
+}
+
+async fn revoke_trace_submission_at_endpoint_with_credential_provider(
+    submission_id: Uuid,
+    endpoint: &str,
+    policy: &StandingTraceContributionPolicy,
+    provider: &dyn TraceUploadCredentialProvider,
+) -> anyhow::Result<()> {
+    let context = TraceUploadClaimContext::for_submission_id(submission_id);
+    let token = provider.bearer_token(policy, &context, false).await?;
+    match revoke_trace_submission_at_endpoint_with_token(submission_id, endpoint, &token).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.auth_rejection() => {
+            let refreshed = provider.bearer_token(policy, &context, true).await?;
+            revoke_trace_submission_at_endpoint_with_token(submission_id, endpoint, &refreshed)
+                .await
+                .map_err(anyhow::Error::from)
+        }
+        Err(error) => Err(anyhow::Error::from(error)),
+    }
+}
+
+async fn revoke_trace_submission_at_endpoint_with_token(
+    submission_id: Uuid,
+    endpoint: &str,
+    token: &str,
+) -> Result<(), TraceRemoteRequestFailure> {
+    let response = reqwest::Client::new()
+        .delete(endpoint)
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "submission_id": submission_id }))
+        .send()
+        .await
+        .map_err(|e| TraceRemoteRequestFailure {
+            status: None,
+            message: format!("trace revocation request failed: {e}"),
+        })?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(TraceRemoteRequestFailure {
+            status: Some(status),
+            message: format!("trace revocation rejected by {status}: {body}"),
+        });
+    }
+    Ok(())
 }
 
 pub fn trace_autonomous_eligibility(
@@ -8724,6 +8834,99 @@ mod tests {
                 "Bearer fresh-upload-claim".to_string()
             ]
         );
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[tokio::test]
+    async fn revoke_trace_submission_uses_refreshed_upload_claim() {
+        let scope = format!("trace-revoke-refresh-test-{}", Uuid::new_v4());
+        let submission_id = Uuid::new_v4();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen_for_revoke = seen.clone();
+        let app = axum::Router::new().route(
+            "/v1/traces/revoke",
+            axum::routing::delete(move |headers: axum::http::HeaderMap| {
+                let seen = seen_for_revoke.clone();
+                async move {
+                    let authorization = headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("<missing>")
+                        .to_string();
+                    seen.lock().expect("seen lock").push(authorization.clone());
+                    if authorization == "Bearer stale-upload-claim" {
+                        return (
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            axum::Json(serde_json::json!({"error": "expired"})),
+                        );
+                    }
+                    (
+                        axum::http::StatusCode::NO_CONTENT,
+                        axum::Json(serde_json::json!({})),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock trace commons listener binds");
+        let endpoint = format!(
+            "http://{}/v1/traces/revoke",
+            listener.local_addr().expect("local addr")
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        write_local_trace_records_for_scope(
+            Some(&scope),
+            &[LocalTraceSubmissionRecord {
+                submission_id,
+                trace_id: Uuid::new_v4(),
+                endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                status: LocalTraceSubmissionStatus::Submitted,
+                server_status: Some("accepted".to_string()),
+                submitted_at: Some(Utc::now()),
+                revoked_at: None,
+                privacy_risk: "low".to_string(),
+                redaction_counts: BTreeMap::new(),
+                credit_points_pending: 1.0,
+                credit_points_final: None,
+                credit_explanation: Vec::new(),
+                credit_events: Vec::new(),
+                last_credit_notice_at: None,
+                credit_notice_state: TraceCreditNoticeState::default(),
+            }],
+        )
+        .expect("local record writes");
+
+        let provider =
+            RefreshingTestUploadCredentialProvider::new("stale-upload-claim", "fresh-upload-claim");
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            ingestion_endpoint: Some(endpoint.clone()),
+            ..Default::default()
+        };
+        revoke_trace_submission_for_scope_with_credential_provider(
+            Some(&scope),
+            submission_id,
+            Some(&endpoint),
+            &policy,
+            &provider,
+        )
+        .await
+        .expect("revoke retries with refreshed claim");
+
+        assert_eq!(
+            *seen.lock().expect("seen lock"),
+            vec![
+                "Bearer stale-upload-claim".to_string(),
+                "Bearer fresh-upload-claim".to_string()
+            ]
+        );
+        let records = read_local_trace_records_for_scope(Some(&scope)).expect("records read");
+        assert_eq!(records[0].status, LocalTraceSubmissionStatus::Revoked);
+        assert!(records[0].revoked_at.is_some());
 
         let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
     }

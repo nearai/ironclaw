@@ -25,7 +25,7 @@ use crate::trace_contribution::{
     mark_trace_credit_notice_due_for_scope, preflight_trace_contribution_policy,
     queue_trace_envelope_for_scope, queued_trace_envelope_paths_for_scope,
     read_local_trace_records_for_scope, read_trace_policy_for_scope,
-    read_trace_queue_holds_for_scope, revoke_trace_submission_for_scope,
+    read_trace_queue_holds_for_scope, revoke_trace_submission_for_scope_with_policy,
     snooze_trace_credit_notice_for_scope, sync_remote_trace_submission_records_for_scope,
     trace_credit_report, trace_credit_summary, trace_queue_diagnostics_for_scope,
     write_trace_policy_for_scope,
@@ -495,11 +495,11 @@ pub async fn traces_revoke_handler(
     } else {
         None
     };
-    revoke_trace_submission_for_scope(
+    revoke_trace_submission_for_scope_with_policy(
         Some(user.user_id.as_str()),
         submission_id,
         endpoint,
-        &policy.bearer_token_env,
+        &policy,
     )
     .await
     .map_err(internal_error)?;

@@ -18,12 +18,13 @@ use crate::trace_contribution::{
     StandingTraceContributionPolicy, TraceChannel, TraceContributionAcceptance,
     TraceContributionEnvelope, TraceCreditEvent, TraceCreditEventKind, TraceRedactor,
     TraceSubmissionReceipt, TraceSubmissionStatusUpdate, acknowledge_trace_credit_notice_for_scope,
-    estimate_initial_credit, fetch_trace_submission_statuses,
+    estimate_initial_credit, fetch_trace_submission_statuses_with_policy,
     flush_trace_contribution_queue_for_scope, mark_trace_credit_notice_due_for_scope,
     preflight_trace_contribution_policy, privacy_filter_adapter_from_env,
     read_local_trace_records_for_scope, read_trace_policy_for_scope,
-    snooze_trace_credit_notice_for_scope, submit_trace_envelope_to_endpoint_with_policy,
-    trace_credit_summary, trace_queue_diagnostics_for_scope, trace_submission_status_endpoint,
+    revoke_trace_submission_at_endpoint_with_policy, snooze_trace_credit_notice_for_scope,
+    submit_trace_envelope_to_endpoint_with_policy, trace_credit_summary,
+    trace_queue_diagnostics_for_scope, trace_submission_status_endpoint,
 };
 
 #[derive(Subcommand, Debug, Clone)]
@@ -2568,26 +2569,9 @@ async fn revoke_submission(
     bearer_token_env: &str,
 ) -> anyhow::Result<()> {
     if let Some(endpoint) = endpoint {
-        let token = std::env::var(bearer_token_env).map_err(|_| {
-            anyhow::anyhow!(
-                "{} is not set; refusing to call revocation API without credentials",
-                bearer_token_env
-            )
-        })?;
-
-        let client = reqwest::Client::new();
-        let response = client
-            .delete(endpoint)
-            .bearer_auth(token)
-            .json(&serde_json::json!({ "submission_id": submission_id }))
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("trace revocation request failed: {}", e))?;
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        if !status.is_success() {
-            anyhow::bail!("trace revocation rejected by {}: {}", status, body);
-        }
+        let mut policy = read_policy()?;
+        policy.bearer_token_env = bearer_token_env.to_string();
+        revoke_trace_submission_at_endpoint_with_policy(submission_id, endpoint, &policy).await?;
     }
 
     mark_local_revoked(submission_id)?;
@@ -4808,12 +4792,9 @@ async fn sync_cli_submission_records(
     }
 
     let status_endpoint = trace_submission_status_endpoint(endpoint)?;
-    let updates = fetch_trace_submission_statuses(
-        &status_endpoint,
-        &policy.bearer_token_env,
-        &submission_ids,
-    )
-    .await?;
+    let updates =
+        fetch_trace_submission_statuses_with_policy(&status_endpoint, policy, &submission_ids)
+            .await?;
     apply_cli_submission_status_updates(&updates)
 }
 
