@@ -2859,6 +2859,32 @@ async fn append_credit_event_handler(
             "benchmark, regression, training, and ranking utility credit require external_ref",
         ));
     }
+    let required_uses = delayed_credit_required_allowed_uses(body.event_type);
+    let tenant_policy = if required_uses.is_empty() {
+        None
+    } else {
+        tenant_utility_credit_policy_for_request(state.as_ref(), &tenant, required_uses).await?
+    };
+    if !required_uses.is_empty()
+        && !record_matches_utility_credit_policy_abac(
+            &submission,
+            &tenant,
+            tenant_policy.as_ref(),
+            required_uses,
+        )
+    {
+        tracing::warn!(
+            tenant_id = %tenant.tenant_id,
+            submission_id = %submission.submission_id,
+            event_type = ?body.event_type,
+            ?required_uses,
+            "Trace Commons tenant policy rejected delayed credit source"
+        );
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "trace delayed credit source is not allowed for this utility use",
+        ));
+    }
     let event = TraceCommonsCreditLedgerRecord {
         event_id: Uuid::new_v4(),
         tenant_id: tenant.tenant_id.clone(),
@@ -3039,6 +3065,20 @@ async fn utility_credit_handler(
         appended_count: counts.appended,
         skipped_existing_count: counts.skipped_existing,
     }))
+}
+
+fn delayed_credit_required_allowed_uses(
+    event_type: TraceCreditLedgerEventType,
+) -> &'static [TraceAllowedUse] {
+    match event_type {
+        TraceCreditLedgerEventType::BenchmarkConversion => &[TraceAllowedUse::BenchmarkGeneration],
+        TraceCreditLedgerEventType::RegressionCatch
+        | TraceCreditLedgerEventType::TrainingUtility
+        | TraceCreditLedgerEventType::RankingUtility => {
+            utility_credit_required_allowed_uses(event_type)
+        }
+        TraceCreditLedgerEventType::ReviewerBonus | TraceCreditLedgerEventType::AbusePenalty => &[],
+    }
 }
 
 fn utility_credit_required_allowed_uses(
@@ -19945,6 +19985,9 @@ mod tests {
         );
         let mut envelope = sample_envelope().await;
         make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+        envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
         let submission_id = envelope.submission_id;
 
         let _ = submit_trace_handler(
@@ -20316,6 +20359,9 @@ mod tests {
         );
         let mut envelope = sample_envelope().await;
         make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
         let submission_id = envelope.submission_id;
 
         let _ = submit_trace_handler(
@@ -30565,7 +30611,11 @@ mod tests {
     async fn reviewer_can_append_delayed_credit_event() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
-        let envelope = sample_envelope().await;
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::BenchmarkOnly];
+        envelope.trace_card.consent_scope = ConsentScope::BenchmarkOnly;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::BenchmarkGeneration];
         let submission_id = envelope.submission_id;
 
         let _ = submit_trace_handler(
@@ -30664,10 +30714,162 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manual_training_credit_rejects_source_without_model_training_use() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::DebuggingEvaluation];
+        envelope.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::Evaluation];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("evaluation-only submission succeeds");
+
+        let error = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.0,
+                reason: Some("manual training credit should be use-gated".to_string()),
+                external_ref: Some("training-job:evaluation-only".to_string()),
+            }),
+        )
+        .await
+        .expect_err("manual training credit requires model-training source use");
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+
+        let credit_events = read_all_credit_events(temp.path(), "tenant-a").expect("credit reads");
+        assert!(credit_events.iter().all(|event| {
+            event.submission_id != submission_id
+                || event.event_type != TraceCreditLedgerEventType::TrainingUtility
+        }));
+    }
+
+    #[tokio::test]
+    async fn manual_benchmark_credit_rejects_source_without_benchmark_generation_use() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::DebuggingEvaluation];
+        envelope.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::Evaluation];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("evaluation-only submission succeeds");
+
+        let error = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::BenchmarkConversion,
+                credit_points_delta: 1.0,
+                reason: Some("manual benchmark credit should be use-gated".to_string()),
+                external_ref: Some("benchmark:evaluation-only".to_string()),
+            }),
+        )
+        .await
+        .expect_err("manual benchmark credit requires benchmark-generation source use");
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+
+        let credit_events = read_all_credit_events(temp.path(), "tenant-a").expect("credit reads");
+        assert!(credit_events.iter().all(|event| {
+            event.submission_id != submission_id
+                || event.event_type != TraceCreditLedgerEventType::BenchmarkConversion
+        }));
+    }
+
+    #[tokio::test]
+    async fn signed_claim_reviewer_cannot_append_ranking_credit_outside_claim_scope() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let secret = "manual-delayed-credit-abac-secret";
+        let state =
+            test_state_with_signed_token_verifier(temp.path().to_path_buf(), secret, None, None);
+        let exp = (Utc::now() + Duration::minutes(5)).timestamp();
+        let contributor_token = signed_tenant_token(
+            secret,
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "contributor",
+                "sub": "ranking-contributor",
+                "allowed_consent_scopes": ["ranking_training"],
+                "allowed_uses": ["ranking_model_training"],
+                "exp": exp
+            }),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+        envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(&contributor_token),
+            Json(envelope),
+        )
+        .await
+        .expect("ranking-scoped source submission succeeds");
+
+        let reviewer_token = signed_tenant_token(
+            secret,
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "reviewer",
+                "sub": "model-only-reviewer",
+                "allowed_consent_scopes": ["ranking_training"],
+                "allowed_uses": ["model_training"],
+                "exp": exp
+            }),
+        );
+        let error = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers(&reviewer_token),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::RankingUtility,
+                credit_points_delta: 1.0,
+                reason: Some("ranking utility outside reviewer claim".to_string()),
+                external_ref: Some("ranker:denied-by-claim".to_string()),
+            }),
+        )
+        .await
+        .expect_err("signed reviewer claim cannot append ranking credit outside allowed use");
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+
+        let credit_events = read_all_credit_events(temp.path(), "tenant-a").expect("credit reads");
+        assert!(credit_events.iter().all(|event| {
+            event.submission_id != submission_id
+                || event.event_type != TraceCreditLedgerEventType::RankingUtility
+        }));
+    }
+
+    #[tokio::test]
     async fn contributor_sees_own_delayed_credit_events_in_summary() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
-        let envelope = sample_envelope().await;
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
         let submission_id = envelope.submission_id;
 
         let _ = submit_trace_handler(
@@ -30789,7 +30991,11 @@ mod tests {
     async fn other_same_tenant_contributor_cannot_see_delayed_credit_events() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
-        let envelope = sample_envelope().await;
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::DebuggingEvaluation];
+        envelope.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::Evaluation];
         let submission_id = envelope.submission_id;
 
         let _ = submit_trace_handler(
