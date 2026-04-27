@@ -10,9 +10,11 @@ use ironclaw::trace_corpus_storage::{
     TraceCorpusStatus, TraceCorpusStore, TraceCreditEventType, TraceCreditEventWrite,
     TraceCreditSettlementState, TraceDerivedRecordWrite, TraceDerivedStatus,
     TraceExportManifestItemInvalidationReason, TraceExportManifestItemWrite,
-    TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefWrite, TraceSubmissionWrite,
-    TraceTombstoneWrite, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
-    TraceVectorEntryWrite, TraceWorkerKind,
+    TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefWrite,
+    TraceRetentionJobItemAction, TraceRetentionJobItemStatus, TraceRetentionJobItemWrite,
+    TraceRetentionJobStatus, TraceRetentionJobWrite, TraceSubmissionWrite, TraceTombstoneWrite,
+    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
+    TraceWorkerKind,
 };
 use secrecy::{ExposeSecret, SecretString};
 use tokio::time::{Duration, sleep};
@@ -176,6 +178,7 @@ struct RawTraceRlsIds {
     export_manifest_id: Uuid,
     credit_event_id: Uuid,
     tombstone_id: Uuid,
+    retention_job_id: Uuid,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -186,6 +189,8 @@ struct RawTraceRlsCounts {
     export_manifest_items: i64,
     credit_events: i64,
     tombstones: i64,
+    retention_jobs: i64,
+    retention_job_items: i64,
 }
 
 impl RawTraceRlsCounts {
@@ -197,6 +202,8 @@ impl RawTraceRlsCounts {
             export_manifest_items: count,
             credit_events: count,
             tombstones: count,
+            retention_jobs: count,
+            retention_job_items: count,
         }
     }
 }
@@ -304,13 +311,16 @@ async fn raw_trace_rls_counts(
                 (SELECT COUNT(*) FROM trace_export_manifests WHERE export_manifest_id = $3) AS export_manifests,
                 (SELECT COUNT(*) FROM trace_export_manifest_items WHERE export_manifest_id = $3) AS export_manifest_items,
                 (SELECT COUNT(*) FROM trace_credit_ledger WHERE credit_event_id = $4) AS credit_events,
-                (SELECT COUNT(*) FROM trace_tombstones WHERE tombstone_id = $5) AS tombstones",
+                (SELECT COUNT(*) FROM trace_tombstones WHERE tombstone_id = $5) AS tombstones,
+                (SELECT COUNT(*) FROM trace_retention_jobs WHERE retention_job_id = $6) AS retention_jobs,
+                (SELECT COUNT(*) FROM trace_retention_job_items WHERE retention_job_id = $6) AS retention_job_items",
             &[
                 &ids.submission_id,
                 &ids.object_ref_id,
                 &ids.export_manifest_id,
                 &ids.credit_event_id,
                 &ids.tombstone_id,
+                &ids.retention_job_id,
             ],
         )
         .await
@@ -323,6 +333,8 @@ async fn raw_trace_rls_counts(
         export_manifest_items: row.get("export_manifest_items"),
         credit_events: row.get("credit_events"),
         tombstones: row.get("tombstones"),
+        retention_jobs: row.get("retention_jobs"),
+        retention_job_items: row.get("retention_job_items"),
     }
 }
 
@@ -744,6 +756,171 @@ async fn store_facade_keeps_same_submission_id_isolated_by_tenant() {
 }
 
 #[tokio::test]
+async fn store_facade_preserves_retention_job_scope_and_items() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+    assert_trace_rls_policies_installed(&backend).await;
+
+    let tenant_alpha = format!("rls-retention-alpha-{}", Uuid::new_v4());
+    let tenant_beta = format!("rls-retention-beta-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+
+    backend
+        .upsert_trace_submission(sample_submission(&tenant_alpha, submission_id))
+        .await
+        .expect("insert alpha submission");
+    backend
+        .upsert_trace_submission(sample_submission(&tenant_beta, submission_id))
+        .await
+        .expect("insert beta submission with same submission id");
+
+    let retention_job_id = Uuid::new_v4();
+    let mut action_counts = BTreeMap::new();
+    action_counts.insert("records_marked_expired".to_string(), 1);
+    action_counts.insert("records_marked_purged".to_string(), 1);
+    let job = backend
+        .upsert_trace_retention_job(TraceRetentionJobWrite {
+            tenant_id: tenant_alpha.clone(),
+            retention_job_id,
+            purpose: "test_pg_retention_purge".to_string(),
+            dry_run: false,
+            status: TraceRetentionJobStatus::Running,
+            requested_by_principal_ref: "principal:retention-worker".to_string(),
+            requested_by_role: "retention_worker".to_string(),
+            purge_expired_before: Some(Utc::now()),
+            prune_export_cache: true,
+            max_export_age_hours: Some(24),
+            audit_event_id: Some(Uuid::new_v4()),
+            action_counts: action_counts.clone(),
+            selected_revoked_count: 0,
+            selected_expired_count: 1,
+            started_at: Some(Utc::now()),
+            completed_at: None,
+        })
+        .await
+        .expect("insert alpha retention job");
+    assert_eq!(job.tenant_id, tenant_alpha);
+    assert_eq!(job.retention_job_id, retention_job_id);
+    assert_eq!(job.status, TraceRetentionJobStatus::Running);
+    assert_eq!(job.action_counts, action_counts);
+
+    action_counts.insert("records_marked_purged".to_string(), 2);
+    let updated_job = backend
+        .upsert_trace_retention_job(TraceRetentionJobWrite {
+            tenant_id: tenant_alpha.clone(),
+            retention_job_id,
+            purpose: "test_pg_retention_purge".to_string(),
+            dry_run: false,
+            status: TraceRetentionJobStatus::Complete,
+            requested_by_principal_ref: "principal:retention-worker".to_string(),
+            requested_by_role: "retention_worker".to_string(),
+            purge_expired_before: Some(Utc::now()),
+            prune_export_cache: true,
+            max_export_age_hours: Some(24),
+            audit_event_id: job.audit_event_id,
+            action_counts: action_counts.clone(),
+            selected_revoked_count: 0,
+            selected_expired_count: 2,
+            started_at: job.started_at,
+            completed_at: Some(Utc::now()),
+        })
+        .await
+        .expect("idempotently update alpha retention job");
+    assert_eq!(updated_job.retention_job_id, retention_job_id);
+    assert_eq!(updated_job.status, TraceRetentionJobStatus::Complete);
+    assert_eq!(updated_job.action_counts, action_counts);
+    assert_eq!(updated_job.selected_expired_count, 2);
+
+    let mut item_counts = BTreeMap::new();
+    item_counts.insert("object_refs_invalidated".to_string(), 1);
+    item_counts.insert("derived_records_invalidated".to_string(), 1);
+    let item = backend
+        .upsert_trace_retention_job_item(TraceRetentionJobItemWrite {
+            tenant_id: tenant_alpha.clone(),
+            retention_job_id,
+            submission_id,
+            action: TraceRetentionJobItemAction::Purge,
+            status: TraceRetentionJobItemStatus::Pending,
+            reason: "retention_pending".to_string(),
+            action_counts: item_counts.clone(),
+            verified_at: None,
+        })
+        .await
+        .expect("insert alpha retention job item");
+    assert_eq!(item.tenant_id, tenant_alpha);
+    assert_eq!(item.submission_id, submission_id);
+    assert_eq!(item.action, TraceRetentionJobItemAction::Purge);
+    assert_eq!(item.status, TraceRetentionJobItemStatus::Pending);
+
+    item_counts.insert("records_marked_purged".to_string(), 1);
+    let updated_item = backend
+        .upsert_trace_retention_job_item(TraceRetentionJobItemWrite {
+            tenant_id: tenant_alpha.clone(),
+            retention_job_id,
+            submission_id,
+            action: TraceRetentionJobItemAction::Purge,
+            status: TraceRetentionJobItemStatus::Done,
+            reason: "retention_purged".to_string(),
+            action_counts: item_counts.clone(),
+            verified_at: Some(Utc::now()),
+        })
+        .await
+        .expect("idempotently update alpha retention job item");
+    assert_eq!(updated_item.status, TraceRetentionJobItemStatus::Done);
+    assert_eq!(updated_item.reason, "retention_purged");
+    assert_eq!(updated_item.action_counts, item_counts);
+
+    let alpha_jobs = backend
+        .list_trace_retention_jobs(&tenant_alpha)
+        .await
+        .expect("list alpha retention jobs");
+    assert_eq!(alpha_jobs.len(), 1);
+    assert_eq!(alpha_jobs[0].retention_job_id, retention_job_id);
+    assert_eq!(alpha_jobs[0].status, TraceRetentionJobStatus::Complete);
+    let beta_jobs = backend
+        .list_trace_retention_jobs(&tenant_beta)
+        .await
+        .expect("list beta retention jobs");
+    assert!(beta_jobs.is_empty());
+
+    let alpha_items = backend
+        .list_trace_retention_job_items(&tenant_alpha, retention_job_id)
+        .await
+        .expect("list alpha retention job items");
+    assert_eq!(alpha_items.len(), 1);
+    assert_eq!(alpha_items[0].submission_id, submission_id);
+    assert_eq!(alpha_items[0].status, TraceRetentionJobItemStatus::Done);
+    let beta_items = backend
+        .list_trace_retention_job_items(&tenant_beta, retention_job_id)
+        .await
+        .expect("list beta retention job items");
+    assert!(beta_items.is_empty());
+
+    let mut client = backend.pool().get().await.expect("get cleanup connection");
+    for tenant_id in [&tenant_alpha, &tenant_beta] {
+        let tx = client
+            .transaction()
+            .await
+            .expect("start cleanup transaction");
+        tx.execute(
+            "SELECT set_config('ironclaw.trace_tenant_id', $1, true)",
+            &[tenant_id],
+        )
+        .await
+        .expect("set cleanup tenant context");
+        let _ = tx
+            .execute(
+                "DELETE FROM trace_tenants WHERE tenant_id = $1",
+                &[tenant_id],
+            )
+            .await;
+        tx.commit().await.expect("commit cleanup transaction");
+    }
+}
+
+#[tokio::test]
 async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context() {
     let Some(backend) = postgres_backend().await else {
         return;
@@ -922,6 +1099,86 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
         .await
         .expect("write tenant B tombstone");
 
+    let mut tenant_a_retention_action_counts = BTreeMap::new();
+    tenant_a_retention_action_counts.insert("records_marked_expired".to_string(), 1);
+    let tenant_a_retention_job_id = Uuid::new_v4();
+    backend
+        .upsert_trace_retention_job(TraceRetentionJobWrite {
+            tenant_id: tenant_a.clone(),
+            retention_job_id: tenant_a_retention_job_id,
+            purpose: "rls_retention_a".to_string(),
+            dry_run: false,
+            status: TraceRetentionJobStatus::Complete,
+            requested_by_principal_ref: format!("principal:{tenant_a}"),
+            requested_by_role: "retention_worker".to_string(),
+            purge_expired_before: Some(effective_at),
+            prune_export_cache: true,
+            max_export_age_hours: Some(24),
+            audit_event_id: Some(Uuid::new_v4()),
+            action_counts: tenant_a_retention_action_counts,
+            selected_revoked_count: 0,
+            selected_expired_count: 1,
+            started_at: Some(effective_at),
+            completed_at: Some(effective_at),
+        })
+        .await
+        .expect("write tenant A retention job");
+    let mut tenant_a_retention_item_counts = BTreeMap::new();
+    tenant_a_retention_item_counts.insert("records_marked_expired".to_string(), 1);
+    backend
+        .upsert_trace_retention_job_item(TraceRetentionJobItemWrite {
+            tenant_id: tenant_a.clone(),
+            retention_job_id: tenant_a_retention_job_id,
+            submission_id: tenant_a_submission_id,
+            action: TraceRetentionJobItemAction::Expire,
+            status: TraceRetentionJobItemStatus::Done,
+            reason: "retention_expired".to_string(),
+            action_counts: tenant_a_retention_item_counts,
+            verified_at: Some(effective_at),
+        })
+        .await
+        .expect("write tenant A retention job item");
+
+    let mut tenant_b_retention_action_counts = BTreeMap::new();
+    tenant_b_retention_action_counts.insert("records_marked_purged".to_string(), 1);
+    let tenant_b_retention_job_id = Uuid::new_v4();
+    backend
+        .upsert_trace_retention_job(TraceRetentionJobWrite {
+            tenant_id: tenant_b.clone(),
+            retention_job_id: tenant_b_retention_job_id,
+            purpose: "rls_retention_b".to_string(),
+            dry_run: false,
+            status: TraceRetentionJobStatus::Complete,
+            requested_by_principal_ref: format!("principal:{tenant_b}"),
+            requested_by_role: "retention_worker".to_string(),
+            purge_expired_before: Some(effective_at),
+            prune_export_cache: true,
+            max_export_age_hours: Some(24),
+            audit_event_id: Some(Uuid::new_v4()),
+            action_counts: tenant_b_retention_action_counts,
+            selected_revoked_count: 0,
+            selected_expired_count: 1,
+            started_at: Some(effective_at),
+            completed_at: Some(effective_at),
+        })
+        .await
+        .expect("write tenant B retention job");
+    let mut tenant_b_retention_item_counts = BTreeMap::new();
+    tenant_b_retention_item_counts.insert("records_marked_purged".to_string(), 1);
+    backend
+        .upsert_trace_retention_job_item(TraceRetentionJobItemWrite {
+            tenant_id: tenant_b.clone(),
+            retention_job_id: tenant_b_retention_job_id,
+            submission_id: tenant_b_submission_id,
+            action: TraceRetentionJobItemAction::Purge,
+            status: TraceRetentionJobItemStatus::Done,
+            reason: "retention_purged".to_string(),
+            action_counts: tenant_b_retention_item_counts,
+            verified_at: Some(effective_at),
+        })
+        .await
+        .expect("write tenant B retention job item");
+
     assert!(
         backend
             .get_trace_submission(&tenant_b, tenant_a_submission_id)
@@ -970,6 +1227,7 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
                 export_manifest_id: tenant_a_export_manifest_id,
                 credit_event_id: tenant_a_credit_event_id,
                 tombstone_id: tenant_a_tombstone_id,
+                retention_job_id: tenant_a_retention_job_id,
             },
             RawTraceRlsIds {
                 submission_id: tenant_b_submission_id,
@@ -977,6 +1235,7 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
                 export_manifest_id: tenant_b_export_manifest_id,
                 credit_event_id: tenant_b_credit_event_id,
                 tombstone_id: tenant_b_tombstone_id,
+                retention_job_id: tenant_b_retention_job_id,
             },
         )
         .await;

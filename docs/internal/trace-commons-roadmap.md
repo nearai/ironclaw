@@ -24,7 +24,7 @@ These are the next independent production slices that can be staffed in parallel
 
 - [ ] Promote DB/object-primary submit, review, replay, benchmark, and ranker paths from pilot flags to per-tenant rollout flags after reconciliation parity is green.
 - [ ] Replace service-local encrypted artifact storage with a service-owned object-store provider abstraction, KMS/key-ref strategy, tenant-hashed object keys, hash/decrypt verification, and migration/backfill tooling.
-- [ ] Add PostgreSQL integration coverage matching the current libSQL `TraceCorpusStore` slices for submissions, object refs, derived records, vectors, audit, credit, retention jobs, export manifests/items, policies, and tombstones.
+- [ ] Add PostgreSQL integration coverage matching the current libSQL `TraceCorpusStore` slices for submissions, object refs, derived records, vectors, audit, credit, retention jobs, export manifests/items, policies, and tombstones. Retention job/item facade scope plus raw RLS visibility now have PostgreSQL coverage.
 
 ### Review and Governance
 
