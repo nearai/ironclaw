@@ -11144,7 +11144,7 @@ async fn run_revocation_propagation_worker(
             )
         })?;
 
-        match apply_revocation_propagation_item(db.as_ref(), tenant, &item).await {
+        match apply_revocation_propagation_item(state, db.as_ref(), tenant, &item).await {
             Ok(TraceRevocationPropagationItemOutcome::Done { evidence_hash }) => {
                 db.update_trace_revocation_propagation_item_status(
                     &tenant.tenant_id,
@@ -11224,6 +11224,7 @@ async fn run_revocation_propagation_worker(
 }
 
 async fn apply_revocation_propagation_item(
+    state: &AppState,
     db: &dyn Database,
     tenant: &TenantAuth,
     item: &StorageTraceRevocationPropagationItemRecord,
@@ -11315,10 +11316,7 @@ async fn apply_revocation_propagation_item(
             ))
         }
         StorageTraceRevocationPropagationAction::DeleteObjectPayload => {
-            Ok(skipped_revocation_propagation_item(
-                item,
-                "object payload deletion requires a configured object-store delete worker",
-            ))
+            delete_object_payload_for_revocation_propagation(state, db, tenant, item).await
         }
         StorageTraceRevocationPropagationAction::RecordPhysicalDeleteReceipt => {
             if let StorageTraceRevocationPropagationTarget::PhysicalDeleteReceipt {
@@ -11337,6 +11335,125 @@ async fn apply_revocation_propagation_item(
                 ))
             }
         }
+    }
+}
+
+async fn delete_object_payload_for_revocation_propagation(
+    state: &AppState,
+    db: &dyn Database,
+    tenant: &TenantAuth,
+    item: &StorageTraceRevocationPropagationItemRecord,
+) -> anyhow::Result<TraceRevocationPropagationItemOutcome> {
+    let StorageTraceRevocationPropagationTarget::ObjectRef { object_ref_id } = &item.target else {
+        return Ok(skipped_revocation_propagation_item(
+            item,
+            "object payload deletion requires an object-ref target",
+        ));
+    };
+    let object_refs = db
+        .list_trace_object_refs(&tenant.tenant_id, item.source_submission_id)
+        .await
+        .context("failed to read trace object refs for payload deletion")?;
+    let Some(object_ref) = object_refs
+        .into_iter()
+        .find(|object_ref| object_ref.object_ref_id == *object_ref_id)
+    else {
+        return Ok(skipped_revocation_propagation_item(
+            item,
+            "object payload target is not active for this tenant submission",
+        ));
+    };
+    anyhow::ensure!(
+        object_ref.tenant_id == tenant.tenant_id
+            && object_ref.submission_id == item.source_submission_id,
+        "trace object ref tenant or submission mismatch"
+    );
+    if object_ref.deleted_at.is_some() {
+        return Ok(done_revocation_propagation_object_payload_item(
+            item,
+            &object_ref,
+            "delete_object_payload_already_deleted",
+        ));
+    }
+    if object_ref.object_store != TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE {
+        return Ok(skipped_revocation_propagation_item(
+            item,
+            "object payload deletion currently supports only service-local encrypted objects",
+        ));
+    }
+    if !matches!(
+        object_ref.artifact_kind,
+        StorageTraceObjectArtifactKind::SubmittedEnvelope
+            | StorageTraceObjectArtifactKind::ReviewSnapshot
+    ) {
+        return Ok(skipped_revocation_propagation_item(
+            item,
+            "object payload artifact kind is not supported for physical deletion",
+        ));
+    }
+    let Some(store) = state.artifact_store.as_ref() else {
+        anyhow::bail!("service-local encrypted object store is not configured");
+    };
+    anyhow::ensure!(
+        store.object_store_name() == object_ref.object_store,
+        "configured trace artifact store does not match object ref store"
+    );
+    let tenant_ref = tenant_storage_ref(&tenant.tenant_id);
+    store
+        .get_json_by_object_key::<serde_json::Value>(
+            &tenant_ref,
+            TraceArtifactKind::ContributionEnvelope,
+            &object_ref.object_key,
+            &object_ref.content_sha256,
+        )
+        .map_err(|_| {
+            anyhow::anyhow!("service-local encrypted object verification failed before deletion")
+        })?;
+    let receipt = EncryptedTraceArtifactReceipt {
+        tenant_storage_ref: tenant_ref.clone(),
+        artifact_kind: TraceArtifactKind::ContributionEnvelope,
+        object_key: object_ref.object_key.clone(),
+        ciphertext_sha256: object_ref
+            .content_sha256
+            .strip_prefix("sha256:")
+            .unwrap_or(&object_ref.content_sha256)
+            .to_string(),
+        encrypted_at: Utc::now(),
+    };
+    store
+        .delete_artifact(&tenant_ref, &receipt)
+        .map_err(|_| anyhow::anyhow!("service-local encrypted object deletion failed"))?;
+    db.mark_trace_object_ref_deleted(
+        &tenant.tenant_id,
+        item.source_submission_id,
+        &object_ref.object_store,
+        &object_ref.object_key,
+    )
+    .await
+    .context("failed to mark trace object ref deleted")?;
+    Ok(done_revocation_propagation_object_payload_item(
+        item,
+        &object_ref,
+        "delete_object_payload",
+    ))
+}
+
+fn done_revocation_propagation_object_payload_item(
+    item: &StorageTraceRevocationPropagationItemRecord,
+    object_ref: &StorageTraceObjectRefRecord,
+    label: &str,
+) -> TraceRevocationPropagationItemOutcome {
+    TraceRevocationPropagationItemOutcome::Done {
+        evidence_hash: sha256_prefixed(&format!(
+            "trace_revocation_propagation:{}:{}:{}:{}:{}:{}:{}",
+            item.tenant_id,
+            item.propagation_item_id,
+            item.source_submission_id,
+            object_ref.object_ref_id,
+            object_ref.object_store,
+            object_ref.object_key,
+            label
+        )),
     }
 }
 
@@ -23701,7 +23818,7 @@ mod tests {
             delete_item
                 .last_error
                 .as_deref()
-                .is_some_and(|error| { error.contains("object-store delete worker") })
+                .is_some_and(|error| error.contains("object payload target"))
         );
 
         let beta_due = db
@@ -23720,6 +23837,196 @@ mod tests {
                         && reason.contains("skipped=1")
                 })
         }));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn revocation_worker_deletes_service_local_object_payload_and_marks_ref_deleted() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_root = temp.path().join("service-local-objects");
+        let artifact_store = test_artifact_store(&artifact_root);
+        let configured_store = ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            artifact_store.clone(),
+        );
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp
+            .path()
+            .join("trace-revocation-propagation-delete-object.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+            Some(configured_store),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+
+        let mut alpha = sample_envelope().await;
+        make_metadata_only_low_risk(&mut alpha);
+        let alpha_submission_id = alpha.submission_id;
+        let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(alpha))
+            .await
+            .expect("tenant-a submission succeeds");
+        let alpha_record = read_submission_record(temp.path(), "tenant-a", alpha_submission_id)
+            .expect("tenant-a record reads")
+            .expect("tenant-a record exists");
+        let alpha_receipt = alpha_record
+            .artifact_receipt
+            .clone()
+            .expect("tenant-a service-local receipt exists");
+        artifact_store
+            .read_artifact(&alpha_record.tenant_storage_ref, &alpha_receipt)
+            .expect("tenant-a service-local object exists");
+        let alpha_object_ref = db
+            .get_latest_active_trace_object_ref(
+                "tenant-a",
+                alpha_submission_id,
+                StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            )
+            .await
+            .expect("tenant-a object ref reads")
+            .expect("tenant-a submitted envelope object ref exists");
+
+        let mut beta = sample_envelope().await;
+        make_metadata_only_low_risk(&mut beta);
+        let beta_submission_id = beta.submission_id;
+        let _ = submit_trace_handler(State(state.clone()), auth_headers("token-b"), Json(beta))
+            .await
+            .expect("tenant-b submission succeeds");
+        let beta_record = read_submission_record(temp.path(), "tenant-b", beta_submission_id)
+            .expect("tenant-b record reads")
+            .expect("tenant-b record exists");
+        let beta_receipt = beta_record
+            .artifact_receipt
+            .clone()
+            .expect("tenant-b service-local receipt exists");
+        let beta_object_ref = db
+            .get_latest_active_trace_object_ref(
+                "tenant-b",
+                beta_submission_id,
+                StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            )
+            .await
+            .expect("tenant-b object ref reads")
+            .expect("tenant-b submitted envelope object ref exists");
+
+        let alpha_delete_item_id = Uuid::new_v4();
+        db.upsert_trace_revocation_propagation_item(TraceRevocationPropagationItemWrite {
+            tenant_id: "tenant-a".to_string(),
+            propagation_item_id: alpha_delete_item_id,
+            source_submission_id: alpha_submission_id,
+            target: StorageTraceRevocationPropagationTarget::ObjectRef {
+                object_ref_id: alpha_object_ref.object_ref_id,
+            },
+            action: StorageTraceRevocationPropagationAction::DeleteObjectPayload,
+            status: StorageTraceRevocationPropagationItemStatus::Pending,
+            idempotency_key: format!("{alpha_submission_id}:delete-service-local-object"),
+            reason: "user_revoked_trace".to_string(),
+            attempt_count: 0,
+            last_error: None,
+            next_attempt_at: None,
+            completed_at: None,
+            evidence_hash: None,
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("tenant-a delete propagation item writes");
+        db.upsert_trace_revocation_propagation_item(TraceRevocationPropagationItemWrite {
+            tenant_id: "tenant-b".to_string(),
+            propagation_item_id: Uuid::new_v4(),
+            source_submission_id: beta_submission_id,
+            target: StorageTraceRevocationPropagationTarget::ObjectRef {
+                object_ref_id: beta_object_ref.object_ref_id,
+            },
+            action: StorageTraceRevocationPropagationAction::DeleteObjectPayload,
+            status: StorageTraceRevocationPropagationItemStatus::Pending,
+            idempotency_key: format!("{beta_submission_id}:delete-service-local-object"),
+            reason: "user_revoked_trace".to_string(),
+            attempt_count: 0,
+            last_error: None,
+            next_attempt_at: None,
+            completed_at: None,
+            evidence_hash: None,
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("tenant-b delete propagation item writes");
+
+        let Json(response) = revocation_propagation_worker_handler(
+            State(state),
+            auth_headers("revocation-worker-token-a"),
+            Json(TraceRevocationPropagationWorkerRequest {
+                purpose: Some("test_delete_service_local_object_payload".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("revocation worker deletes tenant-a object payload");
+        assert_eq!(response.checked, 1);
+        assert_eq!(response.completed, 1);
+        assert_eq!(response.skipped, 0);
+        assert_eq!(response.failed, 0);
+
+        artifact_store
+            .read_artifact(&alpha_record.tenant_storage_ref, &alpha_receipt)
+            .expect_err("tenant-a service-local object was deleted");
+        artifact_store
+            .read_artifact(&beta_record.tenant_storage_ref, &beta_receipt)
+            .expect("tenant-b service-local object is untouched");
+
+        let alpha_items = db
+            .list_trace_revocation_propagation_items("tenant-a", alpha_submission_id)
+            .await
+            .expect("tenant-a propagation items read");
+        let alpha_delete_item = alpha_items
+            .iter()
+            .find(|item| item.propagation_item_id == alpha_delete_item_id)
+            .expect("tenant-a delete item exists");
+        assert_eq!(
+            alpha_delete_item.status,
+            StorageTraceRevocationPropagationItemStatus::Done
+        );
+        assert!(
+            alpha_delete_item
+                .evidence_hash
+                .as_deref()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+
+        let alpha_object_refs = db
+            .list_trace_object_refs("tenant-a", alpha_submission_id)
+            .await
+            .expect("tenant-a object refs read");
+        assert_eq!(alpha_object_refs.len(), 1);
+        assert!(alpha_object_refs[0].invalidated_at.is_some());
+        assert!(alpha_object_refs[0].deleted_at.is_some());
+        let beta_object_refs = db
+            .list_trace_object_refs("tenant-b", beta_submission_id)
+            .await
+            .expect("tenant-b object refs read");
+        assert_eq!(beta_object_refs.len(), 1);
+        assert!(beta_object_refs[0].deleted_at.is_none());
+        let beta_due = db
+            .list_due_trace_revocation_propagation_items("tenant-b", Utc::now(), 10)
+            .await
+            .expect("tenant-b due propagation items read");
+        assert_eq!(beta_due.len(), 1);
     }
 
     #[tokio::test]
