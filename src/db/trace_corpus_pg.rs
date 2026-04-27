@@ -16,12 +16,13 @@ use crate::trace_corpus_storage::{
     TraceAuditEventWrite, TraceAuditSafeMetadata, TraceCorpusStatus, TraceCorpusStore,
     TraceCreditEventRecord, TraceCreditEventWrite, TraceCreditSettlementState, TraceDerivedRecord,
     TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportManifestItemInvalidationReason,
-    TraceExportManifestItemRecord, TraceExportManifestItemWrite, TraceExportManifestRecord,
-    TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefRecord, TraceObjectRefWrite,
-    TraceRetentionJobItemAction, TraceRetentionJobItemRecord, TraceRetentionJobItemStatus,
-    TraceRetentionJobItemWrite, TraceRetentionJobRecord, TraceRetentionJobStatus,
-    TraceRetentionJobWrite, TraceSubmissionRecord, TraceSubmissionWrite, TraceTenantPolicyRecord,
-    TraceTenantPolicyWrite, TraceTombstoneRecord, TraceTombstoneWrite, TraceVectorEntryRecord,
+    TraceExportManifestItemRecord, TraceExportManifestItemWrite, TraceExportManifestMirrorWrite,
+    TraceExportManifestRecord, TraceExportManifestWrite, TraceObjectArtifactKind,
+    TraceObjectRefRecord, TraceObjectRefWrite, TraceRetentionJobItemAction,
+    TraceRetentionJobItemRecord, TraceRetentionJobItemStatus, TraceRetentionJobItemWrite,
+    TraceRetentionJobRecord, TraceRetentionJobStatus, TraceRetentionJobWrite,
+    TraceSubmissionRecord, TraceSubmissionWrite, TraceTenantPolicyRecord, TraceTenantPolicyWrite,
+    TraceTombstoneRecord, TraceTombstoneWrite, TraceVectorEntryRecord,
     TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
     TraceWorkerKind,
 };
@@ -1363,6 +1364,189 @@ impl TraceCorpusStore for PgBackend {
             .await
             .map_err(DatabaseError::Postgres)?;
         let record = row_to_export_manifest(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn upsert_trace_export_manifest_mirror(
+        &self,
+        mirror: TraceExportManifestMirrorWrite,
+    ) -> Result<TraceExportManifestRecord, DatabaseError> {
+        let tenant_id = mirror.manifest.tenant_id.clone();
+        for object_ref in &mirror.object_refs {
+            if object_ref.tenant_id != tenant_id {
+                return Err(DatabaseError::Serialization(format!(
+                    "trace export mirror object ref tenant {} does not match manifest tenant {}",
+                    object_ref.tenant_id, tenant_id
+                )));
+            }
+        }
+        for item in &mirror.items {
+            if item.tenant_id != tenant_id {
+                return Err(DatabaseError::Serialization(format!(
+                    "trace export mirror item tenant {} does not match manifest tenant {}",
+                    item.tenant_id, tenant_id
+                )));
+            }
+            if item.export_manifest_id != mirror.manifest.export_manifest_id {
+                return Err(DatabaseError::Serialization(format!(
+                    "trace export mirror item manifest {} does not match manifest {}",
+                    item.export_manifest_id, mirror.manifest.export_manifest_id
+                )));
+            }
+        }
+
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &tenant_id).await?;
+        tx.execute(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ($1)
+             ON CONFLICT (tenant_id) DO UPDATE SET updated_at = NOW()",
+            &[&tenant_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        for object_ref in &mirror.object_refs {
+            let artifact_kind = enum_to_storage(object_ref.artifact_kind)?;
+            tx.execute(
+                "INSERT INTO trace_object_refs (
+                    tenant_id, submission_id, object_ref_id, artifact_kind, object_store,
+                    object_key, content_sha256, encryption_key_ref, size_bytes, compression,
+                    created_by_job_id
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                 ON CONFLICT (tenant_id, submission_id, object_ref_id) DO UPDATE SET
+                    artifact_kind = excluded.artifact_kind,
+                    object_store = excluded.object_store,
+                    object_key = excluded.object_key,
+                    content_sha256 = excluded.content_sha256,
+                    encryption_key_ref = excluded.encryption_key_ref,
+                    size_bytes = excluded.size_bytes,
+                    compression = excluded.compression,
+                    created_by_job_id = excluded.created_by_job_id,
+                    updated_at = NOW()",
+                &[
+                    &object_ref.tenant_id,
+                    &object_ref.submission_id,
+                    &object_ref.object_ref_id,
+                    &artifact_kind,
+                    &object_ref.object_store,
+                    &object_ref.object_key,
+                    &object_ref.content_sha256,
+                    &object_ref.encryption_key_ref,
+                    &object_ref.size_bytes,
+                    &object_ref.compression,
+                    &object_ref.created_by_job_id,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        }
+
+        let artifact_kind = enum_to_storage(mirror.manifest.artifact_kind)?;
+        let item_count = i32::try_from(mirror.manifest.item_count).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace export manifest item_count exceeds PostgreSQL integer range: {e}"
+            ))
+        })?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_export_manifests (
+                        tenant_id, export_manifest_id, artifact_kind, purpose_code,
+                        audit_event_id, source_submission_ids, source_submission_ids_hash,
+                        item_count, generated_at
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                     ON CONFLICT (tenant_id, export_manifest_id) DO UPDATE SET
+                        artifact_kind = excluded.artifact_kind,
+                        purpose_code = excluded.purpose_code,
+                        audit_event_id = excluded.audit_event_id,
+                        source_submission_ids = excluded.source_submission_ids,
+                        source_submission_ids_hash = excluded.source_submission_ids_hash,
+                        item_count = excluded.item_count,
+                        generated_at = excluded.generated_at,
+                        invalidated_at = NULL,
+                        deleted_at = NULL,
+                        updated_at = NOW()
+                     RETURNING {TRACE_EXPORT_MANIFEST_COLUMNS}"
+                ),
+                &[
+                    &mirror.manifest.tenant_id,
+                    &mirror.manifest.export_manifest_id,
+                    &artifact_kind,
+                    &mirror.manifest.purpose_code,
+                    &mirror.manifest.audit_event_id,
+                    &mirror.manifest.source_submission_ids,
+                    &mirror.manifest.source_submission_ids_hash,
+                    &item_count,
+                    &mirror.manifest.generated_at,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_export_manifest(&row)?;
+
+        for item in &mirror.items {
+            if let Some(derived_id) = item.derived_id {
+                ensure_pg_derived_record_belongs_to_submission(
+                    &tx,
+                    &item.tenant_id,
+                    item.submission_id,
+                    derived_id,
+                )
+                .await?;
+            }
+            if let Some(object_ref_id) = item.object_ref_id {
+                ensure_pg_object_ref_belongs_to_submission(
+                    &tx,
+                    &item.tenant_id,
+                    item.submission_id,
+                    object_ref_id,
+                    "export manifest mirror item",
+                )
+                .await?;
+            }
+            if let Some(vector_entry_id) = item.vector_entry_id {
+                ensure_pg_vector_entry_belongs_to_submission(
+                    &tx,
+                    &item.tenant_id,
+                    item.submission_id,
+                    vector_entry_id,
+                )
+                .await?;
+            }
+            let source_status_at_export = enum_to_storage(item.source_status_at_export)?;
+            tx.execute(
+                "INSERT INTO trace_export_manifest_items (
+                    tenant_id, export_manifest_id, submission_id, trace_id, derived_id,
+                    object_ref_id, vector_entry_id, source_status_at_export,
+                    source_hash_at_export
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 ON CONFLICT (tenant_id, export_manifest_id, submission_id) DO UPDATE SET
+                    trace_id = excluded.trace_id,
+                    derived_id = excluded.derived_id,
+                    object_ref_id = excluded.object_ref_id,
+                    vector_entry_id = excluded.vector_entry_id,
+                    source_status_at_export = excluded.source_status_at_export,
+                    source_hash_at_export = excluded.source_hash_at_export,
+                    source_invalidated_at = NULL,
+                    source_invalidation_reason = NULL,
+                    updated_at = NOW()",
+                &[
+                    &item.tenant_id,
+                    &item.export_manifest_id,
+                    &item.submission_id,
+                    &item.trace_id,
+                    &item.derived_id,
+                    &item.object_ref_id,
+                    &item.vector_entry_id,
+                    &source_status_at_export,
+                    &item.source_hash_at_export,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        }
+
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(record)
     }

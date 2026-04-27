@@ -42,6 +42,7 @@ use ironclaw::trace_corpus_storage::{
     TraceDerivedStatus as StorageTraceDerivedStatus,
     TraceExportManifestItemInvalidationReason as StorageTraceExportManifestItemInvalidationReason,
     TraceExportManifestItemWrite as StorageTraceExportManifestItemWrite,
+    TraceExportManifestMirrorWrite as StorageTraceExportManifestMirrorWrite,
     TraceExportManifestRecord as StorageTraceExportManifestRecord,
     TraceExportManifestWrite as StorageTraceExportManifestWrite,
     TraceObjectArtifactKind as StorageTraceObjectArtifactKind,
@@ -3753,23 +3754,43 @@ async fn dataset_replay_handler(
         &items,
         source_submission_ids_hash,
     );
-    write_export_manifest(&state.root, &tenant.tenant_id, &manifest).map_err(internal_error)?;
-    let mirror_result = mirror_export_manifest_to_db(
-        state.as_ref(),
-        StorageTraceObjectArtifactKind::ExportArtifact,
-        &manifest,
-        &items,
-    )
-    .await;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(
-            %error,
-            export_id = %manifest.export_id,
-            "Trace Commons DB dual-write export manifest mirror failed"
-        );
+    if state.require_db_mirror_writes {
+        let mirror_result = mirror_export_manifest_to_db(
+            state.as_ref(),
+            StorageTraceObjectArtifactKind::ExportArtifact,
+            &manifest,
+            &items,
+        )
+        .await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                %error,
+                export_id = %manifest.export_id,
+                "Trace Commons DB dual-write export manifest mirror failed"
+            );
+        }
+        enforce_db_mirror_write_result(state.as_ref(), "replay export manifest", mirror_result)
+            .map_err(internal_error)?;
+        write_export_manifest(&state.root, &tenant.tenant_id, &manifest).map_err(internal_error)?;
+    } else {
+        write_export_manifest(&state.root, &tenant.tenant_id, &manifest).map_err(internal_error)?;
+        let mirror_result = mirror_export_manifest_to_db(
+            state.as_ref(),
+            StorageTraceObjectArtifactKind::ExportArtifact,
+            &manifest,
+            &items,
+        )
+        .await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                %error,
+                export_id = %manifest.export_id,
+                "Trace Commons DB dual-write export manifest mirror failed"
+            );
+        }
+        enforce_db_mirror_write_result(state.as_ref(), "replay export manifest", mirror_result)
+            .map_err(internal_error)?;
     }
-    enforce_db_mirror_write_result(state.as_ref(), "replay export manifest", mirror_result)
-        .map_err(internal_error)?;
     append_audit_event_with_db_mirror(
         state.as_ref(),
         &tenant,
@@ -4259,35 +4280,77 @@ async fn persist_benchmark_lifecycle_artifact(
     artifact: &TraceBenchmarkConversionArtifact,
     operation: &str,
 ) -> anyhow::Result<()> {
-    if !state.object_primary_derived_exports {
-        write_benchmark_artifact(&state.root, &tenant.tenant_id, artifact)?;
-    }
-    let artifact_object_ref_material = if state.db_mirror.is_some() {
-        Some(trace_export_artifact_object_ref_material(
+    let artifact_path =
+        benchmark_artifact_path(&state.root, &tenant.tenant_id, artifact.conversion_id);
+    if state.require_db_mirror_writes {
+        let staged_artifact_object_id = Uuid::new_v4();
+        let artifact_object_ref_material = if state.db_mirror.is_some() {
+            Some(trace_export_artifact_object_ref_material(
+                state,
+                &tenant.tenant_id,
+                TraceArtifactKind::BenchmarkConversion,
+                staged_artifact_object_id,
+                &artifact_path,
+                artifact,
+            )?)
+        } else {
+            None
+        };
+        let mirror_result = mirror_benchmark_export_provenance_to_db(
             state,
-            &tenant.tenant_id,
-            TraceArtifactKind::BenchmarkConversion,
-            artifact.conversion_id,
-            &benchmark_artifact_path(&state.root, &tenant.tenant_id, artifact.conversion_id),
             artifact,
-        )?)
+            artifact_object_ref_material.as_ref(),
+        )
+        .await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                %error,
+                export_id = %artifact.conversion_id,
+                "Trace Commons DB dual-write benchmark lifecycle mirror failed"
+            );
+            cleanup_export_artifact_publication(
+                state,
+                &tenant.tenant_id,
+                TraceArtifactKind::BenchmarkConversion,
+                artifact_object_ref_material.as_ref(),
+                &[],
+            )?;
+        }
+        enforce_db_mirror_write_result(state, operation, mirror_result)?;
+        if !state.object_primary_derived_exports {
+            write_benchmark_artifact(&state.root, &tenant.tenant_id, artifact)?;
+        }
     } else {
-        None
-    };
-    let mirror_result = mirror_benchmark_export_provenance_to_db(
-        state,
-        artifact,
-        artifact_object_ref_material.as_ref(),
-    )
-    .await;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(
-            %error,
-            export_id = %artifact.conversion_id,
-            "Trace Commons DB dual-write benchmark lifecycle mirror failed"
-        );
+        if !state.object_primary_derived_exports {
+            write_benchmark_artifact(&state.root, &tenant.tenant_id, artifact)?;
+        }
+        let artifact_object_ref_material = if state.db_mirror.is_some() {
+            Some(trace_export_artifact_object_ref_material(
+                state,
+                &tenant.tenant_id,
+                TraceArtifactKind::BenchmarkConversion,
+                artifact.conversion_id,
+                &artifact_path,
+                artifact,
+            )?)
+        } else {
+            None
+        };
+        let mirror_result = mirror_benchmark_export_provenance_to_db(
+            state,
+            artifact,
+            artifact_object_ref_material.as_ref(),
+        )
+        .await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                %error,
+                export_id = %artifact.conversion_id,
+                "Trace Commons DB dual-write benchmark lifecycle mirror failed"
+            );
+        }
+        enforce_db_mirror_write_result(state, operation, mirror_result)?;
     }
-    enforce_db_mirror_write_result(state, operation, mirror_result)?;
 
     append_audit_event_with_db_mirror(
         state,
@@ -8294,21 +8357,9 @@ async fn mirror_export_manifest_to_db(
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
     };
-    db.upsert_trace_export_manifest(StorageTraceExportManifestWrite {
-        tenant_id: manifest.tenant_id.clone(),
-        export_manifest_id: manifest.export_id,
-        artifact_kind,
-        purpose_code: Some(manifest.purpose.clone()),
-        audit_event_id: Some(manifest.audit_event_id),
-        source_submission_ids: manifest.source_submission_ids.clone(),
-        source_submission_ids_hash: manifest.source_submission_ids_hash.clone(),
-        item_count: manifest.source_submission_ids.len().min(u32::MAX as usize) as u32,
-        generated_at: manifest.generated_at,
-    })
-    .await
-    .context("failed to mirror trace export manifest metadata")?;
-    for item in items {
-        db.upsert_trace_export_manifest_item(StorageTraceExportManifestItemWrite {
+    let items = items
+        .iter()
+        .map(|item| StorageTraceExportManifestItemWrite {
             tenant_id: manifest.tenant_id.clone(),
             export_manifest_id: manifest.export_id,
             submission_id: item.submission_id,
@@ -8319,14 +8370,24 @@ async fn mirror_export_manifest_to_db(
             source_status_at_export: storage_corpus_status(item.source_status_at_export),
             source_hash_at_export: item.source_hash_at_export.clone(),
         })
-        .await
-        .with_context(|| {
-            format!(
-                "failed to mirror trace export manifest item metadata for {}",
-                item.submission_id
-            )
-        })?;
-    }
+        .collect::<Vec<_>>();
+    db.upsert_trace_export_manifest_mirror(StorageTraceExportManifestMirrorWrite {
+        manifest: StorageTraceExportManifestWrite {
+            tenant_id: manifest.tenant_id.clone(),
+            export_manifest_id: manifest.export_id,
+            artifact_kind,
+            purpose_code: Some(manifest.purpose.clone()),
+            audit_event_id: Some(manifest.audit_event_id),
+            source_submission_ids: manifest.source_submission_ids.clone(),
+            source_submission_ids_hash: manifest.source_submission_ids_hash.clone(),
+            item_count: manifest.source_submission_ids.len().min(u32::MAX as usize) as u32,
+            generated_at: manifest.generated_at,
+        },
+        object_refs: Vec::new(),
+        items,
+    })
+    .await
+    .context("failed to atomically mirror trace export manifest metadata")?;
     Ok(())
 }
 
@@ -8338,38 +8399,33 @@ async fn mirror_benchmark_export_provenance_to_db(
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
     };
-    db.upsert_trace_export_manifest(StorageTraceExportManifestWrite {
-        tenant_id: artifact.tenant_id.clone(),
-        export_manifest_id: artifact.conversion_id,
-        artifact_kind: StorageTraceObjectArtifactKind::BenchmarkArtifact,
-        purpose_code: Some(artifact.purpose.clone()),
-        audit_event_id: Some(artifact.audit_event_id),
-        source_submission_ids: artifact.source_submission_ids.clone(),
-        source_submission_ids_hash: artifact.source_submission_ids_hash.clone(),
-        item_count: artifact.item_count.min(u32::MAX as usize) as u32,
-        generated_at: artifact.generated_at,
-    })
-    .await
-    .context("failed to mirror benchmark provenance manifest metadata")?;
     let vector_entry_ids = active_vector_entry_lookup_for_export(db.as_ref(), &artifact.tenant_id)
         .await
         .context("failed to read active vector entries for benchmark provenance")?;
+    let mut object_refs = Vec::new();
+    let mut items = Vec::new();
     for candidate in &artifact.candidates {
-        db.upsert_trace_export_manifest_item(StorageTraceExportManifestItemWrite {
+        let object_ref_id = if let Some(material) = artifact_object_ref_material {
+            let object_ref = trace_export_artifact_object_ref_write(
+                &artifact.tenant_id,
+                candidate.submission_id,
+                StorageTraceObjectArtifactKind::BenchmarkArtifact,
+                artifact.conversion_id,
+                material,
+            );
+            let object_ref_id = object_ref.object_ref_id;
+            object_refs.push(object_ref);
+            Some(object_ref_id)
+        } else {
+            None
+        };
+        items.push(StorageTraceExportManifestItemWrite {
             tenant_id: artifact.tenant_id.clone(),
             export_manifest_id: artifact.conversion_id,
             submission_id: candidate.submission_id,
             trace_id: candidate.trace_id,
             derived_id: Some(candidate.derived_id),
-            object_ref_id: append_export_artifact_object_ref_to_db(
-                db.as_ref(),
-                &artifact.tenant_id,
-                candidate.submission_id,
-                StorageTraceObjectArtifactKind::BenchmarkArtifact,
-                artifact.conversion_id,
-                artifact_object_ref_material,
-            )
-            .await?,
+            object_ref_id,
             vector_entry_id: vector_entry_ids
                 .get(&(
                     candidate.submission_id,
@@ -8379,15 +8435,25 @@ async fn mirror_benchmark_export_provenance_to_db(
                 .copied(),
             source_status_at_export: StorageTraceCorpusStatus::Accepted,
             source_hash_at_export: candidate.canonical_summary_hash.clone(),
-        })
-        .await
-        .with_context(|| {
-            format!(
-                "failed to mirror benchmark provenance item metadata for {}",
-                candidate.submission_id
-            )
-        })?;
+        });
     }
+    db.upsert_trace_export_manifest_mirror(StorageTraceExportManifestMirrorWrite {
+        manifest: StorageTraceExportManifestWrite {
+            tenant_id: artifact.tenant_id.clone(),
+            export_manifest_id: artifact.conversion_id,
+            artifact_kind: StorageTraceObjectArtifactKind::BenchmarkArtifact,
+            purpose_code: Some(artifact.purpose.clone()),
+            audit_event_id: Some(artifact.audit_event_id),
+            source_submission_ids: artifact.source_submission_ids.clone(),
+            source_submission_ids_hash: artifact.source_submission_ids_hash.clone(),
+            item_count: artifact.item_count.min(u32::MAX as usize) as u32,
+            generated_at: artifact.generated_at,
+        },
+        object_refs,
+        items,
+    })
+    .await
+    .context("failed to atomically mirror benchmark provenance metadata")?;
     Ok(())
 }
 
@@ -8400,33 +8466,34 @@ async fn mirror_ranker_candidate_export_provenance_to_db(
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
     };
-    upsert_provenance_manifest_to_db(
-        db.as_ref(),
-        provenance,
-        StorageTraceObjectArtifactKind::ExportArtifact,
-        candidates.len(),
-    )
-    .await?;
     let vector_entry_ids =
         active_vector_entry_lookup_for_export(db.as_ref(), &provenance.tenant_id)
             .await
             .context("failed to read active vector entries for ranker candidate provenance")?;
+    let mut object_refs = Vec::new();
+    let mut items = Vec::new();
     for candidate in candidates {
-        db.upsert_trace_export_manifest_item(StorageTraceExportManifestItemWrite {
+        let object_ref_id = if let Some(material) = artifact_object_ref_material {
+            let object_ref = trace_export_artifact_object_ref_write(
+                &provenance.tenant_id,
+                candidate.submission_id,
+                StorageTraceObjectArtifactKind::ExportArtifact,
+                provenance.export_id,
+                material,
+            );
+            let object_ref_id = object_ref.object_ref_id;
+            object_refs.push(object_ref);
+            Some(object_ref_id)
+        } else {
+            None
+        };
+        items.push(StorageTraceExportManifestItemWrite {
             tenant_id: provenance.tenant_id.clone(),
             export_manifest_id: provenance.export_id,
             submission_id: candidate.submission_id,
             trace_id: candidate.trace_id,
             derived_id: Some(candidate.derived_id),
-            object_ref_id: append_export_artifact_object_ref_to_db(
-                db.as_ref(),
-                &provenance.tenant_id,
-                candidate.submission_id,
-                StorageTraceObjectArtifactKind::ExportArtifact,
-                provenance.export_id,
-                artifact_object_ref_material,
-            )
-            .await?,
+            object_ref_id,
             vector_entry_id: vector_entry_ids
                 .get(&(
                     candidate.submission_id,
@@ -8436,15 +8503,19 @@ async fn mirror_ranker_candidate_export_provenance_to_db(
                 .copied(),
             source_status_at_export: storage_corpus_status(candidate.status),
             source_hash_at_export: candidate.canonical_summary_hash.clone(),
-        })
-        .await
-        .with_context(|| {
-            format!(
-                "failed to mirror ranker candidate provenance item metadata for {}",
-                candidate.submission_id
-            )
-        })?;
+        });
     }
+    db.upsert_trace_export_manifest_mirror(StorageTraceExportManifestMirrorWrite {
+        manifest: provenance_manifest_write(
+            provenance,
+            StorageTraceObjectArtifactKind::ExportArtifact,
+            candidates.len(),
+        ),
+        object_refs,
+        items,
+    })
+    .await
+    .context("failed to atomically mirror ranker candidate provenance metadata")?;
     Ok(())
 }
 
@@ -8457,34 +8528,35 @@ async fn mirror_ranker_pair_export_provenance_to_db(
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
     };
-    upsert_provenance_manifest_to_db(
-        db.as_ref(),
-        provenance,
-        StorageTraceObjectArtifactKind::ExportArtifact,
-        provenance.source_submission_ids.len(),
-    )
-    .await?;
     let vector_entry_ids =
         active_vector_entry_lookup_for_export(db.as_ref(), &provenance.tenant_id)
             .await
             .context("failed to read active vector entries for ranker pair provenance")?;
+    let mut object_refs = Vec::new();
+    let mut items = Vec::new();
     for pair in pairs {
         for candidate in [&pair.preferred, &pair.rejected] {
-            db.upsert_trace_export_manifest_item(StorageTraceExportManifestItemWrite {
+            let object_ref_id = if let Some(material) = artifact_object_ref_material {
+                let object_ref = trace_export_artifact_object_ref_write(
+                    &provenance.tenant_id,
+                    candidate.submission_id,
+                    StorageTraceObjectArtifactKind::ExportArtifact,
+                    provenance.export_id,
+                    material,
+                );
+                let object_ref_id = object_ref.object_ref_id;
+                object_refs.push(object_ref);
+                Some(object_ref_id)
+            } else {
+                None
+            };
+            items.push(StorageTraceExportManifestItemWrite {
                 tenant_id: provenance.tenant_id.clone(),
                 export_manifest_id: provenance.export_id,
                 submission_id: candidate.submission_id,
                 trace_id: candidate.trace_id,
                 derived_id: Some(candidate.derived_id),
-                object_ref_id: append_export_artifact_object_ref_to_db(
-                    db.as_ref(),
-                    &provenance.tenant_id,
-                    candidate.submission_id,
-                    StorageTraceObjectArtifactKind::ExportArtifact,
-                    provenance.export_id,
-                    artifact_object_ref_material,
-                )
-                .await?,
+                object_ref_id,
                 vector_entry_id: vector_entry_ids
                     .get(&(
                         candidate.submission_id,
@@ -8494,46 +8566,21 @@ async fn mirror_ranker_pair_export_provenance_to_db(
                     .copied(),
                 source_status_at_export: storage_corpus_status(candidate.status),
                 source_hash_at_export: candidate.canonical_summary_hash.clone(),
-            })
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to mirror ranker pair provenance item metadata for {}",
-                    candidate.submission_id
-                )
-            })?;
+            });
         }
     }
+    db.upsert_trace_export_manifest_mirror(StorageTraceExportManifestMirrorWrite {
+        manifest: provenance_manifest_write(
+            provenance,
+            StorageTraceObjectArtifactKind::ExportArtifact,
+            provenance.source_submission_ids.len(),
+        ),
+        object_refs,
+        items,
+    })
+    .await
+    .context("failed to atomically mirror ranker pair provenance metadata")?;
     Ok(())
-}
-
-async fn append_export_artifact_object_ref_to_db(
-    db: &dyn Database,
-    tenant_id: &str,
-    submission_id: Uuid,
-    artifact_kind: StorageTraceObjectArtifactKind,
-    export_id: Uuid,
-    material: Option<&TraceExportArtifactObjectRefMaterial>,
-) -> anyhow::Result<Option<Uuid>> {
-    let Some(material) = material else {
-        return Ok(None);
-    };
-    let object_ref = trace_export_artifact_object_ref_write(
-        tenant_id,
-        submission_id,
-        artifact_kind,
-        export_id,
-        material,
-    );
-    let object_ref_id = object_ref.object_ref_id;
-    db.append_trace_object_ref(object_ref)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to mirror trace export artifact object ref for submission {submission_id}"
-            )
-        })?;
-    Ok(Some(object_ref_id))
 }
 
 async fn active_vector_entry_lookup_for_export(
@@ -8559,13 +8606,12 @@ async fn active_vector_entry_lookup_for_export(
         .collect())
 }
 
-async fn upsert_provenance_manifest_to_db(
-    db: &dyn Database,
+fn provenance_manifest_write(
     provenance: &TraceExportProvenanceManifest,
     artifact_kind: StorageTraceObjectArtifactKind,
     item_count: usize,
-) -> anyhow::Result<()> {
-    db.upsert_trace_export_manifest(StorageTraceExportManifestWrite {
+) -> StorageTraceExportManifestWrite {
+    StorageTraceExportManifestWrite {
         tenant_id: provenance.tenant_id.clone(),
         export_manifest_id: provenance.export_id,
         artifact_kind,
@@ -8575,10 +8621,7 @@ async fn upsert_provenance_manifest_to_db(
         source_submission_ids_hash: provenance.source_submission_ids_hash.clone(),
         item_count: item_count.min(u32::MAX as usize) as u32,
         generated_at: provenance.generated_at,
-    })
-    .await
-    .context("failed to mirror export provenance manifest metadata")?;
-    Ok(())
+    }
 }
 
 fn provenance_storage_purpose_code(provenance: &TraceExportProvenanceManifest) -> String {
@@ -15816,6 +15859,21 @@ mod tests {
         files
     }
 
+    #[cfg(feature = "libsql")]
+    async fn libsql_count(conn: &libsql::Connection, query: &str) -> anyhow::Result<i64> {
+        let mut rows = conn
+            .query(query, ())
+            .await
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+            .context("count query returned no rows")?;
+        row.get::<i64>(0)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+    }
+
     fn collect_regular_files(
         root: &Path,
         dir: &Path,
@@ -18569,8 +18627,16 @@ mod tests {
         for score in [0.9_f32, 0.1_f32] {
             let mut envelope = sample_envelope().await;
             make_metadata_only_low_risk(&mut envelope);
-            envelope.consent.scopes = vec![ConsentScope::RankingTraining];
-            envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+            envelope.consent.scopes = vec![
+                ConsentScope::DebuggingEvaluation,
+                ConsentScope::RankingTraining,
+            ];
+            envelope.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
+            envelope.trace_card.allowed_uses = vec![
+                TraceAllowedUse::Evaluation,
+                TraceAllowedUse::BenchmarkGeneration,
+                TraceAllowedUse::RankingModelTraining,
+            ];
             envelope.value.submission_score = score;
             let _ = submit_trace_handler(
                 State(state.clone()),
@@ -18584,6 +18650,29 @@ mod tests {
         conn.execute("DROP TABLE trace_export_manifests", ())
             .await
             .expect("drop mirrored export manifest table");
+        let tenant_root = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"));
+
+        let replay_error = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("required_db_replay".to_string()),
+                consent_scope: Some("debugging-evaluation".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect_err("required DB mirror writes fail closed when replay manifest mirror fails");
+        assert_eq!(replay_error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            !tenant_root.join("exports").exists(),
+            "failed required DB mirror replay export must not publish file manifests"
+        );
 
         let benchmark_error = benchmark_convert_handler(
             State(state.clone()),
@@ -18600,10 +18689,6 @@ mod tests {
         .await
         .expect_err("required DB mirror writes fail closed when benchmark provenance fails");
         assert_eq!(benchmark_error.0, StatusCode::INTERNAL_SERVER_ERROR);
-        let tenant_root = temp
-            .path()
-            .join("tenants")
-            .join(tenant_storage_key("tenant-a"));
         assert!(
             !tenant_root.join("benchmarks").exists(),
             "failed required DB mirror benchmark conversion must not publish file artifacts"
@@ -18645,6 +18730,213 @@ mod tests {
         assert!(
             !tenant_root.join("ranker_exports").exists(),
             "failed required DB mirror ranker pair export must not publish file provenance"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn required_db_mirror_writes_fail_closed_on_benchmark_lifecycle_mirror_failure() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp
+            .path()
+            .join("trace-required-benchmark-lifecycle-mirror.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_required_db_mirror_writes(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("benchmark source submits before lifecycle mirror failure");
+        let Json(benchmark) = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("required_db_lifecycle".to_string()),
+                consent_scope: None,
+                status: None,
+                privacy_risk: None,
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("benchmark conversion succeeds before lifecycle mirror failure");
+        let artifact_path =
+            benchmark_artifact_path(temp.path(), "tenant-a", benchmark.conversion_id);
+        let artifact_before: TraceBenchmarkConversionArtifact = serde_json::from_str(
+            &std::fs::read_to_string(&artifact_path).expect("benchmark artifact reads before"),
+        )
+        .expect("benchmark artifact parses before");
+        assert_eq!(
+            artifact_before.registry.status,
+            TraceBenchmarkRegistryStatus::Candidate
+        );
+
+        let conn = db.connect().await.expect("connect to mirror");
+        conn.execute("DROP TABLE trace_export_manifests", ())
+            .await
+            .expect("drop mirrored export manifest table");
+        let error = benchmark_lifecycle_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            AxumPath(benchmark.conversion_id),
+            Json(BenchmarkLifecycleUpdateRequest {
+                registry: Some(TraceBenchmarkRegistryPatch {
+                    status: Some(TraceBenchmarkRegistryStatus::Published),
+                    registry_ref: Some("benchmark-registry:required-db".to_string()),
+                    published_at: Some(Utc::now()),
+                }),
+                evaluation: Some(TraceBenchmarkEvaluationPatch {
+                    status: Some(TraceBenchmarkEvaluationStatus::Passed),
+                    evaluator_ref: Some("evaluator:required-db".to_string()),
+                    evaluated_at: Some(Utc::now()),
+                    score: Some(1.0),
+                    pass_count: Some(1),
+                    fail_count: Some(0),
+                }),
+                reason: Some("must fail before publishing lifecycle update".to_string()),
+            }),
+        )
+        .await
+        .expect_err("required DB mirror writes fail closed when benchmark lifecycle mirror fails");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let artifact_after: TraceBenchmarkConversionArtifact = serde_json::from_str(
+            &std::fs::read_to_string(&artifact_path).expect("benchmark artifact reads after"),
+        )
+        .expect("benchmark artifact parses after");
+        assert_eq!(
+            artifact_after.registry.status,
+            TraceBenchmarkRegistryStatus::Candidate,
+            "failed required DB lifecycle mirror must not publish the updated artifact"
+        );
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("audit reads after failure");
+        assert!(
+            audit_events
+                .iter()
+                .all(|event| event.kind != "benchmark_lifecycle_update"),
+            "failed required DB lifecycle mirror must not publish a lifecycle audit event"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn required_db_mirror_writes_roll_back_partial_export_mirror_rows_on_item_failure() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp
+            .path()
+            .join("trace-required-export-atomic-mirror.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_required_db_mirror_writes(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        for _ in 0..2 {
+            let mut envelope = sample_envelope().await;
+            make_metadata_only_low_risk(&mut envelope);
+            envelope.consent.scopes = vec![
+                ConsentScope::DebuggingEvaluation,
+                ConsentScope::RankingTraining,
+            ];
+            envelope.trace_card.allowed_uses = vec![
+                TraceAllowedUse::BenchmarkGeneration,
+                TraceAllowedUse::RankingModelTraining,
+            ];
+            let _ = submit_trace_handler(
+                State(state.clone()),
+                auth_headers("token-a"),
+                Json(envelope),
+            )
+            .await
+            .expect("export source submits before item mirror failure");
+        }
+
+        let conn = db.connect().await.expect("connect to mirror");
+        let object_ref_count_before = libsql_count(&conn, "SELECT COUNT(*) FROM trace_object_refs")
+            .await
+            .expect("object ref count before");
+        let manifest_count_before =
+            libsql_count(&conn, "SELECT COUNT(*) FROM trace_export_manifests")
+                .await
+                .expect("manifest count before");
+        let manifest_item_count_before =
+            libsql_count(&conn, "SELECT COUNT(*) FROM trace_export_manifest_items")
+                .await
+                .expect("manifest item count before");
+        conn.execute(
+            "DELETE FROM trace_derived_records WHERE tenant_id = ?1",
+            libsql::params!["tenant-a"],
+        )
+        .await
+        .expect("remove derived rows to force manifest item validation failure");
+
+        let error = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("required_db_atomic_export".to_string()),
+                consent_scope: Some("debugging-evaluation".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect_err("required DB mirror writes fail closed when export item mirror fails");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            libsql_count(&conn, "SELECT COUNT(*) FROM trace_object_refs")
+                .await
+                .expect("object ref count after"),
+            object_ref_count_before,
+            "failed export item mirror must roll back export object refs"
+        );
+        assert_eq!(
+            libsql_count(&conn, "SELECT COUNT(*) FROM trace_export_manifests")
+                .await
+                .expect("manifest count after"),
+            manifest_count_before,
+            "failed export item mirror must roll back the export manifest"
+        );
+        assert_eq!(
+            libsql_count(&conn, "SELECT COUNT(*) FROM trace_export_manifest_items")
+                .await
+                .expect("manifest item count after"),
+            manifest_item_count_before,
+            "failed export item mirror must roll back manifest items"
+        );
+        let tenant_root = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"));
+        assert!(
+            !tenant_root.join("benchmarks").exists(),
+            "failed atomic export mirror must not publish file artifacts"
         );
     }
 

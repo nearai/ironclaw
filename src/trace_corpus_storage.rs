@@ -246,6 +246,13 @@ pub struct TraceExportManifestWrite {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceExportManifestMirrorWrite {
+    pub manifest: TraceExportManifestWrite,
+    pub object_refs: Vec<TraceObjectRefWrite>,
+    pub items: Vec<TraceExportManifestItemWrite>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TraceExportManifestRecord {
     pub tenant_id: String,
     pub export_manifest_id: Uuid,
@@ -761,6 +768,11 @@ pub trait TraceCorpusStore: Send + Sync {
     async fn upsert_trace_export_manifest(
         &self,
         manifest: TraceExportManifestWrite,
+    ) -> Result<TraceExportManifestRecord, DatabaseError>;
+
+    async fn upsert_trace_export_manifest_mirror(
+        &self,
+        mirror: TraceExportManifestMirrorWrite,
     ) -> Result<TraceExportManifestRecord, DatabaseError>;
 
     async fn list_trace_export_manifests(

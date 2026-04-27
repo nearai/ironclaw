@@ -15,12 +15,13 @@ use crate::trace_corpus_storage::{
     TraceAuditEventWrite, TraceAuditSafeMetadata, TraceCorpusStatus, TraceCorpusStore,
     TraceCreditEventRecord, TraceCreditEventWrite, TraceCreditSettlementState, TraceDerivedRecord,
     TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportManifestItemInvalidationReason,
-    TraceExportManifestItemRecord, TraceExportManifestItemWrite, TraceExportManifestRecord,
-    TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefRecord, TraceObjectRefWrite,
-    TraceRetentionJobItemAction, TraceRetentionJobItemRecord, TraceRetentionJobItemStatus,
-    TraceRetentionJobItemWrite, TraceRetentionJobRecord, TraceRetentionJobStatus,
-    TraceRetentionJobWrite, TraceSubmissionRecord, TraceSubmissionWrite, TraceTenantPolicyRecord,
-    TraceTenantPolicyWrite, TraceTombstoneRecord, TraceTombstoneWrite, TraceVectorEntryRecord,
+    TraceExportManifestItemRecord, TraceExportManifestItemWrite, TraceExportManifestMirrorWrite,
+    TraceExportManifestRecord, TraceExportManifestWrite, TraceObjectArtifactKind,
+    TraceObjectRefRecord, TraceObjectRefWrite, TraceRetentionJobItemAction,
+    TraceRetentionJobItemRecord, TraceRetentionJobItemStatus, TraceRetentionJobItemWrite,
+    TraceRetentionJobRecord, TraceRetentionJobStatus, TraceRetentionJobWrite,
+    TraceSubmissionRecord, TraceSubmissionWrite, TraceTenantPolicyRecord, TraceTenantPolicyWrite,
+    TraceTombstoneRecord, TraceTombstoneWrite, TraceVectorEntryRecord,
     TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
     TraceWorkerKind,
 };
@@ -1477,6 +1478,272 @@ impl TraceCorpusStore for LibSqlBackend {
                 id: manifest.export_manifest_id.to_string(),
             }),
         }
+    }
+
+    async fn upsert_trace_export_manifest_mirror(
+        &self,
+        mirror: TraceExportManifestMirrorWrite,
+    ) -> Result<TraceExportManifestRecord, DatabaseError> {
+        let tenant_id = mirror.manifest.tenant_id.clone();
+        for object_ref in &mirror.object_refs {
+            if object_ref.tenant_id != tenant_id {
+                return Err(DatabaseError::Serialization(format!(
+                    "trace export mirror object ref tenant {} does not match manifest tenant {}",
+                    object_ref.tenant_id, tenant_id
+                )));
+            }
+        }
+        for item in &mirror.items {
+            if item.tenant_id != tenant_id {
+                return Err(DatabaseError::Serialization(format!(
+                    "trace export mirror item tenant {} does not match manifest tenant {}",
+                    item.tenant_id, tenant_id
+                )));
+            }
+            if item.export_manifest_id != mirror.manifest.export_manifest_id {
+                return Err(DatabaseError::Serialization(format!(
+                    "trace export mirror item manifest {} does not match manifest {}",
+                    item.export_manifest_id, mirror.manifest.export_manifest_id
+                )));
+            }
+        }
+
+        let conn = self.connect().await?;
+        let tx = conn
+            .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        tx.execute(
+            "INSERT INTO trace_tenants (tenant_id) VALUES (?1)
+             ON CONFLICT (tenant_id) DO UPDATE SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+            libsql::params![tenant_id.as_str()],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        for object_ref in &mirror.object_refs {
+            tx.execute(
+                "INSERT INTO trace_object_refs (
+                    tenant_id, submission_id, object_ref_id, artifact_kind, object_store,
+                    object_key, content_sha256, encryption_key_ref, size_bytes, compression,
+                    created_by_job_id
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT (tenant_id, submission_id, object_ref_id) DO UPDATE SET
+                    artifact_kind = excluded.artifact_kind,
+                    object_store = excluded.object_store,
+                    object_key = excluded.object_key,
+                    content_sha256 = excluded.content_sha256,
+                    encryption_key_ref = excluded.encryption_key_ref,
+                    size_bytes = excluded.size_bytes,
+                    compression = excluded.compression,
+                    created_by_job_id = excluded.created_by_job_id,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+                libsql::params![
+                    object_ref.tenant_id.as_str(),
+                    object_ref.submission_id.to_string(),
+                    object_ref.object_ref_id.to_string(),
+                    enum_to_storage(object_ref.artifact_kind)?,
+                    object_ref.object_store.as_str(),
+                    object_ref.object_key.as_str(),
+                    object_ref.content_sha256.as_str(),
+                    object_ref.encryption_key_ref.as_str(),
+                    object_ref.size_bytes,
+                    opt_string(object_ref.compression.clone()),
+                    opt_uuid(object_ref.created_by_job_id),
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        }
+
+        let source_submission_ids = mirror
+            .manifest
+            .source_submission_ids
+            .iter()
+            .map(Uuid::to_string)
+            .collect::<Vec<_>>();
+        let source_submission_ids = json_string(&source_submission_ids)?;
+        tx.execute(
+            "INSERT INTO trace_export_manifests (
+                tenant_id, export_manifest_id, artifact_kind, purpose_code, audit_event_id,
+                source_submission_ids, source_submission_ids_hash, item_count, generated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT (tenant_id, export_manifest_id) DO UPDATE SET
+                artifact_kind = excluded.artifact_kind,
+                purpose_code = excluded.purpose_code,
+                audit_event_id = excluded.audit_event_id,
+                source_submission_ids = excluded.source_submission_ids,
+                source_submission_ids_hash = excluded.source_submission_ids_hash,
+                item_count = excluded.item_count,
+                generated_at = excluded.generated_at,
+                invalidated_at = NULL,
+                deleted_at = NULL,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+            libsql::params![
+                mirror.manifest.tenant_id.as_str(),
+                mirror.manifest.export_manifest_id.to_string(),
+                enum_to_storage(mirror.manifest.artifact_kind)?,
+                opt_string(mirror.manifest.purpose_code.clone()),
+                opt_uuid(mirror.manifest.audit_event_id),
+                source_submission_ids,
+                mirror.manifest.source_submission_ids_hash.as_str(),
+                i64::from(mirror.manifest.item_count),
+                fmt_ts(&mirror.manifest.generated_at),
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let record = {
+            let mut rows = tx
+                .query(
+                    &format!(
+                        "SELECT {TRACE_EXPORT_MANIFEST_COLUMNS}
+                         FROM trace_export_manifests
+                         WHERE tenant_id = ?1 AND export_manifest_id = ?2"
+                    ),
+                    libsql::params![
+                        mirror.manifest.tenant_id.as_str(),
+                        mirror.manifest.export_manifest_id.to_string(),
+                    ],
+                )
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            match rows
+                .next()
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?
+            {
+                Some(row) => row_to_export_manifest(&row)?,
+                None => {
+                    return Err(DatabaseError::NotFound {
+                        entity: "trace_export_manifest".to_string(),
+                        id: mirror.manifest.export_manifest_id.to_string(),
+                    });
+                }
+            }
+        };
+
+        for item in &mirror.items {
+            if let Some(derived_id) = item.derived_id {
+                let exists = {
+                    let mut rows = tx
+                        .query(
+                            "SELECT 1
+                             FROM trace_derived_records
+                             WHERE tenant_id = ?1 AND submission_id = ?2 AND derived_id = ?3
+                             LIMIT 1",
+                            libsql::params![
+                                item.tenant_id.as_str(),
+                                item.submission_id.to_string(),
+                                derived_id.to_string(),
+                            ],
+                        )
+                        .await
+                        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+                    rows.next()
+                        .await
+                        .map_err(|e| DatabaseError::Query(e.to_string()))?
+                        .is_some()
+                };
+                if !exists {
+                    return Err(DatabaseError::NotFound {
+                        entity: "export manifest mirror item derived record".to_string(),
+                        id: format!("{}:{}", item.submission_id, derived_id),
+                    });
+                }
+            }
+            if let Some(object_ref_id) = item.object_ref_id {
+                let exists = {
+                    let mut rows = tx
+                        .query(
+                            "SELECT 1
+                             FROM trace_object_refs
+                             WHERE tenant_id = ?1 AND submission_id = ?2 AND object_ref_id = ?3
+                             LIMIT 1",
+                            libsql::params![
+                                item.tenant_id.as_str(),
+                                item.submission_id.to_string(),
+                                object_ref_id.to_string(),
+                            ],
+                        )
+                        .await
+                        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+                    rows.next()
+                        .await
+                        .map_err(|e| DatabaseError::Query(e.to_string()))?
+                        .is_some()
+                };
+                if !exists {
+                    return Err(DatabaseError::NotFound {
+                        entity: "export manifest mirror item object_ref".to_string(),
+                        id: format!("{}:{}", item.submission_id, object_ref_id),
+                    });
+                }
+            }
+            if let Some(vector_entry_id) = item.vector_entry_id {
+                let exists = {
+                    let mut rows = tx
+                        .query(
+                            "SELECT 1
+                             FROM trace_vector_entries
+                             WHERE tenant_id = ?1 AND submission_id = ?2 AND vector_entry_id = ?3
+                             LIMIT 1",
+                            libsql::params![
+                                item.tenant_id.as_str(),
+                                item.submission_id.to_string(),
+                                vector_entry_id.to_string(),
+                            ],
+                        )
+                        .await
+                        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+                    rows.next()
+                        .await
+                        .map_err(|e| DatabaseError::Query(e.to_string()))?
+                        .is_some()
+                };
+                if !exists {
+                    return Err(DatabaseError::NotFound {
+                        entity: "export manifest mirror item vector entry".to_string(),
+                        id: format!("{}:{}", item.submission_id, vector_entry_id),
+                    });
+                }
+            }
+            tx.execute(
+                "INSERT INTO trace_export_manifest_items (
+                    tenant_id, export_manifest_id, submission_id, trace_id, derived_id,
+                    object_ref_id, vector_entry_id, source_status_at_export, source_hash_at_export
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT (tenant_id, export_manifest_id, submission_id) DO UPDATE SET
+                    trace_id = excluded.trace_id,
+                    derived_id = excluded.derived_id,
+                    object_ref_id = excluded.object_ref_id,
+                    vector_entry_id = excluded.vector_entry_id,
+                    source_status_at_export = excluded.source_status_at_export,
+                    source_hash_at_export = excluded.source_hash_at_export,
+                    source_invalidated_at = NULL,
+                    source_invalidation_reason = NULL,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+                libsql::params![
+                    item.tenant_id.as_str(),
+                    item.export_manifest_id.to_string(),
+                    item.submission_id.to_string(),
+                    item.trace_id.to_string(),
+                    opt_uuid(item.derived_id),
+                    opt_uuid(item.object_ref_id),
+                    opt_uuid(item.vector_entry_id),
+                    enum_to_storage(item.source_status_at_export)?,
+                    item.source_hash_at_export.as_str(),
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(record)
     }
 
     async fn list_trace_export_manifests(
