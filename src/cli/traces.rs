@@ -11,6 +11,7 @@ use std::time::Duration;
 use clap::{Args, Subcommand, ValueEnum};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::trace_contribution::{
@@ -973,6 +974,25 @@ pub enum TracesCommand {
         /// Environment variable containing an admin bearer token
         #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
         bearer_token_env: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Derive the stored principal_ref used by tenant access grants
+    TenantPrincipalRef {
+        /// Environment variable containing a static Trace Commons bearer token
+        #[arg(long)]
+        token_env: Option<String>,
+
+        /// Tenant ID for a signed-claim principal
+        #[arg(long)]
+        signed_tenant_id: Option<String>,
+
+        /// Signed claim principal_ref or sub value
+        #[arg(long)]
+        signed_actor_ref: Option<String>,
 
         /// Output as JSON
         #[arg(long)]
@@ -2386,6 +2406,17 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
             )
             .await
         }
+        TracesCommand::TenantPrincipalRef {
+            token_env,
+            signed_tenant_id,
+            signed_actor_ref,
+            json,
+        } => trace_commons_tenant_principal_ref(
+            token_env.as_deref(),
+            signed_tenant_id.as_deref(),
+            signed_actor_ref.as_deref(),
+            json,
+        ),
         TracesCommand::TenantAccessGrantCreate {
             endpoint,
             principal_ref,
@@ -4686,6 +4717,78 @@ async fn trace_commons_tenant_access_grants_list(
         );
         Ok(())
     }
+}
+
+fn trace_commons_tenant_principal_ref(
+    token_env: Option<&str>,
+    signed_tenant_id: Option<&str>,
+    signed_actor_ref: Option<&str>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let token_env = trimmed_optional_cli_string(token_env);
+    let signed_tenant_id = trimmed_optional_cli_string(signed_tenant_id);
+    let signed_actor_ref = trimmed_optional_cli_string(signed_actor_ref);
+    let has_static_token = token_env.is_some();
+    let has_signed_actor = signed_tenant_id.is_some() || signed_actor_ref.is_some();
+    if has_static_token == has_signed_actor {
+        anyhow::bail!(
+            "provide either --token-env or both --signed-tenant-id and --signed-actor-ref"
+        );
+    }
+    let (mode, principal_ref) = if let Some(token_env) = token_env {
+        let token = std::env::var(&token_env).map_err(|_| {
+            anyhow::anyhow!(
+                "{} is not set; refusing to derive a principal_ref from a missing token",
+                token_env
+            )
+        })?;
+        if token.trim().is_empty() {
+            anyhow::bail!("{token_env} is empty; refusing to derive a principal_ref");
+        }
+        ("static_token", trace_commons_principal_storage_ref(&token))
+    } else {
+        let Some(tenant_id) = signed_tenant_id else {
+            anyhow::bail!("--signed-tenant-id is required with --signed-actor-ref");
+        };
+        let Some(actor_ref) = signed_actor_ref else {
+            anyhow::bail!("--signed-actor-ref is required with --signed-tenant-id");
+        };
+        (
+            "signed_claim",
+            trace_commons_signed_claim_principal_ref(&tenant_id, &actor_ref),
+        )
+    };
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "mode": mode,
+                "principal_ref": principal_ref,
+            }))
+            .map_err(|error| anyhow::anyhow!("failed to serialize principal_ref: {error}"))?
+        );
+    } else {
+        println!("{principal_ref}");
+    }
+    Ok(())
+}
+
+fn trace_commons_signed_claim_principal_ref(tenant_id: &str, actor_ref: &str) -> String {
+    trace_commons_principal_storage_ref(&format!(
+        "signed:{}:{}",
+        tenant_id.trim(),
+        actor_ref.trim()
+    ))
+}
+
+fn trace_commons_principal_storage_ref(value: &str) -> String {
+    format!("principal_{}", trace_commons_sha256_prefixed(value))
+}
+
+fn trace_commons_sha256_prefixed(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    format!("sha256:{}", hex::encode(digest))
 }
 
 struct TraceCommonsTenantAccessGrantCreateOptions<'a> {
@@ -7153,6 +7256,43 @@ mod tests {
         assert_eq!(principal_ref.as_deref(), Some("principal_sha256:abc"));
         assert_eq!(bearer_token_env, "TRACE_COMMONS_ADMIN_TOKEN");
         assert!(json);
+    }
+
+    #[test]
+    fn tenant_principal_ref_parses_through_cli() {
+        let cli = parse_cli([
+            "ironclaw",
+            "traces",
+            "tenant-principal-ref",
+            "--signed-tenant-id",
+            "tenant-a",
+            "--signed-actor-ref",
+            "actor-123",
+            "--json",
+        ]);
+
+        let TracesCommand::TenantPrincipalRef {
+            signed_tenant_id,
+            signed_actor_ref,
+            json,
+            ..
+        } = unwrap_traces_command(cli)
+        else {
+            panic!("expected traces tenant-principal-ref command");
+        };
+
+        assert_eq!(signed_tenant_id.as_deref(), Some("tenant-a"));
+        assert_eq!(signed_actor_ref.as_deref(), Some("actor-123"));
+        assert!(json);
+    }
+
+    #[test]
+    fn tenant_principal_ref_uses_ingest_principal_hash_shape() {
+        let signed = trace_commons_signed_claim_principal_ref("tenant-a", "actor-123");
+        let expected = trace_commons_principal_storage_ref("signed:tenant-a:actor-123");
+
+        assert_eq!(signed, expected);
+        assert!(signed.starts_with("principal_sha256:"));
     }
 
     #[test]

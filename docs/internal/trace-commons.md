@@ -179,8 +179,11 @@ allow-lists and cannot upgrade the token's role. Admin tokens can manage the
 current tenant's grant rows through `GET|POST /v1/admin/tenant-access-grants`
 and `POST /v1/admin/tenant-access-grants/{grant_id}/revoke`, or the matching
 `ironclaw traces tenant-access-grants-list`, `tenant-access-grant-create`, and
-`tenant-access-grant-revoke` CLI helpers; those routes are tenant-scoped,
-DB-backed, and audited with safe hash/count-only grant metadata.
+`tenant-access-grant-revoke` CLI helpers. The local-only
+`ironclaw traces tenant-principal-ref` helper derives the stored
+`principal_sha256:...` value for either static-token or signed-claim actors
+without printing raw credentials. Those routes are tenant-scoped, DB-backed, and
+audited with safe hash/count-only grant metadata.
 For autonomous clients, the standing policy can point at a separate guarded
 HTTPS upload-claim issuer. The queue worker posts a bounded claim request with
 tenant/audience/consent/use metadata, sends optional workload credentials only
