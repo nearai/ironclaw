@@ -43,6 +43,7 @@ pub struct PgBackend {
 const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_tenants",
     "trace_tenant_policies",
+    "trace_tenant_access_grants",
     "trace_submissions",
     "trace_object_refs",
     "trace_derived_records",

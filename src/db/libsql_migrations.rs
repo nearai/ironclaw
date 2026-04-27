@@ -1012,6 +1012,39 @@ CREATE TABLE IF NOT EXISTS trace_tenant_policies (
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
+CREATE TABLE IF NOT EXISTS trace_tenant_access_grants (
+    tenant_id TEXT NOT NULL,
+    grant_id TEXT NOT NULL,
+    principal_ref TEXT NOT NULL,
+    role TEXT NOT NULL,
+    status TEXT NOT NULL,
+    allowed_consent_scopes TEXT NOT NULL DEFAULT '[]',
+    allowed_uses TEXT NOT NULL DEFAULT '[]',
+    issuer TEXT,
+    audience TEXT,
+    subject TEXT,
+    issued_at TEXT NOT NULL,
+    expires_at TEXT,
+    revoked_at TEXT,
+    created_by_principal_ref TEXT,
+    revoked_by_principal_ref TEXT,
+    reason TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (tenant_id, grant_id),
+    FOREIGN KEY (tenant_id)
+        REFERENCES trace_tenants (tenant_id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_trace_tenant_access_grants_principal
+    ON trace_tenant_access_grants (tenant_id, principal_ref, status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_trace_tenant_access_grants_role
+    ON trace_tenant_access_grants (tenant_id, role, status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_trace_tenant_access_grants_issuer_subject
+    ON trace_tenant_access_grants (tenant_id, issuer, subject);
+
 CREATE TABLE IF NOT EXISTS trace_submissions (
     tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
     submission_id TEXT NOT NULL,
@@ -1785,6 +1818,44 @@ CREATE INDEX IF NOT EXISTS idx_trace_export_jobs_status
     ON trace_export_jobs (tenant_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_trace_export_jobs_grant
     ON trace_export_jobs (tenant_id, grant_id);
+"#,
+    ),
+    (
+        39,
+        "trace_tenant_access_grants",
+        r#"
+CREATE TABLE IF NOT EXISTS trace_tenant_access_grants (
+    tenant_id TEXT NOT NULL,
+    grant_id TEXT NOT NULL,
+    principal_ref TEXT NOT NULL,
+    role TEXT NOT NULL,
+    status TEXT NOT NULL,
+    allowed_consent_scopes TEXT NOT NULL DEFAULT '[]',
+    allowed_uses TEXT NOT NULL DEFAULT '[]',
+    issuer TEXT,
+    audience TEXT,
+    subject TEXT,
+    issued_at TEXT NOT NULL,
+    expires_at TEXT,
+    revoked_at TEXT,
+    created_by_principal_ref TEXT,
+    revoked_by_principal_ref TEXT,
+    reason TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (tenant_id, grant_id),
+    FOREIGN KEY (tenant_id)
+        REFERENCES trace_tenants (tenant_id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_trace_tenant_access_grants_principal
+    ON trace_tenant_access_grants (tenant_id, principal_ref, status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_trace_tenant_access_grants_role
+    ON trace_tenant_access_grants (tenant_id, role, status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_trace_tenant_access_grants_issuer_subject
+    ON trace_tenant_access_grants (tenant_id, issuer, subject);
 "#,
     ),
 ];

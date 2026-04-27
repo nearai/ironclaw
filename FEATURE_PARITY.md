@@ -201,6 +201,8 @@ Trace Commons worker-export note: export-worker automation now has dedicated rep
 
 Trace Commons export-control observability note: admins can now list tenant-scoped durable export access grants and export jobs through `GET /v1/admin/export/access-grants` and `GET /v1/admin/export/jobs`, with status and dataset-kind filters plus matching CLI helpers. Reads are DB-backed, admin-only, tenant-scoped, and audited without exposing trace bodies.
 
+Trace Commons tenant-access grant note: PostgreSQL/libSQL now include a durable tenant-scoped `trace_tenant_access_grants` storage surface for issuer-authorized principals, roles, consent scopes, allowed uses, issuer/audience/subject attribution, status, expiry, revocation metadata, and safe metadata. This is storage-only groundwork for multitenant hosted-agent permissioning; runtime auth enforcement still comes from existing static/EdDSA claims until the access-grant enforcement slice lands.
+
 ### Owner: _Unassigned_
 
 ---

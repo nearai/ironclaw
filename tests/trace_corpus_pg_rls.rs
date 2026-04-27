@@ -17,6 +17,7 @@ use ironclaw::trace_corpus_storage::{
     TraceReviewLeaseAuditAction, TraceRevocationPropagationAction,
     TraceRevocationPropagationItemStatus, TraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget, TraceSubmissionWrite,
+    TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus, TraceTenantAccessGrantWrite,
     TraceTenantPolicyWrite, TraceTombstoneWrite, TraceVectorEntrySourceProjection,
     TraceVectorEntryStatus, TraceVectorEntryWrite, TraceWorkerKind,
 };
@@ -588,6 +589,112 @@ async fn assert_raw_sql_tenant_policies_visible_only_with_matching_tenant_contex
         .expect("commit raw tenant policy tenant B assertion");
 }
 
+async fn assert_raw_sql_tenant_access_grants_visible_only_with_matching_tenant_context(
+    database_url: &str,
+    tenant_a: &str,
+    tenant_b: &str,
+) {
+    let (mut client, connection) = match tokio_postgres::connect(database_url, NoTls).await {
+        Ok(parts) => parts,
+        Err(e) => {
+            eprintln!("skipping raw tenant access grant RLS assertion: database unavailable ({e})");
+            return;
+        }
+    };
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    match current_role_bypasses_trace_rls(&mut client).await {
+        Ok(true) => {
+            eprintln!("skipping raw tenant access grant RLS assertion: current role bypasses RLS");
+            return;
+        }
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!(
+                "skipping raw tenant access grant RLS assertion: could not inspect role ({e})"
+            );
+            return;
+        }
+    }
+
+    let tx = client
+        .transaction()
+        .await
+        .expect("start raw tenant access grant no-context assertion transaction");
+    let no_context_count: i64 = tx
+        .query_one("SELECT COUNT(*) FROM trace_tenant_access_grants", &[])
+        .await
+        .expect("count tenant access grants without context")
+        .get(0);
+    assert_eq!(
+        no_context_count, 0,
+        "tenant access grant rows must be invisible without tenant context"
+    );
+    tx.commit()
+        .await
+        .expect("commit raw tenant access grant no-context assertion");
+
+    let tx = client
+        .transaction()
+        .await
+        .expect("start raw tenant access grant tenant A assertion transaction");
+    tx.execute(
+        "SELECT set_config('ironclaw.trace_tenant_id', $1, true)",
+        &[&tenant_a],
+    )
+    .await
+    .expect("set tenant A context");
+    let tenant_a_visible_count: i64 = tx
+        .query_one("SELECT COUNT(*) FROM trace_tenant_access_grants", &[])
+        .await
+        .expect("count tenant access grants for tenant A")
+        .get(0);
+    let tenant_b_from_a_count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_tenant_access_grants WHERE tenant_id = $1",
+            &[&tenant_b],
+        )
+        .await
+        .expect("count tenant B access grant from tenant A context")
+        .get(0);
+    assert_eq!(tenant_a_visible_count, 1);
+    assert_eq!(tenant_b_from_a_count, 0);
+    tx.commit()
+        .await
+        .expect("commit raw tenant access grant tenant A assertion");
+
+    let tx = client
+        .transaction()
+        .await
+        .expect("start raw tenant access grant tenant B assertion transaction");
+    tx.execute(
+        "SELECT set_config('ironclaw.trace_tenant_id', $1, true)",
+        &[&tenant_b],
+    )
+    .await
+    .expect("set tenant B context");
+    let tenant_b_visible_count: i64 = tx
+        .query_one("SELECT COUNT(*) FROM trace_tenant_access_grants", &[])
+        .await
+        .expect("count tenant access grants for tenant B")
+        .get(0);
+    let tenant_a_from_b_count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_tenant_access_grants WHERE tenant_id = $1",
+            &[&tenant_a],
+        )
+        .await
+        .expect("count tenant A access grant from tenant B context")
+        .get(0);
+    assert_eq!(tenant_b_visible_count, 1);
+    assert_eq!(tenant_a_from_b_count, 0);
+    tx.commit()
+        .await
+        .expect("commit raw tenant access grant tenant B assertion");
+}
+
 async fn cleanup_trace_tenants(backend: &PgBackend, tenant_ids: &[&str]) {
     let mut client = backend.pool().get().await.expect("get cleanup connection");
     for tenant_id in tenant_ids {
@@ -616,6 +723,7 @@ async fn assert_trace_rls_policies_installed(backend: &PgBackend) {
     let expected_tables = vec![
         "trace_tenants".to_string(),
         "trace_tenant_policies".to_string(),
+        "trace_tenant_access_grants".to_string(),
         "trace_submissions".to_string(),
         "trace_object_refs".to_string(),
         "trace_derived_records".to_string(),
@@ -1066,6 +1174,154 @@ async fn store_facade_preserves_tenant_policy_scope_and_updates() {
 
     if let Some(config) = postgres_test_config() {
         assert_raw_sql_tenant_policies_visible_only_with_matching_tenant_context(
+            config.url.expose_secret(),
+            &tenant_alpha,
+            &tenant_beta,
+        )
+        .await;
+    }
+
+    cleanup_trace_tenants(&backend, &[&tenant_alpha, &tenant_beta]).await;
+}
+
+#[tokio::test]
+async fn store_facade_preserves_tenant_access_grant_scope_and_active_filter() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+    assert_trace_rls_policies_installed(&backend).await;
+
+    let tenant_alpha = format!("rls-access-alpha-{}", Uuid::new_v4());
+    let tenant_beta = format!("rls-access-beta-{}", Uuid::new_v4());
+    let now = DateTime::parse_from_rfc3339("2026-04-27T12:00:00Z")
+        .expect("parse now")
+        .with_timezone(&Utc);
+    let grant_id = Uuid::new_v4();
+    let expired_grant_id = Uuid::new_v4();
+    let mut metadata = BTreeMap::new();
+    metadata.insert("issuer_key_mode".to_string(), "managed_eddsa".to_string());
+    metadata.insert("hosted_surface".to_string(), "near.com".to_string());
+
+    let alpha_grant = backend
+        .upsert_trace_tenant_access_grant(TraceTenantAccessGrantWrite {
+            tenant_id: tenant_alpha.clone(),
+            grant_id,
+            principal_ref: "principal:hosted-agent".to_string(),
+            role: TraceTenantAccessGrantRole::Contributor,
+            status: TraceTenantAccessGrantStatus::Active,
+            allowed_consent_scopes: vec![
+                "debugging_evaluation".to_string(),
+                "ranking_training".to_string(),
+            ],
+            allowed_uses: vec![
+                "debugging_evaluation".to_string(),
+                "ranking_model_training".to_string(),
+            ],
+            issuer: Some("https://issuer.near.com".to_string()),
+            audience: Some("trace-commons".to_string()),
+            subject: Some("tenant-alpha-agent".to_string()),
+            issued_at: now - chrono::Duration::minutes(5),
+            expires_at: Some(now + chrono::Duration::minutes(30)),
+            revoked_at: None,
+            created_by_principal_ref: Some("issuer:near.com".to_string()),
+            revoked_by_principal_ref: None,
+            reason: Some("hosted tenant verified".to_string()),
+            metadata: metadata.clone(),
+        })
+        .await
+        .expect("insert alpha tenant access grant");
+    assert_eq!(alpha_grant.tenant_id, tenant_alpha);
+    assert_eq!(alpha_grant.grant_id, grant_id);
+    assert_eq!(alpha_grant.role, TraceTenantAccessGrantRole::Contributor);
+    assert_eq!(alpha_grant.status, TraceTenantAccessGrantStatus::Active);
+    assert_eq!(alpha_grant.metadata, metadata);
+
+    backend
+        .upsert_trace_tenant_access_grant(TraceTenantAccessGrantWrite {
+            tenant_id: tenant_alpha.clone(),
+            grant_id: expired_grant_id,
+            principal_ref: "principal:hosted-agent".to_string(),
+            role: TraceTenantAccessGrantRole::Contributor,
+            status: TraceTenantAccessGrantStatus::Active,
+            allowed_consent_scopes: vec!["debugging_evaluation".to_string()],
+            allowed_uses: vec!["debugging_evaluation".to_string()],
+            issuer: Some("https://issuer.near.com".to_string()),
+            audience: Some("trace-commons".to_string()),
+            subject: Some("tenant-alpha-agent".to_string()),
+            issued_at: now - chrono::Duration::hours(1),
+            expires_at: Some(now - chrono::Duration::minutes(1)),
+            revoked_at: None,
+            created_by_principal_ref: Some("issuer:near.com".to_string()),
+            revoked_by_principal_ref: None,
+            reason: Some("expired grant".to_string()),
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("insert alpha expired tenant access grant");
+
+    let beta_grant = backend
+        .upsert_trace_tenant_access_grant(TraceTenantAccessGrantWrite {
+            tenant_id: tenant_beta.clone(),
+            grant_id,
+            principal_ref: "principal:hosted-agent".to_string(),
+            role: TraceTenantAccessGrantRole::Admin,
+            status: TraceTenantAccessGrantStatus::Active,
+            allowed_consent_scopes: vec!["debugging_evaluation".to_string()],
+            allowed_uses: vec!["debugging_evaluation".to_string()],
+            issuer: Some("https://issuer.near.com".to_string()),
+            audience: Some("trace-commons".to_string()),
+            subject: Some("tenant-beta-agent".to_string()),
+            issued_at: now - chrono::Duration::minutes(5),
+            expires_at: Some(now + chrono::Duration::minutes(30)),
+            revoked_at: None,
+            created_by_principal_ref: Some("issuer:near.com".to_string()),
+            revoked_by_principal_ref: None,
+            reason: Some("beta grant with same id".to_string()),
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("insert beta tenant access grant");
+    assert_eq!(beta_grant.tenant_id, tenant_beta);
+    assert_eq!(beta_grant.grant_id, grant_id);
+    assert_eq!(beta_grant.role, TraceTenantAccessGrantRole::Admin);
+
+    let alpha_grants = backend
+        .list_trace_tenant_access_grants(&tenant_alpha)
+        .await
+        .expect("list alpha tenant access grants");
+    assert_eq!(alpha_grants.len(), 2);
+    assert!(
+        alpha_grants
+            .iter()
+            .all(|grant| grant.tenant_id == tenant_alpha)
+    );
+
+    let alpha_active = backend
+        .list_active_trace_tenant_access_grants_for_principal(
+            &tenant_alpha,
+            "principal:hosted-agent",
+            now,
+        )
+        .await
+        .expect("list active alpha tenant access grants");
+    assert_eq!(alpha_active.len(), 1);
+    assert_eq!(alpha_active[0].grant_id, grant_id);
+    assert_eq!(
+        alpha_active[0].allowed_uses,
+        vec!["debugging_evaluation", "ranking_model_training"]
+    );
+
+    let beta_grants = backend
+        .list_trace_tenant_access_grants(&tenant_beta)
+        .await
+        .expect("list beta tenant access grants");
+    assert_eq!(beta_grants.len(), 1);
+    assert_eq!(beta_grants[0].grant_id, grant_id);
+    assert_eq!(beta_grants[0].role, TraceTenantAccessGrantRole::Admin);
+
+    if let Some(config) = postgres_test_config() {
+        assert_raw_sql_tenant_access_grants_visible_only_with_matching_tenant_context(
             config.url.expose_secret(),
             &tenant_alpha,
             &tenant_beta,

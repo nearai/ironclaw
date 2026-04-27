@@ -17,7 +17,8 @@ mod libsql_trace_corpus_store {
         TraceRetentionJobWrite, TraceReviewLeaseAuditAction, TraceRevocationPropagationAction,
         TraceRevocationPropagationItemStatus, TraceRevocationPropagationItemStatusUpdate,
         TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget,
-        TraceSubmissionWrite, TraceTenantPolicyWrite, TraceTombstoneWrite,
+        TraceSubmissionWrite, TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus,
+        TraceTenantAccessGrantWrite, TraceTenantPolicyWrite, TraceTombstoneWrite,
         TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
         TraceWorkerKind,
     };
@@ -2270,5 +2271,167 @@ mod libsql_trace_corpus_store {
                 .expect("tenant-scoped update")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn libsql_store_persists_tenant_access_grants_and_active_principal_scope() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let db_path = temp_dir.path().join("trace-tenant-access-grants.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("create libsql backend");
+        backend.run_migrations().await.expect("run migrations");
+
+        let now = DateTime::parse_from_rfc3339("2026-04-27T12:00:00Z")
+            .expect("parse now")
+            .with_timezone(&Utc);
+        let active_grant_id = Uuid::new_v4();
+        let expired_grant_id = Uuid::new_v4();
+        let revoked_grant_id = Uuid::new_v4();
+        let future_grant_id = Uuid::new_v4();
+        let mut metadata = BTreeMap::new();
+        metadata.insert("issuer_key_mode".to_string(), "managed_eddsa".to_string());
+        metadata.insert("hosted_surface".to_string(), "near.com".to_string());
+
+        let active = backend
+            .upsert_trace_tenant_access_grant(TraceTenantAccessGrantWrite {
+                tenant_id: "tenant-alpha".to_string(),
+                grant_id: active_grant_id,
+                principal_ref: "principal:hosted-agent".to_string(),
+                role: TraceTenantAccessGrantRole::Contributor,
+                status: TraceTenantAccessGrantStatus::Active,
+                allowed_consent_scopes: vec![
+                    "debugging_evaluation".to_string(),
+                    "ranking_training".to_string(),
+                ],
+                allowed_uses: vec![
+                    "debugging_evaluation".to_string(),
+                    "ranking_model_training".to_string(),
+                ],
+                issuer: Some("https://issuer.near.com".to_string()),
+                audience: Some("trace-commons".to_string()),
+                subject: Some("tenant-alpha-agent".to_string()),
+                issued_at: now - chrono::Duration::minutes(5),
+                expires_at: Some(now + chrono::Duration::minutes(30)),
+                revoked_at: None,
+                created_by_principal_ref: Some("issuer:near.com".to_string()),
+                revoked_by_principal_ref: None,
+                reason: Some("hosted tenant verified".to_string()),
+                metadata: metadata.clone(),
+            })
+            .await
+            .expect("insert active tenant access grant");
+        assert_eq!(active.tenant_id, "tenant-alpha");
+        assert_eq!(active.grant_id, active_grant_id);
+        assert_eq!(active.role, TraceTenantAccessGrantRole::Contributor);
+        assert_eq!(active.status, TraceTenantAccessGrantStatus::Active);
+        assert_eq!(active.metadata, metadata);
+
+        for (grant_id, status, issued_at, expires_at, revoked_at, reason) in [
+            (
+                expired_grant_id,
+                TraceTenantAccessGrantStatus::Active,
+                now - chrono::Duration::hours(2),
+                Some(now - chrono::Duration::minutes(1)),
+                None,
+                "expired grant",
+            ),
+            (
+                revoked_grant_id,
+                TraceTenantAccessGrantStatus::Revoked,
+                now - chrono::Duration::hours(1),
+                Some(now + chrono::Duration::minutes(30)),
+                Some(now - chrono::Duration::minutes(2)),
+                "tenant deprovisioned",
+            ),
+            (
+                future_grant_id,
+                TraceTenantAccessGrantStatus::Active,
+                now + chrono::Duration::minutes(5),
+                Some(now + chrono::Duration::hours(1)),
+                None,
+                "future activation",
+            ),
+        ] {
+            backend
+                .upsert_trace_tenant_access_grant(TraceTenantAccessGrantWrite {
+                    tenant_id: "tenant-alpha".to_string(),
+                    grant_id,
+                    principal_ref: "principal:hosted-agent".to_string(),
+                    role: TraceTenantAccessGrantRole::Contributor,
+                    status,
+                    allowed_consent_scopes: vec!["debugging_evaluation".to_string()],
+                    allowed_uses: vec!["debugging_evaluation".to_string()],
+                    issuer: Some("https://issuer.near.com".to_string()),
+                    audience: Some("trace-commons".to_string()),
+                    subject: Some("tenant-alpha-agent".to_string()),
+                    issued_at,
+                    expires_at,
+                    revoked_at,
+                    created_by_principal_ref: Some("issuer:near.com".to_string()),
+                    revoked_by_principal_ref: revoked_at.map(|_| "admin:alpha".to_string()),
+                    reason: Some(reason.to_string()),
+                    metadata: BTreeMap::new(),
+                })
+                .await
+                .expect("insert inactive tenant access grant");
+        }
+
+        backend
+            .upsert_trace_tenant_access_grant(TraceTenantAccessGrantWrite {
+                tenant_id: "tenant-beta".to_string(),
+                grant_id: active_grant_id,
+                principal_ref: "principal:hosted-agent".to_string(),
+                role: TraceTenantAccessGrantRole::Admin,
+                status: TraceTenantAccessGrantStatus::Active,
+                allowed_consent_scopes: vec!["debugging_evaluation".to_string()],
+                allowed_uses: vec!["debugging_evaluation".to_string()],
+                issuer: Some("https://issuer.near.com".to_string()),
+                audience: Some("trace-commons".to_string()),
+                subject: Some("tenant-beta-agent".to_string()),
+                issued_at: now - chrono::Duration::minutes(5),
+                expires_at: Some(now + chrono::Duration::minutes(30)),
+                revoked_at: None,
+                created_by_principal_ref: Some("issuer:near.com".to_string()),
+                revoked_by_principal_ref: None,
+                reason: Some("beta grant with same id".to_string()),
+                metadata: BTreeMap::new(),
+            })
+            .await
+            .expect("insert same grant id for beta tenant");
+
+        let alpha_grants = backend
+            .list_trace_tenant_access_grants("tenant-alpha")
+            .await
+            .expect("list alpha tenant access grants");
+        assert_eq!(alpha_grants.len(), 4);
+        assert!(
+            alpha_grants
+                .iter()
+                .all(|grant| grant.tenant_id == "tenant-alpha")
+        );
+
+        let active_for_principal = backend
+            .list_active_trace_tenant_access_grants_for_principal(
+                "tenant-alpha",
+                "principal:hosted-agent",
+                now,
+            )
+            .await
+            .expect("list active tenant access grants for principal");
+        assert_eq!(active_for_principal.len(), 1);
+        assert_eq!(active_for_principal[0].grant_id, active_grant_id);
+        assert_eq!(
+            active_for_principal[0].allowed_uses,
+            vec!["debugging_evaluation", "ranking_model_training"]
+        );
+
+        let beta_grants = backend
+            .list_trace_tenant_access_grants("tenant-beta")
+            .await
+            .expect("list beta tenant access grants");
+        assert_eq!(beta_grants.len(), 1);
+        assert_eq!(beta_grants[0].grant_id, active_grant_id);
+        assert_eq!(beta_grants[0].role, TraceTenantAccessGrantRole::Admin);
     }
 }

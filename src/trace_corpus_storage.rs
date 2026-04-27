@@ -198,6 +198,73 @@ pub struct TraceTenantPolicyRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceTenantAccessGrantRole {
+    Contributor,
+    Reviewer,
+    Admin,
+    ExportWorker,
+    RetentionWorker,
+    VectorWorker,
+    BenchmarkWorker,
+    UtilityWorker,
+    ProcessEvalWorker,
+    RevocationWorker,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceTenantAccessGrantStatus {
+    Active,
+    Revoked,
+    Expired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceTenantAccessGrantWrite {
+    pub tenant_id: String,
+    pub grant_id: Uuid,
+    pub principal_ref: String,
+    pub role: TraceTenantAccessGrantRole,
+    pub status: TraceTenantAccessGrantStatus,
+    pub allowed_consent_scopes: Vec<String>,
+    pub allowed_uses: Vec<String>,
+    pub issuer: Option<String>,
+    pub audience: Option<String>,
+    pub subject: Option<String>,
+    pub issued_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub created_by_principal_ref: Option<String>,
+    pub revoked_by_principal_ref: Option<String>,
+    pub reason: Option<String>,
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceTenantAccessGrantRecord {
+    pub tenant_id: String,
+    pub grant_id: Uuid,
+    pub principal_ref: String,
+    pub role: TraceTenantAccessGrantRole,
+    pub status: TraceTenantAccessGrantStatus,
+    pub allowed_consent_scopes: Vec<String>,
+    pub allowed_uses: Vec<String>,
+    pub issuer: Option<String>,
+    pub audience: Option<String>,
+    pub subject: Option<String>,
+    pub issued_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub created_by_principal_ref: Option<String>,
+    pub revoked_by_principal_ref: Option<String>,
+    pub reason: Option<String>,
+    pub metadata: BTreeMap<String, String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TraceObjectRefWrite {
     pub object_ref_id: Uuid,
@@ -952,6 +1019,23 @@ pub trait TraceCorpusStore: Send + Sync {
         &self,
         tenant_id: &str,
     ) -> Result<Option<TraceTenantPolicyRecord>, DatabaseError>;
+
+    async fn upsert_trace_tenant_access_grant(
+        &self,
+        grant: TraceTenantAccessGrantWrite,
+    ) -> Result<TraceTenantAccessGrantRecord, DatabaseError>;
+
+    async fn list_trace_tenant_access_grants(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceTenantAccessGrantRecord>, DatabaseError>;
+
+    async fn list_active_trace_tenant_access_grants_for_principal(
+        &self,
+        tenant_id: &str,
+        principal_ref: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<TraceTenantAccessGrantRecord>, DatabaseError>;
 
     async fn list_trace_credit_events(
         &self,

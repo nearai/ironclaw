@@ -27,9 +27,11 @@ use crate::trace_corpus_storage::{
     TraceRevocationPropagationItemStatus, TraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget,
     TraceRevocationPropagationTargetKind, TraceSubmissionRecord, TraceSubmissionWrite,
-    TraceTenantPolicyRecord, TraceTenantPolicyWrite, TraceTombstoneRecord, TraceTombstoneWrite,
-    TraceVectorEntryRecord, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
-    TraceVectorEntryWrite, TraceWorkerKind,
+    TraceTenantAccessGrantRecord, TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus,
+    TraceTenantAccessGrantWrite, TraceTenantPolicyRecord, TraceTenantPolicyWrite,
+    TraceTombstoneRecord, TraceTombstoneWrite, TraceVectorEntryRecord,
+    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
+    TraceWorkerKind,
 };
 
 const TRACE_OBJECT_REF_COLUMNS: &str = "\
@@ -74,6 +76,11 @@ const TRACE_EXPORT_JOB_COLUMNS: &str = "\
     tenant_id, export_job_id, grant_id, caller_principal_ref, requested_dataset_kind, \
     purpose, max_item_cap, status, requested_at, started_at, finished_at, expires_at, \
     result_manifest_id, item_count, last_error, metadata_json, created_at, updated_at";
+
+const TRACE_TENANT_ACCESS_GRANT_COLUMNS: &str = "\
+    tenant_id, grant_id, principal_ref, role, status, allowed_consent_scopes, allowed_uses, \
+    issuer, audience, subject, issued_at, expires_at, revoked_at, created_by_principal_ref, \
+    revoked_by_principal_ref, reason, metadata_json, created_at, updated_at";
 
 async fn ensure_pg_object_ref_belongs_to_submission(
     tx: &Transaction<'_>,
@@ -239,6 +246,45 @@ fn row_to_tenant_policy(row: &Row) -> Result<TraceTenantPolicyRecord, DatabaseEr
         )?,
         allowed_uses: json_array_strings(allowed_uses, "allowed_uses")?,
         updated_by_principal_ref: row.get("updated_by_principal_ref"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    })
+}
+
+fn row_to_tenant_access_grant(row: &Row) -> Result<TraceTenantAccessGrantRecord, DatabaseError> {
+    let role: String = row.get("role");
+    let status: String = row.get("status");
+    let allowed_consent_scopes: serde_json::Value = row.get("allowed_consent_scopes");
+    let allowed_uses: serde_json::Value = row.get("allowed_uses");
+    let metadata_json: serde_json::Value = row.get("metadata_json");
+    Ok(TraceTenantAccessGrantRecord {
+        tenant_id: row.get("tenant_id"),
+        grant_id: row.get("grant_id"),
+        principal_ref: row.get("principal_ref"),
+        role: enum_from_storage::<TraceTenantAccessGrantRole>(&role, "TraceTenantAccessGrantRole")?,
+        status: enum_from_storage::<TraceTenantAccessGrantStatus>(
+            &status,
+            "TraceTenantAccessGrantStatus",
+        )?,
+        allowed_consent_scopes: json_array_strings(
+            allowed_consent_scopes,
+            "tenant_access_grants.allowed_consent_scopes",
+        )?,
+        allowed_uses: json_array_strings(allowed_uses, "tenant_access_grants.allowed_uses")?,
+        issuer: row.get("issuer"),
+        audience: row.get("audience"),
+        subject: row.get("subject"),
+        issued_at: row.get("issued_at"),
+        expires_at: row.get("expires_at"),
+        revoked_at: row.get("revoked_at"),
+        created_by_principal_ref: row.get("created_by_principal_ref"),
+        revoked_by_principal_ref: row.get("revoked_by_principal_ref"),
+        reason: row.get("reason"),
+        metadata: serde_json::from_value(metadata_json).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace tenant access grant metadata decode failed: {e}"
+            ))
+        })?,
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
@@ -917,6 +963,140 @@ impl TraceCorpusStore for PgBackend {
         let record = row.as_ref().map(row_to_tenant_policy).transpose()?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(record)
+    }
+
+    async fn upsert_trace_tenant_access_grant(
+        &self,
+        grant: TraceTenantAccessGrantWrite,
+    ) -> Result<TraceTenantAccessGrantRecord, DatabaseError> {
+        self.ensure_trace_tenant(&grant.tenant_id).await?;
+        let role = enum_to_storage(grant.role)?;
+        let status = enum_to_storage(grant.status)?;
+        let allowed_consent_scopes =
+            serde_json::to_value(&grant.allowed_consent_scopes).map_err(|e| {
+                DatabaseError::Serialization(format!(
+                    "trace tenant access grant consent scopes encode failed: {e}"
+                ))
+            })?;
+        let allowed_uses = serde_json::to_value(&grant.allowed_uses).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace tenant access grant allowed uses encode failed: {e}"
+            ))
+        })?;
+        let metadata_json = serde_json::to_value(&grant.metadata).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace tenant access grant metadata encode failed: {e}"
+            ))
+        })?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &grant.tenant_id).await?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_tenant_access_grants (
+                        tenant_id, grant_id, principal_ref, role, status,
+                        allowed_consent_scopes, allowed_uses, issuer, audience, subject,
+                        issued_at, expires_at, revoked_at, created_by_principal_ref,
+                        revoked_by_principal_ref, reason, metadata_json
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                     ON CONFLICT (tenant_id, grant_id) DO UPDATE SET
+                        principal_ref = excluded.principal_ref,
+                        role = excluded.role,
+                        status = excluded.status,
+                        allowed_consent_scopes = excluded.allowed_consent_scopes,
+                        allowed_uses = excluded.allowed_uses,
+                        issuer = excluded.issuer,
+                        audience = excluded.audience,
+                        subject = excluded.subject,
+                        issued_at = excluded.issued_at,
+                        expires_at = excluded.expires_at,
+                        revoked_at = excluded.revoked_at,
+                        created_by_principal_ref = excluded.created_by_principal_ref,
+                        revoked_by_principal_ref = excluded.revoked_by_principal_ref,
+                        reason = excluded.reason,
+                        metadata_json = excluded.metadata_json,
+                        updated_at = NOW()
+                     RETURNING {TRACE_TENANT_ACCESS_GRANT_COLUMNS}"
+                ),
+                &[
+                    &grant.tenant_id,
+                    &grant.grant_id,
+                    &grant.principal_ref,
+                    &role,
+                    &status,
+                    &allowed_consent_scopes,
+                    &allowed_uses,
+                    &grant.issuer,
+                    &grant.audience,
+                    &grant.subject,
+                    &grant.issued_at,
+                    &grant.expires_at,
+                    &grant.revoked_at,
+                    &grant.created_by_principal_ref,
+                    &grant.revoked_by_principal_ref,
+                    &grant.reason,
+                    &metadata_json,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_tenant_access_grant(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_tenant_access_grants(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceTenantAccessGrantRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_TENANT_ACCESS_GRANT_COLUMNS}
+                     FROM trace_tenant_access_grants
+                     WHERE tenant_id = $1
+                     ORDER BY issued_at ASC, created_at ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_tenant_access_grant).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn list_active_trace_tenant_access_grants_for_principal(
+        &self,
+        tenant_id: &str,
+        principal_ref: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<TraceTenantAccessGrantRecord>, DatabaseError> {
+        let active = enum_to_storage(TraceTenantAccessGrantStatus::Active)?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_TENANT_ACCESS_GRANT_COLUMNS}
+                     FROM trace_tenant_access_grants
+                     WHERE tenant_id = $1
+                       AND principal_ref = $2
+                       AND status = $3
+                       AND issued_at <= $4
+                       AND (expires_at IS NULL OR expires_at > $4)
+                       AND revoked_at IS NULL
+                     ORDER BY issued_at ASC, created_at ASC"
+                ),
+                &[&tenant_id, &principal_ref, &active, &now],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_tenant_access_grant).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
     }
 
     async fn list_trace_credit_events(

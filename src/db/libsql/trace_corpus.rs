@@ -26,9 +26,11 @@ use crate::trace_corpus_storage::{
     TraceRevocationPropagationItemStatus, TraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget,
     TraceRevocationPropagationTargetKind, TraceSubmissionRecord, TraceSubmissionWrite,
-    TraceTenantPolicyRecord, TraceTenantPolicyWrite, TraceTombstoneRecord, TraceTombstoneWrite,
-    TraceVectorEntryRecord, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
-    TraceVectorEntryWrite, TraceWorkerKind,
+    TraceTenantAccessGrantRecord, TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus,
+    TraceTenantAccessGrantWrite, TraceTenantPolicyRecord, TraceTenantPolicyWrite,
+    TraceTombstoneRecord, TraceTombstoneWrite, TraceVectorEntryRecord,
+    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
+    TraceWorkerKind,
 };
 
 const TRACE_SUBMISSION_COLUMNS: &str = "\
@@ -44,6 +46,11 @@ const TRACE_SUBMISSION_COLUMNS: &str = "\
 const TRACE_TENANT_POLICY_COLUMNS: &str = "\
     tenant_id, policy_version, allowed_consent_scopes, allowed_uses, \
     updated_by_principal_ref, created_at, updated_at";
+
+const TRACE_TENANT_ACCESS_GRANT_COLUMNS: &str = "\
+    tenant_id, grant_id, principal_ref, role, status, allowed_consent_scopes, allowed_uses, \
+    issuer, audience, subject, issued_at, expires_at, revoked_at, created_by_principal_ref, \
+    revoked_by_principal_ref, reason, metadata_json, created_at, updated_at";
 
 const TRACE_OBJECT_REF_COLUMNS: &str = "\
     tenant_id, submission_id, object_ref_id, artifact_kind, object_store, object_key, \
@@ -347,6 +354,47 @@ fn row_to_tenant_policy(row: &libsql::Row) -> Result<TraceTenantPolicyRecord, Da
         updated_by_principal_ref: get_text(row, 4),
         created_at: get_ts(row, 5),
         updated_at: get_ts(row, 6),
+    })
+}
+
+fn row_to_tenant_access_grant(
+    row: &libsql::Row,
+) -> Result<TraceTenantAccessGrantRecord, DatabaseError> {
+    Ok(TraceTenantAccessGrantRecord {
+        tenant_id: get_text(row, 0),
+        grant_id: parse_uuid(&get_text(row, 1), "trace_tenant_access_grants.grant_id")?,
+        principal_ref: get_text(row, 2),
+        role: enum_from_storage::<TraceTenantAccessGrantRole>(
+            &get_text(row, 3),
+            "TraceTenantAccessGrantRole",
+        )?,
+        status: enum_from_storage::<TraceTenantAccessGrantStatus>(
+            &get_text(row, 4),
+            "TraceTenantAccessGrantStatus",
+        )?,
+        allowed_consent_scopes: json_array_strings(
+            &get_text(row, 5),
+            "trace_tenant_access_grants.allowed_consent_scopes",
+        )?,
+        allowed_uses: json_array_strings(
+            &get_text(row, 6),
+            "trace_tenant_access_grants.allowed_uses",
+        )?,
+        issuer: get_opt_text(row, 7),
+        audience: get_opt_text(row, 8),
+        subject: get_opt_text(row, 9),
+        issued_at: get_ts(row, 10),
+        expires_at: get_opt_ts(row, 11),
+        revoked_at: get_opt_ts(row, 12),
+        created_by_principal_ref: get_opt_text(row, 13),
+        revoked_by_principal_ref: get_opt_text(row, 14),
+        reason: get_opt_text(row, 15),
+        metadata: json_string_map(
+            &get_text(row, 16),
+            "trace_tenant_access_grants.metadata_json",
+        )?,
+        created_at: get_ts(row, 17),
+        updated_at: get_ts(row, 18),
     })
 }
 
@@ -985,6 +1033,150 @@ impl TraceCorpusStore for LibSqlBackend {
             Some(row) => Ok(Some(row_to_tenant_policy(&row)?)),
             None => Ok(None),
         }
+    }
+
+    async fn upsert_trace_tenant_access_grant(
+        &self,
+        grant: TraceTenantAccessGrantWrite,
+    ) -> Result<TraceTenantAccessGrantRecord, DatabaseError> {
+        self.ensure_trace_tenant(&grant.tenant_id).await?;
+        let conn = self.connect().await?;
+        let allowed_consent_scopes = json_string(&grant.allowed_consent_scopes)?;
+        let allowed_uses = json_string(&grant.allowed_uses)?;
+        let metadata_json = json_string(&grant.metadata)?;
+        conn.execute(
+            "INSERT INTO trace_tenant_access_grants (
+                tenant_id, grant_id, principal_ref, role, status, allowed_consent_scopes,
+                allowed_uses, issuer, audience, subject, issued_at, expires_at, revoked_at,
+                created_by_principal_ref, revoked_by_principal_ref, reason, metadata_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+             ON CONFLICT (tenant_id, grant_id) DO UPDATE SET
+                principal_ref = excluded.principal_ref,
+                role = excluded.role,
+                status = excluded.status,
+                allowed_consent_scopes = excluded.allowed_consent_scopes,
+                allowed_uses = excluded.allowed_uses,
+                issuer = excluded.issuer,
+                audience = excluded.audience,
+                subject = excluded.subject,
+                issued_at = excluded.issued_at,
+                expires_at = excluded.expires_at,
+                revoked_at = excluded.revoked_at,
+                created_by_principal_ref = excluded.created_by_principal_ref,
+                revoked_by_principal_ref = excluded.revoked_by_principal_ref,
+                reason = excluded.reason,
+                metadata_json = excluded.metadata_json,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+            libsql::params![
+                grant.tenant_id.as_str(),
+                grant.grant_id.to_string(),
+                grant.principal_ref.as_str(),
+                enum_to_storage(grant.role)?,
+                enum_to_storage(grant.status)?,
+                allowed_consent_scopes,
+                allowed_uses,
+                opt_string(grant.issuer),
+                opt_string(grant.audience),
+                opt_string(grant.subject),
+                fmt_ts(&grant.issued_at),
+                fmt_opt_ts(&grant.expires_at),
+                fmt_opt_ts(&grant.revoked_at),
+                opt_string(grant.created_by_principal_ref),
+                opt_string(grant.revoked_by_principal_ref),
+                opt_string(grant.reason),
+                metadata_json,
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {TRACE_TENANT_ACCESS_GRANT_COLUMNS}
+                     FROM trace_tenant_access_grants
+                     WHERE tenant_id = ?1 AND grant_id = ?2"
+                ),
+                libsql::params![grant.tenant_id.as_str(), grant.grant_id.to_string()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        match rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            Some(row) => row_to_tenant_access_grant(&row),
+            None => Err(DatabaseError::NotFound {
+                entity: "trace_tenant_access_grant".to_string(),
+                id: grant.grant_id.to_string(),
+            }),
+        }
+    }
+
+    async fn list_trace_tenant_access_grants(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceTenantAccessGrantRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {TRACE_TENANT_ACCESS_GRANT_COLUMNS}
+                     FROM trace_tenant_access_grants
+                     WHERE tenant_id = ?1
+                     ORDER BY issued_at ASC, created_at ASC"
+                ),
+                libsql::params![tenant_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut grants = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            grants.push(row_to_tenant_access_grant(&row)?);
+        }
+        Ok(grants)
+    }
+
+    async fn list_active_trace_tenant_access_grants_for_principal(
+        &self,
+        tenant_id: &str,
+        principal_ref: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<TraceTenantAccessGrantRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let active = enum_to_storage(TraceTenantAccessGrantStatus::Active)?;
+        let now = fmt_ts(&now);
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {TRACE_TENANT_ACCESS_GRANT_COLUMNS}
+                     FROM trace_tenant_access_grants
+                     WHERE tenant_id = ?1
+                       AND principal_ref = ?2
+                       AND status = ?3
+                       AND issued_at <= ?4
+                       AND (expires_at IS NULL OR expires_at > ?4)
+                       AND revoked_at IS NULL
+                     ORDER BY issued_at ASC, created_at ASC"
+                ),
+                libsql::params![tenant_id, principal_ref, active, now],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut grants = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            grants.push(row_to_tenant_access_grant(&row)?);
+        }
+        Ok(grants)
     }
 
     async fn list_trace_credit_events(
