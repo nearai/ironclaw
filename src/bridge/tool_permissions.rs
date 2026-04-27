@@ -39,7 +39,8 @@ impl ToolPermissionSnapshot {
 
     pub(crate) fn resolve_permission(&self, tool_name: &str) -> ToolPermissionResolution {
         let canonical = canonical_tool_name(tool_name);
-        let explicit = self.explicit_permission(tool_name);
+        let hyphenated = canonical.replace('_', "-");
+        let explicit = self.explicit_permission_with_names(tool_name, &canonical, &hyphenated);
         let configured = explicit.or_else(|| TOOL_RISK_DEFAULTS.get(canonical.as_str()).copied());
         let effective = configured.unwrap_or(PermissionState::AskEachTime);
         ToolPermissionResolution {
@@ -49,15 +50,17 @@ impl ToolPermissionSnapshot {
         }
     }
 
-    pub(crate) fn explicit_permission(&self, tool_name: &str) -> Option<PermissionState> {
-        let canonical = canonical_tool_name(tool_name);
-        let hyphenated = canonical.replace('_', "-");
-
+    fn explicit_permission_with_names(
+        &self,
+        tool_name: &str,
+        canonical: &str,
+        hyphenated: &str,
+    ) -> Option<PermissionState> {
         self.overrides
             .get(tool_name)
             .copied()
-            .or_else(|| self.overrides.get(&canonical).copied())
-            .or_else(|| self.overrides.get(&hyphenated).copied())
+            .or_else(|| self.overrides.get(canonical).copied())
+            .or_else(|| self.overrides.get(hyphenated).copied())
     }
 }
 
