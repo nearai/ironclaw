@@ -69,6 +69,7 @@ use ironclaw::trace_corpus_storage::{
     TraceRevocationPropagationItemRecord as StorageTraceRevocationPropagationItemRecord,
     TraceRevocationPropagationItemStatus as StorageTraceRevocationPropagationItemStatus,
     TraceRevocationPropagationItemStatusUpdate as StorageTraceRevocationPropagationItemStatusUpdate,
+    TraceRevocationPropagationItemWrite as StorageTraceRevocationPropagationItemWrite,
     TraceRevocationPropagationTarget as StorageTraceRevocationPropagationTarget,
     TraceSubmissionRecord as StorageTraceSubmissionRecord,
     TraceSubmissionWrite as StorageTraceSubmissionWrite,
@@ -11369,6 +11370,7 @@ async fn delete_object_payload_for_revocation_propagation(
         "trace object ref tenant or submission mismatch"
     );
     if object_ref.deleted_at.is_some() {
+        record_physical_delete_receipt_for_revocation_propagation(db, item, &object_ref).await?;
         return Ok(done_revocation_propagation_object_payload_item(
             item,
             &object_ref,
@@ -11431,10 +11433,75 @@ async fn delete_object_payload_for_revocation_propagation(
     )
     .await
     .context("failed to mark trace object ref deleted")?;
+    record_physical_delete_receipt_for_revocation_propagation(db, item, &object_ref).await?;
     Ok(done_revocation_propagation_object_payload_item(
         item,
         &object_ref,
         "delete_object_payload",
+    ))
+}
+
+async fn record_physical_delete_receipt_for_revocation_propagation(
+    db: &dyn Database,
+    item: &StorageTraceRevocationPropagationItemRecord,
+    object_ref: &StorageTraceObjectRefRecord,
+) -> anyhow::Result<()> {
+    let receipt_sha256 = physical_delete_receipt_hash(item, object_ref);
+    let mut metadata = BTreeMap::new();
+    metadata.insert(
+        "source_propagation_item_id".to_string(),
+        item.propagation_item_id.to_string(),
+    );
+    metadata.insert(
+        "receipt_kind".to_string(),
+        "object_payload_delete".to_string(),
+    );
+    db.upsert_trace_revocation_propagation_item(StorageTraceRevocationPropagationItemWrite {
+        tenant_id: item.tenant_id.clone(),
+        propagation_item_id: deterministic_trace_uuid_for_external_ref(
+            "revocation-physical-delete-receipt",
+            &item.tenant_id,
+            item.source_submission_id,
+            &object_ref.object_ref_id.to_string(),
+        ),
+        source_submission_id: item.source_submission_id,
+        target: StorageTraceRevocationPropagationTarget::PhysicalDeleteReceipt {
+            object_ref_id: Some(object_ref.object_ref_id),
+            object_store: object_ref.object_store.clone(),
+            object_key: object_ref.object_key.clone(),
+            receipt_sha256: receipt_sha256.clone(),
+        },
+        action: StorageTraceRevocationPropagationAction::RecordPhysicalDeleteReceipt,
+        status: StorageTraceRevocationPropagationItemStatus::Done,
+        idempotency_key: format!(
+            "{}:{}:physical-delete-receipt",
+            item.source_submission_id, object_ref.object_ref_id
+        ),
+        reason: "service_local_object_payload_deleted".to_string(),
+        attempt_count: 1,
+        last_error: None,
+        next_attempt_at: None,
+        completed_at: Some(Utc::now()),
+        evidence_hash: Some(receipt_sha256),
+        metadata,
+    })
+    .await
+    .context("failed to record physical delete receipt")?;
+    Ok(())
+}
+
+fn physical_delete_receipt_hash(
+    item: &StorageTraceRevocationPropagationItemRecord,
+    object_ref: &StorageTraceObjectRefRecord,
+) -> String {
+    sha256_prefixed(&format!(
+        "trace_physical_delete_receipt:v1:{}:{}:{}:{}:{}:{}",
+        item.tenant_id,
+        item.source_submission_id,
+        object_ref.object_ref_id,
+        object_ref.object_store,
+        object_ref.object_key,
+        object_ref.content_sha256
     ))
 }
 
@@ -19202,6 +19269,7 @@ mod tests {
     use ironclaw::trace_contribution::{
         DeterministicTraceRedactor, RecordedTraceContributionOptions, TraceRedactor,
     };
+    use ironclaw::trace_corpus_storage::TraceRevocationPropagationTargetKind as StorageTraceRevocationPropagationTargetKind;
     use ironclaw::trace_corpus_storage::{
         TraceCorpusStore, TraceRevocationPropagationItemWrite, TraceTenantAccessGrantRole,
         TraceTenantAccessGrantStatus, TraceTenantAccessGrantWrite,
@@ -24008,6 +24076,39 @@ mod tests {
                 .as_deref()
                 .is_some_and(|hash| hash.starts_with("sha256:"))
         );
+        let receipt_item = alpha_items
+            .iter()
+            .find(|item| {
+                item.action == StorageTraceRevocationPropagationAction::RecordPhysicalDeleteReceipt
+            })
+            .expect("tenant-a physical delete receipt item exists");
+        assert_eq!(
+            receipt_item.status,
+            StorageTraceRevocationPropagationItemStatus::Done
+        );
+        assert_eq!(
+            receipt_item.target_kind,
+            StorageTraceRevocationPropagationTargetKind::PhysicalDeleteReceipt
+        );
+        let StorageTraceRevocationPropagationTarget::PhysicalDeleteReceipt {
+            object_ref_id,
+            object_store,
+            object_key,
+            receipt_sha256,
+        } = &receipt_item.target
+        else {
+            panic!("receipt item target must be a physical delete receipt");
+        };
+        assert_eq!(*object_ref_id, Some(alpha_object_ref.object_ref_id));
+        assert_eq!(
+            object_store,
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+        );
+        assert_eq!(object_key, &alpha_object_ref.object_key);
+        assert_eq!(
+            receipt_item.evidence_hash.as_deref(),
+            Some(receipt_sha256.as_str())
+        );
 
         let alpha_object_refs = db
             .list_trace_object_refs("tenant-a", alpha_submission_id)
@@ -24027,6 +24128,12 @@ mod tests {
             .await
             .expect("tenant-b due propagation items read");
         assert_eq!(beta_due.len(), 1);
+        let beta_items = db
+            .list_trace_revocation_propagation_items("tenant-b", beta_submission_id)
+            .await
+            .expect("tenant-b propagation items read");
+        assert!(beta_items.iter().all(|item| item.action
+            != StorageTraceRevocationPropagationAction::RecordPhysicalDeleteReceipt));
     }
 
     #[tokio::test]
