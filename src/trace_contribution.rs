@@ -3529,16 +3529,61 @@ pub struct TraceSubmissionStatusUpdate {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TraceQueueHold {
     pub submission_id: Uuid,
+    pub kind: TraceQueueHoldKind,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_retry_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceQueueHoldKind {
+    PolicyGate,
+    ManualReview,
+    RetryableSubmissionFailure,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TraceQueueHoldSidecar {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    envelope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    held_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<TraceQueueHoldKind>,
     reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attempts: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    next_retry_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceQueueFlushReport {
+    pub submitted: usize,
+    pub held: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holds: Vec<TraceQueueHold>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_notice: Option<CreditSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceQueueWorkerReport {
+    pub scopes_checked: usize,
+    pub submitted: usize,
+    pub held: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scope_reports: Vec<TraceQueueWorkerScopeReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceQueueWorkerScopeReport {
+    pub scope: String,
     pub submitted: usize,
     pub held: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -3560,6 +3605,14 @@ pub struct TraceQueueDiagnostics {
     pub last_credit_sync_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub held_reason_counts: BTreeMap<String, u32>,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub retry_scheduled_count: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub manual_review_hold_count: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub policy_hold_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_retry_at: Option<DateTime<Utc>>,
     pub policy_enabled: bool,
     pub endpoint_configured: bool,
     pub ready_to_flush: bool,
@@ -3742,11 +3795,7 @@ pub fn read_trace_queue_holds_for_scope(
             tracing::debug!(path = %path.display(), "Ignoring malformed Trace Commons queue hold");
             continue;
         };
-
-        holds.push(TraceQueueHold {
-            submission_id,
-            reason: safe_trace_queue_hold_reason(sidecar.reason.as_deref().unwrap_or("held")),
-        });
+        holds.push(trace_queue_hold_from_sidecar(submission_id, &sidecar));
     }
     holds.sort_by_key(|hold| hold.submission_id);
     Ok(holds)
@@ -3763,8 +3812,24 @@ pub fn trace_queue_diagnostics_for_scope(
     let credit_report = trace_credit_report(&records);
 
     let mut held_reason_counts = BTreeMap::new();
+    let mut retry_scheduled_count = 0;
+    let mut manual_review_hold_count = 0;
+    let mut policy_hold_count = 0;
+    let mut next_retry_at = None;
     for hold in &holds {
         *held_reason_counts.entry(hold.reason.clone()).or_insert(0) += 1;
+        match hold.kind {
+            TraceQueueHoldKind::RetryableSubmissionFailure => {
+                retry_scheduled_count += 1;
+                if let Some(retry_at) = hold.next_retry_at {
+                    next_retry_at = Some(
+                        next_retry_at.map_or(retry_at, |current| std::cmp::min(current, retry_at)),
+                    );
+                }
+            }
+            TraceQueueHoldKind::ManualReview => manual_review_hold_count += 1,
+            TraceQueueHoldKind::PolicyGate => policy_hold_count += 1,
+        }
     }
 
     let endpoint_configured = policy
@@ -3781,6 +3846,10 @@ pub fn trace_queue_diagnostics_for_scope(
         last_submission_at: credit_report.last_submission_at,
         last_credit_sync_at: credit_report.last_credit_sync_at,
         held_reason_counts,
+        retry_scheduled_count,
+        manual_review_hold_count,
+        policy_hold_count,
+        next_retry_at,
         policy_enabled: policy.enabled,
         endpoint_configured,
         ready_to_flush: policy.enabled && endpoint_configured && queued_count > 0,
@@ -3924,6 +3993,10 @@ pub async fn flush_trace_contribution_queue_for_scope(
 
         match trace_autonomous_eligibility(&envelope, &policy) {
             TraceQueueEligibility::Submit => {
+                if let Some(hold) = retry_hold_if_not_due(&path, Utc::now())? {
+                    holds.push(hold);
+                    continue;
+                }
                 let receipt = match submit_trace_envelope_to_endpoint(
                     &envelope,
                     endpoint,
@@ -3933,18 +4006,22 @@ pub async fn flush_trace_contribution_queue_for_scope(
                 {
                     Ok(receipt) => receipt,
                     Err(error) => {
-                        let reason = sanitized_trace_submission_failure_reason(&error);
-                        if let Err(hold_error) = write_trace_queue_hold_reason(&path, &reason) {
+                        let hold = retry_hold_after_submission_failure(
+                            &path,
+                            envelope.submission_id,
+                            &error,
+                            Utc::now(),
+                        )?;
+                        if let Err(hold_error) =
+                            write_trace_queue_hold_sidecar_for_path(&path, &hold)
+                        {
                             tracing::debug!(
                                 error = %hold_error,
                                 submission_id = %envelope.submission_id,
                                 "Failed to write retry hold reason for trace submission"
                             );
                         }
-                        holds.push(TraceQueueHold {
-                            submission_id: envelope.submission_id,
-                            reason,
-                        });
+                        holds.push(hold);
                         continue;
                     }
                 };
@@ -3957,11 +4034,15 @@ pub async fn flush_trace_contribution_queue_for_scope(
                 submitted += 1;
             }
             TraceQueueEligibility::Hold { reason } => {
-                write_trace_queue_hold_reason(&path, &reason)?;
-                holds.push(TraceQueueHold {
+                let hold = TraceQueueHold {
                     submission_id: envelope.submission_id,
-                    reason,
-                });
+                    kind: trace_queue_hold_kind_for_policy_reason(&reason),
+                    reason: safe_trace_queue_hold_reason(&reason),
+                    attempts: 0,
+                    next_retry_at: None,
+                };
+                write_trace_queue_hold_sidecar_for_path(&path, &hold)?;
+                holds.push(hold);
             }
         }
     }
@@ -3980,6 +4061,54 @@ pub async fn flush_trace_contribution_queue_for_scope(
         holds,
         credit_notice,
     })
+}
+
+pub async fn flush_trace_contribution_queue_worker_tick<I, S>(
+    scopes: I,
+    limit_per_scope: usize,
+) -> anyhow::Result<TraceQueueWorkerReport>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut report = TraceQueueWorkerReport {
+        scopes_checked: 0,
+        submitted: 0,
+        held: 0,
+        scope_reports: Vec::new(),
+    };
+    let mut seen = BTreeSet::new();
+
+    for scope in scopes {
+        let scope = scope.as_ref().trim();
+        if scope.is_empty() || !seen.insert(scope.to_string()) {
+            continue;
+        }
+        report.scopes_checked += 1;
+        let scope_report =
+            match flush_trace_contribution_queue_for_scope(Some(scope), limit_per_scope).await {
+                Ok(flush) => TraceQueueWorkerScopeReport {
+                    scope: scope.to_string(),
+                    submitted: flush.submitted,
+                    held: flush.held,
+                    holds: flush.holds,
+                    credit_notice: flush.credit_notice,
+                },
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        scope_hash = %scope_hash(scope),
+                        "Trace Commons queue worker skipped scope"
+                    );
+                    continue;
+                }
+            };
+        report.submitted += scope_report.submitted;
+        report.held += scope_report.held;
+        report.scope_reports.push(scope_report);
+    }
+
+    Ok(report)
 }
 
 pub async fn sync_remote_trace_submission_records_for_scope(
@@ -4578,13 +4707,14 @@ fn mark_trace_credit_noticed_if_due_unlocked(
     Ok(Some(summary))
 }
 
-fn sanitized_trace_submission_failure_reason(error: &anyhow::Error) -> String {
+fn sanitized_trace_submission_failure_reason(error: &anyhow::Error) -> (String, String) {
     let mut hasher = Sha256::new();
     hasher.update(error.to_string().as_bytes());
     let digest = hasher.finalize();
-    format!(
-        "submission failed; retained for retry (error_hash=sha256:{})",
-        hex::encode(&digest[..8])
+    let error_hash = format!("sha256:{}", hex::encode(&digest[..8]));
+    (
+        format!("submission failed; retained for retry (error_hash={error_hash})"),
+        error_hash,
     )
 }
 
@@ -4603,14 +4733,163 @@ fn write_local_trace_records_for_scope(
     )
 }
 
+#[cfg(test)]
 fn write_trace_queue_hold_reason(path: &Path, reason: &str) -> anyhow::Result<()> {
+    write_trace_queue_hold_sidecar_for_path(
+        path,
+        &TraceQueueHold {
+            submission_id: trace_queue_submission_id_from_envelope_path(path)
+                .unwrap_or_else(Uuid::nil),
+            kind: trace_queue_hold_kind_for_policy_reason(reason),
+            reason: safe_trace_queue_hold_reason(reason),
+            attempts: 0,
+            next_retry_at: None,
+        },
+    )
+}
+
+fn write_trace_queue_hold_sidecar_for_path(
+    path: &Path,
+    hold: &TraceQueueHold,
+) -> anyhow::Result<()> {
     let hold_path = path.with_extension("held.json");
-    let body = serde_json::json!({
-        "envelope": path.file_name().and_then(|name| name.to_str()).unwrap_or("unknown"),
-        "held_at": Utc::now(),
-        "reason": safe_trace_queue_hold_reason(reason),
-    });
+    let body = TraceQueueHoldSidecar {
+        envelope: path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string),
+        held_at: Some(Utc::now()),
+        kind: Some(hold.kind),
+        reason: Some(safe_trace_queue_hold_reason(&hold.reason)),
+        attempts: (hold.attempts > 0).then_some(hold.attempts),
+        next_retry_at: hold.next_retry_at,
+        error_hash: trace_queue_error_hash_from_reason(&hold.reason),
+    };
     write_json_file(&hold_path, &body, "trace queue hold reason")
+}
+
+fn retry_hold_if_not_due(
+    path: &Path,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Option<TraceQueueHold>> {
+    let Some(sidecar) = read_trace_queue_hold_sidecar_for_envelope(path).unwrap_or_else(|error| {
+        tracing::debug!(
+            %error,
+            path = %path.display(),
+            "Ignoring unreadable Trace Commons retry sidecar"
+        );
+        None
+    }) else {
+        return Ok(None);
+    };
+    let Some(submission_id) = trace_queue_submission_id_from_envelope_path(path) else {
+        return Ok(None);
+    };
+    let hold = trace_queue_hold_from_sidecar(submission_id, &sidecar);
+    if hold.kind == TraceQueueHoldKind::RetryableSubmissionFailure
+        && hold
+            .next_retry_at
+            .is_some_and(|next_retry_at| next_retry_at > now)
+    {
+        return Ok(Some(hold));
+    }
+    Ok(None)
+}
+
+fn retry_hold_after_submission_failure(
+    path: &Path,
+    submission_id: Uuid,
+    error: &anyhow::Error,
+    now: DateTime<Utc>,
+) -> anyhow::Result<TraceQueueHold> {
+    let previous = read_trace_queue_hold_sidecar_for_envelope(path).unwrap_or_else(|error| {
+        tracing::debug!(
+            %error,
+            path = %path.display(),
+            "Ignoring unreadable Trace Commons retry sidecar before rescheduling"
+        );
+        None
+    });
+    let attempts = previous.and_then(|sidecar| sidecar.attempts).unwrap_or(0) + 1;
+    let next_retry_at = trace_queue_next_retry_at(now, attempts);
+    let (reason, _) = sanitized_trace_submission_failure_reason(error);
+    Ok(TraceQueueHold {
+        submission_id,
+        kind: TraceQueueHoldKind::RetryableSubmissionFailure,
+        reason,
+        attempts,
+        next_retry_at: Some(next_retry_at),
+    })
+}
+
+fn trace_queue_next_retry_at(now: DateTime<Utc>, attempts: u32) -> DateTime<Utc> {
+    let exponent = attempts.saturating_sub(1).min(8);
+    let multiplier = 1u64 << exponent;
+    let seconds = 300u64.saturating_mul(multiplier).min(86_400);
+    now + chrono::Duration::seconds(seconds as i64)
+}
+
+fn read_trace_queue_hold_sidecar_for_envelope(
+    path: &Path,
+) -> anyhow::Result<Option<TraceQueueHoldSidecar>> {
+    let hold_path = path.with_extension("held.json");
+    if !hold_path.exists() {
+        return Ok(None);
+    }
+    let body = std::fs::read_to_string(&hold_path).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to read trace queue hold {}: {}",
+            hold_path.display(),
+            e
+        )
+    })?;
+    let sidecar = serde_json::from_str::<TraceQueueHoldSidecar>(&body).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to parse trace queue hold {}: {}",
+            hold_path.display(),
+            e
+        )
+    })?;
+    Ok(Some(sidecar))
+}
+
+fn trace_queue_hold_from_sidecar(
+    submission_id: Uuid,
+    sidecar: &TraceQueueHoldSidecar,
+) -> TraceQueueHold {
+    let reason = safe_trace_queue_hold_reason(sidecar.reason.as_deref().unwrap_or("held"));
+    TraceQueueHold {
+        submission_id,
+        kind: sidecar
+            .kind
+            .unwrap_or_else(|| trace_queue_hold_kind_for_policy_reason(&reason)),
+        reason,
+        attempts: sidecar.attempts.unwrap_or(0),
+        next_retry_at: sidecar.next_retry_at,
+    }
+}
+
+fn trace_queue_hold_kind_for_policy_reason(reason: &str) -> TraceQueueHoldKind {
+    if reason.to_ascii_lowercase().contains("manual review") {
+        TraceQueueHoldKind::ManualReview
+    } else if reason.to_ascii_lowercase().contains("retained for retry") {
+        TraceQueueHoldKind::RetryableSubmissionFailure
+    } else {
+        TraceQueueHoldKind::PolicyGate
+    }
+}
+
+fn trace_queue_submission_id_from_envelope_path(path: &Path) -> Option<Uuid> {
+    let raw = path.file_stem()?.to_str()?;
+    Uuid::parse_str(raw).ok()
+}
+
+fn trace_queue_error_hash_from_reason(reason: &str) -> Option<String> {
+    reason
+        .split("error_hash=")
+        .nth(1)
+        .map(|suffix| suffix.trim_end_matches(')').trim().to_string())
+        .filter(|hash| hash.starts_with("sha256:"))
 }
 
 fn trace_queue_hold_submission_id(path: &Path) -> Option<Uuid> {
@@ -6414,6 +6693,153 @@ mod tests {
         assert_eq!(notice.submissions_submitted, 1);
         assert_eq!(notice.pending_credit, 1.5);
         assert_eq!(notice.final_credit, 2.5);
+    }
+
+    #[tokio::test]
+    async fn queue_flush_records_typed_retry_state_and_defers_until_backoff_expires() {
+        let scope = format!("trace-flush-typed-retry-state-test-{}", Uuid::new_v4());
+        let _token_guard = EnvVarRestore::set("TRACE_COMMONS_TEST_TOKEN", "super-secret-token");
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            ingestion_endpoint: Some("http://127.0.0.1:9/v1/traces".to_string()),
+            bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
+            auto_submit_high_value_traces: true,
+            min_submission_score: 0.0,
+            ..Default::default()
+        };
+        write_trace_policy_for_scope(Some(&scope), &policy).expect("policy writes");
+
+        let raw = RawTraceContribution::from_recorded_trace(
+            &sample_trace(),
+            RecordedTraceContributionOptions::default(),
+        );
+        let mut envelope = DeterministicTraceRedactor::default()
+            .redact_trace(raw)
+            .await
+            .expect("redaction should succeed");
+        apply_credit_estimate_to_envelope(&mut envelope);
+        let queue_path = queue_trace_envelope_for_scope(Some(&scope), &envelope)
+            .expect("queued envelope writes");
+
+        let first = flush_trace_contribution_queue_for_scope(Some(&scope), 10)
+            .await
+            .expect("first flush should hold failed submission");
+        assert_eq!(first.submitted, 0);
+        assert_eq!(first.held, 1);
+        assert_eq!(
+            first.holds[0].kind,
+            TraceQueueHoldKind::RetryableSubmissionFailure
+        );
+        assert_eq!(first.holds[0].attempts, 1);
+        let first_retry_at = first.holds[0]
+            .next_retry_at
+            .expect("retry failure gets a next retry time");
+        assert!(first_retry_at > Utc::now());
+
+        let second = flush_trace_contribution_queue_for_scope(Some(&scope), 10)
+            .await
+            .expect("second flush should respect retry backoff");
+        assert_eq!(second.submitted, 0);
+        assert_eq!(second.held, 1);
+        assert_eq!(
+            second.holds[0].kind,
+            TraceQueueHoldKind::RetryableSubmissionFailure
+        );
+        assert_eq!(
+            second.holds[0].attempts, 1,
+            "a backoff-held envelope must not consume another retry attempt"
+        );
+        assert_eq!(second.holds[0].next_retry_at, Some(first_retry_at));
+
+        let holds = read_trace_queue_holds_for_scope(Some(&scope)).expect("holds read");
+        assert_eq!(
+            holds[0].kind,
+            TraceQueueHoldKind::RetryableSubmissionFailure
+        );
+        assert_eq!(holds[0].attempts, 1);
+        assert_eq!(holds[0].next_retry_at, Some(first_retry_at));
+
+        let diagnostics = trace_queue_diagnostics_for_scope(Some(&scope)).expect("diagnostics");
+        assert_eq!(diagnostics.retry_scheduled_count, 1);
+        assert_eq!(diagnostics.manual_review_hold_count, 0);
+        assert_eq!(diagnostics.policy_hold_count, 0);
+        assert_eq!(diagnostics.next_retry_at, Some(first_retry_at));
+
+        let hold_body = std::fs::read_to_string(queue_path.with_extension("held.json"))
+            .expect("hold reason writes");
+        assert!(hold_body.contains("\"kind\": \"retryable_submission_failure\""));
+        assert!(hold_body.contains("\"attempts\": 1"));
+        assert!(!hold_body.contains("127.0.0.1"));
+        assert!(!hold_body.contains("super-secret-token"));
+    }
+
+    #[tokio::test]
+    async fn trace_queue_worker_tick_flushes_scopes_and_returns_credit_notices_for_delivery() {
+        let scope = format!("trace-worker-tick-test-{}", Uuid::new_v4());
+        let _token_guard = EnvVarRestore::set("TRACE_COMMONS_TEST_TOKEN", "super-secret-token");
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            ingestion_endpoint: Some("http://127.0.0.1:9/v1/traces".to_string()),
+            bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
+            auto_submit_high_value_traces: true,
+            min_submission_score: 0.0,
+            credit_notice_interval_hours: 168,
+            ..Default::default()
+        };
+        write_trace_policy_for_scope(Some(&scope), &policy).expect("policy writes");
+
+        let raw = RawTraceContribution::from_recorded_trace(
+            &sample_trace(),
+            RecordedTraceContributionOptions::default(),
+        );
+        let mut envelope = DeterministicTraceRedactor::default()
+            .redact_trace(raw)
+            .await
+            .expect("redaction should succeed");
+        apply_credit_estimate_to_envelope(&mut envelope);
+        queue_trace_envelope_for_scope(Some(&scope), &envelope).expect("queued envelope writes");
+
+        write_local_trace_records_for_scope(
+            Some(&scope),
+            &[LocalTraceSubmissionRecord {
+                submission_id: Uuid::new_v4(),
+                trace_id: Uuid::new_v4(),
+                endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                status: LocalTraceSubmissionStatus::Submitted,
+                server_status: Some("accepted".to_string()),
+                submitted_at: Some(Utc::now()),
+                revoked_at: None,
+                privacy_risk: "low".to_string(),
+                redaction_counts: BTreeMap::new(),
+                credit_points_pending: 1.0,
+                credit_points_final: Some(1.5),
+                credit_explanation: vec!["Delayed utility credit posted.".to_string()],
+                credit_events: Vec::new(),
+                last_credit_notice_at: None,
+            }],
+        )
+        .expect("local record writes");
+
+        let report = flush_trace_contribution_queue_worker_tick(vec![scope.clone()], 10)
+            .await
+            .expect("worker tick succeeds");
+
+        assert_eq!(report.scopes_checked, 1);
+        assert_eq!(report.submitted, 0);
+        assert_eq!(report.held, 1);
+        assert_eq!(report.scope_reports[0].scope, scope);
+        let notice = report.scope_reports[0]
+            .credit_notice
+            .as_ref()
+            .expect("worker returns due credit notice for caller delivery");
+        assert_eq!(notice.pending_credit, 1.0);
+        assert_eq!(notice.final_credit, 1.5);
+
+        let records = read_local_trace_records_for_scope(Some(&scope)).expect("records read");
+        assert!(
+            records[0].last_credit_notice_at.is_some(),
+            "worker tick marks due notices only when it returns them for delivery"
+        );
     }
 
     #[test]

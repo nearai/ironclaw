@@ -33,6 +33,9 @@ use crate::workspace::Workspace;
 use ironclaw_safety::SafetyLayer;
 use ironclaw_skills::SkillRegistry;
 
+const TRACE_QUEUE_WORKER_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+const TRACE_QUEUE_WORKER_FLUSH_LIMIT: usize = 25;
+
 /// Outcome of [`Agent::handle_message`] — drives the run-loop's response/Done dispatch.
 ///
 /// Distinguishes "no response, turn is over" from "no response, turn is paused"
@@ -119,6 +122,104 @@ fn trimmed_option(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn trace_queue_worker_credit_notice_message(
+    summary: &crate::trace_contribution::CreditSummary,
+) -> String {
+    let mut message = format!(
+        "Trace contribution credit update: {} submitted, {} expired ({} total), pending +{:.2}, final confirmed +{:.2}, delayed ledger {:+.2}. Delayed credit can change after privacy review, replay/eval, duplicate checks, and downstream utility scoring.",
+        summary.submissions_submitted,
+        summary.submissions_expired,
+        summary.submissions_total,
+        summary.pending_credit,
+        summary.final_credit,
+        summary.delayed_credit_delta
+    );
+    if summary.credit_events_total > 0 {
+        message.push_str(&format!(
+            " {} credit event(s) recorded.",
+            summary.credit_events_total
+        ));
+    }
+    if !summary.recent_explanations.is_empty() {
+        let explanations = summary
+            .recent_explanations
+            .iter()
+            .take(2)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(" ");
+        message.push_str(" Recent factors: ");
+        message.push_str(&explanations);
+    }
+    message
+}
+
+async fn trace_queue_worker_scopes(
+    owner_id: &str,
+    store: Option<Arc<dyn Database>>,
+) -> Vec<String> {
+    let mut scopes = vec![owner_id.to_string()];
+    if let Some(store) = store {
+        match store.list_users(Some("active")).await {
+            Ok(users) => scopes.extend(users.into_iter().map(|user| user.id)),
+            Err(error) => {
+                tracing::debug!(%error, "Trace Commons queue worker failed to list active users");
+            }
+        }
+    }
+    scopes.sort();
+    scopes.dedup();
+    scopes
+}
+
+fn spawn_trace_queue_flush_worker(
+    owner_id: String,
+    store: Option<Arc<dyn Database>>,
+    channels: Arc<ChannelManager>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(TRACE_QUEUE_WORKER_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+
+        loop {
+            interval.tick().await;
+            let scopes = trace_queue_worker_scopes(&owner_id, store.clone()).await;
+            let report =
+                match crate::trace_contribution::flush_trace_contribution_queue_worker_tick(
+                    scopes,
+                    TRACE_QUEUE_WORKER_FLUSH_LIMIT,
+                )
+                .await
+                {
+                    Ok(report) => report,
+                    Err(error) => {
+                        tracing::debug!(%error, "Trace Commons queue worker tick failed");
+                        continue;
+                    }
+                };
+
+            for scope_report in report.scope_reports {
+                let Some(summary) = scope_report.credit_notice else {
+                    continue;
+                };
+                let message = trace_queue_worker_credit_notice_message(&summary);
+                let response = OutgoingResponse::text(message);
+                let results = channels.broadcast_all(&scope_report.scope, response).await;
+                for (channel, result) in results {
+                    if let Err(error) = result {
+                        tracing::debug!(
+                            %channel,
+                            %error,
+                            "Trace Commons queue worker failed to deliver credit notice"
+                        );
+                    }
+                }
+            }
+        }
+    })
 }
 
 fn resolve_owner_scope_notification_user(
@@ -793,6 +894,12 @@ impl Agent {
             }
         });
 
+        let trace_queue_worker_handle = spawn_trace_queue_flush_worker(
+            self.owner_id().to_string(),
+            self.deps.store.clone(),
+            self.channels.clone(),
+        );
+
         // Spawn heartbeat if enabled
         let heartbeat_handle = if let Some(ref hb_config) = self.heartbeat_config {
             if hb_config.enabled {
@@ -1214,6 +1321,7 @@ impl Agent {
         tracing::debug!("Agent shutting down...");
         repair_handle.abort();
         pruning_handle.abort();
+        trace_queue_worker_handle.abort();
         if let Some(handle) = heartbeat_handle {
             handle.abort();
         }

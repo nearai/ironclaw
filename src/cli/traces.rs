@@ -15,13 +15,13 @@ use uuid::Uuid;
 
 use crate::trace_contribution::{
     ConsentScope, CreditSummary, DeterministicTraceRedactor, RecordedTraceContributionOptions,
-    ResidualPiiRisk, StandingTraceContributionPolicy, TraceChannel, TraceContributionAcceptance,
+    StandingTraceContributionPolicy, TraceChannel, TraceContributionAcceptance,
     TraceContributionEnvelope, TraceCreditEvent, TraceCreditEventKind, TraceRedactor,
     TraceSubmissionStatusUpdate, estimate_initial_credit, fetch_trace_submission_statuses,
-    mark_trace_credit_notice_due_for_scope, preflight_trace_contribution_policy,
-    privacy_filter_adapter_from_env, read_local_trace_records_for_scope,
-    read_trace_policy_for_scope, trace_credit_summary, trace_queue_diagnostics_for_scope,
-    trace_submission_status_endpoint,
+    flush_trace_contribution_queue_for_scope, mark_trace_credit_notice_due_for_scope,
+    preflight_trace_contribution_policy, privacy_filter_adapter_from_env,
+    read_local_trace_records_for_scope, read_trace_policy_for_scope, trace_credit_summary,
+    trace_queue_diagnostics_for_scope, trace_submission_status_endpoint,
 };
 
 #[derive(Subcommand, Debug, Clone)]
@@ -2125,6 +2125,18 @@ fn show_queue_status(json: bool, scope: Option<&str>) -> anyhow::Result<()> {
     println!("  selected tools: {}", diagnostics.selected_tools_count);
     println!("  queued envelopes: {}", diagnostics.queue.queued_count);
     println!("  held envelopes: {}", diagnostics.queue.held_count);
+    println!(
+        "  retry scheduled: {}",
+        diagnostics.queue.retry_scheduled_count
+    );
+    println!(
+        "  manual review holds: {}",
+        diagnostics.queue.manual_review_hold_count
+    );
+    println!("  policy holds: {}", diagnostics.queue.policy_hold_count);
+    if let Some(next_retry_at) = diagnostics.queue.next_retry_at {
+        println!("  next retry at: {}", next_retry_at.to_rfc3339());
+    }
     println!("  submitted records: {}", diagnostics.queue.submitted_count);
     println!("  revoked records: {}", diagnostics.queue.revoked_count);
     println!("  expired records: {}", diagnostics.queue.expired_count);
@@ -4587,44 +4599,23 @@ fn compact_response_body(body: &str) -> String {
 }
 
 async fn flush_queue(limit: usize) -> anyhow::Result<()> {
-    let policy = read_policy()?;
-    if !policy.enabled {
-        anyhow::bail!("trace contribution opt-in is disabled; run `ironclaw traces opt-in` first");
+    let report = flush_trace_contribution_queue_for_scope(None, limit).await?;
+    println!(
+        "Autonomous trace queue flush complete: {} submitted, {} held.",
+        report.submitted, report.held
+    );
+    for hold in report.holds.iter().take(5) {
+        println!(
+            "  held {} ({:?}, attempts {}): {}",
+            hold.submission_id, hold.kind, hold.attempts, hold.reason
+        );
     }
-    let endpoint = policy
-        .ingestion_endpoint
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("trace contribution endpoint is not configured"))?;
-
-    let mut submitted = 0usize;
-    let mut held = 0usize;
-    for path in queued_envelope_paths()?.into_iter().take(limit) {
-        let mut envelope = load_envelope(&path)?;
-        apply_credit_estimate(&mut envelope);
-
-        match autonomous_eligibility(&envelope, &policy) {
-            QueueEligibility::Submit => {
-                let receipt =
-                    submit_envelope_to_endpoint(&envelope, endpoint, &policy.bearer_token_env)
-                        .await?;
-                record_submitted_envelope(&envelope, endpoint, receipt)?;
-                std::fs::remove_file(&path).map_err(|e| {
-                    anyhow::anyhow!("failed to remove queued envelope {}: {}", path.display(), e)
-                })?;
-                submitted += 1;
-            }
-            QueueEligibility::Hold { reason } => {
-                write_queue_hold_reason(&path, &reason)?;
-                held += 1;
-            }
+    if let Some(summary) = report.credit_notice {
+        println!("{}", credit_notice_message(&summary));
+        for explanation in summary.recent_explanations.iter().take(3) {
+            println!("  - {explanation}");
         }
     }
-
-    if let Err(error) = sync_cli_submission_records(&policy).await {
-        eprintln!("Warning: failed to sync remote trace credit status: {error}");
-    }
-    println!("Autonomous trace queue flush complete: {submitted} submitted, {held} held.");
-    maybe_print_credit_notice(&policy)?;
     Ok(())
 }
 
@@ -4744,53 +4735,6 @@ fn apply_cli_submission_status_updates_to_records(
     changed
 }
 
-fn maybe_print_credit_notice(policy: &StandingTraceContributionPolicy) -> anyhow::Result<()> {
-    if policy.credit_notice_interval_hours == 0 {
-        return Ok(());
-    }
-
-    let mut records = read_local_records()?;
-    if records
-        .iter()
-        .all(|record| !local_record_noticeable_for_credit(record))
-    {
-        return Ok(());
-    }
-
-    let now = chrono::Utc::now();
-    let interval = chrono::Duration::hours(i64::from(policy.credit_notice_interval_hours));
-    let notice_due = records
-        .iter()
-        .filter(|record| local_record_noticeable_for_credit(record))
-        .any(|record| {
-            record
-                .last_credit_notice_at
-                .map(|last_notice| now.signed_duration_since(last_notice) >= interval)
-                .unwrap_or(true)
-        });
-
-    if !notice_due {
-        return Ok(());
-    }
-
-    let summary = credit_summary(&records);
-    println!("{}", credit_notice_message(&summary));
-    for explanation in summary.recent_explanations.iter().take(3) {
-        println!("  - {explanation}");
-    }
-
-    for record in &mut records {
-        if local_record_noticeable_for_credit(record) {
-            record.last_credit_notice_at = Some(now);
-        }
-    }
-    write_local_records(&records)
-}
-
-fn local_record_noticeable_for_credit(record: &LocalSubmissionRecord) -> bool {
-    record.status == LocalSubmissionStatus::Submitted || !record.credit_events.is_empty()
-}
-
 fn credit_notice_message(summary: &CreditSummary) -> String {
     let mut message = format!(
         "Trace contribution credit update: {} submitted, {} expired ({} total), pending +{:.2}, final confirmed +{:.2}, delayed ledger {:+.2}. Delayed credit can change after privacy review, replay/eval, duplicate checks, and downstream utility scoring.",
@@ -4808,82 +4752,6 @@ fn credit_notice_message(summary: &CreditSummary) -> String {
         ));
     }
     message
-}
-
-enum QueueEligibility {
-    Submit,
-    Hold { reason: String },
-}
-
-fn autonomous_eligibility(
-    envelope: &TraceContributionEnvelope,
-    policy: &StandingTraceContributionPolicy,
-) -> QueueEligibility {
-    if policy.require_manual_approval_when_pii_detected
-        && envelope.privacy.residual_pii_risk != ResidualPiiRisk::Low
-    {
-        return QueueEligibility::Hold {
-            reason: "manual review required because residual privacy risk is not low".to_string(),
-        };
-    }
-
-    if !policy.selected_tools.is_empty()
-        && envelope
-            .replay
-            .required_tools
-            .iter()
-            .all(|tool| !policy.selected_tools.contains(tool))
-    {
-        return QueueEligibility::Hold {
-            reason: "trace does not use any selected auto-submit tools".to_string(),
-        };
-    }
-
-    if envelope.value.submission_score < policy.min_submission_score {
-        return QueueEligibility::Hold {
-            reason: format!(
-                "submission score {:.2} is below policy minimum {:.2}",
-                envelope.value.submission_score, policy.min_submission_score
-            ),
-        };
-    }
-
-    let failed_trace = matches!(
-        envelope.outcome.task_success,
-        crate::trace_contribution::TaskSuccess::Failure
-            | crate::trace_contribution::TaskSuccess::Partial
-    );
-    if failed_trace && policy.auto_submit_failed_traces {
-        return QueueEligibility::Submit;
-    }
-    if policy.auto_submit_high_value_traces {
-        return QueueEligibility::Submit;
-    }
-
-    QueueEligibility::Hold {
-        reason: "policy does not allow this autonomous submission class".to_string(),
-    }
-}
-
-fn write_queue_hold_reason(path: &Path, reason: &str) -> anyhow::Result<()> {
-    let hold_path = path.with_extension("held.json");
-    let body = serde_json::json!({
-        "envelope": path.file_name().and_then(|name| name.to_str()).unwrap_or("unknown"),
-        "held_at": chrono::Utc::now(),
-        "reason": reason,
-    });
-    std::fs::write(
-        &hold_path,
-        serde_json::to_string_pretty(&body)
-            .map_err(|e| anyhow::anyhow!("failed to serialize queue hold reason: {}", e))?,
-    )
-    .map_err(|e| {
-        anyhow::anyhow!(
-            "failed to write queue hold reason {}: {}",
-            hold_path.display(),
-            e
-        )
-    })
 }
 
 async fn list_submissions(json: bool, summary: bool) -> anyhow::Result<()> {
@@ -5362,7 +5230,7 @@ mod tests {
     use crate::cli::{Cli, Command};
     use crate::trace_contribution::{
         ConsentMetadata, ContributorMetadata, DETERMINISTIC_REDACTION_PIPELINE_VERSION,
-        IronclawTraceMetadata, OutcomeMetadata, PrivacyMetadata, ReplayMetadata,
+        IronclawTraceMetadata, OutcomeMetadata, PrivacyMetadata, ReplayMetadata, ResidualPiiRisk,
         TRACE_CONTRIBUTION_POLICY_VERSION, TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceCard,
         TraceValueCard, ValueMetadata,
     };
