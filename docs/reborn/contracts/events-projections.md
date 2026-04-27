@@ -36,6 +36,8 @@ Rules:
 - projections must be rebuildable from durable state/events
 - transport adapters may cache delivery cursors but do not own business state
 
+The durable append log plus scoped replay cursor envelope is the substrate. It must be usable by implementation agents and caller-level tests before product transports are complete. SSE/WebSocket delivery and UI-specific projections are downstream integrations over that substrate, not prerequisites for landing the substrate.
+
 ---
 
 ## 3. Event identity and ordering
@@ -174,17 +176,24 @@ This contract does not define the final event store backend, wire protocol, UI s
 
 ## Contract freeze addendum — durable streams and projections (2026-04-25)
 
-V1 includes projection and SSE/WebSocket APIs backed by a durable append log with replay cursors.
+V1 includes a durable append log with scoped replay cursors as the first event substrate. Projection and SSE/WebSocket APIs are downstream product integrations backed by that substrate; they should not block landing or testing the append-log/cursor contract.
 
-Minimum event-store contract:
+Minimum substrate event-store contract:
 
 ```text
 append redacted event
 read after cursor
 read scoped stream snapshot
-ack/track cursor where transport needs it
 retention/replay-gap reporting
+caller-level test replay across service boundaries
+```
+
+Additional projection/transport contract:
+
+```text
+ack/track cursor where transport needs it
 projection rebuild from durable events/state
+SSE/WebSocket resume over validated scoped cursors
 ```
 
 Cursor rules:

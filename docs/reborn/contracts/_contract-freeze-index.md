@@ -40,7 +40,7 @@ If a task needs to change one of those answers, it is not implementation work; i
 | Prompt context | `MemoryPromptContextService` owns prompt assembly and prompt-injection write safety. |
 | Secrets | Typed encrypted secret repository is production source of truth; file views are redacted projections/reference only. |
 | Network | All host/provider HTTP goes through `ironclaw_network`. |
-| Events/projections | V1 includes durable append log, projections, SSE/WebSocket, and replay cursors. |
+| Events/projections | Durable append log plus scoped replay cursors are substrate dependencies; projections and SSE/WebSocket transports build on that substrate. |
 | Resources | V1 reserves/enforces runtime/process, network, embeddings/providers, and artifacts/storage quotas. |
 | Settings/extensions/skills | Typed repositories are source of truth with optional `/system/...` file projections. |
 | Extensions | Full lifecycle contract is frozen; partial implementation is allowed if states/transitions remain compatible. |
@@ -148,9 +148,18 @@ Every task touching authority, persistence, events, network, secrets, filesystem
 
 ---
 
-## 5. Parallel implementation waves
+## 6. Implementation dependency graph, not calendar waves
 
-### Wave 0 — contract ratification
+The levels below are dependency levels, not a delivery schedule. With agent-assisted implementation, downstream work should fan out as soon as the contracts it depends on are ratified. Do not wait for every item in a numbered bucket if a task's direct dependencies are already frozen.
+
+Dependency rules:
+
+1. Contract ratification gates implementation only for the contracts a task depends on.
+2. Substrate tasks with independent contracts can run concurrently.
+3. Product integration tasks should wait for their substrate dependencies, not for unrelated substrate tasks.
+4. If a task requires changing frozen ownership, scope, storage placement, or failure semantics, it is a contract-change request rather than implementation work.
+
+### Level 0 — contract ratification
 
 Goal: make docs explicit enough that implementation tasks do not need architectural debate.
 
@@ -162,23 +171,25 @@ Tasks:
 4. Ratify durable event cursor envelope from [`events-projections.md`](events-projections.md).
 5. Ratify settings/config source-of-truth rules from [`settings-config.md`](settings-config.md).
 
-### Wave 1 — independent substrate tasks
+### Level 1 — independent substrate tasks
 
-Can run in parallel after Wave 0 docs are accepted:
+Can run in parallel after their direct Level 0 contract dependencies are accepted:
 
-| Task | Main contract | Primary crate(s) |
-| --- | --- | --- |
-| Filesystem V1 ops | `filesystem.md` | `ironclaw_filesystem` |
-| AgentId propagation | `host-api.md`, `storage-placement.md` | `ironclaw_host_api`, all scope stores |
-| Typed secret repository | `secrets.md` | `ironclaw_secrets` |
-| Network provider client boundary | `network.md` | `ironclaw_network`, provider crates |
-| Durable event log/cursors | `events-projections.md` | `ironclaw_events`, web gateway later |
-| Resource reservation expansion | `resources.md` | `ironclaw_resources`, capabilities/processes/network |
-| Extension lifecycle state machine | `extensions.md` | `ironclaw_extensions` |
+| Task | Main contract | Primary crate(s) | Direct blockers |
+| --- | --- | --- | --- |
+| Filesystem V1 ops | `filesystem.md` | `ironclaw_filesystem` | filesystem ops semantics |
+| AgentId propagation | `host-api.md`, `storage-placement.md` | `ironclaw_host_api`, all scope stores | global scope model |
+| Typed secret repository | `secrets.md` | `ironclaw_secrets` | storage/source-of-truth rules |
+| Network provider client boundary | `network.md` | `ironclaw_network`, provider crates | network boundary contract |
+| Durable event log/cursors | `events-projections.md` | `ironclaw_events`, web gateway later | cursor envelope and redaction rules |
+| Resource reservation expansion | `resources.md` | `ironclaw_resources`, capabilities/processes/network | resource scope and lifecycle ownership |
+| Extension lifecycle state machine | `extensions.md` | `ironclaw_extensions` | lifecycle states/transitions |
 
-### Wave 2 — memory/workspace parity
+`Durable event log/cursors` is a substrate dependency, not merely a web feature. It gives parallel implementation agents a typed, replayable surface for caller-level tests and cross-component debugging. SSE/WebSocket transport can remain downstream product integration over this substrate.
 
-Can run in parallel once `memory.md` is accepted:
+### Level 2 — memory/workspace parity
+
+Can run in parallel once the relevant `memory.md`, storage, network, secrets, and event substrate dependencies are accepted:
 
 | Task | Main contract | Notes |
 | --- | --- | --- |
@@ -190,19 +201,27 @@ Can run in parallel once `memory.md` is accepted:
 | `MemoryVersionService` | `memory.md` | get/list/prune/patch version behavior |
 | Embedding provider adapters | `memory.md`, `network.md`, `secrets.md` | OpenAI/Ollama/NEAR/Bedrock via policy-aware clients |
 
-### Wave 3 — product integration
+### Level 3 — coherent product integration
 
 | Task | Main contract | Notes |
 | --- | --- | --- |
 | `TurnService`/`AgentLoopService` | `turns-agent-loop.md` | one-active-run-per-thread, prompt context, CapabilityHost |
-| Web SSE/WebSocket event APIs | `events-projections.md` | durable replay cursors + projections |
+| Web SSE/WebSocket event APIs | `events-projections.md` | product transport over durable replay cursors + projections |
 | Settings/extension/skill projections | `settings-config.md`, `extensions.md` | typed repos with `/system/...` views |
 | Runtime lane hardening | `wasm.md`, `scripts.md`, `mcp.md`, `network.md` | all three first-class |
 | Migration bridge | `migration-compatibility.md` | reuse schemas where viable |
 
 ---
 
-## 6. Non-negotiable implementation invariants
+## 7. Cutover discipline
+
+Reborn implementation slices can land incrementally, but user-visible exposure should cut over coherently behind a feature flag or parallel binary rather than as disconnected islands. The target is a single `vReborn` composition path where `HostRuntimeServices` is built from config and caller-level tests exercise the integrated `CapabilityHost -> Dispatcher -> Adapter -> Process/Event/Memory` chains.
+
+Legacy `src/` feature additions are a drift risk while Reborn is being built. This packet does not enact a blanket `src/` feature freeze; security fixes, urgent customer fixes, and explicitly approved compatibility work may continue. New non-trivial product work should prefer Reborn crates when practical, and a separate guardrail/CI task may be ratified later to flag additions to deprecated legacy modules.
+
+---
+
+## 8. Non-negotiable implementation invariants
 
 - `CapabilityHost` is the caller-facing workflow gate; callers do not manually authorize then call dispatcher.
 - `RuntimeDispatcher` routes already-authorized runtime requests only.
@@ -217,7 +236,7 @@ Can run in parallel once `memory.md` is accepted:
 
 ---
 
-## 7. Review rubric for delegated work
+## 9. Review rubric for delegated work
 
 A delegated implementation is not complete until it provides:
 

@@ -194,7 +194,23 @@ Migration strategy:
 
 ---
 
-## 9. Migration acceptance tests
+## 9. Cutover model
+
+Reborn should ship to users as a coherent composition path, not as partially exposed islands. Internal Reborn crates and adapters may land incrementally, but production exposure should be guarded by a feature flag, parallel binary, or equivalent deployment switch until the caller-level integration spine is complete.
+
+Cutover requirements:
+
+- one config-driven production composition root for `HostRuntimeServices` and adjacent first-party services;
+- caller-level tests across `CapabilityHost -> Dispatcher -> Adapter -> Process/Event/Memory` paths;
+- explicit migration/backfill path for reused legacy schemas;
+- rollback notes for any bridge that can affect production state;
+- no accidental dual source of truth between legacy `src/` services and Reborn repositories.
+
+Legacy `src/` changes remain allowed for security, urgent customer fixes, and explicitly approved compatibility work. New non-trivial product work should prefer Reborn crates when practical, but a hard `src/` feature freeze is a separate policy decision rather than part of this contract update.
+
+---
+
+## 10. Migration acceptance tests
 
 Every migration/compatibility task must include:
 
@@ -209,7 +225,7 @@ Every migration/compatibility task must include:
 
 ---
 
-## 10. When new schemas are allowed
+## 11. When new schemas are allowed
 
 A new schema is justified when the existing schema cannot support one of:
 
