@@ -1,0 +1,447 @@
+name: Architecture Map
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+  push:
+    branches:
+      - main
+      - staging
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to refresh"
+        required: false
+        type: string
+      mode:
+        description: "preview or apply"
+        required: false
+        default: preview
+        type: choice
+        options:
+          - preview
+          - apply
+
+permissions:
+  contents: read
+
+concurrency:
+  group: architecture-map-${{ github.event.issue.number || github.event.pull_request.number || github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  pr-map:
+    name: Refresh PR architecture map
+    if: >
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       startsWith(github.event.comment.body, '/architecture-map')) ||
+      (github.event_name == 'pull_request_target' &&
+       contains(github.event.pull_request.labels.*.name, 'architecture-map')) ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
+    steps:
+      - name: Resolve request
+        id: request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          COMMENT_BODY: ${{ github.event.comment.body || '' }}
+          ACTOR: ${{ github.actor }}
+          AUTHOR_ASSOCIATION: ${{ github.event.comment.author_association || '' }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || '' }}
+          PR_NUMBER_EVENT: ${{ github.event.pull_request.number || '' }}
+          PR_NUMBER_INPUT: ${{ inputs.pr_number || '' }}
+          MODE_INPUT: ${{ inputs.mode || 'preview' }}
+        run: |
+          set -euo pipefail
+
+          if [ "${EVENT_NAME}" = "issue_comment" ]; then
+            case "${AUTHOR_ASSOCIATION}" in
+              OWNER|MEMBER|COLLABORATOR) ;;
+              *)
+                echo "trusted=false" >> "$GITHUB_OUTPUT"
+                echo "reason=Ignoring architecture-map request from ${AUTHOR_ASSOCIATION:-unknown} commenter." >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+            esac
+
+            permission="$(gh api "repos/${REPO}/collaborators/${ACTOR}/permission" --jq '.permission' 2>/dev/null || echo none)"
+            case "${permission}" in
+              admin|maintain|write) ;;
+              *)
+                echo "trusted=false" >> "$GITHUB_OUTPUT"
+                echo "reason=Ignoring architecture-map request from actor without write permission (${permission})." >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+            esac
+
+            mode="$(printf '%s\n' "${COMMENT_BODY}" | awk '{print $2}' | head -n 1)"
+            if [ -z "${mode}" ]; then
+              mode="preview"
+            fi
+            pr_number="${ISSUE_NUMBER}"
+          elif [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            mode="${MODE_INPUT}"
+            pr_number="${PR_NUMBER_INPUT}"
+            if [ -z "${pr_number}" ]; then
+              echo "workflow_dispatch requires pr_number"
+              exit 1
+            fi
+          else
+            mode="apply"
+            pr_number="${PR_NUMBER_EVENT}"
+          fi
+
+          case "${mode}" in
+            preview|apply) ;;
+            *)
+              echo "Unsupported architecture-map mode: ${mode}"
+              exit 1
+              ;;
+          esac
+
+          echo "trusted=true" >> "$GITHUB_OUTPUT"
+          echo "mode=${mode}" >> "$GITHUB_OUTPUT"
+          echo "pr_number=${pr_number}" >> "$GITHUB_OUTPUT"
+
+      - name: Report ignored request
+        if: steps.request.outputs.trusted == 'false' && github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          REASON: ${{ steps.request.outputs.reason }}
+        run: gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${REASON}"
+
+      - name: Require Claude Code credentials
+        if: steps.request.outputs.trusted == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ANTHROPIC_API_KEY}" ]; then
+            echo "ANTHROPIC_API_KEY is required because Claude Code writes the semantic architecture explanation."
+            exit 1
+          fi
+
+      - name: Checkout trusted scripts
+        if: steps.request.outputs.trusted == 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: trusted
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read PR metadata
+        if: steps.request.outputs.trusted == 'true'
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.request.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          gh pr view "${PR_NUMBER}" --repo "${REPO}" \
+            --json body,baseRefName,baseRefOid,headRefName,headRefOid,isCrossRepository \
+            > pr.json
+          jq -r '.body // ""' pr.json > body.md
+          echo "base_ref=$(jq -r '.baseRefName' pr.json)" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$(jq -r '.baseRefOid' pr.json)" >> "$GITHUB_OUTPUT"
+          echo "head_ref=$(jq -r '.headRefName' pr.json)" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$(jq -r '.headRefOid' pr.json)" >> "$GITHUB_OUTPUT"
+          echo "is_cross_repo=$(jq -r '.isCrossRepository' pr.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout PR head as data
+        if: steps.request.outputs.trusted == 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ github.repository }}
+          ref: refs/pull/${{ steps.request.outputs.pr_number }}/head
+          path: pr
+          fetch-depth: 0
+          persist-credentials: ${{ steps.request.outputs.mode == 'apply' && steps.pr.outputs.is_cross_repo == 'false' }}
+
+      - name: Fetch base into PR checkout
+        if: steps.request.outputs.trusted == 'true'
+        working-directory: pr
+        run: git fetch origin "${{ steps.pr.outputs.base_ref }}" --depth=1
+
+      - name: Generate deterministic architecture drafts
+        if: steps.request.outputs.trusted == 'true'
+        env:
+          ARCH_MAP_REPO_ROOT: ${{ github.workspace }}/pr
+        run: |
+          set -euo pipefail
+          mkdir -p pr/.architecture-map
+          python3 trusted/scripts/architecture_map.py apply \
+            --base "${{ steps.pr.outputs.base_sha }}" \
+            --head "${{ steps.pr.outputs.head_sha }}" \
+            --output-root pr \
+            --facts-out pr/.architecture-map/facts.json \
+            --pr-section-out pr/.architecture-map/pr-section.md \
+            --shards-out .architecture-map/owners \
+            --owner-matrix-out pr/.architecture-map/owner-matrix.json
+
+      - name: Refine architecture maps with Claude Code
+        if: steps.request.outputs.trusted == 'true'
+        uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          allowed_bots: "ironclaw-ci[bot]"
+          claude_args: "--max-turns 20 --model claude-haiku-4-5-20251001 --allowedTools 'Read,Glob,Grep,Agent,Edit,MultiEdit,Bash(git diff:*)'"
+          prompt: |
+            Refine this PR's generated architecture map in one bounded Claude Code session. Work only inside the `pr/` checkout.
+
+            Required inputs:
+            - `pr/.architecture-map/facts.json`
+            - `pr/.architecture-map/pr-section.md`
+            - `pr/.architecture-map/owner-matrix.json`
+            - owner shard facts/prompts under `pr/.architecture-map/owners/`
+            - generated `ARCHITECTURE.md` files listed in facts.json
+            - changed source files mentioned in facts.json
+            - nearby `CLAUDE.md`, `README.md`, or existing architecture docs when useful
+
+            Cost and scope rules:
+            - This is the only Claude Code session for this PR architecture refresh.
+            - Use the Agent tool like `.github/workflows/claude-review.yml`: launch at most 4 parallel agents total.
+            - Assign each agent up to 5 owner roots from `owner-matrix.json`, for at most 20 semantically reviewed owners.
+            - Prioritize highest-impact owner docs, preferring public interface changes, security/runtime/persistence boundaries, new crates, and cross-crate edges.
+            - For lower-impact owners, keep the deterministic draft and mention the affected scope in the PR summary if needed.
+
+            Agent contract:
+            - Agents must read only their assigned owner shard facts/prompts, the generated owner doc, relevant changed source files, and nearby `CLAUDE.md` or `README.md`.
+            - Agents must return concise curation guidance: diagram nodes/edges to keep, prose facts, boundary rules, invariants, and any owner-specific reviewer notes.
+            - Agents must not edit files, call GitHub, or touch owners outside their assigned batch.
+            - Agents should explicitly say when a deterministic owner draft is already good enough.
+
+            Your job:
+            - Add semantic explanation of the changed flow to `pr/.architecture-map/pr-section.md`.
+            - Improve Mermaid grouping and labels in `pr/docs/architecture/ARCHITECTURE.md`.
+            - Consolidate agent results, then refine selected owner `ARCHITECTURE.md` files yourself.
+            - Keep diagrams at the correct level:
+              repo map = crate/package edges,
+              crate map = major interfaces/components,
+              subsystem map = subsystem modules,
+              complex module map = local module flow, not helper-function call graphs.
+            - Put important facts that do not belong in Mermaid into prose sections below the diagram.
+
+            Hard constraints:
+            - Do not edit source code.
+            - Do not edit workflows, scripts, Cargo files, tests, migrations, or unrelated docs.
+            - Only edit `pr/.architecture-map/pr-section.md` and generated `ARCHITECTURE.md` files listed in facts.json.
+            - Only the parent process may edit files. Agents return guidance only.
+            - Do not invent crates, interfaces, or dependency edges not present in facts.json or source files.
+
+      - name: Validate Claude output scope
+        if: steps.request.outputs.trusted == 'true'
+        working-directory: pr
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import subprocess
+          import sys
+
+          facts = json.loads(pathlib.Path(".architecture-map/facts.json").read_text())
+          allowed = set(facts.get("architecture_docs", []))
+          changed = subprocess.check_output(["git", "diff", "--name-only"], text=True).splitlines()
+          untracked = subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard"], text=True).splitlines()
+          changed.extend(path for path in untracked if not path.startswith(".architecture-map/"))
+          violations = [path for path in changed if path not in allowed]
+          if violations:
+              print("Claude changed files outside allowed architecture outputs:")
+              for path in violations:
+                  print(f"- {path}")
+              sys.exit(1)
+          PY
+
+      - name: Update PR body
+        if: steps.request.outputs.trusted == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.request.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          python3 trusted/scripts/architecture_map.py update-pr-body \
+            --body body.md \
+            --section pr/.architecture-map/pr-section.md \
+            --out new-body.md
+          gh pr edit "${PR_NUMBER}" --repo "${REPO}" --body-file new-body.md
+
+      - name: Commit generated architecture maps
+        if: >
+          steps.request.outputs.trusted == 'true' &&
+          steps.request.outputs.mode == 'apply' &&
+          steps.pr.outputs.is_cross_repo == 'false'
+        working-directory: pr
+        run: |
+          set -euo pipefail
+          if git diff --quiet && [ -z "$(git ls-files --others --exclude-standard -- 'docs/architecture/ARCHITECTURE.md' '**/ARCHITECTURE.md')" ]; then
+            echo "No architecture map changes to commit."
+            exit 0
+          fi
+          git config user.name "ironclaw-ci[bot]"
+          git config user.email "ironclaw-ci[bot]@users.noreply.github.com"
+          git add $(jq -r '.architecture_docs[]' .architecture-map/facts.json)
+          git commit -m "docs: update architecture maps"
+          git push origin "HEAD:${{ steps.pr.outputs.head_ref }}"
+
+      - name: Label PR for automatic architecture-map refresh
+        if: >
+          steps.request.outputs.trusted == 'true' &&
+          steps.request.outputs.mode == 'apply'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.request.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          gh label create "architecture-map" --repo "${REPO}" --color "1D76DB" --description "Auto-refresh architecture maps for this PR" --force
+          gh pr edit "${PR_NUMBER}" --repo "${REPO}" --add-label "architecture-map"
+
+      - name: Upload architecture-map artifacts
+        if: steps.request.outputs.trusted == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: architecture-map-${{ steps.request.outputs.pr_number }}
+          include-hidden-files: true
+          path: |
+            pr/.architecture-map/facts.json
+            pr/.architecture-map/pr-section.md
+            pr/.architecture-map/owner-matrix.json
+            pr/.architecture-map/owners/**
+
+  refresh-after-merge:
+    name: Refresh merged architecture maps
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Checkout target branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Detect architecture-impacting changes
+        id: changes
+        run: |
+          set -euo pipefail
+          changed_files="$(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}" -- \
+            'src/**' 'crates/**' 'channels-src/**' 'tools-src/**' 'Cargo.toml' 'Cargo.lock' \
+            | grep -Ev '(^|/)ARCHITECTURE\.md$' || true)"
+          if [ -n "${changed_files}" ]; then
+            echo "has_architecture=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_architecture=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Require Claude Code credentials
+        if: steps.changes.outputs.has_architecture == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ANTHROPIC_API_KEY}" ]; then
+            echo "ANTHROPIC_API_KEY is required because Claude Code writes the semantic architecture explanation."
+            exit 1
+          fi
+
+      - name: Generate deterministic merged architecture drafts
+        if: steps.changes.outputs.has_architecture == 'true'
+        env:
+          ARCH_MAP_REPO_ROOT: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          mkdir -p .architecture-map
+          python3 scripts/architecture_map.py apply \
+            --base "${{ github.event.before }}" \
+            --head "${{ github.sha }}" \
+            --output-root . \
+            --facts-out .architecture-map/facts.json \
+            --pr-section-out .architecture-map/pr-section.md \
+            --shards-out .architecture-map/owners \
+            --owner-matrix-out .architecture-map/owner-matrix.json
+
+      - name: Refine merged architecture maps with Claude Code
+        if: steps.changes.outputs.has_architecture == 'true'
+        uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          allowed_bots: "ironclaw-ci[bot]"
+          claude_args: "--max-turns 20 --model claude-haiku-4-5-20251001 --allowedTools 'Read,Glob,Grep,Agent,Edit,MultiEdit,Bash(git diff:*)'"
+          prompt: |
+            Refine generated architecture maps for this merged change in one bounded Claude Code session.
+
+            Use `.architecture-map/facts.json`, `.architecture-map/owner-matrix.json`, owner shards under `.architecture-map/owners/`, and generated `ARCHITECTURE.md` files listed in facts.json.
+
+            Cost and scope rules:
+            - This is the only Claude Code session for this merge refresh.
+            - Use the Agent tool like `.github/workflows/claude-review.yml`: launch at most 4 parallel agents total.
+            - Assign each agent up to 5 owner roots from `owner-matrix.json`, for at most 20 semantically reviewed owners.
+            - Prioritize highest-impact owner docs, preferring public interface changes, security/runtime/persistence boundaries, new crates, and cross-crate edges.
+            - For lower-impact owners, keep the deterministic draft.
+
+            Agent contract:
+            - Agents must read only their assigned owner shard facts/prompts, the generated owner doc, relevant changed source files, and nearby `CLAUDE.md` or `README.md`.
+            - Agents must return concise curation guidance: diagram nodes/edges to keep, prose facts, boundary rules, invariants, and any owner-specific reviewer notes.
+            - Agents must not edit files or touch owners outside their assigned batch.
+            - Agents should explicitly say when a deterministic owner draft is already good enough.
+
+            Parent write contract:
+            - Consolidate agent results, then edit only generated `ARCHITECTURE.md` files listed in facts.json.
+            - Improve Mermaid labels/grouping and prose sections.
+            - Keep diagrams at the correct level.
+            - Only the parent process may edit files. Agents return guidance only.
+            - Do not edit source code, workflows, scripts, Cargo files, tests, migrations, or unrelated docs.
+
+      - name: Validate merged Claude output scope
+        if: steps.changes.outputs.has_architecture == 'true'
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import subprocess
+          import sys
+
+          facts = json.loads(pathlib.Path(".architecture-map/facts.json").read_text())
+          allowed = set(facts.get("architecture_docs", []))
+          changed = subprocess.check_output(["git", "diff", "--name-only"], text=True).splitlines()
+          untracked = subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard"], text=True).splitlines()
+          changed.extend(path for path in untracked if not path.startswith(".architecture-map/"))
+          violations = [path for path in changed if path not in allowed]
+          if violations:
+              print("Claude changed files outside allowed architecture outputs:")
+              for path in violations:
+                  print(f"- {path}")
+              sys.exit(1)
+          PY
+
+      - name: Commit merged architecture maps
+        if: steps.changes.outputs.has_architecture == 'true'
+        run: |
+          set -euo pipefail
+          if git diff --quiet && [ -z "$(git ls-files --others --exclude-standard -- 'docs/architecture/ARCHITECTURE.md' '**/ARCHITECTURE.md')" ]; then
+            echo "Merged architecture maps are already current."
+            exit 0
+          fi
+          git config user.name "ironclaw-ci[bot]"
+          git config user.email "ironclaw-ci[bot]@users.noreply.github.com"
+          git add $(jq -r '.architecture_docs[]' .architecture-map/facts.json)
+          git commit -m "docs: refresh architecture maps"
+          git push
