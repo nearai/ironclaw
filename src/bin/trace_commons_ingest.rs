@@ -6015,9 +6015,13 @@ async fn run_benchmark_conversion_with_grant(
     )
     .await
     .map_err(internal_error)?;
-    let TraceCommonsMetadataView { records, derived } = read_reviewer_metadata_view(state, tenant)
-        .await
-        .map_err(internal_error)?;
+    let TraceCommonsMetadataView { records, derived } = fail_export_job_on_error(
+        state,
+        &job,
+        "benchmark export job failure",
+        read_reviewer_metadata_view(state, tenant).await,
+    )
+    .await?;
     let accepted_by_submission = records
         .into_iter()
         .filter(TraceCommonsSubmissionRecord::is_benchmark_eligible)
@@ -6057,24 +6061,34 @@ async fn run_benchmark_conversion_with_grant(
         .iter()
         .map(|candidate| candidate.submission_id)
         .collect::<Vec<_>>();
-    let source_object_refs = revalidate_db_export_sources(
+    let source_object_refs = fail_export_job_on_error(
         state,
-        tenant,
-        &source_submission_ids,
-        state.require_derived_export_object_refs_for_tenant(&tenant.tenant_id),
+        &job,
+        "benchmark export job failure",
+        revalidate_db_export_sources(
+            state,
+            tenant,
+            &source_submission_ids,
+            state.require_derived_export_object_refs_for_tenant(&tenant.tenant_id),
+        )
+        .await,
     )
-    .await
-    .map_err(internal_error)?;
-    append_derived_source_read_audits(
+    .await?;
+    fail_export_job_on_error(
         state,
-        tenant,
-        &source_submission_ids,
-        &source_object_refs,
-        "benchmark_conversion",
-        Some(&purpose),
+        &job,
+        "benchmark export job failure",
+        append_derived_source_read_audits(
+            state,
+            tenant,
+            &source_submission_ids,
+            &source_object_refs,
+            "benchmark_conversion",
+            Some(&purpose),
+        )
+        .await,
     )
-    .await
-    .map_err(internal_error)?;
+    .await?;
     let source_submission_ids_hash =
         source_submission_ids_hash("benchmark_conversion", &source_submission_ids);
     let audit_event = TraceCommonsAuditEvent::benchmark_conversion(
@@ -6513,38 +6527,53 @@ async fn run_ranker_training_candidates_export_with_grant(
     .map_err(internal_error)?;
     let mut candidate_query = query;
     candidate_query.limit = Some(job.max_item_cap);
-    let candidates = collect_ranker_training_candidates(
+    let candidates = fail_export_job_on_error(
         state,
-        tenant,
-        &candidate_query,
-        consent_scope,
-        tenant_policy.as_ref(),
+        &job,
+        "ranker candidate export job failure",
+        collect_ranker_training_candidates(
+            state,
+            tenant,
+            &candidate_query,
+            consent_scope,
+            tenant_policy.as_ref(),
+        )
+        .await,
     )
-    .await
-    .map_err(internal_error)?;
+    .await?;
     let export_id = Uuid::new_v4();
     let source_submission_ids = candidates
         .iter()
         .map(|candidate| candidate.submission_id)
         .collect::<Vec<_>>();
-    let source_object_refs = revalidate_db_export_sources(
+    let source_object_refs = fail_export_job_on_error(
         state,
-        tenant,
-        &source_submission_ids,
-        state.require_derived_export_object_refs_for_tenant(&tenant.tenant_id),
+        &job,
+        "ranker candidate export job failure",
+        revalidate_db_export_sources(
+            state,
+            tenant,
+            &source_submission_ids,
+            state.require_derived_export_object_refs_for_tenant(&tenant.tenant_id),
+        )
+        .await,
     )
-    .await
-    .map_err(internal_error)?;
-    append_derived_source_read_audits(
+    .await?;
+    fail_export_job_on_error(
         state,
-        tenant,
-        &source_submission_ids,
-        &source_object_refs,
-        "ranker_training_candidates",
-        Some(&purpose),
+        &job,
+        "ranker candidate export job failure",
+        append_derived_source_read_audits(
+            state,
+            tenant,
+            &source_submission_ids,
+            &source_object_refs,
+            "ranker_training_candidates",
+            Some(&purpose),
+        )
+        .await,
     )
-    .await
-    .map_err(internal_error)?;
+    .await?;
     let source_item_list_hash =
         source_submission_ids_hash("ranker_training_candidates_export", &source_submission_ids);
     let audit_event = TraceCommonsAuditEvent::ranker_training_export(
@@ -6819,35 +6848,50 @@ async fn run_ranker_training_pairs_export_with_grant(
     let mut pair_query = query;
     let pair_limit = job.max_item_cap;
     pair_query.limit = Some(pair_limit.saturating_add(1));
-    let candidates = collect_ranker_training_candidates(
+    let candidates = fail_export_job_on_error(
         state,
-        tenant,
-        &pair_query,
-        consent_scope,
-        tenant_policy.as_ref(),
+        &job,
+        "ranker pair export job failure",
+        collect_ranker_training_candidates(
+            state,
+            tenant,
+            &pair_query,
+            consent_scope,
+            tenant_policy.as_ref(),
+        )
+        .await,
     )
-    .await
-    .map_err(internal_error)?;
+    .await?;
     let pairs = build_ranker_training_pairs(&candidates, pair_limit);
     let source_submission_ids = ranker_pair_source_submission_ids(&pairs);
-    let source_object_refs = revalidate_db_export_sources(
+    let source_object_refs = fail_export_job_on_error(
         state,
-        tenant,
-        &source_submission_ids,
-        state.require_derived_export_object_refs_for_tenant(&tenant.tenant_id),
+        &job,
+        "ranker pair export job failure",
+        revalidate_db_export_sources(
+            state,
+            tenant,
+            &source_submission_ids,
+            state.require_derived_export_object_refs_for_tenant(&tenant.tenant_id),
+        )
+        .await,
     )
-    .await
-    .map_err(internal_error)?;
-    append_derived_source_read_audits(
+    .await?;
+    fail_export_job_on_error(
         state,
-        tenant,
-        &source_submission_ids,
-        &source_object_refs,
-        "ranker_training_pairs",
-        Some(&purpose),
+        &job,
+        "ranker pair export job failure",
+        append_derived_source_read_audits(
+            state,
+            tenant,
+            &source_submission_ids,
+            &source_object_refs,
+            "ranker_training_pairs",
+            Some(&purpose),
+        )
+        .await,
     )
-    .await
-    .map_err(internal_error)?;
+    .await?;
     let export_id = Uuid::new_v4();
     let source_item_list_hash = ranker_pair_list_hash(&pairs);
     let audit_event = TraceCommonsAuditEvent::ranker_training_export(
@@ -7727,6 +7771,18 @@ async fn fail_export_job_with_internal_error<T>(
     .await
     .map_err(internal_error)?;
     Err(api_error)
+}
+
+async fn fail_export_job_on_error<T>(
+    state: &AppState,
+    job: &TraceExportJobSlice,
+    operation: &str,
+    result: anyhow::Result<T>,
+) -> ApiResult<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => fail_export_job_with_internal_error(state, job, operation, error).await,
+    }
 }
 
 async fn enforce_export_job_mirror_result(
@@ -26768,22 +26824,32 @@ mod tests {
         let mut tenant_a_best = sample_envelope().await;
         make_metadata_only_low_risk(&mut tenant_a_best);
         tenant_a_best.consent.scopes = vec![ConsentScope::RankingTraining];
+        tenant_a_best.trace_card.consent_scope = ConsentScope::RankingTraining;
+        tenant_a_best.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
         let tenant_a_best_id = tenant_a_best.submission_id;
         let mut tenant_a_lower = sample_envelope().await;
         make_metadata_only_low_risk(&mut tenant_a_lower);
         tenant_a_lower.consent.scopes = vec![ConsentScope::RankingTraining];
+        tenant_a_lower.trace_card.consent_scope = ConsentScope::RankingTraining;
+        tenant_a_lower.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
         tenant_a_lower.value.submission_score = 0.25;
         let tenant_a_lower_id = tenant_a_lower.submission_id;
         let mut tenant_a_quarantined = sample_envelope().await;
         tenant_a_quarantined.consent.scopes = vec![ConsentScope::RankingTraining];
+        tenant_a_quarantined.trace_card.consent_scope = ConsentScope::RankingTraining;
+        tenant_a_quarantined.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
         let tenant_a_quarantined_id = tenant_a_quarantined.submission_id;
         let mut tenant_a_revoked = sample_envelope().await;
         make_metadata_only_low_risk(&mut tenant_a_revoked);
         tenant_a_revoked.consent.scopes = vec![ConsentScope::RankingTraining];
+        tenant_a_revoked.trace_card.consent_scope = ConsentScope::RankingTraining;
+        tenant_a_revoked.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
         let tenant_a_revoked_id = tenant_a_revoked.submission_id;
         let mut tenant_b = sample_envelope().await;
         make_metadata_only_low_risk(&mut tenant_b);
         tenant_b.consent.scopes = vec![ConsentScope::RankingTraining];
+        tenant_b.trace_card.consent_scope = ConsentScope::RankingTraining;
+        tenant_b.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
         let tenant_b_id = tenant_b.submission_id;
 
         let _ = submit_trace_handler(
@@ -27271,12 +27337,23 @@ mod tests {
         );
         let mut preferred = sample_envelope().await;
         make_metadata_only_low_risk(&mut preferred);
-        preferred.consent.scopes = vec![ConsentScope::RankingTraining];
+        preferred.consent.scopes = vec![ConsentScope::BenchmarkOnly, ConsentScope::RankingTraining];
+        preferred.trace_card.consent_scope = ConsentScope::RankingTraining;
+        preferred.trace_card.allowed_uses = vec![
+            TraceAllowedUse::BenchmarkGeneration,
+            TraceAllowedUse::RankingModelTraining,
+        ];
         preferred.value.submission_score = 0.9;
         let preferred_id = preferred.submission_id;
         let mut revoked_in_db = sample_envelope().await;
         make_metadata_only_low_risk(&mut revoked_in_db);
-        revoked_in_db.consent.scopes = vec![ConsentScope::RankingTraining];
+        revoked_in_db.consent.scopes =
+            vec![ConsentScope::BenchmarkOnly, ConsentScope::RankingTraining];
+        revoked_in_db.trace_card.consent_scope = ConsentScope::RankingTraining;
+        revoked_in_db.trace_card.allowed_uses = vec![
+            TraceAllowedUse::BenchmarkGeneration,
+            TraceAllowedUse::RankingModelTraining,
+        ];
         revoked_in_db.value.submission_score = 0.1;
         let revoked_id = revoked_in_db.submission_id;
 
@@ -27383,9 +27460,13 @@ mod tests {
         for score in [0.9_f32, 0.1_f32] {
             let mut envelope = sample_envelope().await;
             make_metadata_only_low_risk(&mut envelope);
-            envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+            envelope.consent.scopes =
+                vec![ConsentScope::BenchmarkOnly, ConsentScope::RankingTraining];
             envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
-            envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+            envelope.trace_card.allowed_uses = vec![
+                TraceAllowedUse::BenchmarkGeneration,
+                TraceAllowedUse::RankingModelTraining,
+            ];
             envelope.value.submission_score = score;
             submission_ids.push(envelope.submission_id);
             let _ = submit_trace_handler(
@@ -27486,6 +27567,28 @@ mod tests {
                 .expect("export manifests read")
                 .is_empty()
         );
+        let export_jobs = db
+            .list_trace_export_jobs("tenant-a")
+            .await
+            .expect("export jobs read");
+        assert_eq!(export_jobs.len(), 3);
+        for purpose in [
+            "require_source_object_ref_benchmark",
+            "require_source_object_ref_candidates",
+            "require_source_object_ref_pairs",
+        ] {
+            let job = export_jobs
+                .iter()
+                .find(|job| job.purpose == purpose)
+                .unwrap_or_else(|| panic!("missing export job for {purpose}"));
+            assert_eq!(job.status, StorageTraceExportJobStatus::Failed);
+            assert!(job.finished_at.is_some());
+            assert_eq!(job.result_manifest_id, None);
+            assert_eq!(job.item_count, None);
+            assert!(job.last_error.as_deref().is_some_and(|error| {
+                error.contains("missing active submitted-envelope object ref")
+            }));
+        }
         assert_eq!(utility_credit_count(), initial_utility_credit_count);
     }
 
