@@ -18,6 +18,7 @@ use ironclaw::db::{Database, TraceCorpusRlsDiagnostics};
 use ironclaw::secrets::SecretsCrypto;
 use ironclaw::trace_artifact_store::{
     EncryptedTraceArtifactReceipt, LocalEncryptedTraceArtifactStore, TraceArtifactKind,
+    TraceArtifactStore,
 };
 use ironclaw::trace_contribution::{
     ConsentScope, EmbeddingAnalysisMetadata, ProcessEvalRating, ProcessEvaluationLabels,
@@ -90,6 +91,27 @@ const TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS";
 const TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN: &str =
     "TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN";
+const TRACE_COMMONS_DB_CONTRIBUTOR_READS_TENANT_IDS: &str =
+    "TRACE_COMMONS_DB_CONTRIBUTOR_READS_TENANT_IDS";
+const TRACE_COMMONS_DB_REVIEWER_READS_TENANT_IDS: &str =
+    "TRACE_COMMONS_DB_REVIEWER_READS_TENANT_IDS";
+const TRACE_COMMONS_DB_REVIEWER_REQUIRE_OBJECT_REFS_TENANT_IDS: &str =
+    "TRACE_COMMONS_DB_REVIEWER_REQUIRE_OBJECT_REFS_TENANT_IDS";
+const TRACE_COMMONS_DB_REPLAY_EXPORT_READS_TENANT_IDS: &str =
+    "TRACE_COMMONS_DB_REPLAY_EXPORT_READS_TENANT_IDS";
+const TRACE_COMMONS_DB_REPLAY_EXPORT_REQUIRE_OBJECT_REFS_TENANT_IDS: &str =
+    "TRACE_COMMONS_DB_REPLAY_EXPORT_REQUIRE_OBJECT_REFS_TENANT_IDS";
+const TRACE_COMMONS_DB_AUDIT_READS_TENANT_IDS: &str = "TRACE_COMMONS_DB_AUDIT_READS_TENANT_IDS";
+const TRACE_COMMONS_DB_TENANT_POLICY_READS_TENANT_IDS: &str =
+    "TRACE_COMMONS_DB_TENANT_POLICY_READS_TENANT_IDS";
+const TRACE_COMMONS_DERIVED_EXPORT_REQUIRE_OBJECT_REFS_TENANT_IDS: &str =
+    "TRACE_COMMONS_DERIVED_EXPORT_REQUIRE_OBJECT_REFS_TENANT_IDS";
+const TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW_TENANT_IDS: &str =
+    "TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW_TENANT_IDS";
+const TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT_TENANT_IDS: &str =
+    "TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT_TENANT_IDS";
+const TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS_TENANT_IDS: &str =
+    "TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS_TENANT_IDS";
 const TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES: &str =
     "TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES";
 const TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: &str =
@@ -164,11 +186,176 @@ struct AppState {
     object_primary_derived_exports: bool,
     require_db_reconciliation_clean: bool,
     require_export_guardrails: bool,
+    tenant_rollout_gates: TraceTenantRolloutGates,
     max_export_items_per_request: usize,
     analytics_min_cell_count: usize,
     submission_quota: TraceSubmissionQuotaConfig,
     legal_hold_retention_policy_ids: Arc<BTreeSet<String>>,
     artifact_store: Option<ConfiguredTraceArtifactStore>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum TraceTenantRolloutFeature {
+    DbContributorReads,
+    DbReviewerReads,
+    DbReviewerRequireObjectRefs,
+    DbReplayExportReads,
+    DbReplayExportRequireObjectRefs,
+    DbAuditReads,
+    DbTenantPolicyReads,
+    DerivedExportRequireObjectRefs,
+    ObjectPrimarySubmitReview,
+    ObjectPrimaryReplayExport,
+    ObjectPrimaryDerivedExports,
+}
+
+impl TraceTenantRolloutFeature {
+    const ALL: [Self; 11] = [
+        Self::DbContributorReads,
+        Self::DbReviewerReads,
+        Self::DbReviewerRequireObjectRefs,
+        Self::DbReplayExportReads,
+        Self::DbReplayExportRequireObjectRefs,
+        Self::DbAuditReads,
+        Self::DbTenantPolicyReads,
+        Self::DerivedExportRequireObjectRefs,
+        Self::ObjectPrimarySubmitReview,
+        Self::ObjectPrimaryReplayExport,
+        Self::ObjectPrimaryDerivedExports,
+    ];
+
+    fn env_key(self) -> &'static str {
+        match self {
+            Self::DbContributorReads => TRACE_COMMONS_DB_CONTRIBUTOR_READS_TENANT_IDS,
+            Self::DbReviewerReads => TRACE_COMMONS_DB_REVIEWER_READS_TENANT_IDS,
+            Self::DbReviewerRequireObjectRefs => {
+                TRACE_COMMONS_DB_REVIEWER_REQUIRE_OBJECT_REFS_TENANT_IDS
+            }
+            Self::DbReplayExportReads => TRACE_COMMONS_DB_REPLAY_EXPORT_READS_TENANT_IDS,
+            Self::DbReplayExportRequireObjectRefs => {
+                TRACE_COMMONS_DB_REPLAY_EXPORT_REQUIRE_OBJECT_REFS_TENANT_IDS
+            }
+            Self::DbAuditReads => TRACE_COMMONS_DB_AUDIT_READS_TENANT_IDS,
+            Self::DbTenantPolicyReads => TRACE_COMMONS_DB_TENANT_POLICY_READS_TENANT_IDS,
+            Self::DerivedExportRequireObjectRefs => {
+                TRACE_COMMONS_DERIVED_EXPORT_REQUIRE_OBJECT_REFS_TENANT_IDS
+            }
+            Self::ObjectPrimarySubmitReview => {
+                TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW_TENANT_IDS
+            }
+            Self::ObjectPrimaryReplayExport => {
+                TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT_TENANT_IDS
+            }
+            Self::ObjectPrimaryDerivedExports => {
+                TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS_TENANT_IDS
+            }
+        }
+    }
+
+    fn status_key(self) -> &'static str {
+        match self {
+            Self::DbContributorReads => "db_contributor_reads",
+            Self::DbReviewerReads => "db_reviewer_reads",
+            Self::DbReviewerRequireObjectRefs => "db_reviewer_require_object_refs",
+            Self::DbReplayExportReads => "db_replay_export_reads",
+            Self::DbReplayExportRequireObjectRefs => "db_replay_export_require_object_refs",
+            Self::DbAuditReads => "db_audit_reads",
+            Self::DbTenantPolicyReads => "db_tenant_policy_reads",
+            Self::DerivedExportRequireObjectRefs => "derived_export_require_object_refs",
+            Self::ObjectPrimarySubmitReview => "object_primary_submit_review",
+            Self::ObjectPrimaryReplayExport => "object_primary_replay_export",
+            Self::ObjectPrimaryDerivedExports => "object_primary_derived_exports",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct TraceTenantRolloutGates {
+    tenant_ids_by_feature: Arc<BTreeMap<TraceTenantRolloutFeature, BTreeSet<String>>>,
+}
+
+impl TraceTenantRolloutGates {
+    fn from_env() -> anyhow::Result<Self> {
+        let mut tenant_ids_by_feature = BTreeMap::new();
+        for feature in TraceTenantRolloutFeature::ALL {
+            let tenant_ids = parse_trace_rollout_tenant_ids_from_env(feature.env_key())?;
+            if !tenant_ids.is_empty() {
+                tenant_ids_by_feature.insert(feature, tenant_ids);
+            }
+        }
+        Ok(Self {
+            tenant_ids_by_feature: Arc::new(tenant_ids_by_feature),
+        })
+    }
+
+    #[cfg(test)]
+    fn for_feature(feature: TraceTenantRolloutFeature, tenant_ids: &[&str]) -> Self {
+        let mut tenant_ids_by_feature = BTreeMap::new();
+        tenant_ids_by_feature.insert(
+            feature,
+            tenant_ids
+                .iter()
+                .map(|tenant_id| (*tenant_id).to_string())
+                .collect(),
+        );
+        Self {
+            tenant_ids_by_feature: Arc::new(tenant_ids_by_feature),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_feature(mut self, feature: TraceTenantRolloutFeature, tenant_ids: &[&str]) -> Self {
+        let mut tenant_ids_by_feature = (*self.tenant_ids_by_feature).clone();
+        tenant_ids_by_feature.insert(
+            feature,
+            tenant_ids
+                .iter()
+                .map(|tenant_id| (*tenant_id).to_string())
+                .collect(),
+        );
+        self.tenant_ids_by_feature = Arc::new(tenant_ids_by_feature);
+        self
+    }
+
+    fn enabled_for(
+        &self,
+        feature: TraceTenantRolloutFeature,
+        global_enabled: bool,
+        tenant_id: &str,
+    ) -> bool {
+        global_enabled
+            || self
+                .tenant_ids_by_feature
+                .get(&feature)
+                .is_some_and(|tenant_ids| tenant_ids.contains(tenant_id))
+    }
+
+    fn configured(&self, feature: TraceTenantRolloutFeature, global_enabled: bool) -> bool {
+        global_enabled || self.tenant_count(feature) > 0
+    }
+
+    fn tenant_count(&self, feature: TraceTenantRolloutFeature) -> usize {
+        self.tenant_ids_by_feature
+            .get(&feature)
+            .map_or(0, BTreeSet::len)
+    }
+
+    fn tenant_ids(&self, feature: TraceTenantRolloutFeature) -> BTreeSet<String> {
+        self.tenant_ids_by_feature
+            .get(&feature)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn status_counts(&self) -> BTreeMap<String, usize> {
+        TraceTenantRolloutFeature::ALL
+            .into_iter()
+            .filter_map(|feature| {
+                let count = self.tenant_count(feature);
+                (count > 0).then_some((feature.status_key().to_string(), count))
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
@@ -186,14 +373,11 @@ impl TraceSubmissionQuotaConfig {
 #[derive(Clone)]
 struct ConfiguredTraceArtifactStore {
     object_store_name: String,
-    store: Arc<LocalEncryptedTraceArtifactStore>,
+    store: Arc<dyn TraceArtifactStore>,
 }
 
 impl ConfiguredTraceArtifactStore {
-    fn new(
-        object_store_name: impl Into<String>,
-        store: Arc<LocalEncryptedTraceArtifactStore>,
-    ) -> Self {
+    fn new(object_store_name: impl Into<String>, store: Arc<dyn TraceArtifactStore>) -> Self {
         Self {
             object_store_name: object_store_name.into(),
             store,
@@ -216,8 +400,14 @@ impl ConfiguredTraceArtifactStore {
         object_id: &str,
         value: &T,
     ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
-        self.store
-            .put_json(tenant_storage_ref, artifact_kind, object_id, value)
+        let serialized_json =
+            serde_json::to_vec(value).context("failed to serialize trace artifact")?;
+        self.store.put_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            &serialized_json,
+        )
     }
 
     fn get_json<T: DeserializeOwned>(
@@ -225,7 +415,8 @@ impl ConfiguredTraceArtifactStore {
         expected_tenant_storage_ref: &str,
         receipt: &EncryptedTraceArtifactReceipt,
     ) -> anyhow::Result<T> {
-        self.store.get_json(expected_tenant_storage_ref, receipt)
+        let value = self.store.read_json(expected_tenant_storage_ref, receipt)?;
+        serde_json::from_value(value).context("failed to deserialize trace artifact JSON")
     }
 
     fn get_json_by_object_key<T: DeserializeOwned>(
@@ -235,12 +426,13 @@ impl ConfiguredTraceArtifactStore {
         object_key: &str,
         expected_ciphertext_sha256: &str,
     ) -> anyhow::Result<T> {
-        self.store.get_json_by_object_key(
+        let value = self.store.read_json_by_object_key(
             expected_tenant_storage_ref,
             expected_artifact_kind,
             object_key,
             expected_ciphertext_sha256,
-        )
+        )?;
+        serde_json::from_value(value).context("failed to deserialize trace artifact JSON")
     }
 
     fn delete_artifact(
@@ -454,6 +646,86 @@ impl TokenRole {
 }
 
 impl AppState {
+    fn db_contributor_reads_for_tenant(&self, tenant_id: &str) -> bool {
+        self.tenant_rollout_gates.enabled_for(
+            TraceTenantRolloutFeature::DbContributorReads,
+            self.db_contributor_reads,
+            tenant_id,
+        )
+    }
+
+    fn db_reviewer_reads_for_tenant(&self, tenant_id: &str) -> bool {
+        self.tenant_rollout_gates.enabled_for(
+            TraceTenantRolloutFeature::DbReviewerReads,
+            self.db_reviewer_reads,
+            tenant_id,
+        )
+    }
+
+    fn db_reviewer_require_object_refs_for_tenant(&self, tenant_id: &str) -> bool {
+        self.tenant_rollout_gates.enabled_for(
+            TraceTenantRolloutFeature::DbReviewerRequireObjectRefs,
+            self.db_reviewer_require_object_refs,
+            tenant_id,
+        )
+    }
+
+    fn db_replay_export_reads_for_tenant(&self, tenant_id: &str) -> bool {
+        self.tenant_rollout_gates.enabled_for(
+            TraceTenantRolloutFeature::DbReplayExportReads,
+            self.db_replay_export_reads,
+            tenant_id,
+        )
+    }
+
+    fn db_replay_export_require_object_refs_for_tenant(&self, tenant_id: &str) -> bool {
+        self.tenant_rollout_gates.enabled_for(
+            TraceTenantRolloutFeature::DbReplayExportRequireObjectRefs,
+            self.db_replay_export_require_object_refs,
+            tenant_id,
+        )
+    }
+
+    fn db_audit_reads_for_tenant(&self, tenant_id: &str) -> bool {
+        self.tenant_rollout_gates.enabled_for(
+            TraceTenantRolloutFeature::DbAuditReads,
+            self.db_audit_reads,
+            tenant_id,
+        )
+    }
+
+    fn db_tenant_policy_reads_for_tenant(&self, tenant_id: &str) -> bool {
+        self.tenant_rollout_gates.enabled_for(
+            TraceTenantRolloutFeature::DbTenantPolicyReads,
+            self.db_tenant_policy_reads,
+            tenant_id,
+        )
+    }
+
+    fn require_derived_export_object_refs_for_tenant(&self, tenant_id: &str) -> bool {
+        self.tenant_rollout_gates.enabled_for(
+            TraceTenantRolloutFeature::DerivedExportRequireObjectRefs,
+            self.require_derived_export_object_refs,
+            tenant_id,
+        )
+    }
+
+    fn object_primary_submit_review_for_tenant(&self, tenant_id: &str) -> bool {
+        self.tenant_rollout_gates.enabled_for(
+            TraceTenantRolloutFeature::ObjectPrimarySubmitReview,
+            self.object_primary_submit_review,
+            tenant_id,
+        )
+    }
+
+    fn object_primary_derived_exports_for_tenant(&self, tenant_id: &str) -> bool {
+        self.tenant_rollout_gates.enabled_for(
+            TraceTenantRolloutFeature::ObjectPrimaryDerivedExports,
+            self.object_primary_derived_exports,
+            tenant_id,
+        )
+    }
+
     async fn from_env() -> anyhow::Result<Self> {
         let root = std::env::var("TRACE_COMMONS_DATA_DIR")
             .map(PathBuf::from)
@@ -474,42 +746,67 @@ impl AppState {
         let require_tenant_submission_policy =
             env_truthy("TRACE_COMMONS_REQUIRE_TENANT_SUBMISSION_POLICY");
         let db_mirror = trace_corpus_db_mirror_from_env().await?;
+        let tenant_rollout_gates = TraceTenantRolloutGates::from_env()?;
         let db_contributor_reads = env_truthy("TRACE_COMMONS_DB_CONTRIBUTOR_READS");
-        if db_contributor_reads && db_mirror.is_none() {
+        if tenant_rollout_gates.configured(
+            TraceTenantRolloutFeature::DbContributorReads,
+            db_contributor_reads,
+        ) && db_mirror.is_none()
+        {
             anyhow::bail!(
                 "TRACE_COMMONS_DB_CONTRIBUTOR_READS requires TRACE_COMMONS_DB_DUAL_WRITE"
             );
         }
         let db_reviewer_reads = env_truthy("TRACE_COMMONS_DB_REVIEWER_READS");
-        if db_reviewer_reads && db_mirror.is_none() {
+        if tenant_rollout_gates.configured(
+            TraceTenantRolloutFeature::DbReviewerReads,
+            db_reviewer_reads,
+        ) && db_mirror.is_none()
+        {
             anyhow::bail!("TRACE_COMMONS_DB_REVIEWER_READS requires TRACE_COMMONS_DB_DUAL_WRITE");
         }
         let db_reviewer_require_object_refs =
             env_truthy("TRACE_COMMONS_DB_REVIEWER_REQUIRE_OBJECT_REFS");
-        if db_reviewer_require_object_refs && !db_reviewer_reads {
-            anyhow::bail!(
-                "TRACE_COMMONS_DB_REVIEWER_REQUIRE_OBJECT_REFS requires TRACE_COMMONS_DB_REVIEWER_READS"
-            );
-        }
+        validate_rollout_gate_dependency(
+            &tenant_rollout_gates,
+            TraceTenantRolloutFeature::DbReviewerRequireObjectRefs,
+            db_reviewer_require_object_refs,
+            TraceTenantRolloutFeature::DbReviewerReads,
+            db_reviewer_reads,
+            "TRACE_COMMONS_DB_REVIEWER_REQUIRE_OBJECT_REFS requires TRACE_COMMONS_DB_REVIEWER_READS",
+        )?;
         let db_replay_export_reads = env_truthy("TRACE_COMMONS_DB_REPLAY_EXPORT_READS");
-        if db_replay_export_reads && db_mirror.is_none() {
+        if tenant_rollout_gates.configured(
+            TraceTenantRolloutFeature::DbReplayExportReads,
+            db_replay_export_reads,
+        ) && db_mirror.is_none()
+        {
             anyhow::bail!(
                 "TRACE_COMMONS_DB_REPLAY_EXPORT_READS requires TRACE_COMMONS_DB_DUAL_WRITE"
             );
         }
         let db_replay_export_require_object_refs =
             env_truthy("TRACE_COMMONS_DB_REPLAY_EXPORT_REQUIRE_OBJECT_REFS");
-        if db_replay_export_require_object_refs && !db_replay_export_reads {
-            anyhow::bail!(
-                "TRACE_COMMONS_DB_REPLAY_EXPORT_REQUIRE_OBJECT_REFS requires TRACE_COMMONS_DB_REPLAY_EXPORT_READS"
-            );
-        }
+        validate_rollout_gate_dependency(
+            &tenant_rollout_gates,
+            TraceTenantRolloutFeature::DbReplayExportRequireObjectRefs,
+            db_replay_export_require_object_refs,
+            TraceTenantRolloutFeature::DbReplayExportReads,
+            db_replay_export_reads,
+            "TRACE_COMMONS_DB_REPLAY_EXPORT_REQUIRE_OBJECT_REFS requires TRACE_COMMONS_DB_REPLAY_EXPORT_READS",
+        )?;
         let db_audit_reads = env_truthy("TRACE_COMMONS_DB_AUDIT_READS");
-        if db_audit_reads && db_mirror.is_none() {
+        if tenant_rollout_gates.configured(TraceTenantRolloutFeature::DbAuditReads, db_audit_reads)
+            && db_mirror.is_none()
+        {
             anyhow::bail!("TRACE_COMMONS_DB_AUDIT_READS requires TRACE_COMMONS_DB_DUAL_WRITE");
         }
         let db_tenant_policy_reads = env_truthy("TRACE_COMMONS_DB_TENANT_POLICY_READS");
-        if db_tenant_policy_reads && db_mirror.is_none() {
+        if tenant_rollout_gates.configured(
+            TraceTenantRolloutFeature::DbTenantPolicyReads,
+            db_tenant_policy_reads,
+        ) && db_mirror.is_none()
+        {
             anyhow::bail!(
                 "TRACE_COMMONS_DB_TENANT_POLICY_READS requires TRACE_COMMONS_DB_DUAL_WRITE"
             );
@@ -522,7 +819,11 @@ impl AppState {
         }
         let require_derived_export_object_refs =
             env_truthy("TRACE_COMMONS_DERIVED_EXPORT_REQUIRE_OBJECT_REFS");
-        if require_derived_export_object_refs && db_mirror.is_none() {
+        if tenant_rollout_gates.configured(
+            TraceTenantRolloutFeature::DerivedExportRequireObjectRefs,
+            require_derived_export_object_refs,
+        ) && db_mirror.is_none()
+        {
             anyhow::bail!(
                 "TRACE_COMMONS_DERIVED_EXPORT_REQUIRE_OBJECT_REFS requires TRACE_COMMONS_DB_DUAL_WRITE"
             );
@@ -545,35 +846,110 @@ impl AppState {
         let object_primary_derived_exports =
             env_truthy(TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS);
         validate_object_primary_submit_review_config(
-            object_primary_submit_review,
+            tenant_rollout_gates.configured(
+                TraceTenantRolloutFeature::ObjectPrimarySubmitReview,
+                object_primary_submit_review,
+            ),
             db_mirror.is_some(),
             require_db_mirror_writes,
-            db_reviewer_reads,
-            db_reviewer_require_object_refs,
+            tenant_rollout_gates.configured(
+                TraceTenantRolloutFeature::DbReviewerReads,
+                db_reviewer_reads,
+            ),
+            tenant_rollout_gates.configured(
+                TraceTenantRolloutFeature::DbReviewerRequireObjectRefs,
+                db_reviewer_require_object_refs,
+            ),
             artifact_store
                 .as_ref()
                 .map(ConfiguredTraceArtifactStore::object_store_name),
+        )?;
+        validate_rollout_gate_dependency(
+            &tenant_rollout_gates,
+            TraceTenantRolloutFeature::ObjectPrimarySubmitReview,
+            object_primary_submit_review,
+            TraceTenantRolloutFeature::DbReviewerReads,
+            db_reviewer_reads,
+            "TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW requires TRACE_COMMONS_DB_REVIEWER_READS",
+        )?;
+        validate_rollout_gate_dependency(
+            &tenant_rollout_gates,
+            TraceTenantRolloutFeature::ObjectPrimarySubmitReview,
+            object_primary_submit_review,
+            TraceTenantRolloutFeature::DbReviewerRequireObjectRefs,
+            db_reviewer_require_object_refs,
+            "TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW requires TRACE_COMMONS_DB_REVIEWER_REQUIRE_OBJECT_REFS",
         )?;
         validate_object_primary_replay_export_config(
-            object_primary_replay_export,
+            tenant_rollout_gates.configured(
+                TraceTenantRolloutFeature::ObjectPrimaryReplayExport,
+                object_primary_replay_export,
+            ),
             db_mirror.is_some(),
             require_db_mirror_writes,
-            db_replay_export_reads,
-            db_replay_export_require_object_refs,
+            tenant_rollout_gates.configured(
+                TraceTenantRolloutFeature::DbReplayExportReads,
+                db_replay_export_reads,
+            ),
+            tenant_rollout_gates.configured(
+                TraceTenantRolloutFeature::DbReplayExportRequireObjectRefs,
+                db_replay_export_require_object_refs,
+            ),
             artifact_store
                 .as_ref()
                 .map(ConfiguredTraceArtifactStore::object_store_name),
         )?;
+        validate_rollout_gate_dependency(
+            &tenant_rollout_gates,
+            TraceTenantRolloutFeature::ObjectPrimaryReplayExport,
+            object_primary_replay_export,
+            TraceTenantRolloutFeature::DbReplayExportReads,
+            db_replay_export_reads,
+            "TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT requires TRACE_COMMONS_DB_REPLAY_EXPORT_READS",
+        )?;
+        validate_rollout_gate_dependency(
+            &tenant_rollout_gates,
+            TraceTenantRolloutFeature::ObjectPrimaryReplayExport,
+            object_primary_replay_export,
+            TraceTenantRolloutFeature::DbReplayExportRequireObjectRefs,
+            db_replay_export_require_object_refs,
+            "TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT requires TRACE_COMMONS_DB_REPLAY_EXPORT_REQUIRE_OBJECT_REFS",
+        )?;
         validate_object_primary_derived_exports_config(
-            object_primary_derived_exports,
+            tenant_rollout_gates.configured(
+                TraceTenantRolloutFeature::ObjectPrimaryDerivedExports,
+                object_primary_derived_exports,
+            ),
             db_mirror.is_some(),
             require_db_mirror_writes,
-            db_reviewer_reads,
-            require_derived_export_object_refs,
+            tenant_rollout_gates.configured(
+                TraceTenantRolloutFeature::DbReviewerReads,
+                db_reviewer_reads,
+            ),
+            tenant_rollout_gates.configured(
+                TraceTenantRolloutFeature::DerivedExportRequireObjectRefs,
+                require_derived_export_object_refs,
+            ),
             require_export_guardrails,
             artifact_store
                 .as_ref()
                 .map(ConfiguredTraceArtifactStore::object_store_name),
+        )?;
+        validate_rollout_gate_dependency(
+            &tenant_rollout_gates,
+            TraceTenantRolloutFeature::ObjectPrimaryDerivedExports,
+            object_primary_derived_exports,
+            TraceTenantRolloutFeature::DbReviewerReads,
+            db_reviewer_reads,
+            "TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS requires TRACE_COMMONS_DB_REVIEWER_READS",
+        )?;
+        validate_rollout_gate_dependency(
+            &tenant_rollout_gates,
+            TraceTenantRolloutFeature::ObjectPrimaryDerivedExports,
+            object_primary_derived_exports,
+            TraceTenantRolloutFeature::DerivedExportRequireObjectRefs,
+            require_derived_export_object_refs,
+            "TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS requires TRACE_COMMONS_DERIVED_EXPORT_REQUIRE_OBJECT_REFS",
         )?;
         Ok(Self {
             root,
@@ -597,6 +973,7 @@ impl AppState {
             object_primary_derived_exports,
             require_db_reconciliation_clean,
             require_export_guardrails,
+            tenant_rollout_gates,
             max_export_items_per_request,
             analytics_min_cell_count,
             submission_quota,
@@ -734,6 +1111,31 @@ fn enforce_db_mirror_write_result(
     }
 }
 
+fn validate_rollout_gate_dependency(
+    gates: &TraceTenantRolloutGates,
+    feature: TraceTenantRolloutFeature,
+    feature_global: bool,
+    dependency: TraceTenantRolloutFeature,
+    dependency_global: bool,
+    message: &str,
+) -> anyhow::Result<()> {
+    let feature_tenant_ids = gates.tenant_ids(feature);
+    if !feature_global && feature_tenant_ids.is_empty() {
+        return Ok(());
+    }
+    if dependency_global {
+        return Ok(());
+    }
+    let dependency_tenant_ids = gates.tenant_ids(dependency);
+    if feature_global
+        || dependency_tenant_ids.is_empty()
+        || !feature_tenant_ids.is_subset(&dependency_tenant_ids)
+    {
+        anyhow::bail!("{message}");
+    }
+    Ok(())
+}
+
 fn trace_artifact_store_from_env(
     default_root: &Path,
 ) -> anyhow::Result<Option<ConfiguredTraceArtifactStore>> {
@@ -805,6 +1207,29 @@ fn env_truthy(key: &str) -> bool {
             "1" | "true" | "yes" | "on"
         )
     })
+}
+
+fn parse_trace_rollout_tenant_ids_from_env(key: &str) -> anyhow::Result<BTreeSet<String>> {
+    match std::env::var(key) {
+        Ok(configured) => parse_trace_rollout_tenant_ids(key, &configured),
+        Err(std::env::VarError::NotPresent) => Ok(BTreeSet::new()),
+        Err(error) => Err(error).with_context(|| format!("failed to read {key}")),
+    }
+}
+
+fn parse_trace_rollout_tenant_ids(key: &str, configured: &str) -> anyhow::Result<BTreeSet<String>> {
+    let mut tenant_ids = BTreeSet::new();
+    for tenant_id in configured.split(',').map(str::trim) {
+        if tenant_id.is_empty() {
+            continue;
+        }
+        anyhow::ensure!(
+            !tenant_id.contains(':') && !tenant_id.contains(';') && !tenant_id.contains('/'),
+            "{key} contains an invalid tenant id"
+        );
+        tenant_ids.insert(tenant_id.to_string());
+    }
+    Ok(tenant_ids)
 }
 
 fn app(state: Arc<AppState>) -> Router {
@@ -1784,6 +2209,7 @@ struct TraceCommonsConfigStatusResponse {
     object_primary_derived_exports: bool,
     require_db_reconciliation_clean: bool,
     require_export_guardrails: bool,
+    tenant_rollout_gate_counts: BTreeMap<String, usize>,
     max_export_items_per_request: usize,
     analytics_min_cell_count: usize,
     submission_quota: TraceSubmissionQuotaConfig,
@@ -1856,6 +2282,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         object_primary_derived_exports: state.object_primary_derived_exports,
         require_db_reconciliation_clean: state.require_db_reconciliation_clean,
         require_export_guardrails: state.require_export_guardrails,
+        tenant_rollout_gate_counts: state.tenant_rollout_gates.status_counts(),
         max_export_items_per_request: state.max_export_items_per_request,
         analytics_min_cell_count: state.analytics_min_cell_count,
         submission_quota: state.submission_quota,
@@ -3638,7 +4065,7 @@ async fn claim_review_lease_handler(
 ) -> ApiResult<Json<TraceReviewLeaseResponse>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_reviewer(&tenant)?;
-    let db = require_db_reviewer_lease_store(state.as_ref())?;
+    let db = require_db_reviewer_lease_store(state.as_ref(), &tenant)?;
     let ttl_seconds = body
         .lease_ttl_seconds
         .unwrap_or(DEFAULT_REVIEW_LEASE_TTL_SECONDS);
@@ -3700,7 +4127,7 @@ async fn release_review_lease_handler(
 ) -> ApiResult<Json<TraceReviewLeaseResponse>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_reviewer(&tenant)?;
-    let db = require_db_reviewer_lease_store(state.as_ref())?;
+    let db = require_db_reviewer_lease_store(state.as_ref(), &tenant)?;
     let released = db
         .release_trace_review_lease(&tenant.tenant_id, submission_id, &tenant.principal_ref)
         .await
@@ -3737,8 +4164,11 @@ async fn release_review_lease_handler(
     Ok(Json(TraceReviewLeaseResponse::from_record(&record)))
 }
 
-fn require_db_reviewer_lease_store(state: &AppState) -> ApiResult<&dyn Database> {
-    if !state.db_reviewer_reads {
+fn require_db_reviewer_lease_store<'a>(
+    state: &'a AppState,
+    tenant: &TenantAuth,
+) -> ApiResult<&'a dyn Database> {
+    if !state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
         return Err(api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "review leases require TRACE_COMMONS_DB_REVIEWER_READS=true",
@@ -4272,7 +4702,7 @@ async fn run_benchmark_conversion(
         state,
         tenant,
         &source_submission_ids,
-        state.require_derived_export_object_refs,
+        state.require_derived_export_object_refs_for_tenant(&tenant.tenant_id),
     )
     .await
     .map_err(internal_error)?;
@@ -4329,6 +4759,8 @@ async fn run_benchmark_conversion(
     let artifact_path = benchmark_artifact_path(&state.root, &tenant.tenant_id, conversion_id);
     let provenance_path = benchmark_provenance_path(&state.root, &tenant.tenant_id, conversion_id);
     let mut required_artifact_object_ref_material = None;
+    let object_primary_derived_exports =
+        state.object_primary_derived_exports_for_tenant(&tenant.tenant_id);
     if state.require_db_mirror_writes {
         let artifact_object_ref_material = if state.db_mirror.is_some() {
             Some(
@@ -4369,13 +4801,13 @@ async fn run_benchmark_conversion(
         enforce_db_mirror_write_result(state, "benchmark provenance", mirror_result)
             .map_err(internal_error)?;
         required_artifact_object_ref_material = artifact_object_ref_material;
-        if !state.object_primary_derived_exports {
+        if !object_primary_derived_exports {
             write_benchmark_artifact(&state.root, &tenant.tenant_id, &artifact)
                 .map_err(internal_error)?;
             write_export_provenance(&provenance_path, &provenance).map_err(internal_error)?;
         }
     } else {
-        if !state.object_primary_derived_exports {
+        if !object_primary_derived_exports {
             write_benchmark_artifact(&state.root, &tenant.tenant_id, &artifact)
                 .map_err(internal_error)?;
             write_export_provenance(&provenance_path, &provenance).map_err(internal_error)?;
@@ -4538,11 +4970,15 @@ async fn persist_benchmark_lifecycle_artifact(
             )?;
         }
         enforce_db_mirror_write_result(state, operation, mirror_result)?;
-        if !state.object_primary_derived_exports {
+        let object_primary_derived_exports =
+            state.object_primary_derived_exports_for_tenant(&tenant.tenant_id);
+        if !object_primary_derived_exports {
             write_benchmark_artifact(&state.root, &tenant.tenant_id, artifact)?;
         }
     } else {
-        if !state.object_primary_derived_exports {
+        let object_primary_derived_exports =
+            state.object_primary_derived_exports_for_tenant(&tenant.tenant_id);
+        if !object_primary_derived_exports {
             write_benchmark_artifact(&state.root, &tenant.tenant_id, artifact)?;
         }
         let artifact_object_ref_material = if state.db_mirror.is_some() {
@@ -4648,7 +5084,7 @@ async fn ranker_training_candidates_handler(
         state.as_ref(),
         &tenant,
         &source_submission_ids,
-        state.require_derived_export_object_refs,
+        state.require_derived_export_object_refs_for_tenant(&tenant.tenant_id),
     )
     .await
     .map_err(internal_error)?;
@@ -4683,6 +5119,8 @@ async fn ranker_training_candidates_handler(
     );
     let provenance_path = ranker_provenance_path(&state.root, &tenant.tenant_id, export_id);
     let mut required_artifact_object_ref_material = None;
+    let object_primary_derived_exports =
+        state.object_primary_derived_exports_for_tenant(&tenant.tenant_id);
     if state.require_db_mirror_writes {
         let artifact_object_ref_material = if state.db_mirror.is_some() {
             Some(
@@ -4728,11 +5166,11 @@ async fn ranker_training_candidates_handler(
         )
         .map_err(internal_error)?;
         required_artifact_object_ref_material = artifact_object_ref_material;
-        if !state.object_primary_derived_exports {
+        if !object_primary_derived_exports {
             write_export_provenance(&provenance_path, &provenance).map_err(internal_error)?;
         }
     } else {
-        if !state.object_primary_derived_exports {
+        if !object_primary_derived_exports {
             write_export_provenance(&provenance_path, &provenance).map_err(internal_error)?;
         }
         let artifact_object_ref_material = if state.db_mirror.is_some() {
@@ -4874,7 +5312,7 @@ async fn ranker_training_pairs_handler(
         state.as_ref(),
         &tenant,
         &source_submission_ids,
-        state.require_derived_export_object_refs,
+        state.require_derived_export_object_refs_for_tenant(&tenant.tenant_id),
     )
     .await
     .map_err(internal_error)?;
@@ -4909,6 +5347,8 @@ async fn ranker_training_pairs_handler(
     );
     let provenance_path = ranker_provenance_path(&state.root, &tenant.tenant_id, export_id);
     let mut required_artifact_object_ref_material = None;
+    let object_primary_derived_exports =
+        state.object_primary_derived_exports_for_tenant(&tenant.tenant_id);
     if state.require_db_mirror_writes {
         let artifact_object_ref_material = if state.db_mirror.is_some() {
             Some(
@@ -4950,11 +5390,11 @@ async fn ranker_training_pairs_handler(
         enforce_db_mirror_write_result(state.as_ref(), "ranker pair provenance", mirror_result)
             .map_err(internal_error)?;
         required_artifact_object_ref_material = artifact_object_ref_material;
-        if !state.object_primary_derived_exports {
+        if !object_primary_derived_exports {
             write_export_provenance(&provenance_path, &provenance).map_err(internal_error)?;
         }
     } else {
-        if !state.object_primary_derived_exports {
+        if !object_primary_derived_exports {
             write_export_provenance(&provenance_path, &provenance).map_err(internal_error)?;
         }
         let artifact_object_ref_material = if state.db_mirror.is_some() {
@@ -5704,7 +6144,7 @@ async fn tenant_submission_policy_for_request(
     state: &AppState,
     tenant: &TenantAuth,
 ) -> ApiResult<Option<TenantSubmissionPolicy>> {
-    if state.db_tenant_policy_reads {
+    if state.db_tenant_policy_reads_for_tenant(&tenant.tenant_id) {
         let db = state
             .db_mirror
             .as_ref()
@@ -6605,7 +7045,7 @@ async fn read_reviewer_submission_record(
     tenant: &TenantAuth,
     submission_id: Uuid,
 ) -> anyhow::Result<Option<TraceCommonsSubmissionRecord>> {
-    if state.db_reviewer_reads {
+    if state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
         let db = state
             .db_mirror
             .as_ref()
@@ -6641,7 +7081,7 @@ async fn read_utility_submission_record(
     tenant: &TenantAuth,
     submission_id: Uuid,
 ) -> anyhow::Result<Option<TraceCommonsSubmissionRecord>> {
-    if state.db_reviewer_reads {
+    if state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
         let db = state
             .db_mirror
             .as_ref()
@@ -6667,7 +7107,7 @@ async fn read_review_decision_record(
     tenant: &TenantAuth,
     submission_id: Uuid,
 ) -> anyhow::Result<Option<ReviewDecisionRecord>> {
-    if state.db_reviewer_reads {
+    if state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
         let db = state
             .db_mirror
             .as_ref()
@@ -6713,7 +7153,7 @@ async fn read_reviewer_metadata_view(
     state: &AppState,
     tenant: &TenantAuth,
 ) -> anyhow::Result<TraceCommonsMetadataView> {
-    if state.db_reviewer_reads {
+    if state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
         return read_reviewer_metadata_view_from_db(state, tenant).await;
     }
 
@@ -6727,7 +7167,7 @@ async fn read_replay_export_metadata_view(
     state: &AppState,
     tenant: &TenantAuth,
 ) -> anyhow::Result<TraceCommonsMetadataView> {
-    if state.db_replay_export_reads {
+    if state.db_replay_export_reads_for_tenant(&tenant.tenant_id) {
         return read_reviewer_metadata_view_from_db(state, tenant).await;
     }
 
@@ -6767,7 +7207,7 @@ async fn trace_list_purpose_submission_ids(
         return Ok(None);
     };
 
-    if state.db_reviewer_reads {
+    if state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
         let db = state
             .db_mirror
             .as_ref()
@@ -6839,7 +7279,7 @@ async fn read_contributor_credit_view(
     state: &AppState,
     tenant: &TenantAuth,
 ) -> anyhow::Result<TraceContributorCreditView> {
-    if state.db_contributor_reads {
+    if state.db_contributor_reads_for_tenant(&tenant.tenant_id) {
         return read_contributor_credit_view_from_db(state, tenant).await;
     }
 
@@ -6894,7 +7334,7 @@ async fn read_contributor_status_credit_events(
     if records.is_empty() {
         return Ok(Vec::new());
     }
-    let credit_events = if state.db_contributor_reads {
+    let credit_events = if state.db_contributor_reads_for_tenant(&tenant.tenant_id) {
         read_contributor_credit_events_from_db(state, tenant, records).await?
     } else {
         visible_credit_events(
@@ -6941,7 +7381,7 @@ async fn read_audit_events(
     state: &AppState,
     tenant: &TenantAuth,
 ) -> anyhow::Result<Vec<TraceCommonsAuditEvent>> {
-    if state.db_audit_reads {
+    if state.db_audit_reads_for_tenant(&tenant.tenant_id) {
         return read_audit_events_from_db(state, tenant).await;
     }
 
@@ -7501,7 +7941,8 @@ fn store_envelope(
     envelope: &TraceContributionEnvelope,
 ) -> anyhow::Result<StoredTraceEnvelope> {
     let object_key = trace_envelope_object_key(tenant_id, status, envelope.submission_id);
-    if !state.object_primary_submit_review {
+    let object_primary_submit_review = state.object_primary_submit_review_for_tenant(tenant_id);
+    if !object_primary_submit_review {
         let path = state.root.join(&object_key);
         write_json_file(&path, envelope, "trace contribution envelope")?;
     }
@@ -7518,7 +7959,7 @@ fn store_envelope(
         )?)
     } else {
         anyhow::ensure!(
-            !state.object_primary_submit_review,
+            !object_primary_submit_review,
             "{TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW} requires a configured encrypted object store"
         );
         None
@@ -9228,7 +9669,7 @@ async fn read_envelope_for_process_evaluation(
         record.status == TraceCorpusStatus::Accepted,
         "trace process evaluation source is not accepted"
     );
-    let body_read = if state.db_reviewer_reads {
+    let body_read = if state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
         if let Some(envelope) =
             read_envelope_from_active_db_object_ref(state, &tenant.tenant_id, record.submission_id)
                 .await?
@@ -9236,7 +9677,7 @@ async fn read_envelope_for_process_evaluation(
             envelope
         } else {
             anyhow::ensure!(
-                !state.db_reviewer_require_object_refs,
+                !state.db_reviewer_require_object_refs_for_tenant(&tenant.tenant_id),
                 "missing active submitted envelope object ref for process evaluation"
             );
             TraceEnvelopeBodyRead {
@@ -9268,7 +9709,7 @@ async fn read_envelope_body_for_review_decision(
     record: &TraceCommonsSubmissionRecord,
     allow_file_body_fallback: bool,
 ) -> anyhow::Result<TraceEnvelopeBodyRead> {
-    if state.db_reviewer_reads
+    if state.db_reviewer_reads_for_tenant(&tenant.tenant_id)
         && let Some(envelope) =
             read_envelope_from_active_db_object_ref(state, &tenant.tenant_id, record.submission_id)
                 .await?
@@ -9276,7 +9717,8 @@ async fn read_envelope_body_for_review_decision(
         return Ok(envelope);
     }
     anyhow::ensure!(
-        !state.db_reviewer_require_object_refs && allow_file_body_fallback,
+        !state.db_reviewer_require_object_refs_for_tenant(&tenant.tenant_id)
+            && allow_file_body_fallback,
         "missing active submitted envelope object ref for review decision"
     );
     Ok(TraceEnvelopeBodyRead {
@@ -9290,7 +9732,7 @@ async fn read_envelope_body_for_replay_export(
     tenant: &TenantAuth,
     record: &TraceCommonsSubmissionRecord,
 ) -> anyhow::Result<TraceEnvelopeBodyRead> {
-    if state.db_replay_export_reads {
+    if state.db_replay_export_reads_for_tenant(&tenant.tenant_id) {
         if let Some(envelope) =
             read_envelope_from_active_db_object_ref(state, &tenant.tenant_id, record.submission_id)
                 .await?
@@ -9298,7 +9740,7 @@ async fn read_envelope_body_for_replay_export(
             return Ok(envelope);
         }
         anyhow::ensure!(
-            !state.db_replay_export_require_object_refs,
+            !state.db_replay_export_require_object_refs_for_tenant(&tenant.tenant_id),
             "missing active submitted envelope object ref for replay export"
         );
     }
@@ -15596,6 +16038,7 @@ mod tests {
             object_primary_derived_exports: false,
             require_db_reconciliation_clean: false,
             require_export_guardrails: false,
+            tenant_rollout_gates: TraceTenantRolloutGates::default(),
             max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
             analytics_min_cell_count: 0,
             submission_quota: TraceSubmissionQuotaConfig::default(),
@@ -15727,6 +16170,16 @@ mod tests {
     ) -> Arc<AppState> {
         let mut state = test_state(root);
         Arc::make_mut(&mut state).tokens = Arc::new(tokens);
+        state
+    }
+
+    fn with_tenant_rollout_gate(
+        mut state: Arc<AppState>,
+        feature: TraceTenantRolloutFeature,
+        tenant_ids: &[&str],
+    ) -> Arc<AppState> {
+        Arc::make_mut(&mut state).tenant_rollout_gates =
+            TraceTenantRolloutGates::for_feature(feature, tenant_ids);
         state
     }
 
@@ -16052,6 +16505,7 @@ mod tests {
             object_primary_derived_exports: false,
             require_db_reconciliation_clean: false,
             require_export_guardrails,
+            tenant_rollout_gates: TraceTenantRolloutGates::default(),
             max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
             analytics_min_cell_count: 0,
             submission_quota: TraceSubmissionQuotaConfig::default(),
@@ -16111,6 +16565,7 @@ mod tests {
             object_primary_derived_exports: true,
             require_db_reconciliation_clean: false,
             require_export_guardrails: true,
+            tenant_rollout_gates: TraceTenantRolloutGates::default(),
             max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
             analytics_min_cell_count: 0,
             submission_quota: TraceSubmissionQuotaConfig::default(),
@@ -16156,6 +16611,7 @@ mod tests {
             object_primary_derived_exports: false,
             require_db_reconciliation_clean: false,
             require_export_guardrails: false,
+            tenant_rollout_gates: TraceTenantRolloutGates::default(),
             max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
             analytics_min_cell_count: 0,
             submission_quota: TraceSubmissionQuotaConfig::default(),
@@ -16198,6 +16654,7 @@ mod tests {
             object_primary_derived_exports: false,
             require_db_reconciliation_clean: true,
             require_export_guardrails: false,
+            tenant_rollout_gates: TraceTenantRolloutGates::default(),
             max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
             analytics_min_cell_count: 0,
             submission_quota: TraceSubmissionQuotaConfig::default(),
@@ -16876,6 +17333,62 @@ mod tests {
                 .to_string()
                 .contains("unsupported TRACE_COMMONS_OBJECT_STORE")
         );
+    }
+
+    #[test]
+    fn tenant_rollout_gates_enable_global_or_allowlisted_tenants() {
+        let gates = TraceTenantRolloutGates::for_feature(
+            TraceTenantRolloutFeature::DbContributorReads,
+            &["tenant-a"],
+        );
+        assert!(gates.enabled_for(
+            TraceTenantRolloutFeature::DbContributorReads,
+            false,
+            "tenant-a"
+        ));
+        assert!(!gates.enabled_for(
+            TraceTenantRolloutFeature::DbContributorReads,
+            false,
+            "tenant-b"
+        ));
+        assert!(gates.enabled_for(
+            TraceTenantRolloutFeature::DbContributorReads,
+            true,
+            "tenant-b"
+        ));
+        assert_eq!(gates.status_counts().get("db_contributor_reads"), Some(&1));
+    }
+
+    #[test]
+    fn tenant_rollout_gate_dependency_requires_matching_tenant_scope() {
+        let gates = TraceTenantRolloutGates::for_feature(
+            TraceTenantRolloutFeature::ObjectPrimarySubmitReview,
+            &["tenant-a"],
+        )
+        .with_feature(
+            TraceTenantRolloutFeature::DbReviewerReads,
+            &["tenant-a", "tenant-b"],
+        );
+        validate_rollout_gate_dependency(
+            &gates,
+            TraceTenantRolloutFeature::ObjectPrimarySubmitReview,
+            false,
+            TraceTenantRolloutFeature::DbReviewerReads,
+            false,
+            "missing dependency",
+        )
+        .expect("allowlisted dependency covers feature tenant");
+
+        let missing = validate_rollout_gate_dependency(
+            &gates,
+            TraceTenantRolloutFeature::ObjectPrimarySubmitReview,
+            false,
+            TraceTenantRolloutFeature::DbReviewerRequireObjectRefs,
+            false,
+            "missing dependency",
+        )
+        .expect_err("missing tenant-scoped dependency is rejected");
+        assert!(missing.to_string().contains("missing dependency"));
     }
 
     #[test]
@@ -18548,6 +19061,103 @@ mod tests {
             read_envelope_from_object_ref(state.as_ref(), "tenant-a", &object_ref)
                 .expect("DB object ref reads encrypted envelope");
         assert_eq!(object_ref_round_trip.submission_id, submission_id);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn object_primary_submit_review_can_roll_out_per_tenant() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_root = temp.path().join("tenant-service-object-store");
+        let artifact_store = test_artifact_store(&artifact_root);
+        let configured_store = ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            artifact_store,
+        );
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-object-primary-tenant-submit.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = with_tenant_rollout_gate(
+            test_state_with_configured_artifact_store_policies_export_guardrails_and_required_db_writes(
+                temp.path().to_path_buf(),
+                Some(db.clone() as Arc<dyn Database>),
+                Some(configured_store),
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                BTreeMap::new(),
+                false,
+                false,
+                true,
+                false,
+            ),
+            TraceTenantRolloutFeature::ObjectPrimarySubmitReview,
+            &["tenant-a"],
+        );
+
+        let mut tenant_a_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_a_envelope);
+        let tenant_a_submission_id = tenant_a_envelope.submission_id;
+        let Json(tenant_a_receipt) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(tenant_a_envelope),
+        )
+        .await
+        .expect("tenant-a object-primary submission succeeds");
+        assert_eq!(tenant_a_receipt.status, "accepted");
+
+        let mut tenant_b_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_b_envelope);
+        let tenant_b_submission_id = tenant_b_envelope.submission_id;
+        let Json(tenant_b_receipt) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(tenant_b_envelope),
+        )
+        .await
+        .expect("tenant-b fallback submission succeeds");
+        assert_eq!(tenant_b_receipt.status, "accepted");
+
+        let tenant_a_record =
+            read_submission_record(temp.path(), "tenant-a", tenant_a_submission_id)
+                .expect("tenant-a record reads")
+                .expect("tenant-a record exists");
+        assert!(
+            !temp.path().join(&tenant_a_record.object_key).exists(),
+            "tenant-a rollout should suppress plaintext envelope body"
+        );
+        let tenant_a_ref = db
+            .get_latest_active_trace_object_ref(
+                "tenant-a",
+                tenant_a_submission_id,
+                StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            )
+            .await
+            .expect("tenant-a object ref reads")
+            .expect("tenant-a object ref exists");
+        assert_eq!(
+            tenant_a_ref.object_store,
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+        );
+
+        let tenant_b_record =
+            read_submission_record(temp.path(), "tenant-b", tenant_b_submission_id)
+                .expect("tenant-b record reads")
+                .expect("tenant-b record exists");
+        assert!(
+            temp.path().join(&tenant_b_record.object_key).exists(),
+            "tenant-b should remain on plaintext-compatible file fallback"
+        );
     }
 
     #[cfg(feature = "libsql")]
@@ -20544,6 +21154,122 @@ mod tests {
                 .expect("same-tenant contributor remains principal scoped");
         assert_eq!(other_contributor_credit.accepted, 0);
         assert_eq!(other_contributor_credit.credit_points_ledger, 0.0);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn contributor_credit_db_reads_can_roll_out_per_tenant() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-mirror-tenant-credit.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = with_tenant_rollout_gate(
+            test_state_with_db(temp.path().to_path_buf(), Some(db as Arc<dyn Database>)),
+            TraceTenantRolloutFeature::DbContributorReads,
+            &["tenant-a"],
+        );
+
+        let mut tenant_a_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_a_envelope);
+        let tenant_a_submission_id = tenant_a_envelope.submission_id;
+        let Json(tenant_a_receipt) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(tenant_a_envelope),
+        )
+        .await
+        .expect("tenant-a submission succeeds");
+        assert_eq!(tenant_a_receipt.status, "accepted");
+
+        let mut tenant_b_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_b_envelope);
+        let tenant_b_submission_id = tenant_b_envelope.submission_id;
+        let Json(tenant_b_receipt) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(tenant_b_envelope),
+        )
+        .await
+        .expect("tenant-b submission succeeds");
+        assert_eq!(tenant_b_receipt.status, "accepted");
+
+        let Json(tenant_a_bonus) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(tenant_a_submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::ReviewerBonus,
+                credit_points_delta: 1.25,
+                reason: Some("tenant-a rollout credit".to_string()),
+                external_ref: Some("review:tenant-a-rollout".to_string()),
+            }),
+        )
+        .await
+        .expect("tenant-a credit appends");
+        assert_eq!(tenant_a_bonus.credit_points_delta, 1.25);
+
+        let Json(tenant_b_bonus) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-b"),
+            AxumPath(tenant_b_submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::ReviewerBonus,
+                credit_points_delta: 2.5,
+                reason: Some("tenant-b file fallback credit".to_string()),
+                external_ref: Some("review:tenant-b-rollout".to_string()),
+            }),
+        )
+        .await
+        .expect("tenant-b credit appends");
+        assert_eq!(tenant_b_bonus.credit_points_delta, 2.5);
+
+        let tenant_a_dir = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"));
+        std::fs::remove_file(
+            tenant_a_dir
+                .join("metadata")
+                .join(format!("{tenant_a_submission_id}.json")),
+        )
+        .expect("remove tenant-a file metadata");
+        std::fs::remove_file(tenant_a_dir.join("credit_ledger").join("events.jsonl"))
+            .expect("remove tenant-a file ledger");
+
+        let Json(tenant_a_credit) = credit_handler(State(state.clone()), auth_headers("token-a"))
+            .await
+            .expect("tenant-a credit reads from DB rollout");
+        assert_eq!(tenant_a_credit.accepted, 1);
+        assert_eq!(tenant_a_credit.credit_points_ledger, 1.25);
+
+        let Json(tenant_b_credit) = credit_handler(State(state.clone()), auth_headers("token-b"))
+            .await
+            .expect("tenant-b credit reads file fallback");
+        assert_eq!(tenant_b_credit.accepted, 1);
+        assert_eq!(tenant_b_credit.credit_points_ledger, 2.5);
+
+        let tenant_b_dir = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-b"));
+        std::fs::remove_file(
+            tenant_b_dir
+                .join("metadata")
+                .join(format!("{tenant_b_submission_id}.json")),
+        )
+        .expect("remove tenant-b file metadata");
+        let Json(tenant_b_after_file_removal) =
+            credit_handler(State(state), auth_headers("token-b"))
+                .await
+                .expect("tenant-b remains on file fallback instead of silently using DB");
+        assert_eq!(tenant_b_after_file_removal.accepted, 0);
     }
 
     #[tokio::test]
@@ -25097,6 +25823,7 @@ mod tests {
             object_primary_derived_exports: false,
             require_db_reconciliation_clean: false,
             require_export_guardrails: false,
+            tenant_rollout_gates: TraceTenantRolloutGates::default(),
             max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
             analytics_min_cell_count: 0,
             submission_quota: TraceSubmissionQuotaConfig::default(),

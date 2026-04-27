@@ -62,6 +62,42 @@ pub struct EncryptedTraceArtifact {
     pub ciphertext_base64: String,
 }
 
+pub trait TraceArtifactStore: Send + Sync {
+    fn put_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt>;
+
+    fn read_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<EncryptedTraceArtifact>;
+
+    fn read_json(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<serde_json::Value>;
+
+    fn read_json_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value>;
+
+    fn delete_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool>;
+}
+
 pub struct LocalEncryptedTraceArtifactStore {
     root: PathBuf,
     crypto: SecretsCrypto,
@@ -83,9 +119,21 @@ impl LocalEncryptedTraceArtifactStore {
         value: &T,
     ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
         let plaintext = serde_json::to_vec(value).context("failed to serialize trace artifact")?;
+        self.put_serialized_json(tenant_storage_ref, artifact_kind, object_id, &plaintext)
+    }
+
+    pub fn put_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        serde_json::from_slice::<serde_json::Value>(serialized_json)
+            .context("failed to parse serialized trace artifact")?;
         let (ciphertext, salt) = self
             .crypto
-            .encrypt(&plaintext)
+            .encrypt(serialized_json)
             .context("failed to encrypt trace artifact")?;
         let ciphertext_sha256 = sha256_hex(&ciphertext);
         let object_key = artifact_object_key(tenant_storage_ref, &artifact_kind, object_id);
@@ -257,6 +305,64 @@ impl LocalEncryptedTraceArtifactStore {
     }
 }
 
+impl TraceArtifactStore for LocalEncryptedTraceArtifactStore {
+    fn put_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        Self::put_serialized_json(
+            self,
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn read_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<EncryptedTraceArtifact> {
+        Self::read_artifact(self, expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<serde_json::Value> {
+        Self::get_json(self, expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        Self::get_json_by_object_key(
+            self,
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
+    }
+
+    fn delete_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        Self::delete_artifact(self, expected_tenant_storage_ref, receipt)
+    }
+}
+
 fn decrypt_artifact_json<T: DeserializeOwned>(
     crypto: &SecretsCrypto,
     artifact: &EncryptedTraceArtifact,
@@ -332,6 +438,45 @@ mod tests {
         LocalEncryptedTraceArtifactStore::new(temp.path(), crypto)
     }
 
+    fn assert_trace_artifact_store_contract(store: &dyn TraceArtifactStore) {
+        let payload = json!({"safe": true, "summary": "<redacted>"});
+        let serialized_payload = serde_json::to_vec(&payload).expect("payload serializes");
+        let receipt = store
+            .put_serialized_json(
+                "tenant:sha256:trait",
+                TraceArtifactKind::ContributionEnvelope,
+                "trait-contract",
+                &serialized_payload,
+            )
+            .expect("artifact writes through trait");
+
+        let artifact = store
+            .read_artifact("tenant:sha256:trait", &receipt)
+            .expect("artifact envelope reads through trait");
+        assert_eq!(artifact.receipt, receipt);
+
+        let receipt_round_trip: serde_json::Value = store
+            .read_json("tenant:sha256:trait", &receipt)
+            .expect("artifact JSON reads by receipt through trait");
+        assert_eq!(receipt_round_trip, payload);
+
+        let round_trip: serde_json::Value = store
+            .read_json_by_object_key(
+                "tenant:sha256:trait",
+                TraceArtifactKind::ContributionEnvelope,
+                &receipt.object_key,
+                &receipt.ciphertext_sha256,
+            )
+            .expect("artifact JSON reads through trait");
+        assert_eq!(round_trip, payload);
+
+        assert!(
+            store
+                .delete_artifact("tenant:sha256:trait", &receipt)
+                .expect("artifact deletes through trait")
+        );
+    }
+
     #[test]
     fn encrypted_artifact_round_trips_without_plaintext_on_disk() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -362,6 +507,14 @@ mod tests {
         assert!(!serialized.contains("<PRIVATE_DATE>"));
         assert!(!serialized.contains("User asked"));
         assert_eq!(artifact.receipt.tenant_storage_ref, "tenant:sha256:abc123");
+    }
+
+    #[test]
+    fn local_store_satisfies_trace_artifact_store_contract() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = test_store(&temp);
+
+        assert_trace_artifact_store_contract(&store);
     }
 
     #[test]

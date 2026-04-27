@@ -22,8 +22,8 @@ These are the next independent production slices that can be staffed in parallel
 
 ### Ingestion Storage
 
-- [ ] Promote DB/object-primary submit, review, replay, benchmark, and ranker paths from pilot flags to per-tenant rollout flags after reconciliation parity is green.
-- [ ] Replace service-local encrypted artifact storage with a service-owned object-store provider abstraction, KMS/key-ref strategy, tenant-hashed object keys, hash/decrypt verification, and migration/backfill tooling.
+- [ ] Promote DB/object-primary submit, review, replay, benchmark, and ranker paths from pilot flags to per-tenant rollout flags after reconciliation parity is green. Initial tenant allowlist gates now wrap DB contributor/reviewer/replay/audit/tenant-policy reads, object-ref-required modes, and object-primary submit/replay/derived flags; contributor-credit and object-primary submit caller tests cover tenant A canary rollout while tenant B remains on file fallback.
+- [ ] Replace service-local encrypted artifact storage with a service-owned object-store provider abstraction, KMS/key-ref strategy, tenant-hashed object keys, hash/decrypt verification, and migration/backfill tooling. The local encrypted store now implements a `TraceArtifactStore` provider trait for serialized JSON write/read/delete conformance; remote object/KMS providers and migration tooling remain.
 - [ ] Add PostgreSQL integration coverage matching the current libSQL `TraceCorpusStore` slices for submissions, object refs, derived records, vectors, audit, credit, retention jobs, export manifests/items, policies, and tombstones. Retention job/item facade scope, tenant-policy update/scope behavior, review-lease claim/release/audit behavior, raw RLS visibility, and export-manifest mirror rollback atomicity now have PostgreSQL coverage.
 
 ### Review and Governance
