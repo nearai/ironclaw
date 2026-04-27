@@ -177,8 +177,10 @@ same role as the request token. Grant consent-scope and allowed-use allow-lists
 are additional constraints; they intersect with any static-token or EdDSA claim
 allow-lists and cannot upgrade the token's role. Admin tokens can manage the
 current tenant's grant rows through `GET|POST /v1/admin/tenant-access-grants`
-and `POST /v1/admin/tenant-access-grants/{grant_id}/revoke`; those routes are
-tenant-scoped, DB-backed, and audited with safe hash/count-only grant metadata.
+and `POST /v1/admin/tenant-access-grants/{grant_id}/revoke`, or the matching
+`ironclaw traces tenant-access-grants-list`, `tenant-access-grant-create`, and
+`tenant-access-grant-revoke` CLI helpers; those routes are tenant-scoped,
+DB-backed, and audited with safe hash/count-only grant metadata.
 For autonomous clients, the standing policy can point at a separate guarded
 HTTPS upload-claim issuer. The queue worker posts a bounded claim request with
 tenant/audience/consent/use metadata, sends optional workload credentials only

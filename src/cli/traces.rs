@@ -948,6 +948,122 @@ pub enum TracesCommand {
         json: bool,
     },
 
+    /// List DB-backed tenant access grants for hosted-agent permissioning
+    TenantAccessGrantsList {
+        /// Trace Commons ingestion base URL or /v1/traces URL
+        #[arg(long)]
+        endpoint: String,
+
+        /// Maximum tenant access grants to return
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Filter by grant status
+        #[arg(long, value_enum)]
+        status: Option<TraceTenantAccessGrantStatusArg>,
+
+        /// Filter by grant role
+        #[arg(long, value_enum)]
+        role: Option<TraceTenantAccessGrantRoleArg>,
+
+        /// Filter by stored principal_ref
+        #[arg(long)]
+        principal_ref: Option<String>,
+
+        /// Environment variable containing an admin bearer token
+        #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
+        bearer_token_env: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Create a DB-backed tenant access grant for an issuer-authorized principal
+    TenantAccessGrantCreate {
+        /// Trace Commons ingestion base URL or /v1/traces URL
+        #[arg(long)]
+        endpoint: String,
+
+        /// Stored principal_ref to authorize
+        #[arg(long)]
+        principal_ref: String,
+
+        /// Role this grant authorizes
+        #[arg(long, value_enum)]
+        role: TraceTenantAccessGrantRoleArg,
+
+        /// Optional explicit grant id
+        #[arg(long)]
+        grant_id: Option<Uuid>,
+
+        /// Allowed consent scopes, comma separated
+        #[arg(long, value_enum, value_delimiter = ',')]
+        allowed_consent_scopes: Vec<TraceScopeArg>,
+
+        /// Allowed trace-card uses, comma separated
+        #[arg(long, value_enum, value_delimiter = ',')]
+        allowed_uses: Vec<TraceAllowedUseArg>,
+
+        /// Issuer that authorized the principal
+        #[arg(long)]
+        issuer: Option<String>,
+
+        /// Audience bound by the issuer
+        #[arg(long)]
+        audience: Option<String>,
+
+        /// Subject bound by the issuer
+        #[arg(long)]
+        subject: Option<String>,
+
+        /// RFC3339 issued-at timestamp
+        #[arg(long)]
+        issued_at: Option<String>,
+
+        /// RFC3339 expiration timestamp
+        #[arg(long)]
+        expires_at: Option<String>,
+
+        /// Required audit reason
+        #[arg(long)]
+        reason: String,
+
+        /// Safe grant metadata as key=value, repeatable
+        #[arg(long = "metadata", value_name = "KEY=VALUE")]
+        metadata: Vec<String>,
+
+        /// Environment variable containing an admin bearer token
+        #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
+        bearer_token_env: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Revoke a DB-backed tenant access grant
+    TenantAccessGrantRevoke {
+        /// Trace Commons ingestion base URL or /v1/traces URL
+        #[arg(long)]
+        endpoint: String,
+
+        /// Grant ID to revoke
+        grant_id: Uuid,
+
+        /// Required audit reason
+        #[arg(long)]
+        reason: String,
+
+        /// Environment variable containing an admin bearer token
+        #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
+        bearer_token_env: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Export approved ranker training candidates
     RankerTrainingCandidates {
         /// Trace Commons ingestion base URL or /v1/traces URL
@@ -1626,6 +1742,61 @@ impl std::fmt::Display for TraceExportJobStatusArg {
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceTenantAccessGrantRoleArg {
+    Contributor,
+    Reviewer,
+    Admin,
+    ExportWorker,
+    RetentionWorker,
+    VectorWorker,
+    BenchmarkWorker,
+    UtilityWorker,
+    ProcessEvalWorker,
+    RevocationWorker,
+}
+
+impl TraceTenantAccessGrantRoleArg {
+    fn server_value(self) -> &'static str {
+        match self {
+            Self::Contributor => "contributor",
+            Self::Reviewer => "reviewer",
+            Self::Admin => "admin",
+            Self::ExportWorker => "export_worker",
+            Self::RetentionWorker => "retention_worker",
+            Self::VectorWorker => "vector_worker",
+            Self::BenchmarkWorker => "benchmark_worker",
+            Self::UtilityWorker => "utility_worker",
+            Self::ProcessEvalWorker => "process_eval_worker",
+            Self::RevocationWorker => "revocation_worker",
+        }
+    }
+}
+
+impl std::fmt::Display for TraceTenantAccessGrantRoleArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.server_value())
+    }
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceTenantAccessGrantStatusArg {
+    Active,
+    Revoked,
+    Expired,
+}
+
+impl std::fmt::Display for TraceTenantAccessGrantStatusArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::Active => "active",
+            Self::Revoked => "revoked",
+            Self::Expired => "expired",
+        };
+        write!(f, "{value}")
+    }
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceRetentionJobItemActionArg {
     Revoke,
     Expire,
@@ -2191,6 +2362,78 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
                 policy_version,
                 allowed_consent_scopes,
                 allowed_uses,
+                json,
+            )
+            .await
+        }
+        TracesCommand::TenantAccessGrantsList {
+            endpoint,
+            limit,
+            status,
+            role,
+            principal_ref,
+            bearer_token_env,
+            json,
+        } => {
+            trace_commons_tenant_access_grants_list(
+                &endpoint,
+                &bearer_token_env,
+                limit,
+                status,
+                role,
+                principal_ref,
+                json,
+            )
+            .await
+        }
+        TracesCommand::TenantAccessGrantCreate {
+            endpoint,
+            principal_ref,
+            role,
+            grant_id,
+            allowed_consent_scopes,
+            allowed_uses,
+            issuer,
+            audience,
+            subject,
+            issued_at,
+            expires_at,
+            reason,
+            metadata,
+            bearer_token_env,
+            json,
+        } => {
+            trace_commons_tenant_access_grant_create(TraceCommonsTenantAccessGrantCreateOptions {
+                endpoint: &endpoint,
+                bearer_token_env: &bearer_token_env,
+                principal_ref,
+                role,
+                grant_id,
+                allowed_consent_scopes,
+                allowed_uses,
+                issuer,
+                audience,
+                subject,
+                issued_at,
+                expires_at,
+                reason,
+                metadata,
+                json,
+            })
+            .await
+        }
+        TracesCommand::TenantAccessGrantRevoke {
+            endpoint,
+            grant_id,
+            reason,
+            bearer_token_env,
+            json,
+        } => {
+            trace_commons_tenant_access_grant_revoke(
+                &endpoint,
+                &bearer_token_env,
+                grant_id,
+                reason,
                 json,
             )
             .await
@@ -4384,6 +4627,245 @@ fn print_trace_commons_tenant_policy_response(
     print_optional_json_field("  updated by", value, "updated_by_principal_ref");
     print_optional_json_field("  updated at", value, "updated_at");
     Ok(())
+}
+
+async fn trace_commons_tenant_access_grants_list(
+    endpoint: &str,
+    bearer_token_env: &str,
+    limit: Option<usize>,
+    status: Option<TraceTenantAccessGrantStatusArg>,
+    role: Option<TraceTenantAccessGrantRoleArg>,
+    principal_ref: Option<String>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let mut query = optional_usize_query("limit", limit);
+    if let Some(status) = status {
+        query.push(("status", status.to_string()));
+    }
+    if let Some(role) = role {
+        query.push(("role", role.to_string()));
+    }
+    if let Some(principal_ref) = principal_ref
+        .map(|principal_ref| principal_ref.trim().to_string())
+        .filter(|principal_ref| !principal_ref.is_empty())
+    {
+        query.push(("principal_ref", principal_ref));
+    }
+    let Some(response) = trace_commons_optional_api_request(
+        Method::GET,
+        endpoint,
+        "/v1/admin/tenant-access-grants",
+        &query,
+        Some(bearer_token_env),
+        None,
+    )
+    .await?
+    else {
+        print_trace_commons_unsupported("/v1/admin/tenant-access-grants");
+        return Ok(());
+    };
+
+    if json {
+        print_trace_commons_json(&response)
+    } else {
+        print_trace_commons_items(
+            "Central tenant access grants",
+            response.json.as_ref(),
+            &[
+                "grant_id",
+                "principal_ref",
+                "role",
+                "status",
+                "allowed_consent_scopes",
+                "allowed_uses",
+                "issuer",
+                "subject",
+                "expires_at",
+                "revoked_at",
+            ],
+        );
+        Ok(())
+    }
+}
+
+struct TraceCommonsTenantAccessGrantCreateOptions<'a> {
+    endpoint: &'a str,
+    bearer_token_env: &'a str,
+    principal_ref: String,
+    role: TraceTenantAccessGrantRoleArg,
+    grant_id: Option<Uuid>,
+    allowed_consent_scopes: Vec<TraceScopeArg>,
+    allowed_uses: Vec<TraceAllowedUseArg>,
+    issuer: Option<String>,
+    audience: Option<String>,
+    subject: Option<String>,
+    issued_at: Option<String>,
+    expires_at: Option<String>,
+    reason: String,
+    metadata: Vec<String>,
+    json: bool,
+}
+
+async fn trace_commons_tenant_access_grant_create(
+    options: TraceCommonsTenantAccessGrantCreateOptions<'_>,
+) -> anyhow::Result<()> {
+    let body = trace_commons_tenant_access_grant_body(&options)?;
+    let response = trace_commons_api_request(
+        Method::POST,
+        options.endpoint,
+        "/v1/admin/tenant-access-grants",
+        &[],
+        Some(options.bearer_token_env),
+        Some(body),
+    )
+    .await?;
+    print_trace_commons_tenant_access_grant_response(
+        response,
+        options.json,
+        "Trace Commons tenant access grant created.",
+    )
+}
+
+fn trace_commons_tenant_access_grant_body(
+    options: &TraceCommonsTenantAccessGrantCreateOptions<'_>,
+) -> anyhow::Result<serde_json::Value> {
+    let principal_ref = options.principal_ref.trim();
+    if principal_ref.is_empty() {
+        anyhow::bail!("--principal-ref must not be empty");
+    }
+    require_non_empty_reason(&options.reason)?;
+    if let Some(issued_at) = options.issued_at.as_deref() {
+        require_rfc3339_timestamp("--issued-at", issued_at)?;
+    }
+    if let Some(expires_at) = options.expires_at.as_deref() {
+        require_rfc3339_timestamp("--expires-at", expires_at)?;
+    }
+    let mut body = serde_json::json!({
+        "principal_ref": principal_ref,
+        "role": options.role.server_value(),
+        "allowed_consent_scopes": options
+            .allowed_consent_scopes
+            .iter()
+            .copied()
+            .map(trace_scope_server_value)
+            .collect::<Vec<_>>(),
+        "allowed_uses": options
+            .allowed_uses
+            .iter()
+            .copied()
+            .map(TraceAllowedUseArg::server_value)
+            .collect::<Vec<_>>(),
+        "reason": options.reason.trim(),
+    });
+    if let Some(grant_id) = options.grant_id {
+        body["grant_id"] = serde_json::Value::String(grant_id.to_string());
+    }
+    if let Some(issuer) = trimmed_optional_cli_string(options.issuer.as_deref()) {
+        body["issuer"] = serde_json::Value::String(issuer);
+    }
+    if let Some(audience) = trimmed_optional_cli_string(options.audience.as_deref()) {
+        body["audience"] = serde_json::Value::String(audience);
+    }
+    if let Some(subject) = trimmed_optional_cli_string(options.subject.as_deref()) {
+        body["subject"] = serde_json::Value::String(subject);
+    }
+    if let Some(issued_at) = trimmed_optional_cli_string(options.issued_at.as_deref()) {
+        body["issued_at"] = serde_json::Value::String(issued_at);
+    }
+    if let Some(expires_at) = trimmed_optional_cli_string(options.expires_at.as_deref()) {
+        body["expires_at"] = serde_json::Value::String(expires_at);
+    }
+    let metadata = parse_trace_commons_metadata(&options.metadata)?;
+    if !metadata.is_empty() {
+        body["metadata"] = serde_json::to_value(metadata)
+            .map_err(|error| anyhow::anyhow!("failed to encode grant metadata: {error}"))?;
+    }
+    Ok(body)
+}
+
+async fn trace_commons_tenant_access_grant_revoke(
+    endpoint: &str,
+    bearer_token_env: &str,
+    grant_id: Uuid,
+    reason: String,
+    json: bool,
+) -> anyhow::Result<()> {
+    require_non_empty_reason(&reason)?;
+    let response = trace_commons_api_request(
+        Method::POST,
+        endpoint,
+        &format!("/v1/admin/tenant-access-grants/{grant_id}/revoke"),
+        &[],
+        Some(bearer_token_env),
+        Some(serde_json::json!({ "reason": reason.trim() })),
+    )
+    .await?;
+    print_trace_commons_tenant_access_grant_response(
+        response,
+        json,
+        "Trace Commons tenant access grant revoked.",
+    )
+}
+
+fn print_trace_commons_tenant_access_grant_response(
+    response: TraceCommonsApiResponse,
+    json: bool,
+    heading: &str,
+) -> anyhow::Result<()> {
+    if json {
+        print_trace_commons_json(&response)?;
+        return Ok(());
+    }
+    let Some(value) = response.json.as_ref() else {
+        println!("{}", response.body.trim());
+        return Ok(());
+    };
+    println!("{heading}");
+    print_optional_json_field("  tenant", value, "tenant_id");
+    print_optional_json_field("  grant id", value, "grant_id");
+    print_optional_json_field("  principal", value, "principal_ref");
+    print_optional_json_field("  role", value, "role");
+    print_optional_json_field("  status", value, "status");
+    print_optional_json_field("  allowed consent scopes", value, "allowed_consent_scopes");
+    print_optional_json_field("  allowed uses", value, "allowed_uses");
+    print_optional_json_field("  issuer", value, "issuer");
+    print_optional_json_field("  audience", value, "audience");
+    print_optional_json_field("  subject", value, "subject");
+    print_optional_json_field("  expires at", value, "expires_at");
+    print_optional_json_field("  revoked at", value, "revoked_at");
+    Ok(())
+}
+
+fn parse_trace_commons_metadata(values: &[String]) -> anyhow::Result<BTreeMap<String, String>> {
+    let mut metadata = BTreeMap::new();
+    for value in values {
+        let Some((key, raw_value)) = value.split_once('=') else {
+            anyhow::bail!("--metadata values must use KEY=VALUE");
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            anyhow::bail!("--metadata keys must not be empty");
+        }
+        metadata.insert(key.to_string(), raw_value.trim().to_string());
+    }
+    Ok(metadata)
+}
+
+fn require_rfc3339_timestamp(label: &str, value: &str) -> anyhow::Result<()> {
+    let value = value.trim();
+    if value.is_empty() {
+        anyhow::bail!("{label} must not be empty");
+    }
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map_err(|error| anyhow::anyhow!("{label} must be RFC3339: {error}"))?;
+    Ok(())
+}
+
+fn trimmed_optional_cli_string(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 struct TraceCommonsRankerTrainingExportOptions<'a> {
@@ -6628,6 +7110,250 @@ mod tests {
             body["allowed_uses"],
             serde_json::json!(["debugging", "aggregate_analytics", "ranking_model_training"])
         );
+    }
+
+    #[test]
+    fn tenant_access_grants_list_parses_through_cli() {
+        let cli = parse_cli([
+            "ironclaw",
+            "traces",
+            "tenant-access-grants-list",
+            "--endpoint",
+            "https://trace.example/internal",
+            "--limit",
+            "25",
+            "--status",
+            "active",
+            "--role",
+            "contributor",
+            "--principal-ref",
+            "principal_sha256:abc",
+            "--bearer-token-env",
+            "TRACE_COMMONS_ADMIN_TOKEN",
+            "--json",
+        ]);
+
+        let TracesCommand::TenantAccessGrantsList {
+            endpoint,
+            limit,
+            status,
+            role,
+            principal_ref,
+            bearer_token_env,
+            json,
+        } = unwrap_traces_command(cli)
+        else {
+            panic!("expected traces tenant-access-grants-list command");
+        };
+
+        assert_eq!(endpoint, "https://trace.example/internal");
+        assert_eq!(limit, Some(25));
+        assert_eq!(status, Some(TraceTenantAccessGrantStatusArg::Active));
+        assert_eq!(role, Some(TraceTenantAccessGrantRoleArg::Contributor));
+        assert_eq!(principal_ref.as_deref(), Some("principal_sha256:abc"));
+        assert_eq!(bearer_token_env, "TRACE_COMMONS_ADMIN_TOKEN");
+        assert!(json);
+    }
+
+    #[test]
+    fn tenant_access_grant_create_parses_through_cli() {
+        let grant_id = "018f2b7b-0c11-72fd-95c4-1f9f98feac01";
+        let cli = parse_cli([
+            "ironclaw",
+            "traces",
+            "tenant-access-grant-create",
+            "--endpoint",
+            "https://trace.example/internal",
+            "--principal-ref",
+            "principal_sha256:abc",
+            "--role",
+            "process-eval-worker",
+            "--grant-id",
+            grant_id,
+            "--allowed-consent-scopes",
+            "debugging-evaluation,ranking-training",
+            "--allowed-uses",
+            "debugging,ranking-model-training",
+            "--issuer",
+            "https://issuer.near.com",
+            "--audience",
+            "trace-commons",
+            "--subject",
+            "tenant-a-agent",
+            "--issued-at",
+            "2026-04-27T00:00:00Z",
+            "--expires-at",
+            "2026-04-28T00:00:00Z",
+            "--reason",
+            "hosted tenant verified",
+            "--metadata",
+            "hosted_surface=near.com",
+            "--bearer-token-env",
+            "TRACE_COMMONS_ADMIN_TOKEN",
+        ]);
+
+        let TracesCommand::TenantAccessGrantCreate {
+            principal_ref,
+            role,
+            grant_id: parsed_grant_id,
+            allowed_consent_scopes,
+            allowed_uses,
+            issuer,
+            audience,
+            subject,
+            issued_at,
+            expires_at,
+            reason,
+            metadata,
+            bearer_token_env,
+            ..
+        } = unwrap_traces_command(cli)
+        else {
+            panic!("expected traces tenant-access-grant-create command");
+        };
+
+        assert_eq!(principal_ref, "principal_sha256:abc");
+        assert_eq!(role, TraceTenantAccessGrantRoleArg::ProcessEvalWorker);
+        assert_eq!(parsed_grant_id, Some(Uuid::parse_str(grant_id).unwrap()));
+        assert_eq!(
+            allowed_consent_scopes,
+            vec![
+                TraceScopeArg::DebuggingEvaluation,
+                TraceScopeArg::RankingTraining
+            ]
+        );
+        assert_eq!(
+            allowed_uses,
+            vec![
+                TraceAllowedUseArg::Debugging,
+                TraceAllowedUseArg::RankingModelTraining
+            ]
+        );
+        assert_eq!(issuer.as_deref(), Some("https://issuer.near.com"));
+        assert_eq!(audience.as_deref(), Some("trace-commons"));
+        assert_eq!(subject.as_deref(), Some("tenant-a-agent"));
+        assert_eq!(issued_at.as_deref(), Some("2026-04-27T00:00:00Z"));
+        assert_eq!(expires_at.as_deref(), Some("2026-04-28T00:00:00Z"));
+        assert_eq!(reason, "hosted tenant verified");
+        assert_eq!(metadata, vec!["hosted_surface=near.com"]);
+        assert_eq!(bearer_token_env, "TRACE_COMMONS_ADMIN_TOKEN");
+    }
+
+    #[test]
+    fn tenant_access_grant_revoke_parses_through_cli() {
+        let grant_id = "018f2b7b-0c11-72fd-95c4-1f9f98feac01";
+        let cli = parse_cli([
+            "ironclaw",
+            "traces",
+            "tenant-access-grant-revoke",
+            "--endpoint",
+            "https://trace.example/internal",
+            grant_id,
+            "--reason",
+            "tenant deprovisioned",
+            "--bearer-token-env",
+            "TRACE_COMMONS_ADMIN_TOKEN",
+            "--json",
+        ]);
+
+        let TracesCommand::TenantAccessGrantRevoke {
+            grant_id: parsed_grant_id,
+            reason,
+            bearer_token_env,
+            json,
+            ..
+        } = unwrap_traces_command(cli)
+        else {
+            panic!("expected traces tenant-access-grant-revoke command");
+        };
+
+        assert_eq!(parsed_grant_id, Uuid::parse_str(grant_id).unwrap());
+        assert_eq!(reason, "tenant deprovisioned");
+        assert_eq!(bearer_token_env, "TRACE_COMMONS_ADMIN_TOKEN");
+        assert!(json);
+    }
+
+    #[test]
+    fn tenant_access_grants_use_ingest_endpoint() {
+        let url = trace_commons_api_url(
+            "https://trace.example/internal/v1/traces",
+            "/v1/admin/tenant-access-grants",
+            &[
+                ("status", "active".to_string()),
+                ("role", "export_worker".to_string()),
+            ],
+        )
+        .expect("url builds");
+
+        assert_eq!(
+            url,
+            "https://trace.example/internal/v1/admin/tenant-access-grants?status=active&role=export_worker"
+        );
+    }
+
+    #[test]
+    fn tenant_access_grant_revoke_uses_ingest_endpoint() {
+        let grant_id = Uuid::parse_str("018f2b7b-0c11-72fd-95c4-1f9f98feac01").unwrap();
+        let url = trace_commons_api_url(
+            "https://trace.example/internal/v1/traces",
+            &format!("/v1/admin/tenant-access-grants/{grant_id}/revoke"),
+            &[],
+        )
+        .expect("url builds");
+
+        assert_eq!(
+            url,
+            "https://trace.example/internal/v1/admin/tenant-access-grants/018f2b7b-0c11-72fd-95c4-1f9f98feac01/revoke"
+        );
+    }
+
+    #[test]
+    fn tenant_access_grant_body_uses_server_enum_names_and_metadata() {
+        let options = TraceCommonsTenantAccessGrantCreateOptions {
+            endpoint: "https://trace.example/internal",
+            bearer_token_env: "TRACE_COMMONS_ADMIN_TOKEN",
+            principal_ref: "principal_sha256:abc".to_string(),
+            role: TraceTenantAccessGrantRoleArg::ExportWorker,
+            grant_id: Some(Uuid::parse_str("018f2b7b-0c11-72fd-95c4-1f9f98feac01").unwrap()),
+            allowed_consent_scopes: vec![
+                TraceScopeArg::DebuggingEvaluation,
+                TraceScopeArg::BenchmarkOnly,
+            ],
+            allowed_uses: vec![
+                TraceAllowedUseArg::Debugging,
+                TraceAllowedUseArg::AggregateAnalytics,
+                TraceAllowedUseArg::RankingModelTraining,
+            ],
+            issuer: Some(" https://issuer.near.com ".to_string()),
+            audience: Some(" trace-commons ".to_string()),
+            subject: Some(" tenant-a-agent ".to_string()),
+            issued_at: Some("2026-04-27T00:00:00Z".to_string()),
+            expires_at: Some("2026-04-28T00:00:00Z".to_string()),
+            reason: " hosted tenant verified ".to_string(),
+            metadata: vec![
+                "hosted_surface=near.com".to_string(),
+                "region=iad".to_string(),
+            ],
+            json: false,
+        };
+
+        let body = trace_commons_tenant_access_grant_body(&options).expect("body builds");
+        assert_eq!(body["principal_ref"], "principal_sha256:abc");
+        assert_eq!(body["role"], "export_worker");
+        assert_eq!(
+            body["allowed_consent_scopes"],
+            serde_json::json!(["debugging_evaluation", "benchmark_only"])
+        );
+        assert_eq!(
+            body["allowed_uses"],
+            serde_json::json!(["debugging", "aggregate_analytics", "ranking_model_training"])
+        );
+        assert_eq!(body["issuer"], "https://issuer.near.com");
+        assert_eq!(body["audience"], "trace-commons");
+        assert_eq!(body["subject"], "tenant-a-agent");
+        assert_eq!(body["reason"], "hosted tenant verified");
+        assert_eq!(body["metadata"]["hosted_surface"], "near.com");
+        assert_eq!(body["metadata"]["region"], "iad");
     }
 
     #[test]
