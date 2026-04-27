@@ -1591,7 +1591,7 @@ fn extract_skill_bundle_from_zip(
     }
 
     let strip_root = strip_common_archive_root(&raw_paths);
-    let mut files = Vec::<(PathBuf, Vec<u8>)>::new();
+    let mut files = Vec::<(PathBuf, Vec<u8>, bool)>::new();
     let mut skill_dirs = HashSet::<PathBuf>::new();
     let mut total_unzipped_bytes = 0u64;
 
@@ -1663,7 +1663,8 @@ fn extract_skill_bundle_from_zip(
         if path.file_name().is_some_and(|name| name == "SKILL.md") {
             skill_dirs.insert(path.parent().unwrap_or(Path::new("")).to_path_buf());
         }
-        files.push((path, contents));
+        let executable = file.unix_mode().is_some_and(|m| m & 0o111 != 0);
+        files.push((path, contents, executable));
     }
 
     let requested_dir = if let Some(subdir) = requested_subdir {
@@ -1699,7 +1700,7 @@ fn extract_skill_bundle_from_zip(
 
     let mut skill_md = None;
     let mut extra_files = Vec::new();
-    for (path, contents) in files {
+    for (path, contents, executable) in files {
         let Ok(relative) = path.strip_prefix(&requested_dir) else {
             continue;
         };
@@ -1722,6 +1723,7 @@ fn extract_skill_bundle_from_zip(
         extra_files.push(ironclaw_skills::registry::InstallFile {
             relative_path: relative.to_path_buf(),
             contents,
+            executable,
         });
     }
 
