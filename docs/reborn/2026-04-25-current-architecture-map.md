@@ -40,7 +40,7 @@ Current landing tracker:
 https://github.com/nearai/ironclaw/issues/2987
 ```
 
-These docs record the delegation-ready system decisions: kernel as security perimeter, PM-facing product functions and loops as userland on the kernel surface, first-class optional `AgentId`, hybrid storage placement, typed repositories for structured state, split memory services over shared backends, durable event streams with replay cursors, all built-in obligations for V1, all three runtime lanes as first-class, and schema reuse where viable.
+These docs record the delegation-ready system decisions: kernel as security perimeter, loops/userland running on the kernel surface, first-class optional `AgentId`, hybrid storage placement, typed repositories for structured state, split memory services over shared backends, durable event streams with replay cursors, all built-in obligations for V1, all three runtime lanes as first-class, and schema reuse where viable.
 
 ---
 
@@ -64,16 +64,6 @@ Reborn has one host core with many adapters and runtime ports. It should not gro
                   | normalize ingress/egress  |
                   | [contract; real channel   |
                   |  adapters mostly not yet] |
-                  +-------------+-------------+
-                                |
-                                v
-                  +---------------------------+
-                  | Product function layer    |
-                  | PM-facing workflows:      |
-                  | chat turn, task run,      |
-                  | memory/profile action,    |
-                  | extension lifecycle       |
-                  | [contract; not impl]      |
                   +-------------+-------------+
                                 |
                                 v
@@ -161,54 +151,16 @@ Key boundary decisions shown above:
 - The kernel is the security perimeter, not the agent brain; it is defined by what it mediates and secures.
 - Telegram, Slack, Web, and CLI are **channel adapters/drivers**, not separate hosts.
 - Vendor-specific behavior belongs in adapters or extension packages behind the host API, not in duplicated host cores.
-- Product functions are PM-facing user outcomes such as “answer this chat,” “run this task,” “remember this preference,” or “install this extension.” They own product workflow and UX policy, but every privileged effect still crosses the kernel surface.
 - The parent agent loop is **userland running on the kernel surface**, not kernel, dispatcher, or transport-driver logic. Shipped reference loops still need explicit grants and kernel-mediated calls.
 
 ---
 
-## 2. Product function layer
-
-A **product function** is a PM-facing description of what the product does for a user. It is not necessarily a Rust type, crate, or service name. It is the bridge between roadmap language and the kernel/userland architecture.
-
-Product functions answer questions like:
-
-```text
-What user outcome is this feature trying to deliver?
-Which user-visible workflow owns the experience?
-Which kernel-mediated capabilities does it need?
-What data should it read/write, and under whose scope?
-What must be observable/replayable for support and QA?
-```
-
-Examples in product language:
-
-| Product function | User promise | Typical technical composition |
-| --- | --- | --- |
-| Answer a chat message | The assistant responds in the right thread with the right context. | Channel adapter, turn coordination, active loop, memory reads, LLM/provider call, event stream. |
-| Run a task/tool | The assistant performs an approved action and reports status/result. | CapabilityHost, approvals/leases, runtime adapter, ProcessHost for background work, events. |
-| Remember or update profile | The assistant stores useful memory without leaking private context. | Memory services, prompt-safety policy, scoped filesystem/repository writes, audit/event records. |
-| Install or configure an extension | A user adds capability surface safely. | Extension registry/lifecycle, trust policy, settings/secrets, capability grants. |
-| Resolve an approval/auth gate | A blocked run resumes only after the right user decision or auth repair. | Approval resolver, exact invocation lease, run-state, audit records, resume path. |
-| Run a workflow/mission | The product coordinates multiple steps while staying inspectable. | Product orchestration, loop/capability calls, process APIs, event replay, resource accounting. |
-
-Rules:
-
-- product functions own user outcome, UX policy, retry/orchestration choices, and acceptance criteria;
-- product functions do not own authorization, grants, secret material, network policy, filesystem authority, resource quotas, or redaction obligations;
-- privileged effects go through `CapabilityHost`, scoped memory/filesystem services, `ProcessHost`, provider clients mediated by `ironclaw_network`, and typed repositories;
-- product functions emit durable redacted events so behavior can be replayed/debugged without leaking prompts, secrets, host paths, or raw tool input;
-- a product function can choose a reference loop, CodeAct loop, or future custom loop, but that loop remains userland and receives only explicit grants/policy allowed by the kernel.
-
-This keeps PM-facing product language stable and understandable while preventing product behavior from drifting into `ironclaw_host_runtime` or bypassing kernel-mediated calls.
-
----
-
-## 3. Current caller path
+## 2. Current caller path
 
 The current host-facing invocation path is:
 
 ```text
-PM-facing product function / shipped reference loop / future custom loop / turn coordinator
+caller / shipped reference loop / future custom loop / turn coordinator
   -> CapabilityHost::invoke_json(...) | resume_json(...) | spawn_json(...)
       -> validates ExecutionContext and ResourceScope consistency
       -> looks up CapabilityDescriptor in ExtensionRegistry
@@ -237,7 +189,7 @@ The dispatcher does not own authorization, approval semantics, extension discove
 
 ---
 
-## 4. Background/process execution path
+## 3. Background/process execution path
 
 Process/background execution exists as a capability-backed slice, not as an arbitrary host-process escape hatch.
 
@@ -278,7 +230,7 @@ Still missing for process/product completeness:
 
 ---
 
-## 5. Implementation status by slice
+## 4. Implementation status by slice
 
 The current Reborn stack includes these contract and implementation slices. These rows do not claim full product completion unless they explicitly use `[fully implemented]`:
 
@@ -307,14 +259,13 @@ The current Reborn stack includes these contract and implementation slices. Thes
 
 ---
 
-## 6. What does not exist yet
+## 5. What does not exist yet
 
 These are explicit gaps, not architecture contradictions:
 
 | Gap | Why it matters |
 | --- | --- |
 | Real Telegram/channel adapters | Telegram/Slack/Web/CLI should be transport drivers over the shared host request/event contracts; product-grade channel adapters still need to be built or ported into this shape. |
-| Product function layer | The PM-facing product-outcome map above loops/kernel surfaces is documented here, but not yet turned into first-class planning templates, acceptance criteria, or product workflow service boundaries. |
 | Kernel turn coordination | The shared kernel-mediated service that owns one-active-run-per-thread, scope-consistent turn/run state, blocked-state coordination, checkpoint/resume edge, and handoff to the loop is not implemented yet. |
 | Reference/userland loop runtime | The default parent agent loop should be a shipped reference loop running on the kernel surface and emitting `Reply | CapabilityCalls`; custom loop families are expected later. It is not yet a Reborn runtime/service. |
 | Process product APIs | Process records, scoped status/kill/await/subscribe/result/output APIs, cooperative cancellation tokens, result records with filesystem JSON output refs, lifecycle events, and resource cleanup ownership exist as service slices; generalized artifact refs for streaming/binary outputs, output streams, forced abort handles, richer scoped read/projection APIs, durable subscription cursors, and event fanout are not complete. |
@@ -330,7 +281,7 @@ These are explicit gaps, not architecture contradictions:
 
 ---
 
-## 7. Adapter, product-function, and host naming rules
+## 6. Adapter and host naming rules
 
 Use these naming rules in future docs and implementation plans:
 
@@ -343,7 +294,6 @@ Correct:
   Slack channel adapter
   Web gateway adapter
   CLI driver
-  product function (PM-facing user outcome)
   shipped reference loop / configured userland loop
 
 Avoid:
@@ -353,14 +303,13 @@ Avoid:
   per-vendor host
   dispatcher-owned agent loop
   kernel-owned product workflow
-  product function bypassing CapabilityHost
 ```
 
-The host/kernel is the authority envelope. Adapters translate protocol-specific ingress/egress into host requests and events. Product functions describe PM-facing workflows over loops, memory, capabilities, process APIs, and events. Runtime lanes execute already-authorized capability work. Product behavior should live as shipped or third-party userland over those contracts, not inside kernel-owned workflow.
+The host/kernel is the authority envelope. Adapters translate protocol-specific ingress/egress into host requests and events. Runtime lanes execute already-authorized capability work. Product behavior should live as shipped or third-party userland over those contracts, not inside kernel-owned workflow.
 
 ---
 
-## 8. Agent loop placement
+## 7. Agent loop placement
 
 The current architecture decision is:
 
@@ -382,11 +331,11 @@ Where:
 - `Reply` is user-visible output for the active thread.
 - `CapabilityCalls` are explicit capability requests against the visible capability surface.
 
-CodeAct, scripting, subagents, jobs, and other worker modes should be expressed as product functions and/or capabilities such as `spawn_subagent(...)`, `create_job(...)`, or `script.run(...)`, then pass through `CapabilityHost` and the authorized runtime dispatch path for privileged effects. A shipped loop may have a higher trust ceiling by host policy, but trust class is not a grant and never allows bypassing the kernel surface.
+CodeAct, scripting, subagents, jobs, and other worker modes should be expressed as userland loop behavior and/or capabilities such as `spawn_subagent(...)`, `create_job(...)`, or `script.run(...)`, then pass through `CapabilityHost` and the authorized runtime dispatch path for privileged effects. A shipped loop may have a higher trust ceiling by host policy, but trust class is not a grant and never allows bypassing the kernel surface.
 
 ---
 
-## 9. Source contracts
+## 8. Source contracts
 
 Use these docs as the detailed contract sources behind this map:
 

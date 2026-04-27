@@ -30,8 +30,7 @@ If a task needs to change one of those answers, it is not implementation work; i
 
 | Area | Decision |
 | --- | --- |
-| Kernel boundary | Kernel means the security perimeter that mediates authority; loops, prompt assembly, mission/routine behavior, skill selection, channel behavior, and PM-facing product-function orchestration are userland. See [`kernel-boundary.md`](kernel-boundary.md). |
-| Product function layer | User-facing workflows should be expressible as PM-readable product functions above transport/loop/kernel surfaces; they own outcome/UX/orchestration, but privileged effects still cross kernel-mediated APIs. |
+| Kernel boundary | Kernel means the security perimeter that mediates authority; loops, prompt assembly, mission/routine behavior, skill selection, and channel behavior are userland. See [`kernel-boundary.md`](kernel-boundary.md). |
 | Global scope | Preserve optional `AgentId` as a first-class scope alongside tenant/user/project/mission/thread/process/invocation. |
 | Storage model | Hybrid: file-shaped content uses filesystem surfaces; structured/query-heavy/security/control-plane state uses typed repositories. |
 | Namespace map | Adopt the map in [`storage-placement.md`](storage-placement.md). |
@@ -124,7 +123,7 @@ Current implemented/partial substrate called out there includes:
 - process store/manager/result/output-ref/process-host slices;
 - architecture dependency guardrails and live vertical-slice examples.
 
-Explicit gaps are also listed there, including PM-facing product-function templates, kernel trust-class policy engine productization, turn coordination/reference loop services, durable event projections/SSE/WebSocket, full obligation implementations, production typed secret repository wiring, product memory service parity, and migration bridges.
+Explicit gaps are also listed there, including kernel trust-class policy engine productization, turn coordination/reference loop services, durable event projections/SSE/WebSocket, full obligation implementations, production typed secret repository wiring, product memory service parity, and migration bridges.
 
 ---
 
@@ -159,7 +158,7 @@ Dependency rules:
 
 1. Contract ratification gates implementation only for the contracts a task depends on.
 2. Substrate tasks with independent contracts can run concurrently.
-3. Product integration tasks should define the PM-facing product function they implement, then wait for their substrate dependencies rather than unrelated substrate tasks.
+3. Product integration tasks should wait for their substrate dependencies, not for unrelated substrate tasks.
 4. If a task requires changing frozen ownership, scope, storage placement, or failure semantics, it is a contract-change request rather than implementation work.
 
 ### Level 0 — contract ratification
@@ -210,7 +209,7 @@ Can run in parallel once the relevant `memory.md`, storage, network, secrets, an
 
 | Task | Main contract | Notes |
 | --- | --- | --- |
-| PM-facing product functions + kernel turn coordination + reference loops | `kernel-boundary.md`, `turns-agent-loop.md` | product functions describe user outcomes and acceptance criteria; one-active-run-per-thread stays kernel-mediated; loop behavior/prompt strategy remains userland over `CapabilityHost` |
+| Kernel turn coordination + reference loops | `kernel-boundary.md`, `turns-agent-loop.md` | one-active-run-per-thread in kernel-mediated coordination; loop behavior/prompt strategy as userland over `CapabilityHost` |
 | Web SSE/WebSocket event APIs | `events-projections.md` | product transport over durable replay cursors + projections |
 | Settings/extension/skill projections | `settings-config.md`, `extensions.md` | typed repos with `/system/...` views |
 | Runtime lane hardening | `wasm.md`, `scripts.md`, `mcp.md`, `network.md` | all three first-class |
@@ -228,7 +227,7 @@ Legacy `src/` feature additions are a drift risk while Reborn is being built. Th
 
 ## 8. Non-negotiable implementation invariants
 
-- The kernel is the security perimeter, not the agent brain or PM-facing product-function layer; anything not needed to mediate authority/security/coordination stays out of kernel-owned code.
+- The kernel is the security perimeter, not the agent brain; anything not needed to mediate authority/security/coordination stays out of kernel-owned code.
 - `CapabilityHost` is the caller-facing workflow gate; callers do not manually authorize then call dispatcher.
 - `RuntimeDispatcher` routes already-authorized runtime requests only.
 - Unsupported obligations fail closed before runtime dispatch, process start, approval lease claim, secret consumption, or network execution.
