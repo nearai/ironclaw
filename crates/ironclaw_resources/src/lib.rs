@@ -323,7 +323,12 @@ pub trait ResourceGovernor: Send + Sync {
     /// Sets or replaces limits for a scoped resource account without mutating existing reservations.
     fn set_limit(&self, account: ResourceAccount, limits: ResourceLimits);
 
-    /// Reserves estimated resources before costed/quota-limited work starts, failing closed if any scoped account would exceed limits.
+    /// Reserves estimated resources before costed/quota-limited work starts.
+    ///
+    /// A reservation succeeds only if every account in [`ResourceAccount::cascade`]
+    /// would remain within its limits. Limits at deeper accounts do not override
+    /// shallower limits; tenant, user, project, agent, mission, and thread limits
+    /// all apply when present.
     fn reserve(
         &self,
         scope: ResourceScope,

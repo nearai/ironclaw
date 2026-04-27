@@ -533,6 +533,85 @@ fn sample_scope_with_agent(
 }
 
 #[test]
+fn project_and_agent_limits_both_apply_without_override() {
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope_with_agent("tenant1", "user1", Some("project1"), Some("agent1"));
+    let project_account = ResourceAccount::project(
+        scope.tenant_id.clone(),
+        scope.user_id.clone(),
+        scope.project_id.clone().unwrap(),
+    );
+    let agent_account = ResourceAccount::agent(
+        scope.tenant_id.clone(),
+        scope.user_id.clone(),
+        scope.project_id.clone(),
+        scope.agent_id.clone().unwrap(),
+    );
+
+    governor.set_limit(
+        project_account.clone(),
+        ResourceLimits {
+            max_usd: Some(dec!(0.50)),
+            ..ResourceLimits::default()
+        },
+    );
+    governor.set_limit(
+        agent_account.clone(),
+        ResourceLimits {
+            max_usd: Some(dec!(1.00)),
+            ..ResourceLimits::default()
+        },
+    );
+
+    let err = governor
+        .reserve(
+            scope.clone(),
+            ResourceEstimate {
+                usd: Some(dec!(0.75)),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ResourceError::LimitExceeded(denial)
+            if denial.account == project_account && denial.dimension == ResourceDimension::Usd
+    ));
+
+    governor.set_limit(
+        project_account,
+        ResourceLimits {
+            max_usd: Some(dec!(1.00)),
+            ..ResourceLimits::default()
+        },
+    );
+    governor.set_limit(
+        agent_account.clone(),
+        ResourceLimits {
+            max_usd: Some(dec!(0.50)),
+            ..ResourceLimits::default()
+        },
+    );
+
+    let err = governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                usd: Some(dec!(0.75)),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ResourceError::LimitExceeded(denial)
+            if denial.account == agent_account && denial.dimension == ResourceDimension::Usd
+    ));
+}
+
+#[test]
 fn reservation_and_usage_are_charged_to_full_scope_cascade() {
     let governor = InMemoryResourceGovernor::new();
     let mut scope = sample_scope("tenant1", "user1", Some("project1"));
