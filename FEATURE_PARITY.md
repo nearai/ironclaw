@@ -197,6 +197,8 @@ Trace Commons revocation-worker note: the ingest service now recognizes a scoped
 
 Trace Commons export-job note: replay dataset, benchmark conversion, ranker-candidate, and ranker-pair export call sites now mirror their short-lived one-shot access grants plus running/complete export job lifecycle rows into the PostgreSQL/libSQL DB control plane. Required DB mirror mode now fails closed if a durable export job cannot be started or completed, and tests cover tenant-scoped grant/job persistence for replay exports.
 
+Trace Commons worker-export note: export-worker automation now has dedicated replay and ranker export routes, `GET|POST /v1/workers/replay-export`, `GET|POST /v1/workers/ranker/training-candidates`, and `GET|POST /v1/workers/ranker/training-pairs`, plus matching CLI helpers. These routes reuse the same consent/use ABAC, access-grant, export-job, source-hash, audit, and delayed-credit behavior as the reviewer/admin routes while keeping scheduled automation off reviewer endpoints.
+
 ### Owner: _Unassigned_
 
 ---

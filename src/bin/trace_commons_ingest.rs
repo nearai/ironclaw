@@ -1799,12 +1799,26 @@ fn app(state: Arc<AppState>) -> Router {
             post(benchmark_worker_convert_handler),
         )
         .route(
+            "/v1/workers/replay-export",
+            get(worker_replay_export_handler).post(worker_replay_export_body_handler),
+        )
+        .route(
             "/v1/ranker/training-candidates",
             get(ranker_training_candidates_handler),
         )
         .route(
             "/v1/ranker/training-pairs",
             get(ranker_training_pairs_handler),
+        )
+        .route(
+            "/v1/workers/ranker/training-candidates",
+            get(worker_ranker_training_candidates_handler)
+                .post(worker_ranker_training_candidates_body_handler),
+        )
+        .route(
+            "/v1/workers/ranker/training-pairs",
+            get(worker_ranker_training_pairs_handler)
+                .post(worker_ranker_training_pairs_body_handler),
         )
         .route(
             "/v1/admin/tenant-policy",
@@ -5380,6 +5394,45 @@ async fn dataset_replay_handler(
     run_dataset_replay_export_with_grant(state.as_ref(), &tenant, query, grant, now).await
 }
 
+async fn worker_replay_export_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<DatasetExportQuery>,
+) -> ApiResult<Json<TraceReplayDatasetExport>> {
+    run_worker_replay_export(state, headers, query).await
+}
+
+async fn worker_replay_export_body_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(query): Json<DatasetExportQuery>,
+) -> ApiResult<Json<TraceReplayDatasetExport>> {
+    run_worker_replay_export(state, headers, query).await
+}
+
+async fn run_worker_replay_export(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    query: DatasetExportQuery,
+) -> ApiResult<Json<TraceReplayDatasetExport>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_exporter(&tenant)?;
+    let now = Utc::now();
+    let purpose = normalized_export_purpose(
+        query.purpose.as_deref(),
+        "trace_commons_worker_replay_dataset",
+    );
+    let grant = create_one_shot_export_grant(
+        state.as_ref(),
+        &tenant,
+        TraceExportDatasetKind::ReplayDataset,
+        purpose,
+        query.limit,
+        now,
+    );
+    run_dataset_replay_export_with_grant(state.as_ref(), &tenant, query, grant, now).await
+}
+
 async fn run_dataset_replay_export_with_grant(
     state: &AppState,
     tenant: &TenantAuth,
@@ -6239,6 +6292,46 @@ async fn ranker_training_candidates_handler(
         .await
 }
 
+async fn worker_ranker_training_candidates_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<RankerTrainingExportQuery>,
+) -> ApiResult<Json<TraceRankerTrainingCandidateExport>> {
+    run_worker_ranker_training_candidates_export(state, headers, query).await
+}
+
+async fn worker_ranker_training_candidates_body_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(query): Json<RankerTrainingExportQuery>,
+) -> ApiResult<Json<TraceRankerTrainingCandidateExport>> {
+    run_worker_ranker_training_candidates_export(state, headers, query).await
+}
+
+async fn run_worker_ranker_training_candidates_export(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    query: RankerTrainingExportQuery,
+) -> ApiResult<Json<TraceRankerTrainingCandidateExport>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_exporter(&tenant)?;
+    let now = Utc::now();
+    let purpose = normalized_export_purpose(
+        query.purpose.as_deref(),
+        "ranker_training_candidates_worker_export",
+    );
+    let grant = create_one_shot_export_grant(
+        state.as_ref(),
+        &tenant,
+        TraceExportDatasetKind::RankerTrainingCandidates,
+        purpose,
+        query.limit,
+        now,
+    );
+    run_ranker_training_candidates_export_with_grant(state.as_ref(), &tenant, query, grant, now)
+        .await
+}
+
 async fn run_ranker_training_candidates_export_with_grant(
     state: &AppState,
     tenant: &TenantAuth,
@@ -6496,6 +6589,45 @@ async fn ranker_training_pairs_handler(
     let now = Utc::now();
     let purpose =
         normalized_export_purpose(query.purpose.as_deref(), "ranker_training_pairs_export");
+    let grant = create_one_shot_export_grant(
+        state.as_ref(),
+        &tenant,
+        TraceExportDatasetKind::RankerTrainingPairs,
+        purpose,
+        query.limit,
+        now,
+    );
+    run_ranker_training_pairs_export_with_grant(state.as_ref(), &tenant, query, grant, now).await
+}
+
+async fn worker_ranker_training_pairs_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<RankerTrainingExportQuery>,
+) -> ApiResult<Json<TraceRankerTrainingPairExport>> {
+    run_worker_ranker_training_pairs_export(state, headers, query).await
+}
+
+async fn worker_ranker_training_pairs_body_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(query): Json<RankerTrainingExportQuery>,
+) -> ApiResult<Json<TraceRankerTrainingPairExport>> {
+    run_worker_ranker_training_pairs_export(state, headers, query).await
+}
+
+async fn run_worker_ranker_training_pairs_export(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    query: RankerTrainingExportQuery,
+) -> ApiResult<Json<TraceRankerTrainingPairExport>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_exporter(&tenant)?;
+    let now = Utc::now();
+    let purpose = normalized_export_purpose(
+        query.purpose.as_deref(),
+        "ranker_training_pairs_worker_export",
+    );
     let grant = create_one_shot_export_grant(
         state.as_ref(),
         &tenant,
@@ -21008,13 +21140,34 @@ mod tests {
         .expect("export worker can build replay dataset");
         assert_eq!(replay_export.item_count, 1);
 
+        let Json(worker_replay_export) = worker_replay_export_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("worker_replay_dedicated".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("export worker can use dedicated replay export route");
+        assert_eq!(worker_replay_export.item_count, 1);
+
         let Json(manifests) = replay_export_manifests_handler(
             State(state.clone()),
             auth_headers("export-worker-token-a"),
         )
         .await
         .expect("export worker can list replay manifests");
-        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests.len(), 2);
+        let manifest_ids = manifests
+            .iter()
+            .map(|manifest| manifest.export_manifest_id)
+            .collect::<BTreeSet<_>>();
+        assert!(manifest_ids.contains(&replay_export.export_id));
+        assert!(manifest_ids.contains(&worker_replay_export.export_id));
 
         let Json(ranker_candidates) = ranker_training_candidates_handler(
             State(state.clone()),
@@ -21030,6 +21183,36 @@ mod tests {
         .await
         .expect("export worker can build ranker candidates");
         assert_eq!(ranker_candidates.item_count, 1);
+
+        let Json(worker_ranker_candidates) = worker_ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("worker_ranker_candidates_dedicated".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking_training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect("export worker can use dedicated ranker candidate route");
+        assert_eq!(worker_ranker_candidates.item_count, 1);
+
+        let Json(worker_ranker_pairs) = worker_ranker_training_pairs_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("worker_ranker_pairs_dedicated".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking_training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect("export worker can use dedicated ranker pair route");
+        assert_eq!(worker_ranker_pairs.item_count, 0);
 
         let utility_export_error = dataset_replay_handler(
             State(state.clone()),
@@ -21240,6 +21423,36 @@ mod tests {
         .await
         .expect_err("benchmark worker cannot build replay exports");
         assert_eq!(benchmark_export_error.0, StatusCode::FORBIDDEN);
+
+        let dedicated_replay_error = worker_replay_export_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("benchmark_worker_dedicated_replay_denied".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect_err("benchmark worker cannot use dedicated replay route");
+        assert_eq!(dedicated_replay_error.0, StatusCode::FORBIDDEN);
+
+        let dedicated_ranker_error = worker_ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("benchmark_worker_dedicated_ranker_denied".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking_training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect_err("benchmark worker cannot use dedicated ranker route");
+        assert_eq!(dedicated_ranker_error.0, StatusCode::FORBIDDEN);
 
         let Json(retention_dry_run) = maintenance_handler(
             State(state.clone()),

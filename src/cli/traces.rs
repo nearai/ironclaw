@@ -787,6 +787,45 @@ pub enum TracesCommand {
         json: bool,
     },
 
+    /// Export an approved replay dataset slice through the worker route
+    WorkerReplayDatasetExport {
+        /// Trace Commons ingestion base URL or /v1/traces URL
+        #[arg(long)]
+        endpoint: String,
+
+        /// Explicit export purpose for services that enforce export manifests
+        #[arg(long)]
+        purpose: Option<String>,
+
+        /// Filter by consent scope
+        #[arg(long, value_enum)]
+        consent_scope: Option<TraceScopeArg>,
+
+        /// Filter by central corpus status
+        #[arg(long, value_enum)]
+        status: Option<TraceCorpusStatusArg>,
+
+        /// Filter by residual privacy risk
+        #[arg(long, value_enum)]
+        privacy_risk: Option<TracePrivacyRiskArg>,
+
+        /// Maximum exported dataset items
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Write export JSON to a file instead of stdout
+        #[arg(short, long, value_name = "PATH")]
+        output: Option<PathBuf>,
+
+        /// Environment variable containing an export-worker bearer token
+        #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
+        bearer_token_env: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// List replay export manifest metadata from the central corpus
     ReplayExportManifests {
         /// Trace Commons ingestion base URL or /v1/traces URL
@@ -894,6 +933,45 @@ pub enum TracesCommand {
         json: bool,
     },
 
+    /// Export approved ranker training candidates through the worker route
+    WorkerRankerTrainingCandidates {
+        /// Trace Commons ingestion base URL or /v1/traces URL
+        #[arg(long)]
+        endpoint: String,
+
+        /// Explicit export purpose for services that enforce ranker manifests
+        #[arg(long)]
+        purpose: Option<String>,
+
+        /// Filter by consent scope
+        #[arg(long, value_enum)]
+        consent_scope: Option<TraceScopeArg>,
+
+        /// Filter by corpus status
+        #[arg(long, value_enum)]
+        status: Option<TraceCorpusStatusArg>,
+
+        /// Filter by residual privacy risk
+        #[arg(long, value_enum)]
+        privacy_risk: Option<TracePrivacyRiskArg>,
+
+        /// Maximum exported training candidates
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Write export JSON to a file instead of stdout
+        #[arg(short, long, value_name = "PATH")]
+        output: Option<PathBuf>,
+
+        /// Environment variable containing an export-worker bearer token
+        #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
+        bearer_token_env: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Export approved ranker training pairs
     RankerTrainingPairs {
         /// Trace Commons ingestion base URL or /v1/traces URL
@@ -925,6 +1003,45 @@ pub enum TracesCommand {
         output: Option<PathBuf>,
 
         /// Environment variable containing a reviewer/admin bearer token
+        #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
+        bearer_token_env: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Export approved ranker training pairs through the worker route
+    WorkerRankerTrainingPairs {
+        /// Trace Commons ingestion base URL or /v1/traces URL
+        #[arg(long)]
+        endpoint: String,
+
+        /// Explicit export purpose for services that enforce ranker manifests
+        #[arg(long)]
+        purpose: Option<String>,
+
+        /// Filter by consent scope
+        #[arg(long, value_enum)]
+        consent_scope: Option<TraceScopeArg>,
+
+        /// Filter by corpus status
+        #[arg(long, value_enum)]
+        status: Option<TraceCorpusStatusArg>,
+
+        /// Filter by residual privacy risk
+        #[arg(long, value_enum)]
+        privacy_risk: Option<TracePrivacyRiskArg>,
+
+        /// Maximum exported training pairs
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Write export JSON to a file instead of stdout
+        #[arg(short, long, value_name = "PATH")]
+        output: Option<PathBuf>,
+
+        /// Environment variable containing an export-worker bearer token
         #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
         bearer_token_env: String,
 
@@ -1881,6 +1998,34 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
                 limit,
                 output,
                 json,
+                method: Method::GET,
+                path: "/v1/datasets/replay",
+            })
+            .await
+        }
+        TracesCommand::WorkerReplayDatasetExport {
+            endpoint,
+            purpose,
+            consent_scope,
+            status,
+            privacy_risk,
+            limit,
+            output,
+            bearer_token_env,
+            json,
+        } => {
+            trace_commons_replay_dataset_export(TraceCommonsReplayDatasetExportOptions {
+                endpoint: &endpoint,
+                bearer_token_env: &bearer_token_env,
+                purpose,
+                consent_scope,
+                status,
+                privacy_risk,
+                limit,
+                output,
+                json,
+                method: Method::GET,
+                path: "/v1/workers/replay-export",
             })
             .await
         }
@@ -1943,6 +2088,33 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
             })
             .await
         }
+        TracesCommand::WorkerRankerTrainingCandidates {
+            endpoint,
+            purpose,
+            consent_scope,
+            status,
+            privacy_risk,
+            limit,
+            output,
+            bearer_token_env,
+            json,
+        } => {
+            trace_commons_ranker_training_export(TraceCommonsRankerTrainingExportOptions {
+                endpoint: &endpoint,
+                bearer_token_env: &bearer_token_env,
+                purpose,
+                consent_scope,
+                status,
+                privacy_risk,
+                limit,
+                output,
+                json,
+                path: "/v1/workers/ranker/training-candidates",
+                output_label: "ranker training candidates",
+                item_field: "candidates",
+            })
+            .await
+        }
         TracesCommand::RankerTrainingPairs {
             endpoint,
             purpose,
@@ -1965,6 +2137,33 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
                 output,
                 json,
                 path: "/v1/ranker/training-pairs",
+                output_label: "ranker training pairs",
+                item_field: "pairs",
+            })
+            .await
+        }
+        TracesCommand::WorkerRankerTrainingPairs {
+            endpoint,
+            purpose,
+            consent_scope,
+            status,
+            privacy_risk,
+            limit,
+            output,
+            bearer_token_env,
+            json,
+        } => {
+            trace_commons_ranker_training_export(TraceCommonsRankerTrainingExportOptions {
+                endpoint: &endpoint,
+                bearer_token_env: &bearer_token_env,
+                purpose,
+                consent_scope,
+                status,
+                privacy_risk,
+                limit,
+                output,
+                json,
+                path: "/v1/workers/ranker/training-pairs",
                 output_label: "ranker training pairs",
                 item_field: "pairs",
             })
@@ -3758,6 +3957,8 @@ struct TraceCommonsReplayDatasetExportOptions<'a> {
     limit: Option<usize>,
     output: Option<PathBuf>,
     json: bool,
+    method: Method,
+    path: &'a str,
 }
 
 async fn trace_commons_replay_dataset_export(
@@ -3782,9 +3983,9 @@ async fn trace_commons_replay_dataset_export(
     }
 
     let response = trace_commons_api_request(
-        Method::GET,
+        options.method,
         options.endpoint,
-        "/v1/datasets/replay",
+        options.path,
         &query,
         Some(options.bearer_token_env),
         None,
@@ -5941,6 +6142,33 @@ mod tests {
     }
 
     #[test]
+    fn worker_ranker_training_candidates_parses_through_cli() {
+        let cli = parse_cli([
+            "ironclaw",
+            "traces",
+            "worker-ranker-training-candidates",
+            "--endpoint",
+            "https://trace.example/internal",
+            "--purpose",
+            "nightly-worker-candidates",
+            "--bearer-token-env",
+            "TRACE_COMMONS_EXPORT_WORKER_TOKEN",
+        ]);
+
+        let TracesCommand::WorkerRankerTrainingCandidates {
+            purpose,
+            bearer_token_env,
+            ..
+        } = unwrap_traces_command(cli)
+        else {
+            panic!("expected traces worker-ranker-training-candidates command");
+        };
+
+        assert_eq!(purpose.as_deref(), Some("nightly-worker-candidates"));
+        assert_eq!(bearer_token_env, "TRACE_COMMONS_EXPORT_WORKER_TOKEN");
+    }
+
+    #[test]
     fn ranker_training_pairs_purpose_flag_parses_through_cli() {
         let cli = parse_cli([
             "ironclaw",
@@ -5960,6 +6188,33 @@ mod tests {
     }
 
     #[test]
+    fn worker_ranker_training_pairs_parses_through_cli() {
+        let cli = parse_cli([
+            "ironclaw",
+            "traces",
+            "worker-ranker-training-pairs",
+            "--endpoint",
+            "https://trace.example/internal",
+            "--purpose",
+            "nightly-worker-pairs",
+            "--bearer-token-env",
+            "TRACE_COMMONS_EXPORT_WORKER_TOKEN",
+        ]);
+
+        let TracesCommand::WorkerRankerTrainingPairs {
+            purpose,
+            bearer_token_env,
+            ..
+        } = unwrap_traces_command(cli)
+        else {
+            panic!("expected traces worker-ranker-training-pairs command");
+        };
+
+        assert_eq!(purpose.as_deref(), Some("nightly-worker-pairs"));
+        assert_eq!(bearer_token_env, "TRACE_COMMONS_EXPORT_WORKER_TOKEN");
+    }
+
+    #[test]
     fn ranker_training_pairs_use_ingest_endpoint() {
         let url = trace_commons_api_url(
             "https://trace.example/internal/v1",
@@ -5971,6 +6226,36 @@ mod tests {
         assert_eq!(
             url,
             "https://trace.example/internal/v1/ranker/training-pairs?privacy_risk=low"
+        );
+    }
+
+    #[test]
+    fn worker_ranker_training_candidates_use_dedicated_route() {
+        let url = trace_commons_api_url(
+            "https://trace.example/internal/v1",
+            "/v1/workers/ranker/training-candidates",
+            &[("purpose", "nightly-worker-candidates".to_string())],
+        )
+        .expect("url builds");
+
+        assert_eq!(
+            url,
+            "https://trace.example/internal/v1/workers/ranker/training-candidates?purpose=nightly-worker-candidates"
+        );
+    }
+
+    #[test]
+    fn worker_ranker_training_pairs_use_dedicated_route() {
+        let url = trace_commons_api_url(
+            "https://trace.example/internal/v1",
+            "/v1/workers/ranker/training-pairs",
+            &[("privacy_risk", "low".to_string())],
+        )
+        .expect("url builds");
+
+        assert_eq!(
+            url,
+            "https://trace.example/internal/v1/workers/ranker/training-pairs?privacy_risk=low"
         );
     }
 
@@ -6123,6 +6408,48 @@ mod tests {
         assert_eq!(
             url,
             "https://trace.example/internal/v1/workers/benchmark-convert"
+        );
+    }
+
+    #[test]
+    fn worker_replay_dataset_export_parses_through_cli() {
+        let cli = parse_cli([
+            "ironclaw",
+            "traces",
+            "worker-replay-dataset-export",
+            "--endpoint",
+            "https://trace.example/internal",
+            "--purpose",
+            "nightly-worker-replay",
+            "--bearer-token-env",
+            "TRACE_COMMONS_EXPORT_WORKER_TOKEN",
+        ]);
+
+        let TracesCommand::WorkerReplayDatasetExport {
+            purpose,
+            bearer_token_env,
+            ..
+        } = unwrap_traces_command(cli)
+        else {
+            panic!("expected traces worker-replay-dataset-export command");
+        };
+
+        assert_eq!(purpose.as_deref(), Some("nightly-worker-replay"));
+        assert_eq!(bearer_token_env, "TRACE_COMMONS_EXPORT_WORKER_TOKEN");
+    }
+
+    #[test]
+    fn worker_replay_dataset_export_uses_dedicated_route() {
+        let url = trace_commons_api_url(
+            "https://trace.example/internal/v1/traces",
+            "/v1/workers/replay-export",
+            &[("purpose", "nightly-worker-replay".to_string())],
+        )
+        .expect("url builds");
+
+        assert_eq!(
+            url,
+            "https://trace.example/internal/v1/workers/replay-export?purpose=nightly-worker-replay"
         );
     }
 
