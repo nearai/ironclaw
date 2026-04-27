@@ -393,6 +393,7 @@ This function is pure lexical resolution. Backend symlink containment remains th
 pub enum Principal {
     Tenant(TenantId),
     User(UserId),
+    Agent(AgentId),
     Project(ProjectId),
     Mission(MissionId),
     Thread(ThreadId),
@@ -409,6 +410,7 @@ Resource scope is a cascade, not a single owner.
 pub struct ResourceScope {
     pub tenant_id: TenantId,
     pub user_id: UserId,
+    pub agent_id: Option<AgentId>,
     pub project_id: Option<ProjectId>,
     pub mission_id: Option<MissionId>,
     pub thread_id: Option<ThreadId>,
@@ -419,8 +421,28 @@ pub struct ResourceScope {
 Rules:
 
 - tenant and user are mandatory
-- project/mission/thread can be absent for system/bootstrap work, but absence must be explicit
-- child invocation resource scope must preserve tenant and user from parent
+- agent/project/mission/thread can be absent for system/bootstrap work, but absence must be explicit
+- child invocation resource scope must preserve tenant, user, and agent from parent unless a trusted host workflow intentionally changes agent scope
+- `_none` path partitions represent an intentionally absent optional scope, not the default local tenant/agent
+
+#### Local single-user convention
+
+Local or single-user deployments still normalize scope into concrete IDs so durable paths stay stable across backends. The recommended defaults are:
+
+```text
+tenant_id = "default"
+user_id   = the stable local user id, username, or hosted identity subject
+agent_id  = Some("default") for the default local agent
+project_id = None when no project/workspace is selected
+```
+
+With those defaults, optional path partitions render as:
+
+```text
+/tenants/default/users/{user}/agents/default/projects/_none/...
+```
+
+Use `agents/_none` only for deliberately shared/no-agent records. Do not use `_none` as a shorthand for the default single-agent experience; otherwise future additional agents may accidentally share state that should have remained isolated.
 
 ### 9.3 Execution context
 
@@ -433,6 +455,7 @@ pub struct ExecutionContext {
 
     pub tenant_id: TenantId,
     pub user_id: UserId,
+    pub agent_id: Option<AgentId>,
     pub project_id: Option<ProjectId>,
     pub mission_id: Option<MissionId>,
     pub thread_id: Option<ThreadId>,
@@ -452,6 +475,8 @@ Rules:
 - `resource_scope.invocation_id == invocation_id`
 - `resource_scope.tenant_id == tenant_id`
 - `resource_scope.user_id == user_id`
+- `resource_scope.agent_id == agent_id`
+- `resource_scope.project_id == project_id`
 - `process_id` may be absent for pure host calls or WASM invocations that are not process-backed
 - every audit/event/budget decision must include `correlation_id`
 

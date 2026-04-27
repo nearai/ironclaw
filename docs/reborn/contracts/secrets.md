@@ -106,6 +106,8 @@ Rules:
 
 - no global handle lookup
 - the same `SecretHandle` in another tenant/user/agent/project is a distinct secret
+- local/single-user deployments should use a concrete tenant such as `default` and a concrete default agent such as `default`
+- `_none` means intentionally absent/shared optional scope; it is not the default local agent
 - cross-scope lease consumption returns `UnknownLease`
 - missing secrets return `UnknownSecret` and do not create leases
 - consumed leases cannot be consumed again
@@ -123,6 +125,14 @@ This is the minimum shape needed before wiring secret lease consumption into obl
 ```text
 /engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/projects/{project_id-or-_none}/secrets/{handle}.json
 ```
+
+For a single local user with one default agent and no selected project, use concrete defaults rather than `_none` for tenant/agent identity:
+
+```text
+/engine/tenants/default/users/alice/agents/default/projects/_none/secrets/gmail.work.refresh_token.json
+```
+
+Use `agents/_none` only for intentionally no-agent/shared records.
 
 Repository records contain only metadata, ciphertext, salt, and a small tombstone flag used for delete semantics on filesystems that do not expose physical deletion yet. `list`, `get`, `record_usage`, `delete`, and `any_exist` operate through `RootFilesystem` only. There are no direct PostgreSQL/libSQL dependencies in the repository; DB durability is supplied by composing this repository with `PostgresRootFilesystem` or `LibSqlRootFilesystem` from `ironclaw_filesystem`.
 
@@ -211,6 +221,14 @@ Filesystem-backed credential account metadata uses redacted JSON under:
 
 ```text
 /engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/projects/{project_id-or-_none}/credential-accounts/{extension_id}/{slot_id}/{account_id}.json
+```
+
+For a single local user with three Gmail accounts, this becomes:
+
+```text
+/engine/tenants/default/users/alice/agents/default/projects/_none/credential-accounts/gmail/google_oauth/personal.json
+/engine/tenants/default/users/alice/agents/default/projects/_none/credential-accounts/gmail/google_oauth/work.json
+/engine/tenants/default/users/alice/agents/default/projects/_none/credential-accounts/gmail/google_oauth/client.json
 ```
 
 This path stores only labels, subject hints, secret handles, and timestamps. Secret material remains exclusively in encrypted secret records and is only exposed by `SecretStore::consume(...)` after an explicit scoped lease.
