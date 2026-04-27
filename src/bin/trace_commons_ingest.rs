@@ -42,6 +42,11 @@ use ironclaw::trace_corpus_storage::{
     TraceDerivedRecord as StorageTraceDerivedRecord,
     TraceDerivedRecordWrite as StorageTraceDerivedRecordWrite,
     TraceDerivedStatus as StorageTraceDerivedStatus,
+    TraceExportAccessGrantStatus as StorageTraceExportAccessGrantStatus,
+    TraceExportAccessGrantWrite as StorageTraceExportAccessGrantWrite,
+    TraceExportJobStatus as StorageTraceExportJobStatus,
+    TraceExportJobStatusUpdate as StorageTraceExportJobStatusUpdate,
+    TraceExportJobWrite as StorageTraceExportJobWrite,
     TraceExportManifestItemInvalidationReason as StorageTraceExportManifestItemInvalidationReason,
     TraceExportManifestItemWrite as StorageTraceExportManifestItemWrite,
     TraceExportManifestMirrorWrite as StorageTraceExportManifestMirrorWrite,
@@ -424,6 +429,15 @@ impl TraceExportDatasetKind {
             Self::BenchmarkConversion => "benchmark conversion",
             Self::RankerTrainingCandidates => "ranker training candidates",
             Self::RankerTrainingPairs => "ranker training pairs",
+        }
+    }
+
+    fn storage_name(self) -> &'static str {
+        match self {
+            Self::ReplayDataset => "replay_dataset",
+            Self::BenchmarkConversion => "benchmark_conversion",
+            Self::RankerTrainingCandidates => "ranker_training_candidates",
+            Self::RankerTrainingPairs => "ranker_training_pairs",
         }
     }
 }
@@ -5398,9 +5412,16 @@ async fn run_dataset_replay_export_with_grant(
         TraceExportDatasetKind::ReplayDataset,
         &purpose,
         query.limit,
-        grant,
+        grant.clone(),
         now,
     )?;
+    enforce_export_job_mirror_result(
+        state,
+        "replay export job start",
+        mirror_export_job_started_to_db(state, tenant, &grant, &job).await,
+    )
+    .await
+    .map_err(internal_error)?;
     let TraceCommonsMetadataView { records, derived } =
         read_replay_export_metadata_view(state, tenant)
             .await
@@ -5539,6 +5560,13 @@ async fn run_dataset_replay_export_with_grant(
         }
         return Err(internal_error(error));
     }
+    enforce_export_job_mirror_result(
+        state,
+        "replay export job completion",
+        mirror_export_job_finished_to_db(state, &job, export_id, items.len()).await,
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(TraceReplayDatasetExport {
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
@@ -5788,9 +5816,16 @@ async fn run_benchmark_conversion_with_grant(
         TraceExportDatasetKind::BenchmarkConversion,
         &purpose,
         body.limit,
-        grant,
+        grant.clone(),
         now,
     )?;
+    enforce_export_job_mirror_result(
+        state,
+        "benchmark export job start",
+        mirror_export_job_started_to_db(state, tenant, &grant, &job).await,
+    )
+    .await
+    .map_err(internal_error)?;
     let TraceCommonsMetadataView { records, derived } = read_reviewer_metadata_view(state, tenant)
         .await
         .map_err(internal_error)?;
@@ -6033,6 +6068,14 @@ async fn run_benchmark_conversion_with_grant(
     )
     .await
     .map_err(internal_error)?;
+    enforce_export_job_mirror_result(
+        state,
+        "benchmark export job completion",
+        mirror_export_job_finished_to_db(state, &job, artifact.conversion_id, artifact.item_count)
+            .await,
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(artifact))
 }
 
@@ -6229,9 +6272,16 @@ async fn run_ranker_training_candidates_export_with_grant(
         TraceExportDatasetKind::RankerTrainingCandidates,
         &purpose,
         query.limit,
-        grant,
+        grant.clone(),
         now,
     )?;
+    enforce_export_job_mirror_result(
+        state,
+        "ranker candidate export job start",
+        mirror_export_job_started_to_db(state, tenant, &grant, &job).await,
+    )
+    .await
+    .map_err(internal_error)?;
     let mut candidate_query = query;
     candidate_query.limit = Some(job.max_item_cap);
     let candidates = collect_ranker_training_candidates(
@@ -6416,6 +6466,13 @@ async fn run_ranker_training_candidates_export_with_grant(
     )
     .await
     .map_err(internal_error)?;
+    enforce_export_job_mirror_result(
+        state,
+        "ranker candidate export job completion",
+        mirror_export_job_finished_to_db(state, &job, export_id, candidates.len()).await,
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(TraceRankerTrainingCandidateExport {
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
@@ -6481,9 +6538,16 @@ async fn run_ranker_training_pairs_export_with_grant(
         TraceExportDatasetKind::RankerTrainingPairs,
         &purpose,
         query.limit,
-        grant,
+        grant.clone(),
         now,
     )?;
+    enforce_export_job_mirror_result(
+        state,
+        "ranker pair export job start",
+        mirror_export_job_started_to_db(state, tenant, &grant, &job).await,
+    )
+    .await
+    .map_err(internal_error)?;
     let mut pair_query = query;
     let pair_limit = job.max_item_cap;
     pair_query.limit = Some(pair_limit.saturating_add(1));
@@ -6670,6 +6734,13 @@ async fn run_ranker_training_pairs_export_with_grant(
             external_ref: format!("ranker_training_pairs_export:{export_id}"),
         },
         pair_credit_sources,
+    )
+    .await
+    .map_err(internal_error)?;
+    enforce_export_job_mirror_result(
+        state,
+        "ranker pair export job completion",
+        mirror_export_job_finished_to_db(state, &job, export_id, pairs.len()).await,
     )
     .await
     .map_err(internal_error)?;
@@ -7244,6 +7315,130 @@ fn create_validated_export_job_slice(
         started_at: Some(now),
         finished_at: None,
     })
+}
+
+async fn mirror_export_job_started_to_db(
+    state: &AppState,
+    tenant: &TenantAuth,
+    grant: &TraceExportAccessGrant,
+    job: &TraceExportJobSlice,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    let mut grant_metadata = BTreeMap::new();
+    grant_metadata.insert("grant_type".to_string(), "one_shot".to_string());
+    grant_metadata.insert(
+        "dataset_kind".to_string(),
+        job.requested_dataset_kind.storage_name().to_string(),
+    );
+    db.upsert_trace_export_access_grant(StorageTraceExportAccessGrantWrite {
+        tenant_id: tenant.tenant_id.clone(),
+        export_job_id: job.job_id,
+        grant_id: grant.grant_id,
+        caller_principal_ref: tenant.principal_ref.clone(),
+        requested_dataset_kind: grant.requested_dataset_kind.storage_name().to_string(),
+        purpose: grant.purpose.clone(),
+        max_item_cap: Some(grant.max_item_cap.min(u32::MAX as usize) as u32),
+        status: storage_export_grant_status(grant.status),
+        requested_at: job.requested_at,
+        expires_at: grant.expires_at,
+        metadata: grant_metadata,
+    })
+    .await
+    .context("failed to mirror trace export access grant")?;
+
+    let mut job_metadata = BTreeMap::new();
+    job_metadata.insert("state".to_string(), "started".to_string());
+    db.upsert_trace_export_job(StorageTraceExportJobWrite {
+        tenant_id: job.tenant_id.clone(),
+        export_job_id: job.job_id,
+        grant_id: job.grant_id,
+        caller_principal_ref: job.caller_principal_ref.clone(),
+        requested_dataset_kind: job.requested_dataset_kind.storage_name().to_string(),
+        purpose: job.purpose.clone(),
+        max_item_cap: Some(job.max_item_cap.min(u32::MAX as usize) as u32),
+        status: storage_export_job_status(job.status),
+        requested_at: job.requested_at,
+        started_at: job.started_at,
+        finished_at: job.finished_at,
+        expires_at: job.expires_at,
+        result_manifest_id: None,
+        item_count: None,
+        last_error: None,
+        metadata: job_metadata,
+    })
+    .await
+    .context("failed to mirror trace export job start")?;
+    Ok(())
+}
+
+async fn mirror_export_job_finished_to_db(
+    state: &AppState,
+    job: &TraceExportJobSlice,
+    result_manifest_id: Uuid,
+    item_count: usize,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    let mut metadata = BTreeMap::new();
+    metadata.insert("state".to_string(), "completed".to_string());
+    let updated = db
+        .update_trace_export_job_status(
+            &job.tenant_id,
+            job.job_id,
+            StorageTraceExportJobStatusUpdate {
+                status: StorageTraceExportJobStatus::Complete,
+                started_at: job.started_at,
+                finished_at: Some(Utc::now()),
+                result_manifest_id: Some(result_manifest_id),
+                item_count: Some(item_count.min(u32::MAX as usize) as u32),
+                last_error: None,
+                metadata,
+            },
+        )
+        .await
+        .context("failed to mirror trace export job completion")?;
+    if updated.is_none() {
+        anyhow::bail!(
+            "trace export job {} was not found for completion mirror",
+            job.job_id
+        );
+    }
+    Ok(())
+}
+
+async fn enforce_export_job_mirror_result(
+    state: &AppState,
+    operation: &str,
+    result: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    if let Err(error) = &result {
+        tracing::warn!(%error, operation, "Trace Commons DB export job mirror failed");
+    }
+    enforce_db_mirror_write_result(state, operation, result)
+}
+
+fn storage_export_grant_status(
+    status: TraceExportGrantStatus,
+) -> StorageTraceExportAccessGrantStatus {
+    match status {
+        TraceExportGrantStatus::Active => StorageTraceExportAccessGrantStatus::Active,
+        TraceExportGrantStatus::Consumed => StorageTraceExportAccessGrantStatus::Consumed,
+        TraceExportGrantStatus::Expired => StorageTraceExportAccessGrantStatus::Expired,
+        TraceExportGrantStatus::Revoked => StorageTraceExportAccessGrantStatus::Revoked,
+    }
+}
+
+fn storage_export_job_status(status: TraceExportJobStatus) -> StorageTraceExportJobStatus {
+    match status {
+        TraceExportJobStatus::Pending => StorageTraceExportJobStatus::Queued,
+        TraceExportJobStatus::InProgress => StorageTraceExportJobStatus::Running,
+        TraceExportJobStatus::Completed => StorageTraceExportJobStatus::Complete,
+        TraceExportJobStatus::Failed => StorageTraceExportJobStatus::Failed,
+        TraceExportJobStatus::Rejected => StorageTraceExportJobStatus::Cancelled,
+    }
 }
 
 fn validate_export_access_grant(
@@ -27133,7 +27328,7 @@ mod tests {
         .expect("submission dual-writes to DB mirror");
         let Json(vector_response) = maintenance_handler(
             State(state.clone()),
-            auth_headers("review-token-a"),
+            auth_headers("vector-worker-token-a"),
             Json(TraceMaintenanceRequest {
                 purpose: Some("test_revocation_vector_index".to_string()),
                 dry_run: false,
@@ -31324,11 +31519,50 @@ mod tests {
         assert!(manifest.invalidated_at.is_none());
         assert!(manifest.deleted_at.is_none());
 
+        let grants = db
+            .list_trace_export_access_grants("tenant-a")
+            .await
+            .expect("list export access grants");
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].tenant_id, "tenant-a");
+        assert_eq!(grants[0].requested_dataset_kind, "replay_dataset");
+        assert_eq!(grants[0].purpose, "db_export_manifest");
+        assert_eq!(
+            grants[0].status,
+            StorageTraceExportAccessGrantStatus::Active
+        );
+        assert_eq!(grants[0].max_item_cap, Some(10));
+
+        let jobs = db
+            .list_trace_export_jobs("tenant-a")
+            .await
+            .expect("list export jobs");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].tenant_id, "tenant-a");
+        assert_eq!(jobs[0].grant_id, grants[0].grant_id);
+        assert_eq!(jobs[0].requested_dataset_kind, "replay_dataset");
+        assert_eq!(jobs[0].purpose, "db_export_manifest");
+        assert_eq!(jobs[0].status, StorageTraceExportJobStatus::Complete);
+        assert_eq!(jobs[0].result_manifest_id, Some(export.export_id));
+        assert_eq!(jobs[0].item_count, Some(1));
+
         let other_tenant_manifests = db
             .list_trace_export_manifests("tenant-b")
             .await
             .expect("list other tenant export manifest metadata");
         assert!(other_tenant_manifests.is_empty());
+        assert!(
+            db.list_trace_export_access_grants("tenant-b")
+                .await
+                .expect("list other tenant export access grants")
+                .is_empty()
+        );
+        assert!(
+            db.list_trace_export_jobs("tenant-b")
+                .await
+                .expect("list other tenant export jobs")
+                .is_empty()
+        );
     }
 
     #[cfg(feature = "libsql")]
@@ -31640,7 +31874,13 @@ mod tests {
         make_metadata_only_low_risk(&mut envelope);
         envelope.consent.scopes = vec![
             ConsentScope::DebuggingEvaluation,
+            ConsentScope::BenchmarkOnly,
             ConsentScope::RankingTraining,
+        ];
+        envelope.trace_card.allowed_uses = vec![
+            TraceAllowedUse::Evaluation,
+            TraceAllowedUse::BenchmarkGeneration,
+            TraceAllowedUse::RankingModelTraining,
         ];
         let submission_id = envelope.submission_id;
 
@@ -31654,6 +31894,7 @@ mod tests {
         let mut pair_source = sample_envelope().await;
         make_metadata_only_low_risk(&mut pair_source);
         pair_source.consent.scopes = vec![ConsentScope::RankingTraining];
+        pair_source.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
         pair_source.value.submission_score = 0.1;
         let pair_source_id = pair_source.submission_id;
 
@@ -31666,7 +31907,7 @@ mod tests {
         .expect("second ranker source dual-writes to DB mirror");
         let Json(vector_response) = maintenance_handler(
             State(state.clone()),
-            auth_headers("review-token-a"),
+            auth_headers("vector-worker-token-a"),
             Json(TraceMaintenanceRequest {
                 purpose: Some("manifest_listing_vector_index".to_string()),
                 dry_run: false,

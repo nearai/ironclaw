@@ -195,6 +195,8 @@ Trace Commons production-boundary note: PostgreSQL/libSQL now include a durable 
 
 Trace Commons revocation-worker note: the ingest service now recognizes a scoped `revocation_worker` role and exposes `POST /v1/workers/revocation-propagation` for DB-backed propagation runs. The worker claims due tenant-scoped ledger items, performs idempotent metadata/vector/export invalidation actions, records unsupported physical-delete and credit-settlement actions as explicit skipped items until their dedicated workers exist, preserves other tenants' due work, and emits safe audit counts without reading trace bodies.
 
+Trace Commons export-job note: replay dataset, benchmark conversion, ranker-candidate, and ranker-pair export call sites now mirror their short-lived one-shot access grants plus running/complete export job lifecycle rows into the PostgreSQL/libSQL DB control plane. Required DB mirror mode now fails closed if a durable export job cannot be started or completed, and tests cover tenant-scoped grant/job persistence for replay exports.
+
 ### Owner: _Unassigned_
 
 ---

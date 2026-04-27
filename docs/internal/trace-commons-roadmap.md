@@ -38,8 +38,8 @@ These are the next independent production slices that can be staffed in parallel
 ### Datasets
 
 - [ ] Replace deterministic vector similarity with a private embedding worker that reads only approved redacted projections, writes tenant-scoped vector metadata, and invalidates entries on revocation/retention.
-- [ ] Promote benchmark conversion and ranker training exports into durable worker jobs with source-list hashes, artifact object refs, lifecycle state, replayability checks, and idempotent delayed utility credit.
-- [ ] Add export governance for replay, benchmark, ranker, and training slices: explicit purpose, consent/use filters, item caps, source object refs, manifest invalidation, and time-limited controlled job access.
+- [ ] Promote benchmark conversion and ranker training exports into durable worker jobs with source-list hashes, artifact object refs, lifecycle state, replayability checks, and idempotent delayed utility credit. Export call sites now mirror one-shot durable grant rows and running/complete job rows; background worker execution remains.
+- [ ] Add export governance for replay, benchmark, ranker, and training slices: explicit purpose, consent/use filters, item caps, source object refs, manifest invalidation, and time-limited controlled job access. Replay, benchmark, ranker-candidate, and ranker-pair exports now validate and persist tenant/principal/purpose/dataset-kind grant/job slices.
 
 ### Observability
 
@@ -62,7 +62,7 @@ As of the `gecko-pass` branch, Trace Commons has moved beyond the local-only MVP
 - The encrypted local artifact sidecar stores submitted redacted envelopes, and DB-backed replay export resolves bodies through a shared policy/audit helper that verifies active DB object refs, tenant scope, artifact kind, and content hash for file-backed objects or encrypted artifacts. Production-shaped object-primary modes can now skip plaintext submit/review bodies, replay-export body fallback, and benchmark/ranker derived export files when the matching DB/object-store guards are enabled.
 - Local credit visibility now has a reusable report shape that separates local lifecycle state from central accepted/quarantined/rejected status, credit totals, delayed ledger deltas, and last submission/status-sync times.
 - Maintenance can backfill file-backed pilot records into the DB mirror, mark/purge expired records, prune invalid export caches, index deterministic vector metadata for canonical summaries, and run file-vs-DB reconciliation with reader-projection parity diagnostics.
-- Export audit paths now carry deterministic source-list hashes, and replay export manifest metadata can be listed by reviewer/admin tokens.
+- Export audit paths now carry deterministic source-list hashes, replay export manifest metadata can be listed by reviewer/admin tokens, and replay/benchmark/ranker export call sites mirror short-lived grant plus export-job lifecycle rows into the DB control plane.
 - Revocation, retention expiration, and maintenance-discovered file tombstones already invalidate DB-mirrored submission status, object refs, derived records, vector metadata, replay export manifests, and replay export item rows. Non-dry-run physical purge also marks only the exact deleted file/service-local submitted-envelope object refs with `deleted_at`.
 
 The main remaining gap is production ownership: file-backed serving is still the compatibility path, encrypted artifacts are still local rather than service-owned object storage, PostgreSQL RLS/central policy is not yet the active trust boundary, and vector, benchmark, ranking, retention, and audit systems are not yet complete production workers.
