@@ -84,6 +84,15 @@ const TRACE_COMMONS_FILE_OBJECT_STORE: &str = "trace_commons_file_store";
 const TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE: &str = "trace_commons_encrypted_artifact_store";
 const TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE: &str =
     "trace_commons_service_local_encrypted";
+const TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE: &str =
+    "trace_commons_service_owned_remote_disabled";
+const TRACE_COMMONS_REMOTE_OBJECT_STORE_PROVIDER: &str =
+    "TRACE_COMMONS_REMOTE_OBJECT_STORE_PROVIDER";
+const TRACE_COMMONS_REMOTE_OBJECT_STORE_BUCKET: &str = "TRACE_COMMONS_REMOTE_OBJECT_STORE_BUCKET";
+const TRACE_COMMONS_REMOTE_OBJECT_STORE_KMS_KEY_ID: &str =
+    "TRACE_COMMONS_REMOTE_OBJECT_STORE_KMS_KEY_ID";
+const TRACE_COMMONS_REMOTE_OBJECT_STORE_CREDENTIAL_REF: &str =
+    "TRACE_COMMONS_REMOTE_OBJECT_STORE_CREDENTIAL_REF";
 const TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW";
 const TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT: &str =
@@ -165,6 +174,7 @@ const TRACE_BACKFILL_FAILURE_DETAIL_LIMIT: usize = 20;
 const TRACE_REVIEW_DUE_AFTER_HOURS: i64 = 24;
 const TRACE_REVIEW_OVERDUE_AFTER_HOURS: i64 = 72;
 const TRACE_REVIEW_HIGH_RISK_URGENT_AFTER_HOURS: i64 = 4;
+const TRACE_EXPORT_ONE_SHOT_GRANT_TTL_SECONDS: i64 = 300;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -393,10 +403,99 @@ impl TraceSubmissionQuotaConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TraceExportDatasetKind {
+    ReplayDataset,
+    BenchmarkConversion,
+    RankerTrainingCandidates,
+    RankerTrainingPairs,
+}
+
+impl TraceExportDatasetKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ReplayDataset => "replay dataset",
+            Self::BenchmarkConversion => "benchmark conversion",
+            Self::RankerTrainingCandidates => "ranker training candidates",
+            Self::RankerTrainingPairs => "ranker training pairs",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TraceExportGrantStatus {
+    Active,
+    Consumed,
+    Expired,
+    Revoked,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceExportAccessGrant {
+    grant_id: Uuid,
+    tenant_id: String,
+    caller_principal_ref: String,
+    requested_dataset_kind: TraceExportDatasetKind,
+    purpose: String,
+    expires_at: DateTime<Utc>,
+    max_item_cap: usize,
+    status: TraceExportGrantStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TraceExportJobStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Failed,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceExportJobSlice {
+    job_id: Uuid,
+    grant_id: Uuid,
+    tenant_id: String,
+    caller_principal_ref: String,
+    requested_dataset_kind: TraceExportDatasetKind,
+    purpose: String,
+    expires_at: DateTime<Utc>,
+    max_item_cap: usize,
+    status: TraceExportJobStatus,
+    requested_at: DateTime<Utc>,
+    started_at: Option<DateTime<Utc>>,
+    finished_at: Option<DateTime<Utc>>,
+}
+
+impl TraceExportAccessGrant {
+    fn one_shot(
+        tenant: &TenantAuth,
+        requested_dataset_kind: TraceExportDatasetKind,
+        purpose: impl Into<String>,
+        max_item_cap: usize,
+        now: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            grant_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            caller_principal_ref: tenant.principal_ref.clone(),
+            requested_dataset_kind,
+            purpose: purpose.into(),
+            expires_at: now + Duration::seconds(TRACE_EXPORT_ONE_SHOT_GRANT_TTL_SECONDS),
+            max_item_cap,
+            status: TraceExportGrantStatus::Active,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct ConfiguredTraceArtifactStore {
     object_store_name: String,
     store: Arc<dyn TraceArtifactStore>,
+    plaintext_compatibility_allowed: bool,
 }
 
 impl ConfiguredTraceArtifactStore {
@@ -404,6 +503,7 @@ impl ConfiguredTraceArtifactStore {
         Self {
             object_store_name: object_store_name.into(),
             store,
+            plaintext_compatibility_allowed: true,
         }
     }
 
@@ -412,8 +512,20 @@ impl ConfiguredTraceArtifactStore {
         Self::new(TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE, store)
     }
 
+    fn remote_disabled(config: TraceRemoteObjectStoreConfig) -> Self {
+        Self {
+            object_store_name: config.status_object_store_alias().to_string(),
+            store: Arc::new(DisabledRemoteTraceArtifactStore::new(config)),
+            plaintext_compatibility_allowed: false,
+        }
+    }
+
     fn object_store_name(&self) -> &str {
         &self.object_store_name
+    }
+
+    fn plaintext_compatibility_allowed(&self) -> bool {
+        self.plaintext_compatibility_allowed
     }
 
     fn put_json<T: Serialize>(
@@ -468,10 +580,166 @@ impl ConfiguredTraceArtifactStore {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TraceRemoteObjectStoreConfig {
+    provider: TraceRemoteObjectStoreProvider,
+}
+
+impl TraceRemoteObjectStoreConfig {
+    fn from_env() -> anyhow::Result<Self> {
+        let provider = std::env::var(TRACE_COMMONS_REMOTE_OBJECT_STORE_PROVIDER).ok();
+        let bucket = std::env::var(TRACE_COMMONS_REMOTE_OBJECT_STORE_BUCKET).ok();
+        let kms_key_id = std::env::var(TRACE_COMMONS_REMOTE_OBJECT_STORE_KMS_KEY_ID).ok();
+        let credential_ref = std::env::var(TRACE_COMMONS_REMOTE_OBJECT_STORE_CREDENTIAL_REF).ok();
+        Self::from_parts(
+            provider.as_deref(),
+            bucket.as_deref(),
+            kms_key_id.as_deref(),
+            credential_ref.as_deref(),
+        )
+    }
+
+    fn from_parts(
+        provider: Option<&str>,
+        bucket: Option<&str>,
+        kms_key_id: Option<&str>,
+        credential_ref: Option<&str>,
+    ) -> anyhow::Result<Self> {
+        let provider =
+            required_remote_object_store_env(TRACE_COMMONS_REMOTE_OBJECT_STORE_PROVIDER, provider)?;
+        let _bucket =
+            required_remote_object_store_env(TRACE_COMMONS_REMOTE_OBJECT_STORE_BUCKET, bucket)?;
+        let _kms_key_id = required_remote_object_store_env(
+            TRACE_COMMONS_REMOTE_OBJECT_STORE_KMS_KEY_ID,
+            kms_key_id,
+        )?;
+        let _credential_ref = required_remote_object_store_env(
+            TRACE_COMMONS_REMOTE_OBJECT_STORE_CREDENTIAL_REF,
+            credential_ref,
+        )?;
+        Ok(Self {
+            provider: TraceRemoteObjectStoreProvider::parse(provider)?,
+        })
+    }
+
+    fn status_object_store_alias(&self) -> &'static str {
+        TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE
+    }
+}
+
+fn required_remote_object_store_env<'a>(
+    env_name: &'static str,
+    value: Option<&'a str>,
+) -> anyhow::Result<&'a str> {
+    let value = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .with_context(|| {
+            format!("TRACE_COMMONS_OBJECT_STORE=remote_service requires {env_name}")
+        })?;
+    anyhow::ensure!(
+        value.len() <= 2048,
+        "{env_name} is too long for Trace Commons remote object-store configuration"
+    );
+    Ok(value)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TraceRemoteObjectStoreProvider {
+    AwsS3,
+    Gcs,
+    AzureBlob,
+}
+
+impl TraceRemoteObjectStoreProvider {
+    fn parse(raw: &str) -> anyhow::Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "aws_s3" | "s3" => Ok(Self::AwsS3),
+            "gcs" | "google_cloud_storage" => Ok(Self::Gcs),
+            "azure_blob" | "azure" => Ok(Self::AzureBlob),
+            other => anyhow::bail!(
+                "unsupported TRACE_COMMONS_REMOTE_OBJECT_STORE_PROVIDER value: {other}"
+            ),
+        }
+    }
+}
+
+struct DisabledRemoteTraceArtifactStore {
+    provider: TraceRemoteObjectStoreProvider,
+}
+
+impl DisabledRemoteTraceArtifactStore {
+    fn new(config: TraceRemoteObjectStoreConfig) -> Self {
+        Self {
+            provider: config.provider,
+        }
+    }
+
+    fn disabled_error(&self) -> anyhow::Error {
+        let provider = match self.provider {
+            TraceRemoteObjectStoreProvider::AwsS3 => "aws_s3",
+            TraceRemoteObjectStoreProvider::Gcs => "gcs",
+            TraceRemoteObjectStoreProvider::AzureBlob => "azure_blob",
+        };
+        anyhow::anyhow!(
+            "remote Trace Commons object store provider is not enabled: \
+             TRACE_COMMONS_OBJECT_STORE=remote_service selected provider {provider}, \
+             but no production remote TraceArtifactStore adapter is compiled; refusing plaintext fallback"
+        )
+    }
+}
+
+impl TraceArtifactStore for DisabledRemoteTraceArtifactStore {
+    fn put_serialized_json(
+        &self,
+        _tenant_storage_ref: &str,
+        _artifact_kind: TraceArtifactKind,
+        _object_id: &str,
+        _serialized_json: &[u8],
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        Err(self.disabled_error())
+    }
+
+    fn read_artifact(
+        &self,
+        _expected_tenant_storage_ref: &str,
+        _receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<ironclaw::trace_artifact_store::EncryptedTraceArtifact> {
+        Err(self.disabled_error())
+    }
+
+    fn read_json(
+        &self,
+        _expected_tenant_storage_ref: &str,
+        _receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<serde_json::Value> {
+        Err(self.disabled_error())
+    }
+
+    fn read_json_by_object_key(
+        &self,
+        _expected_tenant_storage_ref: &str,
+        _expected_artifact_kind: TraceArtifactKind,
+        _object_key: &str,
+        _expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        Err(self.disabled_error())
+    }
+
+    fn delete_artifact(
+        &self,
+        _expected_tenant_storage_ref: &str,
+        _receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        Err(self.disabled_error())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TraceEncryptedObjectStoreKind {
     LegacyArtifactSidecar,
     ServiceLocal,
+    ServiceRemote,
 }
 
 impl TraceEncryptedObjectStoreKind {
@@ -490,6 +758,10 @@ impl TraceEncryptedObjectStoreKind {
             "local_service" | "local_service_encrypted" | "service_local_encrypted" => {
                 Ok(Some(Self::ServiceLocal))
             }
+            "remote_service"
+            | "service_remote"
+            | "service_owned_remote"
+            | "remote_service_owned" => Ok(Some(Self::ServiceRemote)),
             other => anyhow::bail!("unsupported TRACE_COMMONS_OBJECT_STORE value: {other}"),
         }
     }
@@ -498,6 +770,7 @@ impl TraceEncryptedObjectStoreKind {
         match self {
             Self::LegacyArtifactSidecar => TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE,
             Self::ServiceLocal => TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            Self::ServiceRemote => TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE,
         }
     }
 
@@ -510,6 +783,7 @@ impl TraceEncryptedObjectStoreKind {
                 .or_else(|_| std::env::var("TRACE_COMMONS_ARTIFACT_DIR"))
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| default_root.join("service_object_store")),
+            Self::ServiceRemote => default_root.join("remote_object_store_disabled"),
         }
     }
 }
@@ -1171,8 +1445,8 @@ fn validate_object_primary_submit_review_config(
         "{TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW} requires TRACE_COMMONS_DB_REVIEWER_REQUIRE_OBJECT_REFS"
     );
     anyhow::ensure!(
-        artifact_store_name == Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE),
-        "{TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW} requires TRACE_COMMONS_OBJECT_STORE=local_service"
+        is_service_owned_trace_object_store(artifact_store_name),
+        "{TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW} requires TRACE_COMMONS_OBJECT_STORE=local_service or remote_service"
     );
     Ok(())
 }
@@ -1205,8 +1479,8 @@ fn validate_object_primary_replay_export_config(
         "{TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT} requires TRACE_COMMONS_DB_REPLAY_EXPORT_REQUIRE_OBJECT_REFS"
     );
     anyhow::ensure!(
-        artifact_store_name == Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE),
-        "{TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT} requires TRACE_COMMONS_OBJECT_STORE=local_service"
+        is_service_owned_trace_object_store(artifact_store_name),
+        "{TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT} requires TRACE_COMMONS_OBJECT_STORE=local_service or remote_service"
     );
     Ok(())
 }
@@ -1244,10 +1518,20 @@ fn validate_object_primary_derived_exports_config(
         "{TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS} requires TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS"
     );
     anyhow::ensure!(
-        artifact_store_name == Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE),
-        "{TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS} requires TRACE_COMMONS_OBJECT_STORE=local_service"
+        is_service_owned_trace_object_store(artifact_store_name),
+        "{TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS} requires TRACE_COMMONS_OBJECT_STORE=local_service or remote_service"
     );
     Ok(())
+}
+
+fn is_service_owned_trace_object_store(artifact_store_name: Option<&str>) -> bool {
+    matches!(
+        artifact_store_name,
+        Some(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+                | TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE
+        )
+    )
 }
 
 fn enforce_db_mirror_write_result(
@@ -1308,6 +1592,11 @@ fn trace_artifact_store_from_env(
     let Some(encrypted_store_kind) = encrypted_store_kind else {
         return Ok(None);
     };
+    if encrypted_store_kind == TraceEncryptedObjectStoreKind::ServiceRemote {
+        return Ok(Some(ConfiguredTraceArtifactStore::remote_disabled(
+            TraceRemoteObjectStoreConfig::from_env()?,
+        )));
+    }
     let key = key.context(
         "encrypted Trace Commons object storage requires TRACE_COMMONS_ARTIFACT_KEY_HEX",
     )?;
@@ -5051,9 +5340,30 @@ async fn dataset_replay_handler(
 ) -> ApiResult<Json<TraceReplayDatasetExport>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_exporter(&tenant)?;
+    let now = Utc::now();
+    let purpose =
+        normalized_export_purpose(query.purpose.as_deref(), "trace_commons_replay_dataset");
+    let grant = create_one_shot_export_grant(
+        state.as_ref(),
+        &tenant,
+        TraceExportDatasetKind::ReplayDataset,
+        purpose,
+        query.limit,
+        now,
+    );
+    run_dataset_replay_export_with_grant(state.as_ref(), &tenant, query, grant, now).await
+}
+
+async fn run_dataset_replay_export_with_grant(
+    state: &AppState,
+    tenant: &TenantAuth,
+    query: DatasetExportQuery,
+    grant: TraceExportAccessGrant,
+    now: DateTime<Utc>,
+) -> ApiResult<Json<TraceReplayDatasetExport>> {
     let consent_scope = parse_consent_scope_filter(query.consent_scope.as_deref())?;
     enforce_dataset_export_guardrails(
-        state.as_ref(),
+        state,
         "replay dataset",
         query.purpose.as_deref(),
         query.status,
@@ -5061,8 +5371,8 @@ async fn dataset_replay_handler(
         consent_scope,
     )?;
     let tenant_policy = tenant_export_policy_for_request(
-        state.as_ref(),
-        &tenant,
+        state,
+        tenant,
         "replay dataset",
         consent_scope,
         TraceAllowedUse::Evaluation,
@@ -5070,15 +5380,24 @@ async fn dataset_replay_handler(
     .await?;
     let purpose =
         normalized_export_purpose(query.purpose.as_deref(), "trace_commons_replay_dataset");
+    let job = create_validated_export_job_slice(
+        state,
+        tenant,
+        TraceExportDatasetKind::ReplayDataset,
+        &purpose,
+        query.limit,
+        grant,
+        now,
+    )?;
     let TraceCommonsMetadataView { records, derived } =
-        read_replay_export_metadata_view(state.as_ref(), &tenant)
+        read_replay_export_metadata_view(state, tenant)
             .await
             .map_err(internal_error)?;
     let derived_by_submission = derived
         .into_iter()
         .map(|record| (record.submission_id, record))
         .collect::<BTreeMap<_, _>>();
-    let limit = resolve_export_limit(state.as_ref(), query.limit);
+    let limit = job.max_item_cap;
     let mut items = Vec::new();
     for record in records
         .into_iter()
@@ -5092,7 +5411,7 @@ async fn dataset_replay_handler(
         .filter(|record| {
             record_matches_export_policy_abac(
                 record,
-                &tenant,
+                tenant,
                 tenant_policy.as_ref(),
                 TraceAllowedUse::Evaluation,
             )
@@ -5101,8 +5420,8 @@ async fn dataset_replay_handler(
         .take(limit)
     {
         let body_read = read_envelope_for_replay_export(
-            state.as_ref(),
-            &tenant,
+            state,
+            tenant,
             &record,
             "replay_dataset_export",
             Some(&purpose),
@@ -5125,7 +5444,7 @@ async fn dataset_replay_handler(
 
     let export_id = Uuid::new_v4();
     let audit_event = TraceCommonsAuditEvent::dataset_export(
-        &tenant,
+        tenant,
         export_id,
         items.len(),
         source_submission_ids_hash.clone(),
@@ -5147,7 +5466,7 @@ async fn dataset_replay_handler(
     );
     if state.require_db_mirror_writes {
         let mirror_result = mirror_export_manifest_to_db(
-            state.as_ref(),
+            state,
             StorageTraceObjectArtifactKind::ExportArtifact,
             &manifest,
             &items,
@@ -5160,13 +5479,13 @@ async fn dataset_replay_handler(
                 "Trace Commons DB dual-write export manifest mirror failed"
             );
         }
-        enforce_db_mirror_write_result(state.as_ref(), "replay export manifest", mirror_result)
+        enforce_db_mirror_write_result(state, "replay export manifest", mirror_result)
             .map_err(internal_error)?;
         write_export_manifest(&state.root, &tenant.tenant_id, &manifest).map_err(internal_error)?;
     } else {
         write_export_manifest(&state.root, &tenant.tenant_id, &manifest).map_err(internal_error)?;
         let mirror_result = mirror_export_manifest_to_db(
-            state.as_ref(),
+            state,
             StorageTraceObjectArtifactKind::ExportArtifact,
             &manifest,
             &items,
@@ -5179,12 +5498,12 @@ async fn dataset_replay_handler(
                 "Trace Commons DB dual-write export manifest mirror failed"
             );
         }
-        enforce_db_mirror_write_result(state.as_ref(), "replay export manifest", mirror_result)
+        enforce_db_mirror_write_result(state, "replay export manifest", mirror_result)
             .map_err(internal_error)?;
     }
     let audit_result = append_audit_event_with_db_mirror(
-        state.as_ref(),
-        &tenant,
+        state,
+        tenant,
         audit_event.clone(),
         StorageTraceAuditAction::Export,
         StorageTraceAuditSafeMetadata::Export {
@@ -5200,13 +5519,9 @@ async fn dataset_replay_handler(
                 export_artifact_dir(&state.root, &tenant.tenant_id, manifest.export_id)
                     .join("manifest.json");
             remove_file_if_exists(&manifest_path).map_err(internal_error)?;
-            rollback_db_export_manifest_publication(
-                state.as_ref(),
-                &tenant.tenant_id,
-                manifest.export_id,
-            )
-            .await
-            .map_err(internal_error)?;
+            rollback_db_export_manifest_publication(state, &tenant.tenant_id, manifest.export_id)
+                .await
+                .map_err(internal_error)?;
             remove_audit_event_by_id(&state.root, &tenant.tenant_id, audit_event.event_id)
                 .map_err(internal_error)?;
         }
@@ -5411,6 +5726,29 @@ async fn run_benchmark_conversion(
     tenant: &TenantAuth,
     body: BenchmarkConversionRequest,
 ) -> ApiResult<Json<TraceBenchmarkConversionArtifact>> {
+    let now = Utc::now();
+    let purpose = normalized_export_purpose(
+        body.purpose.as_deref(),
+        "trace_commons_benchmark_candidate_conversion",
+    );
+    let grant = create_one_shot_export_grant(
+        state,
+        tenant,
+        TraceExportDatasetKind::BenchmarkConversion,
+        purpose,
+        body.limit,
+        now,
+    );
+    run_benchmark_conversion_with_grant(state, tenant, body, grant, now).await
+}
+
+async fn run_benchmark_conversion_with_grant(
+    state: &AppState,
+    tenant: &TenantAuth,
+    body: BenchmarkConversionRequest,
+    grant: TraceExportAccessGrant,
+    now: DateTime<Utc>,
+) -> ApiResult<Json<TraceBenchmarkConversionArtifact>> {
     let consent_scope = parse_consent_scope_filter(body.consent_scope.as_deref())?;
     enforce_dataset_export_guardrails(
         state,
@@ -5432,6 +5770,15 @@ async fn run_benchmark_conversion(
         body.purpose.as_deref(),
         "trace_commons_benchmark_candidate_conversion",
     );
+    let job = create_validated_export_job_slice(
+        state,
+        tenant,
+        TraceExportDatasetKind::BenchmarkConversion,
+        &purpose,
+        body.limit,
+        grant,
+        now,
+    )?;
     let TraceCommonsMetadataView { records, derived } = read_reviewer_metadata_view(state, tenant)
         .await
         .map_err(internal_error)?;
@@ -5454,7 +5801,7 @@ async fn run_benchmark_conversion(
         })
         .map(|record| (record.submission_id, record))
         .collect::<BTreeMap<_, _>>();
-    let limit = resolve_export_limit(state, body.limit);
+    let limit = job.max_item_cap;
 
     let mut candidates = Vec::new();
     for derived in derived
@@ -5820,31 +6167,64 @@ async fn ranker_training_candidates_handler(
 ) -> ApiResult<Json<TraceRankerTrainingCandidateExport>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_exporter(&tenant)?;
+    let now = Utc::now();
+    let purpose = normalized_export_purpose(
+        query.purpose.as_deref(),
+        "ranker_training_candidates_export",
+    );
+    let grant = create_one_shot_export_grant(
+        state.as_ref(),
+        &tenant,
+        TraceExportDatasetKind::RankerTrainingCandidates,
+        purpose,
+        query.limit,
+        now,
+    );
+    run_ranker_training_candidates_export_with_grant(state.as_ref(), &tenant, query, grant, now)
+        .await
+}
+
+async fn run_ranker_training_candidates_export_with_grant(
+    state: &AppState,
+    tenant: &TenantAuth,
+    query: RankerTrainingExportQuery,
+    grant: TraceExportAccessGrant,
+    now: DateTime<Utc>,
+) -> ApiResult<Json<TraceRankerTrainingCandidateExport>> {
     let consent_scope = parse_ranker_consent_scope_filter(query.consent_scope.as_deref())?;
     let purpose = normalized_export_purpose(
         query.purpose.as_deref(),
         "ranker_training_candidates_export",
     );
     enforce_ranker_export_guardrails(
-        state.as_ref(),
+        state,
         query.purpose.as_deref(),
         query.status,
         query.privacy_risk,
         consent_scope,
     )?;
     let tenant_policy = tenant_export_policy_for_request(
-        state.as_ref(),
-        &tenant,
+        state,
+        tenant,
         "ranker training candidates",
         consent_scope,
         TraceAllowedUse::RankingModelTraining,
     )
     .await?;
+    let job = create_validated_export_job_slice(
+        state,
+        tenant,
+        TraceExportDatasetKind::RankerTrainingCandidates,
+        &purpose,
+        query.limit,
+        grant,
+        now,
+    )?;
     let mut candidate_query = query;
-    candidate_query.limit = Some(resolve_export_limit(state.as_ref(), candidate_query.limit));
+    candidate_query.limit = Some(job.max_item_cap);
     let candidates = collect_ranker_training_candidates(
-        state.as_ref(),
-        &tenant,
+        state,
+        tenant,
         &candidate_query,
         consent_scope,
         tenant_policy.as_ref(),
@@ -5857,16 +6237,16 @@ async fn ranker_training_candidates_handler(
         .map(|candidate| candidate.submission_id)
         .collect::<Vec<_>>();
     let source_object_refs = revalidate_db_export_sources(
-        state.as_ref(),
-        &tenant,
+        state,
+        tenant,
         &source_submission_ids,
         state.require_derived_export_object_refs_for_tenant(&tenant.tenant_id),
     )
     .await
     .map_err(internal_error)?;
     append_derived_source_read_audits(
-        state.as_ref(),
-        &tenant,
+        state,
+        tenant,
         &source_submission_ids,
         &source_object_refs,
         "ranker_training_candidates",
@@ -5877,7 +6257,7 @@ async fn ranker_training_candidates_handler(
     let source_item_list_hash =
         source_submission_ids_hash("ranker_training_candidates_export", &source_submission_ids);
     let audit_event = TraceCommonsAuditEvent::ranker_training_export(
-        &tenant,
+        tenant,
         export_id,
         purpose.as_str(),
         candidates.len(),
@@ -5901,7 +6281,7 @@ async fn ranker_training_candidates_handler(
         let artifact_object_ref_material = if state.db_mirror.is_some() {
             Some(
                 trace_export_artifact_object_ref_material(
-                    state.as_ref(),
+                    state,
                     &tenant.tenant_id,
                     TraceArtifactKind::RankerTrainingExport,
                     export_id,
@@ -5914,7 +6294,7 @@ async fn ranker_training_candidates_handler(
             None
         };
         let mirror_result = mirror_ranker_candidate_export_provenance_to_db(
-            state.as_ref(),
+            state,
             &provenance,
             &candidates,
             artifact_object_ref_material.as_ref(),
@@ -5927,7 +6307,7 @@ async fn ranker_training_candidates_handler(
                 "Trace Commons DB dual-write ranker candidate provenance mirror failed"
             );
             cleanup_export_artifact_publication(
-                state.as_ref(),
+                state,
                 &tenant.tenant_id,
                 TraceArtifactKind::RankerTrainingExport,
                 artifact_object_ref_material.as_ref(),
@@ -5935,12 +6315,8 @@ async fn ranker_training_candidates_handler(
             )
             .map_err(internal_error)?;
         }
-        enforce_db_mirror_write_result(
-            state.as_ref(),
-            "ranker candidate provenance",
-            mirror_result,
-        )
-        .map_err(internal_error)?;
+        enforce_db_mirror_write_result(state, "ranker candidate provenance", mirror_result)
+            .map_err(internal_error)?;
         required_artifact_object_ref_material = artifact_object_ref_material;
         if !object_primary_derived_exports {
             write_export_provenance(&provenance_path, &provenance).map_err(internal_error)?;
@@ -5952,7 +6328,7 @@ async fn ranker_training_candidates_handler(
         let artifact_object_ref_material = if state.db_mirror.is_some() {
             Some(
                 trace_export_artifact_object_ref_material(
-                    state.as_ref(),
+                    state,
                     &tenant.tenant_id,
                     TraceArtifactKind::RankerTrainingExport,
                     export_id,
@@ -5965,7 +6341,7 @@ async fn ranker_training_candidates_handler(
             None
         };
         let mirror_result = mirror_ranker_candidate_export_provenance_to_db(
-            state.as_ref(),
+            state,
             &provenance,
             &candidates,
             artifact_object_ref_material.as_ref(),
@@ -5978,16 +6354,12 @@ async fn ranker_training_candidates_handler(
                 "Trace Commons DB dual-write ranker candidate provenance mirror failed"
             );
         }
-        enforce_db_mirror_write_result(
-            state.as_ref(),
-            "ranker candidate provenance",
-            mirror_result,
-        )
-        .map_err(internal_error)?;
+        enforce_db_mirror_write_result(state, "ranker candidate provenance", mirror_result)
+            .map_err(internal_error)?;
     }
     let audit_result = append_audit_event_with_db_mirror(
-        state.as_ref(),
-        &tenant,
+        state,
+        tenant,
         audit_event.clone(),
         StorageTraceAuditAction::Export,
         StorageTraceAuditSafeMetadata::Export {
@@ -6000,14 +6372,14 @@ async fn ranker_training_candidates_handler(
     if let Err(error) = audit_result {
         if state.require_db_mirror_writes {
             cleanup_export_artifact_publication(
-                state.as_ref(),
+                state,
                 &tenant.tenant_id,
                 TraceArtifactKind::RankerTrainingExport,
                 required_artifact_object_ref_material.as_ref(),
                 std::slice::from_ref(&provenance_path),
             )
             .map_err(internal_error)?;
-            rollback_db_export_manifest_publication(state.as_ref(), &tenant.tenant_id, export_id)
+            rollback_db_export_manifest_publication(state, &tenant.tenant_id, export_id)
                 .await
                 .map_err(internal_error)?;
             remove_audit_event_by_id(&state.root, &tenant.tenant_id, audit_event.event_id)
@@ -6016,8 +6388,8 @@ async fn ranker_training_candidates_handler(
         return Err(internal_error(error));
     }
     append_automatic_utility_credit_events_once(
-        state.as_ref(),
-        &tenant,
+        state,
+        tenant,
         AutomaticUtilityCreditConfig {
             idempotency_label: "ranker-training-candidate-credit",
             idempotency_ref: None,
@@ -6052,30 +6424,60 @@ async fn ranker_training_pairs_handler(
 ) -> ApiResult<Json<TraceRankerTrainingPairExport>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_exporter(&tenant)?;
+    let now = Utc::now();
+    let purpose =
+        normalized_export_purpose(query.purpose.as_deref(), "ranker_training_pairs_export");
+    let grant = create_one_shot_export_grant(
+        state.as_ref(),
+        &tenant,
+        TraceExportDatasetKind::RankerTrainingPairs,
+        purpose,
+        query.limit,
+        now,
+    );
+    run_ranker_training_pairs_export_with_grant(state.as_ref(), &tenant, query, grant, now).await
+}
+
+async fn run_ranker_training_pairs_export_with_grant(
+    state: &AppState,
+    tenant: &TenantAuth,
+    query: RankerTrainingExportQuery,
+    grant: TraceExportAccessGrant,
+    now: DateTime<Utc>,
+) -> ApiResult<Json<TraceRankerTrainingPairExport>> {
     let consent_scope = parse_ranker_consent_scope_filter(query.consent_scope.as_deref())?;
     let purpose =
         normalized_export_purpose(query.purpose.as_deref(), "ranker_training_pairs_export");
     enforce_ranker_export_guardrails(
-        state.as_ref(),
+        state,
         query.purpose.as_deref(),
         query.status,
         query.privacy_risk,
         consent_scope,
     )?;
     let tenant_policy = tenant_export_policy_for_request(
-        state.as_ref(),
-        &tenant,
+        state,
+        tenant,
         "ranker training pairs",
         consent_scope,
         TraceAllowedUse::RankingModelTraining,
     )
     .await?;
+    let job = create_validated_export_job_slice(
+        state,
+        tenant,
+        TraceExportDatasetKind::RankerTrainingPairs,
+        &purpose,
+        query.limit,
+        grant,
+        now,
+    )?;
     let mut pair_query = query;
-    let pair_limit = resolve_export_limit(state.as_ref(), pair_query.limit);
+    let pair_limit = job.max_item_cap;
     pair_query.limit = Some(pair_limit.saturating_add(1));
     let candidates = collect_ranker_training_candidates(
-        state.as_ref(),
-        &tenant,
+        state,
+        tenant,
         &pair_query,
         consent_scope,
         tenant_policy.as_ref(),
@@ -6085,16 +6487,16 @@ async fn ranker_training_pairs_handler(
     let pairs = build_ranker_training_pairs(&candidates, pair_limit);
     let source_submission_ids = ranker_pair_source_submission_ids(&pairs);
     let source_object_refs = revalidate_db_export_sources(
-        state.as_ref(),
-        &tenant,
+        state,
+        tenant,
         &source_submission_ids,
         state.require_derived_export_object_refs_for_tenant(&tenant.tenant_id),
     )
     .await
     .map_err(internal_error)?;
     append_derived_source_read_audits(
-        state.as_ref(),
-        &tenant,
+        state,
+        tenant,
         &source_submission_ids,
         &source_object_refs,
         "ranker_training_pairs",
@@ -6105,7 +6507,7 @@ async fn ranker_training_pairs_handler(
     let export_id = Uuid::new_v4();
     let source_item_list_hash = ranker_pair_list_hash(&pairs);
     let audit_event = TraceCommonsAuditEvent::ranker_training_export(
-        &tenant,
+        tenant,
         export_id,
         purpose.as_str(),
         pairs.len(),
@@ -6129,7 +6531,7 @@ async fn ranker_training_pairs_handler(
         let artifact_object_ref_material = if state.db_mirror.is_some() {
             Some(
                 trace_export_artifact_object_ref_material(
-                    state.as_ref(),
+                    state,
                     &tenant.tenant_id,
                     TraceArtifactKind::RankerTrainingExport,
                     export_id,
@@ -6142,7 +6544,7 @@ async fn ranker_training_pairs_handler(
             None
         };
         let mirror_result = mirror_ranker_pair_export_provenance_to_db(
-            state.as_ref(),
+            state,
             &provenance,
             &pairs,
             artifact_object_ref_material.as_ref(),
@@ -6155,7 +6557,7 @@ async fn ranker_training_pairs_handler(
                 "Trace Commons DB dual-write ranker pair provenance mirror failed"
             );
             cleanup_export_artifact_publication(
-                state.as_ref(),
+                state,
                 &tenant.tenant_id,
                 TraceArtifactKind::RankerTrainingExport,
                 artifact_object_ref_material.as_ref(),
@@ -6163,7 +6565,7 @@ async fn ranker_training_pairs_handler(
             )
             .map_err(internal_error)?;
         }
-        enforce_db_mirror_write_result(state.as_ref(), "ranker pair provenance", mirror_result)
+        enforce_db_mirror_write_result(state, "ranker pair provenance", mirror_result)
             .map_err(internal_error)?;
         required_artifact_object_ref_material = artifact_object_ref_material;
         if !object_primary_derived_exports {
@@ -6176,7 +6578,7 @@ async fn ranker_training_pairs_handler(
         let artifact_object_ref_material = if state.db_mirror.is_some() {
             Some(
                 trace_export_artifact_object_ref_material(
-                    state.as_ref(),
+                    state,
                     &tenant.tenant_id,
                     TraceArtifactKind::RankerTrainingExport,
                     export_id,
@@ -6189,7 +6591,7 @@ async fn ranker_training_pairs_handler(
             None
         };
         let mirror_result = mirror_ranker_pair_export_provenance_to_db(
-            state.as_ref(),
+            state,
             &provenance,
             &pairs,
             artifact_object_ref_material.as_ref(),
@@ -6202,12 +6604,12 @@ async fn ranker_training_pairs_handler(
                 "Trace Commons DB dual-write ranker pair provenance mirror failed"
             );
         }
-        enforce_db_mirror_write_result(state.as_ref(), "ranker pair provenance", mirror_result)
+        enforce_db_mirror_write_result(state, "ranker pair provenance", mirror_result)
             .map_err(internal_error)?;
     }
     let audit_result = append_audit_event_with_db_mirror(
-        state.as_ref(),
-        &tenant,
+        state,
+        tenant,
         audit_event.clone(),
         StorageTraceAuditAction::Export,
         StorageTraceAuditSafeMetadata::Export {
@@ -6220,14 +6622,14 @@ async fn ranker_training_pairs_handler(
     if let Err(error) = audit_result {
         if state.require_db_mirror_writes {
             cleanup_export_artifact_publication(
-                state.as_ref(),
+                state,
                 &tenant.tenant_id,
                 TraceArtifactKind::RankerTrainingExport,
                 required_artifact_object_ref_material.as_ref(),
                 std::slice::from_ref(&provenance_path),
             )
             .map_err(internal_error)?;
-            rollback_db_export_manifest_publication(state.as_ref(), &tenant.tenant_id, export_id)
+            rollback_db_export_manifest_publication(state, &tenant.tenant_id, export_id)
                 .await
                 .map_err(internal_error)?;
             remove_audit_event_by_id(&state.root, &tenant.tenant_id, audit_event.event_id)
@@ -6245,8 +6647,8 @@ async fn ranker_training_pairs_handler(
         })
         .collect::<Vec<_>>();
     append_automatic_utility_credit_events_once(
-        state.as_ref(),
-        &tenant,
+        state,
+        tenant,
         AutomaticUtilityCreditConfig {
             idempotency_label: "ranker-training-pair-credit",
             idempotency_ref: None,
@@ -6739,6 +7141,119 @@ fn resolve_export_limit(state: &AppState, requested_limit: Option<usize>) -> usi
     requested_limit
         .unwrap_or(100)
         .clamp(1, state.max_export_items_per_request)
+}
+
+fn create_one_shot_export_grant(
+    state: &AppState,
+    tenant: &TenantAuth,
+    requested_dataset_kind: TraceExportDatasetKind,
+    purpose: impl Into<String>,
+    requested_limit: Option<usize>,
+    now: DateTime<Utc>,
+) -> TraceExportAccessGrant {
+    TraceExportAccessGrant::one_shot(
+        tenant,
+        requested_dataset_kind,
+        purpose,
+        resolve_export_limit(state, requested_limit),
+        now,
+    )
+}
+
+fn create_validated_export_job_slice(
+    state: &AppState,
+    tenant: &TenantAuth,
+    requested_dataset_kind: TraceExportDatasetKind,
+    purpose: &str,
+    requested_limit: Option<usize>,
+    grant: TraceExportAccessGrant,
+    now: DateTime<Utc>,
+) -> ApiResult<TraceExportJobSlice> {
+    validate_export_access_grant(&grant, tenant, requested_dataset_kind, purpose, now)?;
+    Ok(TraceExportJobSlice {
+        job_id: Uuid::new_v4(),
+        grant_id: grant.grant_id,
+        tenant_id: tenant.tenant_id.clone(),
+        caller_principal_ref: tenant.principal_ref.clone(),
+        requested_dataset_kind,
+        purpose: purpose.to_string(),
+        expires_at: grant.expires_at,
+        max_item_cap: resolve_export_limit(state, requested_limit).min(grant.max_item_cap),
+        status: TraceExportJobStatus::InProgress,
+        requested_at: now,
+        started_at: Some(now),
+        finished_at: None,
+    })
+}
+
+fn validate_export_access_grant(
+    grant: &TraceExportAccessGrant,
+    tenant: &TenantAuth,
+    requested_dataset_kind: TraceExportDatasetKind,
+    purpose: &str,
+    now: DateTime<Utc>,
+) -> ApiResult<()> {
+    if grant.status != TraceExportGrantStatus::Active {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            format!(
+                "{} export grant is not active",
+                requested_dataset_kind.label()
+            ),
+        ));
+    }
+    if grant.expires_at <= now {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            format!("{} export grant is expired", requested_dataset_kind.label()),
+        ));
+    }
+    if grant.tenant_id != tenant.tenant_id {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            format!(
+                "{} export grant does not belong to the authenticated tenant",
+                requested_dataset_kind.label()
+            ),
+        ));
+    }
+    if grant.caller_principal_ref != tenant.principal_ref {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            format!(
+                "{} export grant does not belong to the authenticated principal",
+                requested_dataset_kind.label()
+            ),
+        ));
+    }
+    if grant.requested_dataset_kind != requested_dataset_kind {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            format!(
+                "{} export grant was issued for a different dataset kind",
+                requested_dataset_kind.label()
+            ),
+        ));
+    }
+    if grant.purpose != purpose {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            format!(
+                "{} export grant purpose does not match the request",
+                requested_dataset_kind.label()
+            ),
+        ));
+    }
+    if grant.max_item_cap == 0 {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            format!(
+                "{} export grant has no remaining item capacity",
+                requested_dataset_kind.label()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn enforce_dataset_export_guardrails(
@@ -8750,6 +9265,16 @@ fn store_envelope(
 ) -> anyhow::Result<StoredTraceEnvelope> {
     let object_key = trace_envelope_object_key(tenant_id, status, envelope.submission_id);
     let object_primary_submit_review = state.object_primary_submit_review_for_tenant(tenant_id);
+    if !object_primary_submit_review
+        && state
+            .artifact_store
+            .as_ref()
+            .is_some_and(|store| !store.plaintext_compatibility_allowed())
+    {
+        anyhow::bail!(
+            "TRACE_COMMONS_OBJECT_STORE=remote_service requires object-primary submit/review mode; refusing compatibility plaintext envelope body files"
+        );
+    }
     if !object_primary_submit_review {
         let path = state.root.join(&object_key);
         write_json_file(&path, envelope, "trace contribution envelope")?;
@@ -10635,6 +11160,7 @@ fn is_encrypted_trace_object_store(object_store: &str) -> bool {
         object_store,
         TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE
             | TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+            | TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE
     )
 }
 
@@ -18298,6 +18824,16 @@ mod tests {
                 .expect("mode parses"),
             Some(TraceEncryptedObjectStoreKind::ServiceLocal)
         );
+        assert_eq!(
+            TraceEncryptedObjectStoreKind::from_config(Some("remote_service"), false)
+                .expect("mode parses"),
+            Some(TraceEncryptedObjectStoreKind::ServiceRemote)
+        );
+        assert_eq!(
+            TraceEncryptedObjectStoreKind::from_config(Some("service_owned_remote"), false)
+                .expect("mode parses"),
+            Some(TraceEncryptedObjectStoreKind::ServiceRemote)
+        );
 
         let error = TraceEncryptedObjectStoreKind::from_config(Some("mystery_store"), false)
             .expect_err("unknown object store mode must fail");
@@ -18305,6 +18841,69 @@ mod tests {
             error
                 .to_string()
                 .contains("unsupported TRACE_COMMONS_OBJECT_STORE")
+        );
+    }
+
+    #[test]
+    fn remote_trace_object_store_config_requires_complete_production_intent() {
+        let missing = TraceRemoteObjectStoreConfig::from_parts(None, None, None, None)
+            .expect_err("remote mode without production env fails closed");
+        assert!(
+            missing
+                .to_string()
+                .contains(TRACE_COMMONS_REMOTE_OBJECT_STORE_PROVIDER)
+        );
+
+        let unsupported = TraceRemoteObjectStoreConfig::from_parts(
+            Some("filesystem"),
+            Some("trace-commons-prod-bucket"),
+            Some("projects/prod/locations/global/keyRings/traces/cryptoKeys/envelope"),
+            Some("secret-manager://trace-commons/remote-writer"),
+        )
+        .expect_err("unsupported remote provider fails closed");
+        assert!(
+            unsupported
+                .to_string()
+                .contains("unsupported TRACE_COMMONS_REMOTE_OBJECT_STORE_PROVIDER")
+        );
+
+        let config = TraceRemoteObjectStoreConfig::from_parts(
+            Some("aws_s3"),
+            Some("trace-commons-prod-bucket"),
+            Some("arn:aws:kms:us-west-2:123456789012:key/trace-commons"),
+            Some("aws-iam-role:trace-commons-writer"),
+        )
+        .expect("complete remote operator intent parses");
+        assert_eq!(config.provider, TraceRemoteObjectStoreProvider::AwsS3);
+        assert_eq!(
+            config.status_object_store_alias(),
+            TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE
+        );
+    }
+
+    #[test]
+    fn remote_disabled_trace_object_store_refuses_artifact_io() {
+        let config = TraceRemoteObjectStoreConfig::from_parts(
+            Some("gcs"),
+            Some("trace-commons-prod-bucket"),
+            Some("projects/prod/locations/global/keyRings/traces/cryptoKeys/envelope"),
+            Some("secret-manager://trace-commons/remote-writer"),
+        )
+        .expect("complete remote operator intent parses");
+        let store = ConfiguredTraceArtifactStore::remote_disabled(config);
+
+        let error = store
+            .put_json(
+                "tenant-hash",
+                TraceArtifactKind::ContributionEnvelope,
+                "submission-id",
+                &serde_json::json!({ "redacted": true }),
+            )
+            .expect_err("disabled remote store refuses writes");
+        assert!(
+            error
+                .to_string()
+                .contains("remote Trace Commons object store provider is not enabled")
         );
     }
 
@@ -18990,6 +19589,83 @@ mod tests {
             event.kind == "read"
                 && event.reason.as_deref() == Some("surface=config_status;item_count=1")
         }));
+    }
+
+    #[tokio::test]
+    async fn admin_config_status_reports_remote_artifact_alias_without_remote_secrets() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let remote_config = TraceRemoteObjectStoreConfig::from_parts(
+            Some("aws_s3"),
+            Some("trace-commons-prod-bucket-secret"),
+            Some("arn:aws:kms:us-west-2:123456789012:key/trace-commons-secret"),
+            Some("aws-iam-role:trace-commons-writer-secret"),
+        )
+        .expect("remote config parses");
+        let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            None,
+            Some(ConfiguredTraceArtifactStore::remote_disabled(remote_config)),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/config-status")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("admin response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("status json parses");
+        assert_eq!(value["artifact_store_configured"], serde_json::json!(true));
+        assert_eq!(
+            value["artifact_object_store"],
+            serde_json::json!(TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE)
+        );
+
+        let object = value.as_object().expect("status response is object");
+        for forbidden_key in [
+            "remote_object_store_provider",
+            "remote_object_store_bucket",
+            "remote_object_store_kms_key_id",
+            "remote_object_store_credential_ref",
+        ] {
+            assert!(
+                !object.contains_key(forbidden_key),
+                "config status leaked {forbidden_key}"
+            );
+        }
+
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        for forbidden_value in [
+            "aws_s3",
+            "trace-commons-prod-bucket-secret",
+            "trace-commons-secret",
+            "trace-commons-writer-secret",
+        ] {
+            assert!(
+                !body_text.contains(forbidden_value),
+                "config status leaked remote value {forbidden_value}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -24045,6 +24721,230 @@ mod tests {
         )
         .await
         .expect("ranker pair export succeeds");
+        assert_eq!(pairs.item_count, 1);
+    }
+
+    #[tokio::test]
+    async fn export_access_grants_gate_replay_dataset_call_site() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let tenant =
+            authenticate(state.as_ref(), &auth_headers("review-token-a")).expect("reviewer auth");
+        let purpose = "grant_replay".to_string();
+
+        for index in 0..2 {
+            let mut envelope = sample_envelope().await;
+            make_metadata_only_low_risk(&mut envelope);
+            envelope.consent.scopes = vec![ConsentScope::DebuggingEvaluation];
+            envelope.value.submission_score = 0.9 - (index as f32 * 0.1);
+            let _ = submit_trace_handler(
+                State(state.clone()),
+                auth_headers("token-a"),
+                Json(envelope),
+            )
+            .await
+            .expect("submission succeeds");
+        }
+
+        let now = Utc::now();
+        let expired_grant = TraceExportAccessGrant {
+            grant_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            caller_principal_ref: tenant.principal_ref.clone(),
+            requested_dataset_kind: TraceExportDatasetKind::ReplayDataset,
+            purpose: purpose.clone(),
+            expires_at: now - Duration::seconds(1),
+            max_item_cap: 10,
+            status: TraceExportGrantStatus::Active,
+        };
+        let expired_error = run_dataset_replay_export_with_grant(
+            state.as_ref(),
+            &tenant,
+            DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some(purpose.clone()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: Some("debugging-evaluation".to_string()),
+            },
+            expired_grant,
+            now,
+        )
+        .await
+        .expect_err("expired replay grant cannot export");
+        assert_eq!(expired_error.0, StatusCode::FORBIDDEN);
+        assert!(
+            read_all_export_manifests(temp.path(), "tenant-a")
+                .expect("manifests read")
+                .is_empty()
+        );
+
+        let wrong_tenant_grant = TraceExportAccessGrant {
+            grant_id: Uuid::new_v4(),
+            tenant_id: "tenant-b".to_string(),
+            caller_principal_ref: tenant.principal_ref.clone(),
+            requested_dataset_kind: TraceExportDatasetKind::ReplayDataset,
+            purpose: purpose.clone(),
+            expires_at: now + Duration::minutes(5),
+            max_item_cap: 10,
+            status: TraceExportGrantStatus::Active,
+        };
+        let wrong_tenant_error = run_dataset_replay_export_with_grant(
+            state.as_ref(),
+            &tenant,
+            DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some(purpose.clone()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: Some("debugging-evaluation".to_string()),
+            },
+            wrong_tenant_grant,
+            now,
+        )
+        .await
+        .expect_err("cross-tenant replay grant cannot export");
+        assert_eq!(wrong_tenant_error.0, StatusCode::FORBIDDEN);
+
+        let valid_grant = TraceExportAccessGrant {
+            grant_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            caller_principal_ref: tenant.principal_ref.clone(),
+            requested_dataset_kind: TraceExportDatasetKind::ReplayDataset,
+            purpose: purpose.clone(),
+            expires_at: now + Duration::minutes(5),
+            max_item_cap: 10,
+            status: TraceExportGrantStatus::Active,
+        };
+        let Json(export) = run_dataset_replay_export_with_grant(
+            state.as_ref(),
+            &tenant,
+            DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some(purpose),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: Some("debugging-evaluation".to_string()),
+            },
+            valid_grant,
+            now,
+        )
+        .await
+        .expect("valid replay grant preserves export behavior");
+        assert_eq!(export.item_count, 2);
+        assert_eq!(export.manifest.filters.limit, 10);
+    }
+
+    #[tokio::test]
+    async fn export_access_grants_gate_benchmark_and_ranker_call_sites() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let tenant =
+            authenticate(state.as_ref(), &auth_headers("review-token-a")).expect("reviewer auth");
+
+        for index in 0..2 {
+            let mut envelope = sample_envelope().await;
+            make_metadata_only_low_risk(&mut envelope);
+            envelope.consent.scopes = vec![
+                ConsentScope::BenchmarkOnly,
+                ConsentScope::RankingTraining,
+                ConsentScope::ModelTraining,
+            ];
+            envelope.trace_card.allowed_uses = vec![
+                TraceAllowedUse::BenchmarkGeneration,
+                TraceAllowedUse::RankingModelTraining,
+            ];
+            envelope.value.submission_score = 0.95 - (index as f32 * 0.1);
+            let _ = submit_trace_handler(
+                State(state.clone()),
+                auth_headers("token-a"),
+                Json(envelope),
+            )
+            .await
+            .expect("submission succeeds");
+        }
+
+        let now = Utc::now();
+        let expired_benchmark_grant = TraceExportAccessGrant {
+            grant_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            caller_principal_ref: tenant.principal_ref.clone(),
+            requested_dataset_kind: TraceExportDatasetKind::BenchmarkConversion,
+            purpose: "grant_benchmark".to_string(),
+            expires_at: now - Duration::seconds(1),
+            max_item_cap: 10,
+            status: TraceExportGrantStatus::Active,
+        };
+        let benchmark_error = run_benchmark_conversion_with_grant(
+            state.as_ref(),
+            &tenant,
+            BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("grant_benchmark".to_string()),
+                consent_scope: Some("benchmark-only".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: None,
+            },
+            expired_benchmark_grant,
+            now,
+        )
+        .await
+        .expect_err("expired benchmark grant cannot export");
+        assert_eq!(benchmark_error.0, StatusCode::FORBIDDEN);
+
+        let wrong_tenant_ranker_grant = TraceExportAccessGrant {
+            grant_id: Uuid::new_v4(),
+            tenant_id: "tenant-b".to_string(),
+            caller_principal_ref: tenant.principal_ref.clone(),
+            requested_dataset_kind: TraceExportDatasetKind::RankerTrainingCandidates,
+            purpose: "grant_ranker_candidates".to_string(),
+            expires_at: now + Duration::minutes(5),
+            max_item_cap: 10,
+            status: TraceExportGrantStatus::Active,
+        };
+        let ranker_error = run_ranker_training_candidates_export_with_grant(
+            state.as_ref(),
+            &tenant,
+            RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("grant_ranker_candidates".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            },
+            wrong_tenant_ranker_grant,
+            now,
+        )
+        .await
+        .expect_err("cross-tenant ranker grant cannot export");
+        assert_eq!(ranker_error.0, StatusCode::FORBIDDEN);
+
+        let valid_pair_grant = TraceExportAccessGrant {
+            grant_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            caller_principal_ref: tenant.principal_ref.clone(),
+            requested_dataset_kind: TraceExportDatasetKind::RankerTrainingPairs,
+            purpose: "grant_ranker_pairs".to_string(),
+            expires_at: now + Duration::minutes(5),
+            max_item_cap: 10,
+            status: TraceExportGrantStatus::Active,
+        };
+        let Json(pairs) = run_ranker_training_pairs_export_with_grant(
+            state.as_ref(),
+            &tenant,
+            RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("grant_ranker_pairs".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("model-training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            },
+            valid_pair_grant,
+            now,
+        )
+        .await
+        .expect("valid ranker pair grant preserves export behavior");
         assert_eq!(pairs.item_count, 1);
     }
 

@@ -3467,6 +3467,24 @@ fn trace_queue_secret_like_reason_regex() -> &'static Regex {
     &TRACE_QUEUE_SECRET_LIKE_REASON_REGEX
 }
 
+fn remote_credit_explanation_url_regex() -> &'static Regex {
+    static REMOTE_CREDIT_EXPLANATION_URL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+        // safety: hardcoded regex is covered by local status-history safety tests.
+        Regex::new(r#"(?i)\bhttps?://[^\s'"`<>{}\[\]]+"#)
+            .expect("hardcoded remote credit explanation URL regex must compile")
+    });
+    &REMOTE_CREDIT_EXPLANATION_URL_REGEX
+}
+
+fn remote_credit_explanation_tenant_ref_regex() -> &'static Regex {
+    static REMOTE_CREDIT_EXPLANATION_TENANT_REF_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+        // safety: hardcoded regex is covered by local status-history safety tests.
+        Regex::new(r"(?i)\btenant[-_][a-z0-9][a-z0-9_-]{1,}\b")
+            .expect("hardcoded remote credit explanation tenant-ref regex must compile")
+    });
+    &REMOTE_CREDIT_EXPLANATION_TENANT_REF_REGEX
+}
+
 fn placeholder_label_fragment(label: &str) -> String {
     let raw = label
         .strip_prefix("private_")
@@ -3507,10 +3525,31 @@ pub struct LocalTraceSubmissionRecord {
     pub credit_explanation: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credit_events: Vec<TraceCreditEvent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<LocalTraceSubmissionHistoryEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_credit_notice_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "TraceCreditNoticeState::is_empty")]
     pub credit_notice_state: TraceCreditNoticeState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LocalTraceSubmissionHistoryEvent {
+    pub event_id: Uuid,
+    pub kind: LocalTraceSubmissionHistoryKind,
+    pub occurred_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_status: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub credit_delta: f32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub delayed_credit_explanation_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalTraceSubmissionHistoryKind {
+    StatusSync,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -4876,6 +4915,7 @@ fn record_submitted_trace_envelope_for_scope_unlocked(
                 reason: "Accepted for private Trace Commons processing; delayed utility credit may be added later.".to_string(),
                 created_at: Utc::now(),
             }],
+            history: Vec::new(),
             last_credit_notice_at: None,
             credit_notice_state: TraceCreditNoticeState::default(),
         },
@@ -5319,13 +5359,13 @@ fn apply_remote_trace_submission_statuses_for_scope_unlocked(
             .or(update.credit_points_final)
             .unwrap_or(update.credit_points_pending);
         let new_stored_final = update.credit_points_total.or(update.credit_points_final);
-        let mut explanation = update.explanation.clone();
-        explanation.extend(update.delayed_credit_explanations.clone());
+        let explanation = safe_remote_credit_explanation_lines(update);
         let credit_changed = (old_effective_credit - new_effective_credit).abs() > f32::EPSILON;
         let explanation_changed =
             !explanation.is_empty() && record.credit_explanation != explanation;
 
         let status_changed = record.server_status.as_deref() != Some(update.status.as_str());
+        let credit_delta = new_effective_credit - old_effective_credit;
 
         record.trace_id = update.trace_id;
         record.server_status = Some(update.status.clone());
@@ -5359,10 +5399,31 @@ fn apply_remote_trace_submission_statuses_for_scope_unlocked(
                 submission_id: update.submission_id,
                 contributor_pseudonym: "local-sync".to_string(),
                 kind: TraceCreditEventKind::CreditSynced,
-                points_delta: new_effective_credit - old_effective_credit,
+                points_delta: credit_delta,
                 reason: sync_reason,
                 created_at: now,
             });
+            let history_event = LocalTraceSubmissionHistoryEvent {
+                event_id: Uuid::new_v4(),
+                kind: LocalTraceSubmissionHistoryKind::StatusSync,
+                occurred_at: now,
+                server_status: Some(update.status.clone()),
+                credit_delta,
+                delayed_credit_explanation_count: update
+                    .delayed_credit_explanations
+                    .len()
+                    .try_into()
+                    .unwrap_or(u32::MAX),
+            };
+            if !record.history.iter().any(|event| {
+                event.kind == history_event.kind
+                    && event.server_status == history_event.server_status
+                    && (event.credit_delta - history_event.credit_delta).abs() <= f32::EPSILON
+                    && event.delayed_credit_explanation_count
+                        == history_event.delayed_credit_explanation_count
+            }) {
+                record.history.push(history_event);
+            }
             changed += 1;
         }
     }
@@ -5371,6 +5432,45 @@ fn apply_remote_trace_submission_statuses_for_scope_unlocked(
         write_local_trace_records_for_scope(scope, &records)?;
     }
     Ok(changed)
+}
+
+fn safe_remote_credit_explanation_lines(update: &TraceSubmissionStatusUpdate) -> Vec<String> {
+    update
+        .explanation
+        .iter()
+        .chain(update.delayed_credit_explanations.iter())
+        .filter_map(|line| {
+            let line = safe_remote_credit_explanation_line(line);
+            (!line.is_empty()).then_some(line)
+        })
+        .take(16)
+        .collect()
+}
+
+fn safe_remote_credit_explanation_line(line: &str) -> String {
+    let normalized = line
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string();
+    if normalized.is_empty() {
+        return String::new();
+    }
+    let (redacted, _) = DeterministicTraceRedactor::default().redact_text(&normalized);
+    let redacted = trace_queue_secret_like_reason_regex().replace_all(&redacted, "[REDACTED]");
+    let redacted =
+        remote_credit_explanation_url_regex().replace_all(&redacted, "[REDACTED:private_url]");
+    let redacted = remote_credit_explanation_tenant_ref_regex()
+        .replace_all(&redacted, "[REDACTED:tenant_ref]");
+    redacted
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .chars()
+        .take(240)
+        .collect()
 }
 
 pub fn read_local_trace_records_for_scope(
@@ -5770,6 +5870,7 @@ fn mark_local_trace_revoked_for_scope_unlocked(
             credit_points_final: None,
             credit_explanation: Vec::new(),
             credit_events: Vec::new(),
+            history: Vec::new(),
             last_credit_notice_at: None,
             credit_notice_state: TraceCreditNoticeState::default(),
         });
@@ -7862,6 +7963,7 @@ mod tests {
             credit_points_final,
             credit_explanation,
             credit_events: Vec::new(),
+            history: Vec::new(),
             last_credit_notice_at,
             credit_notice_state: TraceCreditNoticeState::default(),
         }
@@ -8270,6 +8372,229 @@ mod tests {
     }
 
     #[test]
+    fn local_trace_records_load_legacy_json_without_history() {
+        let scope = format!("trace-local-history-legacy-test-{}", Uuid::new_v4());
+        let submission_id = Uuid::new_v4();
+        let trace_id = Uuid::new_v4();
+        let path = trace_records_path(Some(&scope));
+        std::fs::create_dir_all(path.parent().expect("trace records path has a parent"))
+            .expect("trace records dir exists");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&serde_json::json!([
+                {
+                    "submission_id": submission_id,
+                    "trace_id": trace_id,
+                    "endpoint": "https://trace.example.com/v1/traces",
+                    "status": "submitted",
+                    "server_status": "accepted",
+                    "submitted_at": Utc::now(),
+                    "privacy_risk": "low",
+                    "redaction_counts": {},
+                    "credit_points_pending": 1.0,
+                    "credit_points_final": 1.0,
+                    "credit_explanation": ["Accepted locally."]
+                }
+            ]))
+            .expect("legacy records serialize"),
+        )
+        .expect("legacy records write");
+
+        let records = read_local_trace_records_for_scope(Some(&scope)).expect("records read");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].submission_id, submission_id);
+        assert_eq!(records[0].trace_id, trace_id);
+        let serialized = serde_json::to_value(&records[0]).expect("record serializes");
+        assert!(serialized.get("history").is_none());
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[test]
+    fn status_sync_appends_safe_local_history_event() {
+        let scope = format!("trace-local-history-sync-test-{}", Uuid::new_v4());
+        let submission_id = Uuid::new_v4();
+        let trace_id = Uuid::new_v4();
+        write_local_trace_records_for_scope(
+            Some(&scope),
+            &[LocalTraceSubmissionRecord {
+                submission_id,
+                trace_id,
+                endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                status: LocalTraceSubmissionStatus::Submitted,
+                server_status: Some("accepted".to_string()),
+                submitted_at: Some(Utc::now()),
+                revoked_at: None,
+                privacy_risk: "low".to_string(),
+                redaction_counts: BTreeMap::new(),
+                credit_points_pending: 1.0,
+                credit_points_final: Some(1.0),
+                credit_explanation: vec!["Accepted locally.".to_string()],
+                credit_events: Vec::new(),
+                history: Vec::new(),
+                last_credit_notice_at: None,
+                credit_notice_state: TraceCreditNoticeState::default(),
+            }],
+        )
+        .expect("local record writes");
+
+        let changed = apply_remote_trace_submission_statuses_for_scope(
+            Some(&scope),
+            &[TraceSubmissionStatusUpdate {
+                submission_id,
+                trace_id,
+                status: "accepted".to_string(),
+                credit_points_pending: 1.0,
+                credit_points_final: Some(2.0),
+                credit_points_ledger: 1.0,
+                credit_points_total: Some(2.0),
+                explanation: vec!["Accepted after privacy checks.".to_string()],
+                delayed_credit_explanations: vec!["Regression coverage bonus: +1.0.".to_string()],
+            }],
+        )
+        .expect("status sync applies");
+
+        assert_eq!(changed, 1);
+        let records = read_local_trace_records_for_scope(Some(&scope)).expect("records read");
+        let serialized = serde_json::to_value(&records[0]).expect("record serializes");
+        let history = serialized["history"]
+            .as_array()
+            .expect("history is present");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["kind"], "status_sync");
+        assert_eq!(history[0]["server_status"], "accepted");
+        assert_eq!(history[0]["credit_delta"], 1.0);
+        assert_eq!(history[0]["delayed_credit_explanation_count"], 1);
+        assert!(history[0].get("message").is_none());
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[test]
+    fn duplicate_status_sync_does_not_append_duplicate_history() {
+        let scope = format!("trace-local-history-duplicate-test-{}", Uuid::new_v4());
+        let submission_id = Uuid::new_v4();
+        let trace_id = Uuid::new_v4();
+        write_local_trace_records_for_scope(
+            Some(&scope),
+            &[LocalTraceSubmissionRecord {
+                submission_id,
+                trace_id,
+                endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                status: LocalTraceSubmissionStatus::Submitted,
+                server_status: Some("accepted".to_string()),
+                submitted_at: Some(Utc::now()),
+                revoked_at: None,
+                privacy_risk: "low".to_string(),
+                redaction_counts: BTreeMap::new(),
+                credit_points_pending: 1.0,
+                credit_points_final: Some(1.0),
+                credit_explanation: vec!["Accepted locally.".to_string()],
+                credit_events: Vec::new(),
+                history: Vec::new(),
+                last_credit_notice_at: None,
+                credit_notice_state: TraceCreditNoticeState::default(),
+            }],
+        )
+        .expect("local record writes");
+        let update = TraceSubmissionStatusUpdate {
+            submission_id,
+            trace_id,
+            status: "accepted".to_string(),
+            credit_points_pending: 1.0,
+            credit_points_final: Some(2.0),
+            credit_points_ledger: 1.0,
+            credit_points_total: Some(2.0),
+            explanation: vec!["Accepted after privacy checks.".to_string()],
+            delayed_credit_explanations: vec!["Regression coverage bonus: +1.0.".to_string()],
+        };
+
+        apply_remote_trace_submission_statuses_for_scope(
+            Some(&scope),
+            std::slice::from_ref(&update),
+        )
+        .expect("first status sync applies");
+        apply_remote_trace_submission_statuses_for_scope(Some(&scope), &[update])
+            .expect("duplicate status sync applies");
+
+        let records = read_local_trace_records_for_scope(Some(&scope)).expect("records read");
+        let serialized = serde_json::to_value(&records[0]).expect("record serializes");
+        let history = serialized["history"]
+            .as_array()
+            .expect("history is present");
+        assert_eq!(history.len(), 1);
+        assert_eq!(records[0].credit_events.len(), 1);
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[test]
+    fn local_status_history_does_not_persist_unsafe_remote_fields() {
+        let scope = format!("trace-local-history-safety-test-{}", Uuid::new_v4());
+        let submission_id = Uuid::new_v4();
+        let trace_id = Uuid::new_v4();
+        write_local_trace_records_for_scope(
+            Some(&scope),
+            &[LocalTraceSubmissionRecord {
+                submission_id,
+                trace_id,
+                endpoint: Some("https://private.trace.example.com/v1/traces".to_string()),
+                status: LocalTraceSubmissionStatus::Submitted,
+                server_status: Some("accepted".to_string()),
+                submitted_at: Some(Utc::now()),
+                revoked_at: None,
+                privacy_risk: "low".to_string(),
+                redaction_counts: BTreeMap::new(),
+                credit_points_pending: 1.0,
+                credit_points_final: Some(1.0),
+                credit_explanation: vec!["Accepted locally.".to_string()],
+                credit_events: Vec::new(),
+                history: Vec::new(),
+                last_credit_notice_at: None,
+                credit_notice_state: TraceCreditNoticeState::default(),
+            }],
+        )
+        .expect("local record writes");
+
+        apply_remote_trace_submission_statuses_for_scope(
+            Some(&scope),
+            &[TraceSubmissionStatusUpdate {
+                submission_id,
+                trace_id,
+                status: "accepted".to_string(),
+                credit_points_pending: 1.0,
+                credit_points_final: Some(2.0),
+                credit_points_ledger: 1.0,
+                credit_points_total: Some(2.0),
+                explanation: vec![
+                    "Accepted for alice@example.com under tenant-raw-alpha at https://private.trace.example.com/v1/traces".to_string(),
+                ],
+                delayed_credit_explanations: vec![
+                    "Read /Users/alice/private/token.txt with sk-test-raw-token-123456789".to_string(),
+                ],
+            }],
+        )
+        .expect("status sync applies");
+
+        let records = read_local_trace_records_for_scope(Some(&scope)).expect("records read");
+        let safe_local_credit_projection = serde_json::json!({
+            "credit_explanation": &records[0].credit_explanation,
+            "credit_events": &records[0].credit_events,
+            "history": &records[0].history,
+        });
+        let serialized =
+            serde_json::to_string(&safe_local_credit_projection).expect("records serialize");
+        assert!(!serialized.contains("alice@example.com"));
+        assert!(!serialized.contains("tenant-raw-alpha"));
+        assert!(!serialized.contains("https://private.trace.example.com"));
+        assert!(!serialized.contains("/Users/alice/private"));
+        assert!(!serialized.contains("sk-test-raw-token"));
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[test]
     fn delayed_credit_sync_resets_notice_and_notice_marks_records() {
         let scope = format!("trace-credit-sync-test-{}", Uuid::new_v4());
         let submission_id = Uuid::new_v4();
@@ -8300,6 +8625,7 @@ mod tests {
                 credit_points_final: None,
                 credit_explanation: vec!["Accepted locally.".to_string()],
                 credit_events: Vec::new(),
+                history: Vec::new(),
                 last_credit_notice_at: Some(Utc::now()),
                 credit_notice_state: TraceCreditNoticeState::default(),
             }],
@@ -8367,6 +8693,7 @@ mod tests {
                 credit_points_final: Some(2.0),
                 credit_explanation: vec!["Previous credit explanation.".to_string()],
                 credit_events: Vec::new(),
+                history: Vec::new(),
                 last_credit_notice_at: Some(Utc::now()),
                 credit_notice_state: TraceCreditNoticeState::default(),
             }],
@@ -8425,6 +8752,7 @@ mod tests {
                 credit_points_final: Some(1.0),
                 credit_explanation: vec!["Accepted locally.".to_string()],
                 credit_events: Vec::new(),
+                history: Vec::new(),
                 last_credit_notice_at: Some(Utc::now()),
                 credit_notice_state: TraceCreditNoticeState::default(),
             }],
@@ -8481,6 +8809,7 @@ mod tests {
                 credit_points_final: Some(1.0),
                 credit_explanation: vec!["Accepted locally.".to_string()],
                 credit_events: Vec::new(),
+                history: Vec::new(),
                 last_credit_notice_at: Some(Utc::now()),
                 credit_notice_state: TraceCreditNoticeState::default(),
             }],
@@ -8555,6 +8884,7 @@ mod tests {
                         created_at: sync_event_at,
                     },
                 ],
+                history: Vec::new(),
                 last_credit_notice_at: None,
                 credit_notice_state: TraceCreditNoticeState::default(),
             },
@@ -8574,6 +8904,7 @@ mod tests {
                     "Submission is quarantined until privacy review completes.".to_string(),
                 ],
                 credit_events: Vec::new(),
+                history: Vec::new(),
                 last_credit_notice_at: None,
                 credit_notice_state: TraceCreditNoticeState::default(),
             },
@@ -8591,6 +8922,7 @@ mod tests {
                 credit_points_final: Some(0.0),
                 credit_explanation: vec!["Rejected during privacy review.".to_string()],
                 credit_events: Vec::new(),
+                history: Vec::new(),
                 last_credit_notice_at: None,
                 credit_notice_state: TraceCreditNoticeState::default(),
             },
@@ -8654,6 +8986,7 @@ mod tests {
             credit_points_final: Some(4.0),
             credit_explanation: vec!["Expired under retention policy.".to_string()],
             credit_events: Vec::new(),
+            history: Vec::new(),
             last_credit_notice_at: None,
             credit_notice_state: TraceCreditNoticeState::default(),
         };
@@ -8713,6 +9046,7 @@ mod tests {
                 credit_points_final: Some(2.5),
                 credit_explanation: vec!["Delayed utility credit posted.".to_string()],
                 credit_events: Vec::new(),
+                history: Vec::new(),
                 last_credit_notice_at: None,
                 credit_notice_state: TraceCreditNoticeState::default(),
             }],
@@ -9156,6 +9490,7 @@ mod tests {
                 credit_points_final: None,
                 credit_explanation: Vec::new(),
                 credit_events: Vec::new(),
+                history: Vec::new(),
                 last_credit_notice_at: None,
                 credit_notice_state: TraceCreditNoticeState::default(),
             }],
@@ -9232,6 +9567,7 @@ mod tests {
                 credit_points_final: None,
                 credit_explanation: Vec::new(),
                 credit_events: Vec::new(),
+                history: Vec::new(),
                 last_credit_notice_at: None,
                 credit_notice_state: TraceCreditNoticeState::default(),
             }],
@@ -9845,6 +10181,7 @@ mod tests {
                 credit_points_final: Some(1.5),
                 credit_explanation: vec!["Delayed utility credit posted.".to_string()],
                 credit_events: Vec::new(),
+                history: Vec::new(),
                 last_credit_notice_at: None,
                 credit_notice_state: TraceCreditNoticeState::default(),
             }],

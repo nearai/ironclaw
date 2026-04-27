@@ -1288,6 +1288,64 @@ CREATE TABLE IF NOT EXISTS trace_retention_job_items (
 
 CREATE INDEX IF NOT EXISTS idx_trace_retention_job_items_submission
     ON trace_retention_job_items (tenant_id, submission_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS trace_revocation_propagation_items (
+    tenant_id TEXT NOT NULL,
+    propagation_item_id TEXT NOT NULL,
+    source_submission_id TEXT NOT NULL,
+    trace_id TEXT NOT NULL,
+    target_kind TEXT NOT NULL CHECK (
+        target_kind IN (
+            'object_ref',
+            'export_manifest',
+            'export_manifest_item',
+            'vector_entry',
+            'derived_record',
+            'benchmark_artifact',
+            'ranker_artifact',
+            'credit_settlement',
+            'physical_delete_receipt'
+        )
+    ),
+    target_json TEXT NOT NULL,
+    action TEXT NOT NULL CHECK (
+        action IN (
+            'invalidate_metadata',
+            'invalidate_export_membership',
+            'invalidate_vector',
+            'invalidate_benchmark_artifact',
+            'invalidate_ranker_artifact',
+            'reverse_credit_settlement',
+            'delete_object_payload',
+            'record_physical_delete_receipt'
+        )
+    ),
+    status TEXT NOT NULL CHECK (
+        status IN ('pending', 'in_progress', 'done', 'failed', 'skipped')
+    ),
+    idempotency_key TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    last_error TEXT,
+    next_attempt_at TEXT,
+    completed_at TEXT,
+    evidence_hash TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (tenant_id, propagation_item_id),
+    UNIQUE (tenant_id, idempotency_key),
+    FOREIGN KEY (tenant_id, source_submission_id)
+        REFERENCES trace_submissions (tenant_id, submission_id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_trace_revocation_propagation_source
+    ON trace_revocation_propagation_items (tenant_id, source_submission_id, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_trace_revocation_propagation_due
+    ON trace_revocation_propagation_items (tenant_id, status, next_attempt_at, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_trace_revocation_propagation_target
+    ON trace_revocation_propagation_items (tenant_id, target_kind, updated_at DESC);
 "#,
     ),
     (
@@ -1539,6 +1597,69 @@ ALTER TABLE trace_submissions ADD COLUMN review_lease_expires_at TEXT;
 ALTER TABLE trace_submissions ADD COLUMN review_due_at TEXT;
 CREATE INDEX IF NOT EXISTS idx_trace_submissions_review_lease
     ON trace_submissions (tenant_id, status, review_lease_expires_at, received_at DESC);
+"#,
+    ),
+    (
+        37,
+        "trace_revocation_propagation_ledger",
+        r#"
+CREATE TABLE IF NOT EXISTS trace_revocation_propagation_items (
+    tenant_id TEXT NOT NULL,
+    propagation_item_id TEXT NOT NULL,
+    source_submission_id TEXT NOT NULL,
+    trace_id TEXT NOT NULL,
+    target_kind TEXT NOT NULL CHECK (
+        target_kind IN (
+            'object_ref',
+            'export_manifest',
+            'export_manifest_item',
+            'vector_entry',
+            'derived_record',
+            'benchmark_artifact',
+            'ranker_artifact',
+            'credit_settlement',
+            'physical_delete_receipt'
+        )
+    ),
+    target_json TEXT NOT NULL,
+    action TEXT NOT NULL CHECK (
+        action IN (
+            'invalidate_metadata',
+            'invalidate_export_membership',
+            'invalidate_vector',
+            'invalidate_benchmark_artifact',
+            'invalidate_ranker_artifact',
+            'reverse_credit_settlement',
+            'delete_object_payload',
+            'record_physical_delete_receipt'
+        )
+    ),
+    status TEXT NOT NULL CHECK (
+        status IN ('pending', 'in_progress', 'done', 'failed', 'skipped')
+    ),
+    idempotency_key TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    last_error TEXT,
+    next_attempt_at TEXT,
+    completed_at TEXT,
+    evidence_hash TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (tenant_id, propagation_item_id),
+    UNIQUE (tenant_id, idempotency_key),
+    FOREIGN KEY (tenant_id, source_submission_id)
+        REFERENCES trace_submissions (tenant_id, submission_id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_trace_revocation_propagation_source
+    ON trace_revocation_propagation_items (tenant_id, source_submission_id, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_trace_revocation_propagation_due
+    ON trace_revocation_propagation_items (tenant_id, status, next_attempt_at, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_trace_revocation_propagation_target
+    ON trace_revocation_propagation_items (tenant_id, target_kind, updated_at DESC);
 "#,
     ),
 ];

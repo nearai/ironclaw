@@ -50,3 +50,4 @@ V34__trace_audit_canonical_payload = 631088394933991355
 V35__trace_audit_append_order = 6533181008786793170
 V36__trace_retention_jobs = 10821929363673952473
 V37__trace_review_leases = 9227388822825160176
+V38__trace_revocation_propagation_ledger = 8622618781090729524

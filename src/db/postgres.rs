@@ -54,6 +54,7 @@ const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_export_manifest_items",
     "trace_retention_jobs",
     "trace_retention_job_items",
+    "trace_revocation_propagation_items",
 ];
 
 impl PgBackend {

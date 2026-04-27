@@ -703,6 +703,7 @@ mod tests {
                 reason: "Delayed credit synced.".to_string(),
                 created_at: Utc::now(),
             }],
+            history: Vec::new(),
             last_credit_notice_at: None,
             credit_notice_state: crate::trace_contribution::TraceCreditNoticeState::default(),
         }

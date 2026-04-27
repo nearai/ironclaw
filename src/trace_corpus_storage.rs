@@ -662,6 +662,158 @@ pub struct TraceRetentionJobItemRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceRevocationPropagationTargetKind {
+    ObjectRef,
+    ExportManifest,
+    ExportManifestItem,
+    VectorEntry,
+    DerivedRecord,
+    BenchmarkArtifact,
+    RankerArtifact,
+    CreditSettlement,
+    PhysicalDeleteReceipt,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TraceRevocationPropagationTarget {
+    ObjectRef {
+        object_ref_id: Uuid,
+    },
+    ExportManifest {
+        export_manifest_id: Uuid,
+    },
+    ExportManifestItem {
+        export_manifest_id: Uuid,
+        source_submission_id: Uuid,
+    },
+    VectorEntry {
+        vector_entry_id: Uuid,
+    },
+    DerivedRecord {
+        derived_id: Uuid,
+    },
+    BenchmarkArtifact {
+        derived_id: Option<Uuid>,
+        object_ref_id: Option<Uuid>,
+        export_manifest_id: Option<Uuid>,
+        artifact_ref: Option<String>,
+    },
+    RankerArtifact {
+        export_manifest_id: Option<Uuid>,
+        object_ref_id: Option<Uuid>,
+        artifact_ref: Option<String>,
+    },
+    CreditSettlement {
+        credit_event_id: Uuid,
+        credit_account_ref: String,
+        settlement_state_at_selection: TraceCreditSettlementState,
+    },
+    PhysicalDeleteReceipt {
+        object_ref_id: Option<Uuid>,
+        object_store: String,
+        object_key: String,
+        receipt_sha256: String,
+    },
+}
+
+impl TraceRevocationPropagationTarget {
+    pub fn kind(&self) -> TraceRevocationPropagationTargetKind {
+        match self {
+            Self::ObjectRef { .. } => TraceRevocationPropagationTargetKind::ObjectRef,
+            Self::ExportManifest { .. } => TraceRevocationPropagationTargetKind::ExportManifest,
+            Self::ExportManifestItem { .. } => {
+                TraceRevocationPropagationTargetKind::ExportManifestItem
+            }
+            Self::VectorEntry { .. } => TraceRevocationPropagationTargetKind::VectorEntry,
+            Self::DerivedRecord { .. } => TraceRevocationPropagationTargetKind::DerivedRecord,
+            Self::BenchmarkArtifact { .. } => {
+                TraceRevocationPropagationTargetKind::BenchmarkArtifact
+            }
+            Self::RankerArtifact { .. } => TraceRevocationPropagationTargetKind::RankerArtifact,
+            Self::CreditSettlement { .. } => TraceRevocationPropagationTargetKind::CreditSettlement,
+            Self::PhysicalDeleteReceipt { .. } => {
+                TraceRevocationPropagationTargetKind::PhysicalDeleteReceipt
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceRevocationPropagationAction {
+    InvalidateMetadata,
+    InvalidateExportMembership,
+    InvalidateVector,
+    InvalidateBenchmarkArtifact,
+    InvalidateRankerArtifact,
+    ReverseCreditSettlement,
+    DeleteObjectPayload,
+    RecordPhysicalDeleteReceipt,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceRevocationPropagationItemStatus {
+    Pending,
+    InProgress,
+    Done,
+    Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRevocationPropagationItemWrite {
+    pub tenant_id: String,
+    pub propagation_item_id: Uuid,
+    pub source_submission_id: Uuid,
+    pub target: TraceRevocationPropagationTarget,
+    pub action: TraceRevocationPropagationAction,
+    pub status: TraceRevocationPropagationItemStatus,
+    pub idempotency_key: String,
+    pub reason: String,
+    pub attempt_count: u32,
+    pub last_error: Option<String>,
+    pub next_attempt_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub evidence_hash: Option<String>,
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRevocationPropagationItemStatusUpdate {
+    pub status: TraceRevocationPropagationItemStatus,
+    pub attempt_count: u32,
+    pub last_error: Option<String>,
+    pub next_attempt_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub evidence_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRevocationPropagationItemRecord {
+    pub tenant_id: String,
+    pub propagation_item_id: Uuid,
+    pub source_submission_id: Uuid,
+    pub trace_id: Uuid,
+    pub target_kind: TraceRevocationPropagationTargetKind,
+    pub target: TraceRevocationPropagationTarget,
+    pub action: TraceRevocationPropagationAction,
+    pub status: TraceRevocationPropagationItemStatus,
+    pub idempotency_key: String,
+    pub reason: String,
+    pub attempt_count: u32,
+    pub last_error: Option<String>,
+    pub next_attempt_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub evidence_hash: Option<String>,
+    pub metadata: BTreeMap<String, String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TraceArtifactInvalidationCounts {
     pub object_refs_invalidated: u64,
@@ -861,6 +1013,31 @@ pub trait TraceCorpusStore: Send + Sync {
         tenant_id: &str,
         retention_job_id: Uuid,
     ) -> Result<Vec<TraceRetentionJobItemRecord>, DatabaseError>;
+
+    async fn upsert_trace_revocation_propagation_item(
+        &self,
+        item: TraceRevocationPropagationItemWrite,
+    ) -> Result<TraceRevocationPropagationItemRecord, DatabaseError>;
+
+    async fn list_trace_revocation_propagation_items(
+        &self,
+        tenant_id: &str,
+        source_submission_id: Uuid,
+    ) -> Result<Vec<TraceRevocationPropagationItemRecord>, DatabaseError>;
+
+    async fn list_due_trace_revocation_propagation_items(
+        &self,
+        tenant_id: &str,
+        now: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<TraceRevocationPropagationItemRecord>, DatabaseError>;
+
+    async fn update_trace_revocation_propagation_item_status(
+        &self,
+        tenant_id: &str,
+        propagation_item_id: Uuid,
+        update: TraceRevocationPropagationItemStatusUpdate,
+    ) -> Result<Option<TraceRevocationPropagationItemRecord>, DatabaseError>;
 
     async fn invalidate_trace_submission_artifacts(
         &self,

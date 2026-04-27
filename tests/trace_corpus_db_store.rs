@@ -13,9 +13,12 @@ mod libsql_trace_corpus_store {
         TraceExportManifestMirrorWrite, TraceExportManifestWrite, TraceObjectArtifactKind,
         TraceObjectRefWrite, TraceRetentionJobItemAction, TraceRetentionJobItemStatus,
         TraceRetentionJobItemWrite, TraceRetentionJobStatus, TraceRetentionJobWrite,
-        TraceReviewLeaseAuditAction, TraceSubmissionWrite, TraceTenantPolicyWrite,
-        TraceTombstoneWrite, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
-        TraceVectorEntryWrite, TraceWorkerKind,
+        TraceReviewLeaseAuditAction, TraceRevocationPropagationAction,
+        TraceRevocationPropagationItemStatus, TraceRevocationPropagationItemStatusUpdate,
+        TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget,
+        TraceSubmissionWrite, TraceTenantPolicyWrite, TraceTombstoneWrite,
+        TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
+        TraceWorkerKind,
     };
     use uuid::Uuid;
 
@@ -1799,6 +1802,203 @@ mod libsql_trace_corpus_store {
             .await
             .expect("list beta retention job items");
         assert!(beta_items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn libsql_store_persists_resumable_revocation_propagation_items() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let db_path = temp_dir.path().join("trace-revocation-propagation.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("create libsql backend");
+        backend.run_migrations().await.expect("run migrations");
+
+        let submission_id = Uuid::new_v4();
+        let mut alpha_submission = sample_submission("tenant-alpha", submission_id);
+        let trace_id = alpha_submission.trace_id;
+        backend
+            .upsert_trace_submission(alpha_submission.clone())
+            .await
+            .expect("insert alpha submission");
+        alpha_submission.tenant_id = "tenant-beta".to_string();
+        backend
+            .upsert_trace_submission(alpha_submission)
+            .await
+            .expect("insert beta submission");
+
+        let object_ref_id = Uuid::new_v4();
+        let alpha_pending = backend
+            .upsert_trace_revocation_propagation_item(TraceRevocationPropagationItemWrite {
+                tenant_id: "tenant-alpha".to_string(),
+                propagation_item_id: Uuid::new_v4(),
+                source_submission_id: submission_id,
+                target: TraceRevocationPropagationTarget::ObjectRef { object_ref_id },
+                action: TraceRevocationPropagationAction::InvalidateMetadata,
+                status: TraceRevocationPropagationItemStatus::Pending,
+                idempotency_key: format!("{submission_id}:object-ref:{object_ref_id}"),
+                reason: "user_revoked_trace".to_string(),
+                attempt_count: 0,
+                last_error: None,
+                next_attempt_at: None,
+                completed_at: None,
+                evidence_hash: None,
+                metadata: BTreeMap::from([(
+                    "artifact_kind".to_string(),
+                    "submitted_envelope".to_string(),
+                )]),
+            })
+            .await
+            .expect("insert pending object-ref propagation item");
+
+        let tomorrow = Utc::now() + chrono::Duration::days(1);
+        backend
+            .upsert_trace_revocation_propagation_item(TraceRevocationPropagationItemWrite {
+                tenant_id: "tenant-alpha".to_string(),
+                propagation_item_id: Uuid::new_v4(),
+                source_submission_id: submission_id,
+                target: TraceRevocationPropagationTarget::CreditSettlement {
+                    credit_event_id: Uuid::new_v4(),
+                    credit_account_ref: "credit:tenant-alpha:user".to_string(),
+                    settlement_state_at_selection: TraceCreditSettlementState::Final,
+                },
+                action: TraceRevocationPropagationAction::ReverseCreditSettlement,
+                status: TraceRevocationPropagationItemStatus::Failed,
+                idempotency_key: format!("{submission_id}:credit:settlement"),
+                reason: "awaiting_settlement_reversal_retry".to_string(),
+                attempt_count: 1,
+                last_error: Some("settlement service unavailable".to_string()),
+                next_attempt_at: Some(tomorrow),
+                completed_at: None,
+                evidence_hash: None,
+                metadata: BTreeMap::new(),
+            })
+            .await
+            .expect("insert retry-delayed credit propagation item");
+
+        backend
+            .upsert_trace_revocation_propagation_item(TraceRevocationPropagationItemWrite {
+                tenant_id: "tenant-alpha".to_string(),
+                propagation_item_id: Uuid::new_v4(),
+                source_submission_id: submission_id,
+                target: TraceRevocationPropagationTarget::PhysicalDeleteReceipt {
+                    object_ref_id: Some(object_ref_id),
+                    object_store: "trace_commons_file_store".to_string(),
+                    object_key: "tenant-alpha/submissions/body.json".to_string(),
+                    receipt_sha256: "sha256:delete-receipt".to_string(),
+                },
+                action: TraceRevocationPropagationAction::RecordPhysicalDeleteReceipt,
+                status: TraceRevocationPropagationItemStatus::Done,
+                idempotency_key: format!("{submission_id}:physical-delete:{object_ref_id}"),
+                reason: "object_payload_deleted".to_string(),
+                attempt_count: 1,
+                last_error: None,
+                next_attempt_at: None,
+                completed_at: Some(Utc::now()),
+                evidence_hash: Some("sha256:delete-receipt".to_string()),
+                metadata: BTreeMap::new(),
+            })
+            .await
+            .expect("insert completed physical delete receipt item");
+
+        backend
+            .upsert_trace_revocation_propagation_item(TraceRevocationPropagationItemWrite {
+                tenant_id: "tenant-beta".to_string(),
+                propagation_item_id: Uuid::new_v4(),
+                source_submission_id: submission_id,
+                target: TraceRevocationPropagationTarget::ExportManifestItem {
+                    export_manifest_id: Uuid::new_v4(),
+                    source_submission_id: submission_id,
+                },
+                action: TraceRevocationPropagationAction::InvalidateExportMembership,
+                status: TraceRevocationPropagationItemStatus::Pending,
+                idempotency_key: format!("{submission_id}:beta:export-item"),
+                reason: "other_tenant_pending_item".to_string(),
+                attempt_count: 0,
+                last_error: None,
+                next_attempt_at: None,
+                completed_at: None,
+                evidence_hash: None,
+                metadata: BTreeMap::new(),
+            })
+            .await
+            .expect("insert beta propagation item");
+
+        let alpha_items = backend
+            .list_trace_revocation_propagation_items("tenant-alpha", submission_id)
+            .await
+            .expect("list alpha revocation propagation items");
+        assert_eq!(alpha_items.len(), 3);
+        assert!(alpha_items.iter().any(
+            |item| item.target == TraceRevocationPropagationTarget::ObjectRef { object_ref_id }
+        ));
+        assert!(alpha_items.iter().any(|item| matches!(
+            item.target,
+            TraceRevocationPropagationTarget::CreditSettlement { .. }
+        )));
+        assert!(alpha_items.iter().all(|item| item.trace_id == trace_id));
+
+        let due_now = backend
+            .list_due_trace_revocation_propagation_items("tenant-alpha", Utc::now(), 10)
+            .await
+            .expect("list due alpha propagation items");
+        assert_eq!(due_now.len(), 1);
+        assert_eq!(
+            due_now[0].propagation_item_id,
+            alpha_pending.propagation_item_id
+        );
+
+        let updated = backend
+            .update_trace_revocation_propagation_item_status(
+                "tenant-alpha",
+                alpha_pending.propagation_item_id,
+                TraceRevocationPropagationItemStatusUpdate {
+                    status: TraceRevocationPropagationItemStatus::Done,
+                    attempt_count: 1,
+                    last_error: None,
+                    next_attempt_at: None,
+                    completed_at: Some(Utc::now()),
+                    evidence_hash: Some("sha256:object-ref-invalidated".to_string()),
+                },
+            )
+            .await
+            .expect("update alpha propagation item")
+            .expect("alpha propagation item exists");
+        assert_eq!(updated.status, TraceRevocationPropagationItemStatus::Done);
+        assert_eq!(updated.attempt_count, 1);
+        assert_eq!(
+            updated.evidence_hash.as_deref(),
+            Some("sha256:object-ref-invalidated")
+        );
+
+        let due_after_update = backend
+            .list_due_trace_revocation_propagation_items("tenant-alpha", Utc::now(), 10)
+            .await
+            .expect("list due alpha propagation items after update");
+        assert!(due_after_update.is_empty());
+
+        let beta_due = backend
+            .list_due_trace_revocation_propagation_items("tenant-beta", Utc::now(), 10)
+            .await
+            .expect("list due beta propagation items");
+        assert_eq!(beta_due.len(), 1);
+        assert_eq!(beta_due[0].tenant_id, "tenant-beta");
+
+        let missing_cross_tenant = backend
+            .update_trace_revocation_propagation_item_status(
+                "tenant-beta",
+                alpha_pending.propagation_item_id,
+                TraceRevocationPropagationItemStatusUpdate {
+                    status: TraceRevocationPropagationItemStatus::Done,
+                    attempt_count: 1,
+                    last_error: None,
+                    next_attempt_at: None,
+                    completed_at: Some(Utc::now()),
+                    evidence_hash: None,
+                },
+            )
+            .await
+            .expect("cross-tenant update remains scoped");
+        assert!(missing_cross_tenant.is_none());
     }
 
     #[tokio::test]

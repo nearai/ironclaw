@@ -20,10 +20,13 @@ use crate::trace_corpus_storage::{
     TraceObjectRefRecord, TraceObjectRefWrite, TraceRetentionJobItemAction,
     TraceRetentionJobItemRecord, TraceRetentionJobItemStatus, TraceRetentionJobItemWrite,
     TraceRetentionJobRecord, TraceRetentionJobStatus, TraceRetentionJobWrite,
-    TraceSubmissionRecord, TraceSubmissionWrite, TraceTenantPolicyRecord, TraceTenantPolicyWrite,
-    TraceTombstoneRecord, TraceTombstoneWrite, TraceVectorEntryRecord,
-    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
-    TraceWorkerKind,
+    TraceRevocationPropagationAction, TraceRevocationPropagationItemRecord,
+    TraceRevocationPropagationItemStatus, TraceRevocationPropagationItemStatusUpdate,
+    TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget,
+    TraceRevocationPropagationTargetKind, TraceSubmissionRecord, TraceSubmissionWrite,
+    TraceTenantPolicyRecord, TraceTenantPolicyWrite, TraceTombstoneRecord, TraceTombstoneWrite,
+    TraceVectorEntryRecord, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
+    TraceVectorEntryWrite, TraceWorkerKind,
 };
 
 const TRACE_SUBMISSION_COLUMNS: &str = "\
@@ -68,6 +71,11 @@ const TRACE_RETENTION_JOB_COLUMNS: &str = "\
 const TRACE_RETENTION_JOB_ITEM_COLUMNS: &str = "\
     tenant_id, retention_job_id, submission_id, action, status, reason, action_counts, \
     verified_at, created_at, updated_at";
+
+const TRACE_REVOCATION_PROPAGATION_ITEM_COLUMNS: &str = "\
+    tenant_id, propagation_item_id, source_submission_id, trace_id, target_kind, target_json, \
+    action, status, idempotency_key, reason, attempt_count, last_error, next_attempt_at, \
+    completed_at, evidence_hash, metadata_json, created_at, updated_at";
 
 async fn ensure_libsql_object_ref_belongs_to_submission(
     conn: &libsql::Connection,
@@ -630,6 +638,58 @@ fn row_to_retention_job_item(
         verified_at: get_opt_ts(row, 7),
         created_at: get_ts(row, 8),
         updated_at: get_ts(row, 9),
+    })
+}
+
+fn row_to_revocation_propagation_item(
+    row: &libsql::Row,
+) -> Result<TraceRevocationPropagationItemRecord, DatabaseError> {
+    Ok(TraceRevocationPropagationItemRecord {
+        tenant_id: get_text(row, 0),
+        propagation_item_id: parse_uuid(
+            &get_text(row, 1),
+            "trace_revocation_propagation_items.propagation_item_id",
+        )?,
+        source_submission_id: parse_uuid(
+            &get_text(row, 2),
+            "trace_revocation_propagation_items.source_submission_id",
+        )?,
+        trace_id: parse_uuid(
+            &get_text(row, 3),
+            "trace_revocation_propagation_items.trace_id",
+        )?,
+        target_kind: enum_from_storage::<TraceRevocationPropagationTargetKind>(
+            &get_text(row, 4),
+            "TraceRevocationPropagationTargetKind",
+        )?,
+        target: serde_json::from_str::<TraceRevocationPropagationTarget>(&get_text(row, 5))
+            .map_err(|e| {
+                DatabaseError::Serialization(format!(
+                    "trace revocation propagation target decode failed: {e}"
+                ))
+            })?,
+        action: enum_from_storage::<TraceRevocationPropagationAction>(
+            &get_text(row, 6),
+            "TraceRevocationPropagationAction",
+        )?,
+        status: enum_from_storage::<TraceRevocationPropagationItemStatus>(
+            &get_text(row, 7),
+            "TraceRevocationPropagationItemStatus",
+        )?,
+        idempotency_key: get_text(row, 8),
+        reason: get_text(row, 9),
+        attempt_count: get_u32(row, 10, "trace_revocation_propagation_items.attempt_count")?,
+        last_error: get_opt_text(row, 11),
+        next_attempt_at: get_opt_ts(row, 12),
+        completed_at: get_opt_ts(row, 13),
+        evidence_hash: get_opt_text(row, 14),
+        metadata: serde_json::from_str(&get_text(row, 15)).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace revocation propagation metadata decode failed: {e}"
+            ))
+        })?,
+        created_at: get_ts(row, 16),
+        updated_at: get_ts(row, 17),
     })
 }
 
@@ -2425,6 +2485,187 @@ impl TraceCorpusStore for LibSqlBackend {
             items.push(row_to_retention_job_item(&row)?);
         }
         Ok(items)
+    }
+
+    async fn upsert_trace_revocation_propagation_item(
+        &self,
+        item: TraceRevocationPropagationItemWrite,
+    ) -> Result<TraceRevocationPropagationItemRecord, DatabaseError> {
+        self.ensure_trace_tenant(&item.tenant_id).await?;
+        let target_kind = enum_to_storage(item.target.kind())?;
+        let target_json = json_string(&item.target)?;
+        let action = enum_to_storage(item.action)?;
+        let status = enum_to_storage(item.status)?;
+        let metadata_json = json_string(&item.metadata)?;
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "INSERT INTO trace_revocation_propagation_items (
+                        tenant_id, propagation_item_id, source_submission_id, trace_id,
+                        target_kind, target_json, action, status, idempotency_key, reason,
+                        attempt_count, last_error, next_attempt_at, completed_at, evidence_hash,
+                        metadata_json
+                     )
+                     SELECT ?1, ?2, ?3, submission.trace_id, ?4, ?5, ?6, ?7, ?8, ?9,
+                            ?10, ?11, ?12, ?13, ?14, ?15
+                     FROM trace_submissions submission
+                     WHERE submission.tenant_id = ?1
+                       AND submission.submission_id = ?3
+                     ON CONFLICT (tenant_id, idempotency_key) DO UPDATE
+                     SET target_kind = excluded.target_kind,
+                         target_json = excluded.target_json,
+                         action = excluded.action,
+                         status = excluded.status,
+                         reason = excluded.reason,
+                         attempt_count = excluded.attempt_count,
+                         last_error = excluded.last_error,
+                         next_attempt_at = excluded.next_attempt_at,
+                         completed_at = excluded.completed_at,
+                         evidence_hash = excluded.evidence_hash,
+                         metadata_json = excluded.metadata_json,
+                         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                     RETURNING {TRACE_REVOCATION_PROPAGATION_ITEM_COLUMNS}"
+                ),
+                libsql::params![
+                    item.tenant_id.as_str(),
+                    item.propagation_item_id.to_string(),
+                    item.source_submission_id.to_string(),
+                    target_kind,
+                    target_json,
+                    action,
+                    status,
+                    item.idempotency_key.as_str(),
+                    item.reason.as_str(),
+                    i64::from(item.attempt_count),
+                    opt_string(item.last_error),
+                    fmt_opt_ts(&item.next_attempt_at),
+                    fmt_opt_ts(&item.completed_at),
+                    opt_string(item.evidence_hash),
+                    metadata_json,
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+            .ok_or_else(|| {
+                DatabaseError::Constraint(format!(
+                    "trace revocation propagation source submission {} does not belong to tenant {}",
+                    item.source_submission_id, item.tenant_id
+                ))
+            })?;
+        row_to_revocation_propagation_item(&row)
+    }
+
+    async fn list_trace_revocation_propagation_items(
+        &self,
+        tenant_id: &str,
+        source_submission_id: Uuid,
+    ) -> Result<Vec<TraceRevocationPropagationItemRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {TRACE_REVOCATION_PROPAGATION_ITEM_COLUMNS}
+                     FROM trace_revocation_propagation_items
+                     WHERE tenant_id = ?1
+                       AND source_submission_id = ?2
+                     ORDER BY created_at ASC, propagation_item_id ASC"
+                ),
+                libsql::params![tenant_id, source_submission_id.to_string()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut items = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            items.push(row_to_revocation_propagation_item(&row)?);
+        }
+        Ok(items)
+    }
+
+    async fn list_due_trace_revocation_propagation_items(
+        &self,
+        tenant_id: &str,
+        now: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<TraceRevocationPropagationItemRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let pending = enum_to_storage(TraceRevocationPropagationItemStatus::Pending)?;
+        let failed = enum_to_storage(TraceRevocationPropagationItemStatus::Failed)?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {TRACE_REVOCATION_PROPAGATION_ITEM_COLUMNS}
+                     FROM trace_revocation_propagation_items
+                     WHERE tenant_id = ?1
+                       AND status IN (?2, ?3)
+                       AND (next_attempt_at IS NULL OR next_attempt_at <= ?4)
+                     ORDER BY created_at ASC, propagation_item_id ASC
+                     LIMIT ?5"
+                ),
+                libsql::params![tenant_id, pending, failed, fmt_ts(&now), i64::from(limit)],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut items = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            items.push(row_to_revocation_propagation_item(&row)?);
+        }
+        Ok(items)
+    }
+
+    async fn update_trace_revocation_propagation_item_status(
+        &self,
+        tenant_id: &str,
+        propagation_item_id: Uuid,
+        update: TraceRevocationPropagationItemStatusUpdate,
+    ) -> Result<Option<TraceRevocationPropagationItemRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let status = enum_to_storage(update.status)?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "UPDATE trace_revocation_propagation_items
+                     SET status = ?3,
+                         attempt_count = ?4,
+                         last_error = ?5,
+                         next_attempt_at = ?6,
+                         completed_at = ?7,
+                         evidence_hash = ?8,
+                         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                     WHERE tenant_id = ?1
+                       AND propagation_item_id = ?2
+                     RETURNING {TRACE_REVOCATION_PROPAGATION_ITEM_COLUMNS}"
+                ),
+                libsql::params![
+                    tenant_id,
+                    propagation_item_id.to_string(),
+                    status,
+                    i64::from(update.attempt_count),
+                    opt_string(update.last_error),
+                    fmt_opt_ts(&update.next_attempt_at),
+                    fmt_opt_ts(&update.completed_at),
+                    opt_string(update.evidence_hash),
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        rows.next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+            .map(|row| row_to_revocation_propagation_item(&row))
+            .transpose()
     }
 
     async fn invalidate_trace_submission_artifacts(

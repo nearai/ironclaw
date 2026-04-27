@@ -3389,6 +3389,7 @@ mod tests {
                 reason: "Delayed runtime credit posted.".to_string(),
                 created_at: chrono::Utc::now(),
             }],
+            history: Vec::new(),
             last_credit_notice_at: None,
             credit_notice_state: crate::trace_contribution::TraceCreditNoticeState::default(),
         };
