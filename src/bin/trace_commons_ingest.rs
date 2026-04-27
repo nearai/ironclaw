@@ -2043,21 +2043,40 @@ async fn submit_trace_handler(
         object_key: stored_envelope.object_key,
         artifact_receipt: stored_envelope.artifact_receipt,
     };
-    write_submission_record(&state.root, &record).map_err(internal_error)?;
-    write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
-    append_audit_event(
-        &state.root,
-        &tenant.tenant_id,
-        TraceCommonsAuditEvent::submitted(&record, &tenant),
-    )
-    .map_err(internal_error)?;
-    let mirror_result =
-        mirror_submission_to_db(&state, &tenant, &record, &derived_record, &envelope).await;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(%error, submission_id = %record.submission_id, "Trace Commons DB dual-write mirror failed");
-    }
-    enforce_db_mirror_write_result(state.as_ref(), "submission", mirror_result)
+    if state.require_db_mirror_writes {
+        let mirror_result =
+            mirror_submission_to_db(&state, &tenant, &record, &derived_record, &envelope).await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(%error, submission_id = %record.submission_id, "Trace Commons DB dual-write mirror failed");
+            cleanup_submission_file_side_writes(state.as_ref(), &record).map_err(internal_error)?;
+        }
+        enforce_db_mirror_write_result(state.as_ref(), "submission", mirror_result)
+            .map_err(internal_error)?;
+        write_submission_record(&state.root, &record).map_err(internal_error)?;
+        write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
+        append_audit_event(
+            &state.root,
+            &tenant.tenant_id,
+            TraceCommonsAuditEvent::submitted(&record, &tenant),
+        )
         .map_err(internal_error)?;
+    } else {
+        write_submission_record(&state.root, &record).map_err(internal_error)?;
+        write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
+        append_audit_event(
+            &state.root,
+            &tenant.tenant_id,
+            TraceCommonsAuditEvent::submitted(&record, &tenant),
+        )
+        .map_err(internal_error)?;
+        let mirror_result =
+            mirror_submission_to_db(&state, &tenant, &record, &derived_record, &envelope).await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(%error, submission_id = %record.submission_id, "Trace Commons DB dual-write mirror failed");
+        }
+        enforce_db_mirror_write_result(state.as_ref(), "submission", mirror_result)
+            .map_err(internal_error)?;
+    }
 
     Ok(Json(receipt_from_record(&record)))
 }
@@ -2742,22 +2761,33 @@ async fn append_credit_event_handler(
         actor_principal_ref: tenant.principal_ref.clone(),
         created_at: Utc::now(),
     };
-    append_credit_event(&state.root, &tenant.tenant_id, &event).map_err(internal_error)?;
-    let mirror_result = mirror_credit_event_to_db(&state, &event).await;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(%error, submission_id = %event.submission_id, "Trace Commons DB dual-write credit mirror failed");
+    if state.require_db_mirror_writes {
+        let mirror_result = mirror_credit_event_to_db(&state, &event).await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(%error, submission_id = %event.submission_id, "Trace Commons DB dual-write credit mirror failed");
+        }
+        enforce_db_mirror_write_result(state.as_ref(), "credit ledger event", mirror_result)
+            .map_err(internal_error)?;
+        append_credit_event(&state.root, &tenant.tenant_id, &event).map_err(internal_error)?;
+    } else {
+        append_credit_event(&state.root, &tenant.tenant_id, &event).map_err(internal_error)?;
+        let mirror_result = mirror_credit_event_to_db(&state, &event).await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(%error, submission_id = %event.submission_id, "Trace Commons DB dual-write credit mirror failed");
+        }
+        enforce_db_mirror_write_result(state.as_ref(), "credit ledger event", mirror_result)
+            .map_err(internal_error)?;
     }
-    enforce_db_mirror_write_result(state.as_ref(), "credit ledger event", mirror_result)
-        .map_err(internal_error)?;
-    append_audit_event_with_db_mirror(
+    let credit_audit_event = TraceCommonsAuditEvent::credit_mutation(
+        &tenant,
+        submission_id,
+        body.credit_points_delta,
+        event.reason.as_deref(),
+    );
+    if let Err(error) = append_audit_event_with_db_mirror(
         state.as_ref(),
         &tenant,
-        TraceCommonsAuditEvent::credit_mutation(
-            &tenant,
-            submission_id,
-            body.credit_points_delta,
-            event.reason.as_deref(),
-        ),
+        credit_audit_event.clone(),
         StorageTraceAuditAction::CreditMutate,
         StorageTraceAuditSafeMetadata::CreditMutation {
             event_type: storage_credit_event_type(body.event_type),
@@ -2767,7 +2797,15 @@ async fn append_credit_event_handler(
         },
     )
     .await
-    .map_err(internal_error)?;
+    {
+        if state.require_db_mirror_writes {
+            remove_credit_event_by_id(&state.root, &tenant.tenant_id, event.event_id)
+                .map_err(internal_error)?;
+            remove_audit_event_by_id(&state.root, &tenant.tenant_id, credit_audit_event.event_id)
+                .map_err(internal_error)?;
+        }
+        return Err(internal_error(error));
+    }
     Ok(Json(event))
 }
 
@@ -2902,6 +2940,14 @@ fn utility_credit_required_allowed_uses(
         | TraceCreditLedgerEventType::AbusePenalty => &[],
     }
 }
+
+const VECTOR_INDEX_ALLOWED_USES: &[TraceAllowedUse] = &[
+    TraceAllowedUse::Debugging,
+    TraceAllowedUse::Evaluation,
+    TraceAllowedUse::BenchmarkGeneration,
+    TraceAllowedUse::RankingModelTraining,
+    TraceAllowedUse::ModelTraining,
+];
 
 async fn process_evaluation_worker_handler(
     State(state): State<Arc<AppState>>,
@@ -4700,7 +4746,12 @@ async fn maintenance_handler(
         body.purge_expired_before,
         body.purpose.as_deref(),
     )?;
-    let response = run_maintenance(state.as_ref(), &tenant, body)
+    let vector_tenant_policy = if body.index_vectors {
+        tenant_vector_policy_for_request(state.as_ref(), &tenant).await?
+    } else {
+        None
+    };
+    let response = run_maintenance(state.as_ref(), &tenant, body, vector_tenant_policy.as_ref())
         .await
         .map_err(maintenance_error)?;
     Ok(Json(response))
@@ -4749,6 +4800,7 @@ async fn retention_maintenance_handler(
             max_export_age_hours: body.max_export_age_hours,
             purge_expired_before: body.purge_expired_before,
         },
+        None,
     )
     .await
     .map_err(maintenance_error)?;
@@ -4793,6 +4845,7 @@ async fn vector_index_handler(
 ) -> ApiResult<Json<TraceMaintenanceResponse>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_vector_operator(&tenant)?;
+    let vector_tenant_policy = tenant_vector_policy_for_request(state.as_ref(), &tenant).await?;
     let response = run_maintenance(
         state.as_ref(),
         &tenant,
@@ -4810,6 +4863,7 @@ async fn vector_index_handler(
             max_export_age_hours: None,
             purge_expired_before: None,
         },
+        vector_tenant_policy.as_ref(),
     )
     .await
     .map_err(maintenance_error)?;
@@ -5482,6 +5536,20 @@ async fn tenant_utility_credit_policy_for_request(
     Ok(policy)
 }
 
+async fn tenant_vector_policy_for_request(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> ApiResult<Option<TenantSubmissionPolicy>> {
+    let policy = tenant_submission_policy_for_request(state, tenant).await?;
+    enforce_scoped_token_any_required_use(tenant, "vector index", VECTOR_INDEX_ALLOWED_USES)?;
+    enforce_tenant_vector_policy(
+        tenant,
+        policy.as_ref(),
+        state.require_tenant_submission_policy,
+    )?;
+    Ok(policy)
+}
+
 fn enforce_scoped_token_export_policy(
     tenant: &TenantAuth,
     surface: &str,
@@ -5593,6 +5661,43 @@ fn enforce_tenant_utility_credit_policy(
         return Err(api_error(
             StatusCode::FORBIDDEN,
             "trace utility credit use is not allowed for this tenant",
+        ));
+    }
+
+    Ok(())
+}
+
+fn enforce_tenant_vector_policy(
+    tenant: &TenantAuth,
+    policy: Option<&TenantSubmissionPolicy>,
+    require_policy: bool,
+) -> ApiResult<()> {
+    let Some(policy) = policy else {
+        if require_policy {
+            tracing::warn!(
+                tenant_id = %tenant.tenant_id,
+                "Trace Commons tenant policy rejected vector indexing without tenant policy"
+            );
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "trace vector index tenant does not have a contribution policy",
+            ));
+        }
+        return Ok(());
+    };
+
+    if !policy.allowed_uses.is_empty()
+        && !VECTOR_INDEX_ALLOWED_USES
+            .iter()
+            .any(|allowed_use| policy.allowed_uses.contains(allowed_use))
+    {
+        tracing::warn!(
+            tenant_id = %tenant.tenant_id,
+            "Trace Commons tenant policy rejected vector indexing allowed use"
+        );
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "trace vector index use is not allowed for this tenant",
         ));
     }
 
@@ -5798,6 +5903,14 @@ fn record_matches_scoped_token_utility_credit_abac(
     }
 
     true
+}
+
+fn record_matches_vector_policy_abac(
+    record: &TraceCommonsSubmissionRecord,
+    tenant: &TenantAuth,
+    policy: Option<&TenantSubmissionPolicy>,
+) -> bool {
+    record_matches_utility_credit_policy_abac(record, tenant, policy, VECTOR_INDEX_ALLOWED_USES)
 }
 
 fn authenticate(state: &AppState, headers: &HeaderMap) -> ApiResult<TenantAuth> {
@@ -8872,6 +8985,33 @@ fn delete_trace_objects_for_record(
     Ok(counts)
 }
 
+fn cleanup_submission_file_side_writes(
+    state: &AppState,
+    record: &TraceCommonsSubmissionRecord,
+) -> anyhow::Result<()> {
+    remove_file_if_exists(&submission_metadata_path(
+        &state.root,
+        &record.tenant_id,
+        record.submission_id,
+    ))?;
+    remove_file_if_exists(&derived_record_path(
+        &state.root,
+        &record.tenant_id,
+        record.submission_id,
+    ))?;
+    delete_trace_objects_for_record(state, record)?;
+    Ok(())
+}
+
+fn remove_file_if_exists(path: &Path) -> anyhow::Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    std::fs::remove_file(path)
+        .with_context(|| format!("failed to remove trace file-side state {}", path.display()))?;
+    Ok(true)
+}
+
 fn read_all_submission_records(
     root: &Path,
     tenant_id: &str,
@@ -9221,13 +9361,16 @@ where
 }
 
 fn write_derived_record(root: &Path, record: &TraceCommonsDerivedRecord) -> anyhow::Result<()> {
-    let tenant_key = tenant_storage_key(&record.tenant_id);
-    let path = root
-        .join("tenants")
+    let path = derived_record_path(root, &record.tenant_id, record.submission_id);
+    write_json_file(&path, record, "trace derived record")
+}
+
+fn derived_record_path(root: &Path, tenant_id: &str, submission_id: Uuid) -> PathBuf {
+    let tenant_key = tenant_storage_key(tenant_id);
+    root.join("tenants")
         .join(tenant_key)
         .join("derived")
-        .join(format!("{}.json", record.submission_id));
-    write_json_file(&path, record, "trace derived record")
+        .join(format!("{submission_id}.json"))
 }
 
 fn read_derived_record(
@@ -9235,12 +9378,7 @@ fn read_derived_record(
     tenant_id: &str,
     submission_id: Uuid,
 ) -> anyhow::Result<Option<TraceCommonsDerivedRecord>> {
-    let tenant_key = tenant_storage_key(tenant_id);
-    let path = root
-        .join("tenants")
-        .join(tenant_key)
-        .join("derived")
-        .join(format!("{submission_id}.json"));
+    let path = derived_record_path(root, tenant_id, submission_id);
     if !path.exists() {
         return Ok(None);
     }
@@ -9284,12 +9422,7 @@ fn append_credit_event(
     tenant_id: &str,
     event: &TraceCommonsCreditLedgerRecord,
 ) -> anyhow::Result<()> {
-    let tenant_key = tenant_storage_key(tenant_id);
-    let path = root
-        .join("tenants")
-        .join(tenant_key)
-        .join("credit_ledger")
-        .join("events.jsonl");
+    let path = credit_ledger_path(root, tenant_id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create credit ledger dir {}", parent.display()))?;
@@ -9304,16 +9437,19 @@ fn append_credit_event(
         .with_context(|| format!("failed to append credit ledger {}", path.display()))
 }
 
+fn credit_ledger_path(root: &Path, tenant_id: &str) -> PathBuf {
+    let tenant_key = tenant_storage_key(tenant_id);
+    root.join("tenants")
+        .join(tenant_key)
+        .join("credit_ledger")
+        .join("events.jsonl")
+}
+
 fn read_all_credit_events(
     root: &Path,
     tenant_id: &str,
 ) -> anyhow::Result<Vec<TraceCommonsCreditLedgerRecord>> {
-    let tenant_key = tenant_storage_key(tenant_id);
-    let path = root
-        .join("tenants")
-        .join(tenant_key)
-        .join("credit_ledger")
-        .join("events.jsonl");
+    let path = credit_ledger_path(root, tenant_id);
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -9337,6 +9473,22 @@ fn read_all_credit_events(
     }
     events.sort_by_key(|event: &TraceCommonsCreditLedgerRecord| event.created_at);
     Ok(events)
+}
+
+fn remove_credit_event_by_id(root: &Path, tenant_id: &str, event_id: Uuid) -> anyhow::Result<bool> {
+    let path = credit_ledger_path(root, tenant_id);
+    if !path.exists() {
+        return Ok(false);
+    }
+    let mut events = read_all_credit_events(root, tenant_id)?;
+    let original_len = events.len();
+    events.retain(|event| event.event_id != event_id);
+    if events.len() == original_len {
+        return Ok(false);
+    }
+    rewrite_jsonl_file(&path, &events, "credit ledger")
+        .with_context(|| format!("failed to rewrite credit ledger {}", path.display()))?;
+    Ok(true)
 }
 
 fn write_revocation(root: &Path, tombstone: &TraceCommonsRevocation) -> anyhow::Result<()> {
@@ -9378,12 +9530,7 @@ fn append_audit_event(
     tenant_id: &str,
     mut event: TraceCommonsAuditEvent,
 ) -> anyhow::Result<TraceCommonsAuditEvent> {
-    let tenant_key = tenant_storage_key(tenant_id);
-    let path = root
-        .join("tenants")
-        .join(tenant_key)
-        .join("audit")
-        .join("events.jsonl");
+    let path = audit_events_path(root, tenant_id);
     let previous_event_hash = latest_audit_event_hash(&path)?
         .unwrap_or_else(|| TRACE_AUDIT_EVENT_GENESIS_HASH.to_string());
     event.previous_event_hash = Some(previous_event_hash.clone());
@@ -9402,6 +9549,14 @@ fn append_audit_event(
     writeln!(file, "{line}")
         .with_context(|| format!("failed to append audit log {}", path.display()))?;
     Ok(event)
+}
+
+fn audit_events_path(root: &Path, tenant_id: &str) -> PathBuf {
+    let tenant_key = tenant_storage_key(tenant_id);
+    root.join("tenants")
+        .join(tenant_key)
+        .join("audit")
+        .join("events.jsonl")
 }
 
 const TRACE_AUDIT_EVENT_GENESIS_HASH: &str = "sha256:genesis";
@@ -9645,12 +9800,7 @@ fn read_all_audit_events(
     root: &Path,
     tenant_id: &str,
 ) -> anyhow::Result<Vec<TraceCommonsAuditEvent>> {
-    let tenant_key = tenant_storage_key(tenant_id);
-    let path = root
-        .join("tenants")
-        .join(tenant_key)
-        .join("audit")
-        .join("events.jsonl");
+    let path = audit_events_path(root, tenant_id);
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -9676,6 +9826,51 @@ fn read_all_audit_events(
     }
     events.sort_by_key(|event| event.created_at);
     Ok(events)
+}
+
+fn remove_audit_event_by_id(root: &Path, tenant_id: &str, event_id: Uuid) -> anyhow::Result<bool> {
+    let path = audit_events_path(root, tenant_id);
+    if !path.exists() {
+        return Ok(false);
+    }
+    let mut events = read_all_audit_events(root, tenant_id)?;
+    let original_len = events.len();
+    events.retain(|event| event.event_id != event_id);
+    if events.len() == original_len {
+        return Ok(false);
+    }
+    let mut previous_event_hash = TRACE_AUDIT_EVENT_GENESIS_HASH.to_string();
+    for event in &mut events {
+        event.previous_event_hash = Some(previous_event_hash.clone());
+        event.event_hash = None;
+        let event_hash = compute_audit_event_hash(&previous_event_hash, event)?;
+        event.event_hash = Some(event_hash.clone());
+        previous_event_hash = event_hash;
+    }
+    rewrite_jsonl_file(&path, &events, "audit log")
+        .with_context(|| format!("failed to rewrite audit log {}", path.display()))?;
+    Ok(true)
+}
+
+fn rewrite_jsonl_file<T: Serialize>(path: &Path, records: &[T], label: &str) -> anyhow::Result<()> {
+    if records.is_empty() {
+        if path.exists() {
+            std::fs::remove_file(path)
+                .with_context(|| format!("failed to remove empty {label} {}", path.display()))?;
+        }
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {label} dir {}", parent.display()))?;
+    }
+    let mut body = String::new();
+    for record in records {
+        body.push_str(&serde_json::to_string(record).context("failed to serialize JSONL row")?);
+        body.push('\n');
+    }
+    std::fs::write(path, body)
+        .with_context(|| format!("failed to rewrite {label} {}", path.display()))
 }
 
 fn read_all_revocations(
@@ -9947,6 +10142,7 @@ async fn run_maintenance(
     state: &AppState,
     tenant: &TenantAuth,
     request: TraceMaintenanceRequest,
+    vector_tenant_policy: Option<&TenantSubmissionPolicy>,
 ) -> anyhow::Result<TraceMaintenanceResponse> {
     let purpose = request
         .purpose
@@ -10146,6 +10342,7 @@ async fn run_maintenance(
         request.index_vectors,
         request.dry_run,
         &purpose,
+        vector_tenant_policy,
     )
     .await?;
     let maintenance_counts = TraceMaintenanceAuditCounts {
@@ -10865,6 +11062,7 @@ async fn index_vector_metadata_from_db(
     enabled: bool,
     dry_run: bool,
     purpose: &str,
+    tenant_policy: Option<&TenantSubmissionPolicy>,
 ) -> anyhow::Result<usize> {
     if !enabled {
         return Ok(0);
@@ -10877,12 +11075,28 @@ async fn index_vector_metadata_from_db(
         .list_trace_submissions(&tenant.tenant_id)
         .await
         .context("failed to list trace submissions for vector indexing")?;
-    let accepted_submission_ids = submissions
-        .into_iter()
-        .filter(|record| record.status == StorageTraceCorpusStatus::Accepted)
-        .filter(|record| record.revoked_at.is_none() && record.purged_at.is_none())
-        .map(|record| record.submission_id)
-        .collect::<BTreeSet<_>>();
+    let mut accepted_submissions_by_id = BTreeMap::new();
+    for storage_record in submissions {
+        if storage_record.status != StorageTraceCorpusStatus::Accepted
+            || storage_record.revoked_at.is_some()
+            || storage_record.purged_at.is_some()
+        {
+            continue;
+        }
+        let Some(record) = trace_commons_record_from_storage_submission(storage_record) else {
+            continue;
+        };
+        let record = record.context("failed to parse DB trace submission for vector indexing")?;
+        if !record_matches_vector_policy_abac(&record, tenant, tenant_policy) {
+            tracing::warn!(
+                tenant_id = %tenant.tenant_id,
+                submission_id = %record.submission_id,
+                "Trace Commons tenant policy rejected vector indexing source"
+            );
+            continue;
+        }
+        accepted_submissions_by_id.insert(record.submission_id, record);
+    }
     let derived_records = db
         .list_trace_derived_records(&tenant.tenant_id)
         .await
@@ -10900,7 +11114,7 @@ async fn index_vector_metadata_from_db(
         .iter()
         .filter(|record| record.status == StorageTraceDerivedStatus::Current)
         .filter(|record| record.worker_kind == StorageTraceWorkerKind::DuplicatePrecheck)
-        .filter(|record| accepted_submission_ids.contains(&record.submission_id))
+        .filter(|record| accepted_submissions_by_id.contains_key(&record.submission_id))
         .filter(|record| record.canonical_summary_hash.is_some())
         .collect::<Vec<_>>();
 
@@ -17116,6 +17330,11 @@ mod tests {
         make_metadata_only_low_risk(&mut envelope);
         envelope.consent.scopes = vec![ConsentScope::RankingTraining];
         envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        envelope.trace_card.allowed_uses = vec![
+            TraceAllowedUse::Evaluation,
+            TraceAllowedUse::BenchmarkGeneration,
+            TraceAllowedUse::RankingModelTraining,
+        ];
         let submission_id = envelope.submission_id;
         let _ = submit_trace_handler(
             State(state.clone()),
@@ -18010,11 +18229,41 @@ mod tests {
             .expect("drop mirrored submissions table");
         let mut envelope = sample_envelope().await;
         make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+        let object_path = temp.path().join(trace_envelope_object_key(
+            "tenant-a",
+            TraceCorpusStatus::Accepted,
+            submission_id,
+        ));
 
-        let error = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
-            .await
-            .expect_err("required DB mirror writes fail closed when submit mirror fails");
+        let error = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect_err("required DB mirror writes fail closed when submit mirror fails");
         assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            read_submission_record(temp.path(), "tenant-a", submission_id)
+                .expect("metadata read after failed submit")
+                .is_none()
+        );
+        assert!(
+            read_derived_record(temp.path(), "tenant-a", submission_id)
+                .expect("derived read after failed submit")
+                .is_none()
+        );
+        assert!(
+            !object_path.exists(),
+            "failed required DB mirror submit must not leave a trace object"
+        );
+        assert!(
+            read_all_audit_events(temp.path(), "tenant-a")
+                .expect("audit reads after failed submit")
+                .iter()
+                .all(|event| event.submission_id != submission_id)
+        );
     }
 
     #[cfg(feature = "libsql")]
@@ -18045,6 +18294,10 @@ mod tests {
         )
         .await
         .expect("submission succeeds before mirror table is removed");
+        let credit_events_before =
+            read_all_credit_events(temp.path(), "tenant-a").expect("credit ledger reads");
+        let audit_events_before =
+            read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
         let conn = db.connect().await.expect("connect to mirror");
         conn.execute("DROP TABLE trace_credit_ledger", ())
             .await
@@ -18064,6 +18317,32 @@ mod tests {
         .await
         .expect_err("required DB mirror writes fail closed when credit mirror fails");
         assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        let credit_events_after =
+            read_all_credit_events(temp.path(), "tenant-a").expect("credit ledger reads after");
+        let audit_events_after =
+            read_all_audit_events(temp.path(), "tenant-a").expect("audit reads after");
+        assert_eq!(
+            credit_events_after
+                .iter()
+                .map(|event| event.event_id)
+                .collect::<Vec<_>>(),
+            credit_events_before
+                .iter()
+                .map(|event| event.event_id)
+                .collect::<Vec<_>>(),
+            "failed required DB mirror credit write must not append a file ledger row"
+        );
+        assert_eq!(
+            audit_events_after
+                .iter()
+                .map(|event| event.event_id)
+                .collect::<Vec<_>>(),
+            audit_events_before
+                .iter()
+                .map(|event| event.event_id)
+                .collect::<Vec<_>>(),
+            "failed required DB mirror credit write must not append a file audit row"
+        );
     }
 
     #[cfg(feature = "libsql")]
@@ -27646,6 +27925,215 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn vector_index_filters_sources_by_eddsa_signed_claim_allowed_uses() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-vector-signed-abac.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let mut state = test_state_with_eddsa_signed_token_verifier(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).db_mirror = Some(db.clone() as Arc<dyn Database>);
+        let exp = (Utc::now() + Duration::minutes(5)).timestamp();
+
+        let eval_submit_token = eddsa_signed_tenant_token(serde_json::json!({
+            "tenant_id": "tenant-a",
+            "role": "contributor",
+            "sub": "eval-vector-contributor",
+            "allowed_consent_scopes": ["debugging_evaluation"],
+            "allowed_uses": ["evaluation"],
+            "exp": exp
+        }));
+        let mut eval_source = sample_envelope().await;
+        make_metadata_only_low_risk(&mut eval_source);
+        eval_source.consent.scopes = vec![ConsentScope::DebuggingEvaluation];
+        eval_source.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
+        eval_source.trace_card.allowed_uses = vec![TraceAllowedUse::Evaluation];
+        let eval_submission_id = eval_source.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(&eval_submit_token),
+            Json(eval_source),
+        )
+        .await
+        .expect("evaluation-scoped signed contributor can submit vector source");
+
+        let model_submit_token = eddsa_signed_tenant_token(serde_json::json!({
+            "tenant_id": "tenant-a",
+            "role": "contributor",
+            "sub": "model-vector-contributor",
+            "allowed_consent_scopes": ["model_training"],
+            "allowed_uses": ["model_training"],
+            "exp": exp
+        }));
+        let mut model_source = sample_envelope().await;
+        make_metadata_only_low_risk(&mut model_source);
+        model_source.consent.scopes = vec![ConsentScope::ModelTraining];
+        model_source.trace_card.consent_scope = ConsentScope::ModelTraining;
+        model_source.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let model_submission_id = model_source.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(&model_submit_token),
+            Json(model_source),
+        )
+        .await
+        .expect("model-scoped signed contributor can submit model source");
+
+        let aggregate_only_vector_token = eddsa_signed_tenant_token(serde_json::json!({
+            "tenant_id": "tenant-a",
+            "role": "vector_worker",
+            "sub": "aggregate-only-vector-worker",
+            "allowed_uses": ["aggregate_analytics"],
+            "exp": exp
+        }));
+        let aggregate_error = vector_index_handler(
+            State(state.clone()),
+            auth_headers(&aggregate_only_vector_token),
+            Json(TraceVectorIndexRequest {
+                purpose: Some("aggregate_only_vector_denied".to_string()),
+                dry_run: true,
+            }),
+        )
+        .await
+        .expect_err("aggregate-only signed token cannot index derived vector artifacts");
+        assert_eq!(aggregate_error.0, StatusCode::FORBIDDEN);
+
+        let eval_vector_token = eddsa_signed_tenant_token(serde_json::json!({
+            "tenant_id": "tenant-a",
+            "role": "vector_worker",
+            "sub": "eval-vector-worker",
+            "allowed_consent_scopes": ["debugging_evaluation"],
+            "allowed_uses": ["evaluation"],
+            "exp": exp
+        }));
+        let Json(response) = vector_index_handler(
+            State(state),
+            auth_headers(&eval_vector_token),
+            Json(TraceVectorIndexRequest {
+                purpose: Some("signed_eval_vector_index".to_string()),
+                dry_run: false,
+            }),
+        )
+        .await
+        .expect("evaluation-scoped vector worker indexes only evaluation sources");
+        assert_eq!(response.vector_entries_indexed, 1);
+
+        let vector_entries = db
+            .list_trace_vector_entries("tenant-a")
+            .await
+            .expect("vector entries read");
+        assert_eq!(vector_entries.len(), 1);
+        assert_eq!(vector_entries[0].submission_id, eval_submission_id);
+        assert_ne!(vector_entries[0].submission_id, model_submission_id);
+
+        let db_audit_events = db
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("DB audit events read");
+        assert!(db_audit_events.iter().any(|event| {
+            event.action == StorageTraceAuditAction::Read
+                && event.submission_id == Some(eval_submission_id)
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("surface=vector_index"))
+        }));
+        assert!(!db_audit_events.iter().any(|event| {
+            event.action == StorageTraceAuditAction::Read
+                && event.submission_id == Some(model_submission_id)
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("surface=vector_index"))
+        }));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn vector_index_filters_sources_by_tenant_policy_allowed_uses() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-vector-policy-abac.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let mut state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+
+        let mut benchmark_source = sample_envelope().await;
+        make_metadata_only_low_risk(&mut benchmark_source);
+        benchmark_source.consent.scopes = vec![ConsentScope::BenchmarkOnly];
+        benchmark_source.trace_card.consent_scope = ConsentScope::BenchmarkOnly;
+        benchmark_source.trace_card.allowed_uses = vec![TraceAllowedUse::BenchmarkGeneration];
+        let benchmark_submission_id = benchmark_source.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(benchmark_source),
+        )
+        .await
+        .expect("benchmark source submits before vector policy is enabled");
+
+        let mut model_source = sample_envelope().await;
+        make_metadata_only_low_risk(&mut model_source);
+        model_source.consent.scopes = vec![ConsentScope::ModelTraining];
+        model_source.trace_card.consent_scope = ConsentScope::ModelTraining;
+        model_source.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let model_submission_id = model_source.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(model_source),
+        )
+        .await
+        .expect("model source submits before vector policy is enabled");
+
+        let mut tenant_policies = BTreeMap::new();
+        tenant_policies.insert(
+            "tenant-a".to_string(),
+            TenantSubmissionPolicy {
+                allowed_consent_scopes: BTreeSet::new(),
+                allowed_uses: [TraceAllowedUse::BenchmarkGeneration].into_iter().collect(),
+            },
+        );
+        Arc::make_mut(&mut state).tenant_policies = Arc::new(tenant_policies);
+
+        let Json(response) = vector_index_handler(
+            State(state),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceVectorIndexRequest {
+                purpose: Some("tenant_policy_benchmark_vector_index".to_string()),
+                dry_run: false,
+            }),
+        )
+        .await
+        .expect("tenant policy allows vector indexing over benchmark sources");
+        assert_eq!(response.vector_entries_indexed, 1);
+
+        let vector_entries = db
+            .list_trace_vector_entries("tenant-a")
+            .await
+            .expect("vector entries read");
+        assert_eq!(vector_entries.len(), 1);
+        assert_eq!(vector_entries[0].submission_id, benchmark_submission_id);
+        assert_ne!(vector_entries[0].submission_id, model_submission_id);
     }
 
     #[cfg(feature = "libsql")]
