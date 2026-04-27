@@ -26,7 +26,10 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, reload};
 
+use ironclaw_common::AppEvent;
 use ironclaw_safety::LeakDetector;
+
+use super::platform::sse::SseManager;
 
 /// Maximum number of recent log entries kept for late-joining SSE subscribers.
 const HISTORY_CAP: usize = 500;
@@ -296,6 +299,66 @@ impl WebLogLayer {
     pub fn new(broadcaster: Arc<LogBroadcaster>) -> Self {
         Self { broadcaster }
     }
+}
+
+/// Forward WARN/ERROR log entries into the chat SSE stream as
+/// `AppEvent::Warning` so the debug inspector's Activity tab can surface
+/// warnings alongside tool/LLM events.
+///
+/// The event is verbose-only at the `SseManager` layer, so only debug
+/// subscribers receive it. When `owner_id` is `Some`, warnings are
+/// scoped to that user to avoid leaking per-request log context across
+/// tenants in multi-tenant deployments; in single-user mode they may be
+/// broadcast globally.
+///
+/// Lag recovery: `broadcast::Receiver::recv()` returns
+/// `Err(RecvError::Lagged)` when the subscriber falls behind. Early code
+/// used `while let Ok(entry) = rx.recv().await`, which would permanently
+/// kill the bridge during a log storm. The `match` shape here keeps the
+/// loop alive on lag and exits only when the broadcaster closes.
+pub fn spawn_warning_bridge(
+    broadcaster: Arc<LogBroadcaster>,
+    sse: Arc<SseManager>,
+    owner_id: Option<String>,
+) {
+    let mut rx = broadcaster.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(entry) => {
+                    if entry.level != "WARN" && entry.level != "ERROR" {
+                        continue;
+                    }
+                    // `AppEvent::Warning` is verbose-only: if no debug
+                    // subscriber is connected there is nobody to deliver
+                    // to, and broadcasting would just pressure the
+                    // shared SSE buffer for non-debug clients.
+                    if !sse.has_verbose_receivers() {
+                        continue;
+                    }
+                    let event = AppEvent::Warning {
+                        source: entry.target,
+                        message: entry.message,
+                        thread_id: None,
+                    };
+                    // The tracing `LogBroadcaster` is a typed source log in
+                    // the sense of `.claude/rules/gateway-events.md`: every
+                    // `AppEvent::Warning` on the SSE stream projects from
+                    // exactly one `LogEntry` produced by `WebLogLayer`.
+                    // It is not yet listed in the rule's source-log table
+                    // (the current entries are engine `EventKind`, sandbox
+                    // `JobEvent`, and channel-lifecycle logs), so the
+                    // broadcast sites carry an explicit annotation below.
+                    match &owner_id {
+                        Some(uid) => sse.broadcast_for_user(uid, event), // projection-exempt: log source, WARN/ERROR tracing bridge → AppEvent::Warning
+                        None => sse.broadcast(event), // projection-exempt: log source, WARN/ERROR tracing bridge → AppEvent::Warning
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
 }
 
 impl<S: tracing::Subscriber> Layer<S> for WebLogLayer {

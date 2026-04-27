@@ -906,7 +906,19 @@ fn check_sender_permission(user_id: &str, channel_id: &str, is_dm: bool) -> bool
                     channel_host::LogLevel::Info,
                     &format!("Pairing request for user {}: code {}", user_id, result.code),
                 );
-                let _ = send_pairing_reply(channel_id, &result.code);
+                // Surface Slack-side send failures rather than swallowing them —
+                // #1839 (pairing dead-ends) reported users seeing "Awaiting
+                // Pairing" forever because `chat.postMessage` failed silently
+                // (e.g., missing `chat:write` scope, revoked bot token).
+                if let Err(e) = send_pairing_reply(channel_id, &result.code) {
+                    channel_host::log(
+                        channel_host::LogLevel::Error,
+                        &format!(
+                            "Slack pairing reply failed for user {}: {}. Verify the bot has `chat:write` and `im:write` scopes and that the bot token is still valid.",
+                            user_id, e
+                        ),
+                    );
+                }
             }
             Err(e) => {
                 channel_host::log(
@@ -943,7 +955,14 @@ fn send_pairing_reply(channel_id: &str, code: &str) -> Result<(), String> {
     );
 
     match result {
-        Ok(response) if response.status == 200 => Ok(()),
+        Ok(response) if response.status == 200 => {
+            // Slack's `chat.postMessage` returns HTTP 200 even on permission /
+            // scope / token failures — the actual error lives in the response
+            // body as `{"ok": false, "error": "<code>"}`. Treating HTTP 200 as
+            // success unconditionally was the root cause of pairing-reply
+            // failures being invisible (#1839).
+            slack_post_message_result(&response.body)
+        }
         Ok(response) => {
             let body_str = String::from_utf8_lossy(&response.body);
             Err(format!(
@@ -952,6 +971,29 @@ fn send_pairing_reply(channel_id: &str, code: &str) -> Result<(), String> {
             ))
         }
         Err(e) => Err(format!("HTTP request failed: {}", e)),
+    }
+}
+
+/// Interpret a Slack `chat.postMessage` response body (returned with HTTP 200)
+/// as either success or a scoped failure. Extracted so the parsing logic can
+/// be unit-tested without the `channel_host` extern — see #1839.
+fn slack_post_message_result(body: &[u8]) -> Result<(), String> {
+    let body_str = String::from_utf8_lossy(body);
+    let parsed: Option<serde_json::Value> = serde_json::from_slice(body).ok();
+    let ok = parsed
+        .as_ref()
+        .and_then(|v| v.get("ok").and_then(|b| b.as_bool()))
+        .unwrap_or(false);
+    if ok {
+        Ok(())
+    } else {
+        let error_code = parsed
+            .as_ref()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()))
+            .unwrap_or("unknown_error");
+        Err(format!(
+            "Slack rejected chat.postMessage ({error_code}): {body_str}"
+        ))
     }
 }
 
@@ -1164,6 +1206,37 @@ mod tests {
             subtype: None,
             files: None,
         }
+    }
+
+    // Regression for #1839 — pairing dead-ends were in part caused by
+    // `send_pairing_reply` treating HTTP 200 as success even when Slack's
+    // `chat.postMessage` body contained `{"ok": false}`. The failures were
+    // swallowed, the user saw no pairing code, and "Awaiting Pairing" stuck
+    // in the UI indefinitely.
+    #[test]
+    fn slack_post_message_result_accepts_ok_true() {
+        let body = br#"{"ok":true,"channel":"D123","ts":"1710000000.000100"}"#;
+        assert!(super::slack_post_message_result(body).is_ok());
+    }
+
+    #[test]
+    fn slack_post_message_result_rejects_ok_false_with_error_code() {
+        let body = br#"{"ok":false,"error":"missing_scope","needed":"chat:write"}"#;
+        let err = super::slack_post_message_result(body).expect_err("ok=false must be an error");
+        assert!(
+            err.contains("missing_scope"),
+            "error must carry the Slack error code, got: {err}"
+        );
+    }
+
+    #[test]
+    fn slack_post_message_result_rejects_empty_or_invalid_body() {
+        let err = super::slack_post_message_result(b"").expect_err("empty body must fail");
+        assert!(err.contains("unknown_error"));
+
+        let err = super::slack_post_message_result(b"not json at all")
+            .expect_err("non-JSON body must fail");
+        assert!(err.contains("unknown_error"));
     }
 
     #[test]

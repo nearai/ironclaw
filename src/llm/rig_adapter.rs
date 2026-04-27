@@ -19,7 +19,6 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 
 use std::collections::HashSet;
@@ -33,6 +32,9 @@ use crate::llm::provider::{
     ToolDefinition as IronToolDefinition, strip_unsupported_completion_params,
     strip_unsupported_tool_params,
 };
+use crate::llm::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
+#[cfg(test)]
+use crate::llm::tool_schema::{normalize_schema_strict, serialize_json_capped};
 
 /// Adapter that wraps a rig-core `CompletionModel` and implements `LlmProvider`.
 pub struct RigAdapter<M: CompletionModel> {
@@ -122,505 +124,6 @@ impl<M: CompletionModel> RigAdapter<M> {
 /// the artifact while preserving all meaningful precision for temperature.
 fn round_f32_to_f64(val: f32) -> f64 {
     ((val as f64) * 1_000_000.0).round() / 1_000_000.0
-}
-
-/// Normalize a JSON Schema for OpenAI tool-calling compliance.
-///
-/// Two transforms are applied at the provider boundary:
-///
-/// 1. **Top-level flatten.** OpenAI's tool API (Chat Completions and the
-///    Responses API alike) rejects schemas whose top level isn't
-///    `type: "object"`, or that contain top-level `oneOf`/`anyOf`/`allOf`/
-///    `enum`/`not`. The exact error is:
-///
-///    ```text
-///    Invalid schema for function '<name>': schema must have type 'object'
-///    and not have 'oneOf'/'anyOf'/'allOf'/'enum'/'not' at the top level.
-///    ```
-///
-///    Some MCP servers (notably the GitHub Copilot MCP at
-///    `api.githubcopilot.com/mcp/`) advertise tools whose top-level schema is
-///    a `oneOf` for action dispatch. There's no API-side workaround, so when
-///    we detect this we replace `parameters` with a permissive object
-///    envelope (`{type: "object", properties: {}, additionalProperties: true,
-///    required: []}`) and append the original schema to the tool description
-///    as advisory text. The MCP server still validates the actual shape on
-///    its end, so the tool keeps working — we just lose API-level schema
-///    enforcement and the LLM has to read the variant structure from the
-///    description.
-///
-/// 2. **Strict-mode recursive normalization.** OpenAI strict function
-///    calling requires:
-///    - Every object must have `"additionalProperties": false`
-///    - `"required"` must list ALL property keys
-///    - Optional fields use `"type": ["<original>", "null"]` instead of
-///      being omitted from `required`
-///    - Nested objects and array items are recursively normalized
-///
-/// `description` is a `&mut String` because the top-level flatten needs to
-/// append a hint to it. Pass an owned clone of the tool description and read
-/// it back after the call. If no flatten was needed, `description` is
-/// untouched.
-///
-/// Note on Anthropic: this normalizer is also applied to Anthropic via
-/// `RigAdapter::convert_tools`. Anthropic accepts top-level `oneOf` natively,
-/// so the flatten is slightly lossy for Claude users on tools that have a
-/// top-level union, but the description hint preserves the variant info and
-/// Claude is good at reading schemas out of free text. Keeping a single
-/// normalizer for all rig-based providers is simpler than threading
-/// per-provider flags through the adapter.
-pub(crate) fn normalize_schema_strict(schema: &JsonValue, description: &mut String) -> JsonValue {
-    let mut schema = schema.clone();
-
-    // Step 1: top-level flatten. If the schema has a forbidden top-level
-    // construct, replace it with a permissive envelope whose properties are
-    // merged from the union variants.
-    if needs_top_level_flatten(&schema) {
-        flatten_top_level(&mut schema, description);
-        // The flattened envelope is deliberately permissive
-        // (additionalProperties: true, required: []) so the LLM can
-        // send fields from any variant. Running normalize_schema_recursive
-        // on the ROOT would clobber that (force additionalProperties: false,
-        // required: all keys). But the individual merged properties still
-        // need normalization — e.g. array items must be objects, nested
-        // objects need strict-mode treatment. So we normalize each property
-        // individually without touching the top-level envelope.
-        if let Some(props) = schema.get_mut("properties").and_then(|v| v.as_object_mut()) {
-            for (_key, prop_schema) in props.iter_mut() {
-                normalize_schema_recursive(prop_schema);
-            }
-        }
-        // Skip the post-normalization strict-mode validator for the flatten
-        // path. The flattened envelope is intentionally non-strict
-        // (additionalProperties: true, required: []), so the strict
-        // validator would fire a false positive on every flattened schema
-        // — 12x per LLM call when there are 12 flattened tools, drowning
-        // real signals in noise. The individual properties were already
-        // normalized recursively above; the top-level permissive shape is
-        // by design, not a bug.
-        return schema;
-    }
-
-    // Step 2: recursive strict-mode normalization (non-flatten path).
-    normalize_schema_recursive(&mut schema);
-
-    // Step 3: post-normalization validation (non-flatten path only).
-    // The normalizer handles the rules it knows about, but OpenAI's
-    // strict-mode spec has more rules than any single normalizer pass is
-    // likely to cover perfectly — and new rules appear without notice.
-    // Running the CI validator as a debug-level post-check catches anything
-    // the normalizer missed so we get a local diagnostic instead of a
-    // runtime HTTP 400. Flattened schemas skip this check (see above).
-    //
-    // This is deliberately `debug!` (not `warn!`) because the schema
-    // still goes through — the tool remains usable, and the LLM provider
-    // will surface the 400 if OpenAI actually rejects it. The diagnostic
-    // value is for developers adding new tools or modifying the normalizer.
-    if let Err(violations) =
-        crate::tools::schema_validator::validate_strict_schema(&schema, "<post-normalize>")
-    {
-        tracing::debug!(
-            violations = ?violations,
-            "normalize_schema_strict output has {} strict-mode violation(s) — \
-             the tool is still usable but the LLM provider may reject the schema",
-            violations.len()
-        );
-    }
-
-    schema
-}
-
-/// JSON Schema keywords that OpenAI's tool API rejects at the top level of
-/// a tool's `parameters`. Listed in priority order so that, when more than
-/// one is present, we report the most semantically meaningful one in the
-/// description hint.
-const FORBIDDEN_TOP_LEVEL: &[&str] = &["oneOf", "anyOf", "allOf", "enum", "not"];
-
-/// Detect which forbidden top-level keyword (if any) `schema` has, returning
-/// the keyword name so the caller can pick a precise hint string. Returns
-/// `None` for an object schema with none of the forbidden constructs (the
-/// caller may still want to flatten if `type` isn't `"object"`).
-fn detect_forbidden_top_level(schema: &JsonValue) -> Option<&'static str> {
-    let map = schema.as_object()?;
-    FORBIDDEN_TOP_LEVEL
-        .iter()
-        .find(|keyword| map.contains_key(**keyword))
-        .copied()
-}
-
-/// True if `schema`'s top level would be rejected by OpenAI's tool API.
-fn needs_top_level_flatten(schema: &JsonValue) -> bool {
-    match schema {
-        JsonValue::Object(map) => {
-            let has_forbidden = FORBIDDEN_TOP_LEVEL.iter().any(|k| map.contains_key(*k));
-            // Accept both `"type": "object"` and `"type": ["object", "null"]`
-            // (or any array containing "object"). The array form is valid
-            // JSON Schema for a nullable object and some upstream providers
-            // / `make_nullable` produce it. Treating it as bad_type would
-            // silently flatten a schema that OpenAI might actually accept,
-            // discarding all its properties.
-            let is_object_type = match map.get("type") {
-                Some(JsonValue::String(s)) => s == "object",
-                Some(JsonValue::Array(arr)) => arr
-                    .iter()
-                    .any(|v| matches!(v, JsonValue::String(s) if s == "object")),
-                _ => false,
-            };
-            has_forbidden || !is_object_type
-        }
-        // Schema isn't even a JSON object — definitely not OpenAI-compatible.
-        _ => true,
-    }
-}
-
-/// Pick a description hint that matches the actual JSON Schema construct
-/// that triggered the flatten. The previous one-size-fits-all hint
-/// ("pick one variant and pass its fields") was correct for `oneOf` /
-/// `anyOf` but actively misleading for `allOf` (where the LLM should pass
-/// fields from ALL variants), `enum` (one of the literal values), and `not`
-/// (any object that doesn't match a constraint).
-fn schema_flatten_hint_intro(detected: Option<&'static str>) -> &'static str {
-    match detected {
-        Some("oneOf") | Some("anyOf") => {
-            "\n\nUpstream JSON schema (advisory; the actual top-level union has been \
-             flattened so the OpenAI tool API will accept the tool — pick ONE variant \
-             and pass its fields as a flat object):\n"
-        }
-        Some("allOf") => {
-            "\n\nUpstream JSON schema (advisory; the actual top-level intersection has \
-             been flattened so the OpenAI tool API will accept the tool — pass fields \
-             from ALL variants combined as a flat object):\n"
-        }
-        Some("enum") => {
-            "\n\nUpstream JSON schema (advisory; the actual top-level was an enum, \
-             which OpenAI's tool API doesn't allow at the top level — pass one of \
-             the listed values as the parameters object):\n"
-        }
-        Some("not") => {
-            "\n\nUpstream JSON schema (advisory; the actual top-level was a `not` \
-             constraint, which OpenAI's tool API doesn't allow at the top level — \
-             pass any object that does NOT match the constraint):\n"
-        }
-        // Fallback: schema wasn't an object, or had some unrecognized
-        // shape that we still flattened defensively. The MCP server will
-        // validate the actual call shape on its end, so the LLM just has
-        // to send something the upstream accepts.
-        _ => {
-            "\n\nUpstream JSON schema (advisory; the original was not a top-level \
-             object schema, so we flattened to a free-form object — see below for \
-             the actual constraints the upstream server will enforce):\n"
-        }
-    }
-}
-
-/// Walk the top-level `oneOf` / `anyOf` / `allOf` arrays in `schema` and
-/// collect every property the variants declare into a single map. First-write
-/// wins on conflicting types — if two variants declare the same field name
-/// with different schemas, the first one's schema is kept and the second is
-/// dropped. The full schema still goes into the description hint, so the
-/// truncation we lose here is recoverable from there.
-///
-/// This is the structured-info recovery layer for `flatten_top_level`. The
-/// LLM now sees a real `properties` map instead of `{}`, so it can do
-/// schema-based reasoning about which fields exist across the union — even
-/// though strict-mode validation is disabled at the API layer.
-fn merge_top_level_variant_properties(schema: &JsonValue) -> serde_json::Map<String, JsonValue> {
-    let mut merged = serde_json::Map::new();
-    let Some(obj) = schema.as_object() else {
-        return merged;
-    };
-    for keyword in &["oneOf", "anyOf", "allOf"] {
-        let Some(JsonValue::Array(variants)) = obj.get(*keyword) else {
-            continue;
-        };
-        for variant in variants {
-            let Some(props) = variant.get("properties").and_then(|v| v.as_object()) else {
-                continue;
-            };
-            for (key, value) in props {
-                if !merged.contains_key(key) {
-                    merged.insert(key.clone(), value.clone());
-                }
-            }
-        }
-    }
-    merged
-}
-
-/// Serialize a `serde_json::Value` into a string, stopping after `max_bytes`.
-///
-/// Returns `Ok(s)` where `s.len() <= max_bytes` (truncated on a char
-/// boundary if the serialized output exceeds the budget), or `Err(())` if
-/// serialization itself fails (shouldn't happen for well-formed `Value`s).
-///
-/// This bounds the actual heap allocation regardless of schema structure —
-/// it handles both many-node schemas (deep recursion) AND few-node schemas
-/// with multi-MB string values (the gap the previous `count_json_nodes`
-/// approach missed). The writer stops accepting bytes once the budget is
-/// reached, so the serde serializer does minimal work after that point.
-fn serialize_json_capped(value: &JsonValue, max_bytes: usize) -> Result<String, ()> {
-    use std::io::Write;
-
-    struct CappedWriter {
-        buf: Vec<u8>,
-        max: usize,
-    }
-
-    impl Write for CappedWriter {
-        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-            let remaining = self.max.saturating_sub(self.buf.len());
-            if remaining == 0 {
-                // Accept the bytes (don't error) but don't store them.
-                // serde_json doesn't check for short writes so returning
-                // Ok(data.len()) is safe — it just thinks we consumed them.
-                return Ok(data.len());
-            }
-            let to_write = data.len().min(remaining);
-            self.buf.extend_from_slice(&data[..to_write]);
-            Ok(data.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    // Allocate slightly over max to reduce the chance of a realloc on
-    // the last write when we're right at the boundary.
-    let writer = CappedWriter {
-        buf: Vec::with_capacity(max_bytes.min(8192)),
-        max: max_bytes,
-    };
-    let mut ser = serde_json::Serializer::new(writer);
-    serde::Serialize::serialize(value, &mut ser).map_err(|_| ())?;
-    let buf = ser.into_inner().buf;
-    // serde_json v1 emits raw UTF-8 for non-ASCII characters (e.g. CJK
-    // characters in property descriptions), so the byte cap can cut
-    // mid-codepoint. Use `from_utf8` with a fallback to `valid_up_to()`
-    // to trim to the last complete codepoint instead of dropping the
-    // entire hint on a UTF-8 error.
-    match String::from_utf8(buf) {
-        Ok(s) => Ok(s),
-        Err(e) => {
-            let valid_len = e.utf8_error().valid_up_to();
-            let mut buf = e.into_bytes();
-            buf.truncate(valid_len);
-            // safety: valid_up_to guarantees the prefix is valid UTF-8,
-            // so from_utf8_unchecked is sound here.
-            Ok(unsafe { String::from_utf8_unchecked(buf) })
-        }
-    }
-}
-
-/// Replace `parameters` with a permissive object envelope and append the
-/// original schema to `description` as advisory text. Truncates the hint on a
-/// char boundary if the original schema is too large to fit in a reasonable
-/// description budget. The hint introduction is keyword-aware so the LLM
-/// gets the right shape guidance for `oneOf`/`anyOf`/`allOf`/`enum`/`not`.
-///
-/// The flattened envelope is no longer empty — `merge_top_level_variant_properties`
-/// walks the union variants and rebuilds a flat `properties` map so the LLM
-/// has structured field hints to reason about. Strict-mode validation is
-/// still disabled (`additionalProperties: true`, `required: []`) so the LLM
-/// is free to send any combination of variant fields and the upstream MCP
-/// server enforces the actual constraints.
-fn flatten_top_level(parameters: &mut JsonValue, description: &mut String) {
-    // OpenAI has no documented hard limit on tool description length, but
-    // long descriptions waste prompt budget on every turn. 1500 bytes fits a
-    // typical MCP dispatcher schema and still leaves room for the original
-    // tool description above it.
-    const SCHEMA_HINT_MAX_BYTES: usize = 1500;
-
-    let detected = detect_forbidden_top_level(parameters);
-    let merged_properties = merge_top_level_variant_properties(parameters);
-
-    // Size-capped serialization: bounds the heap allocation to
-    // SCHEMA_HINT_MAX_BYTES regardless of schema structure. Handles both
-    // many-node schemas (deep recursion) and few-node schemas with multi-MB
-    // string values. The writer silently discards bytes past the cap so the
-    // serde serializer does minimal useful work after that point.
-    if let Ok(capped_text) = serialize_json_capped(parameters, SCHEMA_HINT_MAX_BYTES)
-        && !capped_text.is_empty()
-    {
-        let hint = if capped_text.len() >= SCHEMA_HINT_MAX_BYTES {
-            format!("{capped_text} ... (truncated)")
-        } else {
-            capped_text
-        };
-        description.push_str(schema_flatten_hint_intro(detected));
-        description.push_str(&hint);
-    }
-
-    *parameters = serde_json::json!({
-        "type": "object",
-        "properties": JsonValue::Object(merged_properties),
-        "additionalProperties": true,
-        "required": []
-    });
-}
-
-fn normalize_schema_recursive(schema: &mut JsonValue) {
-    let obj = match schema.as_object_mut() {
-        Some(o) => o,
-        None => return,
-    };
-
-    // Recurse into combinators: anyOf, oneOf, allOf
-    for key in &["anyOf", "oneOf", "allOf"] {
-        if let Some(JsonValue::Array(variants)) = obj.get_mut(*key) {
-            for variant in variants.iter_mut() {
-                normalize_schema_recursive(variant);
-            }
-        }
-    }
-
-    // Recurse into array items. OpenAI strict mode requires `items` to be
-    // a JSON Schema object for every array-typed property. Schema generators
-    // (schemars, serde_json) produce `"items": true` or omit `items`
-    // entirely for `Vec<serde_json::Value>` (meaning "accept any item"),
-    // which OpenAI rejects with:
-    //   "array schema items is not an object"
-    // Ensure `items` exists and is an object before recursing.
-    let is_array = obj
-        .get("type")
-        .map(|t| {
-            t.as_str() == Some("array")
-                || t.as_array()
-                    .is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some("array")))
-        })
-        .unwrap_or(false);
-    if is_array {
-        let needs_fix = match obj.get("items") {
-            None => true,                        // missing entirely
-            Some(JsonValue::Object(_)) => false, // already a schema object
-            _ => true,                           // bool, string, array, etc.
-        };
-        if needs_fix {
-            obj.insert("items".to_string(), serde_json::json!({}));
-        }
-    }
-    if let Some(items) = obj.get_mut("items") {
-        normalize_schema_recursive(items);
-    }
-
-    // Recurse into `not`, `if`, `then`, `else`
-    for key in &["not", "if", "then", "else"] {
-        if let Some(sub) = obj.get_mut(*key) {
-            normalize_schema_recursive(sub);
-        }
-    }
-
-    // Only apply object-level normalization if this schema has "properties"
-    // (explicit object schema) or type == "object"
-    let is_object = obj
-        .get("type")
-        .and_then(|t| t.as_str())
-        .map(|t| t == "object")
-        .unwrap_or(false);
-    let has_properties = obj.contains_key("properties");
-
-    if !is_object && !has_properties {
-        return;
-    }
-
-    // Ensure "type": "object" is present
-    if !obj.contains_key("type") && has_properties {
-        obj.insert("type".to_string(), JsonValue::String("object".to_string()));
-    }
-
-    // Force additionalProperties: false (overwrite any existing value)
-    obj.insert("additionalProperties".to_string(), JsonValue::Bool(false));
-
-    // Ensure "properties" exists
-    if !obj.contains_key("properties") {
-        obj.insert(
-            "properties".to_string(),
-            JsonValue::Object(serde_json::Map::new()),
-        );
-    }
-
-    // Collect current required set
-    let current_required: std::collections::HashSet<String> = obj
-        .get("required")
-        .and_then(|r| r.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // Get all property keys (sorted for deterministic output)
-    let all_keys: Vec<String> = obj
-        .get("properties")
-        .and_then(|p| p.as_object())
-        .map(|props| {
-            let mut keys: Vec<String> = props.keys().cloned().collect();
-            keys.sort();
-            keys
-        })
-        .unwrap_or_default();
-
-    // For properties NOT in the original required list, make them nullable
-    if let Some(JsonValue::Object(props)) = obj.get_mut("properties") {
-        for key in &all_keys {
-            // Recurse into each property's schema FIRST (before make_nullable,
-            // which may change the type to an array and prevent object detection)
-            if let Some(prop_schema) = props.get_mut(key) {
-                normalize_schema_recursive(prop_schema);
-            }
-            // Then make originally-optional properties nullable
-            if !current_required.contains(key)
-                && let Some(prop_schema) = props.get_mut(key)
-            {
-                make_nullable(prop_schema);
-            }
-        }
-    }
-
-    // Set required to ALL property keys
-    let required_value: Vec<JsonValue> = all_keys.into_iter().map(JsonValue::String).collect();
-    obj.insert("required".to_string(), JsonValue::Array(required_value));
-}
-
-/// Make a property schema nullable for OpenAI strict mode.
-///
-/// If it has a simple `"type": "<T>"`, converts to `"type": ["<T>", "null"]`.
-/// If it already has an array type, adds "null" if not present.
-/// Otherwise, wraps with `anyOf: [<existing>, {"type": "null"}]`.
-fn make_nullable(schema: &mut JsonValue) {
-    let obj = match schema.as_object_mut() {
-        Some(o) => o,
-        None => return,
-    };
-
-    if let Some(type_val) = obj.get("type").cloned() {
-        match type_val {
-            // "type": "string" → "type": ["string", "null"]
-            JsonValue::String(ref t) if t != "null" => {
-                obj.insert("type".to_string(), serde_json::json!([t, "null"]));
-            }
-            // "type": ["string", "integer"] → add "null" if missing
-            JsonValue::Array(ref arr) => {
-                let has_null = arr.iter().any(|v| v.as_str() == Some("null"));
-                if !has_null {
-                    let mut new_arr = arr.clone();
-                    new_arr.push(JsonValue::String("null".to_string()));
-                    obj.insert("type".to_string(), JsonValue::Array(new_arr));
-                }
-            }
-            _ => {}
-        }
-    } else {
-        // No "type" key — wrap with anyOf including null
-        // (handles enum-only, $ref, or combinator schemas)
-        let existing = JsonValue::Object(obj.clone());
-        obj.clear();
-        obj.insert(
-            "anyOf".to_string(),
-            serde_json::json!([existing, {"type": "null"}]),
-        );
-    }
 }
 
 /// Convert IronClaw messages to rig-core format.
@@ -815,7 +318,11 @@ fn convert_tools(tools: &[IronToolDefinition]) -> Vec<RigToolDefinition> {
         .iter()
         .map(|t| {
             let mut description = t.description.clone();
-            let parameters = normalize_schema_strict(&t.parameters, &mut description);
+            let parameters = shape_tool_schema(
+                ToolSchemaPolicy::StrictOpenAi,
+                &t.parameters,
+                &mut description,
+            );
             RigToolDefinition {
                 name: t.name.clone(),
                 description,
@@ -1644,22 +1151,26 @@ mod tests {
         // Small schema under the cap: full output, no truncation.
         let small = serde_json::json!({"a": 1});
         let result = serialize_json_capped(&small, 1500).expect("should serialize");
-        assert_eq!(result, r#"{"a":1}"#);
+        assert_eq!(result.text, r#"{"a":1}"#);
+        assert!(!result.was_truncated);
 
         // Exactly at the cap: should produce exactly cap bytes (or fewer
         // if the serialized output happens to be shorter).
         let result = serialize_json_capped(&small, 7).expect("should serialize");
-        assert_eq!(result.len(), 7); // {"a":1} is exactly 7 bytes
+        assert_eq!(result.text.len(), 7); // {"a":1} is exactly 7 bytes
+        assert!(!result.was_truncated);
 
         // Over the cap: output is truncated. The JSON will be malformed
         // (cut mid-stream) but that's OK — the caller adds "... (truncated)".
         let result = serialize_json_capped(&small, 4).expect("should serialize");
-        assert_eq!(result.len(), 4);
-        assert_eq!(result, r#"{"a""#);
+        assert_eq!(result.text.len(), 4);
+        assert_eq!(result.text, r#"{"a""#);
+        assert!(result.was_truncated);
 
         // Cap of 0: empty output.
         let result = serialize_json_capped(&small, 0).expect("should serialize");
-        assert!(result.is_empty());
+        assert!(result.text.is_empty());
+        assert!(result.was_truncated);
     }
 
     /// Size-capped serializer with multi-MB string values: the cap must
@@ -1672,12 +1183,22 @@ mod tests {
         });
         let result = serialize_json_capped(&big, 1500).expect("should serialize");
         assert!(
-            result.len() <= 1500,
+            result.text.len() <= 1500,
             "capped serializer must bound output to max_bytes; got {} bytes",
-            result.len()
+            result.text.len()
         );
+        assert!(result.was_truncated);
         // The output should start with valid JSON structure.
-        assert!(result.starts_with(r#"{"description":""#));
+        assert!(result.text.starts_with(r#"{"description":""#));
+    }
+
+    #[test]
+    fn test_serialize_json_capped_reports_multibyte_truncation() {
+        let value = serde_json::json!({"description": "α"});
+        let result = serialize_json_capped(&value, 17).expect("should serialize");
+
+        assert_eq!(result.text, r#"{"description":""#);
+        assert!(result.was_truncated);
     }
 
     /// Caller-level regression test: drives `convert_tools` (the rig-based

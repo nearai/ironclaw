@@ -27,6 +27,7 @@ use std::sync::RwLock;
 
 use crate::secrets::{
     CredentialLocation, CredentialMapping, DecryptedSecret, SecretError, SecretsStore,
+    host_matches_pattern,
 };
 use crate::tools::wasm::OAuthRefreshConfig;
 
@@ -160,6 +161,7 @@ impl SharedCredentialRegistry {
     }
 
     /// Check if any credential mapping matches this host (sync, for requires_approval).
+    /// Uses host-only matching so path-scoped credentials still trigger approval.
     pub fn has_credentials_for_host(&self, host: &str) -> bool {
         let guard = match self.mappings.read() {
             Ok(guard) => guard,
@@ -170,35 +172,47 @@ impl SharedCredentialRegistry {
                 poisoned.into_inner()
             }
         };
-        guard.iter().any(|mapping| {
-            mapping
-                .host_patterns
-                .iter()
-                .any(|pattern| host_matches_pattern(host, pattern))
-        })
+        guard.iter().any(|mapping| mapping.matches_host(host))
     }
 
-    /// Get all credential mappings matching a host (for injection).
+    /// Host-only match, defaulting path to `/`. See `find_for_url`.
+    #[deprecated(
+        note = "use find_for_url(host, path) so path-scoped mappings aren't silently dropped"
+    )]
     pub fn find_for_host(&self, host: &str) -> Vec<CredentialMapping> {
+        self.find_for_url(host, "/")
+    }
+
+    /// Get all credential mappings matching a host and path, ordered by
+    /// **ascending path specificity** (longest matching prefix last). Callers
+    /// iterate and merge headers/query params under last-write-wins, so the
+    /// most-specific mapping overrides any conflicts from less-specific
+    /// mappings. Ties (same specificity) break alphabetically on
+    /// `secret_name` for deterministic ordering regardless of registration
+    /// order.
+    pub fn find_for_url(&self, host: &str, path: &str) -> Vec<CredentialMapping> {
         let guard = match self.mappings.read() {
             Ok(guard) => guard,
             Err(poisoned) => {
                 tracing::warn!(
-                    "SharedCredentialRegistry RwLock poisoned during find_for_host; recovering"
+                    "SharedCredentialRegistry RwLock poisoned during find_for_url; recovering"
                 );
                 poisoned.into_inner()
             }
         };
-        guard
+        let mut matched: Vec<CredentialMapping> = guard
             .iter()
-            .filter(|mapping| {
-                mapping
-                    .host_patterns
-                    .iter()
-                    .any(|pattern| host_matches_pattern(host, pattern))
-            })
+            .filter(|mapping| mapping.matches(host, path))
             .cloned()
-            .collect()
+            .collect();
+        matched.sort_by(|a, b| {
+            let spec_a = crate::secrets::match_specificity(&a.path_patterns, path);
+            let spec_b = crate::secrets::match_specificity(&b.path_patterns, path);
+            spec_a
+                .cmp(&spec_b)
+                .then_with(|| a.secret_name.cmp(&b.secret_name))
+        });
+        matched
     }
 
     pub fn oauth_refresh_for_secret(&self, secret_name: &str) -> Option<OAuthRefreshConfig> {
@@ -258,7 +272,10 @@ impl CredentialInjector {
         }
     }
 
-    /// Find credentials that should be injected for a given host.
+    /// Host-only match, ignores `path_patterns`. See `find_credentials_for_url`.
+    #[deprecated(
+        note = "use find_credentials_for_url(host, path) so path-scoped mappings aren't silently applied to every path"
+    )]
     pub fn find_credentials_for_host(&self, host: &str) -> Vec<&CredentialMapping> {
         self.mappings
             .values()
@@ -271,19 +288,61 @@ impl CredentialInjector {
             .collect()
     }
 
-    /// Inject credentials for an HTTP request.
-    ///
-    /// Returns the headers and query params to add to the request.
+    /// Find credentials that should be injected for a given host + path,
+    /// ordered by ascending path specificity (so more-specific mappings win
+    /// a last-write-wins merge on conflicting headers). `self.mappings` is a
+    /// `HashMap` whose iteration order is nondeterministic, so the sort is
+    /// also what makes the returned order stable across runs.
+    pub fn find_credentials_for_url(&self, host: &str, path: &str) -> Vec<&CredentialMapping> {
+        let mut matched: Vec<&CredentialMapping> = self
+            .mappings
+            .values()
+            .filter(|mapping| mapping.matches(host, path))
+            .collect();
+        matched.sort_by(|a, b| {
+            let spec_a = crate::secrets::match_specificity(&a.path_patterns, path);
+            let spec_b = crate::secrets::match_specificity(&b.path_patterns, path);
+            spec_a
+                .cmp(&spec_b)
+                .then_with(|| a.secret_name.cmp(&b.secret_name))
+        });
+        matched
+    }
+
+    /// Host-only inject. See `inject_for_url`.
+    #[deprecated(note = "use inject_for_url(user_id, host, path, store) instead")]
     pub async fn inject(
         &self,
         user_id: &str,
         host: &str,
         store: &dyn SecretsStore,
     ) -> Result<InjectedCredentials, InjectionError> {
+        #[allow(deprecated)]
         let matching_mappings = self.find_credentials_for_host(host);
+        self.inject_from_mappings(user_id, matching_mappings, store)
+            .await
+    }
 
+    /// Inject credentials for an HTTP request, honoring path scoping.
+    pub async fn inject_for_url(
+        &self,
+        user_id: &str,
+        host: &str,
+        path: &str,
+        store: &dyn SecretsStore,
+    ) -> Result<InjectedCredentials, InjectionError> {
+        let matching_mappings = self.find_credentials_for_url(host, path);
+        self.inject_from_mappings(user_id, matching_mappings, store)
+            .await
+    }
+
+    async fn inject_from_mappings(
+        &self,
+        user_id: &str,
+        matching_mappings: Vec<&CredentialMapping>,
+        store: &dyn SecretsStore,
+    ) -> Result<InjectedCredentials, InjectionError> {
         if matching_mappings.is_empty() {
-            // No credentials needed for this host
             return Ok(InjectedCredentials::empty());
         }
 
@@ -371,35 +430,6 @@ pub(crate) fn inject_credential(
     }
 }
 
-/// Check if a host matches a pattern (supports wildcards).
-pub(crate) fn host_matches_pattern(host: &str, pattern: &str) -> bool {
-    if pattern == host {
-        return true;
-    }
-
-    // Support patterns with port: "127.0.0.1:8080" matches host "127.0.0.1"
-    // (parsed_url.host_str() strips the port, but credential specs may include it)
-    if let Some(pattern_host) = pattern.split(':').next()
-        && pattern.contains(':')
-        && pattern_host == host
-    {
-        return true;
-    }
-
-    // Support wildcard: *.example.com matches sub.example.com
-    if let Some(suffix) = pattern.strip_prefix("*.")
-        && host.ends_with(suffix)
-        && host.len() > suffix.len()
-    {
-        let prefix = &host[..host.len() - suffix.len()];
-        if prefix.ends_with('.') || prefix.is_empty() {
-            return true;
-        }
-    }
-
-    false
-}
-
 /// Simple base64 encoding (avoids extra dependency).
 fn base64_encode(input: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -434,6 +464,7 @@ fn base64_encode(input: &[u8]) -> String {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // tests exercise `find_for_host` / `inject` on purpose
 mod tests {
     use std::collections::HashMap;
 
@@ -442,38 +473,10 @@ mod tests {
         SecretsStore,
     };
     use crate::testing::credentials::{TEST_OPENAI_API_KEY, test_secrets_store};
-    use crate::tools::wasm::credential_injector::{
-        CredentialInjector, base64_encode, host_matches_pattern,
-    };
+    use crate::tools::wasm::credential_injector::{CredentialInjector, base64_encode};
 
     fn test_store() -> InMemorySecretsStore {
         test_secrets_store()
-    }
-
-    #[test]
-    fn test_host_matches_exact() {
-        assert!(host_matches_pattern("api.openai.com", "api.openai.com"));
-        assert!(!host_matches_pattern("api.openai.com", "other.com"));
-    }
-
-    #[test]
-    fn test_host_matches_wildcard() {
-        assert!(host_matches_pattern("api.example.com", "*.example.com"));
-        assert!(host_matches_pattern("sub.api.example.com", "*.example.com"));
-        assert!(!host_matches_pattern("example.com", "*.example.com"));
-    }
-
-    #[test]
-    fn test_host_matches_pattern_with_port() {
-        // Pattern includes port but host_str() returns without port
-        assert!(host_matches_pattern("127.0.0.1", "127.0.0.1:8080"));
-        assert!(host_matches_pattern("localhost", "localhost:3000"));
-        assert!(host_matches_pattern(
-            "api.example.com",
-            "api.example.com:443"
-        ));
-        // Should not match different hosts
-        assert!(!host_matches_pattern("other.com", "api.example.com:443"));
     }
 
     #[test]
@@ -500,6 +503,7 @@ mod tests {
                 secret_name: "openai_key".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.openai.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -534,6 +538,7 @@ mod tests {
                     prefix: None,
                 },
                 host_patterns: vec!["*.example.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -567,6 +572,7 @@ mod tests {
                     username: "myuser".to_string(),
                 },
                 host_patterns: vec!["api.service.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -610,6 +616,7 @@ mod tests {
                 secret_name: "secret_key".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.test.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -619,6 +626,82 @@ mod tests {
         let result = injector.inject("user1", "api.test.com", &store).await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_inject_for_url_honors_path_patterns() {
+        let store = test_store();
+        store
+            .create("user1", CreateSecretParams::new("scoped_token", "tok"))
+            .await
+            .unwrap();
+
+        let mut mappings = HashMap::new();
+        mappings.insert(
+            "scoped".to_string(),
+            CredentialMapping {
+                secret_name: "scoped_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: vec!["/api/v1/write".to_string()],
+                optional: false,
+            },
+        );
+
+        let injector = CredentialInjector::new(mappings, vec!["scoped_token".to_string()]);
+
+        // Matching path → cred injected.
+        let ok = injector
+            .inject_for_url("user1", "api.example.com", "/api/v1/write", &store)
+            .await
+            .unwrap();
+        assert_eq!(
+            ok.headers.get("Authorization"),
+            Some(&"Bearer tok".to_string())
+        );
+
+        // Non-matching path → no cred.
+        let none = injector
+            .inject_for_url("user1", "api.example.com", "/api/v1/read", &store)
+            .await
+            .unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_find_credentials_for_url_filters_by_path() {
+        let mut mappings = HashMap::new();
+        mappings.insert(
+            "write".to_string(),
+            CredentialMapping {
+                secret_name: "write_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: vec!["/api/v1/write".to_string()],
+                optional: false,
+            },
+        );
+        mappings.insert(
+            "global".to_string(),
+            CredentialMapping {
+                secret_name: "global_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: vec![],
+                optional: false,
+            },
+        );
+
+        let injector = CredentialInjector::new(mappings, vec![]);
+
+        let on_write = injector.find_credentials_for_url("api.example.com", "/api/v1/write");
+        let mut names: Vec<&str> = on_write.iter().map(|m| m.secret_name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["global_token", "write_token"]);
+
+        let on_read = injector.find_credentials_for_url("api.example.com", "/api/v1/read");
+        let names: Vec<&str> = on_read.iter().map(|m| m.secret_name.as_str()).collect();
+        assert_eq!(names, vec!["global_token"]);
     }
 
     // ── SharedCredentialRegistry tests ─────────────────────────────────

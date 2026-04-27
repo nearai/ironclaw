@@ -1403,14 +1403,20 @@ class TestV2EngineSkillInstallFlow:
         base_url = v2_skill_install_server["base_url"]
         await _ensure_pika_skill_installed(v2_skill_page, base_url)
 
-        _thread_id, _pending_gate, install_card = await _request_install_approval(
-            v2_skill_page,
-            base_url,
-            "install https://github.com/Pika-Labs/Pika-Skills",
-            timeout=60.0,
-        )
+        # Second `install <url>` on an already-installed skill must NOT
+        # fire a fresh approval gate. `SkillInstallTool::requires_approval`
+        # short-circuits to `ApprovalRequirement::Never` when the skill
+        # is already loaded — asking the user to approve a guaranteed
+        # no-op is pure friction. The test used to wait for an approval
+        # card here and time out; now it skips the approval step and
+        # goes straight to the terminal message, which must carry the
+        # idempotent "already installed / no install needed" wording.
+        await _open_chat_tab(v2_skill_page)
         baseline = await _message_counts(v2_skill_page)
-        await install_card.locator(SEL["approval_approve_btn"]).click()
+        await _send_chat_message(
+            v2_skill_page,
+            "install https://github.com/Pika-Labs/Pika-Skills",
+        )
         installed = await _wait_for_terminal_message(
             v2_skill_page,
             timeout=90000,
