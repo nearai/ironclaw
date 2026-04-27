@@ -47,15 +47,20 @@ function fetchGatewayStatus() {
     var enabled = !!data.engine_v2_enabled;
 
     // Apply engine v2 / v1 tab visibility once. Set the global before
-    // any UI helper reads it.
+    // any UI helper reads it. The flag flips synchronously so that a
+    // second status poll firing while the first refresh is still in
+    // flight does not kick off a duplicate /api/routines/summary
+    // request. refreshLegacyRoutinesPresence swallows fetch errors, so
+    // the trailing .then() still runs on failure with
+    // userHasLegacyRoutines = false (the safe default).
     if (!engineModeApplied) {
+      engineModeApplied = true;
       engineV2Enabled = enabled;
       // Refresh legacy-routine count once on first status so v1 users
       // upgrading to v2 keep the Routines tab affordance (#2982).
       refreshLegacyRoutinesPresence().then(function() {
         applyEngineModeToTabs();
         applyEngineModeUi();
-        engineModeApplied = true;
       });
     } else {
       applyEngineModeUi();
