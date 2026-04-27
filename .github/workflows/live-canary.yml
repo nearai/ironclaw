@@ -268,7 +268,11 @@ jobs:
       # masks and ship them in every step's env, which is exactly the
       # surface the reviewer flagged.
       GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
-      GITHUB_OAUTH_CLIENT_ID: ${{ secrets.GITHUB_OAUTH_CLIENT_ID }}
+      # GitHub reserves the GITHUB_ prefix for repo-scoped secrets (cannot
+      # be created by users), so the secret is stored as
+      # AUTH_BROWSER_GITHUB_CLIENT_ID and re-exported here under the
+      # GITHUB_OAUTH_CLIENT_ID name that auth_registry.py / IronClaw expect.
+      GITHUB_OAUTH_CLIENT_ID: ${{ secrets.AUTH_BROWSER_GITHUB_CLIENT_ID }}
       AUTH_BROWSER_GOOGLE_USERNAME: ${{ secrets.AUTH_BROWSER_GOOGLE_USERNAME }}
       AUTH_BROWSER_GITHUB_OWNER: ${{ secrets.AUTH_BROWSER_GITHUB_OWNER }}
       AUTH_BROWSER_GITHUB_REPO: ${{ secrets.AUTH_BROWSER_GITHUB_REPO }}
@@ -311,7 +315,10 @@ jobs:
         # Materialize step for the rationale.
         env:
           GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
-          GITHUB_OAUTH_CLIENT_SECRET: ${{ secrets.GITHUB_OAUTH_CLIENT_SECRET }}
+          # GitHub reserves the GITHUB_ secret-name prefix; stored as
+          # AUTH_BROWSER_GITHUB_CLIENT_SECRET and re-exposed here under the
+          # GITHUB_OAUTH_CLIENT_SECRET name the materialize/runtime expect.
+          GITHUB_OAUTH_CLIENT_SECRET: ${{ secrets.AUTH_BROWSER_GITHUB_CLIENT_SECRET }}
           AUTH_BROWSER_GOOGLE_PASSWORD: ${{ secrets.AUTH_BROWSER_GOOGLE_PASSWORD }}
           AUTH_BROWSER_GITHUB_PASSWORD: ${{ secrets.AUTH_BROWSER_GITHUB_PASSWORD }}
           AUTH_BROWSER_NOTION_PASSWORD: ${{ secrets.AUTH_BROWSER_NOTION_PASSWORD }}
