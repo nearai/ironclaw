@@ -13,17 +13,20 @@ use ironclaw_memory::{
 async fn backend_filesystem_adapter_routes_file_operations_with_scoped_context() {
     let backend = Arc::new(RecordingBackend::new());
     let filesystem = MemoryBackendFilesystemAdapter::new(backend.clone());
-    let path =
-        VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/project-1/notes/a.md")
-            .unwrap();
+    let path = VirtualPath::new(
+        "/memory/tenants/tenant-a/users/alice/agents/_none/projects/project-1/notes/a.md",
+    )
+    .unwrap();
 
     filesystem.write_file(&path, b"plugin note").await.unwrap();
 
     assert_eq!(filesystem.read_file(&path).await.unwrap(), b"plugin note");
     let entries = filesystem
         .list_dir(
-            &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/project-1/notes")
-                .unwrap(),
+            &VirtualPath::new(
+                "/memory/tenants/tenant-a/users/alice/agents/_none/projects/project-1/notes",
+            )
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -43,8 +46,10 @@ async fn backend_filesystem_adapter_routes_file_operations_with_scoped_context()
 async fn backend_filesystem_adapter_fails_closed_when_file_documents_unsupported() {
     let backend = Arc::new(UnsupportedFileBackend::default());
     let filesystem = MemoryBackendFilesystemAdapter::new(backend.clone());
-    let path =
-        VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/notes.md").unwrap();
+    let path = VirtualPath::new(
+        "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/notes.md",
+    )
+    .unwrap();
 
     let err = filesystem
         .write_file(&path, b"must not write")
@@ -63,8 +68,10 @@ async fn repository_memory_backend_keeps_builtin_repository_as_default_plugin() 
     let repository = Arc::new(InMemoryMemoryDocumentRepository::new());
     let backend = Arc::new(RepositoryMemoryBackend::new(repository.clone()));
     let filesystem = MemoryBackendFilesystemAdapter::new(backend);
-    let path =
-        VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/MEMORY.md").unwrap();
+    let path = VirtualPath::new(
+        "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/MEMORY.md",
+    )
+    .unwrap();
 
     filesystem
         .write_file(&path, b"remember via plugin boundary")

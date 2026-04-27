@@ -37,6 +37,120 @@ async fn libsql_memory_repository_persists_documents_across_instances() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn libsql_memory_repository_maps_agent_scope_to_agent_id_column() {
+    let (db, _dir) = libsql_db().await;
+    let repository = LibSqlMemoryDocumentRepository::new(db.clone());
+    repository.run_migrations().await.unwrap();
+
+    let path = MemoryDocumentPath::new_with_agent(
+        "tenant-a",
+        "alice",
+        Some("agent-1"),
+        Some("project-1"),
+        "notes/a.md",
+    )
+    .unwrap();
+    repository
+        .write_document(&path, b"agent db backed note")
+        .await
+        .unwrap();
+
+    let conn = db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT user_id, agent_id, path, content FROM memory_documents",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().expect("memory document row");
+    let user_id: String = row.get(0).unwrap();
+    let agent_id: Option<String> = row.get(1).unwrap();
+    let db_path: String = row.get(2).unwrap();
+    let content: String = row.get(3).unwrap();
+
+    assert_eq!(user_id, "tenant:tenant-a:user:alice");
+    assert_eq!(agent_id.as_deref(), Some("agent-1"));
+    assert_eq!(db_path, "projects/project-1/notes/a.md");
+    assert_eq!(content, "agent db backed note");
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_memory_repository_isolates_tenant_user_agent_and_project_scopes() {
+    let (db, _dir) = libsql_db().await;
+    let repository = LibSqlMemoryDocumentRepository::new(db);
+    repository.run_migrations().await.unwrap();
+
+    for (path, content) in [
+        (
+            MemoryDocumentPath::new_with_agent(
+                "tenant-a",
+                "alice",
+                Some("agent-1"),
+                Some("project-1"),
+                "MEMORY.md",
+            )
+            .unwrap(),
+            b"tenant-a alice agent-1 project-1".as_slice(),
+        ),
+        (
+            MemoryDocumentPath::new_with_agent(
+                "tenant-a",
+                "alice",
+                Some("agent-2"),
+                Some("project-1"),
+                "MEMORY.md",
+            )
+            .unwrap(),
+            b"tenant-a alice agent-2 project-1".as_slice(),
+        ),
+        (
+            MemoryDocumentPath::new_with_agent(
+                "tenant-a",
+                "alice",
+                None,
+                Some("project-1"),
+                "MEMORY.md",
+            )
+            .unwrap(),
+            b"tenant-a alice no-agent project-1".as_slice(),
+        ),
+    ] {
+        repository.write_document(&path, content).await.unwrap();
+    }
+
+    let visible = repository
+        .list_documents(
+            &MemoryDocumentScope::new_with_agent(
+                "tenant-a",
+                "alice",
+                Some("agent-1"),
+                Some("project-1"),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].tenant_id(), "tenant-a");
+    assert_eq!(visible[0].user_id(), "alice");
+    assert_eq!(visible[0].agent_id(), Some("agent-1"));
+    assert_eq!(visible[0].project_id(), Some("project-1"));
+    assert_eq!(visible[0].relative_path(), "MEMORY.md");
+    assert_eq!(
+        repository
+            .read_document(&visible[0])
+            .await
+            .unwrap()
+            .unwrap(),
+        b"tenant-a alice agent-1 project-1"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn libsql_memory_repository_isolates_tenant_user_and_project_scopes() {
     let (db, _dir) = libsql_db().await;
     let repository = LibSqlMemoryDocumentRepository::new(db);
@@ -90,9 +204,10 @@ async fn libsql_memory_document_filesystem_reads_and_writes_through_db_repositor
     let repository = std::sync::Arc::new(LibSqlMemoryDocumentRepository::new(db));
     repository.run_migrations().await.unwrap();
     let filesystem = MemoryDocumentFilesystem::new(repository);
-    let path =
-        VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/project-1/notes/a.md")
-            .unwrap();
+    let path = VirtualPath::new(
+        "/memory/tenants/tenant-a/users/alice/agents/_none/projects/project-1/notes/a.md",
+    )
+    .unwrap();
 
     filesystem
         .write_file(&path, b"filesystem db note")
@@ -121,8 +236,10 @@ async fn libsql_memory_document_filesystem_reuses_current_chunking_and_fts_schem
     let backend =
         std::sync::Arc::new(RepositoryMemoryBackend::new(repository).with_indexer(indexer));
     let filesystem = MemoryBackendFilesystemAdapter::new(backend);
-    let path =
-        VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/notes.md").unwrap();
+    let path = VirtualPath::new(
+        "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/notes.md",
+    )
+    .unwrap();
 
     filesystem
         .write_file(&path, b"alpha beta gamma delta epsilon zeta")
@@ -175,8 +292,10 @@ async fn libsql_memory_document_filesystem_versions_previous_content_and_replace
     let backend =
         std::sync::Arc::new(RepositoryMemoryBackend::new(repository).with_indexer(indexer));
     let filesystem = MemoryBackendFilesystemAdapter::new(backend);
-    let path =
-        VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/notes.md").unwrap();
+    let path = VirtualPath::new(
+        "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/notes.md",
+    )
+    .unwrap();
 
     filesystem
         .write_file(&path, b"first content")
@@ -231,8 +350,10 @@ async fn libsql_repository_backend_inherits_config_metadata_for_skip_indexing() 
     let backend =
         std::sync::Arc::new(RepositoryMemoryBackend::new(repository).with_indexer(indexer));
     let filesystem = MemoryBackendFilesystemAdapter::new(backend);
-    let path = VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/folder/a.md")
-        .unwrap();
+    let path = VirtualPath::new(
+        "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/folder/a.md",
+    )
+    .unwrap();
 
     filesystem
         .write_file(&path, b"alpha beta gamma")
@@ -262,8 +383,10 @@ async fn libsql_repository_backend_honors_skip_versioning_from_config() {
         .unwrap();
     let backend = std::sync::Arc::new(RepositoryMemoryBackend::new(repository));
     let filesystem = MemoryBackendFilesystemAdapter::new(backend);
-    let path =
-        VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/logs/a.md").unwrap();
+    let path = VirtualPath::new(
+        "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/logs/a.md",
+    )
+    .unwrap();
 
     filesystem.write_file(&path, b"first").await.unwrap();
     filesystem.write_file(&path, b"second").await.unwrap();
@@ -301,9 +424,10 @@ async fn libsql_repository_backend_validates_schema_from_config_before_write() {
         .unwrap();
     let backend = std::sync::Arc::new(RepositoryMemoryBackend::new(repository));
     let filesystem = MemoryBackendFilesystemAdapter::new(backend);
-    let path =
-        VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/settings/llm.json")
-            .unwrap();
+    let path = VirtualPath::new(
+        "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/settings/llm.json",
+    )
+    .unwrap();
 
     let err = filesystem
         .write_file(&path, br#"{"missing":"provider"}"#)
@@ -342,9 +466,10 @@ async fn libsql_chunking_indexer_stores_provider_embeddings_with_chunks() {
     let backend =
         std::sync::Arc::new(RepositoryMemoryBackend::new(repository).with_indexer(indexer));
     let filesystem = MemoryBackendFilesystemAdapter::new(backend);
-    let path =
-        VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/embeddings.md")
-            .unwrap();
+    let path = VirtualPath::new(
+        "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/embeddings.md",
+    )
+    .unwrap();
 
     filesystem
         .write_file(&path, b"hybrid-vector words unrelated words")

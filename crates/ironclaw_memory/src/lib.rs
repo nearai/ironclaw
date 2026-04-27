@@ -15,11 +15,12 @@ use ironclaw_host_api::{HostApiError, VirtualPath};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Tenant/user/project scope for DB-backed memory documents exposed as virtual files.
+/// Tenant/user/agent/project scope for DB-backed memory documents exposed as virtual files.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MemoryDocumentScope {
     tenant_id: String,
     user_id: String,
+    agent_id: Option<String>,
     project_id: Option<String>,
 }
 
@@ -29,8 +30,27 @@ impl MemoryDocumentScope {
         user_id: impl Into<String>,
         project_id: Option<&str>,
     ) -> Result<Self, HostApiError> {
+        Self::new_with_agent(tenant_id, user_id, None, project_id)
+    }
+
+    pub fn new_with_agent(
+        tenant_id: impl Into<String>,
+        user_id: impl Into<String>,
+        agent_id: Option<&str>,
+        project_id: Option<&str>,
+    ) -> Result<Self, HostApiError> {
         let tenant_id = validated_memory_segment("memory tenant", tenant_id.into())?;
         let user_id = validated_memory_segment("memory user", user_id.into())?;
+        let agent_id = agent_id
+            .map(|agent_id| validated_memory_segment("memory agent", agent_id.to_string()))
+            .transpose()?;
+        if agent_id.as_deref() == Some("_none") {
+            return Err(HostApiError::InvalidId {
+                kind: "memory agent",
+                value: "_none".to_string(),
+                reason: "_none is reserved for absent agent ids".to_string(),
+            });
+        }
         let project_id = project_id
             .map(|project_id| validated_memory_segment("memory project", project_id.to_string()))
             .transpose()?;
@@ -44,6 +64,7 @@ impl MemoryDocumentScope {
         Ok(Self {
             tenant_id,
             user_id,
+            agent_id,
             project_id,
         })
     }
@@ -56,15 +77,20 @@ impl MemoryDocumentScope {
         &self.user_id
     }
 
+    pub fn agent_id(&self) -> Option<&str> {
+        self.agent_id.as_deref()
+    }
+
     pub fn project_id(&self) -> Option<&str> {
         self.project_id.as_deref()
     }
 
     fn virtual_prefix(&self) -> Result<VirtualPath, HostApiError> {
         VirtualPath::new(format!(
-            "/memory/tenants/{}/users/{}/projects/{}",
+            "/memory/tenants/{}/users/{}/agents/{}/projects/{}",
             self.tenant_id,
             self.user_id,
+            self.agent_id.as_deref().unwrap_or("_none"),
             self.project_id.as_deref().unwrap_or("_none")
         ))
     }
@@ -84,7 +110,17 @@ impl MemoryDocumentPath {
         project_id: Option<&str>,
         relative_path: impl Into<String>,
     ) -> Result<Self, HostApiError> {
-        let scope = MemoryDocumentScope::new(tenant_id, user_id, project_id)?;
+        Self::new_with_agent(tenant_id, user_id, None, project_id, relative_path)
+    }
+
+    pub fn new_with_agent(
+        tenant_id: impl Into<String>,
+        user_id: impl Into<String>,
+        agent_id: Option<&str>,
+        project_id: Option<&str>,
+        relative_path: impl Into<String>,
+    ) -> Result<Self, HostApiError> {
+        let scope = MemoryDocumentScope::new_with_agent(tenant_id, user_id, agent_id, project_id)?;
         let relative_path = validated_memory_relative_path(relative_path.into())?;
         Ok(Self {
             scope,
@@ -102,6 +138,10 @@ impl MemoryDocumentPath {
 
     pub fn user_id(&self) -> &str {
         self.scope.user_id()
+    }
+
+    pub fn agent_id(&self) -> Option<&str> {
+        self.scope.agent_id()
     }
 
     pub fn project_id(&self) -> Option<&str> {
@@ -254,12 +294,11 @@ impl ParsedMemoryPath {
             || segments.first() != Some(&"memory")
             || segments.get(1) != Some(&"tenants")
             || segments.get(3) != Some(&"users")
-            || segments.get(5) != Some(&"projects")
         {
             return Err(memory_error(
                 path.clone(),
                 operation,
-                "expected /memory/tenants/{tenant}/users/{user}/projects/{project}/{path}",
+                "expected /memory/tenants/{tenant}/users/{user}/agents/{agent}/projects/{project}/{path}",
             ));
         }
 
@@ -269,30 +308,64 @@ impl ParsedMemoryPath {
         let user_id = *segments.get(4).ok_or_else(|| {
             memory_error(path.clone(), operation, "memory user segment is missing")
         })?;
-        let raw_project_id = *segments.get(6).ok_or_else(|| {
-            memory_error(path.clone(), operation, "memory project segment is missing")
-        })?;
+
+        let (agent_id, raw_project_id, relative_start) = if segments.get(5) == Some(&"agents") {
+            if segments.len() < 9 || segments.get(7) != Some(&"projects") {
+                return Err(memory_error(
+                    path.clone(),
+                    operation,
+                    "expected /memory/tenants/{tenant}/users/{user}/agents/{agent}/projects/{project}/{path}",
+                ));
+            }
+            let raw_agent_id = *segments.get(6).ok_or_else(|| {
+                memory_error(path.clone(), operation, "memory agent segment is missing")
+            })?;
+            let agent_id = if raw_agent_id == "_none" {
+                None
+            } else {
+                Some(raw_agent_id)
+            };
+            let raw_project_id = *segments.get(8).ok_or_else(|| {
+                memory_error(path.clone(), operation, "memory project segment is missing")
+            })?;
+            (agent_id, raw_project_id, 9)
+        } else if segments.get(5) == Some(&"projects") {
+            let raw_project_id = *segments.get(6).ok_or_else(|| {
+                memory_error(path.clone(), operation, "memory project segment is missing")
+            })?;
+            (None, raw_project_id, 7)
+        } else {
+            return Err(memory_error(
+                path.clone(),
+                operation,
+                "expected /memory/tenants/{tenant}/users/{user}/agents/{agent}/projects/{project}/{path}",
+            ));
+        };
+
         let project_id = if raw_project_id == "_none" {
             None
         } else {
             Some(raw_project_id)
         };
-        let scope = MemoryDocumentScope::new(tenant_id, user_id, project_id).map_err(|error| {
+        let scope = MemoryDocumentScope::new_with_agent(tenant_id, user_id, agent_id, project_id)
+            .map_err(|error| {
             memory_error(
                 path.clone(),
                 operation,
                 format!("invalid memory document scope: {error}"),
             )
         })?;
-        let relative_path = if segments.len() > 7 {
+        let relative_path = if segments.len() > relative_start {
             Some(
-                validated_memory_relative_path(segments[7..].join("/")).map_err(|error| {
-                    memory_error(
-                        path.clone(),
-                        operation,
-                        format!("invalid memory document path: {error}"),
-                    )
-                })?,
+                validated_memory_relative_path(segments[relative_start..].join("/")).map_err(
+                    |error| {
+                        memory_error(
+                            path.clone(),
+                            operation,
+                            format!("invalid memory document path: {error}"),
+                        )
+                    },
+                )?,
             )
         } else {
             None
@@ -1745,11 +1818,12 @@ impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
             .connect(virtual_path.clone(), FilesystemOperation::ReadFile)
             .await?;
         let owner_key = scoped_memory_owner_key(path.scope());
+        let agent_id = scoped_memory_agent_id(path.scope());
         let db_path = db_path_for_memory_document(path);
         let mut rows = conn
             .query(
-                "SELECT content FROM memory_documents WHERE user_id = ?1 AND agent_id IS NULL AND path = ?2",
-                libsql::params![owner_key, db_path],
+                "SELECT content FROM memory_documents WHERE user_id = ?1 AND ((?2 IS NULL AND agent_id IS NULL) OR agent_id = ?2) AND path = ?3",
+                libsql::params![owner_key, agent_id, db_path],
             )
             .await
             .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::ReadFile, error.to_string()))?;
@@ -1790,12 +1864,13 @@ impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
             .connect(virtual_path.clone(), FilesystemOperation::WriteFile)
             .await?;
         let owner_key = scoped_memory_owner_key(path.scope());
+        let agent_id = scoped_memory_agent_id(path.scope());
         let db_path = db_path_for_memory_document(path);
         let existing = {
             let mut rows = conn
                 .query(
-                    "SELECT id, content FROM memory_documents WHERE user_id = ?1 AND agent_id IS NULL AND path = ?2",
-                    libsql::params![owner_key.as_str(), db_path.as_str()],
+                    "SELECT id, content FROM memory_documents WHERE user_id = ?1 AND ((?2 IS NULL AND agent_id IS NULL) OR agent_id = ?2) AND path = ?3",
+                    libsql::params![owner_key.as_str(), agent_id, db_path.as_str()],
                 )
                 .await
                 .map_err(|error| {
@@ -1850,11 +1925,12 @@ impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
             conn.execute(
                 r#"
                 INSERT INTO memory_documents (id, user_id, agent_id, path, content, metadata)
-                VALUES (?1, ?2, NULL, ?3, ?4, '{}')
+                VALUES (?1, ?2, ?3, ?4, ?5, '{}')
                 "#,
                 libsql::params![
                     uuid::Uuid::new_v4().to_string(),
                     owner_key,
+                    agent_id,
                     db_path,
                     content
                 ],
@@ -1889,12 +1965,13 @@ impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
             .connect(virtual_path.clone(), FilesystemOperation::WriteFile)
             .await?;
         let owner_key = scoped_memory_owner_key(path.scope());
+        let agent_id = scoped_memory_agent_id(path.scope());
         let db_path = db_path_for_memory_document(path);
         let existing = {
             let mut rows = conn
                 .query(
-                    "SELECT id, content FROM memory_documents WHERE user_id = ?1 AND agent_id IS NULL AND path = ?2",
-                    libsql::params![owner_key.as_str(), db_path.as_str()],
+                    "SELECT id, content FROM memory_documents WHERE user_id = ?1 AND ((?2 IS NULL AND agent_id IS NULL) OR agent_id = ?2) AND path = ?3",
+                    libsql::params![owner_key.as_str(), agent_id, db_path.as_str()],
                 )
                 .await
                 .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?;
@@ -1946,11 +2023,12 @@ impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
             conn.execute(
                 r#"
                 INSERT INTO memory_documents (id, user_id, agent_id, path, content, metadata)
-                VALUES (?1, ?2, NULL, ?3, ?4, '{}')
+                VALUES (?1, ?2, ?3, ?4, ?5, '{}')
                 "#,
                 libsql::params![
                     uuid::Uuid::new_v4().to_string(),
                     owner_key,
+                    agent_id,
                     db_path,
                     content
                 ],
@@ -1976,11 +2054,12 @@ impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
             .connect(virtual_path.clone(), FilesystemOperation::ReadFile)
             .await?;
         let owner_key = scoped_memory_owner_key(path.scope());
+        let agent_id = scoped_memory_agent_id(path.scope());
         let db_path = db_path_for_memory_document(path);
         let mut rows = conn
             .query(
-                "SELECT metadata FROM memory_documents WHERE user_id = ?1 AND agent_id IS NULL AND path = ?2",
-                libsql::params![owner_key, db_path],
+                "SELECT metadata FROM memory_documents WHERE user_id = ?1 AND ((?2 IS NULL AND agent_id IS NULL) OR agent_id = ?2) AND path = ?3",
+                libsql::params![owner_key, agent_id, db_path],
             )
             .await
             .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::ReadFile, error.to_string()))?;
@@ -2020,6 +2099,7 @@ impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
             .connect(virtual_path.clone(), FilesystemOperation::WriteFile)
             .await?;
         let owner_key = scoped_memory_owner_key(path.scope());
+        let agent_id = scoped_memory_agent_id(path.scope());
         let db_path = db_path_for_memory_document(path);
         let metadata = serde_json::to_string(metadata).map_err(|error| {
             memory_error(
@@ -2029,8 +2109,8 @@ impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
             )
         })?;
         conn.execute(
-            "UPDATE memory_documents SET metadata = ?3, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE user_id = ?1 AND agent_id IS NULL AND path = ?2",
-            libsql::params![owner_key, db_path, metadata],
+            "UPDATE memory_documents SET metadata = ?4, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE user_id = ?1 AND ((?2 IS NULL AND agent_id IS NULL) OR agent_id = ?2) AND path = ?3",
+            libsql::params![owner_key, agent_id, db_path, metadata],
         )
         .await
         .map_err(|error| memory_error(virtual_path, FilesystemOperation::WriteFile, error.to_string()))?;
@@ -2048,13 +2128,14 @@ impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
             .connect(virtual_path.clone(), FilesystemOperation::ListDir)
             .await?;
         let owner_key = scoped_memory_owner_key(scope);
+        let agent_id = scoped_memory_agent_id(scope);
         let mut documents = Vec::new();
         if let Some(project_id) = scope.project_id() {
             let prefix = format!("projects/{project_id}/");
             let mut rows = conn
                 .query(
-                    "SELECT path FROM memory_documents WHERE user_id = ?1 AND agent_id IS NULL AND path LIKE ?2 ORDER BY path",
-                    libsql::params![owner_key, format!("{prefix}%")],
+                    "SELECT path FROM memory_documents WHERE user_id = ?1 AND ((?2 IS NULL AND agent_id IS NULL) OR agent_id = ?2) AND path LIKE ?3 ORDER BY path",
+                    libsql::params![owner_key, agent_id, format!("{prefix}%")],
                 )
                 .await
                 .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::ListDir, error.to_string()))?;
@@ -2079,8 +2160,8 @@ impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
         } else {
             let mut rows = conn
                 .query(
-                    "SELECT path FROM memory_documents WHERE user_id = ?1 AND agent_id IS NULL AND path NOT LIKE 'projects/%' ORDER BY path",
-                    libsql::params![owner_key],
+                    "SELECT path FROM memory_documents WHERE user_id = ?1 AND ((?2 IS NULL AND agent_id IS NULL) OR agent_id = ?2) AND path NOT LIKE 'projects/%' ORDER BY path",
+                    libsql::params![owner_key, agent_id],
                 )
                 .await
                 .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::ListDir, error.to_string()))?;
@@ -2150,6 +2231,7 @@ async fn libsql_full_text_search_ranked(
         return Ok(Vec::new());
     };
     let owner_key = scoped_memory_owner_key(scope);
+    let agent_id = scoped_memory_agent_id(scope);
     let mut rows = if let Some(project_id) = scope.project_id() {
         conn.query(
             r#"
@@ -2157,14 +2239,15 @@ async fn libsql_full_text_search_ranked(
             FROM memory_chunks_fts fts
             JOIN memory_chunks c ON c._rowid = fts.rowid
             JOIN memory_documents d ON d.id = c.document_id
-            WHERE d.user_id = ?1 AND d.agent_id IS NULL
-              AND d.path LIKE ?2
-              AND memory_chunks_fts MATCH ?3
+            WHERE d.user_id = ?1 AND ((?2 IS NULL AND d.agent_id IS NULL) OR d.agent_id = ?2)
+              AND d.path LIKE ?3
+              AND memory_chunks_fts MATCH ?4
             ORDER BY rank
-            LIMIT ?4
+            LIMIT ?5
             "#,
             libsql::params![
                 owner_key,
+                agent_id,
                 format!("projects/{project_id}/%"),
                 fts_query,
                 request.pre_fusion_limit() as i64
@@ -2178,13 +2261,18 @@ async fn libsql_full_text_search_ranked(
             FROM memory_chunks_fts fts
             JOIN memory_chunks c ON c._rowid = fts.rowid
             JOIN memory_documents d ON d.id = c.document_id
-            WHERE d.user_id = ?1 AND d.agent_id IS NULL
+            WHERE d.user_id = ?1 AND ((?2 IS NULL AND d.agent_id IS NULL) OR d.agent_id = ?2)
               AND d.path NOT LIKE 'projects/%'
-              AND memory_chunks_fts MATCH ?2
+              AND memory_chunks_fts MATCH ?3
             ORDER BY rank
-            LIMIT ?3
+            LIMIT ?4
             "#,
-            libsql::params![owner_key, fts_query, request.pre_fusion_limit() as i64],
+            libsql::params![
+                owner_key,
+                agent_id,
+                fts_query,
+                request.pre_fusion_limit() as i64
+            ],
         )
         .await
     }
@@ -2247,17 +2335,18 @@ async fn libsql_vector_search_ranked(
     virtual_path: &VirtualPath,
 ) -> Result<Vec<RankedMemorySearchResult>, FilesystemError> {
     let owner_key = scoped_memory_owner_key(scope);
+    let agent_id = scoped_memory_agent_id(scope);
     let mut rows = if let Some(project_id) = scope.project_id() {
         conn.query(
             r#"
             SELECT c.id, d.path, c.content, c.embedding
             FROM memory_chunks c
             JOIN memory_documents d ON d.id = c.document_id
-            WHERE d.user_id = ?1 AND d.agent_id IS NULL
-              AND d.path LIKE ?2
+            WHERE d.user_id = ?1 AND ((?2 IS NULL AND d.agent_id IS NULL) OR d.agent_id = ?2)
+              AND d.path LIKE ?3
               AND c.embedding IS NOT NULL
             "#,
-            libsql::params![owner_key, format!("projects/{project_id}/%")],
+            libsql::params![owner_key, agent_id, format!("projects/{project_id}/%")],
         )
         .await
     } else {
@@ -2266,11 +2355,11 @@ async fn libsql_vector_search_ranked(
             SELECT c.id, d.path, c.content, c.embedding
             FROM memory_chunks c
             JOIN memory_documents d ON d.id = c.document_id
-            WHERE d.user_id = ?1 AND d.agent_id IS NULL
+            WHERE d.user_id = ?1 AND ((?2 IS NULL AND d.agent_id IS NULL) OR d.agent_id = ?2)
               AND d.path NOT LIKE 'projects/%'
               AND c.embedding IS NOT NULL
             "#,
-            libsql::params![owner_key],
+            libsql::params![owner_key, agent_id],
         )
         .await
     }
@@ -2477,11 +2566,12 @@ async fn libsql_document_id_and_content(
     virtual_path: &VirtualPath,
 ) -> Result<Option<(String, String)>, FilesystemError> {
     let owner_key = scoped_memory_owner_key(path.scope());
+    let agent_id = scoped_memory_agent_id(path.scope());
     let db_path = db_path_for_memory_document(path);
     let mut rows = conn
         .query(
-            "SELECT id, content FROM memory_documents WHERE user_id = ?1 AND agent_id IS NULL AND path = ?2",
-            libsql::params![owner_key, db_path],
+            "SELECT id, content FROM memory_documents WHERE user_id = ?1 AND ((?2 IS NULL AND agent_id IS NULL) OR agent_id = ?2) AND path = ?3",
+            libsql::params![owner_key, agent_id, db_path],
         )
         .await
         .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?;
@@ -2722,11 +2812,12 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
             .client(virtual_path.clone(), FilesystemOperation::ReadFile)
             .await?;
         let owner_key = scoped_memory_owner_key(path.scope());
+        let agent_id = scoped_memory_agent_id(path.scope());
         let db_path = db_path_for_memory_document(path);
         let row = client
             .query_opt(
-                "SELECT content FROM memory_documents WHERE user_id = $1 AND agent_id IS NULL AND path = $2",
-                &[&owner_key, &db_path],
+                "SELECT content FROM memory_documents WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2 AND path = $3",
+                &[&owner_key, &agent_id, &db_path],
             )
             .await
             .map_err(|error| memory_error(virtual_path, FilesystemOperation::ReadFile, error.to_string()))?;
@@ -2753,11 +2844,12 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
             .client(virtual_path.clone(), FilesystemOperation::WriteFile)
             .await?;
         let owner_key = scoped_memory_owner_key(path.scope());
+        let agent_id = scoped_memory_agent_id(path.scope());
         let db_path = db_path_for_memory_document(path);
         let existing = client
             .query_opt(
-                "SELECT id, content FROM memory_documents WHERE user_id = $1 AND agent_id IS NULL AND path = $2",
-                &[&owner_key, &db_path],
+                "SELECT id, content FROM memory_documents WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2 AND path = $3",
+                &[&owner_key, &agent_id, &db_path],
             )
             .await
             .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?;
@@ -2792,9 +2884,9 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
                 .execute(
                     r#"
                     INSERT INTO memory_documents (user_id, agent_id, path, content, metadata)
-                    VALUES ($1, NULL, $2, $3, '{}'::jsonb)
+                    VALUES ($1, $2, $3, $4, '{}'::jsonb)
                     "#,
-                    &[&owner_key, &db_path, &content],
+                    &[&owner_key, &agent_id, &db_path, &content],
                 )
                 .await
                 .map_err(|error| {
@@ -2826,11 +2918,12 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
             .client(virtual_path.clone(), FilesystemOperation::WriteFile)
             .await?;
         let owner_key = scoped_memory_owner_key(path.scope());
+        let agent_id = scoped_memory_agent_id(path.scope());
         let db_path = db_path_for_memory_document(path);
         let existing = client
             .query_opt(
-                "SELECT id, content FROM memory_documents WHERE user_id = $1 AND agent_id IS NULL AND path = $2",
-                &[&owner_key, &db_path],
+                "SELECT id, content FROM memory_documents WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2 AND path = $3",
+                &[&owner_key, &agent_id, &db_path],
             )
             .await
             .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?;
@@ -2868,9 +2961,9 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
                 .execute(
                     r#"
                     INSERT INTO memory_documents (user_id, agent_id, path, content, metadata)
-                    VALUES ($1, NULL, $2, $3, '{}'::jsonb)
+                    VALUES ($1, $2, $3, $4, '{}'::jsonb)
                     "#,
-                    &[&owner_key, &db_path, &content],
+                    &[&owner_key, &agent_id, &db_path, &content],
                 )
                 .await
                 .map_err(|error| {
@@ -2893,11 +2986,12 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
             .client(virtual_path.clone(), FilesystemOperation::ReadFile)
             .await?;
         let owner_key = scoped_memory_owner_key(path.scope());
+        let agent_id = scoped_memory_agent_id(path.scope());
         let db_path = db_path_for_memory_document(path);
         let row = client
             .query_opt(
-                "SELECT metadata FROM memory_documents WHERE user_id = $1 AND agent_id IS NULL AND path = $2",
-                &[&owner_key, &db_path],
+                "SELECT metadata FROM memory_documents WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2 AND path = $3",
+                &[&owner_key, &agent_id, &db_path],
             )
             .await
             .map_err(|error| memory_error(virtual_path, FilesystemOperation::ReadFile, error.to_string()))?;
@@ -2914,11 +3008,12 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
             .client(virtual_path.clone(), FilesystemOperation::WriteFile)
             .await?;
         let owner_key = scoped_memory_owner_key(path.scope());
+        let agent_id = scoped_memory_agent_id(path.scope());
         let db_path = db_path_for_memory_document(path);
         client
             .execute(
-                "UPDATE memory_documents SET metadata = $3, updated_at = NOW() WHERE user_id = $1 AND agent_id IS NULL AND path = $2",
-                &[&owner_key, &db_path, metadata],
+                "UPDATE memory_documents SET metadata = $4, updated_at = NOW() WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2 AND path = $3",
+                &[&owner_key, &agent_id, &db_path, metadata],
             )
             .await
             .map_err(|error| memory_error(virtual_path, FilesystemOperation::WriteFile, error.to_string()))?;
@@ -2936,19 +3031,20 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
             .client(virtual_path.clone(), FilesystemOperation::ListDir)
             .await?;
         let owner_key = scoped_memory_owner_key(scope);
+        let agent_id = scoped_memory_agent_id(scope);
         let rows = if let Some(project_id) = scope.project_id() {
             let prefix = format!("projects/{project_id}/");
             client
                 .query(
-                    "SELECT path FROM memory_documents WHERE user_id = $1 AND agent_id IS NULL AND path LIKE $2 ORDER BY path",
-                    &[&owner_key, &format!("{prefix}%")],
+                    "SELECT path FROM memory_documents WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2 AND path LIKE $3 ORDER BY path",
+                    &[&owner_key, &agent_id, &format!("{prefix}%")],
                 )
                 .await
         } else {
             client
                 .query(
-                    "SELECT path FROM memory_documents WHERE user_id = $1 AND agent_id IS NULL AND path NOT LIKE 'projects/%' ORDER BY path",
-                    &[&owner_key],
+                    "SELECT path FROM memory_documents WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2 AND path NOT LIKE 'projects/%' ORDER BY path",
+                    &[&owner_key, &agent_id],
                 )
                 .await
         }
@@ -3005,37 +3101,44 @@ async fn postgres_full_text_search_ranked(
     virtual_path: &VirtualPath,
 ) -> Result<Vec<RankedMemorySearchResult>, FilesystemError> {
     let owner_key = scoped_memory_owner_key(scope);
+    let agent_id = scoped_memory_agent_id(scope);
     let limit = request.pre_fusion_limit() as i64;
     let rows = if let Some(project_id) = scope.project_id() {
         client
             .query(
                 r#"
-                SELECT c.id, d.path, c.content, ts_rank_cd(c.content_tsv, plainto_tsquery('english', $2)) AS rank
+                SELECT c.id, d.path, c.content, ts_rank_cd(c.content_tsv, plainto_tsquery('english', $3)) AS rank
                 FROM memory_chunks c
                 JOIN memory_documents d ON d.id = c.document_id
-                WHERE d.user_id = $1 AND d.agent_id IS NULL
-                  AND d.path LIKE $3
-                  AND c.content_tsv @@ plainto_tsquery('english', $2)
+                WHERE d.user_id = $1 AND d.agent_id IS NOT DISTINCT FROM $2
+                  AND d.path LIKE $4
+                  AND c.content_tsv @@ plainto_tsquery('english', $3)
                 ORDER BY rank DESC
-                LIMIT $4
+                LIMIT $5
                 "#,
-                &[&owner_key, &request.query(), &format!("projects/{project_id}/%"), &limit],
+                &[
+                    &owner_key,
+                    &agent_id,
+                    &request.query(),
+                    &format!("projects/{project_id}/%"),
+                    &limit,
+                ],
             )
             .await
     } else {
         client
             .query(
                 r#"
-                SELECT c.id, d.path, c.content, ts_rank_cd(c.content_tsv, plainto_tsquery('english', $2)) AS rank
+                SELECT c.id, d.path, c.content, ts_rank_cd(c.content_tsv, plainto_tsquery('english', $3)) AS rank
                 FROM memory_chunks c
                 JOIN memory_documents d ON d.id = c.document_id
-                WHERE d.user_id = $1 AND d.agent_id IS NULL
+                WHERE d.user_id = $1 AND d.agent_id IS NOT DISTINCT FROM $2
                   AND d.path NOT LIKE 'projects/%'
-                  AND c.content_tsv @@ plainto_tsquery('english', $2)
+                  AND c.content_tsv @@ plainto_tsquery('english', $3)
                 ORDER BY rank DESC
-                LIMIT $3
+                LIMIT $4
                 "#,
-                &[&owner_key, &request.query(), &limit],
+                &[&owner_key, &agent_id, &request.query(), &limit],
             )
             .await
     }
@@ -3068,6 +3171,7 @@ async fn postgres_vector_search_ranked(
     virtual_path: &VirtualPath,
 ) -> Result<Vec<RankedMemorySearchResult>, FilesystemError> {
     let owner_key = scoped_memory_owner_key(scope);
+    let agent_id = scoped_memory_agent_id(scope);
     let limit = request.pre_fusion_limit() as i64;
     let query_vector = pgvector::Vector::from(query_embedding.to_vec());
     let rows = if let Some(project_id) = scope.project_id() {
@@ -3077,14 +3181,15 @@ async fn postgres_vector_search_ranked(
                 SELECT c.id, d.path, c.content
                 FROM memory_chunks c
                 JOIN memory_documents d ON d.id = c.document_id
-                WHERE d.user_id = $1 AND d.agent_id IS NULL
-                  AND d.path LIKE $2
+                WHERE d.user_id = $1 AND d.agent_id IS NOT DISTINCT FROM $2
+                  AND d.path LIKE $3
                   AND c.embedding IS NOT NULL
-                ORDER BY c.embedding <=> $3
-                LIMIT $4
+                ORDER BY c.embedding <=> $4
+                LIMIT $5
                 "#,
                 &[
                     &owner_key,
+                    &agent_id,
                     &format!("projects/{project_id}/%"),
                     &query_vector,
                     &limit,
@@ -3098,13 +3203,13 @@ async fn postgres_vector_search_ranked(
                 SELECT c.id, d.path, c.content
                 FROM memory_chunks c
                 JOIN memory_documents d ON d.id = c.document_id
-                WHERE d.user_id = $1 AND d.agent_id IS NULL
+                WHERE d.user_id = $1 AND d.agent_id IS NOT DISTINCT FROM $2
                   AND d.path NOT LIKE 'projects/%'
                   AND c.embedding IS NOT NULL
-                ORDER BY c.embedding <=> $2
-                LIMIT $3
+                ORDER BY c.embedding <=> $3
+                LIMIT $4
                 "#,
-                &[&owner_key, &query_vector, &limit],
+                &[&owner_key, &agent_id, &query_vector, &limit],
             )
             .await
     }
@@ -3148,6 +3253,7 @@ impl MemoryDocumentIndexRepository for PostgresMemoryDocumentRepository {
             .client(virtual_path.clone(), FilesystemOperation::WriteFile)
             .await?;
         let owner_key = scoped_memory_owner_key(path.scope());
+        let agent_id = scoped_memory_agent_id(path.scope());
         let db_path = db_path_for_memory_document(path);
         let tx = client.transaction().await.map_err(|error| {
             memory_error(
@@ -3158,8 +3264,8 @@ impl MemoryDocumentIndexRepository for PostgresMemoryDocumentRepository {
         })?;
         let Some(row) = tx
             .query_opt(
-                "SELECT id, content FROM memory_documents WHERE user_id = $1 AND agent_id IS NULL AND path = $2 FOR UPDATE",
-                &[&owner_key, &db_path],
+                "SELECT id, content FROM memory_documents WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2 AND path = $3 FOR UPDATE",
+                &[&owner_key, &agent_id, &db_path],
             )
             .await
             .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?
@@ -3231,6 +3337,7 @@ impl MemoryDocumentIndexRepository for PostgresMemoryDocumentRepository {
             .client(virtual_path.clone(), FilesystemOperation::WriteFile)
             .await?;
         let owner_key = scoped_memory_owner_key(path.scope());
+        let agent_id = scoped_memory_agent_id(path.scope());
         let db_path = db_path_for_memory_document(path);
         client
             .execute(
@@ -3238,10 +3345,10 @@ impl MemoryDocumentIndexRepository for PostgresMemoryDocumentRepository {
                 DELETE FROM memory_chunks
                 WHERE document_id IN (
                     SELECT id FROM memory_documents
-                    WHERE user_id = $1 AND agent_id IS NULL AND path = $2
+                    WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2 AND path = $3
                 )
                 "#,
-                &[&owner_key, &db_path],
+                &[&owner_key, &agent_id, &db_path],
             )
             .await
             .map_err(|error| {
@@ -3318,7 +3425,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 CREATE TABLE IF NOT EXISTS memory_documents (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id TEXT NOT NULL,
-    agent_id UUID,
+    agent_id TEXT,
     path TEXT NOT NULL,
     content TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -3382,6 +3489,11 @@ CREATE INDEX IF NOT EXISTS idx_memory_documents_metadata
 
 fn scoped_memory_owner_key(scope: &MemoryDocumentScope) -> String {
     format!("tenant:{}:user:{}", scope.tenant_id(), scope.user_id())
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn scoped_memory_agent_id(scope: &MemoryDocumentScope) -> Option<&str> {
+    scope.agent_id()
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
