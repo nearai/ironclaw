@@ -158,6 +158,8 @@ index_policy
 capabilities
 ```
 
+Here `capabilities` means backend support flags. It is not the same concept as extension capability declarations.
+
 Catalog lookup answers placement only. It does not grant authority.
 
 Untrusted/runtime access still requires:
@@ -168,9 +170,25 @@ ScopedPath -> MountView -> permission check -> VirtualPath -> backend
 
 ---
 
-## 6. Backend capability policy
+## 6. Backend support policy
 
-A backend capability declaration is enforcement input, not documentation only.
+Backend capability fields are support declarations, not extension capability declarations and not authority grants.
+
+The terminology is overloaded today because some types already use names such as `BackendCapabilities` and `MemoryBackendCapabilities`. In this storage contract, those fields mean:
+
+```text
+what this backend can safely perform after the host has already authorized scope and selected the backend
+```
+
+They do not mean:
+
+```text
+caller-visible extension action
+approval/lease authority
+permission to bypass ScopedFilesystem or MountView checks
+```
+
+Backend support declarations are enforcement inputs, not documentation only. Unsupported behavior fails before backend side effects.
 
 Examples:
 
@@ -178,6 +196,8 @@ Examples:
 - if `indexed = false`, callers must not assume search visibility;
 - if `embedded = false`, vector search must fail closed or omit vector results;
 - if a memory backend sets `file_documents = false`, `/memory` file operations fail closed before plugin invocation.
+
+A future implementation cleanup may rename these backend fields/types to `*Support` for clarity, but the frozen contract already distinguishes support declarations from extension capabilities.
 
 ---
 

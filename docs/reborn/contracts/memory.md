@@ -117,7 +117,15 @@ MemoryDocumentIndexer
 EmbeddingProvider
 ```
 
-Capability declarations are enforcement inputs. Unsupported behavior fails before backend side effects.
+`MemoryBackendCapabilities` are backend support declarations, not extension capability declarations and not authority grants.
+
+The distinction is intentional:
+
+- extension capability declarations describe caller-visible actions such as `github.search_issues` and feed authorization, approval, lease, and runtime dispatch;
+- memory backend support declarations describe what an already-selected backend can safely perform;
+- backend support declarations never grant access by themselves. Host scope, authorization, leases, and filesystem mount authority are checked first.
+
+Backend support declarations are still enforcement inputs. Unsupported behavior fails before backend side effects.
 
 Examples:
 
@@ -126,6 +134,8 @@ Examples:
 - `vector_search = false` means vector search fails closed when explicitly requested;
 - `embeddings = false` means host/provider embedding should not be assumed;
 - plugin errors must be sanitized and scoped.
+
+The current type name is `MemoryBackendCapabilities` for implementation continuity. A future cleanup may rename it to `MemoryBackendSupport` or similar, but the contract meaning is support declaration, not extension capability authority.
 
 ---
 
