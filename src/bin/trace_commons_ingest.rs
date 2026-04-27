@@ -1417,20 +1417,38 @@ impl TraceCommonsSignedTokenVerifier {
     fn configured_eddsa_key_count(&self) -> usize {
         usize::from(self.default_eddsa_public_key.is_some()) + self.keyed_eddsa_public_keys.len()
     }
+
+    fn configured_active_eddsa_key_count(&self, now: DateTime<Utc>) -> usize {
+        self.default_eddsa_public_key
+            .as_ref()
+            .filter(|key| key.is_active_at(now))
+            .map_or(0, |_| 1)
+            + self
+                .keyed_eddsa_public_keys
+                .values()
+                .filter(|key| key.is_active_at(now))
+                .count()
+    }
+
+    fn configured_inactive_eddsa_key_count(&self, now: DateTime<Utc>) -> usize {
+        self.configured_eddsa_key_count()
+            .saturating_sub(self.configured_active_eddsa_key_count(now))
+    }
 }
 
 impl TraceCommonsSignedEddsaPublicKey {
-    fn ensure_active(&self) -> ApiResult<()> {
-        let now = Utc::now();
-        if self
-            .not_before
+    fn is_active_at(&self, now: DateTime<Utc>) -> bool {
+        self.not_before
             .as_ref()
-            .is_some_and(|not_before| now < *not_before)
-            || self
+            .is_none_or(|not_before| now >= *not_before)
+            && self
                 .not_after
                 .as_ref()
-                .is_some_and(|not_after| now > *not_after)
-        {
+                .is_none_or(|not_after| now <= *not_after)
+    }
+
+    fn ensure_active(&self) -> ApiResult<()> {
+        if !self.is_active_at(Utc::now()) {
             return Err(api_error(
                 StatusCode::FORBIDDEN,
                 "inactive signed tenant token key",
@@ -1676,6 +1694,8 @@ struct TraceCommonsConfigStatusResponse {
     signed_token_auth_enabled: bool,
     signed_token_key_count: usize,
     signed_token_eddsa_key_count: usize,
+    signed_token_eddsa_active_key_count: usize,
+    signed_token_eddsa_inactive_key_count: usize,
     signed_token_issuer_configured: bool,
     signed_token_audience_configured: bool,
     signed_token_revoked_jti_count: usize,
@@ -1705,6 +1725,7 @@ struct TraceCommonsConfigStatusResponse {
 }
 
 fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigStatusResponse {
+    let now = Utc::now();
     TraceCommonsConfigStatusResponse {
         schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION,
         db_mirror_configured: state.db_mirror.is_some(),
@@ -1717,6 +1738,18 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             0,
             TraceCommonsSignedTokenVerifier::configured_eddsa_key_count,
         ),
+        signed_token_eddsa_active_key_count: state
+            .signed_token_verifier
+            .as_ref()
+            .map_or(0, |verifier| {
+                verifier.configured_active_eddsa_key_count(now)
+            }),
+        signed_token_eddsa_inactive_key_count: state
+            .signed_token_verifier
+            .as_ref()
+            .map_or(0, |verifier| {
+                verifier.configured_inactive_eddsa_key_count(now)
+            }),
         signed_token_issuer_configured: state
             .signed_token_verifier
             .as_ref()
@@ -15912,6 +15945,7 @@ mod tests {
             "review-token-a",
             TokenRole::Reviewer,
         );
+        insert_token(&mut tokens, "tenant-a", "admin-token-a", TokenRole::Admin);
         Arc::new(AppState {
             root,
             tokens: Arc::new(tokens),
@@ -17057,6 +17091,7 @@ mod tests {
             true,
             true,
         );
+        let key_window_now = Utc::now();
         Arc::make_mut(&mut state).signed_token_verifier = Some(TraceCommonsSignedTokenVerifier {
             default_secret: Some(SecretString::from(
                 "config-status-signed-secret".to_string(),
@@ -17066,7 +17101,24 @@ mod tests {
                 SecretString::from("config-status-keyed-secret".to_string()),
             )]),
             default_eddsa_public_key: None,
-            keyed_eddsa_public_keys: BTreeMap::new(),
+            keyed_eddsa_public_keys: BTreeMap::from([
+                (
+                    "config-eddsa-active".to_string(),
+                    TraceCommonsSignedEddsaPublicKey {
+                        pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
+                        not_before: Some(key_window_now - Duration::minutes(1)),
+                        not_after: Some(key_window_now + Duration::minutes(10)),
+                    },
+                ),
+                (
+                    "config-eddsa-inactive".to_string(),
+                    TraceCommonsSignedEddsaPublicKey {
+                        pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
+                        not_before: Some(key_window_now - Duration::minutes(10)),
+                        not_after: Some(key_window_now - Duration::minutes(1)),
+                    },
+                ),
+            ]),
             issuer: Some("config-status-issuer".to_string()),
             audience: Some("config-status-audience".to_string()),
             revoked_jtis: BTreeSet::from(["revoked-config-jti".to_string()]),
@@ -17109,8 +17161,16 @@ mod tests {
         );
         assert_eq!(value["db_mirror_configured"], serde_json::json!(false));
         assert_eq!(value["signed_token_auth_enabled"], serde_json::json!(true));
-        assert_eq!(value["signed_token_key_count"], serde_json::json!(2));
-        assert_eq!(value["signed_token_eddsa_key_count"], serde_json::json!(0));
+        assert_eq!(value["signed_token_key_count"], serde_json::json!(4));
+        assert_eq!(value["signed_token_eddsa_key_count"], serde_json::json!(2));
+        assert_eq!(
+            value["signed_token_eddsa_active_key_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            value["signed_token_eddsa_inactive_key_count"],
+            serde_json::json!(1)
+        );
         assert_eq!(
             value["signed_token_issuer_configured"],
             serde_json::json!(true)
@@ -17180,6 +17240,9 @@ mod tests {
         assert!(!body_text.contains("config-status-signed-secret"));
         assert!(!body_text.contains("config-status-keyed-secret"));
         assert!(!body_text.contains("config-key-1"));
+        assert!(!body_text.contains("config-eddsa-active"));
+        assert!(!body_text.contains("config-eddsa-inactive"));
+        assert!(!body_text.contains("BEGIN PUBLIC KEY"));
         assert!(!body_text.contains("config-status-issuer"));
         assert!(!body_text.contains("config-status-audience"));
         assert!(!body_text.contains("revoked-config-jti"));
@@ -18458,6 +18521,130 @@ mod tests {
                 && event.object_ref_id == Some(submitted_ref.object_ref_id)
                 && event.reason.as_deref() == Some("surface=review_decision")
         }));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn object_primary_maintenance_purge_deletes_submitted_envelope_object_without_plaintext_body()
+     {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_root = temp.path().join("service-object-store");
+        let artifact_store = test_artifact_store(&artifact_root);
+        let configured_store = ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            artifact_store.clone(),
+        );
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp
+            .path()
+            .join("trace-object-primary-submitted-envelope-purge.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_object_primary_submit_review(
+            temp.path().to_path_buf(),
+            db.clone() as Arc<dyn Database>,
+            configured_store,
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let Json(receipt) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("object-primary submission succeeds");
+        assert_eq!(receipt.status, "accepted");
+
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        assert!(
+            !temp.path().join(&record.object_key).exists(),
+            "object-primary purge source must not have a plaintext envelope body"
+        );
+        let receipt = record
+            .artifact_receipt
+            .clone()
+            .expect("submitted envelope artifact receipt exists");
+        artifact_store
+            .read_artifact(&record.tenant_storage_ref, &receipt)
+            .expect("service-local submitted envelope object exists");
+
+        let object_ref = db
+            .get_latest_active_trace_object_ref(
+                "tenant-a",
+                submission_id,
+                StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            )
+            .await
+            .expect("submitted envelope object ref reads")
+            .expect("submitted envelope object ref exists");
+        assert_eq!(
+            object_ref.object_store,
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+        );
+        assert_eq!(object_ref.object_key, receipt.object_key);
+
+        let metadata_path = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"))
+            .join("metadata")
+            .join(format!("{submission_id}.json"));
+        let mut metadata_json = serde_json::to_value(record).expect("record serializes");
+        metadata_json["expires_at"] =
+            serde_json::json!((Utc::now() - chrono::Duration::days(1)).to_rfc3339());
+        write_json_file(&metadata_path, &metadata_json, "expired trace metadata")
+            .expect("expired metadata writes");
+
+        let Json(response) = maintenance_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_object_primary_submitted_envelope_purge".to_string()),
+                dry_run: false,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: Some(Utc::now()),
+            }),
+        )
+        .await
+        .expect("object-primary maintenance purges submitted envelope object");
+        assert_eq!(response.records_marked_expired, 1);
+        assert_eq!(response.records_marked_purged, 1);
+        assert_eq!(response.encrypted_artifacts_deleted, 1);
+        artifact_store
+            .read_artifact(&tenant_storage_ref("tenant-a"), &receipt)
+            .expect_err("service-local submitted envelope object was deleted");
+
+        let object_refs = db
+            .list_trace_object_refs("tenant-a", submission_id)
+            .await
+            .expect("object refs read");
+        assert_eq!(object_refs.len(), 1);
+        assert_eq!(
+            object_refs[0].artifact_kind,
+            StorageTraceObjectArtifactKind::SubmittedEnvelope
+        );
+        assert_eq!(
+            object_refs[0].object_store,
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+        );
+        assert!(object_refs[0].invalidated_at.is_some());
+        assert!(object_refs[0].deleted_at.is_some());
     }
 
     #[cfg(feature = "libsql")]
