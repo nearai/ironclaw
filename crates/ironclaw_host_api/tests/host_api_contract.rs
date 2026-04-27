@@ -66,6 +66,64 @@ fn scope_ids_reject_path_segments_and_controls() {
 }
 
 #[test]
+fn local_default_resource_scope_uses_default_agent_and_bootstrap_project() {
+    let invocation_id = InvocationId::new();
+    let scope = ResourceScope::local_default(UserId::new("alice").unwrap(), invocation_id).unwrap();
+
+    assert_eq!(LOCAL_DEFAULT_TENANT_ID, "default");
+    assert_eq!(LOCAL_DEFAULT_AGENT_ID, "default");
+    assert_eq!(LOCAL_DEFAULT_PROJECT_ID, "bootstrap");
+    assert_eq!(scope.tenant_id.as_str(), LOCAL_DEFAULT_TENANT_ID);
+    assert_eq!(scope.user_id.as_str(), "alice");
+    assert_eq!(
+        scope.agent_id.as_ref().map(AgentId::as_str),
+        Some(LOCAL_DEFAULT_AGENT_ID)
+    );
+    assert_eq!(
+        scope.project_id.as_ref().map(ProjectId::as_str),
+        Some(LOCAL_DEFAULT_PROJECT_ID)
+    );
+    assert_eq!(scope.invocation_id, invocation_id);
+    assert!(scope.mission_id.is_none());
+    assert!(scope.thread_id.is_none());
+}
+
+#[test]
+fn local_default_execution_context_keeps_scope_fields_aligned() {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/bootstrap").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+
+    let ctx = ExecutionContext::local_default(
+        UserId::new("alice").unwrap(),
+        ExtensionId::new("echo").unwrap(),
+        RuntimeKind::Wasm,
+        TrustClass::Sandbox,
+        CapabilitySet::default(),
+        mounts,
+    )
+    .unwrap();
+
+    ctx.validate().unwrap();
+    assert_eq!(ctx.tenant_id.as_str(), LOCAL_DEFAULT_TENANT_ID);
+    assert_eq!(
+        ctx.agent_id.as_ref().map(AgentId::as_str),
+        Some(LOCAL_DEFAULT_AGENT_ID)
+    );
+    assert_eq!(
+        ctx.project_id.as_ref().map(ProjectId::as_str),
+        Some(LOCAL_DEFAULT_PROJECT_ID)
+    );
+    assert_eq!(ctx.resource_scope.tenant_id, ctx.tenant_id);
+    assert_eq!(ctx.resource_scope.user_id, ctx.user_id);
+    assert_eq!(ctx.resource_scope.agent_id, ctx.agent_id);
+    assert_eq!(ctx.resource_scope.project_id, ctx.project_id);
+}
+
+#[test]
 fn scoped_path_rejects_raw_host_paths_urls_and_traversal() {
     assert!(ScopedPath::new("/workspace/README.md").is_ok());
     assert!(ScopedPath::new("/extension/state/db.json").is_ok());

@@ -444,6 +444,8 @@ With those defaults, optional path partitions render as:
 
 Use `agents/_none` or `projects/_none` only for deliberately unscoped/shared records. Do not use `_none` as a shorthand for the default single-agent or default-project experience; otherwise future additional agents or projects may accidentally share state that should have remained isolated.
 
+The host API exposes these defaults as `LOCAL_DEFAULT_TENANT_ID`, `LOCAL_DEFAULT_AGENT_ID`, `LOCAL_DEFAULT_PROJECT_ID`, `ResourceScope::local_default(...)`, and `ExecutionContext::local_default(...)` so bootstrap/local callers do not hand-roll divergent defaults.
+
 ### 9.3 Execution context
 
 ```rust

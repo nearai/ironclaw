@@ -52,6 +52,43 @@ pub struct ExecutionContext {
 }
 
 impl ExecutionContext {
+    /// Build a local/single-user execution context using the canonical default
+    /// tenant, agent, and bootstrap project.
+    ///
+    /// Callers still supply extension/runtime/trust/grants/mounts because those
+    /// are product-workflow decisions; this helper only normalizes local scope.
+    pub fn local_default(
+        user_id: UserId,
+        extension_id: ExtensionId,
+        runtime: RuntimeKind,
+        trust: TrustClass,
+        grants: CapabilitySet,
+        mounts: MountView,
+    ) -> Result<Self, HostApiError> {
+        let invocation_id = InvocationId::new();
+        let resource_scope = ResourceScope::local_default(user_id.clone(), invocation_id)?;
+        let context = Self {
+            invocation_id,
+            correlation_id: CorrelationId::new(),
+            process_id: None,
+            parent_process_id: None,
+            tenant_id: resource_scope.tenant_id.clone(),
+            user_id,
+            agent_id: resource_scope.agent_id.clone(),
+            project_id: resource_scope.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            extension_id,
+            runtime,
+            trust,
+            grants,
+            mounts,
+            resource_scope,
+        };
+        context.validate()?;
+        Ok(context)
+    }
+
     pub fn validate(&self) -> Result<(), HostApiError> {
         if self.resource_scope.invocation_id != self.invocation_id {
             return Err(HostApiError::invariant(

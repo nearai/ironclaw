@@ -9,7 +9,16 @@
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::{AgentId, InvocationId, MissionId, ProjectId, TenantId, ThreadId, UserId};
+use crate::{
+    AgentId, HostApiError, InvocationId, MissionId, ProjectId, TenantId, ThreadId, UserId,
+};
+
+/// Canonical local/single-user tenant id.
+pub const LOCAL_DEFAULT_TENANT_ID: &str = "default";
+/// Canonical local/single-user default agent id.
+pub const LOCAL_DEFAULT_AGENT_ID: &str = "default";
+/// Canonical local/single-user default bootstrap project id.
+pub const LOCAL_DEFAULT_PROJECT_ID: &str = "bootstrap";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceScope {
@@ -21,6 +30,28 @@ pub struct ResourceScope {
     pub mission_id: Option<MissionId>,
     pub thread_id: Option<ThreadId>,
     pub invocation_id: InvocationId,
+}
+
+impl ResourceScope {
+    /// Build the canonical local/single-user scope.
+    ///
+    /// This intentionally uses concrete `default` tenant/agent ids and the
+    /// `bootstrap` project. Optional `None` scopes remain reserved for
+    /// deliberately unscoped/shared records, not for the normal local default.
+    pub fn local_default(
+        user_id: UserId,
+        invocation_id: InvocationId,
+    ) -> Result<Self, HostApiError> {
+        Ok(Self {
+            tenant_id: TenantId::new(LOCAL_DEFAULT_TENANT_ID)?,
+            user_id,
+            agent_id: Some(AgentId::new(LOCAL_DEFAULT_AGENT_ID)?),
+            project_id: Some(ProjectId::new(LOCAL_DEFAULT_PROJECT_ID)?),
+            mission_id: None,
+            thread_id: None,
+            invocation_id,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
