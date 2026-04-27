@@ -3976,6 +3976,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_architecture"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "ironclaw_common"
 version = "0.2.0"
 dependencies = [
@@ -4016,6 +4023,31 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "ironclaw_host_api"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "ironclaw_resources"
+version = "0.1.0"
+dependencies = [
+ "ironclaw_host_api",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
