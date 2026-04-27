@@ -97,10 +97,14 @@ docs/reborn/2026-04-25-current-architecture-map.md
 Reviewers should use it alongside this packet to separate:
 
 ```text
-[exists]    implemented or covered by current Reborn contract/demo slices
-[partial]   present as a narrow slice, not yet a product-complete service
-[not yet]   intentionally missing or deferred
+[contract exists]         contract/docs/API shape exists; runnable implementation may still be pending
+[implemented slice]      tested implementation exists for the described slice; not a blanket product-complete claim
+[partially implemented]  subset exists, but product/production work remains
+[fully implemented]      complete for the frozen V1 contract; use only when the whole contract is done
+[not implemented]        intentionally missing or deferred
 ```
+
+Unless a row explicitly says `[fully implemented]`, reviewers should read the status as applying only to the narrow slice described, not as a full product-completion claim.
 
 Current implemented/partial substrate called out there includes:
 

@@ -12,10 +12,14 @@ Terminology note: older docs use **kernel** for the small host-core composition 
 Legend:
 
 ```text
-[exists]   implemented or covered by current Reborn contract/demo slices
-[partial]  present as a narrow slice, not yet a product-complete service
-[not yet]  intentionally missing or deferred
+[contract exists]         contract/docs/API shape exists; runnable implementation may still be pending
+[implemented slice]      tested implementation exists for the described slice; not a blanket product-complete claim
+[partially implemented]  subset exists, but product/production work remains
+[fully implemented]      complete for the frozen V1 contract; use only when the whole contract is done
+[not implemented]        intentionally missing or deferred
 ```
+
+Unless a row explicitly says `[fully implemented]`, assume the status describes the narrow slice named in that row, not all product behavior for the area.
 
 Contract freeze packet:
 
@@ -59,7 +63,7 @@ Reborn has one host core with many adapters and runtime ports. It should not gro
                   | Turn service              |
                   | one active run/thread,    |
                   | checkpoints, resume edge  |
-                  | [not yet]                 |
+                  | [not implemented]                 |
                   +-------------+-------------+
                                 |
                                 v
@@ -67,7 +71,7 @@ Reborn has one host core with many adapters and runtime ports. It should not gro
                   | First-party agent loop    |
                   | hosted service/extension  |
                   | emits Reply | Capability  |
-                  | Calls [not yet]           |
+                  | Calls [not implemented]           |
                   +-------------+-------------+
                                 |
                                 v
@@ -77,14 +81,14 @@ Reborn has one host core with many adapters and runtime ports. It should not gro
 |  +-------------------+       +-------------------+                    |
 |  | CapabilityHost    | ----> | Authorization /   |                    |
 |  | caller-facing     |       | grants / leases   |                    |
-|  | workflow gate     |       | [exists/partial]  |                    |
-|  | [exists]          |       +---------+---------+                    |
+|  | workflow gate     |       | [partially implemented]  |                    |
+|  | [implemented slice]          |       +---------+---------+                    |
 |  +----+-------+------+                 |                              |
 |       |       |                        v                              |
 |       |       |              +-------------------+                    |
 |       |       |              | Run-state +       |                    |
 |       |       |              | approval stores   |                    |
-|       |       |              | [exists/partial]  |                    |
+|       |       |              | [partially implemented]  |                    |
 |       |       |              +-------------------+                    |
 |       |       |                                                       |
 |       |       | spawn_json                                             |
@@ -92,7 +96,7 @@ Reborn has one host core with many adapters and runtime ports. It should not gro
 |       |  +-------------------+     background execution               |
 |       |  | ProcessManager / | ------------------------------------+   |
 |       |  | ProcessStore     |                                     |   |
-|       |  | [exists]         |                                     |   |
+|       |  | [implemented slice]         |                                     |   |
 |       |  +---------+--------+                                     |   |
 |       |            |                                              |   |
 |       |            v                                              |   |
@@ -100,18 +104,18 @@ Reborn has one host core with many adapters and runtime ports. It should not gro
 |       |  | BackgroundProcessManager  |                            |   |
 |       |  | + ProcessExecutor         |                            |   |
 |       |  | + DispatchProcessExecutor |                            |   |
-|       |  | [exists]                  |                            |   |
+|       |  | [implemented slice]                  |                            |   |
 |       |  +-------------+-------------+                            |   |
 |       |                | uses owned dispatcher handles             |   |
 |       |                v                                           |   |
-|       |  RuntimeDispatcher::from_arcs(...) [exists]                |   |
+|       |  RuntimeDispatcher::from_arcs(...) [implemented slice]                |   |
 |       |                                                            |   |
 |       v                                                            |   |
 |  +-------------------+                                             |   |
 |  | RuntimeDispatcher | <-------------------------------------------+   |
 |  | authorized adapter|                                                 |
 |  | router only       |                                                 |
-|  | [exists]          |                                                 |
+|  | [implemented slice]          |                                                 |
 |  +----+--------+-----+                                                 |
 |       |        |                                                       |
 +-------|--------|-------------------------------------------------------+
@@ -120,23 +124,23 @@ Reborn has one host core with many adapters and runtime ports. It should not gro
 +--------------+ +---------------+ +---------------+ +------------------+
 | WASM adapter | | Script adapter| | MCP adapter   | | FirstParty/System|
 | -> runtime   | | -> runtime    | | -> runtime    | | runtime adapters |
-| [exists]     | | [exists]      | | [exists]      | | [not yet exec]   |
+| [implemented slice]     | | [implemented slice]      | | [implemented slice]      | | [not implemented]   |
 +--------------+ +---------------+ +---------------+ +------------------+
         ^                ^                 ^
         |                |                 |
 +-------+----------------+-----------------+---------------------------+
-| ExtensionDiscovery / ExtensionRegistry [exists]                      |
+| ExtensionDiscovery / ExtensionRegistry [implemented slice]                      |
 | discovers manifests, packages, capabilities, runtime declarations;    |
 | knows what can run, never executes it.                                |
 +-----------------------------------------------------------------------+
 
 +-----------------------------------------------------------------------+
 | Shared host services and records                                       |
-| RootFilesystem/mounts [exists]  ResourceGovernor [exists]              |
-| Network policy boundary [exists] Runtime/control-plane events [partial]|
-| Process persistence + ProcessHost [exists] Durable leases [partial]    |
-| Secret FS durability/leases [exists]                                   |
-| User-facing scoped event API [not yet]                                  |
+| RootFilesystem/mounts [implemented slice]  ResourceGovernor [implemented slice]              |
+| Network policy boundary [implemented slice] Runtime/control-plane events [partially implemented]|
+| Process persistence + ProcessHost [implemented slice] Durable leases [partially implemented]    |
+| Secret FS durability/leases [implemented slice]                                   |
+| User-facing scoped event API [not implemented]                                  |
 +-----------------------------------------------------------------------+
 ```
 
@@ -223,32 +227,32 @@ Still missing for process/product completeness:
 
 ---
 
-## 4. What exists now
+## 4. Implementation status by slice
 
-The current implemented or contract-backed Reborn stack includes these slices:
+The current Reborn stack includes these contract and implementation slices. These rows do not claim full product completion unless they explicitly use `[fully implemented]`:
 
 | Area | Current status |
 | --- | --- |
-| Host API vocabulary | `[exists]` IDs, scopes, runtime kinds, trust classes, capabilities, grants, resources, approvals, events, paths, mount views, neutral dispatch port contracts, and redacted runtime dispatch error kinds |
-| Filesystem/mount surface | `[exists]` root/scoped filesystem contracts, `CompositeRootFilesystem`, `FilesystemCatalog`, catalog descriptors/placement metadata, local backend, and feature-gated PostgreSQL/libSQL `RootFilesystem` backends over `root_filesystem_entries`; used by Reborn services through virtual paths while typed repositories remain valid for structured state |
-| Memory/workspace filesystem adapter | `[exists/partial]` `ironclaw_memory` owns `/memory/tenants/{tenant}/users/{user}/projects/{project}/...` path grammar, `MemoryBackend` plugin contract, capability declarations, host-resolved `MemoryContext`, `MemoryBackendFilesystemAdapter`, `RepositoryMemoryBackend`, legacy-compatible `MemoryDocumentFilesystem`, repository/indexer seams, in-memory repository, PostgreSQL/libSQL adapters over the existing workspace table family, metadata/.config inheritance, schema validation, skip-indexing/versioning behavior, embedding-provider seam, embedded chunk writes, libSQL/PostgreSQL FTS search, rank-fused full-text/vector search APIs, and a chunking indexer ported from current workspace chunk/hash behavior; production provider credential/network wiring, multi-scope search, and richer provider-specific search result metadata are not complete |
-| Extension discovery/registry | `[exists]` manifests, package validation, capability descriptors, runtime declaration mapping |
-| Resource governor | `[exists]` reservation/reconcile/release model and V1 dimensions for hosted resource control |
-| Secrets | `[exists/partial]` `ironclaw_secrets` service boundary with scoped metadata, AES-256-GCM/HKDF encryption, encrypted-row repository contract, in-memory encrypted repository, filesystem-backed encrypted repository experiment/reference over `RootFilesystem`, credential mapping metadata, and one-shot secret leases; final storage placement is expected to favor typed secret repositories over generic file mounts, and keychain master-key composition/runtime injection are not complete |
-| Network | `[exists/partial]` `ironclaw_network` service boundary with scoped policy evaluation, exact/wildcard target matching, literal private IP denial, and egress-estimate checks; HTTP execution/proxying and DNS rebinding protection are not complete |
-| Capability access | `[exists/partial]` grant matching, action-time authorization, lease-backed authorizer semantics, in-memory and filesystem-backed exact-invocation lease stores |
-| CapabilityHost | `[exists]` caller-facing invocation, approval-blocking, resume, spawn workflow gate, fail-closed `CapabilityObligationHandler` seam, and `ProcessServices` spawn wiring over the neutral host API dispatch port |
-| Host runtime composition | `[exists]` `HostRuntimeServices` composition helper for shared registry/filesystem/governor/authorizer/runtime/process/approval/obligation-handler services -> `RuntimeDispatcher`, `CapabilityHost`, `ApprovalResolver`, and `ProcessHost` handles; includes metadata-only built-in `AuditBefore`, WASM-enforced `ApplyNetworkPolicy` obligation handling through hardened network egress or custom host HTTP clients, and optional already-resolved runtime HTTP credential injection after request leak scanning |
-| Architecture guardrails | `[exists/partial]` `ironclaw_architecture` test crate walks `cargo metadata` and enforces central Reborn dependency-boundary rules; per-crate guardrail files document local invariants |
-| Approvals/resume | `[exists/partial]` pending approval records, invocation fingerprints, approval resolver, fail-closed approval+lease persistence ordering/rollback, metadata-only `AuditEnvelope::approval_resolved(...)` audit records with JSONL persistence coverage, in-memory and async filesystem-backed exact-invocation leases, `resume_json` replay checks |
-| Run-state | `[exists]` `Running`, `BlockedApproval`, `BlockedAuth`, `Completed`, `Failed` current-state stores with tenant/user partitioning |
-| Dispatcher | `[exists]` implementation of the neutral `ironclaw_host_api` dispatch port for already-authorized requests to registered runtime adapters; no normal dependencies on concrete WASM/Script/MCP runtime crates; missing adapters fail closed before reservation; event sink failures are best-effort and runtime failures are redacted to stable kinds |
-| Runtime events and audit | `[partial]` runtime/process `RuntimeEvent` vocabulary with `EventSink`, separate control-plane `AuditEnvelope` records with `AuditSink`, in-memory/JSONL sinks, tenant/user-scoped JSONL path helpers, and hardened read-error semantics; sink failures are ignored by dispatcher/resolver so observability outages do not alter runtime or control-plane outcomes |
-| WASM lane | `[exists]` `WasmRuntimeAdapter` composition in `ironclaw_host_runtime` delegates to configured `WasmRuntime` and can enforce accepted `ApplyNetworkPolicy` obligations through `ironclaw_network::HardenedHttpEgressClient` or `WasmPolicyHttpClient` on host-mediated HTTP imports; hardened egress scans guest request/response data and can inject already-resolved HTTP credentials without exposing them to the guest |
-| Script lane | `[exists]` `ScriptRuntimeAdapter` composition in `ironclaw_host_runtime` delegates to `ScriptExecutor` with semantic manifest runner profiles, in-process demo backend, and optional legacy Docker backend support |
-| MCP lane | `[exists]` `McpRuntimeAdapter` composition in `ironclaw_host_runtime` delegates to `McpExecutor`; not a full MCP lifecycle product yet |
-| Process persistence | `[exists]` process store/manager records, scoped process result records with inline JSON or filesystem output refs, `ProcessServices` wiring, host-facing `ProcessHost` status/kill/await/subscribe/result/output APIs, cooperative cancellation tokens, background completion/failure transition protection, lifecycle events, and resource reservation ownership/cleanup |
-| Live vertical slice | `[exists]` runnable demos through discovery -> registry -> dispatcher adapters -> resources/events and through `CapabilityHost` -> authorization -> host-runtime-composed dispatcher adapters -> process services; host-runtime composition helper covers shared service wiring and has non-Docker in-memory and filesystem-backed live examples |
+| Host API vocabulary | `[implemented slice]` IDs, scopes, runtime kinds, trust classes, capabilities, grants, resources, approvals, events, paths, mount views, neutral dispatch port contracts, and redacted runtime dispatch error kinds |
+| Filesystem/mount surface | `[implemented slice]` root/scoped filesystem contracts, `CompositeRootFilesystem`, `FilesystemCatalog`, catalog descriptors/placement metadata, local backend, and feature-gated PostgreSQL/libSQL `RootFilesystem` backends over `root_filesystem_entries`; used by Reborn services through virtual paths while typed repositories remain valid for structured state |
+| Memory/workspace filesystem adapter | `[partially implemented]` `ironclaw_memory` owns `/memory/tenants/{tenant}/users/{user}/projects/{project}/...` path grammar, `MemoryBackend` plugin contract, capability declarations, host-resolved `MemoryContext`, `MemoryBackendFilesystemAdapter`, `RepositoryMemoryBackend`, legacy-compatible `MemoryDocumentFilesystem`, repository/indexer seams, in-memory repository, PostgreSQL/libSQL adapters over the existing workspace table family, metadata/.config inheritance, schema validation, skip-indexing/versioning behavior, embedding-provider seam, embedded chunk writes, libSQL/PostgreSQL FTS search, rank-fused full-text/vector search APIs, and a chunking indexer ported from current workspace chunk/hash behavior; production provider credential/network wiring, multi-scope search, and richer provider-specific search result metadata are not complete |
+| Extension discovery/registry | `[implemented slice]` manifests, package validation, capability descriptors, runtime declaration mapping |
+| Resource governor | `[implemented slice]` reservation/reconcile/release model and V1 dimensions for hosted resource control |
+| Secrets | `[partially implemented]` `ironclaw_secrets` service boundary with scoped metadata, AES-256-GCM/HKDF encryption, encrypted-row repository contract, in-memory encrypted repository, filesystem-backed encrypted repository experiment/reference over `RootFilesystem`, credential mapping metadata, and one-shot secret leases; final storage placement is expected to favor typed secret repositories over generic file mounts, and keychain master-key composition/runtime injection are not complete |
+| Network | `[partially implemented]` `ironclaw_network` service boundary with scoped policy evaluation, exact/wildcard target matching, literal private IP denial, and egress-estimate checks; HTTP execution/proxying and DNS rebinding protection are not complete |
+| Capability access | `[partially implemented]` grant matching, action-time authorization, lease-backed authorizer semantics, in-memory and filesystem-backed exact-invocation lease stores |
+| CapabilityHost | `[implemented slice]` caller-facing invocation, approval-blocking, resume, spawn workflow gate, fail-closed `CapabilityObligationHandler` seam, and `ProcessServices` spawn wiring over the neutral host API dispatch port |
+| Host runtime composition | `[implemented slice]` `HostRuntimeServices` composition helper for shared registry/filesystem/governor/authorizer/runtime/process/approval/obligation-handler services -> `RuntimeDispatcher`, `CapabilityHost`, `ApprovalResolver`, and `ProcessHost` handles; includes metadata-only built-in `AuditBefore`, WASM-enforced `ApplyNetworkPolicy` obligation handling through hardened network egress or custom host HTTP clients, and optional already-resolved runtime HTTP credential injection after request leak scanning |
+| Architecture guardrails | `[partially implemented]` `ironclaw_architecture` test crate walks `cargo metadata` and enforces central Reborn dependency-boundary rules; per-crate guardrail files document local invariants |
+| Approvals/resume | `[partially implemented]` pending approval records, invocation fingerprints, approval resolver, fail-closed approval+lease persistence ordering/rollback, metadata-only `AuditEnvelope::approval_resolved(...)` audit records with JSONL persistence coverage, in-memory and async filesystem-backed exact-invocation leases, `resume_json` replay checks |
+| Run-state | `[implemented slice]` `Running`, `BlockedApproval`, `BlockedAuth`, `Completed`, `Failed` current-state stores with tenant/user partitioning |
+| Dispatcher | `[implemented slice]` implementation of the neutral `ironclaw_host_api` dispatch port for already-authorized requests to registered runtime adapters; no normal dependencies on concrete WASM/Script/MCP runtime crates; missing adapters fail closed before reservation; event sink failures are best-effort and runtime failures are redacted to stable kinds |
+| Runtime events and audit | `[partially implemented]` runtime/process `RuntimeEvent` vocabulary with `EventSink`, separate control-plane `AuditEnvelope` records with `AuditSink`, in-memory/JSONL sinks, tenant/user-scoped JSONL path helpers, and hardened read-error semantics; sink failures are ignored by dispatcher/resolver so observability outages do not alter runtime or control-plane outcomes |
+| WASM lane | `[implemented slice]` `WasmRuntimeAdapter` composition in `ironclaw_host_runtime` delegates to configured `WasmRuntime` and can enforce accepted `ApplyNetworkPolicy` obligations through `ironclaw_network::HardenedHttpEgressClient` or `WasmPolicyHttpClient` on host-mediated HTTP imports; hardened egress scans guest request/response data and can inject already-resolved HTTP credentials without exposing them to the guest |
+| Script lane | `[implemented slice]` `ScriptRuntimeAdapter` composition in `ironclaw_host_runtime` delegates to `ScriptExecutor` with semantic manifest runner profiles, in-process demo backend, and optional legacy Docker backend support |
+| MCP lane | `[implemented slice]` `McpRuntimeAdapter` composition in `ironclaw_host_runtime` delegates to `McpExecutor`; not a full MCP lifecycle product yet |
+| Process persistence | `[implemented slice]` process store/manager records, scoped process result records with inline JSON or filesystem output refs, `ProcessServices` wiring, host-facing `ProcessHost` status/kill/await/subscribe/result/output APIs, cooperative cancellation tokens, background completion/failure transition protection, lifecycle events, and resource reservation ownership/cleanup |
+| Live vertical slice | `[implemented slice]` runnable demos through discovery -> registry -> dispatcher adapters -> resources/events and through `CapabilityHost` -> authorization -> host-runtime-composed dispatcher adapters -> process services; host-runtime composition helper covers shared service wiring and has non-Docker in-memory and filesystem-backed live examples |
 
 ---
 
