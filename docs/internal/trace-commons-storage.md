@@ -8,7 +8,7 @@ The MVP ingestion service still serves tenant-scoped JSON files under `TRACE_COM
 
 This branch now contains the first production-storage bridge:
 
-- `migrations/V25__trace_corpus_storage.sql`, `migrations/V26__trace_object_ref_lifecycle.sql`, `migrations/V27__trace_corpus_rich_metadata.sql`, `migrations/V28__trace_vector_entries.sql`, `migrations/V29__trace_export_manifests.sql`, `migrations/V30__trace_export_manifest_items.sql`, `migrations/V32__trace_audit_hash_chain.sql`, `migrations/V33__trace_tenant_policies.sql`, `migrations/V37__trace_review_leases.sql`, `migrations/V38__trace_revocation_propagation_ledger.sql`, and matching libSQL incremental migrations.
+- `migrations/V25__trace_corpus_storage.sql`, `migrations/V26__trace_object_ref_lifecycle.sql`, `migrations/V27__trace_corpus_rich_metadata.sql`, `migrations/V28__trace_vector_entries.sql`, `migrations/V29__trace_export_manifests.sql`, `migrations/V30__trace_export_manifest_items.sql`, `migrations/V32__trace_audit_hash_chain.sql`, `migrations/V33__trace_tenant_policies.sql`, `migrations/V37__trace_review_leases.sql`, `migrations/V38__trace_revocation_propagation_ledger.sql`, `migrations/V39__trace_export_jobs.sql`, and matching libSQL incremental migrations.
 - `src/trace_corpus_storage.rs` and `TraceCorpusStore` implementations for PostgreSQL and libSQL.
 - Optional ingest-service DB dual-write behind `TRACE_COMMONS_DB_DUAL_WRITE=true`.
 - Optional DB-backed tenant policy reads behind `TRACE_COMMONS_DB_TENANT_POLICY_READS=true`.
@@ -112,7 +112,7 @@ CREATE TABLE trace_access_grants (
     grant_id UUID PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
     principal_ref TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('contributor', 'reviewer', 'admin', 'export_worker', 'retention_worker', 'vector_worker', 'benchmark_worker', 'process_eval_worker')),
+    role TEXT NOT NULL CHECK (role IN ('contributor', 'reviewer', 'admin', 'export_worker', 'retention_worker', 'revocation_worker', 'vector_worker', 'benchmark_worker', 'process_eval_worker')),
     allowed_scopes TEXT[] NOT NULL DEFAULT '{}',
     allowed_uses TEXT[] NOT NULL DEFAULT '{}',
     expires_at TIMESTAMPTZ,
@@ -447,7 +447,7 @@ CREATE TABLE IF NOT EXISTS trace_access_grants (
     grant_id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
     principal_ref TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('contributor', 'reviewer', 'admin', 'export_worker', 'retention_worker', 'vector_worker', 'benchmark_worker', 'process_eval_worker')),
+    role TEXT NOT NULL CHECK (role IN ('contributor', 'reviewer', 'admin', 'export_worker', 'retention_worker', 'revocation_worker', 'vector_worker', 'benchmark_worker', 'process_eval_worker')),
     allowed_scopes TEXT NOT NULL DEFAULT '[]',
     allowed_uses TEXT NOT NULL DEFAULT '[]',
     expires_at TEXT,
@@ -825,7 +825,7 @@ The names below are intentionally close to the MVP concepts, but are not propose
 | `grant_id` | Stable grant id. |
 | `tenant_id` | Tenant boundary. |
 | `principal_ref` | Hash or external subject id from AuthN. |
-| `role` | `contributor`, `reviewer`, `admin`, `export_worker`, `retention_worker`, `vector_worker`, `benchmark_worker`, `process_eval_worker`. |
+| `role` | `contributor`, `reviewer`, `admin`, `export_worker`, `retention_worker`, `revocation_worker`, `vector_worker`, `benchmark_worker`, `process_eval_worker`. |
 | `allowed_scopes` | Consent scopes or ABAC scope list. |
 | `allowed_uses` | Debugging, evaluation, benchmark, ranking, training, analytics. |
 | `expires_at` | Optional expiry for short-lived grants. |
@@ -835,7 +835,8 @@ The names below are intentionally close to the MVP concepts, but are not propose
 Access grants authorize service operations. Envelope contributor fields remain attribution only.
 In the current ingest service, `export_worker` is limited to replay/ranker export surfaces,
 `benchmark_worker` is limited to benchmark conversion, `retention_worker` is limited to
-retention/cache cleanup maintenance, and `vector_worker` is limited to vector-index
+retention/cache cleanup maintenance, `revocation_worker` is limited to the
+revocation-propagation worker route, and `vector_worker` is limited to vector-index
 maintenance. `process_eval_worker` is limited to writing bounded process-evaluation
 metadata for accepted submissions and, when supplied with an external reference, appending
 idempotent `training_utility` delayed credit for the evaluated accepted submission. These
@@ -1023,6 +1024,7 @@ Do not mutate historical ledger rows. Materialized credit totals can be cached s
 Every export item needs an audit event or an audit batch event with a cryptographic item list hash. The pilot replay, benchmark, and ranker export paths already write a deterministic source-list hash into both the exported artifact/manifest and the mirrored audit `decision_inputs_hash`; benchmark and ranker exports also persist file-backed provenance manifests, and replay dataset exports promote that hash plus item-level source snapshots into durable DB manifests.
 
 Pilot `V29` implements the compact `trace_export_manifests` control row for replay dataset exports in both PostgreSQL and libSQL. It stores tenant id, export manifest id, artifact kind, purpose, audit event id, source submission ids, source-list hash, item count, generation time, and invalidation/deletion timestamps. Pilot `V30` adds `trace_export_manifest_items` rows for each replay export source, including source object ref ids, source status/hash snapshots, and per-item revocation, expiration, or purge invalidation. Pilot `V36` adds `trace_retention_jobs` and `trace_retention_job_items` rows so maintenance/retention runs have a tenant-scoped durable ledger of run parameters, aggregate action counts, and per-submission expire/purge/revoke lifecycle counts. Pilot `V37` adds durable review lease fields to `trace_submissions` for reviewer/admin claim/release coordination.
+Pilot `V39` adds durable Trace Commons export access grants and export job rows. The grant row records the short-lived authorization slice issued to a caller, including principal, dataset kind, purpose, cap, expiry, status, and safe metadata. The job row records the tenant-scoped export work slice that consumes that grant, including lifecycle timestamps, optional result manifest id, item count, last error, and metadata. These rows are storage-only scaffolding for later ingest/export integration.
 
 ### Benchmark Artifacts
 
@@ -1087,6 +1089,38 @@ Tombstones should outlive content deletion long enough to prevent re-ingest or r
 | `verified_at` | Post-action verification time. |
 
 Retention jobs must be resumable and must verify that tenant, policy, consent, and revocation state still match immediately before destructive actions.
+
+### Export Grants and Jobs
+
+`trace_export_access_grants`
+
+| Column | Purpose |
+|--------|---------|
+| `tenant_id`, `grant_id` | Tenant-scoped short-lived grant id. |
+| `export_job_id` | Export job slice the grant authorizes. |
+| `caller_principal_ref` | Caller or service principal receiving the grant. |
+| `requested_dataset_kind` | Dataset class such as replay, benchmark, or ranker. |
+| `purpose` | Bounded export purpose. |
+| `max_item_cap` | Optional per-grant item cap. |
+| `status` | `active`, `consumed`, `revoked`, or `expired`. |
+| `requested_at`, `expires_at` | Grant validity window. |
+| `metadata_json` | Safe request metadata only. |
+
+`trace_export_jobs`
+
+| Column | Purpose |
+|--------|---------|
+| `tenant_id`, `export_job_id` | Tenant-scoped export job id. |
+| `grant_id` | Durable grant consumed by the job. |
+| `caller_principal_ref`, `requested_dataset_kind`, `purpose` | Request projection copied from the grant for auditability. |
+| `max_item_cap` | Optional bounded item cap used by the job. |
+| `status` | `queued`, `running`, `complete`, `failed`, `cancelled`, or `expired`. |
+| `requested_at`, `started_at`, `finished_at`, `expires_at` | Lifecycle and expiry timestamps. |
+| `result_manifest_id` | Optional manifest produced by the job. |
+| `item_count`, `last_error` | Result count or bounded failure reason. |
+| `metadata_json` | Safe job metadata only. |
+
+Export grants and jobs must stay tenant-scoped and idempotent. PostgreSQL enables RLS on both tables; libSQL enforces tenant isolation through every `TraceCorpusStore` query and targeted store tests.
 
 ## PostgreSQL and libSQL Parity Notes
 
@@ -1162,8 +1196,8 @@ Each migration batch should verify:
 Implementation checklist for the first real storage migration:
 
 - Refresh `origin/staging` and `origin/main`; choose the next migration number after the highest migration present on either branch. Completed for `V25`.
-- Add `migrations/VN__trace_corpus_storage.sql` with the PostgreSQL DDL, and update `migrations/checksums.lock` through the repo migration checksum workflow. Completed for `V25`, with vector-entry metadata added in `V28`, compact export manifest metadata added in `V29`, and export manifest item rows added in `V30`.
-- Add a same-version `"trace_corpus_storage"` entry to `INCREMENTAL_MIGRATIONS` in `src/db/libsql_migrations.rs`. Completed for version `25`, with `trace_vector_entries` added in version `28`, `trace_export_manifests` added in version `29`, and `trace_export_manifest_items` added in version `30`.
+- Add `migrations/VN__trace_corpus_storage.sql` with the PostgreSQL DDL, and update `migrations/checksums.lock` through the repo migration checksum workflow. Completed for `V25`, with vector-entry metadata added in `V28`, compact export manifest metadata added in `V29`, export manifest item rows added in `V30`, and export grant/job persistence added in `V39`.
+- Add a same-version `"trace_corpus_storage"` entry to `INCREMENTAL_MIGRATIONS` in `src/db/libsql_migrations.rs`. Completed for version `25`, with `trace_vector_entries` added in version `28`, `trace_export_manifests` added in version `29`, `trace_export_manifest_items` added in version `30`, and `trace_export_jobs` added in libSQL incremental version `38`.
 - If the libSQL base `SCHEMA` is updated for fresh installs, keep the incremental migration idempotent and make sure fresh and upgraded databases converge to the same schema.
 - Add `TraceCorpusStore` to the `Database` trait only after both `PgBackend` and `LibSqlBackend` implementations exist. Completed.
 - Keep DB writes behind a dark-launch or dual-write flag until parity checks pass. Completed with `TRACE_COMMONS_DB_DUAL_WRITE=true`.

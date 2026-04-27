@@ -54,6 +54,8 @@ const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_export_manifest_items",
     "trace_retention_jobs",
     "trace_retention_job_items",
+    "trace_export_access_grants",
+    "trace_export_jobs",
     "trace_revocation_propagation_items",
 ];
 

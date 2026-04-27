@@ -9,13 +9,16 @@ use ironclaw::trace_corpus_storage::{
     TenantScopedTraceObjectRef, TraceAuditAction, TraceAuditEventWrite, TraceAuditSafeMetadata,
     TraceCorpusStatus, TraceCorpusStore, TraceCreditEventType, TraceCreditEventWrite,
     TraceCreditSettlementState, TraceDerivedRecordWrite, TraceDerivedStatus,
-    TraceExportManifestItemInvalidationReason, TraceExportManifestItemWrite,
-    TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefWrite,
-    TraceRetentionJobItemAction, TraceRetentionJobItemStatus, TraceRetentionJobItemWrite,
-    TraceRetentionJobStatus, TraceRetentionJobWrite, TraceReviewLeaseAuditAction,
-    TraceSubmissionWrite, TraceTenantPolicyWrite, TraceTombstoneWrite,
-    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
-    TraceWorkerKind,
+    TraceExportAccessGrantStatus, TraceExportAccessGrantWrite, TraceExportJobStatus,
+    TraceExportJobStatusUpdate, TraceExportJobWrite, TraceExportManifestItemInvalidationReason,
+    TraceExportManifestItemWrite, TraceExportManifestWrite, TraceObjectArtifactKind,
+    TraceObjectRefWrite, TraceRetentionJobItemAction, TraceRetentionJobItemStatus,
+    TraceRetentionJobItemWrite, TraceRetentionJobStatus, TraceRetentionJobWrite,
+    TraceReviewLeaseAuditAction, TraceRevocationPropagationAction,
+    TraceRevocationPropagationItemStatus, TraceRevocationPropagationItemStatusUpdate,
+    TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget, TraceSubmissionWrite,
+    TraceTenantPolicyWrite, TraceTombstoneWrite, TraceVectorEntrySourceProjection,
+    TraceVectorEntryStatus, TraceVectorEntryWrite, TraceWorkerKind,
 };
 use secrecy::{ExposeSecret, SecretString};
 use tokio::time::{Duration, sleep};
@@ -194,6 +197,7 @@ struct RawTraceRlsIds {
     credit_event_id: Uuid,
     tombstone_id: Uuid,
     retention_job_id: Uuid,
+    propagation_item_id: Uuid,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -206,6 +210,7 @@ struct RawTraceRlsCounts {
     tombstones: i64,
     retention_jobs: i64,
     retention_job_items: i64,
+    revocation_propagation_items: i64,
 }
 
 impl RawTraceRlsCounts {
@@ -219,7 +224,33 @@ impl RawTraceRlsCounts {
             tombstones: count,
             retention_jobs: count,
             retention_job_items: count,
+            revocation_propagation_items: count,
         }
+    }
+}
+
+fn sample_revocation_propagation_item(
+    tenant_id: &str,
+    submission_id: Uuid,
+    propagation_item_id: Uuid,
+    target: TraceRevocationPropagationTarget,
+    idempotency_suffix: &str,
+) -> TraceRevocationPropagationItemWrite {
+    TraceRevocationPropagationItemWrite {
+        tenant_id: tenant_id.to_string(),
+        propagation_item_id,
+        source_submission_id: submission_id,
+        target,
+        action: TraceRevocationPropagationAction::InvalidateMetadata,
+        status: TraceRevocationPropagationItemStatus::Pending,
+        idempotency_key: format!("{submission_id}:{idempotency_suffix}"),
+        reason: "tenant_revoked_trace".to_string(),
+        attempt_count: 0,
+        last_error: None,
+        next_attempt_at: None,
+        completed_at: None,
+        evidence_hash: None,
+        metadata: BTreeMap::new(),
     }
 }
 
@@ -328,7 +359,8 @@ async fn raw_trace_rls_counts(
                 (SELECT COUNT(*) FROM trace_credit_ledger WHERE credit_event_id = $4) AS credit_events,
                 (SELECT COUNT(*) FROM trace_tombstones WHERE tombstone_id = $5) AS tombstones,
                 (SELECT COUNT(*) FROM trace_retention_jobs WHERE retention_job_id = $6) AS retention_jobs,
-                (SELECT COUNT(*) FROM trace_retention_job_items WHERE retention_job_id = $6) AS retention_job_items",
+                (SELECT COUNT(*) FROM trace_retention_job_items WHERE retention_job_id = $6) AS retention_job_items,
+                (SELECT COUNT(*) FROM trace_revocation_propagation_items WHERE propagation_item_id = $7) AS revocation_propagation_items",
             &[
                 &ids.submission_id,
                 &ids.object_ref_id,
@@ -336,6 +368,7 @@ async fn raw_trace_rls_counts(
                 &ids.credit_event_id,
                 &ids.tombstone_id,
                 &ids.retention_job_id,
+                &ids.propagation_item_id,
             ],
         )
         .await
@@ -350,6 +383,7 @@ async fn raw_trace_rls_counts(
         tombstones: row.get("tombstones"),
         retention_jobs: row.get("retention_jobs"),
         retention_job_items: row.get("retention_job_items"),
+        revocation_propagation_items: row.get("revocation_propagation_items"),
     }
 }
 
@@ -593,6 +627,9 @@ async fn assert_trace_rls_policies_installed(backend: &PgBackend) {
         "trace_export_manifest_items".to_string(),
         "trace_retention_jobs".to_string(),
         "trace_retention_job_items".to_string(),
+        "trace_export_access_grants".to_string(),
+        "trace_export_jobs".to_string(),
+        "trace_revocation_propagation_items".to_string(),
     ];
     let client = backend.pool().get().await.expect("get policy connection");
     let rows = client
@@ -1469,6 +1506,328 @@ async fn store_facade_preserves_retention_job_scope_and_items() {
 }
 
 #[tokio::test]
+async fn store_facade_preserves_revocation_propagation_scope_and_updates() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+    assert_trace_rls_policies_installed(&backend).await;
+
+    let tenant_alpha = format!("rls-propagation-alpha-{}", Uuid::new_v4());
+    let tenant_beta = format!("rls-propagation-beta-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+
+    let alpha_submission = sample_submission(&tenant_alpha, submission_id);
+    let alpha_trace_id = alpha_submission.trace_id;
+    backend
+        .upsert_trace_submission(alpha_submission)
+        .await
+        .expect("insert alpha submission");
+    let beta_submission = sample_submission(&tenant_beta, submission_id);
+    let beta_trace_id = beta_submission.trace_id;
+    backend
+        .upsert_trace_submission(beta_submission)
+        .await
+        .expect("insert beta submission with same submission id");
+
+    let alpha_propagation_item_id = Uuid::new_v4();
+    let alpha_object_ref_id = Uuid::new_v4();
+    let alpha_item = backend
+        .upsert_trace_revocation_propagation_item(sample_revocation_propagation_item(
+            &tenant_alpha,
+            submission_id,
+            alpha_propagation_item_id,
+            TraceRevocationPropagationTarget::ObjectRef {
+                object_ref_id: alpha_object_ref_id,
+            },
+            "alpha:object-ref",
+        ))
+        .await
+        .expect("insert alpha revocation propagation item");
+    assert_eq!(alpha_item.tenant_id, tenant_alpha);
+    assert_eq!(alpha_item.trace_id, alpha_trace_id);
+    assert_eq!(
+        alpha_item.status,
+        TraceRevocationPropagationItemStatus::Pending
+    );
+
+    let beta_propagation_item_id = Uuid::new_v4();
+    let beta_export_manifest_id = Uuid::new_v4();
+    let beta_item = backend
+        .upsert_trace_revocation_propagation_item(sample_revocation_propagation_item(
+            &tenant_beta,
+            submission_id,
+            beta_propagation_item_id,
+            TraceRevocationPropagationTarget::ExportManifestItem {
+                export_manifest_id: beta_export_manifest_id,
+                source_submission_id: submission_id,
+            },
+            "beta:export-item",
+        ))
+        .await
+        .expect("insert beta revocation propagation item");
+    assert_eq!(beta_item.tenant_id, tenant_beta);
+    assert_eq!(beta_item.trace_id, beta_trace_id);
+
+    let alpha_items = backend
+        .list_trace_revocation_propagation_items(&tenant_alpha, submission_id)
+        .await
+        .expect("list alpha revocation propagation items");
+    assert_eq!(alpha_items.len(), 1);
+    assert_eq!(
+        alpha_items[0].propagation_item_id,
+        alpha_propagation_item_id
+    );
+    assert_eq!(
+        alpha_items[0].target,
+        TraceRevocationPropagationTarget::ObjectRef {
+            object_ref_id: alpha_object_ref_id
+        }
+    );
+
+    let beta_items_from_alpha_submission_id = backend
+        .list_trace_revocation_propagation_items(&tenant_beta, submission_id)
+        .await
+        .expect("list beta revocation propagation items");
+    assert_eq!(beta_items_from_alpha_submission_id.len(), 1);
+    assert_eq!(
+        beta_items_from_alpha_submission_id[0].propagation_item_id,
+        beta_propagation_item_id
+    );
+
+    let alpha_due = backend
+        .list_due_trace_revocation_propagation_items(&tenant_alpha, Utc::now(), 10)
+        .await
+        .expect("list due alpha revocation propagation items");
+    assert_eq!(alpha_due.len(), 1);
+    assert_eq!(alpha_due[0].propagation_item_id, alpha_propagation_item_id);
+    assert_ne!(alpha_due[0].propagation_item_id, beta_propagation_item_id);
+
+    let cross_tenant_update = backend
+        .update_trace_revocation_propagation_item_status(
+            &tenant_alpha,
+            beta_propagation_item_id,
+            TraceRevocationPropagationItemStatusUpdate {
+                status: TraceRevocationPropagationItemStatus::Done,
+                attempt_count: 1,
+                last_error: None,
+                next_attempt_at: None,
+                completed_at: Some(Utc::now()),
+                evidence_hash: Some("sha256:cross-tenant-update".to_string()),
+            },
+        )
+        .await
+        .expect("cross-tenant update is scoped by tenant");
+    assert!(cross_tenant_update.is_none());
+
+    let updated_alpha = backend
+        .update_trace_revocation_propagation_item_status(
+            &tenant_alpha,
+            alpha_propagation_item_id,
+            TraceRevocationPropagationItemStatusUpdate {
+                status: TraceRevocationPropagationItemStatus::Done,
+                attempt_count: 1,
+                last_error: None,
+                next_attempt_at: None,
+                completed_at: Some(Utc::now()),
+                evidence_hash: Some("sha256:alpha-object-ref-invalidated".to_string()),
+            },
+        )
+        .await
+        .expect("update alpha revocation propagation item")
+        .expect("alpha revocation propagation item exists");
+    assert_eq!(
+        updated_alpha.status,
+        TraceRevocationPropagationItemStatus::Done
+    );
+    assert_eq!(
+        updated_alpha.evidence_hash.as_deref(),
+        Some("sha256:alpha-object-ref-invalidated")
+    );
+
+    let beta_items_after_alpha_update = backend
+        .list_trace_revocation_propagation_items(&tenant_beta, submission_id)
+        .await
+        .expect("list beta revocation propagation items after alpha update");
+    assert_eq!(beta_items_after_alpha_update.len(), 1);
+    assert_eq!(
+        beta_items_after_alpha_update[0].status,
+        TraceRevocationPropagationItemStatus::Pending
+    );
+    assert!(beta_items_after_alpha_update[0].evidence_hash.is_none());
+
+    cleanup_trace_tenants(&backend, &[&tenant_alpha, &tenant_beta]).await;
+}
+
+#[tokio::test]
+async fn store_facade_preserves_export_grant_job_scope_and_updates() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+    assert_trace_rls_policies_installed(&backend).await;
+
+    let tenant_alpha = format!("rls-export-job-alpha-{}", Uuid::new_v4());
+    let tenant_beta = format!("rls-export-job-beta-{}", Uuid::new_v4());
+    let export_job_id = Uuid::new_v4();
+    let alpha_grant_id = Uuid::new_v4();
+    let beta_grant_id = Uuid::new_v4();
+    let result_manifest_id = Uuid::new_v4();
+    let requested_at = Utc::now();
+    let expires_at = requested_at + chrono::Duration::minutes(15);
+    let mut metadata = BTreeMap::new();
+    metadata.insert("request_id".to_string(), "pg-rls-alpha".to_string());
+
+    let alpha_grant = backend
+        .upsert_trace_export_access_grant(TraceExportAccessGrantWrite {
+            tenant_id: tenant_alpha.clone(),
+            export_job_id,
+            grant_id: alpha_grant_id,
+            caller_principal_ref: "principal:alpha-exporter".to_string(),
+            requested_dataset_kind: "replay".to_string(),
+            purpose: "alpha-eval".to_string(),
+            max_item_cap: Some(64),
+            status: TraceExportAccessGrantStatus::Active,
+            requested_at,
+            expires_at,
+            metadata: metadata.clone(),
+        })
+        .await
+        .expect("insert alpha export access grant");
+    assert_eq!(alpha_grant.tenant_id, tenant_alpha);
+    assert_eq!(alpha_grant.grant_id, alpha_grant_id);
+    assert_eq!(alpha_grant.status, TraceExportAccessGrantStatus::Active);
+
+    let alpha_job = backend
+        .upsert_trace_export_job(TraceExportJobWrite {
+            tenant_id: tenant_alpha.clone(),
+            export_job_id,
+            grant_id: alpha_grant_id,
+            caller_principal_ref: "principal:alpha-exporter".to_string(),
+            requested_dataset_kind: "replay".to_string(),
+            purpose: "alpha-eval".to_string(),
+            max_item_cap: Some(64),
+            status: TraceExportJobStatus::Queued,
+            requested_at,
+            started_at: None,
+            finished_at: None,
+            expires_at,
+            result_manifest_id: None,
+            item_count: None,
+            last_error: None,
+            metadata: metadata.clone(),
+        })
+        .await
+        .expect("insert alpha export job");
+    assert_eq!(alpha_job.tenant_id, tenant_alpha);
+    assert_eq!(alpha_job.status, TraceExportJobStatus::Queued);
+
+    backend
+        .upsert_trace_export_access_grant(TraceExportAccessGrantWrite {
+            tenant_id: tenant_beta.clone(),
+            export_job_id,
+            grant_id: beta_grant_id,
+            caller_principal_ref: "principal:beta-exporter".to_string(),
+            requested_dataset_kind: "benchmark".to_string(),
+            purpose: "beta-eval".to_string(),
+            max_item_cap: Some(7),
+            status: TraceExportAccessGrantStatus::Active,
+            requested_at,
+            expires_at,
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("insert beta export access grant");
+    backend
+        .upsert_trace_export_job(TraceExportJobWrite {
+            tenant_id: tenant_beta.clone(),
+            export_job_id,
+            grant_id: beta_grant_id,
+            caller_principal_ref: "principal:beta-exporter".to_string(),
+            requested_dataset_kind: "benchmark".to_string(),
+            purpose: "beta-eval".to_string(),
+            max_item_cap: Some(7),
+            status: TraceExportJobStatus::Running,
+            requested_at,
+            started_at: Some(requested_at),
+            finished_at: None,
+            expires_at,
+            result_manifest_id: None,
+            item_count: Some(3),
+            last_error: None,
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("insert beta export job with same job id");
+
+    let alpha_grants = backend
+        .list_trace_export_access_grants(&tenant_alpha)
+        .await
+        .expect("list alpha export grants");
+    assert_eq!(alpha_grants.len(), 1);
+    assert_eq!(alpha_grants[0].grant_id, alpha_grant_id);
+    assert_eq!(alpha_grants[0].metadata, metadata);
+
+    let alpha_jobs = backend
+        .list_trace_export_jobs(&tenant_alpha)
+        .await
+        .expect("list alpha export jobs");
+    assert_eq!(alpha_jobs.len(), 1);
+    assert_eq!(alpha_jobs[0].status, TraceExportJobStatus::Queued);
+
+    let finished_at = requested_at + chrono::Duration::seconds(12);
+    let updated_alpha = backend
+        .update_trace_export_job_status(
+            &tenant_alpha,
+            export_job_id,
+            TraceExportJobStatusUpdate {
+                status: TraceExportJobStatus::Complete,
+                started_at: Some(requested_at),
+                finished_at: Some(finished_at),
+                result_manifest_id: Some(result_manifest_id),
+                item_count: Some(42),
+                last_error: None,
+                metadata: metadata.clone(),
+            },
+        )
+        .await
+        .expect("update alpha export job")
+        .expect("alpha export job exists");
+    assert_eq!(updated_alpha.status, TraceExportJobStatus::Complete);
+    assert_eq!(updated_alpha.item_count, Some(42));
+    assert_eq!(updated_alpha.result_manifest_id, Some(result_manifest_id));
+
+    let beta_jobs = backend
+        .list_trace_export_jobs(&tenant_beta)
+        .await
+        .expect("list beta export jobs");
+    assert_eq!(beta_jobs.len(), 1);
+    assert_eq!(beta_jobs[0].status, TraceExportJobStatus::Running);
+    assert_eq!(beta_jobs[0].item_count, Some(3));
+    assert_eq!(beta_jobs[0].result_manifest_id, None);
+
+    let missing_tenant_update = backend
+        .update_trace_export_job_status(
+            "tenant-gamma",
+            export_job_id,
+            TraceExportJobStatusUpdate {
+                status: TraceExportJobStatus::Failed,
+                started_at: None,
+                finished_at: Some(finished_at),
+                result_manifest_id: None,
+                item_count: None,
+                last_error: Some("not found".to_string()),
+                metadata: BTreeMap::new(),
+            },
+        )
+        .await
+        .expect("tenant-scoped missing update");
+    assert!(missing_tenant_update.is_none());
+
+    cleanup_trace_tenants(&backend, &[&tenant_alpha, &tenant_beta]).await;
+}
+
+#[tokio::test]
 async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context() {
     let Some(backend) = postgres_backend().await else {
         return;
@@ -1727,6 +2086,34 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
         .await
         .expect("write tenant B retention job item");
 
+    let tenant_a_propagation_item_id = Uuid::new_v4();
+    backend
+        .upsert_trace_revocation_propagation_item(sample_revocation_propagation_item(
+            &tenant_a,
+            tenant_a_submission_id,
+            tenant_a_propagation_item_id,
+            TraceRevocationPropagationTarget::ObjectRef {
+                object_ref_id: tenant_a_object_ref_id,
+            },
+            "raw-a:object-ref",
+        ))
+        .await
+        .expect("write tenant A revocation propagation item");
+    let tenant_b_propagation_item_id = Uuid::new_v4();
+    backend
+        .upsert_trace_revocation_propagation_item(sample_revocation_propagation_item(
+            &tenant_b,
+            tenant_b_submission_id,
+            tenant_b_propagation_item_id,
+            TraceRevocationPropagationTarget::ExportManifestItem {
+                export_manifest_id: tenant_b_export_manifest_id,
+                source_submission_id: tenant_b_submission_id,
+            },
+            "raw-b:export-item",
+        ))
+        .await
+        .expect("write tenant B revocation propagation item");
+
     assert!(
         backend
             .get_trace_submission(&tenant_b, tenant_a_submission_id)
@@ -1776,6 +2163,7 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
                 credit_event_id: tenant_a_credit_event_id,
                 tombstone_id: tenant_a_tombstone_id,
                 retention_job_id: tenant_a_retention_job_id,
+                propagation_item_id: tenant_a_propagation_item_id,
             },
             RawTraceRlsIds {
                 submission_id: tenant_b_submission_id,
@@ -1784,6 +2172,7 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
                 credit_event_id: tenant_b_credit_event_id,
                 tombstone_id: tenant_b_tombstone_id,
                 retention_job_id: tenant_b_retention_job_id,
+                propagation_item_id: tenant_b_propagation_item_id,
             },
         )
         .await;
@@ -1824,9 +2213,9 @@ async fn pg_trace_corpus_rls_diagnostics_report_policy_coverage() {
         .await
         .expect("read RLS diagnostics")
         .expect("PostgreSQL reports RLS diagnostics");
-    assert_eq!(diagnostics.expected_table_count, 13);
-    assert_eq!(diagnostics.policy_installed_count, 13);
-    assert_eq!(diagnostics.rls_enabled_count, 13);
+    assert_eq!(diagnostics.expected_table_count, 16);
+    assert_eq!(diagnostics.policy_installed_count, 16);
+    assert_eq!(diagnostics.rls_enabled_count, 16);
     assert!(diagnostics.missing_policy_tables.is_empty());
     assert!(diagnostics.rls_disabled_tables.is_empty());
     assert!(diagnostics.policy_expression_mismatch_tables.is_empty());

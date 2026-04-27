@@ -58,6 +58,11 @@ use ironclaw::trace_corpus_storage::{
     TraceRetentionJobStatus as StorageTraceRetentionJobStatus,
     TraceRetentionJobWrite as StorageTraceRetentionJobWrite,
     TraceReviewLeaseAuditAction as StorageTraceReviewLeaseAuditAction,
+    TraceRevocationPropagationAction as StorageTraceRevocationPropagationAction,
+    TraceRevocationPropagationItemRecord as StorageTraceRevocationPropagationItemRecord,
+    TraceRevocationPropagationItemStatus as StorageTraceRevocationPropagationItemStatus,
+    TraceRevocationPropagationItemStatusUpdate as StorageTraceRevocationPropagationItemStatusUpdate,
+    TraceRevocationPropagationTarget as StorageTraceRevocationPropagationTarget,
     TraceSubmissionRecord as StorageTraceSubmissionRecord,
     TraceSubmissionWrite as StorageTraceSubmissionWrite,
     TraceTenantPolicyRecord as StorageTraceTenantPolicyRecord,
@@ -1012,6 +1017,7 @@ enum TokenRole {
     BenchmarkWorker,
     UtilityWorker,
     ProcessEvalWorker,
+    RevocationWorker,
 }
 
 impl TokenRole {
@@ -1029,6 +1035,7 @@ impl TokenRole {
             | "process-eval-worker"
             | "process_evaluation_worker"
             | "process-evaluation-worker" => Ok(Self::ProcessEvalWorker),
+            "revocation_worker" | "revocation-worker" => Ok(Self::RevocationWorker),
             other => anyhow::bail!("unknown Trace Commons token role: {other}"),
         }
     }
@@ -1060,6 +1067,7 @@ impl TokenRole {
             Self::BenchmarkWorker => "benchmark_worker",
             Self::UtilityWorker => "utility_worker",
             Self::ProcessEvalWorker => "process_eval_worker",
+            Self::RevocationWorker => "revocation_worker",
         }
     }
 }
@@ -1800,6 +1808,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/workers/retention-maintenance",
             post(retention_maintenance_handler),
+        )
+        .route(
+            "/v1/workers/revocation-propagation",
+            post(revocation_propagation_worker_handler),
         )
         .route("/v1/workers/vector-index", post(vector_index_handler))
         .route("/v1/workers/utility-credit", post(utility_credit_handler))
@@ -6881,6 +6893,54 @@ async fn retention_maintenance_handler(
     Ok(Json(response))
 }
 
+const TRACE_REVOCATION_PROPAGATION_DEFAULT_LIMIT: u32 = 100;
+const TRACE_REVOCATION_PROPAGATION_MAX_LIMIT: u32 = 500;
+
+#[derive(Debug, Deserialize)]
+struct TraceRevocationPropagationWorkerRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default = "default_revocation_propagation_limit")]
+    limit: u32,
+}
+
+fn default_revocation_propagation_limit() -> u32 {
+    TRACE_REVOCATION_PROPAGATION_DEFAULT_LIMIT
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRevocationPropagationWorkerResponse {
+    purpose: String,
+    dry_run: bool,
+    checked: usize,
+    completed: usize,
+    failed: usize,
+    skipped: usize,
+    pending: usize,
+    next_attempt_scheduled: usize,
+}
+
+async fn revocation_propagation_worker_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceRevocationPropagationWorkerRequest>,
+) -> ApiResult<Json<TraceRevocationPropagationWorkerResponse>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_revocation_propagation_operator(&tenant)?;
+    if state.db_mirror.is_none() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trace revocation propagation worker requires configured DB mirror",
+        ));
+    }
+    let response = run_revocation_propagation_worker(state.as_ref(), &tenant, body)
+        .await
+        .map_err(maintenance_error)?;
+    Ok(Json(response))
+}
+
 fn require_purge_purpose(
     dry_run: bool,
     purge_expired_before: Option<DateTime<Utc>>,
@@ -8223,6 +8283,17 @@ fn require_retention_operator(auth: &TenantAuth) -> ApiResult<()> {
         Err(api_error(
             StatusCode::FORBIDDEN,
             "reviewer, admin, or retention worker token required",
+        ))
+    }
+}
+
+fn require_revocation_propagation_operator(auth: &TenantAuth) -> ApiResult<()> {
+    if auth.role.can_review() || auth.role == TokenRole::RevocationWorker {
+        Ok(())
+    } else {
+        Err(api_error(
+            StatusCode::FORBIDDEN,
+            "reviewer, admin, or revocation worker token required",
         ))
     }
 }
@@ -9844,6 +9915,389 @@ async fn db_submission_record_for_revocation(
     db.get_trace_submission(tenant_id, submission_id)
         .await
         .context("failed to read DB trace submission for revocation")
+}
+
+enum TraceRevocationPropagationItemOutcome {
+    Done {
+        evidence_hash: String,
+    },
+    Skipped {
+        reason: String,
+        evidence_hash: String,
+    },
+}
+
+async fn run_revocation_propagation_worker(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceRevocationPropagationWorkerRequest,
+) -> anyhow::Result<TraceRevocationPropagationWorkerResponse> {
+    let db = state.db_mirror.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("trace revocation propagation worker requires configured DB mirror")
+    })?;
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_revocation_propagation_worker")
+        .to_string();
+    let limit = request
+        .limit
+        .clamp(1, TRACE_REVOCATION_PROPAGATION_MAX_LIMIT);
+    let now = Utc::now();
+    let due_items = db
+        .list_due_trace_revocation_propagation_items(&tenant.tenant_id, now, limit)
+        .await
+        .context("failed to list due trace revocation propagation items")?;
+
+    let mut response = TraceRevocationPropagationWorkerResponse {
+        purpose: purpose.clone(),
+        dry_run: request.dry_run,
+        checked: due_items.len(),
+        completed: 0,
+        failed: 0,
+        skipped: 0,
+        pending: if request.dry_run { due_items.len() } else { 0 },
+        next_attempt_scheduled: 0,
+    };
+
+    if request.dry_run {
+        append_revocation_propagation_audit(state, tenant, &response).await?;
+        return Ok(response);
+    }
+
+    for item in due_items {
+        let attempt_count = item.attempt_count.saturating_add(1);
+        db.update_trace_revocation_propagation_item_status(
+            &tenant.tenant_id,
+            item.propagation_item_id,
+            StorageTraceRevocationPropagationItemStatusUpdate {
+                status: StorageTraceRevocationPropagationItemStatus::InProgress,
+                attempt_count,
+                last_error: None,
+                next_attempt_at: None,
+                completed_at: None,
+                evidence_hash: None,
+            },
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to claim revocation propagation item {}",
+                item.propagation_item_id
+            )
+        })?;
+
+        match apply_revocation_propagation_item(db.as_ref(), tenant, &item).await {
+            Ok(TraceRevocationPropagationItemOutcome::Done { evidence_hash }) => {
+                db.update_trace_revocation_propagation_item_status(
+                    &tenant.tenant_id,
+                    item.propagation_item_id,
+                    StorageTraceRevocationPropagationItemStatusUpdate {
+                        status: StorageTraceRevocationPropagationItemStatus::Done,
+                        attempt_count,
+                        last_error: None,
+                        next_attempt_at: None,
+                        completed_at: Some(Utc::now()),
+                        evidence_hash: Some(evidence_hash),
+                    },
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to complete revocation propagation item {}",
+                        item.propagation_item_id
+                    )
+                })?;
+                response.completed += 1;
+            }
+            Ok(TraceRevocationPropagationItemOutcome::Skipped {
+                reason,
+                evidence_hash,
+            }) => {
+                db.update_trace_revocation_propagation_item_status(
+                    &tenant.tenant_id,
+                    item.propagation_item_id,
+                    StorageTraceRevocationPropagationItemStatusUpdate {
+                        status: StorageTraceRevocationPropagationItemStatus::Skipped,
+                        attempt_count,
+                        last_error: Some(reason),
+                        next_attempt_at: None,
+                        completed_at: Some(Utc::now()),
+                        evidence_hash: Some(evidence_hash),
+                    },
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to skip revocation propagation item {}",
+                        item.propagation_item_id
+                    )
+                })?;
+                response.skipped += 1;
+            }
+            Err(error) => {
+                let next_attempt_at = revocation_propagation_retry_at(now, attempt_count);
+                db.update_trace_revocation_propagation_item_status(
+                    &tenant.tenant_id,
+                    item.propagation_item_id,
+                    StorageTraceRevocationPropagationItemStatusUpdate {
+                        status: StorageTraceRevocationPropagationItemStatus::Failed,
+                        attempt_count,
+                        last_error: Some(safe_worker_error(&error)),
+                        next_attempt_at: Some(next_attempt_at),
+                        completed_at: None,
+                        evidence_hash: None,
+                    },
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to reschedule revocation propagation item {}",
+                        item.propagation_item_id
+                    )
+                })?;
+                response.failed += 1;
+                response.next_attempt_scheduled += 1;
+            }
+        }
+    }
+
+    append_revocation_propagation_audit(state, tenant, &response).await?;
+    Ok(response)
+}
+
+async fn apply_revocation_propagation_item(
+    db: &dyn Database,
+    tenant: &TenantAuth,
+    item: &StorageTraceRevocationPropagationItemRecord,
+) -> anyhow::Result<TraceRevocationPropagationItemOutcome> {
+    match item.action {
+        StorageTraceRevocationPropagationAction::InvalidateMetadata => {
+            db.invalidate_trace_submission_artifacts(
+                &tenant.tenant_id,
+                item.source_submission_id,
+                StorageTraceDerivedStatus::Revoked,
+            )
+            .await
+            .context("failed to invalidate trace metadata for revocation propagation")?;
+            Ok(done_revocation_propagation_item(
+                item,
+                "invalidate_metadata",
+            ))
+        }
+        StorageTraceRevocationPropagationAction::InvalidateExportMembership => {
+            db.invalidate_trace_export_manifests_for_submission(
+                &tenant.tenant_id,
+                item.source_submission_id,
+            )
+            .await
+            .context("failed to invalidate export manifests for revocation propagation")?;
+            db.invalidate_trace_export_manifest_items_for_submission(
+                &tenant.tenant_id,
+                item.source_submission_id,
+                StorageTraceExportManifestItemInvalidationReason::Revoked,
+            )
+            .await
+            .context("failed to invalidate export manifest items for revocation propagation")?;
+            Ok(done_revocation_propagation_item(
+                item,
+                "invalidate_export_membership",
+            ))
+        }
+        StorageTraceRevocationPropagationAction::InvalidateVector => {
+            db.invalidate_trace_vector_entries_for_submission(
+                &tenant.tenant_id,
+                item.source_submission_id,
+            )
+            .await
+            .context("failed to invalidate vector entries for revocation propagation")?;
+            Ok(done_revocation_propagation_item(item, "invalidate_vector"))
+        }
+        StorageTraceRevocationPropagationAction::InvalidateBenchmarkArtifact => {
+            db.invalidate_trace_submission_artifacts(
+                &tenant.tenant_id,
+                item.source_submission_id,
+                StorageTraceDerivedStatus::Revoked,
+            )
+            .await
+            .context("failed to invalidate benchmark artifacts for revocation propagation")?;
+            db.invalidate_trace_export_manifests_for_submission(
+                &tenant.tenant_id,
+                item.source_submission_id,
+            )
+            .await
+            .context("failed to invalidate benchmark manifests for revocation propagation")?;
+            Ok(done_revocation_propagation_item(
+                item,
+                "invalidate_benchmark_artifact",
+            ))
+        }
+        StorageTraceRevocationPropagationAction::InvalidateRankerArtifact => {
+            db.invalidate_trace_submission_artifacts(
+                &tenant.tenant_id,
+                item.source_submission_id,
+                StorageTraceDerivedStatus::Revoked,
+            )
+            .await
+            .context("failed to invalidate ranker artifacts for revocation propagation")?;
+            db.invalidate_trace_export_manifests_for_submission(
+                &tenant.tenant_id,
+                item.source_submission_id,
+            )
+            .await
+            .context("failed to invalidate ranker manifests for revocation propagation")?;
+            Ok(done_revocation_propagation_item(
+                item,
+                "invalidate_ranker_artifact",
+            ))
+        }
+        StorageTraceRevocationPropagationAction::ReverseCreditSettlement => {
+            Ok(skipped_revocation_propagation_item(
+                item,
+                "credit settlement reversal requires a settlement worker",
+            ))
+        }
+        StorageTraceRevocationPropagationAction::DeleteObjectPayload => {
+            Ok(skipped_revocation_propagation_item(
+                item,
+                "object payload deletion requires a configured object-store delete worker",
+            ))
+        }
+        StorageTraceRevocationPropagationAction::RecordPhysicalDeleteReceipt => {
+            if let StorageTraceRevocationPropagationTarget::PhysicalDeleteReceipt {
+                receipt_sha256,
+                ..
+            } = &item.target
+                && !receipt_sha256.trim().is_empty()
+            {
+                Ok(TraceRevocationPropagationItemOutcome::Done {
+                    evidence_hash: receipt_sha256.clone(),
+                })
+            } else {
+                Ok(skipped_revocation_propagation_item(
+                    item,
+                    "physical delete receipt target is missing evidence",
+                ))
+            }
+        }
+    }
+}
+
+fn done_revocation_propagation_item(
+    item: &StorageTraceRevocationPropagationItemRecord,
+    label: &str,
+) -> TraceRevocationPropagationItemOutcome {
+    TraceRevocationPropagationItemOutcome::Done {
+        evidence_hash: revocation_propagation_evidence_hash(item, label),
+    }
+}
+
+fn skipped_revocation_propagation_item(
+    item: &StorageTraceRevocationPropagationItemRecord,
+    reason: &str,
+) -> TraceRevocationPropagationItemOutcome {
+    TraceRevocationPropagationItemOutcome::Skipped {
+        reason: reason.to_string(),
+        evidence_hash: revocation_propagation_evidence_hash(item, reason),
+    }
+}
+
+fn revocation_propagation_evidence_hash(
+    item: &StorageTraceRevocationPropagationItemRecord,
+    label: &str,
+) -> String {
+    sha256_prefixed(&format!(
+        "trace_revocation_propagation:{}:{}:{}:{}",
+        item.tenant_id, item.propagation_item_id, item.source_submission_id, label
+    ))
+}
+
+fn revocation_propagation_retry_at(now: DateTime<Utc>, attempt_count: u32) -> DateTime<Utc> {
+    let delay_minutes = match attempt_count {
+        0 | 1 => 5,
+        2 => 15,
+        3 => 60,
+        _ => 360,
+    };
+    now + Duration::minutes(delay_minutes)
+}
+
+fn safe_worker_error(error: &anyhow::Error) -> String {
+    error
+        .to_string()
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .take(240)
+        .collect()
+}
+
+async fn append_revocation_propagation_audit(
+    state: &AppState,
+    tenant: &TenantAuth,
+    response: &TraceRevocationPropagationWorkerResponse,
+) -> anyhow::Result<()> {
+    let mut action_counts = BTreeMap::new();
+    action_counts.insert(
+        "checked".to_string(),
+        response.checked.min(u32::MAX as usize) as u32,
+    );
+    action_counts.insert(
+        "completed".to_string(),
+        response.completed.min(u32::MAX as usize) as u32,
+    );
+    action_counts.insert(
+        "failed".to_string(),
+        response.failed.min(u32::MAX as usize) as u32,
+    );
+    action_counts.insert(
+        "skipped".to_string(),
+        response.skipped.min(u32::MAX as usize) as u32,
+    );
+    action_counts.insert(
+        "pending".to_string(),
+        response.pending.min(u32::MAX as usize) as u32,
+    );
+    action_counts.insert(
+        "next_attempt_scheduled".to_string(),
+        response.next_attempt_scheduled.min(u32::MAX as usize) as u32,
+    );
+    append_audit_event_with_db_mirror(
+        state,
+        tenant,
+        TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: "revocation_propagation".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(tenant.role),
+            actor_principal_ref: Some(tenant.principal_ref.clone()),
+            reason: Some(format!(
+                "purpose={};dry_run={};checked={};completed={};failed={};skipped={};pending={}",
+                response.purpose,
+                response.dry_run,
+                response.checked,
+                response.completed,
+                response.failed,
+                response.skipped,
+                response.pending
+            )),
+            export_count: Some(response.checked),
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        },
+        StorageTraceAuditAction::Revoke,
+        StorageTraceAuditSafeMetadata::Maintenance {
+            dry_run: response.dry_run,
+            action_counts,
+        },
+    )
+    .await
 }
 
 async fn mirror_expiration_to_db(
@@ -17314,7 +17768,7 @@ mod tests {
     use ironclaw::trace_contribution::{
         DeterministicTraceRedactor, RecordedTraceContributionOptions, TraceRedactor,
     };
-    use ironclaw::trace_corpus_storage::TraceCorpusStore;
+    use ironclaw::trace_corpus_storage::{TraceCorpusStore, TraceRevocationPropagationItemWrite};
 
     fn test_state(root: PathBuf) -> Arc<AppState> {
         test_state_with_options(root, None, None, false, false, false, false)
@@ -17895,6 +18349,12 @@ mod tests {
             "process-eval-worker-token-a",
             TokenRole::ProcessEvalWorker,
         );
+        insert_token(
+            &mut tokens,
+            "tenant-a",
+            "revocation-worker-token-a",
+            TokenRole::RevocationWorker,
+        );
         insert_token(&mut tokens, "tenant-b", "token-b", TokenRole::Contributor);
         insert_token(
             &mut tokens,
@@ -18224,6 +18684,16 @@ mod tests {
                 "process-evaluation-worker",
                 TokenRole::ProcessEvalWorker,
                 "process_eval_worker",
+            ),
+            (
+                "revocation_worker",
+                TokenRole::RevocationWorker,
+                "revocation_worker",
+            ),
+            (
+                "revocation-worker",
+                TokenRole::RevocationWorker,
+                "revocation_worker",
             ),
         ];
 
@@ -20705,6 +21175,212 @@ mod tests {
         .await
         .expect_err("vector worker cannot run retention cleanup");
         assert_eq!(vector_retention_error.0, StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn revocation_propagation_worker_processes_tenant_scoped_due_items() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp
+            .path()
+            .join("trace-revocation-propagation-worker.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+
+        let mut alpha = sample_envelope().await;
+        make_metadata_only_low_risk(&mut alpha);
+        let alpha_submission_id = alpha.submission_id;
+        let Json(alpha_receipt) =
+            submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(alpha))
+                .await
+                .expect("tenant-a submission succeeds");
+        assert_eq!(alpha_receipt.status, "accepted");
+
+        let mut beta = sample_envelope().await;
+        make_metadata_only_low_risk(&mut beta);
+        let beta_submission_id = beta.submission_id;
+        let Json(beta_receipt) =
+            submit_trace_handler(State(state.clone()), auth_headers("token-b"), Json(beta))
+                .await
+                .expect("tenant-b submission succeeds");
+        assert_eq!(beta_receipt.status, "accepted");
+
+        let alpha_metadata_item_id = Uuid::new_v4();
+        db.upsert_trace_revocation_propagation_item(TraceRevocationPropagationItemWrite {
+            tenant_id: "tenant-a".to_string(),
+            propagation_item_id: alpha_metadata_item_id,
+            source_submission_id: alpha_submission_id,
+            target: StorageTraceRevocationPropagationTarget::DerivedRecord {
+                derived_id: Uuid::new_v4(),
+            },
+            action: StorageTraceRevocationPropagationAction::InvalidateMetadata,
+            status: StorageTraceRevocationPropagationItemStatus::Pending,
+            idempotency_key: format!("{alpha_submission_id}:metadata"),
+            reason: "user_revoked_trace".to_string(),
+            attempt_count: 0,
+            last_error: None,
+            next_attempt_at: None,
+            completed_at: None,
+            evidence_hash: None,
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("alpha metadata propagation item writes");
+
+        let alpha_delete_item_id = Uuid::new_v4();
+        db.upsert_trace_revocation_propagation_item(TraceRevocationPropagationItemWrite {
+            tenant_id: "tenant-a".to_string(),
+            propagation_item_id: alpha_delete_item_id,
+            source_submission_id: alpha_submission_id,
+            target: StorageTraceRevocationPropagationTarget::ObjectRef {
+                object_ref_id: Uuid::new_v4(),
+            },
+            action: StorageTraceRevocationPropagationAction::DeleteObjectPayload,
+            status: StorageTraceRevocationPropagationItemStatus::Pending,
+            idempotency_key: format!("{alpha_submission_id}:delete-object"),
+            reason: "user_revoked_trace".to_string(),
+            attempt_count: 0,
+            last_error: None,
+            next_attempt_at: None,
+            completed_at: None,
+            evidence_hash: None,
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("alpha delete propagation item writes");
+
+        db.upsert_trace_revocation_propagation_item(TraceRevocationPropagationItemWrite {
+            tenant_id: "tenant-b".to_string(),
+            propagation_item_id: Uuid::new_v4(),
+            source_submission_id: beta_submission_id,
+            target: StorageTraceRevocationPropagationTarget::VectorEntry {
+                vector_entry_id: Uuid::new_v4(),
+            },
+            action: StorageTraceRevocationPropagationAction::InvalidateVector,
+            status: StorageTraceRevocationPropagationItemStatus::Pending,
+            idempotency_key: format!("{beta_submission_id}:vector"),
+            reason: "user_revoked_trace".to_string(),
+            attempt_count: 0,
+            last_error: None,
+            next_attempt_at: None,
+            completed_at: None,
+            evidence_hash: None,
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("beta propagation item writes");
+
+        let contributor_error = revocation_propagation_worker_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(TraceRevocationPropagationWorkerRequest {
+                purpose: Some("contributor_denied".to_string()),
+                dry_run: true,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect_err("contributors cannot use revocation propagation worker");
+        assert_eq!(contributor_error.0, StatusCode::FORBIDDEN);
+
+        let Json(dry_run) = revocation_propagation_worker_handler(
+            State(state.clone()),
+            auth_headers("revocation-worker-token-a"),
+            Json(TraceRevocationPropagationWorkerRequest {
+                purpose: Some("test_revocation_propagation_dry_run".to_string()),
+                dry_run: true,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("revocation worker can dry-run tenant-a propagation");
+        assert_eq!(dry_run.checked, 2);
+        assert_eq!(dry_run.pending, 2);
+        assert_eq!(dry_run.completed, 0);
+        assert_eq!(
+            db.list_due_trace_revocation_propagation_items("tenant-a", Utc::now(), 10)
+                .await
+                .expect("tenant-a due items read")
+                .len(),
+            2
+        );
+
+        let Json(response) = revocation_propagation_worker_handler(
+            State(state.clone()),
+            auth_headers("revocation-worker-token-a"),
+            Json(TraceRevocationPropagationWorkerRequest {
+                purpose: Some("test_revocation_propagation".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("revocation worker processes tenant-a propagation");
+        assert_eq!(response.checked, 2);
+        assert_eq!(response.completed, 1);
+        assert_eq!(response.skipped, 1);
+        assert_eq!(response.failed, 0);
+
+        let alpha_items = db
+            .list_trace_revocation_propagation_items("tenant-a", alpha_submission_id)
+            .await
+            .expect("tenant-a propagation items read");
+        let metadata_item = alpha_items
+            .iter()
+            .find(|item| item.propagation_item_id == alpha_metadata_item_id)
+            .expect("metadata item exists");
+        assert_eq!(
+            metadata_item.status,
+            StorageTraceRevocationPropagationItemStatus::Done
+        );
+        assert!(
+            metadata_item
+                .evidence_hash
+                .as_deref()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+        let delete_item = alpha_items
+            .iter()
+            .find(|item| item.propagation_item_id == alpha_delete_item_id)
+            .expect("delete item exists");
+        assert_eq!(
+            delete_item.status,
+            StorageTraceRevocationPropagationItemStatus::Skipped
+        );
+        assert!(
+            delete_item
+                .last_error
+                .as_deref()
+                .is_some_and(|error| { error.contains("object-store delete worker") })
+        );
+
+        let beta_due = db
+            .list_due_trace_revocation_propagation_items("tenant-b", Utc::now(), 10)
+            .await
+            .expect("tenant-b due items read");
+        assert_eq!(beta_due.len(), 1);
+
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("tenant-a audit events read");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "revocation_propagation"
+                && event.reason.as_deref().is_some_and(|reason| {
+                    reason.contains("purpose=test_revocation_propagation")
+                        && reason.contains("completed=1")
+                        && reason.contains("skipped=1")
+                })
+        }));
     }
 
     #[tokio::test]

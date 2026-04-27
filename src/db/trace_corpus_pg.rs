@@ -15,13 +15,15 @@ use crate::trace_corpus_storage::{
     TenantScopedTraceObjectRef, TraceArtifactInvalidationCounts, TraceAuditEventRecord,
     TraceAuditEventWrite, TraceAuditSafeMetadata, TraceCorpusStatus, TraceCorpusStore,
     TraceCreditEventRecord, TraceCreditEventWrite, TraceCreditSettlementState, TraceDerivedRecord,
-    TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportManifestItemInvalidationReason,
-    TraceExportManifestItemRecord, TraceExportManifestItemWrite, TraceExportManifestMirrorWrite,
-    TraceExportManifestRecord, TraceExportManifestWrite, TraceObjectArtifactKind,
-    TraceObjectRefRecord, TraceObjectRefWrite, TraceRetentionJobItemAction,
-    TraceRetentionJobItemRecord, TraceRetentionJobItemStatus, TraceRetentionJobItemWrite,
-    TraceRetentionJobRecord, TraceRetentionJobStatus, TraceRetentionJobWrite,
-    TraceRevocationPropagationAction, TraceRevocationPropagationItemRecord,
+    TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportAccessGrantRecord,
+    TraceExportAccessGrantStatus, TraceExportAccessGrantWrite, TraceExportJobRecord,
+    TraceExportJobStatus, TraceExportJobStatusUpdate, TraceExportJobWrite,
+    TraceExportManifestItemInvalidationReason, TraceExportManifestItemRecord,
+    TraceExportManifestItemWrite, TraceExportManifestMirrorWrite, TraceExportManifestRecord,
+    TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefRecord, TraceObjectRefWrite,
+    TraceRetentionJobItemAction, TraceRetentionJobItemRecord, TraceRetentionJobItemStatus,
+    TraceRetentionJobItemWrite, TraceRetentionJobRecord, TraceRetentionJobStatus,
+    TraceRetentionJobWrite, TraceRevocationPropagationAction, TraceRevocationPropagationItemRecord,
     TraceRevocationPropagationItemStatus, TraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget,
     TraceRevocationPropagationTargetKind, TraceSubmissionRecord, TraceSubmissionWrite,
@@ -63,6 +65,15 @@ const TRACE_REVOCATION_PROPAGATION_ITEM_COLUMNS: &str = "\
     tenant_id, propagation_item_id, source_submission_id, trace_id, target_kind, target_json, \
     action, status, idempotency_key, reason, attempt_count, last_error, next_attempt_at, \
     completed_at, evidence_hash, metadata_json, created_at, updated_at";
+
+const TRACE_EXPORT_ACCESS_GRANT_COLUMNS: &str = "\
+    tenant_id, export_job_id, grant_id, caller_principal_ref, requested_dataset_kind, \
+    purpose, max_item_cap, status, requested_at, expires_at, metadata_json, created_at, updated_at";
+
+const TRACE_EXPORT_JOB_COLUMNS: &str = "\
+    tenant_id, export_job_id, grant_id, caller_principal_ref, requested_dataset_kind, \
+    purpose, max_item_cap, status, requested_at, started_at, finished_at, expires_at, \
+    result_manifest_id, item_count, last_error, metadata_json, created_at, updated_at";
 
 async fn ensure_pg_object_ref_belongs_to_submission(
     tx: &Transaction<'_>,
@@ -513,6 +524,87 @@ fn row_to_retention_job_item(row: &Row) -> Result<TraceRetentionJobItemRecord, D
         reason: row.get("reason"),
         action_counts: json_u32_map(action_counts, "retention_job_item.action_counts")?,
         verified_at: row.get("verified_at"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    })
+}
+
+fn row_to_export_access_grant(row: &Row) -> Result<TraceExportAccessGrantRecord, DatabaseError> {
+    let status: String = row.get("status");
+    let metadata_json: serde_json::Value = row.get("metadata_json");
+    Ok(TraceExportAccessGrantRecord {
+        tenant_id: row.get("tenant_id"),
+        export_job_id: row.get("export_job_id"),
+        grant_id: row.get("grant_id"),
+        caller_principal_ref: row.get("caller_principal_ref"),
+        requested_dataset_kind: row.get("requested_dataset_kind"),
+        purpose: row.get("purpose"),
+        max_item_cap: row
+            .get::<_, Option<i32>>("max_item_cap")
+            .map(|value| {
+                u32::try_from(value).map_err(|e| {
+                    DatabaseError::Serialization(format!(
+                        "invalid trace_export_access_grants.max_item_cap column value: {e}"
+                    ))
+                })
+            })
+            .transpose()?,
+        status: enum_from_storage::<TraceExportAccessGrantStatus>(
+            &status,
+            "TraceExportAccessGrantStatus",
+        )?,
+        requested_at: row.get("requested_at"),
+        expires_at: row.get("expires_at"),
+        metadata: serde_json::from_value(metadata_json).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace export access grant metadata decode failed: {e}"
+            ))
+        })?,
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    })
+}
+
+fn row_to_export_job(row: &Row) -> Result<TraceExportJobRecord, DatabaseError> {
+    let status: String = row.get("status");
+    let metadata_json: serde_json::Value = row.get("metadata_json");
+    Ok(TraceExportJobRecord {
+        tenant_id: row.get("tenant_id"),
+        export_job_id: row.get("export_job_id"),
+        grant_id: row.get("grant_id"),
+        caller_principal_ref: row.get("caller_principal_ref"),
+        requested_dataset_kind: row.get("requested_dataset_kind"),
+        purpose: row.get("purpose"),
+        max_item_cap: row
+            .get::<_, Option<i32>>("max_item_cap")
+            .map(|value| {
+                u32::try_from(value).map_err(|e| {
+                    DatabaseError::Serialization(format!(
+                        "invalid trace_export_jobs.max_item_cap column value: {e}"
+                    ))
+                })
+            })
+            .transpose()?,
+        status: enum_from_storage::<TraceExportJobStatus>(&status, "TraceExportJobStatus")?,
+        requested_at: row.get("requested_at"),
+        started_at: row.get("started_at"),
+        finished_at: row.get("finished_at"),
+        expires_at: row.get("expires_at"),
+        result_manifest_id: row.get("result_manifest_id"),
+        item_count: row
+            .get::<_, Option<i32>>("item_count")
+            .map(|value| {
+                u32::try_from(value).map_err(|e| {
+                    DatabaseError::Serialization(format!(
+                        "invalid trace_export_jobs.item_count column value: {e}"
+                    ))
+                })
+            })
+            .transpose()?,
+        last_error: row.get("last_error"),
+        metadata: serde_json::from_value(metadata_json).map_err(|e| {
+            DatabaseError::Serialization(format!("trace export job metadata decode failed: {e}"))
+        })?,
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
@@ -2209,6 +2301,257 @@ impl TraceCorpusStore for PgBackend {
         let records = rows.iter().map(row_to_retention_job_item).collect();
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         records
+    }
+
+    async fn upsert_trace_export_access_grant(
+        &self,
+        grant: TraceExportAccessGrantWrite,
+    ) -> Result<TraceExportAccessGrantRecord, DatabaseError> {
+        self.ensure_trace_tenant(&grant.tenant_id).await?;
+        let max_item_cap = grant
+            .max_item_cap
+            .map(|value| {
+                i32::try_from(value).map_err(|e| {
+                    DatabaseError::Constraint(format!(
+                        "trace export access grant max_item_cap is too large: {e}"
+                    ))
+                })
+            })
+            .transpose()?;
+        let status = enum_to_storage(grant.status)?;
+        let metadata_json = serde_json::to_value(&grant.metadata).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace export access grant metadata encode failed: {e}"
+            ))
+        })?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &grant.tenant_id).await?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_export_access_grants (
+                        tenant_id, export_job_id, grant_id, caller_principal_ref,
+                        requested_dataset_kind, purpose, max_item_cap, status,
+                        requested_at, expires_at, metadata_json
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                     ON CONFLICT (tenant_id, grant_id) DO UPDATE SET
+                        export_job_id = excluded.export_job_id,
+                        caller_principal_ref = excluded.caller_principal_ref,
+                        requested_dataset_kind = excluded.requested_dataset_kind,
+                        purpose = excluded.purpose,
+                        max_item_cap = excluded.max_item_cap,
+                        status = excluded.status,
+                        requested_at = excluded.requested_at,
+                        expires_at = excluded.expires_at,
+                        metadata_json = excluded.metadata_json,
+                        updated_at = NOW()
+                     RETURNING {TRACE_EXPORT_ACCESS_GRANT_COLUMNS}"
+                ),
+                &[
+                    &grant.tenant_id,
+                    &grant.export_job_id,
+                    &grant.grant_id,
+                    &grant.caller_principal_ref,
+                    &grant.requested_dataset_kind,
+                    &grant.purpose,
+                    &max_item_cap,
+                    &status,
+                    &grant.requested_at,
+                    &grant.expires_at,
+                    &metadata_json,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_export_access_grant(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_export_access_grants(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceExportAccessGrantRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_EXPORT_ACCESS_GRANT_COLUMNS}
+                     FROM trace_export_access_grants
+                     WHERE tenant_id = $1
+                     ORDER BY requested_at ASC, created_at ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_export_access_grant).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn upsert_trace_export_job(
+        &self,
+        job: TraceExportJobWrite,
+    ) -> Result<TraceExportJobRecord, DatabaseError> {
+        self.ensure_trace_tenant(&job.tenant_id).await?;
+        let max_item_cap = job
+            .max_item_cap
+            .map(|value| {
+                i32::try_from(value).map_err(|e| {
+                    DatabaseError::Constraint(format!(
+                        "trace export job max_item_cap is too large: {e}"
+                    ))
+                })
+            })
+            .transpose()?;
+        let item_count = job
+            .item_count
+            .map(|value| {
+                i32::try_from(value).map_err(|e| {
+                    DatabaseError::Constraint(format!(
+                        "trace export job item_count is too large: {e}"
+                    ))
+                })
+            })
+            .transpose()?;
+        let status = enum_to_storage(job.status)?;
+        let metadata_json = serde_json::to_value(&job.metadata).map_err(|e| {
+            DatabaseError::Serialization(format!("trace export job metadata encode failed: {e}"))
+        })?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &job.tenant_id).await?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_export_jobs (
+                        tenant_id, export_job_id, grant_id, caller_principal_ref,
+                        requested_dataset_kind, purpose, max_item_cap, status, requested_at,
+                        started_at, finished_at, expires_at, result_manifest_id, item_count,
+                        last_error, metadata_json
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                     ON CONFLICT (tenant_id, export_job_id) DO UPDATE SET
+                        grant_id = excluded.grant_id,
+                        caller_principal_ref = excluded.caller_principal_ref,
+                        requested_dataset_kind = excluded.requested_dataset_kind,
+                        purpose = excluded.purpose,
+                        max_item_cap = excluded.max_item_cap,
+                        status = excluded.status,
+                        requested_at = excluded.requested_at,
+                        started_at = excluded.started_at,
+                        finished_at = excluded.finished_at,
+                        expires_at = excluded.expires_at,
+                        result_manifest_id = excluded.result_manifest_id,
+                        item_count = excluded.item_count,
+                        last_error = excluded.last_error,
+                        metadata_json = excluded.metadata_json,
+                        updated_at = NOW()
+                     RETURNING {TRACE_EXPORT_JOB_COLUMNS}"
+                ),
+                &[
+                    &job.tenant_id,
+                    &job.export_job_id,
+                    &job.grant_id,
+                    &job.caller_principal_ref,
+                    &job.requested_dataset_kind,
+                    &job.purpose,
+                    &max_item_cap,
+                    &status,
+                    &job.requested_at,
+                    &job.started_at,
+                    &job.finished_at,
+                    &job.expires_at,
+                    &job.result_manifest_id,
+                    &item_count,
+                    &job.last_error,
+                    &metadata_json,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_export_job(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_export_jobs(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceExportJobRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_EXPORT_JOB_COLUMNS}
+                     FROM trace_export_jobs
+                     WHERE tenant_id = $1
+                     ORDER BY requested_at ASC, created_at ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_export_job).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn update_trace_export_job_status(
+        &self,
+        tenant_id: &str,
+        export_job_id: Uuid,
+        update: TraceExportJobStatusUpdate,
+    ) -> Result<Option<TraceExportJobRecord>, DatabaseError> {
+        let item_count = update
+            .item_count
+            .map(|value| {
+                i32::try_from(value).map_err(|e| {
+                    DatabaseError::Constraint(format!(
+                        "trace export job item_count is too large: {e}"
+                    ))
+                })
+            })
+            .transpose()?;
+        let status = enum_to_storage(update.status)?;
+        let metadata_json = serde_json::to_value(&update.metadata).map_err(|e| {
+            DatabaseError::Serialization(format!("trace export job metadata encode failed: {e}"))
+        })?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                &format!(
+                    "UPDATE trace_export_jobs
+                     SET status = $3,
+                         started_at = $4,
+                         finished_at = $5,
+                         result_manifest_id = $6,
+                         item_count = $7,
+                         last_error = $8,
+                         metadata_json = $9,
+                         updated_at = NOW()
+                     WHERE tenant_id = $1 AND export_job_id = $2
+                     RETURNING {TRACE_EXPORT_JOB_COLUMNS}"
+                ),
+                &[
+                    &tenant_id,
+                    &export_job_id,
+                    &status,
+                    &update.started_at,
+                    &update.finished_at,
+                    &update.result_manifest_id,
+                    &item_count,
+                    &update.last_error,
+                    &metadata_json,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row.as_ref().map(row_to_export_job).transpose()?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
     }
 
     async fn upsert_trace_revocation_propagation_item(

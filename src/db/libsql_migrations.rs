@@ -1289,6 +1289,66 @@ CREATE TABLE IF NOT EXISTS trace_retention_job_items (
 CREATE INDEX IF NOT EXISTS idx_trace_retention_job_items_submission
     ON trace_retention_job_items (tenant_id, submission_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS trace_export_access_grants (
+    tenant_id TEXT NOT NULL,
+    export_job_id TEXT NOT NULL,
+    grant_id TEXT NOT NULL,
+    caller_principal_ref TEXT NOT NULL,
+    requested_dataset_kind TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    max_item_cap INTEGER,
+    status TEXT NOT NULL,
+    requested_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (tenant_id, grant_id),
+    UNIQUE (tenant_id, export_job_id, grant_id),
+    FOREIGN KEY (tenant_id)
+        REFERENCES trace_tenants (tenant_id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_trace_export_access_grants_job
+    ON trace_export_access_grants (tenant_id, export_job_id);
+CREATE INDEX IF NOT EXISTS idx_trace_export_access_grants_principal
+    ON trace_export_access_grants (tenant_id, caller_principal_ref, expires_at);
+CREATE INDEX IF NOT EXISTS idx_trace_export_access_grants_status
+    ON trace_export_access_grants (tenant_id, status, expires_at);
+
+CREATE TABLE IF NOT EXISTS trace_export_jobs (
+    tenant_id TEXT NOT NULL,
+    export_job_id TEXT NOT NULL,
+    grant_id TEXT NOT NULL,
+    caller_principal_ref TEXT NOT NULL,
+    requested_dataset_kind TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    max_item_cap INTEGER,
+    status TEXT NOT NULL,
+    requested_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    expires_at TEXT NOT NULL,
+    result_manifest_id TEXT,
+    item_count INTEGER,
+    last_error TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (tenant_id, export_job_id),
+    FOREIGN KEY (tenant_id, grant_id)
+        REFERENCES trace_export_access_grants (tenant_id, grant_id)
+        ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_trace_export_jobs_requested
+    ON trace_export_jobs (tenant_id, requested_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trace_export_jobs_status
+    ON trace_export_jobs (tenant_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trace_export_jobs_grant
+    ON trace_export_jobs (tenant_id, grant_id);
+
 CREATE TABLE IF NOT EXISTS trace_revocation_propagation_items (
     tenant_id TEXT NOT NULL,
     propagation_item_id TEXT NOT NULL,
@@ -1660,6 +1720,71 @@ CREATE INDEX IF NOT EXISTS idx_trace_revocation_propagation_due
     ON trace_revocation_propagation_items (tenant_id, status, next_attempt_at, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_trace_revocation_propagation_target
     ON trace_revocation_propagation_items (tenant_id, target_kind, updated_at DESC);
+"#,
+    ),
+    (
+        38,
+        "trace_export_jobs",
+        r#"
+CREATE TABLE IF NOT EXISTS trace_export_access_grants (
+    tenant_id TEXT NOT NULL,
+    export_job_id TEXT NOT NULL,
+    grant_id TEXT NOT NULL,
+    caller_principal_ref TEXT NOT NULL,
+    requested_dataset_kind TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    max_item_cap INTEGER,
+    status TEXT NOT NULL,
+    requested_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (tenant_id, grant_id),
+    UNIQUE (tenant_id, export_job_id, grant_id),
+    FOREIGN KEY (tenant_id)
+        REFERENCES trace_tenants (tenant_id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_trace_export_access_grants_job
+    ON trace_export_access_grants (tenant_id, export_job_id);
+CREATE INDEX IF NOT EXISTS idx_trace_export_access_grants_principal
+    ON trace_export_access_grants (tenant_id, caller_principal_ref, expires_at);
+CREATE INDEX IF NOT EXISTS idx_trace_export_access_grants_status
+    ON trace_export_access_grants (tenant_id, status, expires_at);
+
+CREATE TABLE IF NOT EXISTS trace_export_jobs (
+    tenant_id TEXT NOT NULL,
+    export_job_id TEXT NOT NULL,
+    grant_id TEXT NOT NULL,
+    caller_principal_ref TEXT NOT NULL,
+    requested_dataset_kind TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    max_item_cap INTEGER,
+    status TEXT NOT NULL,
+    requested_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    expires_at TEXT NOT NULL,
+    result_manifest_id TEXT,
+    item_count INTEGER,
+    last_error TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (tenant_id, export_job_id),
+    FOREIGN KEY (tenant_id, grant_id)
+        REFERENCES trace_export_access_grants (tenant_id, grant_id)
+        ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_trace_export_jobs_requested
+    ON trace_export_jobs (tenant_id, requested_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trace_export_jobs_status
+    ON trace_export_jobs (tenant_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trace_export_jobs_grant
+    ON trace_export_jobs (tenant_id, grant_id);
 "#,
     ),
 ];

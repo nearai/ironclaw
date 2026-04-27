@@ -193,6 +193,8 @@ Trace Commons hardening note: required DB mirror mode now avoids publishing loca
 
 Trace Commons production-boundary note: PostgreSQL/libSQL now include a durable tenant-scoped revocation-propagation ledger for downstream invalidation and retry work across object refs, exports, vectors, derived artifacts, benchmark/ranker artifacts, credit settlements, and physical delete receipts. Export call sites for replay, benchmark, and ranker slices now create and validate short-lived tenant/principal/purpose/dataset-kind access grants before producing artifacts. `TRACE_COMMONS_OBJECT_STORE=remote_service` parses production remote object-store intent but deliberately fails closed behind a disabled service-owned provider instead of falling back to plaintext files. Local autonomous status sync now keeps append-only safe history events and sanitizes server-returned credit explanations before periodic credit notices persist them.
 
+Trace Commons revocation-worker note: the ingest service now recognizes a scoped `revocation_worker` role and exposes `POST /v1/workers/revocation-propagation` for DB-backed propagation runs. The worker claims due tenant-scoped ledger items, performs idempotent metadata/vector/export invalidation actions, records unsupported physical-delete and credit-settlement actions as explicit skipped items until their dedicated workers exist, preserves other tenants' due work, and emits safe audit counts without reading trace bodies.
+
 ### Owner: _Unassigned_
 
 ---

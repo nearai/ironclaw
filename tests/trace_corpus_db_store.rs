@@ -9,11 +9,12 @@ mod libsql_trace_corpus_store {
         TenantScopedTraceObjectRef, TraceAuditAction, TraceAuditEventWrite, TraceAuditSafeMetadata,
         TraceCorpusStatus, TraceCorpusStore, TraceCreditEventType, TraceCreditEventWrite,
         TraceCreditSettlementState, TraceDerivedRecordWrite, TraceDerivedStatus,
-        TraceExportManifestItemInvalidationReason, TraceExportManifestItemWrite,
-        TraceExportManifestMirrorWrite, TraceExportManifestWrite, TraceObjectArtifactKind,
-        TraceObjectRefWrite, TraceRetentionJobItemAction, TraceRetentionJobItemStatus,
-        TraceRetentionJobItemWrite, TraceRetentionJobStatus, TraceRetentionJobWrite,
-        TraceReviewLeaseAuditAction, TraceRevocationPropagationAction,
+        TraceExportAccessGrantStatus, TraceExportAccessGrantWrite, TraceExportJobStatus,
+        TraceExportJobStatusUpdate, TraceExportJobWrite, TraceExportManifestItemInvalidationReason,
+        TraceExportManifestItemWrite, TraceExportManifestMirrorWrite, TraceExportManifestWrite,
+        TraceObjectArtifactKind, TraceObjectRefWrite, TraceRetentionJobItemAction,
+        TraceRetentionJobItemStatus, TraceRetentionJobItemWrite, TraceRetentionJobStatus,
+        TraceRetentionJobWrite, TraceReviewLeaseAuditAction, TraceRevocationPropagationAction,
         TraceRevocationPropagationItemStatus, TraceRevocationPropagationItemStatusUpdate,
         TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget,
         TraceSubmissionWrite, TraceTenantPolicyWrite, TraceTombstoneWrite,
@@ -2087,5 +2088,187 @@ mod libsql_trace_corpus_store {
             ))
             .await
             .expect("other tenant starts an independent audit chain");
+    }
+
+    #[tokio::test]
+    async fn libsql_store_persists_trace_export_grants_jobs_and_tenant_scope() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let db_path = temp_dir.path().join("trace-corpus-export-jobs.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("create libsql backend");
+        backend.run_migrations().await.expect("run migrations");
+
+        let alpha_job_id = Uuid::new_v4();
+        let alpha_grant_id = Uuid::new_v4();
+        let alpha_manifest_id = Uuid::new_v4();
+        let requested_at = DateTime::parse_from_rfc3339("2026-04-27T12:00:00Z")
+            .expect("parse requested_at")
+            .with_timezone(&Utc);
+        let expires_at = requested_at + chrono::Duration::minutes(15);
+        let mut metadata = BTreeMap::new();
+        metadata.insert("request_id".to_string(), "req-alpha".to_string());
+        metadata.insert("slice".to_string(), "0".to_string());
+
+        let grant = backend
+            .upsert_trace_export_access_grant(TraceExportAccessGrantWrite {
+                tenant_id: "tenant-alpha".to_string(),
+                export_job_id: alpha_job_id,
+                grant_id: alpha_grant_id,
+                caller_principal_ref: "principal:exporter".to_string(),
+                requested_dataset_kind: "replay".to_string(),
+                purpose: "offline-eval".to_string(),
+                max_item_cap: Some(128),
+                status: TraceExportAccessGrantStatus::Active,
+                requested_at,
+                expires_at,
+                metadata: metadata.clone(),
+            })
+            .await
+            .expect("upsert export access grant");
+        assert_eq!(grant.tenant_id, "tenant-alpha");
+        assert_eq!(grant.export_job_id, alpha_job_id);
+        assert_eq!(grant.grant_id, alpha_grant_id);
+        assert_eq!(grant.status, TraceExportAccessGrantStatus::Active);
+        assert_eq!(grant.max_item_cap, Some(128));
+        assert_eq!(grant.metadata, metadata);
+
+        let job = backend
+            .upsert_trace_export_job(TraceExportJobWrite {
+                tenant_id: "tenant-alpha".to_string(),
+                export_job_id: alpha_job_id,
+                grant_id: alpha_grant_id,
+                caller_principal_ref: "principal:exporter".to_string(),
+                requested_dataset_kind: "replay".to_string(),
+                purpose: "offline-eval".to_string(),
+                max_item_cap: Some(128),
+                status: TraceExportJobStatus::Queued,
+                requested_at,
+                started_at: None,
+                finished_at: None,
+                expires_at,
+                result_manifest_id: None,
+                item_count: None,
+                last_error: None,
+                metadata: metadata.clone(),
+            })
+            .await
+            .expect("upsert export job");
+        assert_eq!(job.tenant_id, "tenant-alpha");
+        assert_eq!(job.export_job_id, alpha_job_id);
+        assert_eq!(job.grant_id, alpha_grant_id);
+        assert_eq!(job.status, TraceExportJobStatus::Queued);
+        assert!(job.started_at.is_none());
+        assert!(job.finished_at.is_none());
+        assert_eq!(job.result_manifest_id, None);
+
+        let started_at = requested_at + chrono::Duration::seconds(5);
+        let finished_at = requested_at + chrono::Duration::seconds(12);
+        let updated = backend
+            .update_trace_export_job_status(
+                "tenant-alpha",
+                alpha_job_id,
+                TraceExportJobStatusUpdate {
+                    status: TraceExportJobStatus::Complete,
+                    started_at: Some(started_at),
+                    finished_at: Some(finished_at),
+                    result_manifest_id: Some(alpha_manifest_id),
+                    item_count: Some(42),
+                    last_error: None,
+                    metadata: metadata.clone(),
+                },
+            )
+            .await
+            .expect("update export job status")
+            .expect("updated job exists");
+        assert_eq!(updated.status, TraceExportJobStatus::Complete);
+        assert_eq!(updated.started_at, Some(started_at));
+        assert_eq!(updated.finished_at, Some(finished_at));
+        assert_eq!(updated.result_manifest_id, Some(alpha_manifest_id));
+        assert_eq!(updated.item_count, Some(42));
+
+        let beta_grant_id = Uuid::new_v4();
+        backend
+            .upsert_trace_export_access_grant(TraceExportAccessGrantWrite {
+                tenant_id: "tenant-beta".to_string(),
+                export_job_id: alpha_job_id,
+                grant_id: beta_grant_id,
+                caller_principal_ref: "principal:beta-exporter".to_string(),
+                requested_dataset_kind: "benchmark".to_string(),
+                purpose: "tenant-beta-eval".to_string(),
+                max_item_cap: Some(7),
+                status: TraceExportAccessGrantStatus::Active,
+                requested_at,
+                expires_at,
+                metadata: BTreeMap::new(),
+            })
+            .await
+            .expect("upsert beta export access grant");
+
+        backend
+            .upsert_trace_export_job(TraceExportJobWrite {
+                tenant_id: "tenant-beta".to_string(),
+                export_job_id: alpha_job_id,
+                grant_id: beta_grant_id,
+                caller_principal_ref: "principal:beta-exporter".to_string(),
+                requested_dataset_kind: "benchmark".to_string(),
+                purpose: "tenant-beta-eval".to_string(),
+                max_item_cap: Some(7),
+                status: TraceExportJobStatus::Running,
+                requested_at,
+                started_at: Some(started_at),
+                finished_at: None,
+                expires_at,
+                result_manifest_id: None,
+                item_count: Some(3),
+                last_error: None,
+                metadata: BTreeMap::new(),
+            })
+            .await
+            .expect("upsert same export job id in other tenant");
+
+        let alpha_jobs = backend
+            .list_trace_export_jobs("tenant-alpha")
+            .await
+            .expect("list alpha export jobs");
+        assert_eq!(alpha_jobs.len(), 1);
+        assert_eq!(alpha_jobs[0].status, TraceExportJobStatus::Complete);
+        assert_eq!(alpha_jobs[0].item_count, Some(42));
+
+        let alpha_grants = backend
+            .list_trace_export_access_grants("tenant-alpha")
+            .await
+            .expect("list alpha export grants");
+        assert_eq!(alpha_grants.len(), 1);
+        assert_eq!(alpha_grants[0].grant_id, alpha_grant_id);
+
+        let beta_jobs = backend
+            .list_trace_export_jobs("tenant-beta")
+            .await
+            .expect("list beta export jobs");
+        assert_eq!(beta_jobs.len(), 1);
+        assert_eq!(beta_jobs[0].tenant_id, "tenant-beta");
+        assert_eq!(beta_jobs[0].status, TraceExportJobStatus::Running);
+        assert_eq!(beta_jobs[0].item_count, Some(3));
+
+        assert!(
+            backend
+                .update_trace_export_job_status(
+                    "tenant-gamma",
+                    alpha_job_id,
+                    TraceExportJobStatusUpdate {
+                        status: TraceExportJobStatus::Failed,
+                        started_at: None,
+                        finished_at: Some(finished_at),
+                        result_manifest_id: None,
+                        item_count: None,
+                        last_error: Some("not found".to_string()),
+                        metadata: BTreeMap::new(),
+                    },
+                )
+                .await
+                .expect("tenant-scoped update")
+                .is_none()
+        );
     }
 }

@@ -234,6 +234,8 @@ pub trait RemoteTraceArtifactProvider: Send + Sync {
     ) -> anyhow::Result<bool>;
 }
 
+const TRACE_ARTIFACT_STORE_LEGACY_SUBMISSION_STORAGE_REF: &str = "trace-artifact-store-legacy";
+
 pub struct ServiceOwnedTraceArtifactStore<P> {
     config: TraceArtifactProviderConfig,
     crypto: SecretsCrypto,
@@ -384,6 +386,89 @@ impl<P: RemoteTraceArtifactProvider> ServiceOwnedTraceArtifactStore<P> {
             "trace artifact provider config is not remote service-owned"
         );
         validate_non_empty_ref("trace artifact object store", &self.config.object_store)
+    }
+}
+
+impl<P: RemoteTraceArtifactProvider> TraceArtifactStore for ServiceOwnedTraceArtifactStore<P> {
+    fn put_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        let scope = legacy_trace_artifact_scope(tenant_storage_ref);
+        let receipt =
+            self.put_scoped_serialized_json(&scope, artifact_kind, object_id, serialized_json)?;
+        Ok(EncryptedTraceArtifactReceipt {
+            tenant_storage_ref: receipt.object_ref.tenant_storage_ref,
+            artifact_kind: receipt.object_ref.artifact_kind,
+            object_key: receipt.object_ref.object_key,
+            ciphertext_sha256: receipt.object_ref.ciphertext_sha256,
+            encrypted_at: receipt.encrypted_at,
+        })
+    }
+
+    fn read_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<EncryptedTraceArtifact> {
+        anyhow::ensure!(
+            receipt.tenant_storage_ref == expected_tenant_storage_ref,
+            "trace artifact receipt tenant mismatch"
+        );
+        let scope = legacy_trace_artifact_scope(expected_tenant_storage_ref);
+        let object_ref = legacy_remote_object_ref_from_receipt(&self.config, &scope, receipt)?;
+        let artifact = self.read_scoped_artifact(&scope, &object_ref)?;
+        anyhow::ensure!(
+            artifact.receipt == *receipt,
+            "encrypted trace artifact receipt mismatch"
+        );
+        Ok(artifact)
+    }
+
+    fn read_json(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<serde_json::Value> {
+        let artifact =
+            TraceArtifactStore::read_artifact(self, expected_tenant_storage_ref, receipt)?;
+        decrypt_artifact_json(&self.crypto, &artifact)
+    }
+
+    fn read_json_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        let scope = legacy_trace_artifact_scope(expected_tenant_storage_ref);
+        let object_ref = legacy_remote_object_ref_from_object_key(
+            &self.config,
+            &scope,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )?;
+        self.read_scoped_json(&scope, &object_ref)
+    }
+
+    fn delete_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            receipt.tenant_storage_ref == expected_tenant_storage_ref,
+            "trace artifact receipt tenant mismatch"
+        );
+        let scope = legacy_trace_artifact_scope(expected_tenant_storage_ref);
+        let object_ref = legacy_remote_object_ref_from_receipt(&self.config, &scope, receipt)?;
+        let delete_receipt = self.delete_scoped_artifact(&scope, &object_ref)?;
+        Ok(delete_receipt.deleted)
     }
 }
 
@@ -737,7 +822,79 @@ fn validate_remote_object_ref(
         object_ref.submission_storage_ref == expected_scope.submission_storage_ref,
         "remote trace artifact submission mismatch"
     );
+    validate_remote_object_key_scope(expected_scope, &object_ref.object_key)?;
     Ok(())
+}
+
+fn validate_remote_object_key_scope(
+    expected_scope: &TraceArtifactScope,
+    object_key: &str,
+) -> anyhow::Result<()> {
+    let segments: Vec<&str> = object_key.split('/').collect();
+    anyhow::ensure!(
+        segments.len() >= 7
+            && segments[0] == "v1"
+            && segments[1] == "tenants"
+            && segments[3] == "submissions",
+        "remote trace artifact object key has unsupported partition layout"
+    );
+    anyhow::ensure!(
+        segments[2] == sha256_text_hex(&expected_scope.tenant_storage_ref),
+        "remote trace artifact tenant mismatch: object key partition"
+    );
+    anyhow::ensure!(
+        segments[4] == sha256_text_hex(&expected_scope.submission_storage_ref),
+        "remote trace artifact submission mismatch: object key partition"
+    );
+    Ok(())
+}
+
+fn legacy_trace_artifact_scope(tenant_storage_ref: &str) -> TraceArtifactScope {
+    TraceArtifactScope::new(
+        tenant_storage_ref,
+        TRACE_ARTIFACT_STORE_LEGACY_SUBMISSION_STORAGE_REF,
+    )
+}
+
+fn legacy_remote_object_ref_from_receipt(
+    config: &TraceArtifactProviderConfig,
+    scope: &TraceArtifactScope,
+    receipt: &EncryptedTraceArtifactReceipt,
+) -> anyhow::Result<TraceArtifactObjectRef> {
+    anyhow::ensure!(
+        receipt.tenant_storage_ref == scope.tenant_storage_ref,
+        "trace artifact receipt tenant mismatch"
+    );
+    legacy_remote_object_ref_from_object_key(
+        config,
+        scope,
+        receipt.artifact_kind.clone(),
+        &receipt.object_key,
+        &receipt.ciphertext_sha256,
+    )
+}
+
+fn legacy_remote_object_ref_from_object_key(
+    config: &TraceArtifactProviderConfig,
+    scope: &TraceArtifactScope,
+    artifact_kind: TraceArtifactKind,
+    object_key: &str,
+    ciphertext_sha256: &str,
+) -> anyhow::Result<TraceArtifactObjectRef> {
+    let object_ref = TraceArtifactObjectRef {
+        provider_kind: TraceArtifactProviderKind::ServiceOwnedRemote,
+        object_store: config.object_store.clone(),
+        tenant_storage_ref: scope.tenant_storage_ref.clone(),
+        submission_storage_ref: scope.submission_storage_ref.clone(),
+        artifact_kind,
+        object_key: object_key.to_string(),
+        ciphertext_sha256: ciphertext_sha256
+            .strip_prefix("sha256:")
+            .unwrap_or(ciphertext_sha256)
+            .to_string(),
+    };
+    validate_remote_object_ref(scope, config, &object_ref)?;
+    Ok(object_ref)
 }
 
 fn validate_non_empty_ref(label: &str, value: &str) -> anyhow::Result<()> {
@@ -962,6 +1119,18 @@ mod tests {
         LocalEncryptedTraceArtifactStore::new(temp.path(), crypto)
     }
 
+    fn test_remote_store() -> ServiceOwnedTraceArtifactStore<InMemoryRemoteTraceArtifactProvider> {
+        let key = crate::secrets::keychain::generate_master_key_hex();
+        let crypto = SecretsCrypto::new(SecretString::from(key)).expect("test crypto");
+        let config = TraceArtifactProviderConfig::service_owned_remote("trace-commons-prod")
+            .expect("remote provider config");
+        ServiceOwnedTraceArtifactStore::new(
+            config,
+            crypto,
+            InMemoryRemoteTraceArtifactProvider::default(),
+        )
+    }
+
     fn assert_trace_artifact_store_contract(store: &dyn TraceArtifactStore) {
         let payload = json!({"safe": true, "summary": "<redacted>"});
         let serialized_payload = serde_json::to_vec(&payload).expect("payload serializes");
@@ -1039,6 +1208,47 @@ mod tests {
         let store = test_store(&temp);
 
         assert_trace_artifact_store_contract(&store);
+    }
+
+    #[test]
+    fn service_owned_remote_store_satisfies_trace_artifact_store_contract() {
+        let store = test_remote_store();
+
+        assert_trace_artifact_store_contract(&store);
+    }
+
+    #[test]
+    fn service_owned_remote_trace_artifact_store_trait_rejects_cross_tenant_access() {
+        let store = test_remote_store();
+        let payload = json!({"safe": true});
+        let serialized_payload = serde_json::to_vec(&payload).expect("payload serializes");
+        let receipt = TraceArtifactStore::put_serialized_json(
+            &store,
+            "tenant:sha256:alpha",
+            TraceArtifactKind::AuditSnapshot,
+            "legacy-trait-audit",
+            &serialized_payload,
+        )
+        .expect("artifact writes through trait");
+
+        let read_error = TraceArtifactStore::read_json(&store, "tenant:sha256:beta", &receipt)
+            .expect_err("cross-tenant remote trait receipt read must fail");
+        assert!(read_error.to_string().contains("tenant mismatch"));
+
+        let object_key_error = TraceArtifactStore::read_json_by_object_key(
+            &store,
+            "tenant:sha256:beta",
+            TraceArtifactKind::AuditSnapshot,
+            &receipt.object_key,
+            &receipt.ciphertext_sha256,
+        )
+        .expect_err("cross-tenant remote trait object-key read must fail");
+        assert!(object_key_error.to_string().contains("tenant mismatch"));
+
+        let delete_error =
+            TraceArtifactStore::delete_artifact(&store, "tenant:sha256:beta", &receipt)
+                .expect_err("cross-tenant remote trait delete must fail");
+        assert!(delete_error.to_string().contains("tenant mismatch"));
     }
 
     #[test]

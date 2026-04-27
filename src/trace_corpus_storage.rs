@@ -664,6 +664,111 @@ pub struct TraceRetentionJobItemRecord {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum TraceExportAccessGrantStatus {
+    Active,
+    Consumed,
+    Revoked,
+    Expired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceExportAccessGrantWrite {
+    pub tenant_id: String,
+    pub export_job_id: Uuid,
+    pub grant_id: Uuid,
+    pub caller_principal_ref: String,
+    pub requested_dataset_kind: String,
+    pub purpose: String,
+    pub max_item_cap: Option<u32>,
+    pub status: TraceExportAccessGrantStatus,
+    pub requested_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceExportAccessGrantRecord {
+    pub tenant_id: String,
+    pub export_job_id: Uuid,
+    pub grant_id: Uuid,
+    pub caller_principal_ref: String,
+    pub requested_dataset_kind: String,
+    pub purpose: String,
+    pub max_item_cap: Option<u32>,
+    pub status: TraceExportAccessGrantStatus,
+    pub requested_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub metadata: BTreeMap<String, String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceExportJobStatus {
+    Queued,
+    Running,
+    Complete,
+    Failed,
+    Cancelled,
+    Expired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceExportJobWrite {
+    pub tenant_id: String,
+    pub export_job_id: Uuid,
+    pub grant_id: Uuid,
+    pub caller_principal_ref: String,
+    pub requested_dataset_kind: String,
+    pub purpose: String,
+    pub max_item_cap: Option<u32>,
+    pub status: TraceExportJobStatus,
+    pub requested_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub expires_at: DateTime<Utc>,
+    pub result_manifest_id: Option<Uuid>,
+    pub item_count: Option<u32>,
+    pub last_error: Option<String>,
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceExportJobStatusUpdate {
+    pub status: TraceExportJobStatus,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub result_manifest_id: Option<Uuid>,
+    pub item_count: Option<u32>,
+    pub last_error: Option<String>,
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceExportJobRecord {
+    pub tenant_id: String,
+    pub export_job_id: Uuid,
+    pub grant_id: Uuid,
+    pub caller_principal_ref: String,
+    pub requested_dataset_kind: String,
+    pub purpose: String,
+    pub max_item_cap: Option<u32>,
+    pub status: TraceExportJobStatus,
+    pub requested_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub expires_at: DateTime<Utc>,
+    pub result_manifest_id: Option<Uuid>,
+    pub item_count: Option<u32>,
+    pub last_error: Option<String>,
+    pub metadata: BTreeMap<String, String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum TraceRevocationPropagationTargetKind {
     ObjectRef,
     ExportManifest,
@@ -1013,6 +1118,33 @@ pub trait TraceCorpusStore: Send + Sync {
         tenant_id: &str,
         retention_job_id: Uuid,
     ) -> Result<Vec<TraceRetentionJobItemRecord>, DatabaseError>;
+
+    async fn upsert_trace_export_access_grant(
+        &self,
+        grant: TraceExportAccessGrantWrite,
+    ) -> Result<TraceExportAccessGrantRecord, DatabaseError>;
+
+    async fn list_trace_export_access_grants(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceExportAccessGrantRecord>, DatabaseError>;
+
+    async fn upsert_trace_export_job(
+        &self,
+        job: TraceExportJobWrite,
+    ) -> Result<TraceExportJobRecord, DatabaseError>;
+
+    async fn list_trace_export_jobs(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceExportJobRecord>, DatabaseError>;
+
+    async fn update_trace_export_job_status(
+        &self,
+        tenant_id: &str,
+        export_job_id: Uuid,
+        update: TraceExportJobStatusUpdate,
+    ) -> Result<Option<TraceExportJobRecord>, DatabaseError>;
 
     async fn upsert_trace_revocation_propagation_item(
         &self,
