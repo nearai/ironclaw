@@ -840,15 +840,32 @@ impl<T: Clone> StreamState<T> {
     /// `earliest_retained` so subsequent reads with stale cursors return
     /// [`EventError::ReplayGap`]. Used by retention policies in production
     /// backends and by tests that exercise the gap path.
-    fn truncate_before_or_at(&mut self, cursor: EventCursor) {
+    ///
+    /// Rejects cursors beyond the current stream head with
+    /// [`EventError::InvalidReplayRequest`]. Without that guard a misuse
+    /// (e.g. a calendar-time retention policy on a quiet stream) could push
+    /// `earliest_retained` past `next_cursor` and brick the stream until
+    /// enough appends caught up — every replay in the meantime would return
+    /// a `ReplayGap` whose `earliest` value points at a cursor the stream
+    /// has never issued.
+    fn truncate_before_or_at(&mut self, cursor: EventCursor) -> Result<(), EventError> {
         let bound = cursor.as_u64();
         if bound == 0 {
-            return;
+            return Ok(());
+        }
+        if bound > self.next_cursor {
+            return Err(EventError::InvalidReplayRequest {
+                reason: format!(
+                    "truncation cursor {bound} exceeds stream head {head}",
+                    head = self.next_cursor,
+                ),
+            });
         }
         self.entries.retain(|entry| entry.cursor.as_u64() > bound);
         if bound >= self.earliest_retained {
             self.earliest_retained = bound + 1;
         }
+        Ok(())
     }
 }
 
@@ -867,6 +884,10 @@ impl InMemoryDurableEventLog {
     /// stream and advance the stream's earliest-retained marker so subsequent
     /// reads against older cursors return [`EventError::ReplayGap`].
     ///
+    /// Returns [`EventError::InvalidReplayRequest`] when the supplied cursor
+    /// exceeds the stream's current head; without that guard a misuse could
+    /// permanently brick the stream.
+    ///
     /// Production backends apply this from a retention policy. Tests use it
     /// to exercise the gap path without coupling to a specific policy.
     pub fn truncate_before_or_at(
@@ -877,10 +898,10 @@ impl InMemoryDurableEventLog {
         let mut streams = self.streams.lock().map_err(|_| EventError::DurableLog {
             reason: "in-memory durable event log lock poisoned".to_string(),
         })?;
-        if let Some(state) = streams.get_mut(stream) {
-            state.truncate_before_or_at(cursor);
+        match streams.get_mut(stream) {
+            Some(state) => state.truncate_before_or_at(cursor),
+            None => Ok(()),
         }
-        Ok(())
     }
 }
 
@@ -954,10 +975,10 @@ impl InMemoryDurableAuditLog {
         let mut streams = self.streams.lock().map_err(|_| EventError::DurableLog {
             reason: "in-memory durable audit log lock poisoned".to_string(),
         })?;
-        if let Some(state) = streams.get_mut(stream) {
-            state.truncate_before_or_at(cursor);
+        match streams.get_mut(stream) {
+            Some(state) => state.truncate_before_or_at(cursor),
+            None => Ok(()),
         }
-        Ok(())
     }
 }
 
@@ -1044,6 +1065,13 @@ where
 ///
 /// Used by JSONL-backed durable log adapters in later grouped Reborn PRs.
 /// The cursor is the 1-based line index of the last consumed record.
+///
+/// **Assumes uncompacted JSONL.** Backends that compact entries (drop old
+/// records to reclaim disk) must not use this helper directly: line index
+/// will desynchronize from the logical cursor and the helper will return
+/// `ReplayGap` with a meaningless `earliest` value. Compacting backends
+/// should either store the cursor inline in each record and use a different
+/// parser, or maintain an out-of-band file-offset → cursor map.
 pub fn replay_jsonl<T>(
     bytes: &[u8],
     after: Option<EventCursor>,

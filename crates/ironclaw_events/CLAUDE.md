@@ -24,5 +24,12 @@ later backends can build on the same redaction and replay invariants.
 
 Forbidden dependencies (enforced by `ironclaw_architecture`): authorization,
 approvals, capabilities, dispatcher, extensions, host_runtime, secrets,
-network, mcp, processes, resources, run_state, scripts, wasm, filesystem,
-memory.
+network, mcp, processes, resources, run_state, scripts, wasm.
+
+`ironclaw_filesystem` is **deliberately not forbidden**: PR2's JSONL durable
+sink will depend on it, and pre-tightening here would force PR2 to relax the
+rule before it can land. `ironclaw_memory` is similarly not forbidden — this
+crate has no need for it today, but no boundary case has been made for
+adding it to the list. The authoritative forbidden list lives in
+`crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs`; if the
+two ever disagree, the test wins and this doc is stale.

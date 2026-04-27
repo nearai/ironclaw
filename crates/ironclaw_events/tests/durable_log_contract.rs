@@ -354,6 +354,43 @@ async fn replay_gap_after_truncation_forces_snapshot_rebase() {
 }
 
 #[tokio::test]
+async fn truncate_beyond_head_is_rejected() {
+    // A retention policy that picks a cursor by calendar time on a quiet
+    // stream could pass a bound > head. Before the guard, that bricked the
+    // stream until enough appends caught up; now it is rejected up front.
+    let log = InMemoryDurableEventLog::new();
+    let scope = local_scope("alice", Some("default"));
+    let stream = EventStreamKey::from_scope(&scope);
+
+    for _ in 0..3 {
+        log.append(RuntimeEvent::dispatch_requested(
+            scope.clone(),
+            capability_id(),
+        ))
+        .await
+        .expect("append");
+    }
+
+    let result = log.truncate_before_or_at(&stream, EventCursor::new(99));
+    match result {
+        Err(EventError::InvalidReplayRequest { reason }) => {
+            assert!(
+                reason.contains("99") && reason.contains("3"),
+                "reason should report cursor and head, got: {reason}"
+            );
+        }
+        other => panic!("expected InvalidReplayRequest, got {other:?}"),
+    }
+
+    // Stream must still be usable after the rejected truncation.
+    let replay = log
+        .read_after_cursor(&stream, &ReadScope::any(), None, 10)
+        .await
+        .expect("replay after rejected truncation");
+    assert_eq!(replay.entries.len(), 3);
+}
+
+#[tokio::test]
 async fn replay_with_zero_limit_is_rejected() {
     let log = InMemoryDurableEventLog::new();
     let scope = local_scope("alice", Some("default"));
