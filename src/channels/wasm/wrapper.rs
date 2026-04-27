@@ -8443,6 +8443,7 @@ mod tests {
             HashMap::new(),
             host_creds,
             Arc::new(PairingStore::new_noop()),
+            None,
         );
 
         // Matching host + matching path → inject
@@ -8492,6 +8493,7 @@ mod tests {
             HashMap::new(),
             host_creds,
             Arc::new(PairingStore::new_noop()),
+            None,
         );
 
         let mut headers = HashMap::new();
