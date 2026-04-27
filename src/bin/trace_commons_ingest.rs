@@ -42,8 +42,10 @@ use ironclaw::trace_corpus_storage::{
     TraceDerivedRecord as StorageTraceDerivedRecord,
     TraceDerivedRecordWrite as StorageTraceDerivedRecordWrite,
     TraceDerivedStatus as StorageTraceDerivedStatus,
+    TraceExportAccessGrantRecord as StorageTraceExportAccessGrantRecord,
     TraceExportAccessGrantStatus as StorageTraceExportAccessGrantStatus,
     TraceExportAccessGrantWrite as StorageTraceExportAccessGrantWrite,
+    TraceExportJobRecord as StorageTraceExportJobRecord,
     TraceExportJobStatus as StorageTraceExportJobStatus,
     TraceExportJobStatusUpdate as StorageTraceExportJobStatusUpdate,
     TraceExportJobWrite as StorageTraceExportJobWrite,
@@ -1831,6 +1833,11 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/admin/retention/jobs/{retention_job_id}/items",
             get(retention_job_items_handler),
         )
+        .route(
+            "/v1/admin/export/access-grants",
+            get(export_access_grants_handler),
+        )
+        .route("/v1/admin/export/jobs", get(export_jobs_handler))
         .route("/v1/admin/config-status", get(config_status_handler))
         .route("/v1/admin/maintenance", post(maintenance_handler))
         .route(
@@ -3529,6 +3536,15 @@ fn trace_retention_ledger_db(state: &AppState) -> ApiResult<Arc<dyn Database>> {
         api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "trace retention ledger DB is not configured",
+        )
+    })
+}
+
+fn trace_export_control_db(state: &AppState) -> ApiResult<Arc<dyn Database>> {
+    state.db_mirror.as_ref().cloned().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trace export control DB is not configured",
         )
     })
 }
@@ -5730,6 +5746,106 @@ async fn retention_job_items_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(summaries))
+}
+
+#[derive(Debug, Deserialize)]
+struct ExportAccessGrantsQuery {
+    limit: Option<usize>,
+    status: Option<StorageTraceExportAccessGrantStatus>,
+    dataset_kind: Option<String>,
+}
+
+async fn export_access_grants_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<ExportAccessGrantsQuery>,
+) -> ApiResult<Json<Vec<TraceExportAccessGrantSummary>>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_admin(&tenant)?;
+    let db = trace_export_control_db(state.as_ref())?;
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let dataset_kind = query
+        .dataset_kind
+        .as_deref()
+        .map(normalized_export_dataset_kind_filter);
+    let grants = db
+        .list_trace_export_access_grants(&tenant.tenant_id)
+        .await
+        .map_err(internal_error)?;
+    let summaries = grants
+        .into_iter()
+        .rev()
+        .filter(|grant| query.status.is_none_or(|status| grant.status == status))
+        .filter(|grant| {
+            dataset_kind
+                .as_deref()
+                .is_none_or(|dataset_kind| grant.requested_dataset_kind == dataset_kind)
+        })
+        .take(limit)
+        .map(TraceExportAccessGrantSummary::from_storage_record)
+        .collect::<Vec<_>>();
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::read(&tenant, "export_access_grants", summaries.len()),
+        StorageTraceAuditAction::Read,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(summaries))
+}
+
+#[derive(Debug, Deserialize)]
+struct ExportJobsQuery {
+    limit: Option<usize>,
+    status: Option<StorageTraceExportJobStatus>,
+    dataset_kind: Option<String>,
+}
+
+async fn export_jobs_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<ExportJobsQuery>,
+) -> ApiResult<Json<Vec<TraceExportJobSummary>>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_admin(&tenant)?;
+    let db = trace_export_control_db(state.as_ref())?;
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let dataset_kind = query
+        .dataset_kind
+        .as_deref()
+        .map(normalized_export_dataset_kind_filter);
+    let jobs = db
+        .list_trace_export_jobs(&tenant.tenant_id)
+        .await
+        .map_err(internal_error)?;
+    let summaries = jobs
+        .into_iter()
+        .rev()
+        .filter(|job| query.status.is_none_or(|status| job.status == status))
+        .filter(|job| {
+            dataset_kind
+                .as_deref()
+                .is_none_or(|dataset_kind| job.requested_dataset_kind == dataset_kind)
+        })
+        .take(limit)
+        .map(TraceExportJobSummary::from_storage_record)
+        .collect::<Vec<_>>();
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::read(&tenant, "export_jobs", summaries.len()),
+        StorageTraceAuditAction::Read,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(summaries))
+}
+
+fn normalized_export_dataset_kind_filter(value: &str) -> String {
+    value.trim().replace('-', "_")
 }
 
 #[derive(Debug, Deserialize)]
@@ -16105,6 +16221,94 @@ impl TraceRetentionJobItemSummary {
             reason: record.reason,
             action_counts: record.action_counts,
             verified_at: record.verified_at,
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct TraceExportAccessGrantSummary {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    export_job_id: Uuid,
+    grant_id: Uuid,
+    caller_principal_ref: String,
+    requested_dataset_kind: String,
+    purpose: String,
+    max_item_cap: Option<u32>,
+    status: StorageTraceExportAccessGrantStatus,
+    requested_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    metadata: BTreeMap<String, String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl TraceExportAccessGrantSummary {
+    fn from_storage_record(record: StorageTraceExportAccessGrantRecord) -> Self {
+        Self {
+            tenant_storage_ref: tenant_storage_ref(&record.tenant_id),
+            tenant_id: record.tenant_id,
+            export_job_id: record.export_job_id,
+            grant_id: record.grant_id,
+            caller_principal_ref: record.caller_principal_ref,
+            requested_dataset_kind: record.requested_dataset_kind,
+            purpose: record.purpose,
+            max_item_cap: record.max_item_cap,
+            status: record.status,
+            requested_at: record.requested_at,
+            expires_at: record.expires_at,
+            metadata: record.metadata,
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct TraceExportJobSummary {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    export_job_id: Uuid,
+    grant_id: Uuid,
+    caller_principal_ref: String,
+    requested_dataset_kind: String,
+    purpose: String,
+    max_item_cap: Option<u32>,
+    status: StorageTraceExportJobStatus,
+    requested_at: DateTime<Utc>,
+    started_at: Option<DateTime<Utc>>,
+    finished_at: Option<DateTime<Utc>>,
+    expires_at: DateTime<Utc>,
+    result_manifest_id: Option<Uuid>,
+    item_count: Option<u32>,
+    last_error: Option<String>,
+    metadata: BTreeMap<String, String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl TraceExportJobSummary {
+    fn from_storage_record(record: StorageTraceExportJobRecord) -> Self {
+        Self {
+            tenant_storage_ref: tenant_storage_ref(&record.tenant_id),
+            tenant_id: record.tenant_id,
+            export_job_id: record.export_job_id,
+            grant_id: record.grant_id,
+            caller_principal_ref: record.caller_principal_ref,
+            requested_dataset_kind: record.requested_dataset_kind,
+            purpose: record.purpose,
+            max_item_cap: record.max_item_cap,
+            status: record.status,
+            requested_at: record.requested_at,
+            started_at: record.started_at,
+            finished_at: record.finished_at,
+            expires_at: record.expires_at,
+            result_manifest_id: record.result_manifest_id,
+            item_count: record.item_count,
+            last_error: record.last_error,
+            metadata: record.metadata,
             created_at: record.created_at,
             updated_at: record.updated_at,
         }
@@ -28964,7 +29168,7 @@ mod tests {
         assert!(held_record.purged_at.is_none());
 
         let Json(export) = dataset_replay_handler(
-            State(state),
+            State(state.clone()),
             auth_headers("review-token-a"),
             Query(DatasetExportQuery {
                 limit: Some(10),
@@ -31694,7 +31898,7 @@ mod tests {
         assert_eq!(receipt.status, "accepted");
 
         let Json(export) = dataset_replay_handler(
-            State(state),
+            State(state.clone()),
             auth_headers("review-token-a"),
             Query(DatasetExportQuery {
                 limit: Some(10),
@@ -31758,6 +31962,49 @@ mod tests {
         assert_eq!(jobs[0].status, StorageTraceExportJobStatus::Complete);
         assert_eq!(jobs[0].result_manifest_id, Some(export.export_id));
         assert_eq!(jobs[0].item_count, Some(1));
+
+        let Json(admin_grants) = export_access_grants_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Query(ExportAccessGrantsQuery {
+                limit: Some(10),
+                status: Some(StorageTraceExportAccessGrantStatus::Active),
+                dataset_kind: Some("replay-dataset".to_string()),
+            }),
+        )
+        .await
+        .expect("admin can list export access grants");
+        assert_eq!(admin_grants.len(), 1);
+        assert_eq!(admin_grants[0].grant_id, grants[0].grant_id);
+        assert_eq!(admin_grants[0].requested_dataset_kind, "replay_dataset");
+
+        let Json(admin_jobs) = export_jobs_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Query(ExportJobsQuery {
+                limit: Some(10),
+                status: Some(StorageTraceExportJobStatus::Complete),
+                dataset_kind: Some("replay_dataset".to_string()),
+            }),
+        )
+        .await
+        .expect("admin can list export jobs");
+        assert_eq!(admin_jobs.len(), 1);
+        assert_eq!(admin_jobs[0].export_job_id, jobs[0].export_job_id);
+        assert_eq!(admin_jobs[0].result_manifest_id, Some(export.export_id));
+
+        let contributor_jobs_error = export_jobs_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Query(ExportJobsQuery {
+                limit: Some(10),
+                status: None,
+                dataset_kind: None,
+            }),
+        )
+        .await
+        .expect_err("contributor cannot list export jobs");
+        assert_eq!(contributor_jobs_error.0, StatusCode::FORBIDDEN);
 
         let other_tenant_manifests = db
             .list_trace_export_manifests("tenant-b")

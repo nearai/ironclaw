@@ -588,6 +588,60 @@ pub enum TracesCommand {
         json: bool,
     },
 
+    /// List DB-backed export access grants from the central corpus
+    ExportAccessGrantsList {
+        /// Trace Commons ingestion base URL or /v1/traces URL
+        #[arg(long)]
+        endpoint: String,
+
+        /// Maximum export access grants to return
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Filter by export grant status
+        #[arg(long, value_enum)]
+        status: Option<TraceExportAccessGrantStatusArg>,
+
+        /// Filter by dataset kind, such as replay_dataset or ranker_training_pairs
+        #[arg(long)]
+        dataset_kind: Option<String>,
+
+        /// Environment variable containing an admin bearer token
+        #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
+        bearer_token_env: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List DB-backed export jobs from the central corpus
+    ExportJobsList {
+        /// Trace Commons ingestion base URL or /v1/traces URL
+        #[arg(long)]
+        endpoint: String,
+
+        /// Maximum export jobs to return
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Filter by export job status
+        #[arg(long, value_enum)]
+        status: Option<TraceExportJobStatusArg>,
+
+        /// Filter by dataset kind, such as replay_dataset or ranker_training_pairs
+        #[arg(long)]
+        dataset_kind: Option<String>,
+
+        /// Environment variable containing an admin bearer token
+        #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
+        bearer_token_env: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Index scoped vector metadata through the worker route
     WorkerVectorIndex {
         /// Trace Commons ingestion base URL or /v1/traces URL
@@ -1528,6 +1582,50 @@ impl std::fmt::Display for TraceRetentionJobStatusArg {
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceExportAccessGrantStatusArg {
+    Active,
+    Consumed,
+    Revoked,
+    Expired,
+}
+
+impl std::fmt::Display for TraceExportAccessGrantStatusArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::Active => "active",
+            Self::Consumed => "consumed",
+            Self::Revoked => "revoked",
+            Self::Expired => "expired",
+        };
+        write!(f, "{value}")
+    }
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceExportJobStatusArg {
+    Queued,
+    Running,
+    Complete,
+    Failed,
+    Cancelled,
+    Expired,
+}
+
+impl std::fmt::Display for TraceExportJobStatusArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Expired => "expired",
+        };
+        write!(f, "{value}")
+    }
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceRetentionJobItemActionArg {
     Revoke,
     Expire,
@@ -1879,6 +1977,42 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
                 limit,
                 action,
                 status,
+                json,
+            )
+            .await
+        }
+        TracesCommand::ExportAccessGrantsList {
+            endpoint,
+            limit,
+            status,
+            dataset_kind,
+            bearer_token_env,
+            json,
+        } => {
+            trace_commons_export_access_grants_list(
+                &endpoint,
+                &bearer_token_env,
+                limit,
+                status,
+                dataset_kind,
+                json,
+            )
+            .await
+        }
+        TracesCommand::ExportJobsList {
+            endpoint,
+            limit,
+            status,
+            dataset_kind,
+            bearer_token_env,
+            json,
+        } => {
+            trace_commons_export_jobs_list(
+                &endpoint,
+                &bearer_token_env,
+                limit,
+                status,
+                dataset_kind,
                 json,
             )
             .await
@@ -3687,6 +3821,106 @@ async fn trace_commons_retention_job_items(
                 "reason",
                 "verified_at",
                 "updated_at",
+            ],
+        );
+        Ok(())
+    }
+}
+
+async fn trace_commons_export_access_grants_list(
+    endpoint: &str,
+    bearer_token_env: &str,
+    limit: Option<usize>,
+    status: Option<TraceExportAccessGrantStatusArg>,
+    dataset_kind: Option<String>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let mut query = optional_usize_query("limit", limit);
+    if let Some(status) = status {
+        query.push(("status", status.to_string()));
+    }
+    if let Some(dataset_kind) = dataset_kind {
+        query.push(("dataset_kind", dataset_kind));
+    }
+    let Some(response) = trace_commons_optional_api_request(
+        Method::GET,
+        endpoint,
+        "/v1/admin/export/access-grants",
+        &query,
+        Some(bearer_token_env),
+        None,
+    )
+    .await?
+    else {
+        print_trace_commons_unsupported("/v1/admin/export/access-grants");
+        return Ok(());
+    };
+
+    if json {
+        print_trace_commons_json(&response)
+    } else {
+        print_trace_commons_items(
+            "Central export access grants",
+            response.json.as_ref(),
+            &[
+                "grant_id",
+                "export_job_id",
+                "status",
+                "requested_dataset_kind",
+                "purpose",
+                "max_item_cap",
+                "requested_at",
+                "expires_at",
+            ],
+        );
+        Ok(())
+    }
+}
+
+async fn trace_commons_export_jobs_list(
+    endpoint: &str,
+    bearer_token_env: &str,
+    limit: Option<usize>,
+    status: Option<TraceExportJobStatusArg>,
+    dataset_kind: Option<String>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let mut query = optional_usize_query("limit", limit);
+    if let Some(status) = status {
+        query.push(("status", status.to_string()));
+    }
+    if let Some(dataset_kind) = dataset_kind {
+        query.push(("dataset_kind", dataset_kind));
+    }
+    let Some(response) = trace_commons_optional_api_request(
+        Method::GET,
+        endpoint,
+        "/v1/admin/export/jobs",
+        &query,
+        Some(bearer_token_env),
+        None,
+    )
+    .await?
+    else {
+        print_trace_commons_unsupported("/v1/admin/export/jobs");
+        return Ok(());
+    };
+
+    if json {
+        print_trace_commons_json(&response)
+    } else {
+        print_trace_commons_items(
+            "Central export jobs",
+            response.json.as_ref(),
+            &[
+                "export_job_id",
+                "status",
+                "requested_dataset_kind",
+                "purpose",
+                "item_count",
+                "result_manifest_id",
+                "started_at",
+                "finished_at",
             ],
         );
         Ok(())
@@ -7322,6 +7556,62 @@ mod tests {
         assert_eq!(
             url,
             "https://trace.example/internal/v1/admin/retention/jobs/11111111-1111-1111-1111-111111111111/items?action=purge&status=done"
+        );
+    }
+
+    #[test]
+    fn export_access_grants_list_parses_through_cli() {
+        let cli = parse_cli([
+            "ironclaw",
+            "traces",
+            "export-access-grants-list",
+            "--endpoint",
+            "https://trace.example/internal",
+            "--limit",
+            "25",
+            "--status",
+            "active",
+            "--dataset-kind",
+            "replay-dataset",
+            "--bearer-token-env",
+            "TRACE_COMMONS_ADMIN_TOKEN",
+        ]);
+
+        let TracesCommand::ExportAccessGrantsList {
+            endpoint,
+            limit,
+            status,
+            dataset_kind,
+            bearer_token_env,
+            json,
+        } = unwrap_traces_command(cli)
+        else {
+            panic!("expected traces export-access-grants-list command");
+        };
+
+        assert_eq!(endpoint, "https://trace.example/internal");
+        assert_eq!(limit, Some(25));
+        assert_eq!(status, Some(TraceExportAccessGrantStatusArg::Active));
+        assert_eq!(dataset_kind.as_deref(), Some("replay-dataset"));
+        assert_eq!(bearer_token_env, "TRACE_COMMONS_ADMIN_TOKEN");
+        assert!(!json);
+    }
+
+    #[test]
+    fn export_jobs_list_uses_ingest_endpoint() {
+        let url = trace_commons_api_url(
+            "https://trace.example/internal/v1/traces",
+            "/v1/admin/export/jobs",
+            &[
+                ("status", "complete".to_string()),
+                ("dataset_kind", "ranker_training_pairs".to_string()),
+            ],
+        )
+        .expect("url builds");
+
+        assert_eq!(
+            url,
+            "https://trace.example/internal/v1/admin/export/jobs?status=complete&dataset_kind=ranker_training_pairs"
         );
     }
 

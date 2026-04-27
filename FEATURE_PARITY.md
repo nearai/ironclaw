@@ -199,6 +199,8 @@ Trace Commons export-job note: replay dataset, benchmark conversion, ranker-cand
 
 Trace Commons worker-export note: export-worker automation now has dedicated replay and ranker export routes, `GET|POST /v1/workers/replay-export`, `GET|POST /v1/workers/ranker/training-candidates`, and `GET|POST /v1/workers/ranker/training-pairs`, plus matching CLI helpers. These routes reuse the same consent/use ABAC, access-grant, export-job, source-hash, audit, and delayed-credit behavior as the reviewer/admin routes while keeping scheduled automation off reviewer endpoints.
 
+Trace Commons export-control observability note: admins can now list tenant-scoped durable export access grants and export jobs through `GET /v1/admin/export/access-grants` and `GET /v1/admin/export/jobs`, with status and dataset-kind filters plus matching CLI helpers. Reads are DB-backed, admin-only, tenant-scoped, and audited without exposing trace bodies.
+
 ### Owner: _Unassigned_
 
 ---
