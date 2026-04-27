@@ -4030,6 +4030,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_filesystem"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "deadpool-postgres",
+ "ironclaw_host_api",
+ "libsql",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
 name = "ironclaw_gateway"
 version = "0.1.0"
 dependencies = [
