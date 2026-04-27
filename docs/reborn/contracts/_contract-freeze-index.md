@@ -86,7 +86,42 @@ If a task needs to change one of those answers, it is not implementation work; i
 
 ---
 
-## 4. Delegation readiness checklist
+## 4. Current implementation status
+
+The implementation-alignment map is:
+
+```text
+docs/reborn/2026-04-25-current-architecture-map.md
+```
+
+Reviewers should use it alongside this packet to separate:
+
+```text
+[exists]    implemented or covered by current Reborn contract/demo slices
+[partial]   present as a narrow slice, not yet a product-complete service
+[not yet]   intentionally missing or deferred
+```
+
+Current implemented/partial substrate called out there includes:
+
+- host API vocabulary and neutral dispatch contracts;
+- root/scoped/composite filesystem surfaces and DB-backed root filesystem backends;
+- `ironclaw_memory` backend/filesystem adapter, DB repositories, metadata/search, embeddings, and plugin seam;
+- extension discovery/registry contracts;
+- resource governor primitives;
+- secret metadata/encryption/leases plus filesystem-backed repository reference;
+- network policy boundary and hardened WASM host HTTP path;
+- capability access, `CapabilityHost`, approvals/resume, and run-state slices;
+- dispatcher runtime-adapter inversion;
+- WASM, Script, and MCP adapter lanes;
+- process store/manager/result/output-ref/process-host slices;
+- architecture dependency guardrails and live vertical-slice examples.
+
+Explicit gaps are also listed there, including turn service, first-party agent loop service, durable event projections/SSE/WebSocket, full obligation implementations, production typed secret repository wiring, product memory service parity, and migration bridges.
+
+---
+
+## 5. Delegation readiness checklist
 
 A task is ready to hand to an engineer only if its prompt includes:
 
