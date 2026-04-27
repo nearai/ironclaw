@@ -154,6 +154,7 @@ Scope IDs may map to existing database or external identity IDs, so they are opa
 pub struct TenantId(pub String);
 pub struct UserId(pub String);
 pub struct ProjectId(pub String);
+pub struct AgentId(pub String);
 pub struct MissionId(pub String);
 pub struct ThreadId(pub String);
 ```
@@ -275,15 +276,23 @@ Meanings:
 
 ### 7.2 Virtual roots
 
-V1 canonical roots:
+V1 canonical virtual areas/roots:
 
 ```text
 /engine
+/system/settings
 /system/extensions
+/system/skills
 /users
 /projects
 /memory
+/artifacts
+/tmp
+/secrets
+/events
 ```
+
+These roots mirror the source-of-truth map in [`storage-placement.md`](storage-placement.md). Sub-roots such as `/engine/runtime` remain owned by their domain contracts.
 
 `VirtualPath` rules:
 
@@ -308,6 +317,7 @@ V1 scoped aliases:
 /extension/state
 /extension/cache
 /tmp
+/artifacts
 ```
 
 `ScopedPath` rules:
@@ -394,6 +404,7 @@ pub enum Principal {
     Tenant(TenantId),
     User(UserId),
     Project(ProjectId),
+    Agent(AgentId),
     Mission(MissionId),
     Thread(ThreadId),
     Extension(ExtensionId),
@@ -410,6 +421,7 @@ pub struct ResourceScope {
     pub tenant_id: TenantId,
     pub user_id: UserId,
     pub project_id: Option<ProjectId>,
+    pub agent_id: Option<AgentId>,
     pub mission_id: Option<MissionId>,
     pub thread_id: Option<ThreadId>,
     pub invocation_id: InvocationId,
@@ -419,8 +431,8 @@ pub struct ResourceScope {
 Rules:
 
 - tenant and user are mandatory
-- project/mission/thread can be absent for system/bootstrap work, but absence must be explicit
-- child invocation resource scope must preserve tenant and user from parent
+- project/agent/mission/thread can be absent for system/bootstrap work, but absence must be explicit
+- child invocation resource scope must preserve tenant, user, and any active agent from parent unless an explicit admin-scoped transition changes scope
 
 ### 9.3 Execution context
 
@@ -434,6 +446,7 @@ pub struct ExecutionContext {
     pub tenant_id: TenantId,
     pub user_id: UserId,
     pub project_id: Option<ProjectId>,
+    pub agent_id: Option<AgentId>,
     pub mission_id: Option<MissionId>,
     pub thread_id: Option<ThreadId>,
 
@@ -452,6 +465,7 @@ Rules:
 - `resource_scope.invocation_id == invocation_id`
 - `resource_scope.tenant_id == tenant_id`
 - `resource_scope.user_id == user_id`
+- `resource_scope.agent_id == agent_id`
 - `process_id` may be absent for pure host calls or WASM invocations that are not process-backed
 - every audit/event/budget decision must include `correlation_id`
 
@@ -865,6 +879,7 @@ pub struct AuditEnvelope {
     pub tenant_id: TenantId,
     pub user_id: UserId,
     pub project_id: Option<ProjectId>,
+    pub agent_id: Option<AgentId>,
     pub mission_id: Option<MissionId>,
     pub thread_id: Option<ThreadId>,
     pub invocation_id: InvocationId,
@@ -1045,6 +1060,16 @@ Required scope-bearing contracts should be updated to include:
 
 ```rust
 pub struct AgentId(pub String);
+
+pub struct ResourceScope {
+    pub tenant_id: TenantId,
+    pub user_id: UserId,
+    pub project_id: Option<ProjectId>,
+    pub agent_id: Option<AgentId>,
+    pub mission_id: Option<MissionId>,
+    pub thread_id: Option<ThreadId>,
+    pub invocation_id: InvocationId,
+}
 
 pub struct ExecutionContext {
     pub tenant_id: TenantId,

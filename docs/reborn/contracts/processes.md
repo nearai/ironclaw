@@ -54,7 +54,7 @@ pub struct ProcessRecord {
 }
 ```
 
-The record always carries tenant/user scope and capability identity so lifecycle, accounting, audit, and future runtime boundaries can be traced back to the same host authority envelope.
+The record always carries tenant/user/agent scope and capability identity so lifecycle, accounting, audit, and future runtime boundaries can be traced back to the same host authority envelope.
 
 ---
 
@@ -177,23 +177,23 @@ fail     -> process_failed
 kill     -> process_killed
 ```
 
-These events include tenant/user `ResourceScope`, `CapabilityId`, provider `ExtensionId`, `RuntimeKind`, and `ProcessId`. The wrapper does not make `ironclaw_dispatcher` process-aware; process observability stays in the process lifecycle service.
+These events include tenant/user/agent `ResourceScope`, `CapabilityId`, provider `ExtensionId`, `RuntimeKind`, and `ProcessId`. The wrapper does not make `ironclaw_dispatcher` process-aware; process observability stays in the process lifecycle service.
 
-`start` rejects duplicate process IDs within the same tenant/user partition. Callers must transition existing records instead of overwriting lifecycle state. `complete`, `fail`, and `kill` only transition from `Running`; late executor completions after `kill` are ignored by the background manager because the store rejects the terminal-state overwrite. Because event emission happens after successful transitions, a killed process does not emit a misleading late `process_completed` event when the background executor finishes after kill.
+`start` rejects duplicate process IDs within the same tenant/user/agent partition. Callers must transition existing records instead of overwriting lifecycle state. `complete`, `fail`, and `kill` only transition from `Running`; late executor completions after `kill` are ignored by the background manager because the store rejects the terminal-state overwrite. Because event emission happens after successful transitions, a killed process does not emit a misleading late `process_completed` event when the background executor finishes after kill.
 
 ---
 
-## 5. Tenant/user partitioning
+## 5. Tenant/user/agent partitioning
 
-Process records and result records are tenant/user scoped. The filesystem-backed stores write through `RootFilesystem` under:
+Process records and result records are tenant/user/agent scoped. The filesystem-backed stores write through `RootFilesystem` under:
 
 ```text
-/engine/tenants/{tenant_id}/users/{user_id}/processes/{process_id}.json
-/engine/tenants/{tenant_id}/users/{user_id}/process-results/{process_id}.json
-/engine/tenants/{tenant_id}/users/{user_id}/process-outputs/{process_id}/output.json
+/engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/processes/{process_id}.json
+/engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/process-results/{process_id}.json
+/engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/process-outputs/{process_id}/output.json
 ```
 
-Cross-tenant and cross-user reads return `None`, empty lists, or `UnknownProcess`; they must not reveal that another tenant/user has a matching process UUID.
+Cross-tenant, cross-user, and cross-agent reads return `None`, empty lists, or `UnknownProcess`; they must not reveal that another tenant/user/agent has a matching process UUID.
 
 ---
 

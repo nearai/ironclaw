@@ -19,7 +19,7 @@ LocalFilesystem mounted at /system/extensions
 -> dispatcher example adapters execute JSON echo capabilities
 -> HostRuntimeServices examples wrap real ScriptRuntime backends for end-to-end capability/process demos
 -> InMemoryResourceGovernor reserves and reconciles all invocations
--> JsonlEventSink records requested/selected/succeeded events under tenant/user-scoped /engine event paths
+-> JsonlEventSink records requested/selected/succeeded events under tenant/user/agent-scoped /engine event paths
 -> JSON outputs are returned through one dispatch path
 ```
 
@@ -41,7 +41,7 @@ discovered_extensions=3
 dispatch=echo-wasm.say runtime=wasm output={"message":"hello wasm"} reservation_status=Reconciled
 dispatch=echo-script.say runtime=script output={"message":"hello script"} reservation_status=Reconciled
 dispatch=echo-mcp.say runtime=mcp output={"message":"hello mcp"} reservation_status=Reconciled
-durable_event_path=VirtualPath("/engine/tenants/tenant1/users/user1/events/runtime/reborn-demo.jsonl")
+durable_event_path=VirtualPath("/engine/tenants/tenant1/users/user1/agents/_none/events/runtime/reborn-demo.jsonl")
 events=9
 event[0]=dispatch_requested capability=echo-wasm.say runtime=none error=none
 event[1]=runtime_selected capability=echo-wasm.say runtime=wasm error=none

@@ -13,7 +13,7 @@
 It answers one question before costed or quota-limited work starts:
 
 ```text
-Can this tenant/user/project/mission/thread/invocation reserve enough resources to run?
+Can this tenant/user/project/agent/mission/thread/invocation reserve enough resources to run?
 ```
 
 The resource governor is not a billing provider, payment system, LLM provider, sandbox runtime, policy engine, approval UI, or database migration layer. It owns the shared reservation protocol and ledgers that every runtime lane must use.
@@ -218,7 +218,7 @@ Audit records should include:
 
 - correlation ID
 - invocation ID
-- tenant/user/project/mission/thread scope
+- tenant/user/project/agent/mission/thread scope
 - estimate or actual usage summary
 - denial dimension and account when denied
 - reservation ID when granted/reconciled/released
@@ -236,8 +236,9 @@ pub enum ResourceAccount {
     Tenant { tenant_id: TenantId },
     User { tenant_id: TenantId, user_id: UserId },
     Project { tenant_id: TenantId, user_id: UserId, project_id: ProjectId },
-    Mission { /* tenant/user/project/mission */ },
-    Thread { /* tenant/user/project/mission/thread */ },
+    Agent { tenant_id: TenantId, user_id: UserId, agent_id: AgentId },
+    Mission { /* tenant/user/project/agent/mission */ },
+    Thread { /* tenant/user/project/agent/mission/thread */ },
 }
 
 pub trait ResourceGovernor {
@@ -273,7 +274,7 @@ Local contract tests should prove:
 - reconcile records actual usage and releases active reservation
 - unknown reservation cannot be reconciled or released
 - double reconcile/release fails closed
-- tenant/user/project hierarchy checks ancestors, not only leaf scope
+- tenant/user/project/agent hierarchy checks ancestors, not only leaf scope
 
 ---
 

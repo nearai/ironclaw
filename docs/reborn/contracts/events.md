@@ -109,15 +109,15 @@ V1 provides:
 
 `JsonlEventSink` and `JsonlAuditSink` are append-style JSONL persistence helpers over the Reborn filesystem contract.
 
-They treat only a true missing log file as an empty history. Backend, mount, permission, UTF-8, or malformed JSONL failures are returned as errors and must not be silently converted to empty history. `emit`/`emit_audit` validate existing JSONL before appending, and must not append to, overwrite, or truncate an existing log after a read or parse failure.
+They treat only a true missing log file as an empty history. Backend, mount, permission, UTF-8, or malformed JSONL failures are returned as errors and must not be silently converted to empty history. `emit`/`emit_audit` validate existing JSONL before appending, then use `RootFilesystem::append_file` for the new JSONL record. They must not append to, overwrite, or truncate an existing log after a read or parse failure.
 
 Dispatchers and approval resolvers still treat sink failures as best-effort observability. The sink returns errors to the caller, and the owning runtime/control-plane service decides whether the error is outcome-affecting. Current dispatcher and approval resolver semantics ignore sink errors and preserve the original dispatch/approval outcome.
 
 ---
 
-## 6. Tenant/user-scoped log paths
+## 6. Tenant/user/agent-scoped log paths
 
-Durable event and audit paths should be tenant/user scoped unless the caller is intentionally writing an admin-scoped aggregate log.
+Durable event and audit paths should be tenant/user/agent scoped unless the caller is intentionally writing an admin-scoped aggregate log.
 
 The events crate exposes helpers:
 
@@ -129,8 +129,8 @@ scoped_audit_log_path(&scope, "approval-audit.jsonl")
 These produce paths such as:
 
 ```text
-/engine/tenants/{tenant_id}/users/{user_id}/events/runtime/reborn-demo.jsonl
-/engine/tenants/{tenant_id}/users/{user_id}/events/audit/approval-audit.jsonl
+/engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/events/runtime/reborn-demo.jsonl
+/engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/events/audit/approval-audit.jsonl
 ```
 
 The helpers reject traversal-style names and require a simple `.jsonl` file name. Global paths under `/engine/events/...` should be treated as explicit admin/aggregate logs, not default runtime paths.

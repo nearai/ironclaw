@@ -218,8 +218,8 @@ Deployment mode is the outer authority envelope. Profiles are resolved inside it
 Hosted multi-tenant invariants:
 
 - no profile may expose provider host filesystem or provider host shell
-- all storage paths are tenant/user/project scoped
-- all process records carry tenant/user/project resource scope
+- all storage paths are tenant/user/project/agent scoped where the domain is agent-owned
+- all process records carry tenant/user/project/agent resource scope where available
 - all secrets are tenant scoped and never inherited from provider host environment
 - all network egress is brokered or compiled from tenant policy
 - quotas are mandatory for tenant, user, project, run, process, and capability scopes

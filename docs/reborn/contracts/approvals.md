@@ -18,11 +18,11 @@ The intended flow is:
 ```text
 CapabilityHost
   -> Authorization returns RequireApproval
-  -> ApprovalRequestStore saves Pending request under tenant/user scope
+  -> ApprovalRequestStore saves Pending request under tenant/user/agent scope
   -> RunStateStore marks invocation BlockedApproval
 
 ApprovalResolver
-  -> reads Pending ApprovalRecord under the same tenant/user scope
+  -> reads Pending ApprovalRecord under the same tenant/user/agent scope
   -> approve: durably issues a scoped CapabilityLease carrying the invocation fingerprint, then marks Approved
   -> deny: marks Denied and issues no lease
   -> optionally emits metadata-only AuditEnvelope::approval_resolved records
@@ -62,7 +62,7 @@ async fn approve(scope, request_id) -> Result<ApprovalRecord, RunStateError>;
 async fn deny(scope, request_id) -> Result<ApprovalRecord, RunStateError>;
 ```
 
-All operations are tenant/user scoped. Resolving a request with the wrong tenant/user returns an unknown request error and must not reveal whether another tenant/user has a matching UUID.
+All operations are tenant/user/agent scoped. Resolving a request with the wrong tenant/user/agent returns an unknown request error and must not reveal whether another tenant/user/agent has a matching UUID.
 
 ---
 
@@ -125,7 +125,7 @@ pub enum CapabilityLeaseStatus {
 }
 ```
 
-V1 includes in-memory and filesystem-backed lease stores with exact tenant/user/invocation scoped lookup, claim, consumption, and revocation. Filesystem leases persist under `/engine/tenants/{tenant_id}/users/{user_id}/capability-leases/{invocation_id}/{lease_id}.json`. Lease lookup, claim, consumption, and revocation are not global by ID; the authorizer asks for unexpired active leases visible to the current `ExecutionContext.resource_scope`. This slice treats issued approval leases as one-off invocation leases: a lease only authorizes a context with the same invocation ID as the approved request. Broader reusable approval scopes are a later policy slice.
+V1 includes in-memory and filesystem-backed lease stores with exact tenant/user/agent/invocation scoped lookup, claim, consumption, and revocation. Filesystem leases persist under `/engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/capability-leases/{invocation_id}/{lease_id}.json`. Lease lookup, claim, consumption, and revocation are not global by ID; the authorizer asks for unexpired active leases visible to the current `ExecutionContext.resource_scope`. This slice treats issued approval leases as one-off invocation leases: a lease only authorizes a context with the same invocation ID as the approved request. Broader reusable approval scopes are a later policy slice.
 
 Leases preserve the approval request fingerprint so resume can validate that the replayed invocation request matches what was approved. Fingerprinted approval leases are not converted into generic grants for plain `invoke_json`; they can only be used by `resume_json`, which compares the fingerprint and claims the exact lease before dispatch.
 
@@ -210,7 +210,7 @@ let resolver = ApprovalResolver::new(&approvals, &leases).with_audit_sink(&audit
 
 Successful approve and deny transitions emit `AuditEnvelope::approval_resolved(...)` records with `AuditStage::ApprovalResolved`, the original approval correlation ID, the approval request ID, a summarized action, and `DecisionSummary { kind: "approved" | "denied", actor: Some(resolver principal), ... }`.
 
-The audit records do not include approval reasons, replay input, invocation fingerprints, lease IDs, lease contents, raw host paths, or secret values. The same redaction contract applies when records are persisted through `JsonlAuditSink` at a tenant/user scoped virtual path from `scoped_audit_log_path(&scope, "approval-audit.jsonl")`. Audit sink failures are ignored and must not change approval resolution outcomes.
+The audit records do not include approval reasons, replay input, invocation fingerprints, lease IDs, lease contents, raw host paths, or secret values. The same redaction contract applies when records are persisted through `JsonlAuditSink` at a tenant/user/agent scoped virtual path from `scoped_audit_log_path(&scope, "approval-audit.jsonl")`. Audit sink failures are ignored and must not change approval resolution outcomes.
 
 ---
 

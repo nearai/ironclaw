@@ -85,25 +85,37 @@ Use for:
 
 ## 4. Namespace roots
 
-V1 canonical virtual roots:
+V1 canonical virtual areas/roots mirror the storage placement map:
 
 ```text
 /engine
+/system/settings
 /system/extensions
+/system/skills
 /users
 /projects
 /memory
+/artifacts
+/tmp
+/secrets
+/events
 ```
 
 Recommended meaning:
 
 | Root | Purpose |
 |---|---|
-| `/engine` | host-owned engine config, schemas, migrations, and service metadata |
+| `/engine` | host-owned engine config, schemas, migrations, runtime metadata, and not-indexed engine blobs |
+| `/system/settings` | settings repository projections/import-export surfaces |
 | `/system/extensions` | installed extension packages and extension-local config/state/cache roots |
+| `/system/skills` | skill package/registry projections/import-export surfaces |
 | `/users` | user-owned durable profile/config areas |
-| `/projects` | project workspaces, missions, thread state, artifacts, and project-local config |
+| `/projects` | project workspaces, missions, thread state, and project-local config |
 | `/memory` | durable memory namespace, initially file-like even if backed by another store |
+| `/artifacts` | artifact/object/local backend for process and export outputs |
+| `/tmp` | ephemeral runtime temp backend |
+| `/secrets` | typed encrypted secret repository projection/reference surface only; not generic secret material listing |
+| `/events` | durable event/audit append-log export/projection area |
 
 Extension-visible aliases should be scoped aliases such as:
 
@@ -118,7 +130,7 @@ Extension-visible aliases should be scoped aliases such as:
 /artifacts
 ```
 
-Aliases are resolved by `MountView`; they are not global virtual roots by themselves.
+Aliases are resolved by `MountView`; a same-named canonical root such as `/tmp` or `/artifacts` does not make that alias visible without an explicit mount grant.
 
 ---
 
@@ -201,6 +213,7 @@ Operation requirements:
 |---|---|
 | `read_file` | `read` |
 | `write_file` | `write` |
+| `append_file` | `write` |
 | `list_dir` | `list` |
 | `stat` | `read` or `list` |
 | `delete` | `delete` |
@@ -379,8 +392,11 @@ Backend errors may keep raw errors for logs, but public/display errors should us
 pub trait RootFilesystem {
     async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError>;
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError>;
+    async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError>;
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError>;
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError>;
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError>;
+    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError>;
 }
 
 pub trait FilesystemCatalog {
@@ -401,8 +417,11 @@ pub struct ScopedFilesystem<F> {
 impl<F: RootFilesystem> ScopedFilesystem<F> {
     async fn read_file(&self, path: &ScopedPath) -> Result<Vec<u8>, FilesystemError>;
     async fn write_file(&self, path: &ScopedPath, bytes: &[u8]) -> Result<(), FilesystemError>;
+    async fn append_file(&self, path: &ScopedPath, bytes: &[u8]) -> Result<(), FilesystemError>;
     async fn list_dir(&self, path: &ScopedPath) -> Result<Vec<DirEntry>, FilesystemError>;
     async fn stat(&self, path: &ScopedPath) -> Result<FileStat, FilesystemError>;
+    async fn delete(&self, path: &ScopedPath) -> Result<(), FilesystemError>;
+    async fn create_dir_all(&self, path: &ScopedPath) -> Result<(), FilesystemError>;
 }
 ```
 
@@ -417,6 +436,7 @@ Add tests through the caller-facing filesystem APIs, not only helper functions:
 - scoped read resolves through mount view and reads expected bytes
 - read denied when mount lacks `read`
 - write denied on read-only mount
+- append denied on read-only mount
 - list denied when mount lacks `list`
 - longest backend virtual mount wins
 - unknown alias fails closed
@@ -461,6 +481,7 @@ The V1 `RootFilesystem` contract includes exactly these operations:
 ```rust
 read_file
 write_file
+append_file
 list_dir
 stat
 delete
@@ -473,6 +494,7 @@ create_dir_all
 | --- | --- |
 | `read_file` | `read` |
 | `write_file` | `write` |
+| `append_file` | `write` |
 | `list_dir` | `list` |
 | `stat` | `read` or `list` |
 | `delete` | `delete` |
@@ -482,11 +504,12 @@ Deferred from V1:
 
 ```text
 compare-and-swap writes
-append
 rename/copy
 streaming/range reads
 checksums/content-addressed storage
 persistent mount registry
 ```
 
-The source-of-truth namespace map is frozen in [`storage-placement.md`](storage-placement.md). This filesystem crate remains generic: it may route `/memory`, `/system`, `/engine`, `/artifacts`, and `/projects` mounts, but it must not encode memory metadata/search semantics, secret repository semantics, approval/process schemas, or event projection logic.
+`append_file` is included in V1 because event/audit JSONL sinks need append-style writes without read-modify-write truncation risk. It appends bytes at a path; it is not a compare-and-swap, lock, streaming, or multi-record transaction primitive.
+
+The source-of-truth namespace map is frozen in [`storage-placement.md`](storage-placement.md). This filesystem crate remains generic: it may route `/memory`, `/system`, `/engine`, `/artifacts`, `/tmp`, `/secrets`, `/events`, `/users`, and `/projects` mounts, but it must not encode memory metadata/search semantics, secret repository semantics, approval/process schemas, or event projection logic.

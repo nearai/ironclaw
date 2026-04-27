@@ -33,7 +33,7 @@ These are logical service contracts. They do not all need to become crates immed
 | --- | --- | --- |
 | `TransportAdapter` | Normalizing browser/channel/webhook/IDE ingress and adapting events back to transport-specific output | Business policy, authorization, prompt assembly, durable transcript semantics |
 | `ConversationManager` | Durable thread lifecycle, transcript/history reads, references to pending gates and run ids | Live stream fanout, approval semantics, auth semantics, runtime execution |
-| `ScopeManager` | Resolving tenant/user/project/thread/invocation scope and producing typed views | Policy decisions, prompt text, filesystem implementation |
+| `ScopeManager` | Resolving tenant/user/project/agent/thread/invocation scope and producing typed views | Policy decisions, prompt text, filesystem implementation |
 | `InstructionBundleAssembler` | Deterministic prompt/instruction bundles from identity, context, skills, visible capabilities, attachments, and runtime metadata | Tool execution, authorization, long-lived mutable state |
 | `CapabilityCatalog` | Capability descriptors, provider mapping, schema metadata, model-visible names/descriptions | Action-time authorization, runtime execution, resource accounting |
 | `CapabilityAccessManager` | Visible capability surface, grants, scope filtering, action-time authorization inputs | Capability execution, manifest parsing, model prompting |

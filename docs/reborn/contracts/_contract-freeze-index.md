@@ -33,7 +33,7 @@ If a task needs to change one of those answers, it is not implementation work; i
 | Global scope | Preserve optional `AgentId` as a first-class scope alongside tenant/user/project/mission/thread/process/invocation. |
 | Storage model | Hybrid: file-shaped content uses filesystem surfaces; structured/query-heavy/security/control-plane state uses typed repositories. |
 | Namespace map | Adopt the map in [`storage-placement.md`](storage-placement.md). |
-| Filesystem V1 API | `read_file`, `write_file`, `list_dir`, `stat`, `delete`, `create_dir_all`. CAS/streaming/rename/append are deferred. |
+| Filesystem V1 API | `read_file`, `write_file`, `append_file`, `list_dir`, `stat`, `delete`, `create_dir_all`. CAS/streaming/rename are deferred. |
 | Memory service shape | Split services over shared memory backend: document/search/prompt/seed/profile/layer/version services. |
 | Memory multi-scope | Production-like explicit read scopes; writes primary by default; identity/system-prompt files primary-only. |
 | Memory layers | Include in V1, but layer scopes must be namespaced and non-colliding with raw user IDs. |
@@ -157,7 +157,7 @@ Goal: make docs explicit enough that implementation tasks do not need architectu
 Tasks:
 
 1. Add `AgentId` to `ironclaw_host_api` scope/resource/event shapes.
-2. Finalize `RootFilesystem::delete` and `RootFilesystem::create_dir_all` semantics.
+2. Finalize `RootFilesystem::append_file`, `RootFilesystem::delete`, and `RootFilesystem::create_dir_all` semantics.
 3. Ratify memory service trait shapes from [`memory.md`](memory.md).
 4. Ratify durable event cursor envelope from [`events-projections.md`](events-projections.md).
 5. Ratify settings/config source-of-truth rules from [`settings-config.md`](settings-config.md).

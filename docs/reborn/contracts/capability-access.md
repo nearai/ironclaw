@@ -27,7 +27,7 @@ The authorizer does not execute capabilities, reserve resources, prompt users, i
 
 A registered capability is only a possibility. It is not authority.
 
-V1 dispatch authorization requires a matching `CapabilityGrant` from `ExecutionContext.grants` or from an active tenant/user-scoped `CapabilityLease`:
+V1 dispatch authorization requires a matching `CapabilityGrant` from `ExecutionContext.grants` or from an active tenant/user/agent-scoped `CapabilityLease`:
 
 ```text
 grant.capability == descriptor.id
@@ -87,9 +87,9 @@ pub struct CapabilityLease {
 
 `LeaseBackedAuthorizer` combines request-local grants with active non-fingerprinted leases visible to the current `ExecutionContext.resource_scope` and then applies the same grant matching rules. Fingerprinted approval leases are resume-only authority: they are not exposed as generic grants to `CapabilityHost::invoke_json`, because replay must first compare the approved `InvocationFingerprint` and claim the lease through `CapabilityHost::resume_json`.
 
-Lease lookup is tenant/user/invocation scoped; a lease issued under one tenant/user/invocation must not authorize another tenant/user/invocation, even when UUIDs collide. V1 approval leases are exact-invocation leases until reusable approval scopes are explicitly implemented.
+Lease lookup is tenant/user/agent/invocation scoped; a lease issued under one tenant/user/agent/invocation must not authorize another tenant/user/agent/invocation, even when UUIDs collide. V1 approval leases are exact-invocation leases until reusable approval scopes are explicitly implemented.
 
-V1 supports active, claimed, consumed, and revoked lease state. Revocation, claim, and consumption are tenant/user/invocation scoped. Consumed, claimed, revoked, expired, exhausted, and fingerprinted approval leases are ignored by generic lease-backed authorization.
+V1 supports active, claimed, consumed, and revoked lease state. Revocation, claim, and consumption are tenant/user/agent/invocation scoped. Consumed, claimed, revoked, expired, exhausted, and fingerprinted approval leases are ignored by generic lease-backed authorization.
 
 `CapabilityLeaseStore` is async:
 
@@ -109,7 +109,7 @@ pub trait CapabilityLeaseStore: Send + Sync {
 Lease storage implementations now include:
 
 - `InMemoryCapabilityLeaseStore` for tests and ephemeral composition.
-- `FilesystemCapabilityLeaseStore` for durable virtual-path persistence under `/engine/tenants/{tenant_id}/users/{user_id}/capability-leases/{invocation_id}/{lease_id}.json`.
+- `FilesystemCapabilityLeaseStore` for durable virtual-path persistence under `/engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/capability-leases/{invocation_id}/{lease_id}.json`.
 
 The filesystem store persists issue, claim, consume, and revoke transitions with awaited filesystem operations; it must not use nested `block_on` inside async approval/resume paths. Reads are fail-closed for authorization: unreadable or missing lease records do not become ambient grants.
 

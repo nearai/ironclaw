@@ -38,7 +38,7 @@ This service is the middle communication layer between authorization, dispatch, 
 5. lookup CapabilityDescriptor in ExtensionRegistry
 6. call CapabilityDispatchAuthorizer
 7. if denied, mark `Failed` and return a typed invocation error before dispatch/resource reservation
-8. if approval is required, require coherent run-state/approval-store wiring, attach/validate the invocation fingerprint, save a tenant/user-scoped pending approval request, mark `BlockedApproval`, and return a typed approval-required error
+8. if approval is required, require coherent run-state/approval-store wiring, attach/validate the invocation fingerprint, save a tenant/user/agent-scoped pending approval request, mark `BlockedApproval`, and return a typed approval-required error
 9. if allowed with empty obligations, call CapabilityDispatcher with context.resource_scope
 10. if allowed with non-empty obligations and a configured handler satisfies them, continue to dispatch
 11. if obligations are unsupported, unconfigured, or handler-failed, mark `Failed` and return before dispatch
@@ -54,7 +54,7 @@ This service is the middle communication layer between authorization, dispatch, 
 3. load the blocked run from RunStateStore under the same scope
 4. load the approval record and require status Approved
 5. recompute InvocationFingerprint and compare it to the approved request fingerprint
-6. find an unexpired active lease for the same tenant/user/invocation, capability, and fingerprint
+6. find an unexpired active lease for the same tenant/user/agent/invocation, capability, and fingerprint
 7. call CapabilityDispatchAuthorizer with the matching lease grant as request-local authority
 8. if allowed with non-empty obligations and a configured handler satisfies them, continue without claiming the lease yet
 9. if obligations are unsupported, unconfigured, or handler-failed, mark `Failed` and return before claiming the lease or dispatching
@@ -72,7 +72,7 @@ This service is the middle communication layer between authorization, dispatch, 
 3. if configured, mark invocation `Running` in `RunStateStore`
 4. lookup CapabilityDescriptor in ExtensionRegistry
 5. call CapabilityDispatchAuthorizer::authorize_spawn, requiring `SpawnProcess` plus descriptor effects
-6. if allowed with empty obligations, ask ProcessManager to create a tenant/user-scoped ProcessRecord and optionally launch background execution
+6. if allowed with empty obligations, ask ProcessManager to create a tenant/user/agent-scoped ProcessRecord and optionally launch background execution
 7. if allowed with non-empty obligations and a configured handler satisfies them, continue to process creation
 8. if obligations are unsupported, unconfigured, or handler-failed, mark `Failed` and return before process creation
 9. mark the start invocation Completed or Failed
@@ -149,7 +149,7 @@ CapabilityHost::new(&registry, &dispatcher, &authorizer)
     .with_process_manager(&processes)
 ```
 
-The stores are optional for low-level tests, but host-facing invocation should configure them so approvals and failures are visible outside the call stack and can survive process restarts. The durable implementations write through tenant/user partitions under the `/engine` filesystem namespace, so production can provide a DB-backed filesystem implementation without coupling this crate to a specific database.
+The stores are optional for low-level tests, but host-facing invocation should configure them so approvals and failures are visible outside the call stack and can survive process restarts. The durable implementations write through tenant/user/agent partitions under the `/engine` filesystem namespace, so production can provide a DB-backed filesystem implementation without coupling this crate to a specific database.
 
 The capability host is responsible for preserving `ExecutionContext.resource_scope` across run-state, approval persistence, and dispatch. A caller cannot authorize under one tenant/user and persist or bill under another.
 

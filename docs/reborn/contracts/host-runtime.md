@@ -60,7 +60,7 @@ It must not:
 - own broad runtime/input/output obligation semantics; `with_obligation_handler(...)` passes a shared `CapabilityObligationHandler` through to `CapabilityHost`, and `BuiltinObligationHandler` is limited to audit-before metadata plus `ApplyNetworkPolicy` preflight/hand-off to WASM host HTTP imports and `ironclaw_network` egress. Already-resolved runtime HTTP credentials may be injected only in the hardened WASM egress adapter after pre-injection leak scanning.
 - expose process lifecycle APIs through `CapabilityHost`
 - turn process subscriptions into a message bus
-- weaken tenant/user scoped persistence boundaries
+- weaken tenant/user/agent scoped persistence boundaries
 
 Ownership remains:
 
@@ -176,8 +176,8 @@ cargo run -p ironclaw_host_runtime --example reborn_host_runtime_filesystem
 The filesystem example uses `ProcessServices::filesystem(...)` and verifies that result metadata and JSON output are written under scoped artifact refs:
 
 ```text
-/engine/tenants/{tenant_id}/users/{user_id}/process-results/{process_id}.json
-/engine/tenants/{tenant_id}/users/{user_id}/process-outputs/{process_id}/output.json
+/engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/process-results/{process_id}.json
+/engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/process-outputs/{process_id}/output.json
 ```
 
 Both examples use an in-process `ScriptBackend` with a manifest-declared `runner = "sandboxed_process"` script capability so they can demonstrate the full composition path without requiring Docker:

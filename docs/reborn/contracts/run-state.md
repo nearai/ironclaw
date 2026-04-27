@@ -21,7 +21,7 @@ approvals   -> durable request objects that a human/policy service can resolve l
 
 This crate lives in the host control plane. It is not part of WASM, Script, MCP, or dispatcher runtime execution.
 
-Multi-tenancy is part of the contract. Records are keyed by invocation/request IDs but always read, listed, and transitioned through a tenant/user `ResourceScope` partition.
+Multi-tenancy is part of the contract. Records are keyed by invocation/request IDs but always read, listed, and transitioned through a tenant/user/agent `ResourceScope` partition.
 
 ---
 
@@ -68,7 +68,7 @@ pub struct ApprovalRecord {
 
 The run-state API is current-state oriented and async so durable implementations can use the host filesystem abstraction.
 
-Every read, list, and mutation after `start` requires a `ResourceScope`. `start` creates a new invocation record and must fail if the same tenant/user/invocation already exists; callers must use explicit resume/transition APIs rather than overwriting current state. Stored `error_kind` values use the shared sanitized `ErrorKind` contract so current-state APIs do not expose detail-like runtime strings.
+Every read, list, and mutation after `start` requires a `ResourceScope`. `start` creates a new invocation record and must fail if the same tenant/user/agent/invocation already exists; callers must use explicit resume/transition APIs rather than overwriting current state. Stored `error_kind` values use the shared sanitized `ErrorKind` contract so current-state APIs do not expose detail-like runtime strings.
 
 
 ```rust
@@ -106,18 +106,18 @@ FilesystemApprovalRequestStore
 
 ---
 
-## 4. Tenant/user partitioning
+## 4. Tenant/user/agent partitioning
 
-Stores partition durable data by tenant and user from `ResourceScope`:
+Stores partition durable data by tenant, user, and agent from `ResourceScope`:
 
 ```text
-/engine/tenants/{tenant_id}/users/{user_id}/runs/{invocation_id}.json
-/engine/tenants/{tenant_id}/users/{user_id}/approvals/{approval_request_id}.json
+/engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/runs/{invocation_id}.json
+/engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/approvals/{approval_request_id}.json
 ```
 
-The full `ResourceScope` remains inside each record for project/mission/thread/invocation metadata. The first hard isolation boundary is tenant/user; later projection/index layers can add project/thread views without weakening tenant/user partitioning.
+The full `ResourceScope` remains inside each record for project/agent/mission/thread/invocation metadata. The first hard isolation boundary is tenant/user/agent; later projection/index layers can add project/thread views without weakening tenant/user/agent partitioning.
 
-Store APIs hide cross-tenant and cross-user records by returning `None`, an empty list, `UnknownInvocation`, or `UnknownApprovalRequest`. They must not expose whether another tenant/user has a matching UUID. This applies to in-memory stores too: test/dev backends use tenant/user/UUID composite keys rather than UUID-only maps.
+Store APIs hide cross-tenant, cross-user, and cross-agent records by returning `None`, an empty list, `UnknownInvocation`, or `UnknownApprovalRequest`. They must not expose whether another tenant/user/agent has a matching UUID. This applies to in-memory stores too: test/dev backends use tenant/user/agent/UUID composite keys rather than UUID-only maps.
 
 ---
 
@@ -156,7 +156,7 @@ spawn process creation failed -> Failed(error_kind = ProcessSpawn)
 
 For `spawn_json`, run state tracks the start request lifecycle only. Long-running/background process lifecycle belongs to `ironclaw_processes::ProcessStore` after the start workflow returns a `ProcessId`.
 
-`resume_json` continues a `BlockedApproval` run only after loading an approved request and matching lease under the same tenant/user/invocation scope:
+`resume_json` continues a `BlockedApproval` run only after loading an approved request and matching lease under the same tenant/user/agent/invocation scope:
 
 ```text
 Approved + matching fingerprint + active lease -> claim lease -> dispatch -> consume lease -> Completed
