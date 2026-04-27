@@ -17,7 +17,8 @@ use chrono::Utc;
 use hkdf::Hkdf;
 use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    AgentId, ProjectId, ResourceScope, SecretHandle, TenantId, Timestamp, UserId, VirtualPath,
+    AgentId, ExtensionId, ProjectId, ResourceScope, SecretHandle, TenantId, Timestamp, UserId,
+    VirtualPath,
 };
 pub use secrecy::{ExposeSecret, SecretString as SecretMaterial};
 use serde::{Deserialize, Serialize};
@@ -160,6 +161,378 @@ impl CredentialMapping {
             host_patterns: vec![host_pattern.into()],
             optional: false,
         }
+    }
+}
+
+macro_rules! credential_id {
+    ($name:ident) => {
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Result<Self, ironclaw_host_api::HostApiError> {
+                let value = value.into();
+                validate_credential_segment(&value)?;
+                Ok(Self(value))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+
+            pub fn into_string(self) -> String {
+                self.0
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str(&self.0)
+            }
+        }
+    };
+}
+
+credential_id!(CredentialSlotId);
+credential_id!(CredentialAccountId);
+
+fn validate_credential_segment(value: &str) -> Result<(), ironclaw_host_api::HostApiError> {
+    SecretHandle::new(value.to_string()).map(|_| ())
+}
+
+/// Metadata-only reference from a credential account to a stored secret handle.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CredentialSecretRef {
+    pub name: String,
+    pub handle: SecretHandle,
+}
+
+impl CredentialSecretRef {
+    pub fn new(
+        name: impl Into<String>,
+        handle: SecretHandle,
+    ) -> Result<Self, ironclaw_host_api::HostApiError> {
+        let name = name.into();
+        validate_credential_segment(&name)?;
+        Ok(Self { name, handle })
+    }
+}
+
+/// Metadata-only external account saved for an extension credential slot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialAccountRecord {
+    pub scope: ResourceScope,
+    pub extension_id: ExtensionId,
+    pub slot_id: CredentialSlotId,
+    pub account_id: CredentialAccountId,
+    pub label: String,
+    pub subject_hint: Option<String>,
+    pub secret_refs: Vec<CredentialSecretRef>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+impl CredentialAccountRecord {
+    pub fn new(
+        scope: ResourceScope,
+        extension_id: ExtensionId,
+        slot_id: CredentialSlotId,
+        account_id: CredentialAccountId,
+        label: impl Into<String>,
+    ) -> Self {
+        let now = Utc::now();
+        Self {
+            scope,
+            extension_id,
+            slot_id,
+            account_id,
+            label: label.into(),
+            subject_hint: None,
+            secret_refs: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    pub fn with_subject_hint(mut self, subject_hint: impl Into<String>) -> Self {
+        self.subject_hint = Some(subject_hint.into());
+        self
+    }
+
+    pub fn with_secret_ref(mut self, secret_ref: CredentialSecretRef) -> Self {
+        self.secret_refs.push(secret_ref);
+        self
+    }
+}
+
+/// Metadata repository for extension credential accounts.
+#[async_trait]
+pub trait CredentialAccountRepository: Send + Sync {
+    async fn upsert(
+        &self,
+        record: CredentialAccountRecord,
+    ) -> Result<CredentialAccountRecord, SecretStoreError>;
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        extension_id: &ExtensionId,
+        slot_id: &CredentialSlotId,
+        account_id: &CredentialAccountId,
+    ) -> Result<Option<CredentialAccountRecord>, SecretStoreError>;
+
+    async fn list_for_slot(
+        &self,
+        scope: &ResourceScope,
+        extension_id: &ExtensionId,
+        slot_id: &CredentialSlotId,
+    ) -> Result<Vec<CredentialAccountRecord>, SecretStoreError>;
+
+    async fn delete(
+        &self,
+        scope: &ResourceScope,
+        extension_id: &ExtensionId,
+        slot_id: &CredentialSlotId,
+        account_id: &CredentialAccountId,
+    ) -> Result<bool, SecretStoreError>;
+}
+
+/// In-memory credential account repository for tests and demos.
+#[derive(Debug, Default)]
+pub struct InMemoryCredentialAccountRepository {
+    records: Mutex<HashMap<CredentialAccountKey, CredentialAccountRecord>>,
+}
+
+impl InMemoryCredentialAccountRepository {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn lock_records(
+        &self,
+    ) -> Result<
+        MutexGuard<'_, HashMap<CredentialAccountKey, CredentialAccountRecord>>,
+        SecretStoreError,
+    > {
+        self.records
+            .lock()
+            .map_err(|error| SecretStoreError::StoreUnavailable {
+                reason: error.to_string(),
+            })
+    }
+}
+
+#[async_trait]
+impl CredentialAccountRepository for InMemoryCredentialAccountRepository {
+    async fn upsert(
+        &self,
+        mut record: CredentialAccountRecord,
+    ) -> Result<CredentialAccountRecord, SecretStoreError> {
+        let key = CredentialAccountKey::new(
+            &record.scope,
+            &record.extension_id,
+            &record.slot_id,
+            &record.account_id,
+        );
+        if let Some(existing) = self.lock_records()?.get(&key) {
+            record.created_at = existing.created_at;
+        }
+        record.updated_at = Utc::now();
+        self.lock_records()?.insert(key, record.clone());
+        Ok(record)
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        extension_id: &ExtensionId,
+        slot_id: &CredentialSlotId,
+        account_id: &CredentialAccountId,
+    ) -> Result<Option<CredentialAccountRecord>, SecretStoreError> {
+        Ok(self
+            .lock_records()?
+            .get(&CredentialAccountKey::new(
+                scope,
+                extension_id,
+                slot_id,
+                account_id,
+            ))
+            .cloned())
+    }
+
+    async fn list_for_slot(
+        &self,
+        scope: &ResourceScope,
+        extension_id: &ExtensionId,
+        slot_id: &CredentialSlotId,
+    ) -> Result<Vec<CredentialAccountRecord>, SecretStoreError> {
+        let mut records: Vec<_> = self
+            .lock_records()?
+            .iter()
+            .filter(|(key, _)| key.matches_slot(scope, extension_id, slot_id))
+            .map(|(_, record)| record.clone())
+            .collect();
+        records.sort_by(|left, right| left.account_id.as_str().cmp(right.account_id.as_str()));
+        Ok(records)
+    }
+
+    async fn delete(
+        &self,
+        scope: &ResourceScope,
+        extension_id: &ExtensionId,
+        slot_id: &CredentialSlotId,
+        account_id: &CredentialAccountId,
+    ) -> Result<bool, SecretStoreError> {
+        Ok(self
+            .lock_records()?
+            .remove(&CredentialAccountKey::new(
+                scope,
+                extension_id,
+                slot_id,
+                account_id,
+            ))
+            .is_some())
+    }
+}
+
+/// Filesystem-backed credential account metadata repository over any RootFilesystem.
+pub struct FilesystemCredentialAccountRepository<F>
+where
+    F: RootFilesystem,
+{
+    filesystem: Arc<F>,
+}
+
+impl<F> FilesystemCredentialAccountRepository<F>
+where
+    F: RootFilesystem,
+{
+    pub fn new(filesystem: Arc<F>) -> Self {
+        Self { filesystem }
+    }
+
+    pub fn record_path(
+        &self,
+        scope: &ResourceScope,
+        extension_id: &ExtensionId,
+        slot_id: &CredentialSlotId,
+        account_id: &CredentialAccountId,
+    ) -> Result<VirtualPath, SecretStoreError> {
+        credential_account_record_path(scope, extension_id, slot_id, account_id)
+    }
+
+    fn slot_root(
+        &self,
+        scope: &ResourceScope,
+        extension_id: &ExtensionId,
+        slot_id: &CredentialSlotId,
+    ) -> Result<VirtualPath, SecretStoreError> {
+        credential_account_slot_root(scope, extension_id, slot_id)
+    }
+
+    async fn read_record(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<Option<CredentialAccountRecord>, SecretStoreError> {
+        let bytes = match self.filesystem.read_file(path).await {
+            Ok(bytes) => bytes,
+            Err(error) if filesystem_not_found(&error) => return Ok(None),
+            Err(error) => return Err(secret_filesystem_error(error)),
+        };
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(secret_json_error)
+    }
+
+    async fn write_record(
+        &self,
+        path: &VirtualPath,
+        record: &CredentialAccountRecord,
+    ) -> Result<(), SecretStoreError> {
+        let bytes = serde_json::to_vec_pretty(record).map_err(secret_json_error)?;
+        self.filesystem
+            .write_file(path, &bytes)
+            .await
+            .map_err(secret_filesystem_error)
+    }
+}
+
+#[async_trait]
+impl<F> CredentialAccountRepository for FilesystemCredentialAccountRepository<F>
+where
+    F: RootFilesystem,
+{
+    async fn upsert(
+        &self,
+        mut record: CredentialAccountRecord,
+    ) -> Result<CredentialAccountRecord, SecretStoreError> {
+        let path = self.record_path(
+            &record.scope,
+            &record.extension_id,
+            &record.slot_id,
+            &record.account_id,
+        )?;
+        if let Some(existing) = self.read_record(&path).await? {
+            record.created_at = existing.created_at;
+        }
+        record.updated_at = Utc::now();
+        self.write_record(&path, &record).await?;
+        Ok(record)
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        extension_id: &ExtensionId,
+        slot_id: &CredentialSlotId,
+        account_id: &CredentialAccountId,
+    ) -> Result<Option<CredentialAccountRecord>, SecretStoreError> {
+        let path = self.record_path(scope, extension_id, slot_id, account_id)?;
+        self.read_record(&path).await
+    }
+
+    async fn list_for_slot(
+        &self,
+        scope: &ResourceScope,
+        extension_id: &ExtensionId,
+        slot_id: &CredentialSlotId,
+    ) -> Result<Vec<CredentialAccountRecord>, SecretStoreError> {
+        let root = self.slot_root(scope, extension_id, slot_id)?;
+        let entries = match self.filesystem.list_dir(&root).await {
+            Ok(entries) => entries,
+            Err(error) if filesystem_not_found(&error) => return Ok(Vec::new()),
+            Err(error) => return Err(secret_filesystem_error(error)),
+        };
+        let mut records = Vec::new();
+        for entry in entries {
+            if entry.file_type == FileType::File
+                && entry.name.ends_with(".json")
+                && let Some(record) = self.read_record(&entry.path).await?
+            {
+                records.push(record);
+            }
+        }
+        records.sort_by(|left, right| left.account_id.as_str().cmp(right.account_id.as_str()));
+        Ok(records)
+    }
+
+    async fn delete(
+        &self,
+        scope: &ResourceScope,
+        extension_id: &ExtensionId,
+        slot_id: &CredentialSlotId,
+        account_id: &CredentialAccountId,
+    ) -> Result<bool, SecretStoreError> {
+        let path = self.record_path(scope, extension_id, slot_id, account_id)?;
+        if self.read_record(&path).await?.is_none() {
+            return Ok(false);
+        }
+        self.filesystem
+            .delete(&path)
+            .await
+            .map_err(secret_filesystem_error)?;
+        Ok(true)
     }
 }
 
@@ -488,6 +861,51 @@ fn secret_record_path(
 ) -> Result<VirtualPath, SecretStoreError> {
     let root = secret_scope_root(scope)?;
     VirtualPath::new(format!("{}/{}.json", root.as_str(), handle.as_str()))
+        .map_err(secret_path_error)
+}
+
+fn credential_account_root(scope: &ResourceScope) -> Result<VirtualPath, SecretStoreError> {
+    let agent_id = scope
+        .agent_id
+        .as_ref()
+        .map(AgentId::as_str)
+        .unwrap_or("_none");
+    let project_id = scope
+        .project_id
+        .as_ref()
+        .map(ProjectId::as_str)
+        .unwrap_or("_none");
+    VirtualPath::new(format!(
+        "/engine/tenants/{}/users/{}/agents/{agent_id}/projects/{project_id}/credential-accounts",
+        scope.tenant_id.as_str(),
+        scope.user_id.as_str()
+    ))
+    .map_err(secret_path_error)
+}
+
+fn credential_account_slot_root(
+    scope: &ResourceScope,
+    extension_id: &ExtensionId,
+    slot_id: &CredentialSlotId,
+) -> Result<VirtualPath, SecretStoreError> {
+    let root = credential_account_root(scope)?;
+    VirtualPath::new(format!(
+        "{}/{}/{}",
+        root.as_str(),
+        extension_id.as_str(),
+        slot_id.as_str()
+    ))
+    .map_err(secret_path_error)
+}
+
+fn credential_account_record_path(
+    scope: &ResourceScope,
+    extension_id: &ExtensionId,
+    slot_id: &CredentialSlotId,
+    account_id: &CredentialAccountId,
+) -> Result<VirtualPath, SecretStoreError> {
+    let root = credential_account_slot_root(scope, extension_id, slot_id)?;
+    VirtualPath::new(format!("{}/{}.json", root.as_str(), account_id.as_str()))
         .map_err(secret_path_error)
 }
 
@@ -1089,6 +1507,50 @@ impl InMemorySecretStore {
 struct SecretState {
     secrets: HashMap<SecretKey, SecretRecord>,
     leases: HashMap<SecretLeaseKey, LeaseRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CredentialAccountKey {
+    tenant_id: TenantId,
+    user_id: UserId,
+    agent_id: Option<AgentId>,
+    project_id: Option<ProjectId>,
+    extension_id: ExtensionId,
+    slot_id: CredentialSlotId,
+    account_id: CredentialAccountId,
+}
+
+impl CredentialAccountKey {
+    fn new(
+        scope: &ResourceScope,
+        extension_id: &ExtensionId,
+        slot_id: &CredentialSlotId,
+        account_id: &CredentialAccountId,
+    ) -> Self {
+        Self {
+            tenant_id: scope.tenant_id.clone(),
+            user_id: scope.user_id.clone(),
+            agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+            extension_id: extension_id.clone(),
+            slot_id: slot_id.clone(),
+            account_id: account_id.clone(),
+        }
+    }
+
+    fn matches_slot(
+        &self,
+        scope: &ResourceScope,
+        extension_id: &ExtensionId,
+        slot_id: &CredentialSlotId,
+    ) -> bool {
+        self.tenant_id == scope.tenant_id
+            && self.user_id == scope.user_id
+            && self.agent_id == scope.agent_id
+            && self.project_id == scope.project_id
+            && self.extension_id == *extension_id
+            && self.slot_id == *slot_id
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

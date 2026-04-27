@@ -47,6 +47,13 @@ InMemoryEncryptedSecretRepository
 FilesystemEncryptedSecretRepository
 CredentialLocation
 CredentialMapping
+CredentialSlotId
+CredentialAccountId
+CredentialSecretRef
+CredentialAccountRecord
+CredentialAccountRepository
+InMemoryCredentialAccountRepository
+FilesystemCredentialAccountRepository
 ```
 
 `SecretMaterial` is backed by `secrecy::SecretString`, so access to raw values is explicit through `ExposeSecret`. Metadata, lease records, credential mappings, encrypted records, repository errors, and debug output never contain raw secret values.
@@ -151,7 +158,78 @@ Runtime composition must obtain material through explicit scoped secret access b
 
 ---
 
-## 7. Non-goals
+## 7. Credential slots and accounts
+
+Extensions often need a credential *kind* rather than one hard-coded secret. For example, a Gmail extension may need a Google OAuth credential while a user has personal, work, and client Gmail accounts. Reborn models this as metadata-only credential accounts:
+
+```text
+Extension declares or implies a credential slot:
+  extension_id = gmail
+  slot_id      = google_oauth
+
+User stores multiple scoped accounts for that slot:
+  account_id   = personal
+  label        = Personal Gmail
+  subject_hint = me@gmail.com
+  secret_refs  = refresh_token -> SecretHandle("gmail.personal.refresh_token")
+
+  account_id   = work
+  label        = Work Gmail
+  subject_hint = me@company.com
+  secret_refs  = refresh_token -> SecretHandle("gmail.work.refresh_token")
+```
+
+`ironclaw_secrets` owns only the account metadata and secret-handle references:
+
+```rust
+pub struct CredentialAccountRecord {
+    pub scope: ResourceScope,
+    pub extension_id: ExtensionId,
+    pub slot_id: CredentialSlotId,
+    pub account_id: CredentialAccountId,
+    pub label: String,
+    pub subject_hint: Option<String>,
+    pub secret_refs: Vec<CredentialSecretRef>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+```
+
+A credential account is **not** an authority grant. It does not contain raw material and does not bypass `SecretStore` lease consumption. Runtime composition must still authorize the capability, resolve the selected credential account, check that every referenced `SecretHandle` is allowed for the invocation, call `lease_once(scope, handle)`, consume each lease exactly once, and inject material only inside the approved runtime/provider path.
+
+Boundary rules:
+
+- `CredentialAccountRepository` is keyed by tenant/user/agent/project + extension + slot + account.
+- The same extension and slot may have many accounts under the same scope.
+- Account labels and subject hints are UI metadata only; they are not secret material and not authorization decisions.
+- `CredentialSecretRef` contains a reference name and `SecretHandle` only, never plaintext, OAuth access tokens, refresh tokens, cookies, or API keys.
+- Account selection/defaults are product workflow or settings concerns. The secrets crate may persist account records, but it does not choose an account for a prompt, remember defaults, ask users, or resolve policy.
+- OAuth refresh/repair, provider HTTP calls, token exchange, and account verification must go through host/runtime composition and `ironclaw_network`; they do not belong in `ironclaw_secrets`.
+- Auditing account use belongs to host/control-plane event sinks. The secrets crate must not emit events or depend on `ironclaw_events`.
+
+Filesystem-backed credential account metadata uses redacted JSON under:
+
+```text
+/engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/projects/{project_id-or-_none}/credential-accounts/{extension_id}/{slot_id}/{account_id}.json
+```
+
+This path stores only labels, subject hints, secret handles, and timestamps. Secret material remains exclusively in encrypted secret records and is only exposed by `SecretStore::consume(...)` after an explicit scoped lease.
+
+Future obligation handling may add a richer host-api obligation such as:
+
+```rust
+InjectCredentialOnce {
+    extension_id: ExtensionId,
+    slot_id: CredentialSlotId,
+    account_id: CredentialAccountId,
+}
+```
+
+or keep `InjectSecretOnce { handle }` for simple direct-handle cases. In either shape, account metadata remains support data and does not grant authority.
+
+---
+
+## 8. Non-goals
 
 This slice does not implement:
 
@@ -161,16 +239,18 @@ This slice does not implement:
 - secret audit emission
 - authorization policy for secret use
 - approval prompts for secret use
-- production `InjectSecretOnce` obligation handling
+- account selection UI, account defaults, or per-project remembered choices
+- production `InjectSecretOnce` or `InjectCredentialOnce` obligation handling
 - runtime environment/request injection
 - OAuth/token refresh flows
+- provider account verification
 - network policy enforcement
 
-Those should be added as separate service/composition slices without moving runtime or product workflow semantics into this crate. Concrete durable adapters must preserve the same tenant/user/project keying and sanitized error behavior.
+Those should be added as separate service/composition slices without moving runtime or product workflow semantics into this crate. Concrete durable adapters must preserve the same tenant/user/agent/project keying and sanitized error behavior.
 
 ---
 
-## 8. Contract tests
+## 9. Contract tests
 
 The crate tests cover:
 
@@ -179,6 +259,9 @@ The crate tests cover:
 - same-handle secrets are tenant/user/agent/project isolated
 - missing secrets fail without creating leases
 - credential mapping constructors carry handles and host patterns but no secret material
+- credential account records allow multiple accounts for the same extension slot without storing material
+- credential account repositories isolate tenant/user/agent/project scopes and list only selected extension-slot accounts
+- filesystem-backed credential account records persist redacted metadata and survive new repository instances
 - encrypted store persists ciphertext rather than plaintext
 - identical plaintext uses distinct salts/ciphertext
 - a new store instance can read through the same encrypted repository with the same master key
