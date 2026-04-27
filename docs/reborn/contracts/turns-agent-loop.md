@@ -1,4 +1,4 @@
-# Reborn Contract — Turns and First-Party Agent Loop
+# Reborn Contract — Turns and Reference Agent Loops
 
 **Status:** Contract-freeze draft
 **Date:** 2026-04-25
@@ -8,33 +8,44 @@
 
 ## 1. Purpose
 
-The default agent loop is a trusted first-party service, not a generic runtime lane and not dispatcher behavior.
+This contract separates kernel-mediated turn coordination from replaceable agent-loop behavior.
 
-Recommended service names:
+The default shipped loop is a reference loop running on the kernel surface, not a privileged bypass and not dispatcher behavior. Other loop families such as lightweight loop, CodeAct loop, model-specific loops, provider-specific loops, or deployment/user-installed loops must be allowed by the architecture when trust-class policy and explicit grants permit them.
+
+Recommended names for shipped reference services:
 
 ```text
-TurnService
-AgentLoopService
+TurnCoordinator
+ReferenceAgentLoop
 ```
 
-Responsibilities:
+Kernel-mediated responsibilities:
 
-- normalize channel submissions into thread turns;
-- enforce one-active-run-per-thread;
-- build prompt context through `MemoryPromptContextService`;
-- call LLM/provider layer;
-- execute tools/capabilities through `CapabilityHost`;
-- manage approval-blocked and resumable turns;
-- persist turn/thread state;
-- emit replies and durable progress events.
+- normalize accepted channel submissions into scoped turn/run records or require an adapter to do so before handoff;
+- enforce one-active-run-per-thread before model/tool side effects;
+- coordinate approval/auth/resource-blocked and resumable turns;
+- persist scope-consistent turn/thread/run state needed for recovery;
+- route capability/tool effects through `CapabilityHost`;
+- route process status/output/cancellation through `ProcessHost`/process services;
+- emit redacted durable progress/audit events through the event substrate;
+- enforce prompt-injection write-safety policy for kernel-injected prompt files.
 
-Non-responsibilities:
+Loop/userland responsibilities:
+
+- choose model/provider and loop heuristics;
+- assemble prompt context from authorized memory reads;
+- choose tools/capabilities to request;
+- plan, retry, summarize, ask follow-up questions, and manage loop-local strategy state;
+- provide reference behavior such as lightweight loop or CodeAct loop.
+
+Non-responsibilities for any loop:
 
 - direct runtime dispatch bypassing `CapabilityHost`;
 - direct authorization/grant evaluation;
 - low-level network/secrets policy;
 - memory backend storage internals;
-- extension registry mutation except through extension services.
+- extension registry mutation except through extension services;
+- self-assigning `TrustClass::FirstParty` or `TrustClass::System`.
 
 ---
 
@@ -43,11 +54,12 @@ Non-responsibilities:
 ```text
 Channel adapter
   -> normalized incoming message
-  -> TurnService
+  -> kernel turn coordination
       -> thread/run ownership check
-      -> MemoryPromptContextService
-      -> LLM/provider call
-      -> CapabilityHost for capability/tool effects
+      -> active reference/custom loop
+          -> authorized memory reads + loop-owned prompt assembly
+          -> LLM/provider call through policy-aware provider boundary
+          -> CapabilityHost for capability/tool effects
       -> ProcessHost for process status/output where needed
       -> EventStream for progress/replies
 ```
@@ -119,13 +131,9 @@ Rules:
 
 ## 5. Prompt context
 
-The agent loop does not assemble prompt documents directly. It calls:
+Prompt assembly is loop/userland strategy over authorized memory reads. The kernel does not own a single prompt builder.
 
-```text
-MemoryPromptContextService::build(context, mode)
-```
-
-Prompt context modes include:
+Reference loops may provide default prompt assemblers for modes such as:
 
 ```text
 direct/main session
@@ -134,13 +142,14 @@ project session
 admin/system run
 ```
 
-Rules:
+Kernel-mediated prompt safety rules:
 
 - identity/system-prompt files are primary-scope only;
-- group chat excludes personal memory/profile context;
-- prompt-injected file writes are guarded by the memory prompt service;
+- group chat must not receive personal memory/profile context unless explicit policy allows it;
+- writes to prompt-injected files are guarded by prompt-injection write-safety policy;
 - assembled prompts are not emitted in events/audit by default;
-- prompt build failures are explicit turn failures unless a contract marks a missing optional doc as ignorable.
+- prompt read/build failures are explicit turn failures unless a contract marks a missing optional doc as ignorable;
+- custom loops may change assembly strategy, but not scope filtering, write-safety checks, or redaction requirements.
 
 ---
 
@@ -192,7 +201,7 @@ Rules:
 
 For spawned/background capability work:
 
-- turn service starts work through `CapabilityHost::spawn_json` or a first-party process API;
+- turn coordination starts work through `CapabilityHost::spawn_json` or a kernel-mediated process API;
 - process status/result/output are read through `ProcessHost`;
 - streaming output/progress reaches clients through durable event stream;
 - binary/large output is referenced by artifact refs, not embedded in turn state.
@@ -206,7 +215,7 @@ Channel adapters own transport normalization only:
 ```text
 Telegram/Slack/Web/CLI/etc.
   -> IncomingMessage-like normalized record
-  -> TurnService
+  -> TurnCoordinator / active loop runner
 ```
 
 They do not own:
@@ -223,12 +232,14 @@ Transport-specific auth/webhook checks happen before the turn is accepted.
 
 ## 10. Required acceptance tests
 
-- one-active-run-per-thread blocks concurrent turns;
+- one-active-run-per-thread blocks concurrent turns before model/tool side effects;
 - turn scope propagates into `ExecutionContext.resource_scope`;
-- tool calls go through `CapabilityHost` only;
+- shipped and custom loops both send privileged effects through `CapabilityHost` only;
+- trust class alone does not let a loop bypass grants, mounts, leases, obligations, or resource policy;
 - approval-blocked turn resumes with exact invocation fingerprint;
 - group chat prompt excludes personal memory/profile docs;
 - primary identity docs are not read from secondary scopes;
+- prompt-injected file writes are scanned or fail closed regardless of loop implementation;
 - cancellation propagates to process/capability work;
 - durable event cursor can replay turn progress after reconnect;
 - raw secrets/host paths/tool raw input do not leak in turn events.

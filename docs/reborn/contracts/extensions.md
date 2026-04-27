@@ -26,7 +26,7 @@ Execution belongs to:
 - `ironclaw_wasm` for WASM modules
 - `ironclaw_scripts` for Docker-backed native CLI/script capabilities
 - `ironclaw_mcp` for MCP adapter calls
-- trusted host service crates for first-party/system work
+- host-policy-selected service crates for first-party/system work
 
 ---
 
@@ -155,8 +155,8 @@ Manifest runtime kinds map to `ironclaw_host_api::RuntimeKind`:
 | `wasm` | `Wasm` | portable module lane |
 | `script` | `Script` | native CLI/script lane selected by a semantic runner profile |
 | `mcp` | `Mcp` | MCP adapter lane |
-| `first_party` | `FirstParty` | trusted first-party service extension |
-| `system` | `System` | host-owned system fixture/service only |
+| `first_party` | `FirstParty` | host-policy-selected packaged service/loop ceiling; not authority by itself |
+| `system` | `System` | host-owned system fixture/service only; not user-installable |
 
 Runtime metadata is declarative. It is passed to the appropriate runtime crate later.
 
@@ -165,7 +165,9 @@ Rules:
 - WASM declarations may name module assets but must not load modules.
 - Script declarations may name a semantic runner, command, args, and optional backend-specific image metadata, but must not execute or expose raw Docker flags.
 - MCP declarations may describe stdio/remote transport but must not connect during manifest parsing/registry insertion.
-- Host/system declarations require matching trust ceilings and should be rare/first-party only.
+- Host/system declarations require matching trust ceilings and should be rare, host-policy-assigned, and never self-declared by ordinary user-installed packages.
+- Runtime/trust declarations are not grants; privileged effects still require capability grants, mounts, leases, obligations, and resource policy.
+- Extension or loop upgrades that change package identity, signer/source policy, trust class, or requested authority require renewed approval/admin policy before old grants apply.
 
 ---
 

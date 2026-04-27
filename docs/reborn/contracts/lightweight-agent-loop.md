@@ -1,7 +1,7 @@
 # IronClaw Reborn lightweight agent loop contract
 
 **Date:** 2026-04-26
-**Status:** Decision guide / first-party loop contract
+**Status:** Decision guide / reference loop contract
 **Inspired by:** `badlogic/pi-mono/packages/agent` loop mechanics
 **Depends on:** `docs/reborn/contracts/agent-loop-protocol.md`, `docs/reborn/contracts/runtime-workflows.md`, `docs/reborn/contracts/capabilities.md`, `docs/reborn/contracts/run-state.md`, `docs/reborn/contracts/approvals.md`, `docs/reborn/contracts/events.md`, `docs/reborn/contracts/runtime-selection.md`, `docs/reborn/contracts/runtime-profiles.md`
 
@@ -9,7 +9,7 @@
 
 ## 1. Purpose
 
-Define the default first-party lightweight agent loop for Reborn.
+Define the default shipped lightweight agent loop for Reborn as a reference loop implementation, not as kernel behavior.
 
 This loop borrows the useful mechanics of the `pi-mono` agent loop:
 
@@ -22,7 +22,7 @@ stream assistant
 
 But it is not a dependency on `pi-mono`, and it does not import `pi-mono` authority semantics. It is a Reborn-native loop that runs inside IronClaw host contracts.
 
-The loop may be packaged as a first-party bundled `agent_loop` extension or implemented in a first-party crate. In both cases, it receives only a narrow host facade and never raw service managers.
+The loop may be packaged as a bundled `agent_loop` extension or implemented in a shipped reference-loop crate. In both cases, it receives only a narrow kernel-mediated host facade, never raw service managers, and never a bypass around `CapabilityHost`/policy checks.
 
 ---
 
@@ -46,7 +46,7 @@ EventStreamManager
 ResourceGovernor
 ```
 
-The loop is the parent-loop mechanic, not the authority/runtime layer.
+The loop is the parent-loop mechanic, not the authority/runtime layer. Being shipped by the project may affect its trust ceiling through host policy, but it does not grant authority by itself.
 
 ---
 
@@ -230,7 +230,7 @@ else:
 
 ## 8. Suspension and resume
 
-The first-party loop must support structured suspension. Approval/auth/resource waits are not normal tool errors.
+The shipped reference loop must support structured suspension. Approval/auth/resource waits are not normal tool errors.
 
 Capability outcomes:
 
@@ -439,19 +439,19 @@ The loop only sees visible capability descriptors. The profile resolver and runt
 
 ---
 
-## 15. First-party extension posture
+## 15. Reference loop extension posture
 
-This loop is a first-party bundled agent-loop extension in architecture terms:
+This loop may be bundled with first-party package metadata, but the metadata is not authority:
 
 ```text
 extension role: agent_loop
-trust: first_party
+trust ceiling: assigned by host policy
 host surface: AgentLoopHost facade only
 ```
 
 Generated extensions cannot create new parent-loop authority surfaces. They may provide capabilities that this loop can call, subject to normal capability registration, grants, approvals, and runtime dispatch.
 
-`ironclaw_extensions` may register the first-party package metadata if useful, but it must not execute the loop. Loop execution belongs to the host runtime / agent-loop service that owns the `AgentLoopHost` facade.
+`ironclaw_extensions` may register bundled package metadata if useful, but it must not execute the loop. Loop execution belongs to the configured loop runner/service that owns the `AgentLoopHost` facade and remains subject to kernel-mediated policy.
 
 ---
 

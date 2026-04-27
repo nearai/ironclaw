@@ -30,6 +30,7 @@ If a task needs to change one of those answers, it is not implementation work; i
 
 | Area | Decision |
 | --- | --- |
+| Kernel boundary | Kernel means the security perimeter that mediates authority; loops, prompt assembly, mission/routine behavior, skill selection, and channel behavior are userland. See [`kernel-boundary.md`](kernel-boundary.md). |
 | Global scope | Preserve optional `AgentId` as a first-class scope alongside tenant/user/project/mission/thread/process/invocation. |
 | Storage model | Hybrid: file-shaped content uses filesystem surfaces; structured/query-heavy/security/control-plane state uses typed repositories. |
 | Namespace map | Adopt the map in [`storage-placement.md`](storage-placement.md). |
@@ -37,14 +38,14 @@ If a task needs to change one of those answers, it is not implementation work; i
 | Memory service shape | Split services over shared memory backend: document/search/prompt/seed/profile/layer/version services. |
 | Memory multi-scope | Production-like explicit read scopes; writes primary by default; identity/system-prompt files primary-only. |
 | Memory layers | Include in V1, but layer scopes must be namespaced and non-colliding with raw user IDs. |
-| Prompt context | `MemoryPromptContextService` owns prompt assembly and prompt-injection write safety. |
+| Prompt context | Prompt-injection write safety is kernel-mediated policy; prompt assembly is loop/userland strategy over authorized memory reads. |
 | Secrets | Typed encrypted secret repository is production source of truth; file views are redacted projections/reference only. |
 | Network | All host/provider HTTP goes through `ironclaw_network`. |
 | Events/projections | Durable append log plus scoped replay cursors are substrate dependencies; projections and SSE/WebSocket transports build on that substrate. |
 | Resources | V1 reserves/enforces runtime/process, network, embeddings/providers, and artifacts/storage quotas. |
 | Settings/extensions/skills | Typed repositories are source of truth with optional `/system/...` file projections. |
 | Extensions | Full lifecycle contract is frozen; partial implementation is allowed if states/transitions remain compatible. |
-| Agent loop | First-party `TurnService`/`AgentLoopService` using `CapabilityHost`. |
+| Agent loop | Shipped loop docs describe reference userland loops running on the kernel surface; no loop gets a privileged bypass. |
 | Processes | Status/kill/await/result/output-ref plus streaming events in V1. |
 | Approvals | Exact-invocation leases only in V1; reusable scoped approvals are V2. |
 | Obligations | All built-in obligations must be implemented for V1; unsupported obligations fail closed. |
@@ -78,6 +79,7 @@ If a task needs to change one of those answers, it is not implementation work; i
 
 ### New contracts in this packet
 
+- [`kernel-boundary.md`](kernel-boundary.md)
 - [`storage-placement.md`](storage-placement.md)
 - [`memory.md`](memory.md)
 - [`settings-config.md`](settings-config.md)
@@ -121,7 +123,7 @@ Current implemented/partial substrate called out there includes:
 - process store/manager/result/output-ref/process-host slices;
 - architecture dependency guardrails and live vertical-slice examples.
 
-Explicit gaps are also listed there, including turn service, first-party agent loop service, durable event projections/SSE/WebSocket, full obligation implementations, production typed secret repository wiring, product memory service parity, and migration bridges.
+Explicit gaps are also listed there, including kernel trust-class policy engine productization, turn coordination/reference loop services, durable event projections/SSE/WebSocket, full obligation implementations, production typed secret repository wiring, product memory service parity, and migration bridges.
 
 ---
 
@@ -165,11 +167,12 @@ Goal: make docs explicit enough that implementation tasks do not need architectu
 
 Tasks:
 
-1. Add `AgentId` to `ironclaw_host_api` scope/resource/event shapes.
-2. Finalize `RootFilesystem::append_file`, `RootFilesystem::delete`, and `RootFilesystem::create_dir_all` semantics.
-3. Ratify memory service trait shapes from [`memory.md`](memory.md).
-4. Ratify durable event cursor envelope from [`events-projections.md`](events-projections.md).
-5. Ratify settings/config source-of-truth rules from [`settings-config.md`](settings-config.md).
+1. Ratify the kernel/userland boundary and trust-class policy from [`kernel-boundary.md`](kernel-boundary.md).
+2. Add `AgentId` to `ironclaw_host_api` scope/resource/event shapes.
+3. Finalize `RootFilesystem::append_file`, `RootFilesystem::delete`, and `RootFilesystem::create_dir_all` semantics.
+4. Ratify memory service trait shapes from [`memory.md`](memory.md), including the split between prompt safety policy and prompt assembly strategy.
+5. Ratify durable event cursor envelope from [`events-projections.md`](events-projections.md).
+6. Ratify settings/config source-of-truth rules from [`settings-config.md`](settings-config.md).
 
 ### Level 1 — independent substrate tasks
 
@@ -184,6 +187,7 @@ Can run in parallel after their direct Level 0 contract dependencies are accepte
 | Durable event log/cursors | `events-projections.md` | `ironclaw_events`, web gateway later | cursor envelope and redaction rules |
 | Resource reservation expansion | `resources.md` | `ironclaw_resources`, capabilities/processes/network | resource scope and lifecycle ownership |
 | Extension lifecycle state machine | `extensions.md` | `ironclaw_extensions` | lifecycle states/transitions |
+| Trust-class policy engine | `kernel-boundary.md`, `host-api.md`, `extensions.md` | host policy/composition + extension registry | trust assignment, upgrade, revocation, grant ceilings |
 
 `Durable event log/cursors` is a substrate dependency, not merely a web feature. It gives parallel implementation agents a typed, replayable surface for caller-level tests and cross-component debugging. SSE/WebSocket transport can remain downstream product integration over this substrate.
 
@@ -195,7 +199,7 @@ Can run in parallel once the relevant `memory.md`, storage, network, secrets, an
 | --- | --- | --- |
 | `MemoryDocumentService` | `memory.md` | read/write/append/delete/list/exists over backend |
 | `MemorySearchService` | `memory.md` | multi-scope search, identity filtering, search config |
-| `MemoryPromptContextService` | `memory.md`, `turns-agent-loop.md` | prompt assembly + sanitizer policy |
+| Prompt safety policy + reference prompt assembler | `memory.md`, `kernel-boundary.md`, `turns-agent-loop.md` | kernel-mediated write safety, plus replaceable loop-owned prompt assembly over authorized reads |
 | `MemorySeedService` | `memory.md` | core seeds, bootstrap, `.config` seeds, imports |
 | `MemoryLayerService` | `memory.md` | namespaced layers + privacy redirect |
 | `MemoryVersionService` | `memory.md` | get/list/prune/patch version behavior |
@@ -205,7 +209,7 @@ Can run in parallel once the relevant `memory.md`, storage, network, secrets, an
 
 | Task | Main contract | Notes |
 | --- | --- | --- |
-| `TurnService`/`AgentLoopService` | `turns-agent-loop.md` | one-active-run-per-thread, prompt context, CapabilityHost |
+| Kernel turn coordination + reference loops | `kernel-boundary.md`, `turns-agent-loop.md` | one-active-run-per-thread in kernel-mediated coordination; loop behavior/prompt strategy as userland over `CapabilityHost` |
 | Web SSE/WebSocket event APIs | `events-projections.md` | product transport over durable replay cursors + projections |
 | Settings/extension/skill projections | `settings-config.md`, `extensions.md` | typed repos with `/system/...` views |
 | Runtime lane hardening | `wasm.md`, `scripts.md`, `mcp.md`, `network.md` | all three first-class |
@@ -223,6 +227,7 @@ Legacy `src/` feature additions are a drift risk while Reborn is being built. Th
 
 ## 8. Non-negotiable implementation invariants
 
+- The kernel is the security perimeter, not the agent brain; anything not needed to mediate authority/security/coordination stays out of kernel-owned code.
 - `CapabilityHost` is the caller-facing workflow gate; callers do not manually authorize then call dispatcher.
 - `RuntimeDispatcher` routes already-authorized runtime requests only.
 - Unsupported obligations fail closed before runtime dispatch, process start, approval lease claim, secret consumption, or network execution.
@@ -231,8 +236,11 @@ Legacy `src/` feature additions are a drift risk while Reborn is being built. Th
 - Tenant/user/project/agent scope must flow through persistence, resources, events, approvals, leases, processes, results, outputs, secrets, network, runtime boundaries, and memory routing.
 - PostgreSQL/libSQL parity is required for production persistence behavior unless a contract explicitly says a backend is unsupported.
 - `ironclaw_filesystem` remains generic and must not learn memory-domain path grammar.
-- `ironclaw_memory` owns memory path grammar, memory backend plugin contracts, metadata/search/indexing, and prompt-context policy services.
+- Prompt-injection write safety is kernel-mediated policy; prompt assembly strategy belongs to the active loop over authorized memory reads.
+- `ironclaw_memory` owns memory path grammar, memory backend plugin contracts, metadata/search/indexing, and prompt-context policy hooks.
 - Provider HTTP and embedding/memory adapter network calls must go through `ironclaw_network`.
+- Trust class is an authority ceiling and assignment policy input, not a permission grant or kernel bypass.
+- Shipped and user-installed loops both run on the kernel surface and must use mediated grants, mounts, leases, resources, and obligations.
 
 ---
 

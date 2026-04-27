@@ -200,7 +200,7 @@ Reborn should ship to users as a coherent composition path, not as partially exp
 
 Cutover requirements:
 
-- one config-driven production composition root for `HostRuntimeServices` and adjacent first-party services;
+- one config-driven production composition root for `HostRuntimeServices` and adjacent shipped reference/userland services;
 - caller-level tests across `CapabilityHost -> Dispatcher -> Adapter -> Process/Event/Memory` paths;
 - explicit migration/backfill path for reused legacy schemas;
 - rollback notes for any bridge that can affect production state;

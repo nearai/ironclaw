@@ -167,7 +167,7 @@ Rules:
 - append and patch validate the final content, not only the delta;
 - write/append/patch version previous content before mutation according to version policy;
 - write/append/patch reindex after mutation according to metadata policy;
-- system-prompt-file write safety is delegated to `MemoryPromptContextService` policy hooks.
+- system-prompt-file write safety is delegated to kernel-mediated prompt safety policy hooks.
 
 ### 5.2 `MemorySearchService`
 
@@ -230,11 +230,11 @@ Rules:
 - redirects must be visible in the returned write result;
 - layer metadata resolution happens in the target layer scope.
 
-### 5.5 `MemoryPromptContextService`
+### 5.5 Prompt safety policy and reference prompt assembly
 
-Owns prompt assembly and write-time safety for prompt-injected files.
+Prompt-injection write safety is kernel-mediated policy because these files can affect future execution context. Prompt assembly is loop/userland strategy over authorized memory reads, not a single kernel-owned behavior.
 
-Prompt file policy includes at least:
+A reference prompt assembler may read prompt files such as:
 
 ```text
 BOOTSTRAP.md
@@ -250,15 +250,21 @@ context/profile.json
 context/assistant-directives.md
 ```
 
-Rules:
+Kernel-mediated safety rules:
 
 - identity files are primary-scope only;
 - admin `SYSTEM.md` is admin-scope only and may be cached;
-- `MEMORY.md` and daily logs may read configured secondary scopes;
-- group chat contexts exclude personal memory/profile/directives;
+- `MEMORY.md` and daily logs may read configured secondary scopes only through explicit read-scope policy;
+- group chat contexts exclude personal memory/profile/directives unless explicit policy allows them;
 - writes to prompt-injected files are scanned by the safety sanitizer;
-- empty writes used to clear bootstrap/profile state may bypass injection scanning;
+- empty writes used to clear bootstrap/profile state may bypass injection scanning only by explicit policy;
 - raw prompt-injection details should not leak into unrelated events.
+
+Loop/userland assembly rules:
+
+- active loops may choose prompt order, summarization, model-specific formatting, and inclusion heuristics over authorized reads;
+- custom loops cannot bypass primary-scope identity filtering, group-chat privacy filtering, write-safety checks, or event/audit redaction;
+- reference loop prompt assemblers are replaceable behavior, not memory backend source of truth.
 
 ### 5.6 `MemorySeedService`
 

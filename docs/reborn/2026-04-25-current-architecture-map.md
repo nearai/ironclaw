@@ -7,7 +7,7 @@
 
 This document records the current Reborn shape after the recent architecture discussion. It is a map, not a replacement for the contract docs under `docs/reborn/contracts/`.
 
-Terminology note: older docs use **kernel** for the small host-core composition concept. The current concrete crate for that concept is `ironclaw_host_runtime`; there is no active `ironclaw_kernel` crate in the Reborn stack.
+Terminology note: **kernel** is the architectural security perimeter: the small set of mediated services that enforce authority, isolation, leases, obligations, redaction, resources, scoped storage, network policy, and durable audit/event substrate. The current concrete composition crate for kernel-facing services is `ironclaw_host_runtime`; there is no active `ironclaw_kernel` crate in the Reborn stack.
 
 Legend:
 
@@ -25,6 +25,7 @@ Contract freeze packet:
 
 ```text
 docs/reborn/contracts/_contract-freeze-index.md
+docs/reborn/contracts/kernel-boundary.md
 docs/reborn/contracts/storage-placement.md
 docs/reborn/contracts/memory.md
 docs/reborn/contracts/settings-config.md
@@ -32,7 +33,7 @@ docs/reborn/contracts/turns-agent-loop.md
 docs/reborn/contracts/migration-compatibility.md
 ```
 
-These docs record the delegation-ready system decisions: first-class optional `AgentId`, hybrid storage placement, typed repositories for structured state, split memory services over shared backends, durable event streams with replay cursors, all built-in obligations for V1, all three runtime lanes as first-class, and schema reuse where viable.
+These docs record the delegation-ready system decisions: kernel as security perimeter, loops/userland running on the kernel surface, first-class optional `AgentId`, hybrid storage placement, typed repositories for structured state, split memory services over shared backends, durable event streams with replay cursors, all built-in obligations for V1, all three runtime lanes as first-class, and schema reuse where viable.
 
 ---
 
@@ -68,8 +69,8 @@ Reborn has one host core with many adapters and runtime ports. It should not gro
                                 |
                                 v
                   +---------------------------+
-                  | First-party agent loop    |
-                  | hosted service/extension  |
+                  | Reference/userland loop   |
+                  | kernel-surface runner     |
                   | emits Reply | Capability  |
                   | Calls [not implemented]           |
                   +-------------+-------------+
@@ -146,10 +147,11 @@ Reborn has one host core with many adapters and runtime ports. It should not gro
 
 Key boundary decisions shown above:
 
-- There is **one Host core** with stable ports for transports, runtimes, filesystem, resources, approvals, and events.
+- There is **one kernel/host core** with stable ports for transports, runtimes, filesystem, resources, approvals, and events.
+- The kernel is the security perimeter, not the agent brain; it is defined by what it mediates and secures.
 - Telegram, Slack, Web, and CLI are **channel adapters/drivers**, not separate hosts.
 - Vendor-specific behavior belongs in adapters or extension packages behind the host API, not in duplicated host cores.
-- The parent agent loop should be a **first-party hosted service/extension**, not kernel, dispatcher, or transport-driver logic.
+- The parent agent loop is **userland running on the kernel surface**, not kernel, dispatcher, or transport-driver logic. Shipped reference loops still need explicit grants and kernel-mediated calls.
 
 ---
 
@@ -158,7 +160,7 @@ Key boundary decisions shown above:
 The current host-facing invocation path is:
 
 ```text
-caller / first-party service / future turn service
+caller / shipped reference loop / future custom loop / turn coordinator
   -> CapabilityHost::invoke_json(...) | resume_json(...) | spawn_json(...)
       -> validates ExecutionContext and ResourceScope consistency
       -> looks up CapabilityDescriptor in ExtensionRegistry
@@ -264,13 +266,13 @@ These are explicit gaps, not architecture contradictions:
 | --- | --- |
 | Real Telegram/channel adapters | Telegram/Slack/Web/CLI should be transport drivers over the shared host request/event contracts; product-grade channel adapters still need to be built or ported into this shape. |
 | Turn service | The shared service that owns one-active-run-per-thread, turn lifecycle, checkpoint/resume edge, and handoff to the loop is not implemented yet. |
-| First-party agent loop runtime | The default parent agent loop should be hosted as a first-party service/extension that emits `Reply | CapabilityCalls`; it is not yet a Reborn runtime/service. |
+| Reference/userland loop runtime | The default parent agent loop should be a shipped reference loop running on the kernel surface and emitting `Reply | CapabilityCalls`; custom loop families are expected later. It is not yet a Reborn runtime/service. |
 | Process product APIs | Process records, scoped status/kill/await/subscribe/result/output APIs, cooperative cancellation tokens, result records with filesystem JSON output refs, lifecycle events, and resource cleanup ownership exist as service slices; generalized artifact refs for streaming/binary outputs, output streams, forced abort handles, richer scoped read/projection APIs, durable subscription cursors, and event fanout are not complete. |
 | Memory plugin/indexer/search wiring | `ironclaw_memory` now owns the memory backend plugin contract and filesystem adapter plus PostgreSQL/libSQL adapters for `memory_documents`, `memory_chunks`/FTS, and `memory_document_versions`, including metadata inheritance/schema validation, skip-indexing/versioning behavior, embedding-provider integration, and rank-fused full-text/vector search APIs; external MCP/WASM/Rust backend adapters, production provider credential/network wiring, multi-scope search, and richer provider-specific search result metadata are not complete. |
 | Durable leases | Async filesystem-backed exact-invocation lease persistence now covers issue, claim, consume, revoke, reload, tenant/user/invocation isolation, and fail-closed approval+lease coordination without nested async `block_on`; single-store ACID transactions, full audit retention policy, and reusable approval scopes are not complete. |
 | User-facing scoped event API | Runtime/process events, approval audit records, tenant/user-scoped JSONL helpers, and JSONL/in-memory sinks exist, but scoped SSE/WebSocket/reconnect APIs and projection reducers are not productized. |
 | Network execution boundary | Scoped network policy evaluation plus hardened runtime HTTP egress now cover DNS/private-address checks, redirect re-validation, pinned resolution, response-size bounds, WASM host-HTTP `ApplyNetworkPolicy` enforcement, host-runtime request/response leak scanning, and optional already-resolved credential injection; product proxying, secret lease consumption, trace recording, non-WASM enforcement, and network egress resource reservation are not complete. |
-| FirstParty/System runtime execution | `RuntimeKind::FirstParty` and `RuntimeKind::System` are recognized host API/runtime markers, but no trusted host service adapters are registered yet. |
+| FirstParty/System runtime execution | `RuntimeKind::FirstParty` and `RuntimeKind::System` are recognized host API/runtime markers, but no host-policy-selected service adapters are registered yet. |
 | Full MCP server lifecycle | MCP is a current adapter lane, not yet a complete product lifecycle for server install/start/auth/restart/monitoring. |
 | Auth-blocked resume product path | `BlockedAuth` is reserved in run-state; full OAuth/token prompt, callback, and retry-after-auth workflow remains to be implemented. |
 | Concrete obligation handlers | Built-ins now cover metadata-only `AuditBefore` and WASM-enforced `ApplyNetworkPolicy` backed by hardened network egress; already-resolved HTTP credentials can be injected by explicit host-runtime configuration, but `InjectSecretOnce`, `AuditAfter`, `RedactOutput`, `EnforceOutputLimit`, resource reservation, scoped mounts, and non-WASM network enforcement remain fail-closed until required runtime/input/output plumbing exists. |
@@ -291,7 +293,7 @@ Correct:
   Slack channel adapter
   Web gateway adapter
   CLI driver
-  first-party agent loop service/extension
+  shipped reference loop / configured userland loop
 
 Avoid:
   Telegram host
@@ -302,7 +304,7 @@ Avoid:
   kernel-owned product workflow
 ```
 
-The host is the authority envelope. Adapters translate protocol-specific ingress/egress into host requests and events. Runtime lanes execute already-authorized capability work. Product behavior should live as first-party or third-party userland over those contracts.
+The host/kernel is the authority envelope. Adapters translate protocol-specific ingress/egress into host requests and events. Runtime lanes execute already-authorized capability work. Product behavior should live as shipped or third-party userland over those contracts.
 
 ---
 
@@ -311,7 +313,7 @@ The host is the authority envelope. Adapters translate protocol-specific ingress
 The current architecture decision is:
 
 ```text
-agent loop = first-party hosted service/extension
+agent loop = userland loop running on the kernel surface
 agent loop != kernel
 agent loop != RuntimeDispatcher
 agent loop != transport adapter
@@ -328,7 +330,7 @@ Where:
 - `Reply` is user-visible output for the active thread.
 - `CapabilityCalls` are explicit capability requests against the visible capability surface.
 
-CodeAct, scripting, subagents, jobs, and other worker modes should be expressed as capabilities such as `spawn_subagent(...)`, `create_job(...)`, or `script.run(...)`, then pass through `CapabilityHost` and the authorized runtime dispatch path.
+CodeAct, scripting, subagents, jobs, and other worker modes should be expressed as capabilities such as `spawn_subagent(...)`, `create_job(...)`, or `script.run(...)`, then pass through `CapabilityHost` and the authorized runtime dispatch path. A shipped loop may have a higher trust ceiling by host policy, but trust class is not a grant and never allows bypassing the kernel surface.
 
 ---
 
@@ -338,6 +340,7 @@ Use these docs as the detailed contract sources behind this map:
 
 - `docs/reborn/2026-04-25-storage-catalog-and-placement.md`
 - `docs/reborn/contracts/host-api.md`
+- `docs/reborn/contracts/kernel-boundary.md`
 - `docs/reborn/contracts/extensions.md`
 - `docs/reborn/contracts/capability-access.md`
 - `docs/reborn/contracts/capabilities.md`

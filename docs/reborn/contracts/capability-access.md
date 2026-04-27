@@ -68,7 +68,7 @@ The V1 `GrantAuthorizer` can match grants issued to:
 - thread
 - extension
 
-`Principal::System` is not matched as a grantee in this slice. System authority should remain explicit and narrow, not a wildcard grants bypass.
+`Principal::System` is not matched as a grantee in this slice. System authority should remain explicit and narrow, not a wildcard grants bypass. Shipped loops and first-party packages do not become `System` merely because the project authored them; they still need host-policy-assigned trust ceilings plus explicit grants for privileged capability use.
 
 ---
 

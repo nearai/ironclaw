@@ -3,7 +3,7 @@
 **Date:** 2026-04-25
 **Status:** Draft contract
 **Depends on:** `docs/reborn/2026-04-24-os-like-architecture-design.md`, `docs/reborn/contracts/runtime-workflows.md`, `docs/reborn/contracts/capability-access.md`, `docs/reborn/contracts/run-state.md`
-**Default loop mechanics:** `docs/reborn/contracts/lightweight-agent-loop.md`
+**Reference loop mechanics:** `docs/reborn/contracts/lightweight-agent-loop.md`
 
 ---
 
@@ -13,7 +13,8 @@ Define the parent loop protocol boundary for Reborn and make the layering explic
 
 - the host-facing parent-loop envelope stays small and stable
 - loop implementations may keep stronger internal typing
-- effectful work stays behind capability authorization and dispatch
+- effectful work stays behind kernel-mediated capability authorization and dispatch
+- the protocol describes a userland loop surface, not kernel authority
 
 This prevents two common failure modes:
 
