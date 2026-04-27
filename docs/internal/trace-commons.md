@@ -472,8 +472,13 @@ production-shaped issuer service for hosted tenants. It exposes `POST
 with EdDSA/Ed25519 only; rejects RSA key material; signs short-lived contributor
 claims with `kid`, `iss`, `aud`, `iat`, `exp`, and `jti`; and publishes the same
 `kid` plus `public_key_pem` keyset shape consumed by the ingest service. The
-issuer currently enforces workload tenant, scope, and allowed-use narrowing but
-does not yet manage tenant access grants itself.
+issuer enforces workload tenant, scope, and allowed-use narrowing. Deployments
+that wire a Trace Commons DB into the issuer can also require an active
+contributor tenant-access grant before a claim is minted; the issuer uses the
+same signed-principal hash shape as ingest for grant lookup, binds optional
+issuer/audience/subject grant fields to the outgoing claim issuer, audience, and
+workload actor, and intersects grant consent/use allow-lists without replacing
+the raw actor stored in the signed upload claim.
 Configure it with `TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_*` environment variables
 for bind address, signing key PEM or file, signing public key PEM or file,
 signing `kid`, issuer, audience, max TTL, workload public key PEM or file, and

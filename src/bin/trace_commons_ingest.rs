@@ -20460,6 +20460,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reviewer_read_surfaces_reject_mismatched_file_record_tenant() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let envelope = sample_envelope().await;
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("tenant-a submission succeeds");
+        corrupt_submission_record_tenant(temp.path(), "tenant-a", "tenant-b", submission_id);
+
+        let list_error = list_traces_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(TraceListQuery {
+                status: None,
+                limit: None,
+                purpose: None,
+                coverage_tag: None,
+                tool: None,
+                privacy_risk: None,
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect_err("mismatched stored tenant fails trace listing closed");
+        assert_eq!(list_error.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let queue_error = review_quarantine_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Query(ReviewQueueQuery::default()),
+        )
+        .await
+        .expect_err("mismatched stored tenant fails review queue closed");
+        assert_eq!(queue_error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!audit_log_path(temp.path(), "tenant-b").exists());
+    }
+
+    #[tokio::test]
     async fn submit_quota_limits_tenant_new_submissions_but_allows_idempotent_retry() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state_with_submission_quota(

@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,16 +15,21 @@ use jsonwebtoken::errors::ErrorKind as JwtErrorKind;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::db::Database;
 use crate::trace_contribution::{ConsentScope, TraceAllowedUse};
+use crate::trace_corpus_storage::{
+    TraceTenantAccessGrantRecord, TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus,
+};
 
 pub const TRACE_UPLOAD_CLAIM_REQUEST_SCHEMA_VERSION: &str =
     "ironclaw.trace_upload_claim_request.v1";
 const DEFAULT_BIND: &str = "127.0.0.1:3917";
 const DEFAULT_MAX_TTL_SECONDS: i64 = 300;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TraceUploadClaimIssuerConfig {
     pub bind: SocketAddr,
     pub signing_private_key_pem: String,
@@ -35,6 +41,34 @@ pub struct TraceUploadClaimIssuerConfig {
     pub workload_public_key_pem: String,
     pub workload_issuer: Option<String>,
     pub workload_audience: Option<String>,
+    pub tenant_access_grant_db: Option<Arc<dyn Database>>,
+    pub require_tenant_access_grants: bool,
+}
+
+impl fmt::Debug for TraceUploadClaimIssuerConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TraceUploadClaimIssuerConfig")
+            .field("bind", &self.bind)
+            .field("signing_private_key_pem", &"<redacted>")
+            .field("signing_public_key_pem", &"<redacted>")
+            .field("signing_kid", &self.signing_kid)
+            .field("issuer", &self.issuer)
+            .field("audience", &self.audience)
+            .field("max_ttl_seconds", &self.max_ttl_seconds)
+            .field("workload_public_key_pem", &"<redacted>")
+            .field("workload_issuer", &self.workload_issuer)
+            .field("workload_audience", &self.workload_audience)
+            .field(
+                "tenant_access_grant_db",
+                &self.tenant_access_grant_db.as_ref().map(|_| "<configured>"),
+            )
+            .field(
+                "require_tenant_access_grants",
+                &self.require_tenant_access_grants,
+            )
+            .finish()
+    }
 }
 
 impl TraceUploadClaimIssuerConfig {
@@ -75,6 +109,8 @@ impl TraceUploadClaimIssuerConfig {
             workload_public_key_pem,
             workload_issuer: optional_env("TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_WORKLOAD_ISSUER")?,
             workload_audience: optional_env("TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_WORKLOAD_AUDIENCE")?,
+            tenant_access_grant_db: None,
+            require_tenant_access_grants: false,
         })
     }
 
@@ -114,6 +150,8 @@ impl TraceUploadClaimIssuerConfig {
             workload_issuer: trim_optional(self.workload_issuer.clone()),
             workload_audience: trim_optional(self.workload_audience.clone()),
             signing_public_key_pem,
+            tenant_access_grant_db: self.tenant_access_grant_db.clone(),
+            require_tenant_access_grants: self.require_tenant_access_grants,
         }))
     }
 }
@@ -128,6 +166,8 @@ struct TraceUploadClaimIssuerState {
     workload_issuer: Option<String>,
     workload_audience: Option<String>,
     signing_public_key_pem: String,
+    tenant_access_grant_db: Option<Arc<dyn Database>>,
+    require_tenant_access_grants: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -279,7 +319,7 @@ async fn issue_claim_handler(
     Json(request): Json<TraceUploadClaimRequest>,
 ) -> Result<Json<TraceUploadClaimResponse>, IssuerError> {
     let workload = state.authenticate_workload(&headers)?;
-    let response = state.issue_claim(&workload, request)?;
+    let response = state.issue_claim(&workload, request).await?;
     Ok(Json(response))
 }
 
@@ -349,7 +389,7 @@ impl TraceUploadClaimIssuerState {
         Ok(())
     }
 
-    fn issue_claim(
+    async fn issue_claim(
         &self,
         workload: &WorkloadClaims,
         request: TraceUploadClaimRequest,
@@ -401,21 +441,33 @@ impl TraceUploadClaimIssuerState {
             "requested allowed uses exceed workload allowance",
         )?;
 
-        let principal_ref = normalized_required(
+        let actor = normalized_required(
             workload
                 .principal_ref
                 .as_deref()
                 .or(workload.sub.as_deref()),
             "workload subject is required",
         )?;
+        let grant_principal_ref = principal_storage_ref(&format!("signed:{tenant_id}:{actor}"));
+        let mut consent_scopes = request.consent_scopes;
+        let mut allowed_uses = request.allowed_uses;
+        self.enforce_tenant_access_grants(
+            &tenant_id,
+            &grant_principal_ref,
+            &actor,
+            &mut consent_scopes,
+            &mut allowed_uses,
+            now,
+        )
+        .await?;
         let expires_at = now
             .checked_add_signed(Duration::seconds(self.max_ttl_seconds))
             .ok_or_else(IssuerError::internal)?;
         let claims = UploadClaimClaims {
             iss: self.issuer.clone(),
             aud: self.audience.clone(),
-            sub: principal_ref.clone(),
-            principal_ref,
+            sub: actor.clone(),
+            principal_ref: actor,
             tenant_id,
             role: "contributor",
             iat: now.timestamp(),
@@ -423,8 +475,8 @@ impl TraceUploadClaimIssuerState {
             jti: Uuid::new_v4().to_string(),
             trace_id: request.trace_id,
             submission_id: request.submission_id,
-            allowed_consent_scopes: request.consent_scopes,
-            allowed_uses: request.allowed_uses,
+            allowed_consent_scopes: consent_scopes,
+            allowed_uses,
         };
         let mut header = Header::new(Algorithm::EdDSA);
         header.kid = Some(self.signing_kid.clone());
@@ -436,6 +488,36 @@ impl TraceUploadClaimIssuerState {
             expires_at,
             expires_in: self.max_ttl_seconds,
         })
+    }
+
+    async fn enforce_tenant_access_grants(
+        &self,
+        tenant_id: &str,
+        principal_ref: &str,
+        actor: &str,
+        consent_scopes: &mut Vec<ConsentScope>,
+        allowed_uses: &mut Vec<TraceAllowedUse>,
+        now: DateTime<Utc>,
+    ) -> Result<(), IssuerError> {
+        if !self.require_tenant_access_grants {
+            return Ok(());
+        }
+        let db = self
+            .tenant_access_grant_db
+            .as_ref()
+            .ok_or_else(IssuerError::internal)?;
+        let grants = db
+            .list_active_trace_tenant_access_grants_for_principal(tenant_id, principal_ref, now)
+            .await
+            .map_err(|_| IssuerError::internal())?;
+        authorize_upload_claim_from_tenant_grants(
+            &grants,
+            &self.issuer,
+            &self.audience,
+            actor,
+            consent_scopes,
+            allowed_uses,
+        )
     }
 }
 
@@ -478,12 +560,133 @@ fn enforce_subset<T: Ord>(
     }
 }
 
+fn authorize_upload_claim_from_tenant_grants(
+    grants: &[TraceTenantAccessGrantRecord],
+    issuer: &str,
+    audience: &str,
+    actor: &str,
+    consent_scopes: &mut Vec<ConsentScope>,
+    allowed_uses: &mut Vec<TraceAllowedUse>,
+) -> Result<(), IssuerError> {
+    let matching_grants = grants
+        .iter()
+        .filter(|grant| grant.status == TraceTenantAccessGrantStatus::Active)
+        .filter(|grant| grant.role == TraceTenantAccessGrantRole::Contributor)
+        .filter(|grant| tenant_access_grant_matches_claim_binding(grant, issuer, audience, actor))
+        .collect::<Vec<_>>();
+    if matching_grants.is_empty() {
+        return Err(IssuerError::forbidden(
+            "active tenant access grant required",
+        ));
+    }
+
+    for grant in matching_grants {
+        let grant_scopes = parse_storage_grant_values::<ConsentScope>(
+            &grant.allowed_consent_scopes,
+            "tenant_access_grant.allowed_consent_scopes",
+        )?;
+        restrict_requested_allowlist(
+            consent_scopes,
+            grant_scopes,
+            "tenant access grant consent scope intersection is empty",
+        )?;
+
+        let grant_uses = parse_storage_grant_values::<TraceAllowedUse>(
+            &grant.allowed_uses,
+            "tenant_access_grant.allowed_uses",
+        )?;
+        restrict_requested_allowlist(
+            allowed_uses,
+            grant_uses,
+            "tenant access grant allowed-use intersection is empty",
+        )?;
+    }
+    Ok(())
+}
+
+fn tenant_access_grant_matches_claim_binding(
+    grant: &TraceTenantAccessGrantRecord,
+    issuer: &str,
+    audience: &str,
+    actor: &str,
+) -> bool {
+    if let Some(expected) = grant.issuer.as_deref().and_then(non_empty_trimmed)
+        && expected != issuer
+    {
+        return false;
+    }
+    if let Some(expected) = grant.audience.as_deref().and_then(non_empty_trimmed)
+        && expected != audience
+    {
+        return false;
+    }
+    if let Some(expected) = grant.subject.as_deref().and_then(non_empty_trimmed)
+        && expected != actor
+    {
+        return false;
+    }
+    true
+}
+
+fn parse_storage_grant_values<T>(values: &[String], label: &str) -> Result<BTreeSet<T>, IssuerError>
+where
+    T: for<'de> Deserialize<'de> + Ord,
+{
+    values
+        .iter()
+        .map(|value| {
+            serde_json::from_value::<T>(serde_json::Value::String(value.clone())).map_err(|_| {
+                tracing::warn!(%label, value = %value, "invalid Trace Commons tenant access grant value");
+                IssuerError::internal()
+            })
+        })
+        .collect()
+}
+
+fn restrict_requested_allowlist<T>(
+    requested: &mut Vec<T>,
+    grant_values: BTreeSet<T>,
+    empty_message: &'static str,
+) -> Result<(), IssuerError>
+where
+    T: Ord + Clone,
+{
+    if grant_values.is_empty() {
+        return Ok(());
+    }
+    if requested.is_empty() {
+        *requested = grant_values.into_iter().collect();
+        return Ok(());
+    }
+    let requested_set = requested.iter().collect::<BTreeSet<_>>();
+    let intersected = grant_values
+        .iter()
+        .filter(|item| requested_set.contains(item))
+        .cloned()
+        .collect::<Vec<_>>();
+    if intersected.is_empty() {
+        return Err(IssuerError::forbidden(empty_message));
+    }
+    *requested = intersected;
+    Ok(())
+}
+
 fn normalized_required(value: Option<&str>, message: &'static str) -> Result<String, IssuerError> {
     value
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .ok_or_else(|| IssuerError::bad_request(message))
+}
+
+fn non_empty_trimmed(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
+}
+
+fn principal_storage_ref(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    format!("principal_sha256:{}", hex::encode(digest))
 }
 
 fn validate_eddsa_private_key_pem(pem: &str) -> anyhow::Result<String> {
@@ -551,11 +754,15 @@ mod tests {
     use chrono::{Duration, Utc};
     use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
     use serde_json::json;
+    use std::collections::BTreeMap;
     use tower::ServiceExt;
     use uuid::Uuid;
 
     use super::*;
     use crate::trace_contribution::{ConsentScope, TraceAllowedUse};
+    use crate::trace_corpus_storage::{
+        TraceTenantAccessGrantRecord, TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus,
+    };
 
     const TEST_EDDSA_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIAGfN68ko7YyCGJMb3lHVwTn5aiUtbIsAclIx/lX0p2R\n-----END PRIVATE KEY-----\n";
     const TEST_EDDSA_PUBLIC_KEY_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAMnniSMeHZrdoe3gkL7ZeHmG7vAg65c5TqaBd71B2qDw=\n-----END PUBLIC KEY-----\n";
@@ -574,6 +781,8 @@ mod tests {
             workload_public_key_pem: WORKLOAD_EDDSA_PUBLIC_KEY_PEM.to_string(),
             workload_issuer: Some("workload-issuer".to_string()),
             workload_audience: Some("trace-claim-issuer".to_string()),
+            tenant_access_grant_db: None,
+            require_tenant_access_grants: false,
         }
     }
 
@@ -736,8 +945,8 @@ mod tests {
         assert!(!text.contains("BEGIN PRIVATE KEY"));
     }
 
-    #[test]
-    fn rejects_requests_exceeding_workload_allowances() {
+    #[tokio::test]
+    async fn rejects_requests_exceeding_workload_allowances() {
         let state = test_config().build_state().expect("state builds");
         let workload = WorkloadClaims {
             sub: Some("principal:agent-1".to_string()),
@@ -760,6 +969,127 @@ mod tests {
             allowed_uses: vec![TraceAllowedUse::ModelTraining],
             requested_at: Utc::now(),
         };
-        assert!(state.issue_claim(&workload, request).is_err());
+        assert!(state.issue_claim(&workload, request).await.is_err());
+    }
+
+    #[test]
+    fn tenant_grant_principal_ref_matches_ingest_signed_actor_shape() {
+        assert_eq!(
+            principal_storage_ref("signed:tenant-a:actor-123"),
+            "principal_sha256:5cd45d57c4270245a9eae65dc4140e2bbaa5b18e84371fdf9a3abb2feb8c26cc"
+        );
+    }
+
+    #[test]
+    fn tenant_grant_authorization_requires_contributor_binding_and_intersects_allowlists() {
+        let now = Utc::now();
+        let mut consent_scopes = vec![
+            ConsentScope::DebuggingEvaluation,
+            ConsentScope::BenchmarkOnly,
+        ];
+        let mut allowed_uses = vec![TraceAllowedUse::Debugging, TraceAllowedUse::Evaluation];
+        let grant = test_tenant_access_grant(
+            now,
+            TraceTenantAccessGrantRole::Contributor,
+            vec!["debugging_evaluation"],
+            vec!["debugging"],
+            Some("trace-commons-upload-issuer"),
+            Some("trace-commons-upload"),
+            Some("actor-123"),
+        );
+
+        authorize_upload_claim_from_tenant_grants(
+            &[grant],
+            "trace-commons-upload-issuer",
+            "trace-commons-upload",
+            "actor-123",
+            &mut consent_scopes,
+            &mut allowed_uses,
+        )
+        .expect("grant authorizes claim");
+
+        assert_eq!(consent_scopes, vec![ConsentScope::DebuggingEvaluation]);
+        assert_eq!(allowed_uses, vec![TraceAllowedUse::Debugging]);
+
+        let mut consent_scopes = Vec::new();
+        let mut allowed_uses = Vec::new();
+        let default_grant = test_tenant_access_grant(
+            now,
+            TraceTenantAccessGrantRole::Contributor,
+            vec!["benchmark_only"],
+            vec!["evaluation"],
+            Some("trace-commons-upload-issuer"),
+            Some("trace-commons-upload"),
+            Some("actor-123"),
+        );
+        authorize_upload_claim_from_tenant_grants(
+            &[default_grant],
+            "trace-commons-upload-issuer",
+            "trace-commons-upload",
+            "actor-123",
+            &mut consent_scopes,
+            &mut allowed_uses,
+        )
+        .expect("empty request allowlists inherit the grant constraints");
+        assert_eq!(consent_scopes, vec![ConsentScope::BenchmarkOnly]);
+        assert_eq!(allowed_uses, vec![TraceAllowedUse::Evaluation]);
+
+        let mut consent_scopes = vec![ConsentScope::DebuggingEvaluation];
+        let mut allowed_uses = vec![TraceAllowedUse::Debugging];
+        let reviewer_grant = test_tenant_access_grant(
+            now,
+            TraceTenantAccessGrantRole::Reviewer,
+            vec![],
+            vec![],
+            None,
+            None,
+            None,
+        );
+        assert!(
+            authorize_upload_claim_from_tenant_grants(
+                &[reviewer_grant],
+                "trace-commons-upload-issuer",
+                "trace-commons-upload",
+                "actor-123",
+                &mut consent_scopes,
+                &mut allowed_uses,
+            )
+            .is_err()
+        );
+    }
+
+    fn test_tenant_access_grant(
+        now: DateTime<Utc>,
+        role: TraceTenantAccessGrantRole,
+        allowed_consent_scopes: Vec<&str>,
+        allowed_uses: Vec<&str>,
+        issuer: Option<&str>,
+        audience: Option<&str>,
+        subject: Option<&str>,
+    ) -> TraceTenantAccessGrantRecord {
+        TraceTenantAccessGrantRecord {
+            tenant_id: "tenant-a".to_string(),
+            grant_id: Uuid::new_v4(),
+            principal_ref: principal_storage_ref("signed:tenant-a:actor-123"),
+            role,
+            status: TraceTenantAccessGrantStatus::Active,
+            allowed_consent_scopes: allowed_consent_scopes
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            allowed_uses: allowed_uses.into_iter().map(str::to_string).collect(),
+            issuer: issuer.map(str::to_string),
+            audience: audience.map(str::to_string),
+            subject: subject.map(str::to_string),
+            issued_at: now,
+            expires_at: None,
+            revoked_at: None,
+            created_by_principal_ref: None,
+            revoked_by_principal_ref: None,
+            reason: None,
+            metadata: BTreeMap::new(),
+            created_at: now,
+            updated_at: now,
+        }
     }
 }
