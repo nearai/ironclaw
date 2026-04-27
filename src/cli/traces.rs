@@ -17,13 +17,13 @@ use crate::trace_contribution::{
     ConsentScope, CreditSummary, DeterministicTraceRedactor, RecordedTraceContributionOptions,
     StandingTraceContributionPolicy, TraceChannel, TraceContributionAcceptance,
     TraceContributionEnvelope, TraceCreditEvent, TraceCreditEventKind, TraceRedactor,
-    TraceSubmissionStatusUpdate, acknowledge_trace_credit_notice_for_scope,
+    TraceSubmissionReceipt, TraceSubmissionStatusUpdate, acknowledge_trace_credit_notice_for_scope,
     estimate_initial_credit, fetch_trace_submission_statuses,
     flush_trace_contribution_queue_for_scope, mark_trace_credit_notice_due_for_scope,
     preflight_trace_contribution_policy, privacy_filter_adapter_from_env,
     read_local_trace_records_for_scope, read_trace_policy_for_scope,
-    snooze_trace_credit_notice_for_scope, trace_credit_summary, trace_queue_diagnostics_for_scope,
-    trace_submission_status_endpoint,
+    snooze_trace_credit_notice_for_scope, submit_trace_envelope_to_endpoint_with_policy,
+    trace_credit_summary, trace_queue_diagnostics_for_scope, trace_submission_status_endpoint,
 };
 
 #[derive(Subcommand, Debug, Clone)]
@@ -2502,7 +2502,11 @@ async fn submit_envelope(
 ) -> anyhow::Result<()> {
     let mut envelope = load_envelope(envelope_path)?;
     apply_credit_estimate(&mut envelope);
-    let receipt = submit_envelope_to_endpoint(&envelope, endpoint, bearer_token_env).await?;
+    let mut policy = read_policy()?;
+    policy.ingestion_endpoint = Some(endpoint.to_string());
+    policy.bearer_token_env = bearer_token_env.to_string();
+    let receipt =
+        submit_trace_envelope_to_endpoint_with_policy(&envelope, endpoint, &policy).await?;
 
     record_submitted_envelope(&envelope, endpoint, receipt)?;
 
@@ -2511,44 +2515,6 @@ async fn submit_envelope(
         envelope.submission_id
     );
     Ok(())
-}
-
-async fn submit_envelope_to_endpoint(
-    envelope: &TraceContributionEnvelope,
-    endpoint: &str,
-    bearer_token_env: &str,
-) -> anyhow::Result<TraceSubmissionReceipt> {
-    let token = std::env::var(bearer_token_env).map_err(|_| {
-        anyhow::anyhow!(
-            "{} is not set; refusing to submit without explicit API credentials",
-            bearer_token_env
-        )
-    })?;
-
-    let client = reqwest::Client::new();
-    let response = client
-        .post(endpoint)
-        .bearer_auth(token)
-        .header("Idempotency-Key", envelope.submission_id.to_string())
-        .json(&envelope)
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("trace submission request failed: {}", e))?;
-
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        anyhow::bail!("trace submission rejected by {}: {}", status, body);
-    }
-
-    Ok(
-        parse_submission_receipt(&body).unwrap_or_else(|| TraceSubmissionReceipt {
-            status: "submitted".to_string(),
-            credit_points_pending: Some(envelope.value.credit_points_pending),
-            credit_points_final: None,
-            explanation: envelope.value.explanation.clone(),
-        }),
-    )
 }
 
 fn record_submitted_envelope(
@@ -2594,27 +2560,6 @@ fn record_submitted_envelope(
         }],
         last_credit_notice_at: None,
     })
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct TraceSubmissionReceipt {
-    #[serde(default = "default_submitted_status")]
-    status: String,
-    credit_points_pending: Option<f32>,
-    credit_points_final: Option<f32>,
-    #[serde(default)]
-    explanation: Vec<String>,
-}
-
-fn default_submitted_status() -> String {
-    "submitted".to_string()
-}
-
-fn parse_submission_receipt(body: &str) -> Option<TraceSubmissionReceipt> {
-    if body.trim().is_empty() {
-        return None;
-    }
-    serde_json::from_str(body).ok()
 }
 
 async fn revoke_submission(

@@ -4642,6 +4642,20 @@ pub async fn submit_trace_envelope_to_endpoint(
     .await
 }
 
+pub async fn submit_trace_envelope_to_endpoint_with_policy(
+    envelope: &TraceContributionEnvelope,
+    endpoint: &str,
+    policy: &StandingTraceContributionPolicy,
+) -> anyhow::Result<TraceSubmissionReceipt> {
+    submit_trace_envelope_to_endpoint_with_credential_provider(
+        envelope,
+        endpoint,
+        policy,
+        &DefaultTraceUploadCredentialProvider,
+    )
+    .await
+}
+
 async fn submit_trace_envelope_to_endpoint_with_credential_provider(
     envelope: &TraceContributionEnvelope,
     endpoint: &str,
@@ -8712,6 +8726,75 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[tokio::test]
+    async fn policy_aware_direct_submit_uses_default_credential_provider() {
+        let _token_env = EnvVarRestore::set(
+            "IRONCLAW_TRACE_COMMONS_DIRECT_SUBMIT_TEST_TOKEN",
+            "direct-submit-token",
+        );
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen_for_submit = seen.clone();
+        let app = axum::Router::new().route(
+            "/v1/traces",
+            axum::routing::post(
+                move |headers: axum::http::HeaderMap,
+                      axum::Json(_body): axum::Json<TraceContributionEnvelope>| {
+                    let seen = seen_for_submit.clone();
+                    async move {
+                        let authorization = headers
+                            .get(axum::http::header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or("<missing>")
+                            .to_string();
+                        seen.lock().expect("seen lock").push(authorization);
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({
+                                "status": "accepted",
+                                "credit_points_pending": 1.0,
+                                "explanation": ["accepted"]
+                            })),
+                        )
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock trace commons listener binds");
+        let endpoint = format!(
+            "http://{}/v1/traces",
+            listener.local_addr().expect("local addr")
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let raw = RawTraceContribution::from_recorded_trace(
+            &sample_trace(),
+            RecordedTraceContributionOptions::default(),
+        );
+        let mut envelope = DeterministicTraceRedactor::default()
+            .redact_trace(raw)
+            .await
+            .expect("redaction should succeed");
+        apply_credit_estimate_to_envelope(&mut envelope);
+        let policy = StandingTraceContributionPolicy {
+            bearer_token_env: "IRONCLAW_TRACE_COMMONS_DIRECT_SUBMIT_TEST_TOKEN".to_string(),
+            ..Default::default()
+        };
+
+        let receipt = submit_trace_envelope_to_endpoint_with_policy(&envelope, &endpoint, &policy)
+            .await
+            .expect("direct submit uses policy credentials");
+
+        assert_eq!(receipt.status, "accepted");
+        assert_eq!(
+            *seen.lock().expect("seen lock"),
+            vec!["Bearer direct-submit-token".to_string()]
+        );
     }
 
     #[test]

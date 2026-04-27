@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration as StdDuration;
 
 use anyhow::Context;
@@ -139,6 +139,10 @@ const TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_BEARER_TOKEN: &str =
     "TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_BEARER_TOKEN";
 const TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_TIMEOUT_MS: &str =
     "TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_TIMEOUT_MS";
+const TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_REFRESH_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_REFRESH_INTERVAL_SECONDS";
+const TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_MAX_STALE_SECONDS: &str =
+    "TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_MAX_STALE_SECONDS";
 const TRACE_COMMONS_SIGNED_TOKEN_ISSUER: &str = "TRACE_COMMONS_SIGNED_TOKEN_ISSUER";
 const TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE: &str = "TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE";
 const TRACE_COMMONS_SIGNED_TOKEN_REVOKED_JTIS: &str = "TRACE_COMMONS_SIGNED_TOKEN_REVOKED_JTIS";
@@ -153,6 +157,7 @@ const TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR: &str =
 const TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR: &str =
     "TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR";
 const DEFAULT_EDDSA_KEYSET_URL_TIMEOUT_MS: u64 = 5_000;
+const DEFAULT_EDDSA_KEYSET_REFRESH_INTERVAL_SECONDS: u64 = 300;
 const MAX_EDDSA_KEYSET_URL_BYTES: usize = 256 * 1024;
 const TRACE_BACKFILL_FAILURE_DETAIL_LIMIT: usize = 20;
 const TRACE_REVIEW_DUE_AFTER_HOURS: i64 = 24;
@@ -163,6 +168,7 @@ const TRACE_REVIEW_HIGH_RISK_URGENT_AFTER_HOURS: i64 = 4;
 async fn main() -> anyhow::Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let state = Arc::new(AppState::from_env().await?);
+    spawn_managed_eddsa_keyset_refresh_task(&state);
     let bind = std::env::var("TRACE_COMMONS_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
     let addr = bind
         .parse::<SocketAddr>()
@@ -180,7 +186,8 @@ async fn main() -> anyhow::Result<()> {
 struct AppState {
     root: PathBuf,
     tokens: Arc<BTreeMap<String, TenantAuth>>,
-    signed_token_verifier: Option<TraceCommonsSignedTokenVerifier>,
+    signed_token_verifier: Option<SharedTraceCommonsSignedTokenVerifier>,
+    managed_eddsa_keyset_refresh: Option<TraceCommonsManagedEddsaKeysetRefreshConfig>,
     require_eddsa_signed_tokens: bool,
     require_managed_eddsa_signed_tokens: bool,
     tenant_policies: Arc<BTreeMap<String, TenantSubmissionPolicy>>,
@@ -532,6 +539,29 @@ impl TraceAuthMethod {
     }
 }
 
+type SharedTraceCommonsSignedTokenVerifier = Arc<RwLock<TraceCommonsSignedTokenVerifier>>;
+
+#[derive(Clone)]
+struct TraceCommonsManagedEddsaKeysetRefreshConfig {
+    url: String,
+    allowed_hosts: BTreeSet<String>,
+    bearer_token: Option<SecretString>,
+    timeout: StdDuration,
+    refresh_interval: StdDuration,
+    max_stale: Option<StdDuration>,
+}
+
+struct TraceCommonsSignedTokenVerifierEnvConfig {
+    verifier: Option<TraceCommonsSignedTokenVerifier>,
+    managed_eddsa_keyset_refresh: Option<TraceCommonsManagedEddsaKeysetRefreshConfig>,
+}
+
+struct TraceCommonsSignedEddsaKeysetEnvConfig {
+    keys: BTreeMap<String, TraceCommonsSignedEddsaPublicKey>,
+    refresh: Option<TraceCommonsManagedEddsaKeysetRefreshConfig>,
+    fetched_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Clone)]
 struct TraceCommonsSignedTokenVerifier {
     default_secret: Option<SecretString>,
@@ -539,6 +569,8 @@ struct TraceCommonsSignedTokenVerifier {
     default_eddsa_public_key: Option<TraceCommonsSignedEddsaPublicKey>,
     keyed_eddsa_public_keys: BTreeMap<String, TraceCommonsSignedEddsaPublicKey>,
     managed_eddsa_key_ids: BTreeSet<String>,
+    managed_eddsa_keyset_last_refreshed_at: Option<DateTime<Utc>>,
+    managed_eddsa_keyset_last_refresh_failed_at: Option<DateTime<Utc>>,
     issuer: Option<String>,
     audience: Option<String>,
     revoked_jtis: BTreeSet<String>,
@@ -746,23 +778,27 @@ impl AppState {
             .map(PathBuf::from)
             .unwrap_or_else(|_| default_data_dir());
         let tokens = parse_tenant_tokens_from_env()?;
-        let signed_token_verifier = trace_commons_signed_token_verifier_from_env().await?;
+        let signed_token_config = trace_commons_signed_token_verifier_from_env().await?;
         let require_eddsa_signed_tokens = env_truthy(TRACE_COMMONS_REQUIRE_EDDSA_SIGNED_TOKENS);
         let require_managed_eddsa_signed_tokens =
             env_truthy(TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS);
-        if tokens.is_empty() && signed_token_verifier.is_none() {
+        if tokens.is_empty() && signed_token_config.verifier.is_none() {
             anyhow::bail!(
                 "TRACE_COMMONS_TENANT_TOKENS, TRACE_COMMONS_INGEST_TOKEN, or signed token verification must be configured"
             );
         }
         validate_required_eddsa_signed_tokens_config(
             require_eddsa_signed_tokens,
-            signed_token_verifier.as_ref(),
+            signed_token_config.verifier.as_ref(),
         )?;
         validate_required_managed_eddsa_signed_tokens_config(
             require_managed_eddsa_signed_tokens,
-            signed_token_verifier.as_ref(),
+            signed_token_config.verifier.as_ref(),
         )?;
+        let signed_token_verifier = signed_token_config
+            .verifier
+            .map(shared_signed_token_verifier);
+        let managed_eddsa_keyset_refresh = signed_token_config.managed_eddsa_keyset_refresh;
         let tenant_policies = parse_tenant_submission_policies_from_env()?;
         let require_tenant_submission_policy =
             env_truthy("TRACE_COMMONS_REQUIRE_TENANT_SUBMISSION_POLICY");
@@ -976,6 +1012,7 @@ impl AppState {
             root,
             tokens: Arc::new(tokens),
             signed_token_verifier,
+            managed_eddsa_keyset_refresh,
             require_eddsa_signed_tokens,
             require_managed_eddsa_signed_tokens,
             tenant_policies: Arc::new(tenant_policies),
@@ -1447,8 +1484,14 @@ fn parse_token_secret_and_expiry(raw: &str) -> anyhow::Result<(String, Option<Da
     Ok((token.to_string(), expires_at))
 }
 
+fn shared_signed_token_verifier(
+    verifier: TraceCommonsSignedTokenVerifier,
+) -> SharedTraceCommonsSignedTokenVerifier {
+    Arc::new(RwLock::new(verifier))
+}
+
 async fn trace_commons_signed_token_verifier_from_env()
--> anyhow::Result<Option<TraceCommonsSignedTokenVerifier>> {
+-> anyhow::Result<TraceCommonsSignedTokenVerifierEnvConfig> {
     let default_secret = match std::env::var(TRACE_COMMONS_SIGNED_TOKEN_SECRET) {
         Ok(secret) => {
             let secret = secret.trim();
@@ -1466,7 +1509,8 @@ async fn trace_commons_signed_token_verifier_from_env()
     let keyed_secrets = parse_signed_token_keyed_secrets_from_env()?;
     let default_eddsa_public_key = parse_signed_token_default_eddsa_public_key_from_env()?;
     let mut keyed_eddsa_public_keys = parse_signed_token_keyed_eddsa_public_key_files_from_env()?;
-    let managed_eddsa_public_keys = parse_signed_token_eddsa_keyset_from_env().await?;
+    let managed_eddsa_keyset = parse_signed_token_eddsa_keyset_from_env().await?;
+    let managed_eddsa_public_keys = managed_eddsa_keyset.keys;
     let managed_eddsa_key_ids = managed_eddsa_public_keys.keys().cloned().collect();
     for (kid, key) in managed_eddsa_public_keys {
         if keyed_eddsa_public_keys.insert(kid.clone(), key).is_some() {
@@ -1485,21 +1529,29 @@ async fn trace_commons_signed_token_verifier_from_env()
         && default_eddsa_public_key.is_none()
         && keyed_eddsa_public_keys.is_empty()
     {
-        return Ok(None);
+        return Ok(TraceCommonsSignedTokenVerifierEnvConfig {
+            verifier: None,
+            managed_eddsa_keyset_refresh: None,
+        });
     }
 
-    Ok(Some(TraceCommonsSignedTokenVerifier {
-        default_secret,
-        keyed_secrets,
-        default_eddsa_public_key,
-        keyed_eddsa_public_keys,
-        managed_eddsa_key_ids,
-        issuer: optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_ISSUER)?,
-        audience: optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE)?,
-        revoked_jtis: parse_signed_token_revoked_jtis_from_env()?,
-        max_ttl_seconds: parse_signed_token_max_ttl_seconds_from_env()?,
-        require_jti: env_truthy(TRACE_COMMONS_SIGNED_TOKEN_REQUIRE_JTI),
-    }))
+    Ok(TraceCommonsSignedTokenVerifierEnvConfig {
+        verifier: Some(TraceCommonsSignedTokenVerifier {
+            default_secret,
+            keyed_secrets,
+            default_eddsa_public_key,
+            keyed_eddsa_public_keys,
+            managed_eddsa_key_ids,
+            managed_eddsa_keyset_last_refreshed_at: managed_eddsa_keyset.fetched_at,
+            managed_eddsa_keyset_last_refresh_failed_at: None,
+            issuer: optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_ISSUER)?,
+            audience: optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE)?,
+            revoked_jtis: parse_signed_token_revoked_jtis_from_env()?,
+            max_ttl_seconds: parse_signed_token_max_ttl_seconds_from_env()?,
+            require_jti: env_truthy(TRACE_COMMONS_SIGNED_TOKEN_REQUIRE_JTI),
+        }),
+        managed_eddsa_keyset_refresh: managed_eddsa_keyset.refresh,
+    })
 }
 
 fn validate_required_eddsa_signed_tokens_config(
@@ -1675,23 +1727,40 @@ fn parse_signed_token_keyed_eddsa_public_key_files_from_env()
 }
 
 async fn parse_signed_token_eddsa_keyset_from_env()
--> anyhow::Result<BTreeMap<String, TraceCommonsSignedEddsaPublicKey>> {
+-> anyhow::Result<TraceCommonsSignedEddsaKeysetEnvConfig> {
     let inline = optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_JSON)?;
     let file = optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_FILE)?;
     let url = optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL)?;
     ensure_single_eddsa_keyset_source(inline.is_some(), file.is_some(), url.is_some())?;
     match (inline, file, url) {
-        (Some(configured), None, None) => parse_signed_token_eddsa_keyset_config(&configured),
+        (Some(configured), None, None) => Ok(TraceCommonsSignedEddsaKeysetEnvConfig {
+            keys: parse_signed_token_eddsa_keyset_config(&configured)?,
+            refresh: None,
+            fetched_at: None,
+        }),
         (None, Some(path), None) => {
             let configured = std::fs::read_to_string(&path)
                 .with_context(|| format!("failed to read EdDSA keyset file {path}"))?;
-            parse_signed_token_eddsa_keyset_config(&configured)
+            Ok(TraceCommonsSignedEddsaKeysetEnvConfig {
+                keys: parse_signed_token_eddsa_keyset_config(&configured)?,
+                refresh: None,
+                fetched_at: None,
+            })
         }
         (None, None, Some(url)) => {
-            let configured = fetch_signed_token_eddsa_keyset_url(&url).await?;
-            parse_signed_token_eddsa_keyset_config(&configured)
+            let refresh = parse_signed_token_eddsa_keyset_refresh_config_from_env(url)?;
+            let configured = fetch_signed_token_eddsa_keyset_url_with_config(&refresh).await?;
+            Ok(TraceCommonsSignedEddsaKeysetEnvConfig {
+                keys: parse_signed_token_eddsa_keyset_config(&configured)?,
+                refresh: Some(refresh),
+                fetched_at: Some(Utc::now()),
+            })
         }
-        (None, None, None) => Ok(BTreeMap::new()),
+        (None, None, None) => Ok(TraceCommonsSignedEddsaKeysetEnvConfig {
+            keys: BTreeMap::new(),
+            refresh: None,
+            fetched_at: None,
+        }),
         _ => unreachable!("ensure_single_eddsa_keyset_source rejects multiple keyset sources"),
     }
 }
@@ -1705,11 +1774,26 @@ fn ensure_single_eddsa_keyset_source(inline: bool, file: bool, url: bool) -> any
     Ok(())
 }
 
-async fn fetch_signed_token_eddsa_keyset_url(url: &str) -> anyhow::Result<String> {
-    let parsed = reqwest::Url::parse(url)
+fn parse_signed_token_eddsa_keyset_refresh_config_from_env(
+    url: String,
+) -> anyhow::Result<TraceCommonsManagedEddsaKeysetRefreshConfig> {
+    Ok(TraceCommonsManagedEddsaKeysetRefreshConfig {
+        url,
+        allowed_hosts: parse_signed_token_eddsa_keyset_url_allowed_hosts_from_env()?,
+        bearer_token: optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_BEARER_TOKEN)?
+            .map(SecretString::from),
+        timeout: parse_signed_token_eddsa_keyset_url_timeout_from_env()?,
+        refresh_interval: parse_signed_token_eddsa_keyset_refresh_interval_from_env()?,
+        max_stale: parse_signed_token_eddsa_keyset_max_stale_from_env()?,
+    })
+}
+
+async fn fetch_signed_token_eddsa_keyset_url_with_config(
+    refresh: &TraceCommonsManagedEddsaKeysetRefreshConfig,
+) -> anyhow::Result<String> {
+    let parsed = reqwest::Url::parse(&refresh.url)
         .with_context(|| format!("invalid {TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL}"))?;
-    let allowed_hosts = parse_signed_token_eddsa_keyset_url_allowed_hosts_from_env()?;
-    validate_signed_token_eddsa_keyset_url(&parsed, &allowed_hosts)?;
+    validate_signed_token_eddsa_keyset_url(&parsed, &refresh.allowed_hosts)?;
     let host = parsed
         .host_str()
         .ok_or_else(|| {
@@ -1720,10 +1804,9 @@ async fn fetch_signed_token_eddsa_keyset_url(url: &str) -> anyhow::Result<String
         anyhow::anyhow!("{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL} requires a known port")
     })?;
     let resolved_addrs = resolve_signed_token_eddsa_keyset_url_host(&host, port).await?;
-    let timeout = parse_signed_token_eddsa_keyset_url_timeout_from_env()?;
     let client = reqwest::Client::builder()
-        .timeout(timeout)
-        .connect_timeout(timeout.min(StdDuration::from_secs(3)))
+        .timeout(refresh.timeout)
+        .connect_timeout(refresh.timeout.min(StdDuration::from_secs(3)))
         .redirect(reqwest::redirect::Policy::none())
         .user_agent("ironclaw-trace-commons-keyset/0.1")
         .resolve_to_addrs(&host, &resolved_addrs)
@@ -1732,10 +1815,8 @@ async fn fetch_signed_token_eddsa_keyset_url(url: &str) -> anyhow::Result<String
     let mut request = client
         .get(parsed.clone())
         .header(reqwest::header::ACCEPT, "application/json");
-    if let Some(bearer_token) =
-        optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_BEARER_TOKEN)?
-    {
-        request = request.bearer_auth(bearer_token);
+    if let Some(bearer_token) = &refresh.bearer_token {
+        request = request.bearer_auth(bearer_token.expose_secret());
     }
     let response = request.send().await.with_context(|| {
         format!(
@@ -1936,6 +2017,40 @@ fn parse_signed_token_eddsa_keyset_url_timeout_from_env() -> anyhow::Result<StdD
         "{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_TIMEOUT_MS} must be between 1 and 30000"
     );
     Ok(StdDuration::from_millis(timeout_ms))
+}
+
+fn parse_signed_token_eddsa_keyset_refresh_interval_from_env() -> anyhow::Result<StdDuration> {
+    let seconds = match optional_trimmed_env(
+        TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_REFRESH_INTERVAL_SECONDS,
+    )? {
+        Some(configured) => configured.parse::<u64>().with_context(|| {
+            format!(
+                "{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_REFRESH_INTERVAL_SECONDS} must be seconds"
+            )
+        })?,
+        None => DEFAULT_EDDSA_KEYSET_REFRESH_INTERVAL_SECONDS,
+    };
+    anyhow::ensure!(
+        (30..=86_400).contains(&seconds),
+        "{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_REFRESH_INTERVAL_SECONDS} must be between 30 and 86400"
+    );
+    Ok(StdDuration::from_secs(seconds))
+}
+
+fn parse_signed_token_eddsa_keyset_max_stale_from_env() -> anyhow::Result<Option<StdDuration>> {
+    let Some(configured) =
+        optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_MAX_STALE_SECONDS)?
+    else {
+        return Ok(None);
+    };
+    let seconds = configured.parse::<u64>().with_context(|| {
+        format!("{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_MAX_STALE_SECONDS} must be seconds")
+    })?;
+    anyhow::ensure!(
+        (60..=2_592_000).contains(&seconds),
+        "{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_MAX_STALE_SECONDS} must be between 60 and 2592000"
+    );
+    Ok(Some(StdDuration::from_secs(seconds)))
 }
 
 fn safe_keyset_url_label(url: &reqwest::Url) -> String {
@@ -2255,6 +2370,16 @@ impl TraceCommonsSignedTokenVerifier {
         self.configured_eddsa_key_count()
             .saturating_sub(self.configured_active_eddsa_key_count(now))
     }
+
+    fn managed_eddsa_keyset_stale(&self, max_stale: StdDuration, now: DateTime<Utc>) -> bool {
+        let Some(last_refreshed_at) = self.managed_eddsa_keyset_last_refreshed_at else {
+            return true;
+        };
+        let Ok(max_stale) = Duration::from_std(max_stale) else {
+            return false;
+        };
+        now.signed_duration_since(last_refreshed_at) > max_stale
+    }
 }
 
 impl TraceCommonsSignedEddsaPublicKey {
@@ -2277,6 +2402,99 @@ impl TraceCommonsSignedEddsaPublicKey {
         }
         Ok(())
     }
+}
+
+fn replace_managed_eddsa_keyset_for_verifier(
+    verifier: &mut TraceCommonsSignedTokenVerifier,
+    managed_eddsa_public_keys: BTreeMap<String, TraceCommonsSignedEddsaPublicKey>,
+    require_active_managed_key: bool,
+) -> anyhow::Result<()> {
+    if require_active_managed_key {
+        let now = Utc::now();
+        anyhow::ensure!(
+            managed_eddsa_public_keys
+                .values()
+                .any(|key| key.is_active_at(now)),
+            "refreshed keyset must include at least one active managed EdDSA key"
+        );
+    }
+    for kid in managed_eddsa_public_keys.keys() {
+        anyhow::ensure!(
+            !verifier.keyed_secrets.contains_key(kid),
+            "signed tenant token key id {kid} is configured for both HMAC and EdDSA"
+        );
+        anyhow::ensure!(
+            !verifier.keyed_eddsa_public_keys.contains_key(kid)
+                || verifier.managed_eddsa_key_ids.contains(kid),
+            "refreshed managed EdDSA key id {kid} conflicts with an unmanaged EdDSA key"
+        );
+    }
+    for retired_kid in &verifier.managed_eddsa_key_ids {
+        verifier.keyed_eddsa_public_keys.remove(retired_kid);
+    }
+    verifier.managed_eddsa_key_ids = managed_eddsa_public_keys.keys().cloned().collect();
+    for (kid, key) in managed_eddsa_public_keys {
+        verifier.keyed_eddsa_public_keys.insert(kid, key);
+    }
+    verifier.managed_eddsa_keyset_last_refreshed_at = Some(Utc::now());
+    verifier.managed_eddsa_keyset_last_refresh_failed_at = None;
+    Ok(())
+}
+
+async fn refresh_signed_token_managed_eddsa_keyset(
+    verifier: &SharedTraceCommonsSignedTokenVerifier,
+    refresh: &TraceCommonsManagedEddsaKeysetRefreshConfig,
+    require_active_managed_key: bool,
+) -> anyhow::Result<()> {
+    let configured = fetch_signed_token_eddsa_keyset_url_with_config(refresh).await?;
+    let managed_eddsa_public_keys = parse_signed_token_eddsa_keyset_config(&configured)?;
+    let mut verifier = verifier
+        .write()
+        .map_err(|_| anyhow::anyhow!("signed token verifier lock poisoned"))?;
+    replace_managed_eddsa_keyset_for_verifier(
+        &mut verifier,
+        managed_eddsa_public_keys,
+        require_active_managed_key,
+    )
+}
+
+fn record_signed_token_managed_eddsa_keyset_refresh_failure(
+    verifier: &SharedTraceCommonsSignedTokenVerifier,
+) {
+    if let Ok(mut verifier) = verifier.write() {
+        verifier.managed_eddsa_keyset_last_refresh_failed_at = Some(Utc::now());
+    }
+}
+
+fn spawn_managed_eddsa_keyset_refresh_task(state: &Arc<AppState>) {
+    let Some(verifier) = state.signed_token_verifier.clone() else {
+        return;
+    };
+    let Some(refresh) = state.managed_eddsa_keyset_refresh.clone() else {
+        return;
+    };
+    let require_active_managed_key = state.require_managed_eddsa_signed_tokens;
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(refresh.refresh_interval).await;
+            match refresh_signed_token_managed_eddsa_keyset(
+                &verifier,
+                &refresh,
+                require_active_managed_key,
+            )
+            .await
+            {
+                Ok(()) => tracing::info!("Trace Commons managed EdDSA keyset refreshed"),
+                Err(error) => {
+                    record_signed_token_managed_eddsa_keyset_refresh_failure(&verifier);
+                    tracing::warn!(
+                        error = %error,
+                        "Trace Commons managed EdDSA keyset refresh failed; preserving last good keyset"
+                    );
+                }
+            }
+        }
+    });
 }
 
 fn signed_token_claims_to_auth(claims: TraceCommonsSignedTokenClaims) -> ApiResult<TenantAuth> {
@@ -2548,6 +2766,13 @@ struct TraceCommonsConfigStatusResponse {
     signed_token_eddsa_inactive_key_count: usize,
     signed_token_managed_eddsa_key_count: usize,
     signed_token_managed_eddsa_active_key_count: usize,
+    signed_token_managed_eddsa_inactive_key_count: usize,
+    signed_token_eddsa_keyset_url_refresh_enabled: bool,
+    signed_token_eddsa_keyset_url_refresh_interval_seconds: Option<u64>,
+    signed_token_eddsa_keyset_url_max_stale_seconds: Option<u64>,
+    signed_token_eddsa_keyset_url_last_refresh_success_at: Option<DateTime<Utc>>,
+    signed_token_eddsa_keyset_url_last_refresh_failure_at: Option<DateTime<Utc>>,
+    signed_token_eddsa_keyset_url_stale: bool,
     signed_token_issuer_configured: bool,
     signed_token_audience_configured: bool,
     signed_token_revoked_jti_count: usize,
@@ -2583,58 +2808,80 @@ struct TraceCommonsConfigStatusResponse {
 
 fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigStatusResponse {
     let now = Utc::now();
+    let signed_token_verifier = state
+        .signed_token_verifier
+        .as_ref()
+        .and_then(|verifier| verifier.read().ok());
+    let max_stale = state
+        .managed_eddsa_keyset_refresh
+        .as_ref()
+        .and_then(|refresh| refresh.max_stale);
     TraceCommonsConfigStatusResponse {
         schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION,
         db_mirror_configured: state.db_mirror.is_some(),
         signed_token_auth_enabled: state.signed_token_verifier.is_some(),
-        signed_token_key_count: state
-            .signed_token_verifier
+        signed_token_key_count: signed_token_verifier
             .as_ref()
-            .map_or(0, TraceCommonsSignedTokenVerifier::configured_key_count),
-        signed_token_eddsa_key_count: state.signed_token_verifier.as_ref().map_or(
-            0,
-            TraceCommonsSignedTokenVerifier::configured_eddsa_key_count,
-        ),
-        signed_token_eddsa_active_key_count: state
-            .signed_token_verifier
+            .map_or(0, |verifier| verifier.configured_key_count()),
+        signed_token_eddsa_key_count: signed_token_verifier
             .as_ref()
-            .map_or(0, |verifier| {
-                verifier.configured_active_eddsa_key_count(now)
-            }),
-        signed_token_eddsa_inactive_key_count: state
-            .signed_token_verifier
+            .map_or(0, |verifier| verifier.configured_eddsa_key_count()),
+        signed_token_eddsa_active_key_count: signed_token_verifier.as_ref().map_or(0, |verifier| {
+            verifier.configured_active_eddsa_key_count(now)
+        }),
+        signed_token_eddsa_inactive_key_count: signed_token_verifier
             .as_ref()
             .map_or(0, |verifier| {
                 verifier.configured_inactive_eddsa_key_count(now)
             }),
-        signed_token_managed_eddsa_key_count: state.signed_token_verifier.as_ref().map_or(
-            0,
-            TraceCommonsSignedTokenVerifier::configured_managed_eddsa_key_count,
-        ),
-        signed_token_managed_eddsa_active_key_count: state
-            .signed_token_verifier
+        signed_token_managed_eddsa_key_count: signed_token_verifier
+            .as_ref()
+            .map_or(0, |verifier| verifier.configured_managed_eddsa_key_count()),
+        signed_token_managed_eddsa_active_key_count: signed_token_verifier
             .as_ref()
             .map_or(0, |verifier| {
                 verifier.configured_active_managed_eddsa_key_count(now)
             }),
-        signed_token_issuer_configured: state
-            .signed_token_verifier
+        signed_token_managed_eddsa_inactive_key_count: signed_token_verifier.as_ref().map_or(
+            0,
+            |verifier| {
+                verifier
+                    .configured_managed_eddsa_key_count()
+                    .saturating_sub(verifier.configured_active_managed_eddsa_key_count(now))
+            },
+        ),
+        signed_token_eddsa_keyset_url_refresh_enabled: state.managed_eddsa_keyset_refresh.is_some(),
+        signed_token_eddsa_keyset_url_refresh_interval_seconds: state
+            .managed_eddsa_keyset_refresh
+            .as_ref()
+            .map(|refresh| refresh.refresh_interval.as_secs()),
+        signed_token_eddsa_keyset_url_max_stale_seconds: max_stale
+            .map(|duration| duration.as_secs()),
+        signed_token_eddsa_keyset_url_last_refresh_success_at: signed_token_verifier
+            .as_ref()
+            .and_then(|verifier| verifier.managed_eddsa_keyset_last_refreshed_at),
+        signed_token_eddsa_keyset_url_last_refresh_failure_at: signed_token_verifier
+            .as_ref()
+            .and_then(|verifier| verifier.managed_eddsa_keyset_last_refresh_failed_at),
+        signed_token_eddsa_keyset_url_stale: signed_token_verifier
+            .as_ref()
+            .zip(max_stale)
+            .is_some_and(|(verifier, max_stale)| {
+                verifier.managed_eddsa_keyset_stale(max_stale, now)
+            }),
+        signed_token_issuer_configured: signed_token_verifier
             .as_ref()
             .is_some_and(|verifier| verifier.issuer.is_some()),
-        signed_token_audience_configured: state
-            .signed_token_verifier
+        signed_token_audience_configured: signed_token_verifier
             .as_ref()
             .is_some_and(|verifier| verifier.audience.is_some()),
-        signed_token_revoked_jti_count: state
-            .signed_token_verifier
+        signed_token_revoked_jti_count: signed_token_verifier
             .as_ref()
             .map_or(0, |verifier| verifier.revoked_jtis.len()),
-        signed_token_max_ttl_seconds: state
-            .signed_token_verifier
+        signed_token_max_ttl_seconds: signed_token_verifier
             .as_ref()
             .and_then(|verifier| verifier.max_ttl_seconds),
-        signed_token_require_jti: state
-            .signed_token_verifier
+        signed_token_require_jti: signed_token_verifier
             .as_ref()
             .is_some_and(|verifier| verifier.require_jti),
         require_eddsa_signed_tokens: state.require_eddsa_signed_tokens,
@@ -7204,6 +7451,24 @@ fn authenticate(state: &AppState, headers: &HeaderMap) -> ApiResult<TenantAuth> 
                 "Trace Commons requires EdDSA signed tenant tokens",
             ));
         };
+        let verifier = verifier.read().map_err(|_| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "signed tenant token verifier unavailable",
+            )
+        })?;
+        if state.require_managed_eddsa_signed_tokens
+            && state
+                .managed_eddsa_keyset_refresh
+                .as_ref()
+                .and_then(|refresh| refresh.max_stale)
+                .is_some_and(|max_stale| verifier.managed_eddsa_keyset_stale(max_stale, Utc::now()))
+        {
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "stale signed tenant token keyset",
+            ));
+        }
         return verifier.authenticate(
             token,
             state.require_eddsa_signed_tokens,
@@ -7220,6 +7485,12 @@ fn authenticate(state: &AppState, headers: &HeaderMap) -> ApiResult<TenantAuth> 
         return Ok(auth);
     }
     if let Some(verifier) = &state.signed_token_verifier {
+        let verifier = verifier.read().map_err(|_| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "signed tenant token verifier unavailable",
+            )
+        })?;
         return verifier.authenticate(token, false, false);
     }
     Err(api_error(StatusCode::FORBIDDEN, "unknown tenant token"))
@@ -16396,6 +16667,7 @@ mod tests {
             root,
             tokens: Arc::new(tokens),
             signed_token_verifier: None,
+            managed_eddsa_keyset_refresh: None,
             require_eddsa_signed_tokens: false,
             require_managed_eddsa_signed_tokens: false,
             tenant_policies: Arc::new(BTreeMap::new()),
@@ -16550,6 +16822,18 @@ mod tests {
         state
     }
 
+    fn mutate_test_signed_token_verifier(
+        state: &mut Arc<AppState>,
+        mutate: impl FnOnce(&mut TraceCommonsSignedTokenVerifier),
+    ) {
+        let verifier = Arc::make_mut(state)
+            .signed_token_verifier
+            .as_ref()
+            .expect("verifier exists");
+        let mut verifier = verifier.write().expect("verifier lock writes");
+        mutate(&mut verifier);
+    }
+
     fn with_tenant_rollout_gate(
         mut state: Arc<AppState>,
         feature: TraceTenantRolloutFeature,
@@ -16567,18 +16851,22 @@ mod tests {
         audience: Option<&str>,
     ) -> Arc<AppState> {
         let mut state = test_state_with_tokens(root, BTreeMap::new());
-        Arc::make_mut(&mut state).signed_token_verifier = Some(TraceCommonsSignedTokenVerifier {
-            default_secret: Some(SecretString::from(secret.to_string())),
-            keyed_secrets: BTreeMap::new(),
-            default_eddsa_public_key: None,
-            keyed_eddsa_public_keys: BTreeMap::new(),
-            managed_eddsa_key_ids: BTreeSet::new(),
-            issuer: issuer.map(str::to_string),
-            audience: audience.map(str::to_string),
-            revoked_jtis: BTreeSet::new(),
-            max_ttl_seconds: None,
-            require_jti: false,
-        });
+        Arc::make_mut(&mut state).signed_token_verifier = Some(shared_signed_token_verifier(
+            TraceCommonsSignedTokenVerifier {
+                default_secret: Some(SecretString::from(secret.to_string())),
+                keyed_secrets: BTreeMap::new(),
+                default_eddsa_public_key: None,
+                keyed_eddsa_public_keys: BTreeMap::new(),
+                managed_eddsa_key_ids: BTreeSet::new(),
+                managed_eddsa_keyset_last_refreshed_at: None,
+                managed_eddsa_keyset_last_refresh_failed_at: None,
+                issuer: issuer.map(str::to_string),
+                audience: audience.map(str::to_string),
+                revoked_jtis: BTreeSet::new(),
+                max_ttl_seconds: None,
+                require_jti: false,
+            },
+        ));
         state
     }
 
@@ -16596,6 +16884,8 @@ mod tests {
             }),
             keyed_eddsa_public_keys: BTreeMap::new(),
             managed_eddsa_key_ids: BTreeSet::new(),
+            managed_eddsa_keyset_last_refreshed_at: None,
+            managed_eddsa_keyset_last_refresh_failed_at: None,
             issuer: None,
             audience: None,
             revoked_jtis: BTreeSet::new(),
@@ -16622,6 +16912,8 @@ mod tests {
                 },
             )]),
             managed_eddsa_key_ids: BTreeSet::from([kid.to_string()]),
+            managed_eddsa_keyset_last_refreshed_at: Some(Utc::now()),
+            managed_eddsa_keyset_last_refresh_failed_at: None,
             issuer: Some("trace-commons-test-issuer".to_string()),
             audience: Some("trace-commons-test-audience".to_string()),
             revoked_jtis: BTreeSet::new(),
@@ -16632,7 +16924,9 @@ mod tests {
 
     fn test_state_with_eddsa_signed_token_verifier(root: PathBuf) -> Arc<AppState> {
         let mut state = test_state_with_tokens(root, BTreeMap::new());
-        Arc::make_mut(&mut state).signed_token_verifier = Some(test_eddsa_signed_token_verifier());
+        Arc::make_mut(&mut state).signed_token_verifier = Some(shared_signed_token_verifier(
+            test_eddsa_signed_token_verifier(),
+        ));
         state
     }
 
@@ -16647,10 +16941,12 @@ mod tests {
     ) -> Arc<AppState> {
         let mut state = test_state_with_tokens(root, BTreeMap::new());
         let state_mut = Arc::make_mut(&mut state);
-        state_mut.signed_token_verifier = Some(test_managed_eddsa_signed_token_verifier(
-            "managed-eddsa-1",
-            Some(Utc::now() - Duration::minutes(1)),
-            Some(Utc::now() + Duration::minutes(10)),
+        state_mut.signed_token_verifier = Some(shared_signed_token_verifier(
+            test_managed_eddsa_signed_token_verifier(
+                "managed-eddsa-1",
+                Some(Utc::now() - Duration::minutes(1)),
+                Some(Utc::now() + Duration::minutes(10)),
+            ),
         ));
         state_mut.require_managed_eddsa_signed_tokens = true;
         state
@@ -16659,7 +16955,9 @@ mod tests {
     fn test_state_with_required_eddsa_and_static_tokens(root: PathBuf) -> Arc<AppState> {
         let mut state = test_state(root);
         let state_mut = Arc::make_mut(&mut state);
-        state_mut.signed_token_verifier = Some(test_eddsa_signed_token_verifier());
+        state_mut.signed_token_verifier = Some(shared_signed_token_verifier(
+            test_eddsa_signed_token_verifier(),
+        ));
         state_mut.require_eddsa_signed_tokens = true;
         state
     }
@@ -16922,6 +17220,7 @@ mod tests {
             root,
             tokens: Arc::new(tokens),
             signed_token_verifier: None,
+            managed_eddsa_keyset_refresh: None,
             require_eddsa_signed_tokens: false,
             require_managed_eddsa_signed_tokens: false,
             tenant_policies: Arc::new(tenant_policies),
@@ -16983,6 +17282,7 @@ mod tests {
             root,
             tokens: Arc::new(tokens),
             signed_token_verifier: None,
+            managed_eddsa_keyset_refresh: None,
             require_eddsa_signed_tokens: false,
             require_managed_eddsa_signed_tokens: false,
             tenant_policies: Arc::new(BTreeMap::new()),
@@ -17030,6 +17330,7 @@ mod tests {
             root,
             tokens: Arc::new(tokens),
             signed_token_verifier: None,
+            managed_eddsa_keyset_refresh: None,
             require_eddsa_signed_tokens: false,
             require_managed_eddsa_signed_tokens: false,
             tenant_policies: Arc::new(BTreeMap::new()),
@@ -17074,6 +17375,7 @@ mod tests {
             root,
             tokens: Arc::new(tokens),
             signed_token_verifier: None,
+            managed_eddsa_keyset_refresh: None,
             require_eddsa_signed_tokens: false,
             require_managed_eddsa_signed_tokens: false,
             tenant_policies: Arc::new(BTreeMap::new()),
@@ -18234,40 +18536,44 @@ mod tests {
             true,
         );
         let key_window_now = Utc::now();
-        Arc::make_mut(&mut state).signed_token_verifier = Some(TraceCommonsSignedTokenVerifier {
-            default_secret: Some(SecretString::from(
-                "config-status-signed-secret".to_string(),
-            )),
-            keyed_secrets: BTreeMap::from([(
-                "config-key-1".to_string(),
-                SecretString::from("config-status-keyed-secret".to_string()),
-            )]),
-            default_eddsa_public_key: None,
-            keyed_eddsa_public_keys: BTreeMap::from([
-                (
-                    "config-eddsa-active".to_string(),
-                    TraceCommonsSignedEddsaPublicKey {
-                        pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
-                        not_before: Some(key_window_now - Duration::minutes(1)),
-                        not_after: Some(key_window_now + Duration::minutes(10)),
-                    },
-                ),
-                (
-                    "config-eddsa-inactive".to_string(),
-                    TraceCommonsSignedEddsaPublicKey {
-                        pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
-                        not_before: Some(key_window_now - Duration::minutes(10)),
-                        not_after: Some(key_window_now - Duration::minutes(1)),
-                    },
-                ),
-            ]),
-            managed_eddsa_key_ids: BTreeSet::new(),
-            issuer: Some("config-status-issuer".to_string()),
-            audience: Some("config-status-audience".to_string()),
-            revoked_jtis: BTreeSet::from(["revoked-config-jti".to_string()]),
-            max_ttl_seconds: Some(900),
-            require_jti: true,
-        });
+        Arc::make_mut(&mut state).signed_token_verifier = Some(shared_signed_token_verifier(
+            TraceCommonsSignedTokenVerifier {
+                default_secret: Some(SecretString::from(
+                    "config-status-signed-secret".to_string(),
+                )),
+                keyed_secrets: BTreeMap::from([(
+                    "config-key-1".to_string(),
+                    SecretString::from("config-status-keyed-secret".to_string()),
+                )]),
+                default_eddsa_public_key: None,
+                keyed_eddsa_public_keys: BTreeMap::from([
+                    (
+                        "config-eddsa-active".to_string(),
+                        TraceCommonsSignedEddsaPublicKey {
+                            pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
+                            not_before: Some(key_window_now - Duration::minutes(1)),
+                            not_after: Some(key_window_now + Duration::minutes(10)),
+                        },
+                    ),
+                    (
+                        "config-eddsa-inactive".to_string(),
+                        TraceCommonsSignedEddsaPublicKey {
+                            pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
+                            not_before: Some(key_window_now - Duration::minutes(10)),
+                            not_after: Some(key_window_now - Duration::minutes(1)),
+                        },
+                    ),
+                ]),
+                managed_eddsa_key_ids: BTreeSet::new(),
+                managed_eddsa_keyset_last_refreshed_at: None,
+                managed_eddsa_keyset_last_refresh_failed_at: None,
+                issuer: Some("config-status-issuer".to_string()),
+                audience: Some("config-status-audience".to_string()),
+                revoked_jtis: BTreeSet::from(["revoked-config-jti".to_string()]),
+                max_ttl_seconds: Some(900),
+                require_jti: true,
+            },
+        ));
 
         let contributor_response = app(state.clone())
             .oneshot(
@@ -26316,6 +26622,7 @@ mod tests {
             root: temp.path().to_path_buf(),
             tokens: Arc::new(tokens),
             signed_token_verifier: None,
+            managed_eddsa_keyset_refresh: None,
             require_eddsa_signed_tokens: false,
             require_managed_eddsa_signed_tokens: false,
             tenant_policies: Arc::new(BTreeMap::new()),
@@ -32503,6 +32810,8 @@ mod tests {
             default_eddsa_public_key: None,
             keyed_eddsa_public_keys: BTreeMap::new(),
             managed_eddsa_key_ids: BTreeSet::new(),
+            managed_eddsa_keyset_last_refreshed_at: None,
+            managed_eddsa_keyset_last_refresh_failed_at: None,
             issuer: None,
             audience: None,
             revoked_jtis: BTreeSet::new(),
@@ -32539,6 +32848,8 @@ mod tests {
             default_eddsa_public_key: None,
             keyed_eddsa_public_keys: BTreeMap::new(),
             managed_eddsa_key_ids: BTreeSet::new(),
+            managed_eddsa_keyset_last_refreshed_at: None,
+            managed_eddsa_keyset_last_refresh_failed_at: None,
             issuer: Some("trace-commons-test-issuer".to_string()),
             audience: Some("trace-commons-test-audience".to_string()),
             revoked_jtis: BTreeSet::new(),
@@ -32647,10 +32958,12 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(temp.path().to_path_buf());
         let state_mut = Arc::make_mut(&mut state);
-        state_mut.signed_token_verifier = Some(test_managed_eddsa_signed_token_verifier(
-            "managed-eddsa-1",
-            Some(Utc::now() - Duration::minutes(1)),
-            Some(Utc::now() + Duration::minutes(10)),
+        state_mut.signed_token_verifier = Some(shared_signed_token_verifier(
+            test_managed_eddsa_signed_token_verifier(
+                "managed-eddsa-1",
+                Some(Utc::now() - Duration::minutes(1)),
+                Some(Utc::now() + Duration::minutes(10)),
+            ),
         ));
         state_mut.require_managed_eddsa_signed_tokens = true;
         let envelope = sample_envelope().await;
@@ -32671,22 +32984,26 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state_with_tokens(temp.path().to_path_buf(), BTreeMap::new());
         let state_mut = Arc::make_mut(&mut state);
-        state_mut.signed_token_verifier = Some(TraceCommonsSignedTokenVerifier {
-            default_secret: Some(SecretString::from("signed-secret".to_string())),
-            keyed_secrets: BTreeMap::new(),
-            default_eddsa_public_key: Some(TraceCommonsSignedEddsaPublicKey {
-                pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
-                not_before: None,
-                not_after: None,
-            }),
-            keyed_eddsa_public_keys: BTreeMap::new(),
-            managed_eddsa_key_ids: BTreeSet::new(),
-            issuer: None,
-            audience: None,
-            revoked_jtis: BTreeSet::new(),
-            max_ttl_seconds: None,
-            require_jti: false,
-        });
+        state_mut.signed_token_verifier = Some(shared_signed_token_verifier(
+            TraceCommonsSignedTokenVerifier {
+                default_secret: Some(SecretString::from("signed-secret".to_string())),
+                keyed_secrets: BTreeMap::new(),
+                default_eddsa_public_key: Some(TraceCommonsSignedEddsaPublicKey {
+                    pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
+                    not_before: None,
+                    not_after: None,
+                }),
+                keyed_eddsa_public_keys: BTreeMap::new(),
+                managed_eddsa_key_ids: BTreeSet::new(),
+                managed_eddsa_keyset_last_refreshed_at: None,
+                managed_eddsa_keyset_last_refresh_failed_at: None,
+                issuer: None,
+                audience: None,
+                revoked_jtis: BTreeSet::new(),
+                max_ttl_seconds: None,
+                require_jti: false,
+            },
+        ));
         state_mut.require_eddsa_signed_tokens = true;
         let token = signed_tenant_token(
             "signed-secret",
@@ -32715,10 +33032,12 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state_with_tokens(temp.path().to_path_buf(), BTreeMap::new());
         let state_mut = Arc::make_mut(&mut state);
-        state_mut.signed_token_verifier = Some(test_managed_eddsa_signed_token_verifier(
-            "managed-eddsa-1",
-            Some(Utc::now() - Duration::minutes(1)),
-            Some(Utc::now() + Duration::minutes(10)),
+        state_mut.signed_token_verifier = Some(shared_signed_token_verifier(
+            test_managed_eddsa_signed_token_verifier(
+                "managed-eddsa-1",
+                Some(Utc::now() - Duration::minutes(1)),
+                Some(Utc::now() + Duration::minutes(10)),
+            ),
         ));
         state_mut.require_managed_eddsa_signed_tokens = true;
         let token = signed_tenant_token(
@@ -32836,28 +33155,138 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn managed_eddsa_keyset_refresh_rotates_accepted_kids() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state =
+            test_state_with_required_managed_eddsa_signed_token_verifier(temp.path().to_path_buf());
+
+        let old_token = eddsa_signed_tenant_token_with_kid(
+            Some("managed-eddsa-1"),
+            managed_eddsa_signed_claim("actor-before-refresh"),
+        );
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(&old_token),
+            Json(sample_envelope().await),
+        )
+        .await
+        .expect("old managed key is initially accepted");
+
+        let refreshed_keyset = parse_signed_token_eddsa_keyset_config(&format!(
+            r#"{{
+                "keys": [
+                    {{
+                        "kid": "managed-eddsa-2",
+                        "public_key_pem": {public_key},
+                        "not_before": "{not_before}",
+                        "not_after": "{not_after}"
+                    }}
+                ]
+            }}"#,
+            public_key = serde_json::to_string(TEST_EDDSA_PUBLIC_KEY_PEM)
+                .expect("test public key serializes"),
+            not_before = (Utc::now() - Duration::minutes(1)).to_rfc3339(),
+            not_after = (Utc::now() + Duration::minutes(10)).to_rfc3339(),
+        ))
+        .expect("refreshed keyset parses");
+        {
+            let verifier = Arc::make_mut(&mut state)
+                .signed_token_verifier
+                .as_ref()
+                .expect("verifier exists");
+            let mut verifier = verifier.write().expect("verifier lock writes");
+            replace_managed_eddsa_keyset_for_verifier(&mut verifier, refreshed_keyset, true)
+                .expect("active refreshed keyset installs");
+        }
+
+        let new_token = eddsa_signed_tenant_token_with_kid(
+            Some("managed-eddsa-2"),
+            managed_eddsa_signed_claim("actor-after-refresh"),
+        );
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(&new_token),
+            Json(sample_envelope().await),
+        )
+        .await
+        .expect("new managed key is accepted after refresh");
+
+        let retired_error = submit_trace_handler(
+            State(state),
+            auth_headers(&old_token),
+            Json(sample_envelope().await),
+        )
+        .await
+        .expect_err("retired managed key is rejected after refresh");
+        assert_eq!(retired_error.0, StatusCode::FORBIDDEN);
+        assert_eq!(retired_error.1.0.error, "invalid signed tenant token");
+    }
+
+    #[test]
+    fn managed_eddsa_keyset_refresh_preserves_last_good_keyset_when_required_refresh_is_inactive() {
+        let mut verifier = test_managed_eddsa_signed_token_verifier(
+            "managed-eddsa-1",
+            Some(Utc::now() - Duration::minutes(1)),
+            Some(Utc::now() + Duration::minutes(10)),
+        );
+        let inactive_keyset = parse_signed_token_eddsa_keyset_config(&format!(
+            r#"{{
+                "keys": [
+                    {{
+                        "kid": "managed-eddsa-inactive-refresh",
+                        "public_key_pem": {public_key},
+                        "not_before": "{not_before}",
+                        "not_after": "{not_after}"
+                    }}
+                ]
+            }}"#,
+            public_key = serde_json::to_string(TEST_EDDSA_PUBLIC_KEY_PEM)
+                .expect("test public key serializes"),
+            not_before = (Utc::now() - Duration::minutes(10)).to_rfc3339(),
+            not_after = (Utc::now() - Duration::minutes(1)).to_rfc3339(),
+        ))
+        .expect("inactive keyset parses");
+
+        let error = replace_managed_eddsa_keyset_for_verifier(&mut verifier, inactive_keyset, true)
+            .expect_err("managed-required refresh rejects all-inactive keysets");
+
+        assert!(error.to_string().contains("active managed EdDSA key"));
+        assert!(verifier.managed_eddsa_key_ids.contains("managed-eddsa-1"));
+        assert!(
+            verifier
+                .keyed_eddsa_public_keys
+                .contains_key("managed-eddsa-1"),
+            "last good managed key remains installed"
+        );
+    }
+
+    #[tokio::test]
     async fn accepts_keyed_eddsa_signed_tenant_token_for_rotation() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state_with_tokens(temp.path().to_path_buf(), BTreeMap::new());
-        Arc::make_mut(&mut state).signed_token_verifier = Some(TraceCommonsSignedTokenVerifier {
-            default_secret: None,
-            keyed_secrets: BTreeMap::new(),
-            default_eddsa_public_key: None,
-            keyed_eddsa_public_keys: BTreeMap::from([(
-                "trace-eddsa-key-1".to_string(),
-                TraceCommonsSignedEddsaPublicKey {
-                    pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
-                    not_before: None,
-                    not_after: None,
-                },
-            )]),
-            managed_eddsa_key_ids: BTreeSet::new(),
-            issuer: None,
-            audience: None,
-            revoked_jtis: BTreeSet::new(),
-            max_ttl_seconds: None,
-            require_jti: false,
-        });
+        Arc::make_mut(&mut state).signed_token_verifier = Some(shared_signed_token_verifier(
+            TraceCommonsSignedTokenVerifier {
+                default_secret: None,
+                keyed_secrets: BTreeMap::new(),
+                default_eddsa_public_key: None,
+                keyed_eddsa_public_keys: BTreeMap::from([(
+                    "trace-eddsa-key-1".to_string(),
+                    TraceCommonsSignedEddsaPublicKey {
+                        pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
+                        not_before: None,
+                        not_after: None,
+                    },
+                )]),
+                managed_eddsa_key_ids: BTreeSet::new(),
+                managed_eddsa_keyset_last_refreshed_at: None,
+                managed_eddsa_keyset_last_refresh_failed_at: None,
+                issuer: None,
+                audience: None,
+                revoked_jtis: BTreeSet::new(),
+                max_ttl_seconds: None,
+                require_jti: false,
+            },
+        ));
         let token = eddsa_signed_tenant_token_with_kid(
             Some("trace-eddsa-key-1"),
             serde_json::json!({
@@ -32878,25 +33307,29 @@ mod tests {
     async fn accepts_eddsa_signed_tenant_token_from_active_managed_keyset() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state_with_tokens(temp.path().to_path_buf(), BTreeMap::new());
-        Arc::make_mut(&mut state).signed_token_verifier = Some(TraceCommonsSignedTokenVerifier {
-            default_secret: None,
-            keyed_secrets: BTreeMap::new(),
-            default_eddsa_public_key: None,
-            keyed_eddsa_public_keys: BTreeMap::from([(
-                "managed-eddsa-1".to_string(),
-                TraceCommonsSignedEddsaPublicKey {
-                    pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
-                    not_before: Some(Utc::now() - Duration::minutes(1)),
-                    not_after: Some(Utc::now() + Duration::minutes(10)),
-                },
-            )]),
-            managed_eddsa_key_ids: BTreeSet::from(["managed-eddsa-1".to_string()]),
-            issuer: None,
-            audience: None,
-            revoked_jtis: BTreeSet::new(),
-            max_ttl_seconds: None,
-            require_jti: false,
-        });
+        Arc::make_mut(&mut state).signed_token_verifier = Some(shared_signed_token_verifier(
+            TraceCommonsSignedTokenVerifier {
+                default_secret: None,
+                keyed_secrets: BTreeMap::new(),
+                default_eddsa_public_key: None,
+                keyed_eddsa_public_keys: BTreeMap::from([(
+                    "managed-eddsa-1".to_string(),
+                    TraceCommonsSignedEddsaPublicKey {
+                        pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
+                        not_before: Some(Utc::now() - Duration::minutes(1)),
+                        not_after: Some(Utc::now() + Duration::minutes(10)),
+                    },
+                )]),
+                managed_eddsa_key_ids: BTreeSet::from(["managed-eddsa-1".to_string()]),
+                managed_eddsa_keyset_last_refreshed_at: Some(Utc::now()),
+                managed_eddsa_keyset_last_refresh_failed_at: None,
+                issuer: None,
+                audience: None,
+                revoked_jtis: BTreeSet::new(),
+                max_ttl_seconds: None,
+                require_jti: false,
+            },
+        ));
         let token = eddsa_signed_tenant_token_with_kid(
             Some("managed-eddsa-1"),
             serde_json::json!({
@@ -32917,25 +33350,29 @@ mod tests {
     async fn rejects_eddsa_signed_tenant_token_with_inactive_managed_key() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state_with_tokens(temp.path().to_path_buf(), BTreeMap::new());
-        Arc::make_mut(&mut state).signed_token_verifier = Some(TraceCommonsSignedTokenVerifier {
-            default_secret: None,
-            keyed_secrets: BTreeMap::new(),
-            default_eddsa_public_key: None,
-            keyed_eddsa_public_keys: BTreeMap::from([(
-                "managed-eddsa-inactive".to_string(),
-                TraceCommonsSignedEddsaPublicKey {
-                    pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
-                    not_before: Some(Utc::now() - Duration::minutes(10)),
-                    not_after: Some(Utc::now() - Duration::minutes(1)),
-                },
-            )]),
-            managed_eddsa_key_ids: BTreeSet::from(["managed-eddsa-inactive".to_string()]),
-            issuer: None,
-            audience: None,
-            revoked_jtis: BTreeSet::new(),
-            max_ttl_seconds: None,
-            require_jti: false,
-        });
+        Arc::make_mut(&mut state).signed_token_verifier = Some(shared_signed_token_verifier(
+            TraceCommonsSignedTokenVerifier {
+                default_secret: None,
+                keyed_secrets: BTreeMap::new(),
+                default_eddsa_public_key: None,
+                keyed_eddsa_public_keys: BTreeMap::from([(
+                    "managed-eddsa-inactive".to_string(),
+                    TraceCommonsSignedEddsaPublicKey {
+                        pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
+                        not_before: Some(Utc::now() - Duration::minutes(10)),
+                        not_after: Some(Utc::now() - Duration::minutes(1)),
+                    },
+                )]),
+                managed_eddsa_key_ids: BTreeSet::from(["managed-eddsa-inactive".to_string()]),
+                managed_eddsa_keyset_last_refreshed_at: Some(Utc::now()),
+                managed_eddsa_keyset_last_refresh_failed_at: None,
+                issuer: None,
+                audience: None,
+                revoked_jtis: BTreeSet::new(),
+                max_ttl_seconds: None,
+                require_jti: false,
+            },
+        ));
         let token = eddsa_signed_tenant_token_with_kid(
             Some("managed-eddsa-inactive"),
             serde_json::json!({
@@ -33149,15 +33586,12 @@ mod tests {
             None,
             None,
         );
-        Arc::make_mut(&mut state)
-            .signed_token_verifier
-            .as_mut()
-            .expect("verifier exists")
-            .keyed_secrets
-            .insert(
+        mutate_test_signed_token_verifier(&mut state, |verifier| {
+            verifier.keyed_secrets.insert(
                 "trace-key-1".to_string(),
                 SecretString::from("rotated-secret".to_string()),
             );
+        });
         let token = signed_tenant_token_with_kid(
             "rotated-secret",
             Some("trace-key-1"),
@@ -33212,11 +33646,9 @@ mod tests {
             None,
             None,
         );
-        Arc::make_mut(&mut state)
-            .signed_token_verifier
-            .as_mut()
-            .expect("verifier exists")
-            .max_ttl_seconds = Some(300);
+        mutate_test_signed_token_verifier(&mut state, |verifier| {
+            verifier.max_ttl_seconds = Some(300);
+        });
         let token = signed_tenant_token(
             "signed-secret",
             serde_json::json!({
@@ -33245,11 +33677,9 @@ mod tests {
             None,
             None,
         );
-        Arc::make_mut(&mut state)
-            .signed_token_verifier
-            .as_mut()
-            .expect("verifier exists")
-            .max_ttl_seconds = Some(300);
+        mutate_test_signed_token_verifier(&mut state, |verifier| {
+            verifier.max_ttl_seconds = Some(300);
+        });
         let issued_at = Utc::now().timestamp();
         let token = signed_tenant_token(
             "signed-secret",
@@ -33280,11 +33710,9 @@ mod tests {
             None,
             None,
         );
-        Arc::make_mut(&mut state)
-            .signed_token_verifier
-            .as_mut()
-            .expect("verifier exists")
-            .max_ttl_seconds = Some(300);
+        mutate_test_signed_token_verifier(&mut state, |verifier| {
+            verifier.max_ttl_seconds = Some(300);
+        });
         let issued_at = Utc::now().timestamp();
         let token = signed_tenant_token(
             "signed-secret",
@@ -33316,11 +33744,9 @@ mod tests {
             None,
             None,
         );
-        Arc::make_mut(&mut state)
-            .signed_token_verifier
-            .as_mut()
-            .expect("verifier exists")
-            .require_jti = true;
+        mutate_test_signed_token_verifier(&mut state, |verifier| {
+            verifier.require_jti = true;
+        });
         let token = signed_tenant_token(
             "signed-secret",
             serde_json::json!({
@@ -33349,11 +33775,9 @@ mod tests {
             None,
             None,
         );
-        Arc::make_mut(&mut state)
-            .signed_token_verifier
-            .as_mut()
-            .expect("verifier exists")
-            .require_jti = true;
+        mutate_test_signed_token_verifier(&mut state, |verifier| {
+            verifier.require_jti = true;
+        });
         let token = signed_tenant_token(
             "signed-secret",
             serde_json::json!({
@@ -33707,12 +34131,9 @@ mod tests {
             None,
             None,
         );
-        Arc::make_mut(&mut state)
-            .signed_token_verifier
-            .as_mut()
-            .expect("verifier exists")
-            .revoked_jtis
-            .insert("revoked-jti-1".to_string());
+        mutate_test_signed_token_verifier(&mut state, |verifier| {
+            verifier.revoked_jtis.insert("revoked-jti-1".to_string());
+        });
         let token = signed_tenant_token(
             "signed-secret",
             serde_json::json!({
