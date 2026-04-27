@@ -604,8 +604,9 @@ fn trace_policy_rejection(rejection: TraceContributionPolicyRejection) -> (Statu
 mod tests {
     use super::*;
     use crate::channels::web::auth::UserIdentity;
+    use crate::llm::recording::{TraceFile, TraceResponse, TraceStep, TraceToolCall};
     use crate::trace_contribution::{
-        LocalTraceSubmissionStatus, TraceCreditEvent, TraceCreditEventKind,
+        LocalTraceSubmissionStatus, TraceCreditEvent, TraceCreditEventKind, TraceQueueWarningKind,
         trace_contribution_dir_for_scope, write_trace_policy_for_scope,
     };
     use chrono::Utc;
@@ -660,6 +661,42 @@ mod tests {
             }],
             last_credit_notice_at: None,
             credit_notice_state: crate::trace_contribution::TraceCreditNoticeState::default(),
+        }
+    }
+
+    fn queue_status_sensitive_trace() -> TraceFile {
+        TraceFile {
+            model_name: "test-model".to_string(),
+            memory_snapshot: Vec::new(),
+            http_exchanges: Vec::new(),
+            steps: vec![
+                TraceStep {
+                    request_hint: None,
+                    response: TraceResponse::UserInput {
+                        content:
+                            "Please submit TRACE_SECRET_TOKEN_VALUE to https://private.example/v1/traces"
+                                .to_string(),
+                    },
+                    expected_tool_results: Vec::new(),
+                },
+                TraceStep {
+                    request_hint: None,
+                    response: TraceResponse::ToolCalls {
+                        tool_calls: vec![TraceToolCall {
+                            id: "call_private_trace".to_string(),
+                            name: "http".to_string(),
+                            arguments: serde_json::json!({
+                                "url": "https://private.example/v1/traces",
+                                "Authorization": "Bearer TRACE_SECRET_TOKEN_VALUE",
+                                "body": "raw tool body containing TRACE_SECRET_TOKEN_VALUE",
+                            }),
+                        }],
+                        input_tokens: 10,
+                        output_tokens: 3,
+                    },
+                    expected_tool_results: Vec::new(),
+                },
+            ],
         }
     }
 
@@ -791,6 +828,88 @@ mod tests {
         .expect_err("zero-hour snooze should be rejected");
 
         assert_eq!(error.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn traces_queue_status_handler_surfaces_safe_hardened_diagnostics() {
+        let user_id = format!("trace-web-queue-hardened-user-{}", Uuid::new_v4());
+        let other_user_id = format!("trace-web-queue-hardened-other-{}", Uuid::new_v4());
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            ingestion_endpoint: Some("https://private.example/v1/traces".to_string()),
+            bearer_token_env: "TRACE_SECRET_TOKEN_VALUE".to_string(),
+            ..Default::default()
+        };
+        write_trace_policy_for_scope(Some(&user_id), &policy).expect("user policy writes");
+        write_trace_policy_for_scope(Some(&other_user_id), &policy).expect("other policy writes");
+
+        let raw = RawTraceContribution::from_recorded_trace(
+            &queue_status_sensitive_trace(),
+            RecordedTraceContributionOptions::default(),
+        );
+        let mut envelope = DeterministicTraceRedactor::default()
+            .redact_trace(raw)
+            .await
+            .expect("redaction should succeed");
+        envelope.schema_version = "ironclaw.trace_contribution.v0".to_string();
+        envelope.consent.policy_version = "2025-01-01".to_string();
+        envelope.privacy.redaction_pipeline_version = "legacy-redactor".to_string();
+        envelope.trace_card.redaction_pipeline_version = "legacy-trace-card-redactor".to_string();
+        queue_trace_envelope_for_scope(Some(&user_id), &envelope)
+            .expect("mismatched user envelope queues");
+        write_queue_fixture(&other_user_id, Some("other user hold"));
+
+        let Json(response) = traces_queue_status_handler(AuthenticatedUser(UserIdentity {
+            user_id: user_id.clone(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        }))
+        .await
+        .expect("queue status handler succeeds");
+
+        assert_eq!(response.queued_envelopes, 1);
+        assert_eq!(response.held_envelopes, 0);
+        assert!(
+            response
+                .diagnostics
+                .warnings
+                .iter()
+                .any(|warning| warning.kind == TraceQueueWarningKind::SchemaVersionMismatch)
+        );
+        assert!(
+            response
+                .diagnostics
+                .warnings
+                .iter()
+                .any(|warning| warning.kind == TraceQueueWarningKind::PolicyVersionMismatch)
+        );
+        assert!(
+            response
+                .diagnostics
+                .warnings
+                .iter()
+                .any(|warning| warning.kind == TraceQueueWarningKind::RedactionPipelineMismatch)
+        );
+        assert!(response.diagnostics.warnings.iter().any(|warning| {
+            warning.kind == TraceQueueWarningKind::TraceCardRedactionPipelineMismatch
+        }));
+        assert_eq!(response.held_queue.len(), 0);
+
+        let serialized = serde_json::to_string(&response).expect("response serializes");
+        assert!(serialized.contains("\"telemetry\""));
+        assert!(serialized.contains("schema_version_mismatch"));
+        assert!(serialized.contains("policy_version_mismatch"));
+        assert!(serialized.contains("redaction_pipeline_mismatch"));
+        assert!(serialized.contains("trace_card_redaction_pipeline_mismatch"));
+        assert!(!serialized.contains("TRACE_SECRET_TOKEN_VALUE"));
+        assert!(!serialized.contains("https://private.example/v1/traces"));
+        assert!(!serialized.contains("raw tool body containing"));
+        assert!(!serialized.contains("legacy-redactor"));
+        assert!(!serialized.contains("legacy-trace-card-redactor"));
+        assert!(!serialized.contains("other user hold"));
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&user_id)));
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&other_user_id)));
     }
 
     #[tokio::test]

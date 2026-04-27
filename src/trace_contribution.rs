@@ -3601,6 +3601,8 @@ struct TraceQueueHoldSidecar {
 pub struct TraceQueueFlushReport {
     pub submitted: usize,
     pub held: usize,
+    #[serde(default, skip_serializing_if = "TraceQueueCompactionReport::is_empty")]
+    pub compaction: TraceQueueCompactionReport,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub holds: Vec<TraceQueueHold>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3628,6 +3630,29 @@ pub struct TraceQueueWorkerScopeReport {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceQueueCompactionReport {
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub scanned_count: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub duplicate_envelopes_removed: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub orphan_hold_sidecars_removed: u32,
+}
+
+impl TraceQueueCompactionReport {
+    pub fn is_empty(&self) -> bool {
+        self.scanned_count == 0
+            && self.duplicate_envelopes_removed == 0
+            && self.orphan_hold_sidecars_removed == 0
+    }
+
+    fn reclaimed_count(&self) -> u32 {
+        self.duplicate_envelopes_removed
+            .saturating_add(self.orphan_hold_sidecars_removed)
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TraceQueueTelemetry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_flush_attempt_at: Option<DateTime<Utc>>,
@@ -3648,6 +3673,12 @@ pub struct TraceQueueTelemetry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_status_sync_failed_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_compaction_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_compaction: Option<TraceQueueCompactionReport>,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub compaction_reclaimed_items_total: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_failure: Option<TraceQueueTelemetryFailure>,
 }
 
@@ -3663,12 +3694,31 @@ pub struct TraceQueueTelemetryFailure {
 #[serde(rename_all = "snake_case")]
 pub enum TraceQueueTelemetryFailureKind {
     Policy,
+    Endpoint,
     Credential,
     Network,
+    HttpRejection,
     StatusSync,
     Submission,
     Queue,
     Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceQueueWarning {
+    pub kind: TraceQueueWarningKind,
+    pub count: u32,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceQueueWarningKind {
+    SchemaVersionMismatch,
+    PolicyVersionMismatch,
+    RedactionPipelineMismatch,
+    TraceCardRedactionPipelineMismatch,
+    MalformedEnvelope,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -3694,6 +3744,8 @@ pub struct TraceQueueDiagnostics {
     pub next_retry_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub telemetry: TraceQueueTelemetry,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<TraceQueueWarning>,
     pub policy_enabled: bool,
     pub endpoint_configured: bool,
     pub ready_to_flush: bool,
@@ -3962,6 +4014,7 @@ pub fn trace_queue_diagnostics_for_scope(
     let records = read_local_trace_records_for_scope(scope)?;
     let credit_report = trace_credit_report(&records);
     let telemetry = read_trace_queue_telemetry_for_scope_unlocked(scope)?;
+    let warnings = trace_queue_warnings_for_scope_unlocked(scope)?;
 
     let mut held_reason_counts = BTreeMap::new();
     let mut retry_scheduled_count = 0;
@@ -4003,6 +4056,7 @@ pub fn trace_queue_diagnostics_for_scope(
         policy_hold_count,
         next_retry_at,
         telemetry,
+        warnings,
         policy_enabled: policy.enabled,
         endpoint_configured,
         ready_to_flush: policy.enabled && endpoint_configured && queued_count > 0,
@@ -4148,8 +4202,16 @@ pub async fn flush_trace_contribution_queue_for_scope(
         return Err(error);
     };
 
+    let compaction = match compact_trace_queue_for_scope_unlocked(scope) {
+        Ok(report) => report,
+        Err(error) => {
+            record_trace_queue_flush_failure_for_scope_unlocked(scope, &error, flush_started_at)?;
+            return Err(error);
+        }
+    };
     let mut submitted = 0usize;
     let mut holds = Vec::new();
+    let mut had_nonfatal_failure = false;
     for path in queued_trace_envelope_paths_for_scope(scope)?
         .into_iter()
         .take(limit)
@@ -4177,6 +4239,7 @@ pub async fn flush_trace_contribution_queue_for_scope(
                             &error,
                             Utc::now(),
                         )?;
+                        had_nonfatal_failure = true;
                         let hold = retry_hold_after_submission_failure(
                             &path,
                             envelope.submission_id,
@@ -4224,16 +4287,18 @@ pub async fn flush_trace_contribution_queue_for_scope(
         Ok(_) => record_trace_queue_status_sync_success_for_scope_unlocked(scope, Utc::now())?,
         Err(error) => {
             record_trace_queue_status_sync_failure_for_scope_unlocked(scope, &error, Utc::now())?;
+            had_nonfatal_failure = true;
             tracing::debug!(%error, "Failed to sync remote Trace Commons credit status");
         }
     }
 
     let credit_notice =
         mark_trace_credit_noticed_if_due_unlocked(scope, policy.credit_notice_interval_hours)?;
-    record_trace_queue_flush_success_for_scope_unlocked(scope, Utc::now())?;
+    record_trace_queue_flush_success_for_scope_unlocked(scope, Utc::now(), !had_nonfatal_failure)?;
     Ok(TraceQueueFlushReport {
         submitted,
         held: holds.len(),
+        compaction,
         holds,
         credit_notice,
     })
@@ -5074,6 +5139,257 @@ fn trace_credit_notice_fingerprint(records: &[LocalTraceSubmissionRecord]) -> Op
     Some(format!("sha256:{}", hex::encode(&hasher.finalize()[..16])))
 }
 
+struct TraceQueueCompactionCandidate {
+    path: PathBuf,
+    envelope: TraceContributionEnvelope,
+    hold: Option<TraceQueueHold>,
+}
+
+fn compact_trace_queue_for_scope_unlocked(
+    scope: Option<&str>,
+) -> anyhow::Result<TraceQueueCompactionReport> {
+    let paths = queued_trace_envelope_paths_for_scope(scope)?;
+    let mut report = TraceQueueCompactionReport {
+        scanned_count: paths.len() as u32,
+        ..Default::default()
+    };
+    let mut candidates = Vec::new();
+    for path in paths {
+        let envelope = match load_trace_envelope(&path) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    path = %path.display(),
+                    "Skipping malformed Trace Commons queue envelope during compaction"
+                );
+                continue;
+            }
+        };
+        let hold = read_trace_queue_hold_sidecar_for_envelope(&path)
+            .ok()
+            .flatten()
+            .and_then(|sidecar| {
+                trace_queue_submission_id_from_envelope_path(&path)
+                    .map(|submission_id| trace_queue_hold_from_sidecar(submission_id, &sidecar))
+            });
+        candidates.push(TraceQueueCompactionCandidate {
+            path,
+            envelope,
+            hold,
+        });
+    }
+
+    let mut by_key: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        by_key
+            .entry(trace_queue_dedupe_key(&candidate.envelope))
+            .or_default()
+            .push(index);
+    }
+
+    let mut remove_paths = BTreeSet::new();
+    for indexes in by_key.values() {
+        if indexes.len() < 2 {
+            continue;
+        }
+        let Some(keep) = indexes
+            .iter()
+            .copied()
+            .max_by_key(|index| trace_queue_compaction_rank(&candidates[*index]))
+        else {
+            continue;
+        };
+        for index in indexes.iter().copied() {
+            if index != keep {
+                remove_paths.insert(candidates[index].path.clone());
+            }
+        }
+    }
+
+    for path in &remove_paths {
+        let hold_path = trace_queue_hold_path_for_envelope_path(path);
+        if hold_path.exists() {
+            std::fs::remove_file(&hold_path).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to remove duplicate queue hold {}: {}",
+                    hold_path.display(),
+                    e
+                )
+            })?;
+        }
+        if path.exists() {
+            std::fs::remove_file(path).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to remove duplicate queue envelope {}: {}",
+                    path.display(),
+                    e
+                )
+            })?;
+            report.duplicate_envelopes_removed =
+                report.duplicate_envelopes_removed.saturating_add(1);
+        }
+    }
+
+    let dir = trace_queue_dir(scope);
+    if dir.exists() {
+        for entry in std::fs::read_dir(&dir)
+            .map_err(|e| anyhow::anyhow!("failed to read queue {}: {}", dir.display(), e))?
+        {
+            let entry = entry.map_err(|e| anyhow::anyhow!("failed to read queue entry: {}", e))?;
+            let path = entry.path();
+            if !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".held.json"))
+            {
+                continue;
+            }
+            let Some(submission_id) = trace_queue_hold_submission_id(&path) else {
+                continue;
+            };
+            let envelope_path = dir.join(format!("{submission_id}.json"));
+            if !envelope_path.exists() {
+                std::fs::remove_file(&path).map_err(|e| {
+                    anyhow::anyhow!(
+                        "failed to remove orphan queue hold {}: {}",
+                        path.display(),
+                        e
+                    )
+                })?;
+                report.orphan_hold_sidecars_removed =
+                    report.orphan_hold_sidecars_removed.saturating_add(1);
+            }
+        }
+    }
+
+    record_trace_queue_compaction_for_scope_unlocked(scope, &report, Utc::now())?;
+    Ok(report)
+}
+
+fn trace_queue_dedupe_key(envelope: &TraceContributionEnvelope) -> String {
+    let mut value = match serde_json::to_value(envelope) {
+        Ok(value) => value,
+        Err(_) => {
+            return canonical_hash(&format!(
+                "unserializable:{}:{}",
+                envelope.trace_id, envelope.submission_id
+            ));
+        }
+    };
+    if let Value::Object(object) = &mut value {
+        object.remove("submission_id");
+        object.remove("created_at");
+    }
+    match serde_json::to_string(&value) {
+        Ok(canonical) => canonical_hash(&canonical),
+        Err(_) => canonical_hash(&format!(
+            "unserializable:{}:{}",
+            envelope.trace_id, envelope.submission_id
+        )),
+    }
+}
+
+fn trace_queue_compaction_rank(candidate: &TraceQueueCompactionCandidate) -> (u8, u32, i64, i64) {
+    let hold_rank = candidate.hold.as_ref().map_or(0, |_| 1);
+    let attempts = candidate.hold.as_ref().map_or(0, |hold| hold.attempts);
+    let next_retry = candidate
+        .hold
+        .as_ref()
+        .and_then(|hold| hold.next_retry_at)
+        .map(|at| at.timestamp_millis())
+        .unwrap_or(0);
+    (
+        hold_rank,
+        attempts,
+        next_retry,
+        candidate.envelope.created_at.timestamp_millis(),
+    )
+}
+
+fn trace_queue_warnings_for_scope_unlocked(
+    scope: Option<&str>,
+) -> anyhow::Result<Vec<TraceQueueWarning>> {
+    let mut counts: BTreeMap<TraceQueueWarningKind, u32> = BTreeMap::new();
+    for path in queued_trace_envelope_paths_for_scope(scope)? {
+        let envelope = match load_trace_envelope(&path) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    path = %path.display(),
+                    "Trace Commons queue diagnostics found malformed envelope"
+                );
+                *counts
+                    .entry(TraceQueueWarningKind::MalformedEnvelope)
+                    .or_default() += 1;
+                continue;
+            }
+        };
+        if envelope.schema_version != TRACE_CONTRIBUTION_SCHEMA_VERSION {
+            *counts
+                .entry(TraceQueueWarningKind::SchemaVersionMismatch)
+                .or_default() += 1;
+        }
+        if envelope.consent.policy_version != TRACE_CONTRIBUTION_POLICY_VERSION {
+            *counts
+                .entry(TraceQueueWarningKind::PolicyVersionMismatch)
+                .or_default() += 1;
+        }
+        if !trace_queue_redaction_pipeline_supported(&envelope.privacy.redaction_pipeline_version) {
+            *counts
+                .entry(TraceQueueWarningKind::RedactionPipelineMismatch)
+                .or_default() += 1;
+        }
+        if envelope.trace_card.redaction_pipeline_version
+            != envelope.privacy.redaction_pipeline_version
+        {
+            *counts
+                .entry(TraceQueueWarningKind::TraceCardRedactionPipelineMismatch)
+                .or_default() += 1;
+        }
+    }
+    Ok(counts
+        .into_iter()
+        .map(|(kind, count)| TraceQueueWarning {
+            kind,
+            count,
+            message: trace_queue_warning_message(kind, count),
+        })
+        .collect())
+}
+
+fn trace_queue_warning_message(kind: TraceQueueWarningKind, count: u32) -> String {
+    let label = match kind {
+        TraceQueueWarningKind::SchemaVersionMismatch => "schema version mismatch",
+        TraceQueueWarningKind::PolicyVersionMismatch => "policy version mismatch",
+        TraceQueueWarningKind::RedactionPipelineMismatch => "redaction pipeline mismatch",
+        TraceQueueWarningKind::TraceCardRedactionPipelineMismatch => {
+            "trace card redaction pipeline mismatch"
+        }
+        TraceQueueWarningKind::MalformedEnvelope => "malformed queued envelope",
+    };
+    format!("{count} queued trace(s) have {label}")
+}
+
+fn trace_queue_redaction_pipeline_supported(version: &str) -> bool {
+    let parts = version
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    !parts.is_empty()
+        && parts.contains(&DETERMINISTIC_REDACTION_PIPELINE_VERSION)
+        && parts.iter().all(|part| {
+            matches!(
+                *part,
+                DETERMINISTIC_REDACTION_PIPELINE_VERSION
+                    | PRIVACY_FILTER_SIDECAR_PIPELINE_SUFFIX
+                    | SERVER_RESCRUB_PIPELINE_SUFFIX
+            )
+        })
+}
+
 fn read_trace_queue_telemetry_for_scope_unlocked(
     scope: Option<&str>,
 ) -> anyhow::Result<TraceQueueTelemetry> {
@@ -5129,11 +5445,28 @@ fn record_trace_queue_flush_attempt_for_scope_unlocked(
 fn record_trace_queue_flush_success_for_scope_unlocked(
     scope: Option<&str>,
     now: DateTime<Utc>,
+    clear_failure: bool,
 ) -> anyhow::Result<()> {
     mutate_trace_queue_telemetry_for_scope_unlocked(scope, |telemetry| {
         telemetry.last_successful_flush_at = Some(now);
         telemetry.consecutive_flush_failures = 0;
-        telemetry.last_failure = None;
+        if clear_failure {
+            telemetry.last_failure = None;
+        }
+    })
+}
+
+fn record_trace_queue_compaction_for_scope_unlocked(
+    scope: Option<&str>,
+    report: &TraceQueueCompactionReport,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    mutate_trace_queue_telemetry_for_scope_unlocked(scope, |telemetry| {
+        telemetry.last_compaction_at = Some(now);
+        telemetry.last_compaction = Some(report.clone());
+        telemetry.compaction_reclaimed_items_total = telemetry
+            .compaction_reclaimed_items_total
+            .saturating_add(report.reclaimed_count());
     })
 }
 
@@ -5156,12 +5489,8 @@ fn record_trace_queue_retryable_submission_failure_for_scope_unlocked(
     error: &anyhow::Error,
     now: DateTime<Utc>,
 ) -> anyhow::Result<()> {
-    let failure = trace_queue_telemetry_failure_with_kind(
-        error,
-        now,
-        TraceQueueTelemetryFailureKind::Submission,
-        "submission retry scheduled",
-    );
+    let failure =
+        trace_queue_telemetry_failure_with_label(error, now, "submission retry scheduled");
     mutate_trace_queue_telemetry_for_scope_unlocked(scope, |telemetry| {
         telemetry.retryable_submission_failure_count = telemetry
             .retryable_submission_failure_count
@@ -5202,25 +5531,46 @@ fn trace_queue_telemetry_failure(
     error: &anyhow::Error,
     now: DateTime<Utc>,
 ) -> TraceQueueTelemetryFailure {
-    let message = error.to_string();
-    let kind =
-        if message.contains("opt-in") || message.contains("endpoint") || message.contains("policy")
-        {
-            TraceQueueTelemetryFailureKind::Policy
-        } else if message.contains("not set") || message.contains("token") {
-            TraceQueueTelemetryFailureKind::Credential
-        } else if message.contains("request failed")
-            || message.contains("connection")
-            || message.contains("timed out")
-            || message.contains("dns")
-        {
-            TraceQueueTelemetryFailureKind::Network
-        } else if message.contains("queue") || message.contains("envelope") {
-            TraceQueueTelemetryFailureKind::Queue
-        } else {
-            TraceQueueTelemetryFailureKind::Unknown
-        };
+    let kind = trace_queue_telemetry_failure_kind(error);
     trace_queue_telemetry_failure_with_kind(error, now, kind, "flush failed")
+}
+
+fn trace_queue_telemetry_failure_with_label(
+    error: &anyhow::Error,
+    now: DateTime<Utc>,
+    label: &str,
+) -> TraceQueueTelemetryFailure {
+    let kind = trace_queue_telemetry_failure_kind(error);
+    trace_queue_telemetry_failure_with_kind(error, now, kind, label)
+}
+
+fn trace_queue_telemetry_failure_kind(error: &anyhow::Error) -> TraceQueueTelemetryFailureKind {
+    let message = error.to_string().to_ascii_lowercase();
+    if message.contains("endpoint") || message.contains("invalid trace contribution") {
+        TraceQueueTelemetryFailureKind::Endpoint
+    } else if message.contains("not set")
+        || message.contains("credentials")
+        || message.contains("credential")
+        || message.contains("token")
+    {
+        TraceQueueTelemetryFailureKind::Credential
+    } else if message.contains("rejected by") {
+        TraceQueueTelemetryFailureKind::HttpRejection
+    } else if message.contains("request failed")
+        || message.contains("connection")
+        || message.contains("tcp")
+        || message.contains("dns")
+        || message.contains("timed out")
+        || message.contains("error trying to connect")
+    {
+        TraceQueueTelemetryFailureKind::Network
+    } else if message.contains("opt-in") || message.contains("policy") {
+        TraceQueueTelemetryFailureKind::Policy
+    } else if message.contains("queue") || message.contains("envelope") {
+        TraceQueueTelemetryFailureKind::Queue
+    } else {
+        TraceQueueTelemetryFailureKind::Unknown
+    }
 }
 
 fn trace_queue_telemetry_failure_with_kind(
@@ -5287,7 +5637,7 @@ fn write_trace_queue_hold_sidecar_for_path(
     path: &Path,
     hold: &TraceQueueHold,
 ) -> anyhow::Result<()> {
-    let hold_path = path.with_extension("held.json");
+    let hold_path = trace_queue_hold_path_for_envelope_path(path);
     let body = TraceQueueHoldSidecar {
         envelope: path
             .file_name()
@@ -5367,7 +5717,7 @@ fn trace_queue_next_retry_at(now: DateTime<Utc>, attempts: u32) -> DateTime<Utc>
 fn read_trace_queue_hold_sidecar_for_envelope(
     path: &Path,
 ) -> anyhow::Result<Option<TraceQueueHoldSidecar>> {
-    let hold_path = path.with_extension("held.json");
+    let hold_path = trace_queue_hold_path_for_envelope_path(path);
     if !hold_path.exists() {
         return Ok(None);
     }
@@ -5417,6 +5767,10 @@ fn trace_queue_hold_kind_for_policy_reason(reason: &str) -> TraceQueueHoldKind {
 fn trace_queue_submission_id_from_envelope_path(path: &Path) -> Option<Uuid> {
     let raw = path.file_stem()?.to_str()?;
     Uuid::parse_str(raw).ok()
+}
+
+fn trace_queue_hold_path_for_envelope_path(path: &Path) -> PathBuf {
+    path.with_extension("held.json")
 }
 
 fn trace_queue_error_hash_from_reason(reason: &str) -> Option<String> {
@@ -7486,6 +7840,345 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queue_flush_compacts_duplicate_envelopes_and_orphan_holds_before_submit() {
+        let scope = format!("trace-queue-compaction-test-{}", Uuid::new_v4());
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+            bearer_token_env: "TRACE_COMMONS_MISSING_TOKEN".to_string(),
+            auto_submit_high_value_traces: true,
+            min_submission_score: 0.0,
+            ..Default::default()
+        };
+        write_trace_policy_for_scope(Some(&scope), &policy).expect("policy writes");
+
+        let raw = RawTraceContribution::from_recorded_trace(
+            &sample_trace(),
+            RecordedTraceContributionOptions::default(),
+        );
+        let mut older = DeterministicTraceRedactor::default()
+            .redact_trace(raw)
+            .await
+            .expect("redaction should succeed");
+        apply_credit_estimate_to_envelope(&mut older);
+        older.created_at = Utc::now() - chrono::Duration::minutes(5);
+        let older_path =
+            queue_trace_envelope_for_scope(Some(&scope), &older).expect("older queued");
+
+        let mut newer = older.clone();
+        newer.submission_id = Uuid::new_v4();
+        newer.created_at = Utc::now();
+        let newer_path =
+            queue_trace_envelope_for_scope(Some(&scope), &newer).expect("newer queued");
+
+        let orphan_id = Uuid::new_v4();
+        let orphan_path = trace_queue_dir(Some(&scope)).join(format!("{orphan_id}.held.json"));
+        std::fs::write(
+            &orphan_path,
+            serde_json::json!({ "reason": "old sidecar" }).to_string(),
+        )
+        .expect("orphan hold writes");
+
+        let report = flush_trace_contribution_queue_for_scope(Some(&scope), 10)
+            .await
+            .expect("flush handles retryable submit failure after compaction");
+
+        assert_eq!(report.compaction.duplicate_envelopes_removed, 1);
+        assert_eq!(report.compaction.orphan_hold_sidecars_removed, 1);
+        assert!(!older_path.exists(), "older duplicate should be removed");
+        assert!(newer_path.exists(), "newest duplicate should remain queued");
+        assert!(
+            !orphan_path.exists(),
+            "orphan hold sidecar should be removed"
+        );
+
+        let diagnostics = trace_queue_diagnostics_for_scope(Some(&scope)).expect("diagnostics");
+        assert_eq!(diagnostics.queued_count, 1);
+        assert_eq!(
+            diagnostics
+                .telemetry
+                .last_compaction
+                .as_ref()
+                .expect("last compaction is recorded")
+                .duplicate_envelopes_removed,
+            1
+        );
+        assert_eq!(diagnostics.telemetry.compaction_reclaimed_items_total, 2);
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[tokio::test]
+    async fn queue_compaction_keeps_same_trace_when_semantic_metadata_differs() {
+        let scope = format!("trace-queue-exact-compaction-test-{}", Uuid::new_v4());
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+            bearer_token_env: "TRACE_COMMONS_MISSING_TOKEN".to_string(),
+            auto_submit_high_value_traces: true,
+            min_submission_score: 0.0,
+            ..Default::default()
+        };
+        write_trace_policy_for_scope(Some(&scope), &policy).expect("policy writes");
+
+        let raw = RawTraceContribution::from_recorded_trace(
+            &sample_trace(),
+            RecordedTraceContributionOptions::default(),
+        );
+        let mut base = DeterministicTraceRedactor::default()
+            .redact_trace(raw)
+            .await
+            .expect("redaction should succeed");
+        apply_credit_estimate_to_envelope(&mut base);
+        base.created_at = Utc::now() - chrono::Duration::minutes(5);
+        let base_path = queue_trace_envelope_for_scope(Some(&scope), &base).expect("base queued");
+
+        let mut changed = base.clone();
+        changed.submission_id = Uuid::new_v4();
+        changed.created_at = Utc::now();
+        changed.outcome.task_success = TaskSuccess::Failure;
+        changed
+            .value_card
+            .limitations
+            .push("Different replay utility metadata.".to_string());
+        changed.trace_card.redaction_pipeline_version = "legacy-trace-card-redactor".to_string();
+        let changed_path =
+            queue_trace_envelope_for_scope(Some(&scope), &changed).expect("changed queued");
+
+        let report = flush_trace_contribution_queue_for_scope(Some(&scope), 10)
+            .await
+            .expect("flush handles retryable submit failures");
+
+        assert_eq!(report.compaction.duplicate_envelopes_removed, 0);
+        assert!(base_path.exists(), "base envelope should remain queued");
+        assert!(
+            changed_path.exists(),
+            "semantically different envelope should remain queued"
+        );
+
+        let diagnostics = trace_queue_diagnostics_for_scope(Some(&scope)).expect("diagnostics");
+        assert_eq!(diagnostics.queued_count, 2);
+        assert!(
+            diagnostics.warnings.iter().any(|warning| {
+                warning.kind == TraceQueueWarningKind::TraceCardRedactionPipelineMismatch
+            }),
+            "warning from changed envelope should not be hidden by compaction"
+        );
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[tokio::test]
+    async fn queue_compaction_failure_records_sanitized_queue_telemetry() {
+        let scope = format!("trace-queue-compaction-failure-test-{}", Uuid::new_v4());
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+            bearer_token_env: "TRACE_COMMONS_MISSING_TOKEN".to_string(),
+            auto_submit_high_value_traces: true,
+            min_submission_score: 0.0,
+            ..Default::default()
+        };
+        write_trace_policy_for_scope(Some(&scope), &policy).expect("policy writes");
+
+        let raw = RawTraceContribution::from_recorded_trace(
+            &sample_trace(),
+            RecordedTraceContributionOptions::default(),
+        );
+        let mut older = DeterministicTraceRedactor::default()
+            .redact_trace(raw)
+            .await
+            .expect("redaction should succeed");
+        apply_credit_estimate_to_envelope(&mut older);
+        older.created_at = Utc::now() - chrono::Duration::minutes(5);
+        let older_path =
+            queue_trace_envelope_for_scope(Some(&scope), &older).expect("older queued");
+
+        let mut newer = older.clone();
+        newer.submission_id = Uuid::new_v4();
+        newer.created_at = Utc::now();
+        let _newer_path =
+            queue_trace_envelope_for_scope(Some(&scope), &newer).expect("newer queued");
+
+        let older_hold_path = trace_queue_hold_path_for_envelope_path(&older_path);
+        std::fs::create_dir_all(&older_hold_path).expect("hold directory fixture creates");
+
+        let error = flush_trace_contribution_queue_for_scope(Some(&scope), 10)
+            .await
+            .expect_err("compaction hold removal failure should fail flush");
+        assert!(error.to_string().contains("duplicate queue hold"));
+
+        let diagnostics = trace_queue_diagnostics_for_scope(Some(&scope)).expect("diagnostics");
+        let failure = diagnostics
+            .telemetry
+            .last_failure
+            .as_ref()
+            .expect("compaction failure is recorded");
+        assert_eq!(failure.kind, TraceQueueTelemetryFailureKind::Queue);
+        assert!(failure.reason.contains("flush failed"));
+        assert!(!failure.reason.contains(&scope));
+        assert!(!failure.reason.contains("TRACE_COMMONS_MISSING_TOKEN"));
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[tokio::test]
+    async fn queue_diagnostics_reports_schema_policy_and_redaction_warnings() {
+        let scope = format!("trace-queue-warning-test-{}", Uuid::new_v4());
+        write_trace_policy_for_scope(
+            Some(&scope),
+            &StandingTraceContributionPolicy {
+                enabled: true,
+                ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("policy writes");
+
+        let raw = RawTraceContribution::from_recorded_trace(
+            &sample_trace(),
+            RecordedTraceContributionOptions::default(),
+        );
+        let mut envelope = DeterministicTraceRedactor::default()
+            .redact_trace(raw)
+            .await
+            .expect("redaction should succeed");
+        envelope.schema_version = "ironclaw.trace_contribution.v0".to_string();
+        envelope.consent.policy_version = "2025-01-01".to_string();
+        envelope.privacy.redaction_pipeline_version = "legacy-redactor".to_string();
+        envelope.trace_card.redaction_pipeline_version = "legacy-redactor".to_string();
+        queue_trace_envelope_for_scope(Some(&scope), &envelope).expect("queued envelope writes");
+
+        let diagnostics = trace_queue_diagnostics_for_scope(Some(&scope)).expect("diagnostics");
+        assert!(
+            diagnostics
+                .warnings
+                .iter()
+                .any(|warning| warning.kind == TraceQueueWarningKind::SchemaVersionMismatch)
+        );
+        assert!(
+            diagnostics
+                .warnings
+                .iter()
+                .any(|warning| warning.kind == TraceQueueWarningKind::PolicyVersionMismatch)
+        );
+        assert!(
+            diagnostics
+                .warnings
+                .iter()
+                .any(|warning| warning.kind == TraceQueueWarningKind::RedactionPipelineMismatch)
+        );
+        let serialized = serde_json::to_string(&diagnostics).expect("diagnostics serialize");
+        assert!(!serialized.contains("legacy-redactor"));
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[tokio::test]
+    async fn queue_telemetry_classifies_endpoint_credential_and_network_failures() {
+        let endpoint_scope = format!("trace-queue-endpoint-classification-{}", Uuid::new_v4());
+        write_trace_policy_for_scope(
+            Some(&endpoint_scope),
+            &StandingTraceContributionPolicy {
+                enabled: true,
+                ingestion_endpoint: None,
+                ..Default::default()
+            },
+        )
+        .expect("endpoint policy writes");
+        let endpoint_result =
+            flush_trace_contribution_queue_for_scope(Some(&endpoint_scope), 10).await;
+        assert!(endpoint_result.is_err());
+        let endpoint_diagnostics =
+            trace_queue_diagnostics_for_scope(Some(&endpoint_scope)).expect("diagnostics");
+        assert_eq!(
+            endpoint_diagnostics
+                .telemetry
+                .last_failure
+                .as_ref()
+                .expect("endpoint failure recorded")
+                .kind,
+            TraceQueueTelemetryFailureKind::Endpoint
+        );
+
+        let credential_scope = format!("trace-queue-credential-classification-{}", Uuid::new_v4());
+        write_trace_policy_for_scope(
+            Some(&credential_scope),
+            &StandingTraceContributionPolicy {
+                enabled: true,
+                ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                bearer_token_env: "TRACE_COMMONS_MISSING_TOKEN".to_string(),
+                auto_submit_high_value_traces: true,
+                min_submission_score: 0.0,
+                ..Default::default()
+            },
+        )
+        .expect("credential policy writes");
+        let raw = RawTraceContribution::from_recorded_trace(
+            &sample_trace(),
+            RecordedTraceContributionOptions::default(),
+        );
+        let mut envelope = DeterministicTraceRedactor::default()
+            .redact_trace(raw)
+            .await
+            .expect("redaction should succeed");
+        apply_credit_estimate_to_envelope(&mut envelope);
+        queue_trace_envelope_for_scope(Some(&credential_scope), &envelope)
+            .expect("queued envelope writes");
+        flush_trace_contribution_queue_for_scope(Some(&credential_scope), 10)
+            .await
+            .expect("credential submission failure is held for retry");
+        let credential_diagnostics =
+            trace_queue_diagnostics_for_scope(Some(&credential_scope)).expect("diagnostics");
+        assert_eq!(
+            credential_diagnostics
+                .telemetry
+                .last_failure
+                .as_ref()
+                .expect("credential failure recorded")
+                .kind,
+            TraceQueueTelemetryFailureKind::Credential
+        );
+
+        let network_scope = format!("trace-queue-network-classification-{}", Uuid::new_v4());
+        let _token_guard = EnvVarRestore::set("TRACE_COMMONS_TEST_TOKEN", "super-secret-token");
+        write_trace_policy_for_scope(
+            Some(&network_scope),
+            &StandingTraceContributionPolicy {
+                enabled: true,
+                ingestion_endpoint: Some("http://127.0.0.1:9/v1/traces".to_string()),
+                bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
+                auto_submit_high_value_traces: true,
+                min_submission_score: 0.0,
+                ..Default::default()
+            },
+        )
+        .expect("network policy writes");
+        let mut envelope = envelope.clone();
+        envelope.submission_id = Uuid::new_v4();
+        queue_trace_envelope_for_scope(Some(&network_scope), &envelope)
+            .expect("queued envelope writes");
+        flush_trace_contribution_queue_for_scope(Some(&network_scope), 10)
+            .await
+            .expect("network submission failure is held for retry");
+        let network_diagnostics =
+            trace_queue_diagnostics_for_scope(Some(&network_scope)).expect("diagnostics");
+        assert_eq!(
+            network_diagnostics
+                .telemetry
+                .last_failure
+                .as_ref()
+                .expect("network failure recorded")
+                .kind,
+            TraceQueueTelemetryFailureKind::Network
+        );
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&endpoint_scope)));
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&credential_scope)));
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&network_scope)));
+    }
+
+    #[tokio::test]
     async fn trace_queue_worker_tick_flushes_scopes_and_returns_credit_notices_for_delivery() {
         let scope = format!("trace-worker-tick-test-{}", Uuid::new_v4());
         let _token_guard = EnvVarRestore::set("TRACE_COMMONS_TEST_TOKEN", "super-secret-token");
@@ -7583,7 +8276,7 @@ mod tests {
             .last_failure
             .as_ref()
             .expect("failure metadata is stored");
-        assert_eq!(failure.kind, TraceQueueTelemetryFailureKind::Policy);
+        assert_eq!(failure.kind, TraceQueueTelemetryFailureKind::Endpoint);
         assert!(failure.reason.contains("flush failed"));
         assert!(!failure.reason.contains(&scope));
 

@@ -2149,6 +2149,22 @@ fn show_queue_status(json: bool, scope: Option<&str>) -> anyhow::Result<()> {
     if let Some(next_retry_at) = diagnostics.queue.next_retry_at {
         println!("  next retry at: {}", next_retry_at.to_rfc3339());
     }
+    if let Some(compaction) = &diagnostics.queue.telemetry.last_compaction {
+        println!(
+            "  last compaction reclaimed: {} item(s)",
+            compaction
+                .duplicate_envelopes_removed
+                .saturating_add(compaction.orphan_hold_sidecars_removed)
+        );
+        println!(
+            "    duplicate envelopes removed: {}",
+            compaction.duplicate_envelopes_removed
+        );
+        println!(
+            "    orphan hold sidecars removed: {}",
+            compaction.orphan_hold_sidecars_removed
+        );
+    }
     if let Some(at) = diagnostics.queue.telemetry.last_flush_attempt_at {
         println!("  last flush attempt: {}", at.to_rfc3339());
     }
@@ -2189,6 +2205,12 @@ fn show_queue_status(json: bool, scope: Option<&str>) -> anyhow::Result<()> {
             "  last telemetry failure: {:?} {}",
             failure.kind, failure.reason
         );
+    }
+    if !diagnostics.queue.warnings.is_empty() {
+        println!("  queue warnings:");
+        for warning in &diagnostics.queue.warnings {
+            println!("    {:?}: {}", warning.kind, warning.message);
+        }
     }
     println!("  submitted records: {}", diagnostics.queue.submitted_count);
     println!("  revoked records: {}", diagnostics.queue.revoked_count);
