@@ -76,6 +76,58 @@ async fn resolve_job_id(input: &str, context_manager: &ContextManager) -> Result
     }
 }
 
+fn optional_nonempty_str<'a>(params: &'a serde_json::Value, name: &str) -> Option<&'a str> {
+    params
+        .get(name)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn derive_job_title(text: &str) -> String {
+    let first_line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or(text.trim());
+    let mut title = first_line.chars().take(100).collect::<String>();
+    if title.is_empty() {
+        title = "Untitled job".to_string();
+    }
+    title
+}
+
+fn resolve_job_title_and_description(
+    params: &serde_json::Value,
+) -> Result<(String, String), ToolError> {
+    let description = optional_nonempty_str(params, "description")
+        .or_else(|| optional_nonempty_str(params, "task"))
+        .or_else(|| optional_nonempty_str(params, "prompt"))
+        .map(ToOwned::to_owned);
+
+    let title = optional_nonempty_str(params, "title")
+        .map(ToOwned::to_owned)
+        .or_else(|| description.as_deref().map(derive_job_title));
+
+    match (title, description) {
+        (Some(title), Some(description)) => Ok((title, description)),
+        (None, _) => Err(ToolError::InvalidParameters(
+            "missing 'title' parameter".to_string(),
+        )),
+        (_, None) => Err(ToolError::InvalidParameters(
+            "missing 'description' parameter".to_string(),
+        )),
+    }
+}
+
+fn user_facing_job_creation_error(error: &crate::error::OrchestratorError) -> String {
+    if let Some(reason) = error.capability_contract_reason() {
+        reason.to_string()
+    } else {
+        format!("failed to create container: {}", error)
+    }
+}
+
 /// Tool for creating a new job.
 ///
 /// When sandbox deps are injected (via `with_sandbox`), the tool automatically
@@ -497,16 +549,17 @@ impl CreateJobTool {
             .create_job(job_id, task, Some(project_dir), mode, params)
             .await
             .map_err(|e| {
+                let user_message = user_facing_job_creation_error(&e);
                 self.update_status(
                     job_id,
                     "failed",
                     Some(false),
-                    Some(e.to_string()),
+                    Some(user_message.clone()),
                     None,
                     Some(Utc::now()),
                 );
-                self.update_context_state(job_id, JobState::Failed, Some(e.to_string()));
-                ToolError::ExecutionFailed(format!("failed to create container: {}", e))
+                self.update_context_state(job_id, JobState::Failed, Some(user_message.clone()));
+                ToolError::ExecutionFailed(user_message)
             })?;
 
         // Container started successfully.
@@ -598,7 +651,13 @@ impl CreateJobTool {
                             .as_ref()
                             .map(|r| r.success)
                             .unwrap_or(true);
-                        jm.cleanup_job(job_id).await;
+                        let pending_workspace_changes = handle
+                            .pending_workspace_changes
+                            .as_ref()
+                            .map(|payload| payload.summary.clone());
+                        if pending_workspace_changes.is_none() {
+                            jm.cleanup_job(job_id).await;
+                        }
 
                         let finished_at = Utc::now();
                         if success {
@@ -618,6 +677,7 @@ impl CreateJobTool {
                                 "output": message,
                                 "project_dir": project_dir_str,
                                 "browse_url": format!("/projects/{}", browse_id),
+                                "pending_workspace_changes": pending_workspace_changes,
                             });
                             return Ok(ToolOutput::success(result, start.elapsed()));
                         } else {
@@ -984,9 +1044,7 @@ impl Tool for CreateJobTool {
         params: serde_json::Value,
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
-        let title = require_str(&params, "title")?;
-
-        let description = require_str(&params, "description")?;
+        let (title, description) = resolve_job_title_and_description(&params)?;
 
         if self.sandbox_enabled() {
             let wait = params.get("wait").and_then(|v| v.as_bool()).unwrap_or(true);
@@ -1091,7 +1149,7 @@ impl Tool for CreateJobTool {
             )
             .await
         } else {
-            self.execute_local(title, description, ctx).await
+            self.execute_local(&title, &description, ctx).await
         }
     }
 
@@ -1306,6 +1364,100 @@ impl CancelJobTool {
         self.job_manager = Some(job_manager);
         self.store = store;
         self
+    }
+}
+
+pub struct JobApplyChangesTool {
+    context_manager: Arc<ContextManager>,
+    job_manager: Arc<ContainerJobManager>,
+    store: Arc<dyn Database>,
+}
+
+impl JobApplyChangesTool {
+    pub fn new(
+        context_manager: Arc<ContextManager>,
+        job_manager: Arc<ContainerJobManager>,
+        store: Arc<dyn Database>,
+    ) -> Self {
+        Self {
+            context_manager,
+            job_manager,
+            store,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for JobApplyChangesTool {
+    fn name(&self) -> &str {
+        "job_apply_changes"
+    }
+
+    fn description(&self) -> &str {
+        "Apply pending returned workspace changes from a completed sandbox job to the host project after review."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "job_id": {
+                    "type": "string",
+                    "description": "The sandbox job ID (full UUID or short prefix)."
+                }
+            },
+            "required": ["job_id"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+        let requester_id = ctx.user_id.clone();
+        let job_id_str = require_str(&params, "job_id")?;
+        let job_id = resolve_job_id(job_id_str, &self.context_manager).await?;
+
+        let sandbox_job = self
+            .store
+            .get_sandbox_job(job_id)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("failed to load sandbox job: {}", e)))?
+            .ok_or_else(|| ToolError::ExecutionFailed("sandbox job not found".to_string()))?;
+
+        if !sandbox_job.is_owned_by(&requester_id) {
+            return Err(ToolError::ExecutionFailed(
+                "sandbox job not found".to_string(),
+            ));
+        }
+
+        match self
+            .job_manager
+            .apply_pending_workspace_changes(job_id)
+            .await
+        {
+            Ok(Some(applied)) => Ok(ToolOutput::success(
+                serde_json::json!({
+                    "job_id": job_id.to_string(),
+                    "applied_paths": applied.applied_paths,
+                    "deleted_paths": applied.deleted_paths,
+                }),
+                start.elapsed(),
+            )),
+            Ok(None) => Err(ToolError::ExecutionFailed(
+                "no pending workspace changes to apply".to_string(),
+            )),
+            Err(e) => Err(ToolError::ExecutionFailed(format!(
+                "failed to apply returned changes: {}",
+                e.user_facing_message()
+            ))),
+        }
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        false
     }
 }
 
@@ -1692,6 +1844,18 @@ impl Tool for JobPromptTool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_user_facing_job_creation_error_preserves_stage_contract_guidance() {
+        let error = crate::error::OrchestratorError::ContainerCreationFailed {
+            job_id: Uuid::new_v4(),
+            reason: "kubernetes runtime is currently Stage 1 worker runtime. It can run workers, but not jobs that need filtered MCP config because runtime-scoped config delivery is not available yet. Use Docker for jobs that need filtered MCP config.".to_string(),
+        };
+
+        let message = user_facing_job_creation_error(&error);
+        assert!(message.contains("Stage 1 worker runtime"));
+        assert!(!message.contains("failed to create container"));
+    }
+
     #[tokio::test]
     async fn test_create_job_tool_local() {
         let manager = Arc::new(ContextManager::new(5));
@@ -1819,9 +1983,7 @@ mod tests {
         let tool = CreateJobTool::new(manager);
         let ctx = JobContext::default();
 
-        let missing_title = tool
-            .execute(serde_json::json!({ "description": "A test job" }), &ctx)
-            .await;
+        let missing_title = tool.execute(serde_json::json!({}), &ctx).await;
         assert!(missing_title.is_err()); // safety: test
         assert!(
             /* safety: test */
@@ -1829,6 +1991,42 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("missing 'title' parameter")
+        );
+
+        let description_only = tool
+            .execute(serde_json::json!({ "description": "A test job" }), &ctx)
+            .await
+            .expect("description-only params should derive a title"); // safety: test
+        assert_eq!(
+            description_only
+                .result
+                .get("title")
+                .and_then(|v| v.as_str()),
+            Some("A test job")
+        );
+
+        let task_only = tool
+            .execute(
+                serde_json::json!({ "task": "Fix the flaky CI failure on main" }),
+                &ctx,
+            )
+            .await
+            .expect("legacy task param should be accepted"); // safety: test
+        assert_eq!(
+            task_only.result.get("title").and_then(|v| v.as_str()),
+            Some("Fix the flaky CI failure on main")
+        );
+
+        let prompt_only = tool
+            .execute(
+                serde_json::json!({ "prompt": "Investigate why the pod never starts" }),
+                &ctx,
+            )
+            .await
+            .expect("legacy prompt param should be accepted"); // safety: test
+        assert_eq!(
+            prompt_only.result.get("title").and_then(|v| v.as_str()),
+            Some("Investigate why the pod never starts")
         );
 
         let missing_description = tool

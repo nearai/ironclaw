@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>K8s Runtime Allowlist Alignment</title>
+  <style>
+    :root {
+      --bg: #f5f1e8;
+      --panel: #fffaf0;
+      --ink: #1f2a28;
+      --muted: #5d6b68;
+      --accent: #17624b;
+      --line: #d7cfbf;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at top right, rgba(23, 98, 75, 0.10), transparent 28%),
+        linear-gradient(180deg, #f8f5ee 0%, var(--bg) 100%);
+      color: var(--ink);
+      font-family: Georgia, "Iowan Old Style", serif;
+    }
+    main {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 48px 24px 64px;
+    }
+    .hero {
+      padding: 28px 32px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 24px;
+      box-shadow: 0 24px 60px rgba(31, 42, 40, 0.08);
+    }
+    .eyebrow {
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      font-size: 12px;
+      margin-bottom: 14px;
+    }
+    h1 {
+      margin: 0 0 14px;
+      font-size: 44px;
+      line-height: 1.08;
+    }
+    .lead {
+      margin: 0;
+      font-size: 20px;
+      line-height: 1.5;
+      color: var(--muted);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 28px;
+    }
+    .card {
+      padding: 24px 22px;
+      border-radius: 20px;
+      border: 1px solid var(--line);
+      background: rgba(255, 250, 240, 0.92);
+      min-height: 240px;
+    }
+    .card h2 {
+      margin: 0 0 12px;
+      font-size: 24px;
+    }
+    .card p {
+      margin: 0 0 12px;
+      line-height: 1.55;
+      color: var(--muted);
+      font-size: 17px;
+    }
+    .pill {
+      display: inline-block;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(23, 98, 75, 0.10);
+      color: var(--accent);
+      font-size: 13px;
+      margin-bottom: 12px;
+    }
+    .footer {
+      margin-top: 28px;
+      padding: 20px 24px;
+      border-radius: 18px;
+      background: #1f2a28;
+      color: #f7f0e2;
+      font-size: 18px;
+      line-height: 1.5;
+    }
+    code {
+      font-family: "SFMono-Regular", Menlo, monospace;
+      font-size: 0.9em;
+      background: rgba(23, 98, 75, 0.08);
+      padding: 0.08em 0.32em;
+      border-radius: 6px;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <div class="eyebrow">IronClaw / K8s Runtime</div>
+      <h1>Allowlist gating now matches the real runtime contract</h1>
+      <p class="lead">
+        This change narrows Kubernetes messaging to the rule the code already
+        enforces: allowlist networking depends on native network controls,
+        while projected runtime config stays a separate delivery capability.
+      </p>
+    </section>
+
+    <section class="grid">
+      <article class="card">
+        <div class="pill">Rule 1</div>
+        <h2>Allowlist uses one gate</h2>
+        <p>
+          Kubernetes allowlist-only networking is now described as depending on
+          <code>IRONCLAW_K8S_NATIVE_NETWORK_CONTROLS</code> alone.
+        </p>
+        <p>
+          The older wording that bundled it into a broader “Stage 3
+          prerequisites” message has been removed.
+        </p>
+      </article>
+
+      <article class="card">
+        <div class="pill">Rule 2</div>
+        <h2>Projected config stands alone</h2>
+        <p>
+          <code>IRONCLAW_K8S_PROJECTED_RUNTIME_CONFIG</code> is now described
+          only as runtime config delivery.
+        </p>
+        <p>
+          It no longer reads like an extra prerequisite for Kubernetes
+          allowlist support.
+        </p>
+      </article>
+
+      <article class="card">
+        <div class="pill">Rule 3</div>
+        <h2>Write-back wording is corrected</h2>
+        <p>
+          User-facing text no longer says workspace-write one-shot commands must
+          fall back to Docker.
+        </p>
+        <p>
+          The summary now reflects the shipped behavior: pending workspace
+          changes come back for explicit review and apply.
+        </p>
+      </article>
+    </section>
+
+    <section class="footer">
+      Verified with targeted Rust tests for readiness helpers, capability
+      gating, and <code>doctor</code> output strings.
+    </section>
+  </main>
+</body>
+</html>

@@ -91,6 +91,11 @@ pub fn custom_secret_name(provider_id: &str) -> String {
     format!("llm_custom_{provider_id}_api_key")
 }
 
+/// Canonical secret name for the platform-scoped Kubernetes kubeconfig.
+pub fn kubernetes_platform_kubeconfig_secret_name() -> &'static str {
+    "sandbox_kubernetes_kubeconfig"
+}
+
 /// User settings persisted to disk.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Settings {
@@ -712,10 +717,10 @@ impl Default for WasmSettings {
     }
 }
 
-/// Docker sandbox configuration.
+/// Container sandbox configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxSettings {
-    /// Whether the Docker sandbox is enabled.
+    /// Whether the container sandbox is enabled.
     #[serde(default = "default_true")]
     pub enabled: bool,
 
@@ -735,7 +740,7 @@ pub struct SandboxSettings {
     #[serde(default = "default_sandbox_cpu_shares")]
     pub cpu_shares: u32,
 
-    /// Docker image for the sandbox.
+    /// Container image for the sandbox.
     #[serde(default = "default_sandbox_image")]
     pub image: String,
 
@@ -754,6 +759,16 @@ pub struct SandboxSettings {
     /// Whether ACP (Agent Client Protocol) agent mode is enabled.
     #[serde(default)]
     pub acp_enabled: bool,
+
+    /// Container runtime backend: "docker" or "kubernetes".
+    /// When None, falls through to CONTAINER_RUNTIME env var then compiled features default.
+    #[serde(default)]
+    pub container_runtime: Option<String>,
+
+    /// Kubernetes namespace for worker pods.
+    /// When None, falls through to IRONCLAW_K8S_NAMESPACE env var then default "ironclaw".
+    #[serde(default)]
+    pub k8s_namespace: Option<String>,
 }
 
 fn default_sandbox_policy() -> String {
@@ -789,6 +804,8 @@ impl Default for SandboxSettings {
             extra_allowed_domains: Vec::new(),
             claude_code_enabled: false,
             acp_enabled: false,
+            container_runtime: None,
+            k8s_namespace: None,
         }
     }
 }
@@ -2831,6 +2848,14 @@ mod tests {
             base.selected_model.as_deref(),
             Some("toml-model"),
             "TOML selected_model should be preserved when DB has no value"
+        );
+    }
+
+    #[test]
+    fn kubernetes_platform_kubeconfig_secret_name_is_stable() {
+        assert_eq!(
+            kubernetes_platform_kubeconfig_secret_name(),
+            "sandbox_kubernetes_kubeconfig"
         );
     }
 

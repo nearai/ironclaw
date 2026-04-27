@@ -68,6 +68,22 @@ fn check_mode_enabled(mode: JobMode, jm: &ContainerJobManager) -> Result<(), (St
     }
 }
 
+fn sandbox_job_creation_error_response(
+    error: &crate::error::OrchestratorError,
+) -> (StatusCode, String) {
+    if let Some(reason) = error.capability_contract_reason() {
+        (StatusCode::CONFLICT, reason.to_string())
+    } else {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "Failed to create container: {}",
+                error.user_facing_message()
+            ),
+        )
+    }
+}
+
 pub async fn jobs_list_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
@@ -246,6 +262,13 @@ pub async fn jobs_detail_handler(
             let supports_prompts = mode
                 .as_deref()
                 .is_some_and(|m| m == "claude_code" || m.starts_with("acp"));
+            let pending_workspace_changes = if let Some(ref jm) = state.job_manager {
+                jm.pending_workspace_changes(job.id)
+                    .await
+                    .map(|payload| payload.summary)
+            } else {
+                None
+            };
 
             return Ok(Json(JobDetailResponse {
                 id: job.id,
@@ -264,6 +287,7 @@ pub async fn jobs_detail_handler(
                 can_restart: state.job_manager.is_some(),
                 can_prompt: supports_prompts && state.prompt_queue.is_some(),
                 job_kind: Some("sandbox".to_string()),
+                pending_workspace_changes,
             }));
         }
         Ok(None) => {}
@@ -318,10 +342,51 @@ pub async fn jobs_detail_handler(
                 can_restart: state.scheduler.is_some(),
                 can_prompt: is_promptable && state.scheduler.is_some(),
                 job_kind: Some("agent".to_string()),
+                pending_workspace_changes: None,
             }))
         }
         Ok(None) => Err((StatusCode::NOT_FOUND, "Job not found".to_string())),
         Err(e) => Err(db_error("jobs_handler", e)),
+    }
+}
+
+pub async fn jobs_apply_changes_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+    Path(id): Path<String>,
+) -> Result<Json<ApplyWorkspaceChangesResponse>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+    let jm = state.job_manager.as_ref().ok_or((
+        StatusCode::CONFLICT,
+        "Sandbox job manager not available".to_string(),
+    ))?;
+
+    let job_id = Uuid::parse_str(&id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
+
+    let job = store
+        .get_sandbox_job(job_id)
+        .await
+        .map_err(|e| db_error("jobs_apply_changes_handler", e))?
+        .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
+
+    if !job.is_owned_by(&user.user_id) {
+        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+    }
+
+    match jm.apply_pending_workspace_changes(job_id).await {
+        Ok(Some(applied)) => Ok(Json(ApplyWorkspaceChangesResponse {
+            applied_paths: applied.applied_paths,
+            deleted_paths: applied.deleted_paths,
+        })),
+        Ok(None) => Err((
+            StatusCode::CONFLICT,
+            "No pending workspace changes to apply".to_string(),
+        )),
+        Err(e) => Err(sandbox_job_creation_error_response(&e)),
     }
 }
 
@@ -560,7 +625,7 @@ pub async fn jobs_restart_handler(
             let _token = match create_result {
                 Ok(token) => token,
                 Err(e) => {
-                    let error_text = e.to_string();
+                    let error_text = e.user_facing_message();
                     let _ = store
                         .update_sandbox_job_status(
                             new_job_id,
@@ -571,10 +636,7 @@ pub async fn jobs_restart_handler(
                             Some(chrono::Utc::now()),
                         )
                         .await;
-                    return Err((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Failed to create container: {}", error_text),
-                    ));
+                    return Err(sandbox_job_creation_error_response(&e));
                 }
             };
 
@@ -1048,5 +1110,30 @@ mod tests {
         let jm = make_job_manager(false, false);
         let result = check_mode_enabled(JobMode::Worker, &jm);
         assert!(result.is_ok(), "worker mode should always be allowed");
+    }
+
+    #[test]
+    fn test_sandbox_job_creation_error_response_preserves_contract_guidance() {
+        let error = crate::error::OrchestratorError::ContainerCreationFailed {
+            job_id: Uuid::new_v4(),
+            reason: "kubernetes runtime is currently Stage 1 worker runtime. It can run workers, but not project-backed jobs because project content is not available yet. Use Docker for jobs that need a project directory.".to_string(),
+        };
+
+        let (status, body) = sandbox_job_creation_error_response(&error);
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.contains("Stage 1 worker runtime"));
+        assert!(!body.contains("Failed to create container"));
+    }
+
+    #[test]
+    fn test_sandbox_job_creation_error_response_keeps_internal_failures_internal() {
+        let error = crate::error::OrchestratorError::ContainerCreationFailed {
+            job_id: Uuid::new_v4(),
+            reason: "failed to write bootstrap file".to_string(),
+        };
+
+        let (status, body) = sandbox_job_creation_error_response(&error);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body.contains("Failed to create container"));
     }
 }

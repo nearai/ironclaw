@@ -47,7 +47,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Bonjour/mDNS discovery | ✅ | ❌ | |
 | Tailscale integration | ✅ | ❌ | |
 | Health check endpoints | ✅ | ✅ | /api/health + /api/gateway/status + /healthz + /readyz, with channel-backed readiness probes |
-| `doctor` diagnostics | ✅ | 🚧 | 16 checks: settings, LLM, DB, embeddings, routines, gateway, MCP, skills, secrets, service, Docker daemon, tunnel binaries |
+| `doctor` diagnostics | ✅ | 🚧 | 17 checks: settings, LLM, DB, embeddings, routines, gateway, MCP, skills, secrets, service, Docker daemon, Kubernetes cluster, tunnel binaries |
 | Agent event broadcast | ✅ | 🚧 | SSE broadcast manager exists (SseManager) but tool/job-state events not fully wired |
 | Channel health monitor | ✅ | ❌ | Auto-restart with configurable interval |
 | Presence system | ✅ | ❌ | Beacons on connect, system presence for agents |
@@ -484,6 +484,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Cron webhook SSRF guard | ✅ | ❌ | SSRF checks on webhook delivery |
 | Loopback-first | ✅ | 🚧 | HTTP binds 0.0.0.0 |
 | Docker sandbox | ✅ | ✅ | Orchestrator/worker containers |
+| Kubernetes runtime | ❌ | 🚧 | Stage 2 project-backed runtime via `--features kubernetes`; lifecycle/exec/logs work, project-backed jobs receive orchestrator-served workspace/config bootstrap, host-side Kubernetes auth now resolves in-cluster first then encrypted platform kubeconfig secret then local/default kubeconfig fallback, completed jobs can return explicit workspace changes for review and apply, one-shot sandbox commands with uploaded workspaces can now return pending workspace-write changes for explicit apply instead of silently writing back, projected runtime config can use projected file delivery when declared ready, allowlist-only sandbox flows depend on native network controls, doctor reports credential source plus the two cluster-side signals separately |
 | Podman support | ✅ | ❌ | Alternative to Docker |
 | WASM sandbox | ❌ | ✅ | IronClaw innovation |
 | Sandbox env sanitization | ✅ | 🚧 | Shell tool scrubs env vars (secret detection); docker container env sanitization partial |
@@ -547,6 +548,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ✅ Slack channel (WASM tool)
 - ✅ Telegram channel (WASM tool, MTProto)
 - ✅ Docker sandbox (orchestrator/worker)
+- 🚧 Kubernetes runtime (Stage 2 project-backed runtime; project-backed jobs work via bootstrap artifacts, returned edits now flow through explicit review/apply, one-shot sandbox commands with uploaded workspaces can return pending workspace-write changes for explicit apply, projected runtime config can use projected file delivery when declared ready, allowlist-only sandbox flows depend on native network controls, doctor reports the two cluster-side signals separately)
 - ✅ Cron job scheduling (routines)
 - ✅ CLI subcommands (onboard, config, status, memory)
 - ✅ Gateway token auth

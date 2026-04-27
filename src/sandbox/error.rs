@@ -1,4 +1,4 @@
-//! Error types for the Docker execution sandbox.
+//! Error types for the container execution sandbox.
 
 use std::time::Duration;
 
@@ -41,7 +41,12 @@ pub enum SandboxError {
     #[error("Credential injection failed for {domain}: {reason}")]
     CredentialInjectionFailed { domain: String, reason: String },
 
+    /// Container runtime error (generic).
+    #[error("Runtime error: {reason}")]
+    Runtime { reason: String },
+
     /// Docker API error.
+    #[cfg(feature = "docker")]
     #[error("Docker API error: {0}")]
     Docker(#[from] bollard::errors::Error),
 

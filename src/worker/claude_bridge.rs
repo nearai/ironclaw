@@ -37,6 +37,10 @@ use uuid::Uuid;
 
 use crate::error::WorkerError;
 use crate::worker::api::{CompletionReport, JobEventPayload, PromptResponse, WorkerHttpClient};
+use crate::worker::workspace_materializer::{bootstrap_start_message, materialize_job_bootstrap};
+use crate::workspace_changes::{
+    WorkspaceChangesPayload, build_workspace_changes_payload, capture_workspace_snapshot,
+};
 
 /// Configuration for the Claude bridge runtime.
 pub struct ClaudeBridgeConfig {
@@ -207,6 +211,16 @@ impl ClaudeBridgeRuntime {
 
     /// Run the bridge: fetch job, spawn claude, stream events, handle follow-ups.
     pub async fn run(&self) -> Result<(), WorkerError> {
+        let bootstrap_manifest = materialize_job_bootstrap(self.client.as_ref()).await?;
+        if let Some(manifest) = bootstrap_manifest.as_ref() {
+            tracing::info!(
+                job_id = %self.config.job_id,
+                source = %manifest.provenance.snapshot_source,
+                artifacts = manifest.artifacts.len(),
+                "Materialized bootstrap artifacts for Claude bridge"
+            );
+        }
+
         // Copy auth files from read-only host mount (if present) into the
         // writable home directory before Claude Code needs them.
         self.copy_auth_from_mount()?;
@@ -215,6 +229,10 @@ impl ClaudeBridgeRuntime {
         // This replaces --dangerously-skip-permissions with defense-in-depth:
         // only the listed tools are auto-approved, unknown tools fail safely.
         self.write_permission_settings()?;
+        let workspace_snapshot = capture_workspace_snapshot(std::path::Path::new("/workspace"))
+            .map_err(|e| WorkerError::ExecutionFailed {
+                reason: format!("failed to capture baseline workspace snapshot: {e}"),
+            })?;
 
         // Fetch the job description from the orchestrator
         let job = self.client.get_job().await?;
@@ -257,7 +275,10 @@ impl ClaudeBridgeRuntime {
         self.client
             .report_status(&crate::worker::api::StatusUpdate {
                 state: "running".to_string(),
-                message: Some("Spawning Claude Code".to_string()),
+                message: Some(bootstrap_start_message(
+                    bootstrap_manifest.as_ref(),
+                    "Spawning Claude Code",
+                )),
                 iteration: 0,
             })
             .await?;
@@ -275,6 +296,10 @@ impl ClaudeBridgeRuntime {
                         success: false,
                         message: Some(format!("Claude Code failed: {}", e)),
                         iterations: 1,
+                        workspace_changes: self.workspace_changes_payload(
+                            &workspace_snapshot,
+                            bootstrap_manifest.as_ref(),
+                        )?,
                     })
                     .await?;
                 return Ok(());
@@ -333,10 +358,29 @@ impl ClaudeBridgeRuntime {
                 success: true,
                 message: Some("Claude Code session completed".to_string()),
                 iterations: iteration,
+                workspace_changes: self
+                    .workspace_changes_payload(&workspace_snapshot, bootstrap_manifest.as_ref())?,
             })
             .await?;
 
         Ok(())
+    }
+
+    fn workspace_changes_payload(
+        &self,
+        baseline: &crate::workspace_changes::WorkspaceSnapshot,
+        manifest: Option<&crate::worker::api::BootstrapManifest>,
+    ) -> Result<Option<WorkspaceChangesPayload>, WorkerError> {
+        build_workspace_changes_payload(
+            std::path::Path::new("/workspace"),
+            baseline,
+            manifest.map(|m| m.provenance.generated_at.clone()),
+            manifest.map(|m| m.provenance.snapshot_source.clone()),
+            manifest.and_then(|m| m.provenance.project_dir.clone()),
+        )
+        .map_err(|e| WorkerError::ExecutionFailed {
+            reason: format!("failed to build returned workspace changes: {e}"),
+        })
     }
 
     /// Spawn a `claude` CLI process and stream its output.

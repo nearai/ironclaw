@@ -1,4 +1,4 @@
-//! Configuration for the Docker execution sandbox.
+//! Configuration for the container execution sandbox.
 
 use std::time::Duration;
 
@@ -24,12 +24,17 @@ pub struct SandboxConfig {
     pub cpu_shares: u32,
     /// Network allowlist for proxied requests.
     pub network_allowlist: Vec<String>,
-    /// Docker image to use for the sandbox.
+    /// Container image to use for the sandbox.
     pub image: String,
     /// Whether to auto-pull the image if not found.
     pub auto_pull_image: bool,
     /// Port for the HTTP proxy (0 = auto-assign).
     pub proxy_port: u16,
+    /// Container runtime backend override from DB/config ("docker" or "kubernetes").
+    /// When None, runtime selection falls through to compiled features default.
+    pub container_runtime: Option<String>,
+    /// Kubernetes namespace for worker pods.
+    pub k8s_namespace: String,
 }
 
 impl Default for SandboxConfig {
@@ -45,6 +50,8 @@ impl Default for SandboxConfig {
             image: "ironclaw-worker:latest".to_string(),
             auto_pull_image: true,
             proxy_port: 0,
+            container_runtime: None,
+            k8s_namespace: "ironclaw".to_string(),
         }
     }
 }
@@ -52,15 +59,18 @@ impl Default for SandboxConfig {
 /// Security policy for sandbox execution.
 ///
 /// ```text
-/// ┌─────────────────────────────────────────────────────────────────────┐
-/// │                        Sandbox Policies                              │
-/// ├─────────────────┬──────────────────┬────────────────────────────────┤
+/// ┌─────────────────┬──────────────────┬────────────────────────────────┐
 /// │ Policy          │ Filesystem       │ Network                        │
 /// ├─────────────────┼──────────────────┼────────────────────────────────┤
-/// │ ReadOnly        │ /workspace (ro)  │ Proxied (allowlist only)       │
-/// │ WorkspaceWrite  │ /workspace (rw)  │ Proxied (allowlist only)       │
+/// │ ReadOnly        │ /workspace (ro)  │ Proxied (allowlist only) [1]   │
+/// │ WorkspaceWrite  │ /workspace (rw)  │ Proxied (allowlist only) [1]   │
 /// │ FullAccess      │ Full host        │ Full network (DANGER)          │
 /// └─────────────────┴──────────────────┴────────────────────────────────┘
+///
+/// [1] Kubernetes can satisfy `ReadOnly` only when Kubernetes-native egress
+///     enforcement is declared ready and the workspace is uploaded as a
+///     snapshot. `WorkspaceWrite` still fails closed there until workspace
+///     write-back is implemented.
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SandboxPolicy {

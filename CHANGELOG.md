@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(sandbox)* Container runtime abstraction (`ContainerRuntime` trait) decoupling sandbox/orchestrator/reaper from Docker
+- *(sandbox)* Kubernetes runtime backend (`--features kubernetes`) with pod lifecycle, exec, logs, and cluster-DNS networking
+- *(sandbox)* `CONTAINER_RUNTIME` env var to select Docker or Kubernetes backend at startup
+- *(sandbox)* Stage-aware Kubernetes runtime capability model with bootstrap-delivered project content and Stage 3 prerequisite reporting
+- *(wizard)* Interactive container runtime selection in onboarding wizard (Docker / Kubernetes menu when both features compiled)
+- *(wizard)* Kubernetes namespace prompt with default "ironclaw" and cluster connectivity validation during onboarding
+- *(settings)* `sandbox.container_runtime` and `sandbox.k8s_namespace` DB-persisted settings for runtime configuration
+- *(doctor)* Kubernetes cluster reachability check (when `kubernetes` feature is enabled)
+
+### Changed
+
+- *(sandbox)* `bollard` Docker dependency is now optional (gated by `--features docker`, on by default)
+- *(sandbox)* `resolve_runtime_backend()` now accepts config override from DB settings (env var > DB > compiled default)
+- *(sandbox)* `KubernetesRuntime::connect()` accepts namespace parameter instead of reading env var directly
+- *(sandbox)* Kubernetes now presents Stage 2 project-backed behavior consistently across doctor, setup, job bootstrap, and worker startup surfaces
+- *(sandbox)* Read-only one-shot sandbox commands can now upload workspace archives into runtimes that lack host bind mounts, Kubernetes runtime config can use projected file delivery when Stage 3 prerequisites are declared ready, and workspace-write one-shot commands now fail closed until write-back exists
+- *(sandbox)* Shared workload specs now distinguish between replacing an image entrypoint and appending args to it, so Kubernetes worker pods preserve `ENTRYPOINT ["ironclaw"]` semantics while one-shot sandbox commands can still launch explicit shells
+- *(jobs)* `create_job` now accepts legacy `task` / `prompt` inputs and derives a fallback title when callers omit `title`
+- *(boot)* Renamed `BootInfo::docker_status` to `runtime_status` for runtime-agnostic naming
+- *(wizard)* Setup wizard Step 8 renamed from "Docker Sandbox" to "Container Sandbox" with runtime-agnostic UX copy
+
 ### Changed
 
 - *(web)* gateway onboarding/auth SSE now uses the unified `onboarding_state` event; external SSE clients should migrate from the older auth/pairing event names. Legacy WebSocket `auth_token` and `auth_cancel` client messages remain accepted during the temporary web v1-auth compatibility window.
