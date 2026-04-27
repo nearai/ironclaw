@@ -103,6 +103,10 @@ const TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_FILE: &str =
     "TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_FILE";
 const TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_FILES: &str =
     "TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_FILES";
+const TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_JSON: &str =
+    "TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_JSON";
+const TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_FILE: &str =
+    "TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_FILE";
 const TRACE_COMMONS_SIGNED_TOKEN_ISSUER: &str = "TRACE_COMMONS_SIGNED_TOKEN_ISSUER";
 const TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE: &str = "TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE";
 const TRACE_COMMONS_SIGNED_TOKEN_REVOKED_JTIS: &str = "TRACE_COMMONS_SIGNED_TOKEN_REVOKED_JTIS";
@@ -332,9 +336,26 @@ struct TraceCommonsSignedTokenVerifier {
     require_jti: bool,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct TraceCommonsSignedEddsaPublicKey {
     pem: String,
+    not_before: Option<DateTime<Utc>>,
+    not_after: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceCommonsSignedEddsaKeysetConfig {
+    keys: Vec<TraceCommonsSignedEddsaKeyConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceCommonsSignedEddsaKeyConfig {
+    kid: String,
+    public_key_pem: String,
+    #[serde(default)]
+    not_before: Option<DateTime<Utc>>,
+    #[serde(default)]
+    not_after: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -889,7 +910,7 @@ fn parse_tenant_tokens_from_env() -> anyhow::Result<BTreeMap<String, TenantAuth>
             &token,
             TokenRole::Contributor,
             expires_at,
-        );
+        )?;
     }
 
     Ok(tokens)
@@ -924,7 +945,7 @@ fn parse_tenant_token_entries(
             _ => (TokenRole::Contributor, auth_spec),
         };
         let (token, expires_at) = parse_token_secret_and_expiry(token_spec)?;
-        insert_token_with_expiry(tokens, tenant_id, &token, role, expires_at);
+        insert_token_with_expiry(tokens, tenant_id, &token, role, expires_at)?;
     }
     Ok(())
 }
@@ -988,7 +1009,12 @@ fn trace_commons_signed_token_verifier_from_env()
     };
     let keyed_secrets = parse_signed_token_keyed_secrets_from_env()?;
     let default_eddsa_public_key = parse_signed_token_default_eddsa_public_key_from_env()?;
-    let keyed_eddsa_public_keys = parse_signed_token_keyed_eddsa_public_key_files_from_env()?;
+    let mut keyed_eddsa_public_keys = parse_signed_token_keyed_eddsa_public_key_files_from_env()?;
+    for (kid, key) in parse_signed_token_eddsa_keyset_from_env()? {
+        if keyed_eddsa_public_keys.insert(kid.clone(), key).is_some() {
+            anyhow::bail!("signed tenant token EdDSA key id {kid} is configured more than once");
+        }
+    }
     for kid in keyed_secrets.keys() {
         anyhow::ensure!(
             !keyed_eddsa_public_keys.contains_key(kid),
@@ -1056,9 +1082,15 @@ fn parse_signed_token_default_eddsa_public_key_from_env()
         (Some(_), Some(_)) => anyhow::bail!(
             "{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_PEM} and {TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_FILE} cannot both be configured"
         ),
-        (Some(pem), None) => Ok(Some(TraceCommonsSignedEddsaPublicKey { pem })),
+        (Some(pem), None) => Ok(Some(TraceCommonsSignedEddsaPublicKey {
+            pem,
+            not_before: None,
+            not_after: None,
+        })),
         (None, Some(path)) => Ok(Some(TraceCommonsSignedEddsaPublicKey {
             pem: read_eddsa_public_key_file(&path)?,
+            not_before: None,
+            not_after: None,
         })),
         (None, None) => Ok(None),
     }
@@ -1097,6 +1129,8 @@ fn parse_signed_token_keyed_eddsa_public_key_files_from_env()
                 kid.to_string(),
                 TraceCommonsSignedEddsaPublicKey {
                     pem: read_eddsa_public_key_file(path)?,
+                    not_before: None,
+                    not_after: None,
                 },
             )
             .is_some()
@@ -1104,6 +1138,66 @@ fn parse_signed_token_keyed_eddsa_public_key_files_from_env()
             anyhow::bail!(
                 "{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_FILES} contains duplicate kid {kid}"
             );
+        }
+    }
+    Ok(keys)
+}
+
+fn parse_signed_token_eddsa_keyset_from_env()
+-> anyhow::Result<BTreeMap<String, TraceCommonsSignedEddsaPublicKey>> {
+    let inline = optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_JSON)?;
+    let file = optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_FILE)?;
+    match (inline, file) {
+        (Some(_), Some(_)) => anyhow::bail!(
+            "{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_JSON} and {TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_FILE} cannot both be configured"
+        ),
+        (Some(configured), None) => parse_signed_token_eddsa_keyset_config(&configured),
+        (None, Some(path)) => {
+            let configured = std::fs::read_to_string(&path)
+                .with_context(|| format!("failed to read EdDSA keyset file {path}"))?;
+            parse_signed_token_eddsa_keyset_config(&configured)
+        }
+        (None, None) => Ok(BTreeMap::new()),
+    }
+}
+
+fn parse_signed_token_eddsa_keyset_config(
+    configured: &str,
+) -> anyhow::Result<BTreeMap<String, TraceCommonsSignedEddsaPublicKey>> {
+    let keyset: TraceCommonsSignedEddsaKeysetConfig = serde_json::from_str(configured)
+        .context("invalid EdDSA signed tenant token keyset JSON")?;
+    anyhow::ensure!(
+        !keyset.keys.is_empty(),
+        "EdDSA signed tenant token keyset must include at least one key"
+    );
+
+    let mut keys = BTreeMap::new();
+    for key in keyset.keys {
+        let kid = key.kid.trim();
+        let public_key_pem = key.public_key_pem.trim();
+        let not_before = key.not_before;
+        let not_after = key.not_after;
+        anyhow::ensure!(
+            !kid.is_empty(),
+            "EdDSA signed tenant token keyset entries must include non-empty kid"
+        );
+        anyhow::ensure!(
+            !public_key_pem.is_empty(),
+            "EdDSA signed tenant token keyset entries must include non-empty public_key_pem"
+        );
+        if let (Some(not_before), Some(not_after)) = (&not_before, &not_after) {
+            anyhow::ensure!(
+                not_after > not_before,
+                "EdDSA signed tenant token keyset entry {kid} has not_after before not_before"
+            );
+        }
+        let public_key = TraceCommonsSignedEddsaPublicKey {
+            pem: public_key_pem.to_string(),
+            not_before,
+            not_after,
+        };
+        if keys.insert(kid.to_string(), public_key).is_some() {
+            anyhow::bail!("EdDSA signed tenant token keyset contains duplicate kid {kid}");
         }
     }
     Ok(keys)
@@ -1256,6 +1350,7 @@ impl TraceCommonsSignedTokenVerifier {
                         "invalid signed tenant token",
                     ));
                 };
+                public_key.ensure_active()?;
                 let decoding_key = DecodingKey::from_ed_pem(public_key.pem.as_bytes())
                     .map_err(|_| api_error(StatusCode::FORBIDDEN, "invalid signed tenant token"))?;
                 Ok((Algorithm::EdDSA, decoding_key))
@@ -1320,6 +1415,27 @@ impl TraceCommonsSignedTokenVerifier {
 
     fn configured_eddsa_key_count(&self) -> usize {
         usize::from(self.default_eddsa_public_key.is_some()) + self.keyed_eddsa_public_keys.len()
+    }
+}
+
+impl TraceCommonsSignedEddsaPublicKey {
+    fn ensure_active(&self) -> ApiResult<()> {
+        let now = Utc::now();
+        if self
+            .not_before
+            .as_ref()
+            .is_some_and(|not_before| now < *not_before)
+            || self
+                .not_after
+                .as_ref()
+                .is_some_and(|not_after| now > *not_after)
+        {
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "inactive signed tenant token key",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -1483,7 +1599,8 @@ fn insert_token(
     token: &str,
     role: TokenRole,
 ) {
-    insert_token_with_expiry(tokens, tenant_id, token, role, None);
+    insert_token_with_expiry(tokens, tenant_id, token, role, None)
+        .expect("test tenant token inserts");
 }
 
 fn insert_token_with_expiry(
@@ -1492,11 +1609,16 @@ fn insert_token_with_expiry(
     token: &str,
     role: TokenRole,
     expires_at: Option<DateTime<Utc>>,
-) {
+) -> anyhow::Result<()> {
     let tenant_id = tenant_id.trim();
     let token = token.trim();
     if tenant_id.is_empty() || token.is_empty() {
-        return;
+        return Ok(());
+    }
+    if tokens.contains_key(token) {
+        anyhow::bail!(
+            "duplicate Trace Commons tenant token configured for multiple tenants or roles"
+        );
     }
     tokens.insert(
         token.to_string(),
@@ -1510,6 +1632,7 @@ fn insert_token_with_expiry(
             allowed_uses: BTreeSet::new(),
         },
     );
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -5576,6 +5699,10 @@ fn record_matches_export_policy_abac(
         return false;
     }
 
+    if !record.allowed_uses.contains(&required_use) {
+        return false;
+    }
+
     let Some(policy) = policy else {
         return true;
     };
@@ -5589,7 +5716,7 @@ fn record_matches_export_policy_abac(
         return false;
     }
 
-    policy.allowed_uses.is_empty() || record.allowed_uses.contains(&required_use)
+    policy.allowed_uses.is_empty() || policy.allowed_uses.contains(&required_use)
 }
 
 fn record_matches_scoped_token_export_abac(
@@ -5779,7 +5906,7 @@ fn require_maintenance_operator(
     auth: &TenantAuth,
     request: &TraceMaintenanceRequest,
 ) -> ApiResult<()> {
-    if auth.role.can_review() {
+    if auth.role.can_admin() {
         return Ok(());
     }
     if auth.role == TokenRole::RetentionWorker && request.is_retention_worker_request() {
@@ -5790,7 +5917,7 @@ fn require_maintenance_operator(
     }
     Err(api_error(
         StatusCode::FORBIDDEN,
-        "reviewer/admin token or matching maintenance worker token required",
+        "admin token or matching maintenance worker token required",
     ))
 }
 
@@ -14870,6 +14997,8 @@ mod tests {
             keyed_secrets: BTreeMap::new(),
             default_eddsa_public_key: Some(TraceCommonsSignedEddsaPublicKey {
                 pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
+                not_before: None,
+                not_after: None,
             }),
             keyed_eddsa_public_keys: BTreeMap::new(),
             issuer: None,
@@ -15737,6 +15866,49 @@ mod tests {
     }
 
     #[test]
+    fn parse_tenant_tokens_rejects_duplicate_secret_across_tenants() {
+        let error = parse_tenant_tokens("tenant-a:shared-token,tenant-b:reviewer:shared-token")
+            .expect_err("duplicate tenant token should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate Trace Commons tenant token"),
+            "{error}"
+        );
+        assert!(!error.to_string().contains("shared-token"));
+    }
+
+    #[test]
+    fn legacy_ingest_token_cannot_override_configured_tenant_token() {
+        let mut tokens =
+            parse_tenant_tokens("tenant-a:shared-token").expect("configured tenant token parses");
+
+        let error = insert_token_with_expiry(
+            &mut tokens,
+            "default",
+            "shared-token",
+            TokenRole::Contributor,
+            None,
+        )
+        .expect_err("legacy ingest token cannot reuse configured token");
+
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate Trace Commons tenant token"),
+            "{error}"
+        );
+        assert_eq!(
+            tokens
+                .get("shared-token")
+                .expect("original token remains")
+                .tenant_id,
+            "tenant-a"
+        );
+    }
+
+    #[test]
     fn rejects_unknown_tenant_token_attributes() {
         let error = parse_tenant_tokens("tenant-a:dev-token-a;scope=wide")
             .expect_err("unknown token attribute should fail");
@@ -16378,6 +16550,8 @@ mod tests {
             "signed_token_eddsa_public_key_pem",
             "signed_token_eddsa_public_key_file",
             "signed_token_eddsa_public_key_files",
+            "signed_token_eddsa_keyset_json",
+            "signed_token_eddsa_keyset_file",
             "signed_token_issuer",
             "signed_token_audience",
             "signed_token_revoked_jtis",
@@ -16790,6 +16964,44 @@ mod tests {
         .await
         .expect("ranker pair request is policy-allowed");
         assert_eq!(pairs.item_count, 0);
+    }
+
+    #[tokio::test]
+    async fn ranker_export_skips_source_without_required_allowed_use_when_no_policy() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut source = sample_envelope().await;
+        make_metadata_only_low_risk(&mut source);
+        source.consent.scopes = vec![ConsentScope::RankingTraining];
+        source.trace_card.consent_scope = ConsentScope::RankingTraining;
+        source.trace_card.allowed_uses = vec![TraceAllowedUse::Evaluation];
+        source.value.submission_score = 0.95;
+        let submission_id = source.submission_id;
+        let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(source))
+            .await
+            .expect("source can submit before export source ABAC");
+
+        let Json(candidates) = ranker_training_candidates_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("no_policy_source_use_filter".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect("ranker export request is allowed");
+
+        assert_eq!(candidates.item_count, 0);
+        assert!(
+            candidates
+                .candidates
+                .iter()
+                .all(|candidate| candidate.submission_id != submission_id)
+        );
     }
 
     #[cfg(feature = "libsql")]
@@ -21652,9 +21864,28 @@ mod tests {
         .expect_err("contributors cannot run maintenance");
         assert_eq!(contributor_error.0, StatusCode::FORBIDDEN);
 
-        let Json(response) = maintenance_handler(
+        let reviewer_error = maintenance_handler(
             State(state.clone()),
             auth_headers("review-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("reviewer_admin_maintenance_denied".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: true,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect_err("reviewer cannot run broad admin maintenance");
+        assert_eq!(reviewer_error.0, StatusCode::FORBIDDEN);
+
+        let Json(response) = maintenance_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
             Json(TraceMaintenanceRequest {
                 purpose: Some("test_retention".to_string()),
                 dry_run: false,
@@ -21668,7 +21899,7 @@ mod tests {
             }),
         )
         .await
-        .expect("reviewer can run maintenance");
+        .expect("admin can run maintenance");
         assert_eq!(response.tenant_id, "tenant-a");
         assert_eq!(response.records_marked_revoked, 1);
         assert_eq!(response.derived_marked_revoked, 1);
@@ -28714,7 +28945,8 @@ mod tests {
             "expired-token-a",
             TokenRole::Contributor,
             Some(Utc::now() - Duration::minutes(1)),
-        );
+        )
+        .expect("expired token fixture inserts");
         let state = test_state_with_tokens(temp.path().to_path_buf(), tokens);
         let envelope = sample_envelope().await;
 
@@ -28740,7 +28972,8 @@ mod tests {
             "fresh-token-a",
             TokenRole::Contributor,
             Some(Utc::now() + Duration::minutes(5)),
-        );
+        )
+        .expect("fresh token fixture inserts");
         let state = test_state_with_tokens(temp.path().to_path_buf(), tokens);
         let envelope = sample_envelope().await;
 
@@ -28846,6 +29079,8 @@ mod tests {
                 "trace-eddsa-key-1".to_string(),
                 TraceCommonsSignedEddsaPublicKey {
                     pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
+                    not_before: None,
+                    not_after: None,
                 },
             )]),
             issuer: None,
@@ -28868,6 +29103,124 @@ mod tests {
         let _ = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
             .await
             .expect("keyed EdDSA signed tenant token is accepted");
+    }
+
+    #[tokio::test]
+    async fn accepts_eddsa_signed_tenant_token_from_active_managed_keyset() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state_with_tokens(temp.path().to_path_buf(), BTreeMap::new());
+        Arc::make_mut(&mut state).signed_token_verifier = Some(TraceCommonsSignedTokenVerifier {
+            default_secret: None,
+            keyed_secrets: BTreeMap::new(),
+            default_eddsa_public_key: None,
+            keyed_eddsa_public_keys: BTreeMap::from([(
+                "managed-eddsa-1".to_string(),
+                TraceCommonsSignedEddsaPublicKey {
+                    pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
+                    not_before: Some(Utc::now() - Duration::minutes(1)),
+                    not_after: Some(Utc::now() + Duration::minutes(10)),
+                },
+            )]),
+            issuer: None,
+            audience: None,
+            revoked_jtis: BTreeSet::new(),
+            max_ttl_seconds: None,
+            require_jti: false,
+        });
+        let token = eddsa_signed_tenant_token_with_kid(
+            Some("managed-eddsa-1"),
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "contributor",
+                "sub": "actor-managed-eddsa",
+                "exp": (Utc::now() + Duration::minutes(5)).timestamp()
+            }),
+        );
+        let envelope = sample_envelope().await;
+
+        let _ = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+            .await
+            .expect("active managed EdDSA key is accepted");
+    }
+
+    #[tokio::test]
+    async fn rejects_eddsa_signed_tenant_token_with_inactive_managed_key() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state_with_tokens(temp.path().to_path_buf(), BTreeMap::new());
+        Arc::make_mut(&mut state).signed_token_verifier = Some(TraceCommonsSignedTokenVerifier {
+            default_secret: None,
+            keyed_secrets: BTreeMap::new(),
+            default_eddsa_public_key: None,
+            keyed_eddsa_public_keys: BTreeMap::from([(
+                "managed-eddsa-inactive".to_string(),
+                TraceCommonsSignedEddsaPublicKey {
+                    pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
+                    not_before: Some(Utc::now() - Duration::minutes(10)),
+                    not_after: Some(Utc::now() - Duration::minutes(1)),
+                },
+            )]),
+            issuer: None,
+            audience: None,
+            revoked_jtis: BTreeSet::new(),
+            max_ttl_seconds: None,
+            require_jti: false,
+        });
+        let token = eddsa_signed_tenant_token_with_kid(
+            Some("managed-eddsa-inactive"),
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "contributor",
+                "sub": "actor-managed-eddsa-inactive",
+                "exp": (Utc::now() + Duration::minutes(5)).timestamp()
+            }),
+        );
+        let envelope = sample_envelope().await;
+
+        let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+            .await
+            .expect_err("inactive managed EdDSA key is rejected");
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert_eq!(error.1.0.error, "inactive signed tenant token key");
+    }
+
+    #[test]
+    fn parses_managed_eddsa_keyset_and_rejects_duplicate_kids() {
+        let active = parse_signed_token_eddsa_keyset_config(&format!(
+            r#"{{
+                "keys": [
+                    {{
+                        "kid": "managed-eddsa-1",
+                        "public_key_pem": {public_key},
+                        "not_before": "2026-01-01T00:00:00Z",
+                        "not_after": "2027-01-01T00:00:00Z"
+                    }}
+                ]
+            }}"#,
+            public_key = serde_json::to_string(TEST_EDDSA_PUBLIC_KEY_PEM)
+                .expect("test public key serializes")
+        ))
+        .expect("managed EdDSA keyset parses");
+        let parsed = active.get("managed-eddsa-1").expect("managed key exists");
+        assert_eq!(parsed.pem, TEST_EDDSA_PUBLIC_KEY_PEM.trim());
+        assert!(parsed.not_before.is_some());
+        assert!(parsed.not_after.is_some());
+
+        let duplicate = parse_signed_token_eddsa_keyset_config(&format!(
+            r#"{{
+                "keys": [
+                    {{ "kid": "dup", "public_key_pem": {public_key} }},
+                    {{ "kid": "dup", "public_key_pem": {public_key} }}
+                ]
+            }}"#,
+            public_key = serde_json::to_string(TEST_EDDSA_PUBLIC_KEY_PEM)
+                .expect("test public key serializes")
+        ));
+        assert!(
+            duplicate
+                .expect_err("duplicate kid is rejected")
+                .to_string()
+                .contains("duplicate kid dup")
+        );
     }
 
     #[tokio::test]

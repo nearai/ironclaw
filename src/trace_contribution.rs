@@ -3429,6 +3429,15 @@ fn local_path_regex() -> &'static Regex {
     &LOCAL_PATH_REGEX
 }
 
+fn trace_queue_secret_like_reason_regex() -> &'static Regex {
+    static TRACE_QUEUE_SECRET_LIKE_REASON_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+        // safety: hardcoded regex is covered by queue diagnostics tests.
+        Regex::new(r"(?ix)\b(?:sk|pk|rk|ghp|gho|ghu|glpat|xox[baprs])[-_a-z0-9]{8,}\b")
+            .expect("hardcoded trace queue secret-like reason regex must compile")
+    });
+    &TRACE_QUEUE_SECRET_LIKE_REASON_REGEX
+}
+
 fn placeholder_label_fragment(label: &str) -> String {
     let raw = label
         .strip_prefix("private_")
@@ -3536,6 +3545,24 @@ pub struct TraceQueueFlushReport {
     pub holds: Vec<TraceQueueHold>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credit_notice: Option<CreditSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceQueueDiagnostics {
+    pub queued_count: u32,
+    pub held_count: u32,
+    pub submitted_count: u32,
+    pub revoked_count: u32,
+    pub expired_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_submission_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_credit_sync_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub held_reason_counts: BTreeMap<String, u32>,
+    pub policy_enabled: bool,
+    pub endpoint_configured: bool,
+    pub ready_to_flush: bool,
 }
 
 pub enum TraceQueueEligibility {
@@ -3723,6 +3750,41 @@ pub fn read_trace_queue_holds_for_scope(
     }
     holds.sort_by_key(|hold| hold.submission_id);
     Ok(holds)
+}
+
+pub fn trace_queue_diagnostics_for_scope(
+    scope: Option<&str>,
+) -> anyhow::Result<TraceQueueDiagnostics> {
+    let _guard = lock_trace_scope_for_mutation_blocking(scope);
+    let policy = read_trace_policy_for_scope(scope)?;
+    let queued_count = queued_trace_envelope_paths_for_scope(scope)?.len() as u32;
+    let holds = read_trace_queue_holds_for_scope(scope)?;
+    let records = read_local_trace_records_for_scope(scope)?;
+    let credit_report = trace_credit_report(&records);
+
+    let mut held_reason_counts = BTreeMap::new();
+    for hold in &holds {
+        *held_reason_counts.entry(hold.reason.clone()).or_insert(0) += 1;
+    }
+
+    let endpoint_configured = policy
+        .ingestion_endpoint
+        .as_deref()
+        .is_some_and(|endpoint| !endpoint.trim().is_empty());
+
+    Ok(TraceQueueDiagnostics {
+        queued_count,
+        held_count: holds.len() as u32,
+        submitted_count: credit_report.submissions_submitted,
+        revoked_count: credit_report.submissions_revoked,
+        expired_count: credit_report.submissions_expired,
+        last_submission_at: credit_report.last_submission_at,
+        last_credit_sync_at: credit_report.last_credit_sync_at,
+        held_reason_counts,
+        policy_enabled: policy.enabled,
+        endpoint_configured,
+        ready_to_flush: policy.enabled && endpoint_configured && queued_count > 0,
+    })
 }
 
 pub fn load_trace_envelope(path: &Path) -> anyhow::Result<TraceContributionEnvelope> {
@@ -4567,7 +4629,18 @@ fn safe_trace_queue_hold_reason(reason: &str) -> String {
     if normalized.is_empty() {
         return "held".to_string();
     }
-    normalized.chars().take(240).collect()
+    let (redacted, _) = DeterministicTraceRedactor::default().redact_text(&normalized);
+    let redacted = trace_queue_secret_like_reason_regex().replace_all(&redacted, "[REDACTED]");
+    let redacted = redacted
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string();
+    if redacted.is_empty() {
+        return "held".to_string();
+    }
+    redacted.chars().take(240).collect()
 }
 
 fn trace_policy_path(scope: Option<&str>) -> PathBuf {
@@ -5635,6 +5708,134 @@ mod tests {
             credit_events: Vec::new(),
             last_credit_notice_at,
         }
+    }
+
+    #[test]
+    fn queue_diagnostics_are_scoped_to_one_user_queue_and_records() {
+        let scope_a = format!("trace-queue-diagnostics-a-{}", Uuid::new_v4());
+        let scope_b = format!("trace-queue-diagnostics-b-{}", Uuid::new_v4());
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+            ..Default::default()
+        };
+        write_trace_policy_for_scope(Some(&scope_a), &policy).expect("scope a policy writes");
+        write_trace_policy_for_scope(Some(&scope_b), &policy).expect("scope b policy writes");
+
+        let queue_a = trace_queue_dir(Some(&scope_a));
+        let queue_b = trace_queue_dir(Some(&scope_b));
+        std::fs::create_dir_all(&queue_a).expect("scope a queue exists");
+        std::fs::create_dir_all(&queue_b).expect("scope b queue exists");
+        std::fs::write(queue_a.join(format!("{}.json", Uuid::new_v4())), "{}")
+            .expect("scope a queued fixture writes");
+        std::fs::write(queue_b.join(format!("{}.json", Uuid::new_v4())), "{}")
+            .expect("scope b queued fixture writes");
+
+        let sync_at = Utc::now();
+        let mut scope_a_record = submitted_credit_record(
+            1.0,
+            Some(1.5),
+            None,
+            vec!["Accepted for scope a.".to_string()],
+        );
+        scope_a_record.credit_events.push(TraceCreditEvent {
+            event_id: Uuid::new_v4(),
+            submission_id: scope_a_record.submission_id,
+            contributor_pseudonym: "local-sync".to_string(),
+            kind: TraceCreditEventKind::CreditSynced,
+            points_delta: 0.5,
+            reason: "Server status synced as accepted.".to_string(),
+            created_at: sync_at,
+        });
+        write_local_trace_records_for_scope(Some(&scope_a), &[scope_a_record])
+            .expect("scope a records write");
+        write_local_trace_records_for_scope(
+            Some(&scope_b),
+            &[LocalTraceSubmissionRecord {
+                status: LocalTraceSubmissionStatus::Revoked,
+                revoked_at: Some(Utc::now()),
+                ..submitted_credit_record(
+                    0.0,
+                    Some(0.0),
+                    None,
+                    vec!["Revoked for scope b.".to_string()],
+                )
+            }],
+        )
+        .expect("scope b records write");
+
+        let diagnostics_a =
+            trace_queue_diagnostics_for_scope(Some(&scope_a)).expect("scope a diagnostics read");
+        let diagnostics_b =
+            trace_queue_diagnostics_for_scope(Some(&scope_b)).expect("scope b diagnostics read");
+
+        assert_eq!(diagnostics_a.queued_count, 1);
+        assert_eq!(diagnostics_a.submitted_count, 1);
+        assert_eq!(diagnostics_a.revoked_count, 0);
+        assert!(diagnostics_a.policy_enabled);
+        assert!(diagnostics_a.endpoint_configured);
+        assert!(diagnostics_a.ready_to_flush);
+        assert!(diagnostics_a.last_submission_at.is_some());
+        assert_eq!(diagnostics_a.last_credit_sync_at, Some(sync_at));
+
+        assert_eq!(diagnostics_b.queued_count, 1);
+        assert_eq!(diagnostics_b.submitted_count, 0);
+        assert_eq!(diagnostics_b.revoked_count, 1);
+        assert!(diagnostics_b.ready_to_flush);
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope_a)));
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope_b)));
+    }
+
+    #[test]
+    fn queue_diagnostics_aggregates_sanitized_hold_reasons() {
+        let scope = format!("trace-queue-diagnostics-holds-{}", Uuid::new_v4());
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+            ..Default::default()
+        };
+        write_trace_policy_for_scope(Some(&scope), &policy).expect("policy writes");
+        let dir = trace_queue_dir(Some(&scope));
+        std::fs::create_dir_all(&dir).expect("queue dir exists");
+
+        let raw_reason =
+            "manual review for alice@example.com in /Users/alice/private with sk-test-raw-token";
+        for _ in 0..2 {
+            let queue_path = dir.join(format!("{}.json", Uuid::new_v4()));
+            std::fs::write(&queue_path, "{}").expect("queued fixture writes");
+            write_trace_queue_hold_reason(&queue_path, raw_reason).expect("hold reason writes");
+        }
+
+        let diagnostics =
+            trace_queue_diagnostics_for_scope(Some(&scope)).expect("diagnostics read");
+
+        assert_eq!(diagnostics.queued_count, 2);
+        assert_eq!(diagnostics.held_count, 2);
+        assert_eq!(
+            diagnostics
+                .held_reason_counts
+                .values()
+                .copied()
+                .sum::<u32>(),
+            2
+        );
+        assert_eq!(diagnostics.held_reason_counts.len(), 1);
+        let aggregated_reason = diagnostics
+            .held_reason_counts
+            .keys()
+            .next()
+            .expect("held reason is present");
+        assert!(!aggregated_reason.contains("alice@example.com"));
+        assert!(!aggregated_reason.contains("/Users/alice/private"));
+        assert!(!aggregated_reason.contains("sk-test-raw-token"));
+
+        let serialized = serde_json::to_string(&diagnostics).expect("diagnostics serialize");
+        assert!(!serialized.contains("alice@example.com"));
+        assert!(!serialized.contains("/Users/alice/private"));
+        assert!(!serialized.contains("sk-test-raw-token"));
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
     }
 
     #[test]

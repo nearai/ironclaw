@@ -81,13 +81,26 @@ abuse penalty, review queues, audit logs, or tenant policy administration.
 As an alternative to configured static bearer tokens, internal deployments can
 set `TRACE_COMMONS_SIGNED_TOKEN_SECRET` to accept HS256 signed tenant claims.
 This HS256 path is an internal bridge for controlled pilots, not the production
-asymmetric-token design. Production signed upload claims should come from a
-managed issuer with key rotation and must use EdDSA/Ed25519 when asymmetric
-claims are introduced.
-For rotation windows, `TRACE_COMMONS_SIGNED_TOKEN_SECRETS` can also provide
+asymmetric-token design. The current service also accepts EdDSA/Ed25519 signed
+claims when configured with `TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_PEM`
+or `TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_FILE`; keyed EdDSA public-key
+rotation can use `TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_FILES` as
+comma-separated `kid:path` entries. Production upload claims should be treated
+as EdDSA/Ed25519-only: static tokens and HS256 signed claims remain bridge paths
+for controlled pilots, not the production claim mechanism. The verifier rejects
+unsupported JWT algorithms and can run with only EdDSA keys configured.
+For HMAC bridge rotation, `TRACE_COMMONS_SIGNED_TOKEN_SECRETS` can also provide
 comma-separated `kid:secret` entries; signed tokens with a JWT header `kid`
 must match one of those configured key ids, while tokens without `kid` use the
-single default secret when present. Config status reports only a key count.
+single default secret when present. EdDSA keyed public-key files use the same
+JWT `kid` selection behavior. For activation-window rotation,
+`TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_JSON` or
+`TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_FILE` can load a JSON keyset with
+entries shaped as `{ "kid": "...", "public_key_pem": "...", "not_before":
+"<RFC3339>", "not_after": "<RFC3339>" }`; `not_before` and `not_after` are
+optional, but inactive keys are rejected before token verification.
+Config status reports the total signed-token key count and the EdDSA key count,
+not key material or key ids.
 Signed tokens must include `tenant_id`, `exp`, and either `principal_ref` or
 `sub`; `role` defaults to `contributor` and may use the same role names as
 static tokens. Claims may also include `allowed_consent_scopes` and
@@ -107,6 +120,11 @@ plus the revoked-`jti` count, max TTL, and require-`jti` flag; it never returns
 the secret or configured claim values.
 Submitted-trace audit rows record only the safe auth method (`static_token` or
 `signed_claim`) plus the hashed actor principal.
+Local/file managed EdDSA keysets with activation windows are available for
+controlled deployments. Remaining issuer work is distribution and governance:
+fetching or syncing issuer-owned Ed25519 key records, surfacing active/inactive
+key diagnostics safely, and making the issuer keyset the only production
+upload-claim rotation path.
 Process-evaluation workers can submit bounded process quality metadata through
 `POST /v1/workers/process-evaluation` using the CLI helper:
 
@@ -342,14 +360,20 @@ Replay dataset exports, benchmark conversion artifacts, and ranker training expo
 
 Retention legal holds are service-configured by policy ID, not by trace submitters. A trace envelope can suggest a retention policy, but only the authenticated service configuration decides whether that policy is under legal hold.
 
-Tenant tokens can be configured as either `tenant_id:token` for contributor access or `tenant_id:role:token` where role is `contributor`, `reviewer`, `admin`, `export_worker`, `retention_worker`, `vector_worker`, `benchmark_worker`, `utility_worker`, or `process_eval_worker`. Add `;expires_at=<RFC3339>` or `;expires=<RFC3339>` to either syntax for a short-lived static-token bridge while production identity claims are still being built. The service can also accept signed HS256 tenant claims when `TRACE_COMMONS_SIGNED_TOKEN_SECRET` is set; these claims bind tenant id, actor/principal, role, allowed consent scopes/uses, and expiry in the bearer token instead of enumerating every token in service configuration. The claim allow-lists gate submission plus downstream exports, benchmark/ranker generation, process-evaluation labeling, and utility-credit jobs. Each static or signed token is treated as its own pseudonymous auth principal inside the tenant, and the principal hash excludes static-token expiry metadata. Reviewer/admin tokens can list tenant-local quarantine, approve or reject submissions, append delayed credit events, view tenant analytics, and export approved replay dataset slices. Review decisions and delayed credit mutations require non-empty operator reasons. Contributor tokens can submit, revoke, read their own token-principal credit/events, and sync status for their known submission ids, but cannot review, view tenant-wide analytics, append credit events, or export datasets.
+Tenant tokens can be configured as either `tenant_id:token` for contributor access or `tenant_id:role:token` where role is `contributor`, `reviewer`, `admin`, `export_worker`, `retention_worker`, `vector_worker`, `benchmark_worker`, `utility_worker`, or `process_eval_worker`. Add `;expires_at=<RFC3339>` or `;expires=<RFC3339>` to either syntax for a short-lived static-token bridge while production identity claims are still being built. The service can also accept signed HS256 tenant claims when `TRACE_COMMONS_SIGNED_TOKEN_SECRET` is set, and EdDSA/Ed25519 signed claims when an EdDSA public key is configured; these claims bind tenant id, actor/principal, role, allowed consent scopes/uses, and expiry in the bearer token instead of enumerating every token in service configuration. The claim allow-lists gate submission plus downstream exports, benchmark/ranker generation, process-evaluation labeling, and utility-credit jobs. Each static or signed token is treated as its own pseudonymous auth principal inside the tenant, and the principal hash excludes static-token expiry metadata. Reviewer/admin tokens can list tenant-local quarantine, approve or reject submissions, append delayed credit events, view tenant analytics, and export approved replay dataset slices. Review decisions and delayed credit mutations require non-empty operator reasons. Contributor tokens can submit, revoke, read their own token-principal credit/events, and sync status for their known submission ids, but cannot review, view tenant-wide analytics, append credit events, or export datasets.
 
 Production identity should replace static-token enumeration and HS256 bridge
-claims with issuer-managed EdDSA/Ed25519 signed tenant upload claims. Those
-claims must bind the tenant id, actor or job principal, role, expiry, optional
-JWT ID, and allowed consent scopes/uses; the service still derives the storage
-partition from the authenticated claim after verification, not from envelope
-metadata supplied by the contributor.
+claims with issuer-managed EdDSA/Ed25519 signed tenant upload claims. The
+current EdDSA verifier supports default or `kid`-selected public keys, JSON or
+file-backed EdDSA keysets with optional `not_before`/`not_after` activation
+windows, issuer and audience checks, max-TTL policy, required JWT IDs, and
+emergency `jti` denylists. The remaining issuer work is managed key
+distribution and a production policy that accepts only the EdDSA issuer keyset.
+Production claims must bind the tenant id, actor or job principal, role,
+expiry, optional JWT ID, and allowed consent scopes/uses; the service still
+derives the storage partition from the
+authenticated claim after verification, not from envelope metadata supplied by
+the contributor.
 
 On submit, the service also writes a derived redacted-only record with:
 
@@ -377,7 +401,7 @@ The current implementation is a usable MVP for local development and controlled 
 
 ### Tenant RBAC and ABAC
 
-- Move beyond static tenant tokens before production. Static tenant tokens can carry expiry attributes and the ingest service can accept HS256 signed tenant claims as interim bridges, with claim allow-lists already constraining submission and downstream export/worker use; production should use managed issuer/key rotation with EdDSA/Ed25519 signed upload claims bound to tenant, actor, role, allowed scopes, and expiry.
+- Move beyond static tenant tokens before production. Static tenant tokens can carry expiry attributes and the ingest service can accept HS256 signed tenant claims as interim bridges, with claim allow-lists already constraining submission and downstream export/worker use. The service can verify EdDSA/Ed25519 signed claims through default or `kid`-selected public keys and local/file keysets with activation windows; production should use only EdDSA/Ed25519 upload claims and still needs managed issuer distribution/governance before broad rollout.
 - Enforce RBAC for contributor, reviewer, admin, trainer/export job, and service-worker roles.
 - Add ABAC checks for consent scope, allowed use, privacy risk, review state, retention policy, revocation state, export purpose, and tenant data residency. Current tenant policy ABAC covers submission allowed scopes/uses plus replay, benchmark, and ranker export required uses, and signed-claim allow-lists should continue to constrain both submission and downstream worker/export consumption.
 - Require privileged operations such as tombstone deletion to carry an explicit reason. Review decisions, delayed credit mutation, and destructive retention purges already require non-empty reasons or purposes, and export guardrails can require explicit replay, benchmark, and ranker export purposes.
@@ -431,9 +455,13 @@ The local policy is stored under `~/.ironclaw/trace_contributions/policy.json` a
 - selected tool filters
 - minimum local submission score
 - whether medium-risk traces require manual review
-- periodic credit notice interval for future UI/runtime notifications
+- periodic credit notice interval for CLI/web/runtime notifications
 
 The runtime can call the same queue and flush behavior later after a task completes. When `flush-queue` runs under an enabled policy, it submits eligible traces autonomously and prints a credit update when the configured notice interval has elapsed.
+
+`ironclaw traces queue-status` reports local autonomous queue readiness without reading trace bodies: opt-in state, endpoint presence, bearer-token environment availability, capture toggles, selected-tool count, queued and held counts, sanitized held-reason counts, and the same local credit summary used by `credit`. The authenticated web API exposes a narrower scoped queue status through `/api/traces/queue-status`, returning queued/held counts and sanitized held queue entries for the current user only.
+
+`ironclaw traces credit --notice` and `/api/traces/credit-notice` mark a due periodic credit notice without exposing central corpus rows. Notice summaries include pending/final totals, delayed ledger deltas, credit-event counts, and recent safe explanations when the local notice interval is due.
 
 The agent runtime also schedules an autonomous post-turn contribution pass after a response is persisted or a turn fails. It reads the authenticated user's scoped policy, verifies the thread still belongs to that user, captures the most recent turns from durable conversation history, locally redacts the envelope, queues it, and flushes eligible queued envelopes. If the flush produces a due credit notice, the agent sends a status update back through the originating channel.
 
@@ -489,6 +517,8 @@ Protected web API endpoints:
 - `POST /api/traces/submit`
 - `POST /api/traces/flush`
 - `GET /api/traces/credit`
+- `GET /api/traces/credit-notice`
+- `GET /api/traces/queue-status`
 - `GET /api/traces/submissions`
 - `POST /api/traces/submissions/{submission_id}/revoke`
 
@@ -499,14 +529,14 @@ The web settings panel includes a Trace Commons tab for standing opt-in, autonom
 | Area | Status | Maintainer notes |
 |------|--------|------------------|
 | Local opt-in policy and opt-out | Implemented MVP | CLI and scoped web/runtime policy files exist; submit token stays in environment. |
-| Local preview, queue, flush, and credit display | Implemented MVP | CLI and web paths use local redacted envelopes and local submission metadata; authenticated web activity now reloads persisted held queue reasons plus accepted/quarantined/rejected and delayed-credit report fields for the current user scope. |
+| Local preview, queue, flush, and credit display | Implemented MVP | CLI and web paths use local redacted envelopes and local submission metadata; `ironclaw traces queue-status` reports scoped policy readiness, bearer-token environment presence, queued/held counts, sanitized held-reason counts, and the local credit summary, while authenticated web activity exposes scoped queue/held counts and reloads persisted held queue reasons plus accepted/quarantined/rejected and delayed-credit report fields for the current user scope. |
 | Deterministic local redaction | Implemented MVP | Includes generic secret/path scrubbing, stable placeholders, tool-aware payload handling, and Privacy Filter safe projection. |
 | Privacy Filter sidecar integration | Implemented MVP | Local command/stdin/stdout path exists with safe output projection, non-fatal fallback, minimal child environment, stderr hashing, IO limits, and canary tests. Production container sandboxing and stricter output contracts remain. |
-| Autonomous post-turn contribution | Implemented MVP | Runtime queues/flushed scoped envelopes after persisted or failed turns only when the scoped standing policy is enabled, has an ingestion endpoint, and the current redacted envelope is eligible for autonomous submission. Ineligible current traces are skipped instead of written as held queue files, while existing queue flushes and credit-notice sync still run. |
+| Autonomous post-turn contribution | Implemented MVP | Runtime queues/flushed scoped envelopes after persisted or failed turns only when the scoped standing policy is enabled, has an ingestion endpoint, and the current redacted envelope is eligible for autonomous submission. Ineligible current traces are skipped instead of written as held queue files, while existing queue flushes and periodic credit-notice sync still run. |
 | Web Trace Commons settings and preview endpoints | Implemented MVP | Authenticated gateway endpoints and UI controls exist; server-side tenant/user checks remain the trust boundary, and queue/manual-submit paths preflight scoped opt-in policy before enqueueing. |
 | Private ingestion service | Implemented MVP | Development/internal binary validates schema, reruns redaction, computes hashes/credit, enforces optional contributor-only tenant/principal hourly submission quotas for autonomous uploads, stores accepted/quarantined records, and serves review/status/export routes, including reviewer trace-list filtering by export/provenance purpose. It can now dark-launch DB dual-write metadata and encrypted envelope artifacts. |
-| Tenant token roles | Partial | Static tenant tokens support contributor/reviewer/admin plus scoped export, retention, vector, and benchmark worker behavior; benchmark, retention, and vector workers now have dedicated `/v1/workers/benchmark-convert`, `/v1/workers/retention-maintenance`, and `/v1/workers/vector-index` routes as well as CLI helpers for those scoped routes and scoped compatibility routes where needed; optional `expires_at`/`expires` RFC3339 attributes reject stale bearer tokens before tenant attribution while preserving principal hashes over the token secret only; optional HS256 signed tenant claims bind tenant id, actor principal, role, issuer/audience when configured, allowed submission consent scopes/uses, expiry, optionally bounded `exp - iat` lifetime, and optional required `jti` claim without enumerating every bearer token; optional keyed signed-token secrets support `kid`-selected rotation windows; optional tenant submission policies can restrict allowed consent scopes and trace-card uses at ingest and export time, DB-backed tenant policy records can drive submission and export policy reads behind `TRACE_COMMONS_DB_TENANT_POLICY_READS`, admin tokens can manage the current tenant's DB-backed contribution policy via `/v1/admin/tenant-policy` or the `ironclaw traces tenant-policy-get/set` CLI helpers, policy admin reads/writes are audited with safe hash-only policy metadata, and production-like deployments can require every submitting/exporting tenant to have a policy entry. Production still needs managed EdDSA/Ed25519 issuer policy, fuller central policy, RBAC/ABAC, and row-level tenant enforcement hardening. |
-| Contributor credit ledger and delayed credit sync | Partial | Append-only local and central credit events exist, pending submission estimates are kept separate from settled final/ledger credit, reviewer/admin delayed credit mutation requires a reason and can resolve submission metadata through the DB reviewer read path when file metadata has been removed, benchmark conversion plus ranker candidate and pair exports append idempotent delayed utility credit with external artifact/job refs, DB credit events preserve training-vs-ranking utility types, terminal traces retain ledger events for audit but exclude those deltas from contributor totals, DB audit rows include typed credit-mutation metadata with hashed reason/reference fields, maintenance reconciliation reports file/DB ledger event ID gaps, and autonomous clients periodically notify opted-in users when submitted or later-revoked records receive ledger changes. Production needs anti-abuse review and stricter settlement policy. |
+| Tenant token roles | Partial | Static tenant tokens support contributor/reviewer/admin plus scoped export, retention, vector, and benchmark worker behavior; benchmark, retention, and vector workers now have dedicated `/v1/workers/benchmark-convert`, `/v1/workers/retention-maintenance`, and `/v1/workers/vector-index` routes as well as CLI helpers for those scoped routes and scoped compatibility routes where needed; optional `expires_at`/`expires` RFC3339 attributes reject stale bearer tokens before tenant attribution while preserving principal hashes over the token secret only; optional HS256 signed tenant claims bind tenant id, actor principal, role, issuer/audience when configured, allowed submission consent scopes/uses, expiry, optionally bounded `exp - iat` lifetime, and optional required `jti` claim without enumerating every bearer token; optional EdDSA/Ed25519 signed claims can be verified with default, `kid`-selected public keys, or local/file keysets with activation windows, and config status exposes safe total/EdDSA key counts without key material; optional tenant submission policies can restrict allowed consent scopes and trace-card uses at ingest and export time, DB-backed tenant policy records can drive submission and export policy reads behind `TRACE_COMMONS_DB_TENANT_POLICY_READS`, admin tokens can manage the current tenant's DB-backed contribution policy via `/v1/admin/tenant-policy` or the `ironclaw traces tenant-policy-get/set` CLI helpers, policy admin reads/writes are audited with safe hash-only policy metadata, and production-like deployments can require every submitting/exporting tenant to have a policy entry. Production upload claims should be EdDSA/Ed25519-only; the managed issuer keyset with activation windows, fuller central policy, RBAC/ABAC, and row-level tenant enforcement hardening remain. |
+| Contributor credit ledger and delayed credit sync | Partial | Append-only local and central credit events exist, pending submission estimates are kept separate from settled final/ledger credit, reviewer/admin delayed credit mutation requires a reason and can resolve submission metadata through the DB reviewer read path when file metadata has been removed, benchmark conversion plus ranker candidate and pair exports append idempotent delayed utility credit with external artifact/job refs, DB credit events preserve training-vs-ranking utility types, terminal traces retain ledger events for audit but exclude those deltas from contributor totals, DB audit rows include typed credit-mutation metadata with hashed reason/reference fields, maintenance reconciliation reports file/DB ledger event ID gaps, and autonomous clients periodically notify opted-in users when submitted or later-revoked records receive ledger changes, including delayed ledger deltas and credit-event counts. Production needs anti-abuse review and stricter settlement policy. |
 | Quarantine/review workflow | Partial | Reviewer/admin routes can list and decide on quarantined redacted traces; quarantine and active-learning queue items expose reviewer SLA/escalation metadata (`review_age_hours`, `review_escalation_state`, and `review_escalation_reasons`) plus optional DB-backed review lease assignment fields for prioritized triage; queue reads can filter lease state with `all`, `mine`, `available`, `active`, or `expired`; review decisions require a non-empty reason and cannot bypass another active reviewer lease; with DB reviewer reads enabled, reviewers/admins can claim or release durable tenant/principal-scoped leases, review decisions resolve submitted-envelope bodies through active DB object refs when available, can be configured to require active object refs, emit content-read audit rows, and mirror the reviewed envelope body as a fresh `review_snapshot` object ref without reclassifying the original submitted envelope; object-primary submit/review mode can also skip plaintext submitted/reviewed envelope body files. Production still needs richer assignment policy and retention/revocation gates. |
 | Replay dataset export | Partial | Approved redacted slices can be exported by reviewer/admin tokens, production-like deployments can require explicit accepted/low-risk/consent-scoped export guardrails for replay, benchmark, and ranker-training exports plus caller-supplied export purposes and active DB object refs for body reads, tenant policy allowed-use ABAC gates replay/benchmark/ranker requests and source selection, DB metadata can drive replay export selection, benchmark/ranker exports can fail closed when selected sources lack active submitted-envelope object refs, submitted envelope bodies can resolve through active DB object refs for file or encrypted local artifact stores, object-primary replay export mode can require service-local DB object refs with no file fallback, manifests carry source-list hashes mirrored into audit `decision_inputs_hash`, replay exports mirror compact DB manifest rows and per-source item snapshots with source object refs plus invalidation timestamps, benchmark/ranker item rows link derived refs, active vector refs when indexed, and per-source object refs to file-backed or service-local encrypted benchmark/ranker artifacts, reviewer/admins can list replay manifest metadata, and each exported trace body read emits a tenant-scoped audit event. Production needs remote object storage, broader bulk export controls, and revocation propagation for already-published artifacts. |
 | Analytics summary | Partial | Aggregate counts by status/risk/tool/coverage exist, including content-free process-evaluation aggregates for evaluated trace count, labels, rubric ratings, and score bands. Deployments can set a minimum cell-count threshold to suppress rare aggregate buckets before responses leave the service. Production still needs fuller privacy-budget accounting if exposed broadly. |

@@ -8,15 +8,17 @@ These are the next independent production slices that can be staffed in parallel
 
 ### Auth and Keying
 
-- [ ] Finish issuer-managed EdDSA/Ed25519 signed upload-claim verification, including `kid` rotation, issuer/audience/JTI/TTL policy, safe config-status counts, and rejection of every non-EdDSA asymmetric algorithm.
+- [x] Add EdDSA/Ed25519 signed upload-claim verification through default or `kid`-selected public-key config, JSON/file keysets with optional `not_before`/`not_after` activation windows, safe config-status total/EdDSA key counts, issuer/audience/JTI/TTL policy, and unsupported-algorithm rejection. Static tokens and HS256 signed claims remain internal bridge paths only.
+- [ ] Finish issuer-managed EdDSA/Ed25519 upload-claim distribution/governance, including safe active/inactive key diagnostics and production policy that accepts only issuer-managed EdDSA/Ed25519 upload claims.
 - [ ] Promote auth-derived `TenantCtx` into every ingest, review, export, worker, maintenance, and contributor-status path so envelope tenant fields remain attribution only.
 - [ ] Harden PostgreSQL tenant isolation with production roles, transaction-local tenant context coverage, RLS/forced-RLS decisions, and same-id cross-tenant tests; keep libSQL predicate tests in parallel.
 
 ### Autonomous Client
 
-- [ ] Turn opted-in post-turn capture into a durable background worker with retry/backoff, idempotency, queue compaction, network-offline handling, and no held files for traces disallowed by standing policy.
-- [ ] Add periodic contributor credit notices across CLI/web/runtime that summarize accepted, quarantined, rejected, revoked, and delayed-credit deltas without exposing trace bodies or central corpus rows.
-- [ ] Add local operator diagnostics for queue health, last successful flush, last status sync, held-reason counts, and policy/version mismatch warnings.
+- [ ] Turn opted-in post-turn capture into a durable background worker with retry/backoff, idempotency, queue compaction, and network-offline handling. Current runtime capture already skips ineligible current traces instead of leaving new held files while still flushing existing eligible queue entries.
+- [x] Add periodic contributor credit notices across CLI/web/runtime that summarize accepted, quarantined, rejected, revoked, pending/final credit, delayed-credit deltas, and credit-event counts without exposing trace bodies or central corpus rows.
+- [x] Add first local queue diagnostics/status surfaces for CLI and authenticated web: policy readiness, bearer-token environment presence, queued/held counts, sanitized held-reason counts, and local credit summaries where available.
+- [ ] Extend autonomous diagnostics with durable last-successful-flush and last-status-sync telemetry, policy/version mismatch warnings, retry/backoff state, and offline/network failure counters.
 
 ### Ingestion Storage
 
@@ -47,6 +49,9 @@ These are the next independent production slices that can be staffed in parallel
 As of the `gecko-pass` branch, Trace Commons has moved beyond the local-only MVP into a dark-launch production-storage bridge:
 
 - Local capture remains opt-in, local-first, and redaction-first. Raw recorded traces still must not leave the client.
+- Autonomous clients now have first-pass queue diagnostics/status: CLI `traces queue-status` reports scoped readiness, bearer-token environment presence, queue/hold counts, sanitized held-reason counts, and local credit summary fields; the authenticated web API exposes scoped queue/held counts and sanitized held entries.
+- Periodic credit notices now run through CLI, web, and runtime paths, including delayed ledger deltas and credit-event counts without surfacing trace bodies or central corpus rows.
+- Signed upload-claim auth supports EdDSA/Ed25519 public-key verification through default or `kid`-selected keys and JSON/file keysets with optional activation windows, while HS256 claims and static tokens remain internal bridge paths. Managed issuer distribution/governance is still remaining work.
 - The private ingestion service still serves file-backed pilot APIs by default, but can dual-write metadata through `TRACE_COMMONS_DB_DUAL_WRITE=true`.
 - PostgreSQL and libSQL schema slices exist through the current Trace Commons storage work: core corpus rows, object refs, derived records, vector metadata, audit events, credit ledger rows, tombstones, retention/export metadata, compact replay export manifests, and replay export item snapshots.
 - `TraceCorpusStore` exists behind the shared database abstraction with backend implementations and libSQL-focused parity coverage.
@@ -57,7 +62,7 @@ As of the `gecko-pass` branch, Trace Commons has moved beyond the local-only MVP
 - Export audit paths now carry deterministic source-list hashes, and replay export manifest metadata can be listed by reviewer/admin tokens.
 - Revocation, retention expiration, and maintenance-discovered file tombstones already invalidate DB-mirrored submission status, object refs, derived records, vector metadata, replay export manifests, and replay export item rows.
 
-The main remaining gap is production ownership: file-backed serving is still the compatibility path, encrypted artifacts are still local rather than service-owned object storage, PostgreSQL RLS/central policy is not yet the active trust boundary, and vector, benchmark, ranking, retention, and audit systems are not yet complete production workers.
+The main remaining gap is production ownership: file-backed serving is still the compatibility path, encrypted artifacts are still local rather than service-owned object storage, managed EdDSA issuer distribution/governance is not complete, PostgreSQL RLS/central policy is not yet the active trust boundary, and vector, benchmark, ranking, retention, and audit systems are not yet complete production workers.
 
 ## Roadmap Principles
 

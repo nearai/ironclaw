@@ -19,7 +19,9 @@ use crate::trace_contribution::{
     TraceContributionEnvelope, TraceCreditEvent, TraceCreditEventKind, TraceRedactor,
     TraceSubmissionStatusUpdate, estimate_initial_credit, fetch_trace_submission_statuses,
     mark_trace_credit_notice_due_for_scope, preflight_trace_contribution_policy,
-    privacy_filter_adapter_from_env, trace_submission_status_endpoint,
+    privacy_filter_adapter_from_env, read_local_trace_records_for_scope,
+    read_trace_policy_for_scope, trace_credit_summary, trace_queue_diagnostics_for_scope,
+    trace_submission_status_endpoint,
 };
 
 #[derive(Subcommand, Debug, Clone)]
@@ -124,6 +126,17 @@ pub enum TracesCommand {
         /// Maximum queued envelopes to submit
         #[arg(long, default_value_t = 25)]
         limit: usize,
+    },
+
+    /// Show local autonomous trace queue diagnostics
+    QueueStatus {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Local tenant/user trace scope to inspect
+        #[arg(long)]
+        scope: Option<String>,
     },
 
     /// Show local credit totals and recent credit explanations
@@ -1464,6 +1477,7 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
             Ok(())
         }
         TracesCommand::FlushQueue { limit } => flush_queue(limit).await,
+        TracesCommand::QueueStatus { json, scope } => show_queue_status(json, scope.as_deref()),
         TracesCommand::Credit {
             json,
             notice,
@@ -1971,6 +1985,23 @@ struct OptInOptions {
     min_submission_score: f32,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct TraceQueueStatusDiagnostics {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
+    policy_ready: bool,
+    bearer_token_env: String,
+    bearer_token_present: bool,
+    include_message_text: bool,
+    include_tool_payloads: bool,
+    require_manual_approval_when_pii_detected: bool,
+    min_submission_score: f32,
+    credit_notice_interval_hours: u32,
+    selected_tools_count: usize,
+    queue: crate::trace_contribution::TraceQueueDiagnostics,
+    credit_summary: CreditSummary,
+}
+
 fn opt_in(options: OptInOptions) -> anyhow::Result<()> {
     let policy = StandingTraceContributionPolicy {
         enabled: true,
@@ -2037,6 +2068,110 @@ fn show_policy_status(json: bool) -> anyhow::Result<()> {
     );
     println!("  queued envelopes: {}", queued_envelope_paths()?.len());
     Ok(())
+}
+
+fn show_queue_status(json: bool, scope: Option<&str>) -> anyhow::Result<()> {
+    let diagnostics = trace_queue_status_diagnostics(scope)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&diagnostics).map_err(|e| {
+                anyhow::anyhow!("failed to serialize trace queue diagnostics: {}", e)
+            })?
+        );
+        return Ok(());
+    }
+
+    println!("Trace contribution queue status:");
+    println!(
+        "  scope: {}",
+        diagnostics.scope.as_deref().unwrap_or("default")
+    );
+    println!("  policy ready: {}", diagnostics.policy_ready);
+    println!("  opt-in enabled: {}", diagnostics.queue.policy_enabled);
+    println!(
+        "  endpoint configured: {}",
+        diagnostics.queue.endpoint_configured
+    );
+    println!(
+        "  bearer token env: {} ({})",
+        diagnostics.bearer_token_env,
+        if diagnostics.bearer_token_present {
+            "set"
+        } else {
+            "not set"
+        }
+    );
+    println!(
+        "  include message text: {}",
+        diagnostics.include_message_text
+    );
+    println!(
+        "  include tool payloads: {}",
+        diagnostics.include_tool_payloads
+    );
+    println!(
+        "  manual review when PII detected: {}",
+        diagnostics.require_manual_approval_when_pii_detected
+    );
+    println!(
+        "  min submission score: {:.2}",
+        diagnostics.min_submission_score
+    );
+    println!(
+        "  credit notice interval: {} hour(s)",
+        diagnostics.credit_notice_interval_hours
+    );
+    println!("  selected tools: {}", diagnostics.selected_tools_count);
+    println!("  queued envelopes: {}", diagnostics.queue.queued_count);
+    println!("  held envelopes: {}", diagnostics.queue.held_count);
+    println!("  submitted records: {}", diagnostics.queue.submitted_count);
+    println!("  revoked records: {}", diagnostics.queue.revoked_count);
+    println!("  expired records: {}", diagnostics.queue.expired_count);
+    println!("  ready to flush: {}", diagnostics.queue.ready_to_flush);
+    if !diagnostics.queue.held_reason_counts.is_empty() {
+        println!("  held reasons:");
+        for (reason, count) in &diagnostics.queue.held_reason_counts {
+            println!("    {reason}: {count}");
+        }
+    }
+    println!("  local submissions and credit:");
+    print_credit_summary_fields(&diagnostics.credit_summary, "    ");
+    Ok(())
+}
+
+fn trace_queue_status_diagnostics(
+    scope: Option<&str>,
+) -> anyhow::Result<TraceQueueStatusDiagnostics> {
+    let normalized_scope = scope.and_then(|scope| {
+        let trimmed = scope.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+    let scope_ref = normalized_scope.as_deref();
+    let policy = read_trace_policy_for_scope(scope_ref)?;
+    let bearer_token_present = !policy.bearer_token_env.trim().is_empty()
+        && std::env::var_os(&policy.bearer_token_env).is_some();
+    let queue = trace_queue_diagnostics_for_scope(scope_ref)?;
+    let local_records = read_local_trace_records_for_scope(scope_ref)?;
+
+    Ok(TraceQueueStatusDiagnostics {
+        scope: normalized_scope,
+        policy_ready: queue.ready_to_flush && bearer_token_present,
+        bearer_token_env: policy.bearer_token_env,
+        bearer_token_present,
+        include_message_text: policy.include_message_text,
+        include_tool_payloads: policy.include_tool_payloads,
+        require_manual_approval_when_pii_detected: policy.require_manual_approval_when_pii_detected,
+        min_submission_score: policy.min_submission_score,
+        credit_notice_interval_hours: policy.credit_notice_interval_hours,
+        selected_tools_count: policy.selected_tools.len(),
+        queue,
+        credit_summary: trace_credit_summary(&local_records),
+    })
 }
 
 async fn preview_recorded_trace(options: PreviewOptions) -> anyhow::Result<()> {
@@ -5451,6 +5586,25 @@ mod tests {
         assert!(!json);
         assert!(notice);
         assert_eq!(notice_scope.as_deref(), Some("tenant-a:user-alice"));
+    }
+
+    #[test]
+    fn queue_status_flags_parse_through_cli() {
+        let cli = parse_cli([
+            "ironclaw",
+            "traces",
+            "queue-status",
+            "--json",
+            "--scope",
+            "tenant-a:user-alice",
+        ]);
+
+        let TracesCommand::QueueStatus { json, scope } = unwrap_traces_command(cli) else {
+            panic!("expected traces queue-status command");
+        };
+
+        assert!(json);
+        assert_eq!(scope.as_deref(), Some("tenant-a:user-alice"));
     }
 
     #[test]

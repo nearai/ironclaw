@@ -7,7 +7,8 @@ use ironclaw::config::{DatabaseBackend, DatabaseConfig, SslMode};
 use ironclaw::db::{Database, postgres::PgBackend};
 use ironclaw::trace_corpus_storage::{
     TenantScopedTraceObjectRef, TraceAuditAction, TraceAuditEventWrite, TraceAuditSafeMetadata,
-    TraceCorpusStatus, TraceCorpusStore, TraceDerivedRecordWrite, TraceDerivedStatus,
+    TraceCorpusStatus, TraceCorpusStore, TraceCreditEventType, TraceCreditEventWrite,
+    TraceCreditSettlementState, TraceDerivedRecordWrite, TraceDerivedStatus,
     TraceExportManifestItemInvalidationReason, TraceExportManifestItemWrite,
     TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefWrite, TraceSubmissionWrite,
     TraceTombstoneWrite, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
@@ -146,6 +147,55 @@ fn sample_unhashed_audit_event(tenant_id: &str, submission_id: Uuid) -> TraceAud
     }
 }
 
+fn sample_credit_event(
+    tenant_id: &str,
+    submission_id: Uuid,
+    trace_id: Uuid,
+    credit_event_id: Uuid,
+) -> TraceCreditEventWrite {
+    TraceCreditEventWrite {
+        tenant_id: tenant_id.to_string(),
+        credit_event_id,
+        submission_id,
+        trace_id,
+        credit_account_ref: format!("credit-account:{tenant_id}"),
+        event_type: TraceCreditEventType::Accepted,
+        points_delta: "1.0".to_string(),
+        reason: format!("accepted submission for {tenant_id}"),
+        external_ref: Some(format!("external:{tenant_id}:{credit_event_id}")),
+        actor_principal_ref: format!("principal:{tenant_id}"),
+        actor_role: "system".to_string(),
+        settlement_state: TraceCreditSettlementState::Pending,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RawTraceRlsIds {
+    submission_id: Uuid,
+    object_ref_id: Uuid,
+    credit_event_id: Uuid,
+    tombstone_id: Uuid,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RawTraceRlsCounts {
+    submissions: i64,
+    object_refs: i64,
+    credit_events: i64,
+    tombstones: i64,
+}
+
+impl RawTraceRlsCounts {
+    fn all(count: i64) -> Self {
+        Self {
+            submissions: count,
+            object_refs: count,
+            credit_events: count,
+            tombstones: count,
+        }
+    }
+}
+
 async fn current_role_bypasses_trace_rls(
     client: &mut tokio_postgres::Client,
 ) -> Result<bool, tokio_postgres::Error> {
@@ -235,6 +285,132 @@ async fn assert_raw_sql_rls_filters_by_tenant_context(
 
     assert_eq!(tenant_a_count, 1);
     assert_eq!(tenant_b_count, 1);
+}
+
+async fn raw_trace_rls_counts(
+    tx: &tokio_postgres::Transaction<'_>,
+    ids: RawTraceRlsIds,
+) -> RawTraceRlsCounts {
+    let row = tx
+        .query_one(
+            "SELECT
+                (SELECT COUNT(*) FROM trace_submissions WHERE submission_id = $1) AS submissions,
+                (SELECT COUNT(*) FROM trace_object_refs WHERE object_ref_id = $2) AS object_refs,
+                (SELECT COUNT(*) FROM trace_credit_ledger WHERE credit_event_id = $3) AS credit_events,
+                (SELECT COUNT(*) FROM trace_tombstones WHERE tombstone_id = $4) AS tombstones",
+            &[
+                &ids.submission_id,
+                &ids.object_ref_id,
+                &ids.credit_event_id,
+                &ids.tombstone_id,
+            ],
+        )
+        .await
+        .expect("count raw Trace Commons rows under RLS");
+
+    RawTraceRlsCounts {
+        submissions: row.get("submissions"),
+        object_refs: row.get("object_refs"),
+        credit_events: row.get("credit_events"),
+        tombstones: row.get("tombstones"),
+    }
+}
+
+async fn assert_raw_sql_trace_rows_visible_only_with_matching_tenant_context(
+    database_url: &str,
+    tenant_a: &str,
+    tenant_b: &str,
+    tenant_a_ids: RawTraceRlsIds,
+    tenant_b_ids: RawTraceRlsIds,
+) {
+    let (mut client, connection) = match tokio_postgres::connect(database_url, NoTls).await {
+        Ok(parts) => parts,
+        Err(e) => {
+            eprintln!("skipping raw RLS assertion: database unavailable ({e})");
+            return;
+        }
+    };
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    match current_role_bypasses_trace_rls(&mut client).await {
+        Ok(true) => {
+            eprintln!("skipping raw RLS assertion: current role bypasses RLS");
+            return;
+        }
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("skipping raw RLS assertion: could not inspect role ({e})");
+            return;
+        }
+    }
+
+    let tx = client
+        .transaction()
+        .await
+        .expect("start raw no-context RLS assertion transaction");
+    assert_eq!(
+        raw_trace_rls_counts(&tx, tenant_a_ids).await,
+        RawTraceRlsCounts::all(0),
+        "tenant A rows must be invisible without transaction-local tenant context"
+    );
+    assert_eq!(
+        raw_trace_rls_counts(&tx, tenant_b_ids).await,
+        RawTraceRlsCounts::all(0),
+        "tenant B rows must be invisible without transaction-local tenant context"
+    );
+    tx.commit()
+        .await
+        .expect("commit raw no-context RLS assertion");
+
+    let tx = client
+        .transaction()
+        .await
+        .expect("start raw tenant A RLS assertion transaction");
+    tx.execute(
+        "SELECT set_config('ironclaw.trace_tenant_id', $1, true)",
+        &[&tenant_a],
+    )
+    .await
+    .expect("set tenant A context");
+    assert_eq!(
+        raw_trace_rls_counts(&tx, tenant_a_ids).await,
+        RawTraceRlsCounts::all(1),
+        "tenant A rows must be visible with matching tenant context"
+    );
+    assert_eq!(
+        raw_trace_rls_counts(&tx, tenant_b_ids).await,
+        RawTraceRlsCounts::all(0),
+        "tenant B rows must be invisible from tenant A context"
+    );
+    tx.commit()
+        .await
+        .expect("commit raw tenant A RLS assertion");
+
+    let tx = client
+        .transaction()
+        .await
+        .expect("start raw tenant B RLS assertion transaction");
+    tx.execute(
+        "SELECT set_config('ironclaw.trace_tenant_id', $1, true)",
+        &[&tenant_b],
+    )
+    .await
+    .expect("set tenant B context");
+    assert_eq!(
+        raw_trace_rls_counts(&tx, tenant_b_ids).await,
+        RawTraceRlsCounts::all(1),
+        "tenant B rows must be visible with matching tenant context"
+    );
+    assert_eq!(
+        raw_trace_rls_counts(&tx, tenant_a_ids).await,
+        RawTraceRlsCounts::all(0),
+        "tenant A rows must be invisible from tenant B context"
+    );
+    tx.commit()
+        .await
+        .expect("commit raw tenant B RLS assertion");
 }
 
 async fn assert_trace_rls_policies_installed(backend: &PgBackend) {
@@ -551,6 +727,206 @@ async fn store_facade_keeps_same_submission_id_isolated_by_tenant() {
             .execute(
                 "DELETE FROM trace_tenants WHERE tenant_id = $1",
                 &[&tenant_id],
+            )
+            .await;
+        tx.commit().await.expect("commit cleanup transaction");
+    }
+}
+
+#[tokio::test]
+async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+    assert_trace_rls_policies_installed(&backend).await;
+
+    let tenant_a = format!("rls-raw-a-{}", Uuid::new_v4());
+    let tenant_b = format!("rls-raw-b-{}", Uuid::new_v4());
+    let tenant_a_submission_id = Uuid::new_v4();
+    let tenant_b_submission_id = Uuid::new_v4();
+    let tenant_a_trace_id = Uuid::new_v4();
+    let tenant_b_trace_id = Uuid::new_v4();
+
+    let mut tenant_a_submission = sample_submission(&tenant_a, tenant_a_submission_id);
+    tenant_a_submission.trace_id = tenant_a_trace_id;
+    backend
+        .upsert_trace_submission(tenant_a_submission)
+        .await
+        .expect("insert tenant A submission");
+    let mut tenant_b_submission = sample_submission(&tenant_b, tenant_b_submission_id);
+    tenant_b_submission.trace_id = tenant_b_trace_id;
+    backend
+        .upsert_trace_submission(tenant_b_submission)
+        .await
+        .expect("insert tenant B submission");
+
+    let tenant_a_object_ref_id = Uuid::new_v4();
+    backend
+        .append_trace_object_ref(TraceObjectRefWrite {
+            tenant_id: tenant_a.clone(),
+            object_ref_id: tenant_a_object_ref_id,
+            submission_id: tenant_a_submission_id,
+            artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
+            object_store: "s3://private-corpus".to_string(),
+            object_key: format!("{tenant_a}/submission.json"),
+            content_sha256: format!("sha256:{tenant_a}:object"),
+            encryption_key_ref: format!("kms:{tenant_a}"),
+            size_bytes: 4096,
+            compression: None,
+            created_by_job_id: None,
+        })
+        .await
+        .expect("append tenant A object ref");
+    let tenant_b_object_ref_id = Uuid::new_v4();
+    backend
+        .append_trace_object_ref(TraceObjectRefWrite {
+            tenant_id: tenant_b.clone(),
+            object_ref_id: tenant_b_object_ref_id,
+            submission_id: tenant_b_submission_id,
+            artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
+            object_store: "s3://private-corpus".to_string(),
+            object_key: format!("{tenant_b}/submission.json"),
+            content_sha256: format!("sha256:{tenant_b}:object"),
+            encryption_key_ref: format!("kms:{tenant_b}"),
+            size_bytes: 2048,
+            compression: None,
+            created_by_job_id: None,
+        })
+        .await
+        .expect("append tenant B object ref");
+
+    let tenant_a_credit_event_id = Uuid::new_v4();
+    backend
+        .append_trace_credit_event(sample_credit_event(
+            &tenant_a,
+            tenant_a_submission_id,
+            tenant_a_trace_id,
+            tenant_a_credit_event_id,
+        ))
+        .await
+        .expect("append tenant A credit event");
+    let tenant_b_credit_event_id = Uuid::new_v4();
+    backend
+        .append_trace_credit_event(sample_credit_event(
+            &tenant_b,
+            tenant_b_submission_id,
+            tenant_b_trace_id,
+            tenant_b_credit_event_id,
+        ))
+        .await
+        .expect("append tenant B credit event");
+
+    let effective_at = DateTime::parse_from_rfc3339("2026-04-25T12:00:00Z")
+        .expect("parse effective timestamp")
+        .with_timezone(&Utc);
+    let tenant_a_tombstone_id = Uuid::new_v4();
+    backend
+        .write_trace_tombstone(TraceTombstoneWrite {
+            tombstone_id: tenant_a_tombstone_id,
+            tenant_id: tenant_a.clone(),
+            submission_id: tenant_a_submission_id,
+            trace_id: Some(tenant_a_trace_id),
+            redaction_hash: Some(format!("sha256:{tenant_a}:redaction")),
+            canonical_summary_hash: Some(format!("sha256:{tenant_a}:summary")),
+            reason: "tenant A revocation".to_string(),
+            effective_at,
+            retain_until: None,
+            created_by_principal_ref: format!("principal:{tenant_a}"),
+        })
+        .await
+        .expect("write tenant A tombstone");
+    let tenant_b_tombstone_id = Uuid::new_v4();
+    backend
+        .write_trace_tombstone(TraceTombstoneWrite {
+            tombstone_id: tenant_b_tombstone_id,
+            tenant_id: tenant_b.clone(),
+            submission_id: tenant_b_submission_id,
+            trace_id: Some(tenant_b_trace_id),
+            redaction_hash: Some(format!("sha256:{tenant_b}:redaction")),
+            canonical_summary_hash: Some(format!("sha256:{tenant_b}:summary")),
+            reason: "tenant B revocation".to_string(),
+            effective_at,
+            retain_until: None,
+            created_by_principal_ref: format!("principal:{tenant_b}"),
+        })
+        .await
+        .expect("write tenant B tombstone");
+
+    assert!(
+        backend
+            .get_trace_submission(&tenant_b, tenant_a_submission_id)
+            .await
+            .expect("tenant B probes tenant A submission")
+            .is_none()
+    );
+    assert!(
+        backend
+            .list_trace_object_refs(&tenant_b, tenant_a_submission_id)
+            .await
+            .expect("tenant B probes tenant A object refs")
+            .is_empty()
+    );
+
+    let tenant_b_credit_events = backend
+        .list_trace_credit_events(&tenant_b)
+        .await
+        .expect("list tenant B credit events");
+    assert_eq!(tenant_b_credit_events.len(), 1);
+    assert_eq!(
+        tenant_b_credit_events[0].credit_event_id,
+        tenant_b_credit_event_id
+    );
+    assert_ne!(
+        tenant_b_credit_events[0].credit_event_id,
+        tenant_a_credit_event_id
+    );
+
+    let tenant_b_tombstones = backend
+        .list_trace_tombstones(&tenant_b)
+        .await
+        .expect("list tenant B tombstones");
+    assert_eq!(tenant_b_tombstones.len(), 1);
+    assert_eq!(tenant_b_tombstones[0].tombstone_id, tenant_b_tombstone_id);
+    assert_ne!(tenant_b_tombstones[0].tombstone_id, tenant_a_tombstone_id);
+
+    if let Some(config) = postgres_test_config() {
+        assert_raw_sql_trace_rows_visible_only_with_matching_tenant_context(
+            config.url.expose_secret(),
+            &tenant_a,
+            &tenant_b,
+            RawTraceRlsIds {
+                submission_id: tenant_a_submission_id,
+                object_ref_id: tenant_a_object_ref_id,
+                credit_event_id: tenant_a_credit_event_id,
+                tombstone_id: tenant_a_tombstone_id,
+            },
+            RawTraceRlsIds {
+                submission_id: tenant_b_submission_id,
+                object_ref_id: tenant_b_object_ref_id,
+                credit_event_id: tenant_b_credit_event_id,
+                tombstone_id: tenant_b_tombstone_id,
+            },
+        )
+        .await;
+    }
+
+    let mut client = backend.pool().get().await.expect("get cleanup connection");
+    for tenant_id in [&tenant_a, &tenant_b] {
+        let tx = client
+            .transaction()
+            .await
+            .expect("start cleanup transaction");
+        tx.execute(
+            "SELECT set_config('ironclaw.trace_tenant_id', $1, true)",
+            &[tenant_id],
+        )
+        .await
+        .expect("set cleanup tenant context");
+        let _ = tx
+            .execute(
+                "DELETE FROM trace_tenants WHERE tenant_id = $1",
+                &[tenant_id],
             )
             .await;
         tx.commit().await.expect("commit cleanup transaction");

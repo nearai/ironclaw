@@ -934,8 +934,8 @@ mod trace_contribution_isolation {
     use super::*;
     use crate::channels::web::handlers::traces::{
         traces_credit_handler, traces_policy_get_handler, traces_policy_put_handler,
-        traces_preview_handler, traces_revoke_handler, traces_submissions_handler,
-        traces_submit_handler,
+        traces_preview_handler, traces_queue_status_handler, traces_revoke_handler,
+        traces_submissions_handler, traces_submit_handler,
     };
     use crate::trace_contribution::{
         LocalTraceSubmissionStatus, StandingTraceContributionPolicy, TraceSubmissionReceipt,
@@ -956,6 +956,7 @@ mod trace_contribution_isolation {
             .route("/api/traces/preview", post(traces_preview_handler))
             .route("/api/traces/submit", post(traces_submit_handler))
             .route("/api/traces/credit", get(traces_credit_handler))
+            .route("/api/traces/queue-status", get(traces_queue_status_handler))
             .route("/api/traces/submissions", get(traces_submissions_handler))
             .route(
                 "/api/traces/submissions/{submission_id}/revoke",
@@ -1011,6 +1012,30 @@ mod trace_contribution_isolation {
             ..Default::default()
         };
         write_trace_policy_for_scope(Some(scope), &policy).expect("write trace policy");
+    }
+
+    fn write_trace_queue_fixture(scope: &str, held_reason: Option<&str>) -> Uuid {
+        let submission_id = Uuid::new_v4();
+        let dir =
+            crate::trace_contribution::trace_contribution_dir_for_scope(Some(scope)).join("queue");
+        std::fs::create_dir_all(&dir).expect("trace queue dir creates");
+        std::fs::write(dir.join(format!("{submission_id}.json")), "{}")
+            .expect("trace queue fixture writes");
+        if let Some(reason) = held_reason {
+            let body = serde_json::json!({ "reason": reason }).to_string();
+            std::fs::write(dir.join(format!("{submission_id}.held.json")), body)
+                .expect("trace queue hold fixture writes");
+        }
+        submission_id
+    }
+
+    fn assert_body_omits(body: &[u8], needle: &str, context: &str) {
+        assert!(
+            !body
+                .windows(needle.len())
+                .any(|chunk| chunk == needle.as_bytes()),
+            "{context}"
+        );
     }
 
     async fn json_request(
@@ -1273,6 +1298,96 @@ mod trace_contribution_isolation {
                 .expect("events array")
                 .iter()
                 .all(|event| event.get("redacted_content").is_none())
+        );
+
+        remove_trace_state(&alice_user_id);
+        remove_trace_state(&bob_user_id);
+    }
+
+    #[tokio::test]
+    async fn test_trace_queue_status_endpoint_is_tenant_scoped() {
+        let alice_user_id = format!("alice-{}", Uuid::new_v4());
+        let bob_user_id = format!("bob-{}", Uuid::new_v4());
+        remove_trace_state(&alice_user_id);
+        remove_trace_state(&bob_user_id);
+
+        let alice_held_submission_id =
+            write_trace_queue_fixture(&alice_user_id, Some("alice manual review"));
+        let alice_ready_submission_id = write_trace_queue_fixture(&alice_user_id, None);
+        let bob_held_submission_id =
+            write_trace_queue_fixture(&bob_user_id, Some("bob private hold"));
+        let bob_ready_submission_id = write_trace_queue_fixture(&bob_user_id, None);
+        let alice_held_submission_id = alice_held_submission_id.to_string();
+        let alice_ready_submission_id = alice_ready_submission_id.to_string();
+        let bob_held_submission_id = bob_held_submission_id.to_string();
+        let bob_ready_submission_id = bob_ready_submission_id.to_string();
+
+        let app = trace_router_with_auth(
+            build_state(None, None),
+            trace_auth(alice_user_id.clone(), bob_user_id.clone()),
+        );
+
+        let alice_resp = authed_get(&app, "/api/traces/queue-status", "tok-alice").await;
+        assert_eq!(alice_resp.status(), StatusCode::OK);
+        let alice_body = axum::body::to_bytes(alice_resp.into_body(), 1024 * 1024)
+            .await
+            .expect("read alice queue status");
+        let alice_status: serde_json::Value =
+            serde_json::from_slice(&alice_body).expect("parse alice queue status");
+        assert_eq!(alice_status["queued_envelopes"], 2);
+        assert_eq!(alice_status["held_envelopes"], 1);
+        assert_eq!(
+            alice_status["held_queue"][0]["submission_id"],
+            alice_held_submission_id
+        );
+        assert_eq!(
+            alice_status["held_queue"][0]["reason"],
+            "alice manual review"
+        );
+        assert_body_omits(
+            &alice_body,
+            &bob_held_submission_id,
+            "alice queue status must not expose bob held submission ids",
+        );
+        assert_body_omits(
+            &alice_body,
+            &bob_ready_submission_id,
+            "alice queue status must not expose bob ready submission ids",
+        );
+        assert_body_omits(
+            &alice_body,
+            "bob private hold",
+            "alice queue status must not expose bob hold reasons",
+        );
+
+        let bob_resp = authed_get(&app, "/api/traces/queue-status", "tok-bob").await;
+        assert_eq!(bob_resp.status(), StatusCode::OK);
+        let bob_body = axum::body::to_bytes(bob_resp.into_body(), 1024 * 1024)
+            .await
+            .expect("read bob queue status");
+        let bob_status: serde_json::Value =
+            serde_json::from_slice(&bob_body).expect("parse bob queue status");
+        assert_eq!(bob_status["queued_envelopes"], 2);
+        assert_eq!(bob_status["held_envelopes"], 1);
+        assert_eq!(
+            bob_status["held_queue"][0]["submission_id"],
+            bob_held_submission_id
+        );
+        assert_eq!(bob_status["held_queue"][0]["reason"], "bob private hold");
+        assert_body_omits(
+            &bob_body,
+            &alice_held_submission_id,
+            "bob queue status must not expose alice held submission ids",
+        );
+        assert_body_omits(
+            &bob_body,
+            &alice_ready_submission_id,
+            "bob queue status must not expose alice ready submission ids",
+        );
+        assert_body_omits(
+            &bob_body,
+            "alice manual review",
+            "bob queue status must not expose alice hold reasons",
         );
 
         remove_trace_state(&alice_user_id);

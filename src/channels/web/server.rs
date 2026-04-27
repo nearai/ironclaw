@@ -73,7 +73,8 @@ use crate::channels::web::handlers::skills::{
 use crate::channels::web::handlers::traces::{
     traces_credit_handler, traces_credit_notice_handler, traces_flush_handler,
     traces_policy_get_handler, traces_policy_put_handler, traces_preview_handler,
-    traces_revoke_handler, traces_submissions_handler, traces_submit_handler,
+    traces_queue_status_handler, traces_revoke_handler, traces_submissions_handler,
+    traces_submit_handler,
 };
 use crate::channels::web::log_layer::LogBroadcaster;
 use crate::channels::web::sse::SseManager;
@@ -681,6 +682,7 @@ pub async fn start_server(
             "/api/traces/credit-notice",
             get(traces_credit_notice_handler),
         )
+        .route("/api/traces/queue-status", get(traces_queue_status_handler))
         .route("/api/traces/submissions", get(traces_submissions_handler))
         .route(
             "/api/traces/submissions/{submission_id}/revoke",

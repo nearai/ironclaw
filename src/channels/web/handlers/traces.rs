@@ -17,15 +17,16 @@ use crate::trace_contribution::{
     ConsentScope, CreditSummary, DeterministicTraceRedactor, LocalTraceSubmissionRecord,
     RawTraceContribution, RecordedTraceContributionOptions, StandingTraceContributionPolicy,
     TraceChannel, TraceContributionAcceptance, TraceContributionEnvelope,
-    TraceContributionPolicyRejection, TraceCreditReport, TraceQueueFlushReport, TraceQueueHold,
-    TraceRedactor, apply_credit_estimate_to_envelope, capture_turns_from_conversation_messages,
-    flush_trace_contribution_queue_for_scope, local_pseudonymous_contributor_id,
-    local_pseudonymous_tenant_scope_ref, mark_trace_credit_notice_due_for_scope,
-    preflight_trace_contribution_policy, queue_trace_envelope_for_scope,
+    TraceContributionPolicyRejection, TraceCreditReport, TraceQueueDiagnostics,
+    TraceQueueFlushReport, TraceQueueHold, TraceRedactor, apply_credit_estimate_to_envelope,
+    capture_turns_from_conversation_messages, flush_trace_contribution_queue_for_scope,
+    local_pseudonymous_contributor_id, local_pseudonymous_tenant_scope_ref,
+    mark_trace_credit_notice_due_for_scope, preflight_trace_contribution_policy,
+    queue_trace_envelope_for_scope, queued_trace_envelope_paths_for_scope,
     read_local_trace_records_for_scope, read_trace_policy_for_scope,
     read_trace_queue_holds_for_scope, revoke_trace_submission_for_scope,
     sync_remote_trace_submission_records_for_scope, trace_credit_report, trace_credit_summary,
-    write_trace_policy_for_scope,
+    trace_queue_diagnostics_for_scope, write_trace_policy_for_scope,
 };
 
 #[derive(Debug, Deserialize)]
@@ -116,6 +117,16 @@ pub struct TraceCreditNoticeResponse {
     pub credit_notice: Option<CreditSummary>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct TraceQueueStatusResponse {
+    pub queued_envelopes: u32,
+    pub held_envelopes: u32,
+    #[serde(flatten)]
+    pub diagnostics: TraceQueueDiagnostics,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held_queue: Vec<TraceQueueHold>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct TraceRevokeRequest {
     #[serde(default)]
@@ -136,7 +147,7 @@ pub async fn traces_policy_get_handler(
 ) -> Result<Json<TracePolicyResponse>, (StatusCode, String)> {
     let scope = Some(user.user_id.as_str());
     let policy = read_trace_policy_for_scope(scope).map_err(internal_error)?;
-    let queued_envelopes = crate::trace_contribution::queued_trace_envelope_paths_for_scope(scope)
+    let queued_envelopes = queued_trace_envelope_paths_for_scope(scope)
         .map_err(internal_error)?
         .len();
     let held_queue = read_trace_queue_holds_for_scope(scope).map_err(internal_error)?;
@@ -352,6 +363,20 @@ pub async fn traces_credit_notice_handler(
     Ok(Json(TraceCreditNoticeResponse { credit_notice }))
 }
 
+pub async fn traces_queue_status_handler(
+    AuthenticatedUser(user): AuthenticatedUser,
+) -> Result<Json<TraceQueueStatusResponse>, (StatusCode, String)> {
+    let scope = Some(user.user_id.as_str());
+    let diagnostics = trace_queue_diagnostics_for_scope(scope).map_err(internal_error)?;
+    let held_queue = read_trace_queue_holds_for_scope(scope).map_err(internal_error)?;
+    Ok(Json(TraceQueueStatusResponse {
+        queued_envelopes: diagnostics.queued_count,
+        held_envelopes: diagnostics.held_count,
+        diagnostics,
+        held_queue,
+    }))
+}
+
 pub async fn traces_submissions_handler(
     AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<Vec<LocalTraceSubmissionRecord>>, (StatusCode, String)> {
@@ -547,6 +572,21 @@ mod tests {
         std::fs::write(path, body).expect("trace records write");
     }
 
+    fn write_queue_fixture(scope: &str, held_reason: Option<&str>) -> Uuid {
+        let submission_id = Uuid::new_v4();
+        let dir = trace_contribution_dir_for_scope(Some(scope)).join("queue");
+        std::fs::create_dir_all(&dir).expect("trace queue dir creates");
+        std::fs::write(dir.join(format!("{submission_id}.json")), "{}")
+            .expect("trace queue fixture writes");
+        if let Some(reason) = held_reason {
+            let hold = serde_json::json!({ "reason": reason });
+            let body = serde_json::to_string_pretty(&hold).expect("hold fixture serializes");
+            std::fs::write(dir.join(format!("{submission_id}.held.json")), body)
+                .expect("trace queue hold fixture writes");
+        }
+        submission_id
+    }
+
     fn submitted_record(points: f32) -> LocalTraceSubmissionRecord {
         let submission_id = Uuid::new_v4();
         LocalTraceSubmissionRecord {
@@ -618,6 +658,46 @@ mod tests {
                 .recent_explanations
                 .iter()
                 .all(|reason| !reason.contains("99.0"))
+        );
+    }
+
+    #[tokio::test]
+    async fn traces_queue_status_handler_returns_authenticated_user_scoped_diagnostics() {
+        let user_id = format!("trace-web-queue-user-{}", Uuid::new_v4());
+        let other_user_id = format!("trace-web-queue-other-{}", Uuid::new_v4());
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+            ..Default::default()
+        };
+        write_trace_policy_for_scope(Some(&user_id), &policy).expect("user policy writes");
+        write_trace_policy_for_scope(Some(&other_user_id), &policy).expect("other policy writes");
+        let held_submission_id = write_queue_fixture(&user_id, Some("requires manual review"));
+        write_queue_fixture(&user_id, None);
+        write_queue_fixture(&other_user_id, Some("other user hold"));
+        write_queue_fixture(&other_user_id, None);
+
+        let Json(response) = traces_queue_status_handler(AuthenticatedUser(UserIdentity {
+            user_id: user_id.clone(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        }))
+        .await
+        .expect("queue status handler succeeds");
+
+        assert_eq!(response.queued_envelopes, 2);
+        assert_eq!(response.held_envelopes, 1);
+        assert_eq!(response.diagnostics.queued_count, 2);
+        assert_eq!(response.diagnostics.held_count, 1);
+        assert!(response.diagnostics.policy_enabled);
+        assert_eq!(response.held_queue.len(), 1);
+        assert_eq!(response.held_queue[0].submission_id, held_submission_id);
+        assert_eq!(response.held_queue[0].reason, "requires manual review");
+        assert!(
+            response
+                .held_queue
+                .iter()
+                .all(|hold| hold.reason != "other user hold")
         );
     }
 
