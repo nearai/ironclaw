@@ -24,7 +24,7 @@
                 "source": "github",
                 "event_type": "issue.opened",
                 "filters": {
-                  "repository": "nearai/t3claw",
+                  "repository": "nearai/ironclaw",
                   "priority": "p1"
                 }
               },
@@ -50,7 +50,7 @@
               "event_source": "github",
               "event_type": "issue.opened",
               "payload": {
-                "repository": "nearai/t3claw",
+                "repository": "nearai/ironclaw",
                 "priority": "p1",
                 "issue_number": 123,
                 "title": "Support grouped routine create requests"

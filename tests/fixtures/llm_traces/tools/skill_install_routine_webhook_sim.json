@@ -38,7 +38,7 @@
               "event_source": "github",
               "event_type": "issue.opened",
               "event_filters": {
-                "repository": "nearai/t3claw"
+                "repository": "nearai/ironclaw"
               },
               "action_type": "full_job",
               "prompt": "When issue webhook event arrives, start implementation loop and create branch/PR updates."
@@ -60,7 +60,7 @@
               "event_source": "github",
               "event_type": "issue.opened",
               "payload": {
-                "repository": "nearai/t3claw",
+                "repository": "nearai/ironclaw",
                 "issue_number": 4242,
                 "sender": "trace-bot"
               }

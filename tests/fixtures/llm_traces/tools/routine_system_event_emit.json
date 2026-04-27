@@ -22,7 +22,7 @@
               "event_source": "github",
               "event_type": "issue.opened",
               "event_filters": {
-                "repository": "nearai/t3claw",
+                "repository": "nearai/ironclaw",
                 "priority": "p1"
               },
               "action_type": "full_job",
@@ -46,7 +46,7 @@
               "event_source": "github",
               "event_type": "issue.opened",
               "payload": {
-                "repository": "nearai/t3claw",
+                "repository": "nearai/ironclaw",
                 "priority": "p1",
                 "issue_number": 123,
                 "title": "Support event-driven project workflow"
