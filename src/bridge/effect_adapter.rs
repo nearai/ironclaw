@@ -30,7 +30,9 @@ use crate::bridge::action_projector::ActionProjector;
 use crate::bridge::capability_projector::CapabilityProjector;
 use crate::bridge::router::synthetic_action_call_id;
 use crate::bridge::sandbox::{InterceptOutcome, maybe_intercept};
-use crate::bridge::tool_permissions::{ToolPermissionResolution, ToolPermissionSnapshot};
+use crate::bridge::tool_permissions::{
+    ToolPermissionResolution, ToolPermissionSnapshot, canonical_tool_name,
+};
 use crate::context::JobContext;
 use crate::extensions::InstalledExtension;
 use crate::extensions::naming::extension_name_candidates;
@@ -317,13 +319,27 @@ impl EffectBridgeAdapter {
     }
 
     fn apply_user_permission_override(
+        lookup_name: &str,
         base_requirement: ApprovalRequirement,
-        explicit_user_permission: Option<PermissionState>,
+        user_permission: ToolPermissionResolution,
     ) -> ApprovalRequirement {
-        match explicit_user_permission {
-            Some(PermissionState::AskEachTime) => ApprovalRequirement::Always,
+        if matches!(user_permission.explicit, Some(PermissionState::AskEachTime)) {
+            return ApprovalRequirement::Always;
+        }
+        match (base_requirement, user_permission.configured) {
+            (ApprovalRequirement::Never, Some(PermissionState::AskEachTime))
+                if Self::enforce_static_ask_floor_for_base_never_tool(lookup_name) =>
+            {
+                ApprovalRequirement::Always
+            }
             _ => base_requirement,
         }
+    }
+
+    fn enforce_static_ask_floor_for_base_never_tool(lookup_name: &str) -> bool {
+        // Other base-Never bridge tools manage auth/install gates internally.
+        // Restart's command-level confirmation does not cover direct v2 calls.
+        canonical_tool_name(lookup_name) == "restart"
     }
 
     fn ensure_tool_not_disabled(
@@ -356,7 +372,7 @@ impl EffectBridgeAdapter {
         } else {
             tool.requires_approval(parameters)
         };
-        Self::apply_user_permission_override(base_requirement, user_permission.explicit)
+        Self::apply_user_permission_override(lookup_name, base_requirement, user_permission)
     }
 
     async fn enforce_tool_approval(
@@ -463,21 +479,25 @@ impl EffectBridgeAdapter {
             .await?;
         }
 
-        let snapshot_result = tool_info
+        let snapshot_result = if let Some(inventory) = tool_info
             .context
             .available_action_inventory_snapshot
             .as_deref()
-            .map(|inventory| ActionDiscovery::tool_info(tool_info.parameters, inventory))
-            .or_else(|| {
-                tool_info
-                    .context
-                    .available_actions_snapshot
-                    .as_deref()
-                    .map(|actions| {
-                        ActionDiscovery::tool_info_from_actions(tool_info.parameters, actions)
-                    })
-            })
-            .unwrap_or(Ok(None));
+        {
+            ActionDiscovery::tool_info(tool_info.parameters, inventory)
+        } else if let Some(actions) = tool_info.context.available_actions_snapshot.as_deref() {
+            ActionDiscovery::tool_info_from_actions(tool_info.parameters, actions)
+        } else {
+            let error_msg = "tool_info: action inventory unavailable in this execution context";
+            let sanitized = self.safety.sanitize_tool_output("tool_info", error_msg);
+            return Ok(Self::snapshot_action_result(
+                tool_info.context,
+                tool_info.canonical_action_name,
+                serde_json::json!({"error": sanitized.content}),
+                true,
+                tool_info.started_at,
+            ));
+        };
 
         match snapshot_result {
             Ok(Some(output)) => Ok(Self::snapshot_action_result(
@@ -3083,6 +3103,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_info_schema_reads_action_inventory_for_engine_native_actions() {
+        let adapter = make_adapter();
+        let mut ctx = exec_ctx(
+            ironclaw_engine::ThreadId::new(),
+            Some("call_tool_info_schema"),
+        );
+        ctx.available_action_inventory_snapshot = Some(Arc::new(ActionInventory {
+            inline: vec![
+                ActionDef {
+                    name: "tool_info".to_string(),
+                    description: "Inspect actions".to_string(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                    model_tool_surface: ModelToolSurface::FullSchema,
+                    discovery: None,
+                },
+                ActionDef {
+                    name: "mission_create".to_string(),
+                    description: "Create a mission".to_string(),
+                    parameters_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "goal": {"type": "string"},
+                            "cadence": {"type": "string"}
+                        },
+                        "required": ["name", "goal", "cadence"]
+                    }),
+                    effects: vec![],
+                    requires_approval: false,
+                    model_tool_surface: ModelToolSurface::CompactToolInfo,
+                    discovery: None,
+                },
+            ],
+            discoverable: Vec::new(),
+        }));
+
+        let result = adapter
+            .execute_action(
+                "tool_info",
+                serde_json::json!({"name": "mission-create", "detail": "schema"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("tool_info should succeed through action inventory discovery");
+
+        assert!(!result.is_error);
+        assert_eq!(result.output["name"], serde_json::json!("mission_create"));
+        assert_eq!(
+            result.output["schema"]["required"],
+            serde_json::json!(["name", "goal", "cadence"])
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_info_reads_non_registry_action_from_current_inventory() {
+        let adapter = make_adapter();
+        let mut ctx = exec_ctx(
+            ironclaw_engine::ThreadId::new(),
+            Some("call_tool_info_custom_action"),
+        );
+        ctx.available_action_inventory_snapshot = Some(Arc::new(ActionInventory {
+            inline: vec![
+                ActionDef {
+                    name: "tool_info".to_string(),
+                    description: "Inspect actions".to_string(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                    model_tool_surface: ModelToolSurface::FullSchema,
+                    discovery: None,
+                },
+                ActionDef {
+                    name: "custom_provider_send".to_string(),
+                    description: "Send through a provider action".to_string(),
+                    parameters_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "recipient": {"type": "string"},
+                            "message": {"type": "string"}
+                        },
+                        "required": ["recipient", "message"]
+                    }),
+                    effects: vec![],
+                    requires_approval: false,
+                    model_tool_surface: ModelToolSurface::CompactToolInfo,
+                    discovery: None,
+                },
+            ],
+            discoverable: Vec::new(),
+        }));
+
+        let result = adapter
+            .execute_action(
+                "tool_info",
+                serde_json::json!({"name": "custom-provider-send", "detail": "schema"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("tool_info should resolve non-registry action from inventory");
+
+        assert!(!result.is_error);
+        assert_eq!(
+            result.output["name"],
+            serde_json::json!("custom_provider_send")
+        );
+        assert_eq!(
+            result.output["schema"]["required"],
+            serde_json::json!(["recipient", "message"])
+        );
+    }
+
+    #[tokio::test]
     async fn tool_info_rejects_actions_outside_callable_snapshot() {
         let adapter = make_adapter();
         let mut ctx = exec_ctx(
@@ -3125,6 +3261,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_info_does_not_fall_back_to_registry_when_snapshot_omits_tool() {
+        let adapter = make_tool_info_registry_adapter().await;
+        let mut ctx = exec_ctx(
+            ironclaw_engine::ThreadId::new(),
+            Some("call_tool_info_registry_fallback_guard"),
+        );
+        ctx.available_action_inventory_snapshot = Some(Arc::new(ActionInventory {
+            inline: vec![ActionDef {
+                name: "tool_info".to_string(),
+                description: "Inspect actions".to_string(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![],
+                requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
+            }],
+            discoverable: Vec::new(),
+        }));
+
+        let result = adapter
+            .execute_action(
+                "tool_info",
+                serde_json::json!({"name": "approval_test", "detail": "schema"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("tool_info should return an error result for out-of-snapshot action");
+
+        assert!(result.is_error);
+        let error = result.output["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("no callable or discoverable action named 'approval_test'"),
+            "unexpected error output: {:?}",
+            result.output
+        );
+        assert!(
+            !error.contains("No tool named 'approval_test' is registered"),
+            "registry-backed tool_info leaked through: {error}"
+        );
+    }
+
+    #[tokio::test]
     async fn tool_info_rejects_registered_tools_when_snapshots_are_missing() {
         let adapter = make_tool_info_registry_adapter().await;
         let ctx = exec_ctx(
@@ -3148,7 +3327,7 @@ mod tests {
             result.output["error"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("no callable or discoverable action named 'approval_test'"),
+                .contains("action inventory unavailable in this execution context"),
             "unexpected error output: {:?}",
             result.output
         );
