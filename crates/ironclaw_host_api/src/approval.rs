@@ -74,7 +74,7 @@ fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
         }
         serde_json::Value::Object(map) => {
             let mut entries = map.iter().collect::<Vec<_>>();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries.sort_by_key(|(key, _)| *key);
             let mut canonical = serde_json::Map::new();
             for (key, value) in entries {
                 canonical.insert(key.clone(), canonical_json(value));
