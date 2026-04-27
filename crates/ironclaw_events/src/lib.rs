@@ -278,6 +278,45 @@ impl From<FilesystemError> for EventError {
     }
 }
 
+/// Monotonic replay cursor for a durable JSONL log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EventCursor(u64);
+
+impl EventCursor {
+    pub const fn origin() -> Self {
+        Self(0)
+    }
+
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for EventCursor {
+    fn default() -> Self {
+        Self::origin()
+    }
+}
+
+/// One replayed record and its durable cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventLogEntry<T> {
+    pub cursor: EventCursor,
+    pub record: T,
+}
+
+/// Bounded replay response from a durable event/audit log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventReplay<T> {
+    pub entries: Vec<EventLogEntry<T>>,
+    pub next_cursor: EventCursor,
+}
+
 pub fn scoped_runtime_event_log_path(
     scope: &ResourceScope,
     file_name: &str,
@@ -447,6 +486,19 @@ where
         };
         parse_jsonl(&bytes)
     }
+
+    pub async fn replay_events_after(
+        &self,
+        after: Option<EventCursor>,
+        limit: usize,
+    ) -> Result<EventReplay<RuntimeEvent>, EventError> {
+        let bytes = match self.filesystem.read_file(&self.path).await {
+            Ok(bytes) => bytes,
+            Err(error) if is_not_found(&error) => return Ok(empty_replay(after)),
+            Err(error) => return Err(EventError::from(error)),
+        };
+        replay_jsonl(&bytes, after, limit)
+    }
 }
 
 #[async_trait]
@@ -510,6 +562,19 @@ where
         };
         parse_jsonl(&bytes)
     }
+
+    pub async fn replay_records_after(
+        &self,
+        after: Option<EventCursor>,
+        limit: usize,
+    ) -> Result<EventReplay<AuditEnvelope>, EventError> {
+        let bytes = match self.filesystem.read_file(&self.path).await {
+            Ok(bytes) => bytes,
+            Err(error) if is_not_found(&error) => return Ok(empty_replay(after)),
+            Err(error) => return Err(EventError::from(error)),
+        };
+        replay_jsonl(&bytes, after, limit)
+    }
 }
 
 #[async_trait]
@@ -542,6 +607,49 @@ where
     T: DeserializeOwned,
 {
     parse_jsonl::<T>(bytes).map(|_| ())
+}
+
+fn empty_replay<T>(after: Option<EventCursor>) -> EventReplay<T> {
+    EventReplay {
+        entries: Vec::new(),
+        next_cursor: after.unwrap_or_default(),
+    }
+}
+
+fn replay_jsonl<T>(
+    bytes: &[u8],
+    after: Option<EventCursor>,
+    limit: usize,
+) -> Result<EventReplay<T>, EventError>
+where
+    T: DeserializeOwned,
+{
+    let after = after.unwrap_or_default().as_u64();
+    let text = String::from_utf8(bytes.to_vec()).map_err(|error| EventError::Serialize {
+        reason: error.to_string(),
+    })?;
+    let mut entries = Vec::new();
+    let mut current_cursor = 0;
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        current_cursor += 1;
+        let record = serde_json::from_str::<T>(line).map_err(|error| EventError::Serialize {
+            reason: error.to_string(),
+        })?;
+        if current_cursor > after && entries.len() < limit {
+            entries.push(EventLogEntry {
+                cursor: EventCursor::new(current_cursor),
+                record,
+            });
+        }
+    }
+    let next_cursor = entries
+        .last()
+        .map(|entry| entry.cursor)
+        .unwrap_or_else(|| EventCursor::new(after.max(current_cursor)));
+    Ok(EventReplay {
+        entries,
+        next_cursor,
+    })
 }
 
 fn parse_jsonl<T>(bytes: &[u8]) -> Result<Vec<T>, EventError>

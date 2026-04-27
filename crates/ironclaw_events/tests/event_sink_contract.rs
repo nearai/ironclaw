@@ -190,6 +190,78 @@ fn scoped_jsonl_paths_are_tenant_user_scoped_and_reject_traversal() {
 }
 
 #[tokio::test]
+async fn jsonl_event_sink_replays_records_after_monotonic_cursor() {
+    let fs = Arc::new(engine_filesystem(tempfile::tempdir().unwrap().keep()));
+    let scope = sample_scope();
+    let sink = JsonlEventSink::new(
+        Arc::clone(&fs),
+        scoped_runtime_event_log_path(&scope, "reborn-demo.jsonl").unwrap(),
+    );
+
+    sink.emit(RuntimeEvent::dispatch_requested(
+        scope.clone(),
+        CapabilityId::new("echo.say").unwrap(),
+    ))
+    .await
+    .unwrap();
+    sink.emit(RuntimeEvent::runtime_selected(
+        scope,
+        CapabilityId::new("echo.say").unwrap(),
+        ExtensionId::new("echo").unwrap(),
+        RuntimeKind::Wasm,
+    ))
+    .await
+    .unwrap();
+
+    let first_batch = sink.replay_events_after(None, 10).await.unwrap();
+    assert_eq!(first_batch.entries.len(), 2);
+    assert_eq!(first_batch.entries[0].cursor, EventCursor::new(1));
+    assert_eq!(first_batch.entries[1].cursor, EventCursor::new(2));
+    assert_eq!(first_batch.next_cursor, EventCursor::new(2));
+
+    let resumed = sink
+        .replay_events_after(Some(first_batch.entries[0].cursor), 10)
+        .await
+        .unwrap();
+    assert_eq!(resumed.entries.len(), 1);
+    assert_eq!(resumed.entries[0].cursor, EventCursor::new(2));
+    assert_eq!(
+        resumed.entries[0].record.kind,
+        RuntimeEventKind::RuntimeSelected
+    );
+}
+
+#[tokio::test]
+async fn jsonl_audit_sink_replays_records_after_monotonic_cursor() {
+    let fs = Arc::new(engine_filesystem(tempfile::tempdir().unwrap().keep()));
+    let scope = sample_scope();
+    let sink = JsonlAuditSink::new(
+        Arc::clone(&fs),
+        scoped_audit_log_path(&scope, "approval-audit.jsonl").unwrap(),
+    );
+
+    sink.emit_audit(sample_approval_audit_envelope())
+        .await
+        .unwrap();
+    sink.emit_audit(sample_approval_audit_envelope())
+        .await
+        .unwrap();
+
+    let first_batch = sink.replay_records_after(None, 1).await.unwrap();
+    assert_eq!(first_batch.entries.len(), 1);
+    assert_eq!(first_batch.entries[0].cursor, EventCursor::new(1));
+    assert_eq!(first_batch.next_cursor, EventCursor::new(1));
+
+    let resumed = sink
+        .replay_records_after(Some(first_batch.next_cursor), 10)
+        .await
+        .unwrap();
+    assert_eq!(resumed.entries.len(), 1);
+    assert_eq!(resumed.entries[0].cursor, EventCursor::new(2));
+    assert_eq!(resumed.next_cursor, EventCursor::new(2));
+}
+
+#[tokio::test]
 async fn jsonl_sinks_treat_missing_log_files_as_empty() {
     let fs = Arc::new(engine_filesystem(tempfile::tempdir().unwrap().keep()));
     let scope = sample_scope();
