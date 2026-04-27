@@ -24,7 +24,7 @@ use ironclaw::trace_contribution::{
     ResidualPiiRisk, TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceAllowedUse, TraceContributionEnvelope,
     TraceSubmissionReceipt, TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate,
     TraceValueScorecard, apply_credit_estimate_to_envelope, canonical_summary_for_embedding,
-    rescrub_trace_envelope, retention_policy_for_trace,
+    rescrub_trace_envelope, retention_policy_for_allowed_use, retention_policy_for_trace,
 };
 use ironclaw::trace_corpus_storage::{
     TraceArtifactInvalidationCounts as StorageTraceArtifactInvalidationCounts,
@@ -3377,13 +3377,9 @@ async fn review_decision_handler(
         .await
         .map_err(internal_error)?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "trace submission not found"))?;
-    if record.is_terminal() {
-        return Err(api_error(
-            StatusCode::CONFLICT,
-            "terminal trace submissions are not eligible for review approval",
-        ));
-    }
-    if review_lease_held_by_other(&record, &tenant, Utc::now()) {
+    let now = Utc::now();
+    ensure_review_decision_eligible(state.as_ref(), &record, body.decision, now)?;
+    if review_lease_held_by_other(&record, &tenant, now) {
         return Err(api_error(
             StatusCode::CONFLICT,
             "trace review lease is held by another reviewer",
@@ -3476,6 +3472,43 @@ async fn review_decision_handler(
         .map_err(internal_error)?;
 
     Ok(Json(receipt_from_record(&record)))
+}
+
+fn ensure_review_decision_eligible(
+    state: &AppState,
+    record: &TraceCommonsSubmissionRecord,
+    decision: TraceReviewDecision,
+    now: DateTime<Utc>,
+) -> ApiResult<()> {
+    if record.is_terminal() {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "terminal trace submissions are not eligible for review decisions",
+        ));
+    }
+    if record.status != TraceCorpusStatus::Quarantined {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "only quarantined trace submissions are eligible for review decisions",
+        ));
+    }
+    if record.is_expired_at(now) && !retention_policy_is_on_legal_hold(state, record) {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "expired trace submissions are not eligible for review decisions",
+        ));
+    }
+    if matches!(decision, TraceReviewDecision::Approve)
+        && !record.allowed_uses.iter().any(|allowed_use| {
+            retention_policy_for_allowed_use(*allowed_use).allows_derived_artifacts
+        })
+    {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "trace retention policy does not permit review approval",
+        ));
+    }
+    Ok(())
 }
 
 async fn claim_review_lease_handler(
@@ -20594,6 +20627,189 @@ mod tests {
         .await
         .expect_err("contributor cannot export datasets");
         assert_eq!(contributor_export_error.0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn review_decision_requires_quarantined_status() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let Json(receipt) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("accepted submission succeeds");
+        assert_eq!(receipt.status, "accepted");
+
+        let error = review_decision_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Reject,
+                reason: Some("not actually queued for review".to_string()),
+                credit_points_pending: None,
+            }),
+        )
+        .await
+        .expect_err("accepted trace cannot be re-reviewed");
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert_eq!(
+            error.1.0.error,
+            "only quarantined trace submissions are eligible for review decisions"
+        );
+
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        assert_eq!(record.status, TraceCorpusStatus::Accepted);
+    }
+
+    #[tokio::test]
+    async fn review_decision_blocks_unmaintained_expired_trace() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let envelope = sample_envelope().await;
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("quarantined submission succeeds");
+        let mut record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        assert_eq!(record.status, TraceCorpusStatus::Quarantined);
+        record.expires_at = Some(Utc::now() - Duration::minutes(1));
+        write_submission_record(&state.root, &record).expect("expired record writes");
+
+        let error = review_decision_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Approve,
+                reason: Some("too stale for approval".to_string()),
+                credit_points_pending: None,
+            }),
+        )
+        .await
+        .expect_err("unmaintained expired trace cannot be reviewed");
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert_eq!(
+            error.1.0.error,
+            "expired trace submissions are not eligible for review decisions"
+        );
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("audit events read");
+        assert!(audit_events.iter().all(|event| {
+            event.submission_id != submission_id || event.kind != "trace_content_read"
+        }));
+    }
+
+    #[tokio::test]
+    async fn review_decision_blocks_purged_trace() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let envelope = sample_envelope().await;
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("quarantined submission succeeds");
+        let mut record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        record.status = TraceCorpusStatus::Purged;
+        record.purged_at = Some(Utc::now());
+        write_submission_record(&state.root, &record).expect("purged record writes");
+
+        let error = review_decision_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Approve,
+                reason: Some("should be gated".to_string()),
+                credit_points_pending: None,
+            }),
+        )
+        .await
+        .expect_err("purged trace cannot be reviewed");
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert_eq!(
+            error.1.0.error,
+            "terminal trace submissions are not eligible for review decisions"
+        );
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("audit events read");
+        assert!(audit_events.iter().all(|event| {
+            event.submission_id != submission_id || event.kind != "trace_content_read"
+        }));
+    }
+
+    #[tokio::test]
+    async fn review_decision_blocks_retention_ineligible_approval() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::AggregateAnalytics];
+        envelope.trace_card.retention_policy =
+            retention_policy_for_allowed_use(TraceAllowedUse::AggregateAnalytics).name;
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("aggregate-only quarantined submission succeeds");
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        assert_eq!(record.status, TraceCorpusStatus::Quarantined);
+        assert_eq!(
+            record.allowed_uses,
+            vec![TraceAllowedUse::AggregateAnalytics]
+        );
+
+        let error = review_decision_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Approve,
+                reason: Some(
+                    "aggregate-only traces should not become corpus artifacts".to_string(),
+                ),
+                credit_points_pending: None,
+            }),
+        )
+        .await
+        .expect_err("aggregate-only trace cannot be approved");
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert_eq!(
+            error.1.0.error,
+            "trace retention policy does not permit review approval"
+        );
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("audit events read");
+        assert!(audit_events.iter().all(|event| {
+            event.submission_id != submission_id || event.kind != "trace_content_read"
+        }));
     }
 
     #[cfg(feature = "libsql")]

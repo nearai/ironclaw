@@ -28,7 +28,7 @@ These are the next independent production slices that can be staffed in parallel
 
 ### Review and Governance
 
-- [ ] Extend review leases into a fuller assignment/escalation workflow with SLA filters, batch actions, privacy-review reasons, and retention/revocation blocks before decision finalization.
+- [ ] Extend review leases into a fuller assignment/escalation workflow with SLA filters, batch actions, privacy-review reasons, and central reviewer routing. Review finalization now rejects non-quarantined, terminal, expired, and aggregate-only approval records before trace content is read.
 - [ ] Complete privileged-action ABAC for review override, delayed credit, export, process evaluation, utility credit, purge, and tombstone changes using tenant policy plus signed-claim allowed scopes/uses.
 - [ ] Make audit append/read paths production-grade: DB-primary hash-chain verification, per-source content-read rows, reason enforcement, sampled reconciliation, and no broad corpus download path.
 
