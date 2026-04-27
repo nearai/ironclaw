@@ -15,10 +15,10 @@ These are the next independent production slices that can be staffed in parallel
 
 ### Autonomous Client
 
-- [ ] Turn opted-in post-turn capture into a durable background worker with retry/backoff, idempotency, queue compaction, and network-offline handling. Current runtime capture already skips ineligible current traces instead of leaving new held files, and the agent runtime now also runs a periodic scoped queue flush worker with typed retry/backoff sidecars. Remaining work is queue compaction, persistent worker telemetry, and richer offline/network-failure handling.
+- [ ] Turn opted-in post-turn capture into a durable background worker with retry/backoff, idempotency, queue compaction, and network-offline handling. Current runtime capture already skips ineligible current traces instead of leaving new held files, and the agent runtime now also runs a periodic scoped queue flush worker with typed retry/backoff sidecars plus durable scoped flush/status-sync telemetry. Remaining work is queue compaction and richer offline/network-failure handling.
 - [x] Add periodic contributor credit notices across CLI/web/runtime that summarize accepted, quarantined, rejected, revoked, pending/final credit, delayed-credit deltas, and credit-event counts without exposing trace bodies or central corpus rows. Current notices can be acknowledged until the local credit fingerprint changes or snoozed for a bounded period through CLI and authenticated web actions.
 - [x] Add first local queue diagnostics/status surfaces for CLI and authenticated web: policy readiness, bearer-token environment presence, queued/held counts, sanitized held-reason counts, and local credit summaries where available.
-- [ ] Extend autonomous diagnostics with durable last-successful-flush and last-status-sync telemetry, policy/version mismatch warnings, and offline/network failure counters. Retry/backoff state is now exposed locally through typed held-queue diagnostics.
+- [ ] Extend autonomous diagnostics with policy/version mismatch warnings and richer offline/network failure classification. Durable last-attempt/success/failure flush telemetry, retryable submission failure counters, status-sync counters, and retry/backoff state are now exposed locally through scoped queue diagnostics.
 
 ### Ingestion Storage
 
@@ -49,7 +49,7 @@ These are the next independent production slices that can be staffed in parallel
 As of the `gecko-pass` branch, Trace Commons has moved beyond the local-only MVP into a dark-launch production-storage bridge:
 
 - Local capture remains opt-in, local-first, and redaction-first. Raw recorded traces still must not leave the client.
-- Autonomous clients now have first-pass queue diagnostics/status: CLI `traces queue-status` reports scoped readiness, bearer-token environment presence, queue/hold counts, typed retry/manual-review/policy hold counts, next retry time, sanitized held-reason counts, and local credit summary fields; the authenticated web API exposes scoped queue/held counts and sanitized held entries.
+- Autonomous clients now have first-pass queue diagnostics/status: CLI `traces queue-status` reports scoped readiness, bearer-token environment presence, queue/hold counts, typed retry/manual-review/policy hold counts, next retry time, durable flush/status-sync telemetry, sanitized held-reason counts, and local credit summary fields; the authenticated web API exposes scoped queue/held counts, durable telemetry, and sanitized held entries.
 - Periodic credit notices now run through CLI, web, post-turn runtime, and the periodic queue worker path, including delayed ledger deltas and credit-event counts without surfacing trace bodies or central corpus rows. CLI and authenticated web clients can also acknowledge the current local credit fingerprint or snooze notices for a bounded number of hours.
 - Signed upload-claim auth supports EdDSA/Ed25519 public-key verification through default or `kid`-selected keys and JSON/file keysets with optional activation windows, while HS256 claims and static tokens remain internal bridge paths. Managed issuer distribution/governance is still remaining work.
 - The private ingestion service still serves file-backed pilot APIs by default, but can dual-write metadata through `TRACE_COMMONS_DB_DUAL_WRITE=true`.

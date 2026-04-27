@@ -3627,6 +3627,50 @@ pub struct TraceQueueWorkerScopeReport {
     pub credit_notice: Option<CreditSummary>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceQueueTelemetry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_flush_attempt_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_successful_flush_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failed_flush_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub consecutive_flush_failures: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub retryable_submission_failure_count: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub status_sync_failure_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_retryable_submission_failure_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_status_sync_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_status_sync_failed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure: Option<TraceQueueTelemetryFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceQueueTelemetryFailure {
+    pub kind: TraceQueueTelemetryFailureKind,
+    pub reason: String,
+    pub error_hash: String,
+    pub at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceQueueTelemetryFailureKind {
+    Policy,
+    Credential,
+    Network,
+    StatusSync,
+    Submission,
+    Queue,
+    Unknown,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceQueueDiagnostics {
     pub queued_count: u32,
@@ -3648,6 +3692,8 @@ pub struct TraceQueueDiagnostics {
     pub policy_hold_count: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_retry_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub telemetry: TraceQueueTelemetry,
     pub policy_enabled: bool,
     pub endpoint_configured: bool,
     pub ready_to_flush: bool,
@@ -3915,6 +3961,7 @@ pub fn trace_queue_diagnostics_for_scope(
     let holds = read_trace_queue_holds_for_scope(scope)?;
     let records = read_local_trace_records_for_scope(scope)?;
     let credit_report = trace_credit_report(&records);
+    let telemetry = read_trace_queue_telemetry_for_scope_unlocked(scope)?;
 
     let mut held_reason_counts = BTreeMap::new();
     let mut retry_scheduled_count = 0;
@@ -3955,6 +4002,7 @@ pub fn trace_queue_diagnostics_for_scope(
         manual_review_hold_count,
         policy_hold_count,
         next_retry_at,
+        telemetry,
         policy_enabled: policy.enabled,
         endpoint_configured,
         ready_to_flush: policy.enabled && endpoint_configured && queued_count > 0,
@@ -4079,14 +4127,26 @@ pub async fn flush_trace_contribution_queue_for_scope(
     limit: usize,
 ) -> anyhow::Result<TraceQueueFlushReport> {
     let _guard = lock_trace_scope_for_mutation(scope).await;
-    let policy = read_trace_policy_for_scope(scope)?;
+    let flush_started_at = Utc::now();
+    record_trace_queue_flush_attempt_for_scope_unlocked(scope, flush_started_at)?;
+
+    let policy = match read_trace_policy_for_scope(scope) {
+        Ok(policy) => policy,
+        Err(error) => {
+            record_trace_queue_flush_failure_for_scope_unlocked(scope, &error, flush_started_at)?;
+            return Err(error);
+        }
+    };
     if !policy.enabled {
-        anyhow::bail!("trace contribution opt-in is disabled");
+        let error = anyhow::anyhow!("trace contribution opt-in is disabled");
+        record_trace_queue_flush_failure_for_scope_unlocked(scope, &error, flush_started_at)?;
+        return Err(error);
     }
-    let endpoint = policy
-        .ingestion_endpoint
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("trace contribution endpoint is not configured"))?;
+    let Some(endpoint) = policy.ingestion_endpoint.as_deref() else {
+        let error = anyhow::anyhow!("trace contribution endpoint is not configured");
+        record_trace_queue_flush_failure_for_scope_unlocked(scope, &error, flush_started_at)?;
+        return Err(error);
+    };
 
     let mut submitted = 0usize;
     let mut holds = Vec::new();
@@ -4112,6 +4172,11 @@ pub async fn flush_trace_contribution_queue_for_scope(
                 {
                     Ok(receipt) => receipt,
                     Err(error) => {
+                        record_trace_queue_retryable_submission_failure_for_scope_unlocked(
+                            scope,
+                            &error,
+                            Utc::now(),
+                        )?;
                         let hold = retry_hold_after_submission_failure(
                             &path,
                             envelope.submission_id,
@@ -4155,12 +4220,17 @@ pub async fn flush_trace_contribution_queue_for_scope(
 
     // Flush keeps the scoped lock through submission and status-sync network calls
     // so another same-scope flush cannot submit or remove the same queue file.
-    if let Err(error) = sync_remote_trace_submission_records_for_scope_unlocked(scope).await {
-        tracing::debug!(%error, "Failed to sync remote Trace Commons credit status");
+    match sync_remote_trace_submission_records_for_scope_unlocked(scope).await {
+        Ok(_) => record_trace_queue_status_sync_success_for_scope_unlocked(scope, Utc::now())?,
+        Err(error) => {
+            record_trace_queue_status_sync_failure_for_scope_unlocked(scope, &error, Utc::now())?;
+            tracing::debug!(%error, "Failed to sync remote Trace Commons credit status");
+        }
     }
 
     let credit_notice =
         mark_trace_credit_noticed_if_due_unlocked(scope, policy.credit_notice_interval_hours)?;
+    record_trace_queue_flush_success_for_scope_unlocked(scope, Utc::now())?;
     Ok(TraceQueueFlushReport {
         submitted,
         held: holds.len(),
@@ -5004,11 +5074,179 @@ fn trace_credit_notice_fingerprint(records: &[LocalTraceSubmissionRecord]) -> Op
     Some(format!("sha256:{}", hex::encode(&hasher.finalize()[..16])))
 }
 
-fn sanitized_trace_submission_failure_reason(error: &anyhow::Error) -> (String, String) {
+fn read_trace_queue_telemetry_for_scope_unlocked(
+    scope: Option<&str>,
+) -> anyhow::Result<TraceQueueTelemetry> {
+    let path = trace_queue_telemetry_path(scope);
+    if !path.exists() {
+        return Ok(TraceQueueTelemetry::default());
+    }
+    let body = std::fs::read_to_string(&path).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to read trace queue telemetry {}: {}",
+            path.display(),
+            e
+        )
+    })?;
+    serde_json::from_str(&body).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to parse trace queue telemetry {}: {}",
+            path.display(),
+            e
+        )
+    })
+}
+
+fn write_trace_queue_telemetry_for_scope_unlocked(
+    scope: Option<&str>,
+    telemetry: &TraceQueueTelemetry,
+) -> anyhow::Result<()> {
+    write_json_file(
+        &trace_queue_telemetry_path(scope),
+        telemetry,
+        "trace queue telemetry",
+    )
+}
+
+fn mutate_trace_queue_telemetry_for_scope_unlocked(
+    scope: Option<&str>,
+    mut mutate: impl FnMut(&mut TraceQueueTelemetry),
+) -> anyhow::Result<()> {
+    let mut telemetry = read_trace_queue_telemetry_for_scope_unlocked(scope)?;
+    mutate(&mut telemetry);
+    write_trace_queue_telemetry_for_scope_unlocked(scope, &telemetry)
+}
+
+fn record_trace_queue_flush_attempt_for_scope_unlocked(
+    scope: Option<&str>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    mutate_trace_queue_telemetry_for_scope_unlocked(scope, |telemetry| {
+        telemetry.last_flush_attempt_at = Some(now);
+    })
+}
+
+fn record_trace_queue_flush_success_for_scope_unlocked(
+    scope: Option<&str>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    mutate_trace_queue_telemetry_for_scope_unlocked(scope, |telemetry| {
+        telemetry.last_successful_flush_at = Some(now);
+        telemetry.consecutive_flush_failures = 0;
+        telemetry.last_failure = None;
+    })
+}
+
+fn record_trace_queue_flush_failure_for_scope_unlocked(
+    scope: Option<&str>,
+    error: &anyhow::Error,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    let failure = trace_queue_telemetry_failure(error, now);
+    mutate_trace_queue_telemetry_for_scope_unlocked(scope, |telemetry| {
+        telemetry.last_failed_flush_at = Some(now);
+        telemetry.consecutive_flush_failures =
+            telemetry.consecutive_flush_failures.saturating_add(1);
+        telemetry.last_failure = Some(failure.clone());
+    })
+}
+
+fn record_trace_queue_retryable_submission_failure_for_scope_unlocked(
+    scope: Option<&str>,
+    error: &anyhow::Error,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    let failure = trace_queue_telemetry_failure_with_kind(
+        error,
+        now,
+        TraceQueueTelemetryFailureKind::Submission,
+        "submission retry scheduled",
+    );
+    mutate_trace_queue_telemetry_for_scope_unlocked(scope, |telemetry| {
+        telemetry.retryable_submission_failure_count = telemetry
+            .retryable_submission_failure_count
+            .saturating_add(1);
+        telemetry.last_retryable_submission_failure_at = Some(now);
+        telemetry.last_failure = Some(failure.clone());
+    })
+}
+
+fn record_trace_queue_status_sync_success_for_scope_unlocked(
+    scope: Option<&str>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    mutate_trace_queue_telemetry_for_scope_unlocked(scope, |telemetry| {
+        telemetry.last_status_sync_at = Some(now);
+    })
+}
+
+fn record_trace_queue_status_sync_failure_for_scope_unlocked(
+    scope: Option<&str>,
+    error: &anyhow::Error,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    let failure = trace_queue_telemetry_failure_with_kind(
+        error,
+        now,
+        TraceQueueTelemetryFailureKind::StatusSync,
+        "status sync failed",
+    );
+    mutate_trace_queue_telemetry_for_scope_unlocked(scope, |telemetry| {
+        telemetry.status_sync_failure_count = telemetry.status_sync_failure_count.saturating_add(1);
+        telemetry.last_status_sync_failed_at = Some(now);
+        telemetry.last_failure = Some(failure.clone());
+    })
+}
+
+fn trace_queue_telemetry_failure(
+    error: &anyhow::Error,
+    now: DateTime<Utc>,
+) -> TraceQueueTelemetryFailure {
+    let message = error.to_string();
+    let kind =
+        if message.contains("opt-in") || message.contains("endpoint") || message.contains("policy")
+        {
+            TraceQueueTelemetryFailureKind::Policy
+        } else if message.contains("not set") || message.contains("token") {
+            TraceQueueTelemetryFailureKind::Credential
+        } else if message.contains("request failed")
+            || message.contains("connection")
+            || message.contains("timed out")
+            || message.contains("dns")
+        {
+            TraceQueueTelemetryFailureKind::Network
+        } else if message.contains("queue") || message.contains("envelope") {
+            TraceQueueTelemetryFailureKind::Queue
+        } else {
+            TraceQueueTelemetryFailureKind::Unknown
+        };
+    trace_queue_telemetry_failure_with_kind(error, now, kind, "flush failed")
+}
+
+fn trace_queue_telemetry_failure_with_kind(
+    error: &anyhow::Error,
+    now: DateTime<Utc>,
+    kind: TraceQueueTelemetryFailureKind,
+    label: &str,
+) -> TraceQueueTelemetryFailure {
+    let error_hash = trace_queue_error_hash(error);
+    TraceQueueTelemetryFailure {
+        kind,
+        reason: format!("{label}; error_hash={error_hash}"),
+        error_hash,
+        at: now,
+    }
+}
+
+fn trace_queue_error_hash(error: &anyhow::Error) -> String {
     let mut hasher = Sha256::new();
     hasher.update(error.to_string().as_bytes());
     let digest = hasher.finalize();
-    let error_hash = format!("sha256:{}", hex::encode(&digest[..8]));
+    format!("sha256:{}", hex::encode(&digest[..8]))
+}
+
+fn sanitized_trace_submission_failure_reason(error: &anyhow::Error) -> (String, String) {
+    let error_hash = trace_queue_error_hash(error);
     (
         format!("submission failed; retained for retry (error_hash={error_hash})"),
         error_hash,
@@ -5229,6 +5467,10 @@ fn trace_queue_dir(scope: Option<&str>) -> PathBuf {
 
 fn trace_records_path(scope: Option<&str>) -> PathBuf {
     trace_contribution_dir_for_scope(scope).join("submissions.json")
+}
+
+fn trace_queue_telemetry_path(scope: Option<&str>) -> PathBuf {
+    trace_contribution_dir_for_scope(scope).join("queue_telemetry.json")
 }
 
 fn write_json_file<T: Serialize + ?Sized>(
@@ -7311,6 +7553,62 @@ mod tests {
             records[0].last_credit_notice_at.is_some(),
             "worker tick marks due notices only when it returns them for delivery"
         );
+    }
+
+    #[tokio::test]
+    async fn trace_queue_worker_tick_records_durable_failure_and_success_telemetry() {
+        let scope = format!("trace-worker-telemetry-test-{}", Uuid::new_v4());
+        write_trace_policy_for_scope(
+            Some(&scope),
+            &StandingTraceContributionPolicy {
+                enabled: true,
+                ingestion_endpoint: None,
+                ..Default::default()
+            },
+        )
+        .expect("failure policy writes");
+
+        let failed = flush_trace_contribution_queue_worker_tick(vec![scope.clone()], 10)
+            .await
+            .expect("worker tick handles scoped failure");
+        assert_eq!(failed.scopes_checked, 1);
+        assert!(failed.scope_reports.is_empty());
+
+        let diagnostics = trace_queue_diagnostics_for_scope(Some(&scope)).expect("diagnostics");
+        assert!(diagnostics.telemetry.last_flush_attempt_at.is_some());
+        assert!(diagnostics.telemetry.last_failed_flush_at.is_some());
+        assert_eq!(diagnostics.telemetry.consecutive_flush_failures, 1);
+        let failure = diagnostics
+            .telemetry
+            .last_failure
+            .as_ref()
+            .expect("failure metadata is stored");
+        assert_eq!(failure.kind, TraceQueueTelemetryFailureKind::Policy);
+        assert!(failure.reason.contains("flush failed"));
+        assert!(!failure.reason.contains(&scope));
+
+        write_trace_policy_for_scope(
+            Some(&scope),
+            &StandingTraceContributionPolicy {
+                enabled: true,
+                ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("success policy writes");
+
+        let succeeded = flush_trace_contribution_queue_worker_tick(vec![scope.clone()], 10)
+            .await
+            .expect("worker tick handles scoped success");
+        assert_eq!(succeeded.scopes_checked, 1);
+        assert_eq!(succeeded.scope_reports.len(), 1);
+
+        let diagnostics = trace_queue_diagnostics_for_scope(Some(&scope)).expect("diagnostics");
+        assert!(diagnostics.telemetry.last_successful_flush_at.is_some());
+        assert_eq!(diagnostics.telemetry.consecutive_flush_failures, 0);
+        assert!(diagnostics.telemetry.last_failure.is_none());
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
     }
 
     #[test]

@@ -2149,6 +2149,47 @@ fn show_queue_status(json: bool, scope: Option<&str>) -> anyhow::Result<()> {
     if let Some(next_retry_at) = diagnostics.queue.next_retry_at {
         println!("  next retry at: {}", next_retry_at.to_rfc3339());
     }
+    if let Some(at) = diagnostics.queue.telemetry.last_flush_attempt_at {
+        println!("  last flush attempt: {}", at.to_rfc3339());
+    }
+    if let Some(at) = diagnostics.queue.telemetry.last_successful_flush_at {
+        println!("  last successful flush: {}", at.to_rfc3339());
+    }
+    if let Some(at) = diagnostics.queue.telemetry.last_failed_flush_at {
+        println!("  last failed flush: {}", at.to_rfc3339());
+    }
+    if diagnostics.queue.telemetry.consecutive_flush_failures > 0 {
+        println!(
+            "  consecutive flush failures: {}",
+            diagnostics.queue.telemetry.consecutive_flush_failures
+        );
+    }
+    if diagnostics
+        .queue
+        .telemetry
+        .retryable_submission_failure_count
+        > 0
+    {
+        println!(
+            "  retryable submission failures: {}",
+            diagnostics
+                .queue
+                .telemetry
+                .retryable_submission_failure_count
+        );
+    }
+    if diagnostics.queue.telemetry.status_sync_failure_count > 0 {
+        println!(
+            "  status sync failures: {}",
+            diagnostics.queue.telemetry.status_sync_failure_count
+        );
+    }
+    if let Some(failure) = &diagnostics.queue.telemetry.last_failure {
+        println!(
+            "  last telemetry failure: {:?} {}",
+            failure.kind, failure.reason
+        );
+    }
     println!("  submitted records: {}", diagnostics.queue.submitted_count);
     println!("  revoked records: {}", diagnostics.queue.revoked_count);
     println!("  expired records: {}", diagnostics.queue.expired_count);
