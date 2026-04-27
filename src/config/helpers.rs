@@ -186,7 +186,7 @@ pub(crate) fn parse_string_env(
     Ok(optional_env(key)?.unwrap_or_else(|| default.into()))
 }
 
-/// Setting keys that influence LLM/embeddings provider base URLs.
+/// Setting keys that influence LLM/embeddings/image provider base URLs.
 ///
 /// These keys are validated with the operator policy (which allows
 /// private/loopback endpoints), so they must only be writable and
@@ -209,6 +209,11 @@ pub(crate) const ADMIN_ONLY_LLM_SETTING_KEYS: &[&str] = &[
     "bedrock_region",
     "bedrock_cross_region",
     "bedrock_profile",
+    "image",
+    "image.enabled",
+    "image.base_url",
+    "image.model",
+    "image.vision_model",
 ];
 
 /// Remove admin-only LLM setting keys from a flat DB settings map.
@@ -1051,6 +1056,20 @@ mod tests {
             "bedrock_profile".to_string(),
             serde_json::json!("prod-bedrock"),
         );
+        map.insert("image.enabled".to_string(), serde_json::json!(true));
+        map.insert(
+            "image.base_url".to_string(),
+            serde_json::json!("http://192.168.1.30:8080/v1"),
+        );
+        map.insert("image.model".to_string(), serde_json::json!("private-flux"));
+        map.insert(
+            "image.vision_model".to_string(),
+            serde_json::json!("private-vision"),
+        );
+        map.insert(
+            "image".to_string(),
+            serde_json::json!({"base_url": "http://192.168.1.31:8080/v1"}),
+        );
         map.insert("selected_model".to_string(), serde_json::json!("gpt-4o"));
         map.insert("agent.name".to_string(), serde_json::json!("Iron"));
 
@@ -1067,6 +1086,11 @@ mod tests {
         assert!(!map.contains_key("bedrock_region"));
         assert!(!map.contains_key("bedrock_cross_region"));
         assert!(!map.contains_key("bedrock_profile"));
+        assert!(!map.contains_key("image.enabled"));
+        assert!(!map.contains_key("image.base_url"));
+        assert!(!map.contains_key("image.model"));
+        assert!(!map.contains_key("image.vision_model"));
+        assert!(!map.contains_key("image"));
         // Model selection stays per-user — admin chooses the provider,
         // members pick the model within it.
         assert_eq!(

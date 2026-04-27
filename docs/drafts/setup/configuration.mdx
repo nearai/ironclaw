@@ -175,6 +175,16 @@ export LIBSQL_AUTH_TOKEN="your-auth-token"
 | `TINFOIL_API_KEY` | string | — | Tinfoil API key |
 | `TINFOIL_MODEL` | string | `kimi-k2-5` | Model to use |
 
+### Image and Vision Tools
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `IMAGE_TOOLS_ENABLED` | bool | `true` | Enable built-in image tools when endpoint credentials are configured |
+| `IMAGE_BASE_URL` | URL | active compatible LLM endpoint | OpenAI-compatible endpoint for image/vision tools |
+| `IMAGE_API_KEY` | string | active compatible LLM key | API key for `IMAGE_BASE_URL`; required when `IMAGE_BASE_URL` is set |
+| `IMAGE_MODEL` | string | inferred only if active model is an image model | Model for `image_generate` and `image_edit` |
+| `IMAGE_VISION_MODEL` | string | inferred only if active model is a vision model | Provider-specific model for `image_analyze` |
+
 ## Channels
 
 ### Web Gateway

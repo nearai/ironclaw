@@ -7,6 +7,7 @@ use base64::Engine;
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::context::JobContext;
+use crate::tools::builtin::image_api_endpoint_url;
 use crate::tools::builtin::path_utils::validate_path;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
 
@@ -55,6 +56,10 @@ impl ImageAnalyzeTool {
         tokio::fs::read(&resolved)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read image file: {e}")))
+    }
+
+    fn endpoint_url(&self, path: &str) -> String {
+        image_api_endpoint_url(&self.api_base_url, path)
     }
 }
 
@@ -122,10 +127,7 @@ impl Tool for ImageAnalyzeTool {
         let data_url = format!("data:{media_type};base64,{b64}");
 
         // Call vision model via chat completions API
-        let url = format!(
-            "{}/v1/chat/completions",
-            self.api_base_url.trim_end_matches('/')
-        );
+        let url = self.endpoint_url("/chat/completions");
 
         let request_body = serde_json::json!({
             "model": &self.model,
@@ -206,6 +208,20 @@ mod tests {
         assert_eq!(
             tool.requires_approval(&serde_json::json!({})),
             ApprovalRequirement::Never
+        );
+    }
+
+    #[test]
+    fn endpoint_url_does_not_duplicate_v1() {
+        let tool = ImageAnalyzeTool::new(
+            "https://api.example.com/v1".to_string(),
+            "test-key".to_string(),
+            "gpt-4o".to_string(),
+            None,
+        );
+        assert_eq!(
+            tool.endpoint_url("/chat/completions"),
+            "https://api.example.com/v1/chat/completions"
         );
     }
 

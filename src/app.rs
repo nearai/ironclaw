@@ -303,7 +303,7 @@ impl AppBuilder {
                 // Consume unused handles
                 self.handles.take();
 
-                // Re-resolve only the LLM config with OS credentials.
+                // Re-resolve LLM-dependent config with OS credentials.
                 let store: Option<&(dyn crate::db::SettingsStore + Sync)> =
                     self.db.as_ref().map(|db| db.as_ref() as _);
                 let toml_path = self.toml_path.as_deref();
@@ -390,7 +390,7 @@ impl AppBuilder {
             crate::config::inject_llm_keys_from_secrets(secrets.as_ref(), &self.config.owner_id)
                 .await;
 
-            // Re-resolve only the LLM config with newly available keys,
+            // Re-resolve LLM-dependent config with newly available keys,
             // including keys hydrated from the secrets store.
             let settings_store: Option<&(dyn crate::db::SettingsStore + Sync)> =
                 self.db.as_ref().map(|db| db.as_ref() as _);
@@ -621,46 +621,28 @@ impl AppBuilder {
             (None, None)
         };
 
-        // Register image/vision tools if we have a workspace and LLM API credentials
+        // Register image/vision tools when the dedicated image config resolves
+        // to a usable endpoint. Endpoint/key/model selection lives in config;
+        // AppBuilder only wires the resulting tool set.
         if workspace.is_some() {
-            let (api_base, api_key_opt) = if let Some(ref provider) = self.config.llm.provider {
-                (
-                    provider.base_url.clone(),
-                    provider.api_key.as_ref().map(|s| {
-                        use secrecy::ExposeSecret;
-                        s.expose_secret().to_string()
-                    }),
-                )
-            } else {
-                (
-                    self.config.llm.nearai.base_url.clone(),
-                    self.config.llm.nearai.api_key.as_ref().map(|s| {
-                        use secrecy::ExposeSecret;
-                        s.expose_secret().to_string()
-                    }),
-                )
-            };
+            let image_config = &self.config.image;
+            if let Some((api_base, api_key)) = image_config.endpoint_credentials() {
+                use secrecy::ExposeSecret;
 
-            if let Some(api_key) = api_key_opt {
-                // Check for image generation models
-                let model_name = self
-                    .config
-                    .llm
-                    .provider
-                    .as_ref()
-                    .map(|p| p.model.clone())
-                    .unwrap_or_else(|| self.config.llm.nearai.model.clone());
-                let models = vec![model_name.clone()];
-                let gen_model = crate::llm::image_models::suggest_image_model(&models)
-                    .unwrap_or("black-forest-labs/FLUX.2-klein-4B")
-                    .to_string();
-                tools.register_image_tools(api_base.clone(), api_key.clone(), gen_model, None);
+                let api_base = api_base.to_string();
+                let api_key = api_key.expose_secret().to_string();
+                if let Some(image_model) = image_config.model.clone() {
+                    tools.register_image_tools(
+                        api_base.clone(),
+                        api_key.clone(),
+                        image_model,
+                        None,
+                    );
+                }
 
-                // Check for vision models
-                let vision_model = crate::llm::vision_models::suggest_vision_model(&models)
-                    .unwrap_or(&model_name)
-                    .to_string();
-                tools.register_vision_tools(api_base, api_key, vision_model, None);
+                if let Some(vision_model) = image_config.vision_model.clone() {
+                    tools.register_vision_tools(api_base, api_key, vision_model, None);
+                }
             }
         }
 
