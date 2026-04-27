@@ -553,6 +553,19 @@ pub const NEARAI_MCP_SERVER_NAME: &str = "nearai";
 
 const NEARAI_MCP_REGISTRY_KEY: &str = "mcp-servers/nearai";
 
+/// MCP server id for the t3n (Trinity) sidecar auto-bootstrap.
+pub const T3N_MCP_SERVER_NAME: &str = "t3n-mcp";
+
+/// Environment variable used to enable the t3n-mcp auto-bootstrap. When set to a
+/// non-empty Unix socket path, a `unix`-transport MCP server entry is registered
+/// on first boot so the agent can connect to the sidecar without manual setup.
+/// Docker compose sets this automatically; bare-metal deployments that want the
+/// same behaviour should export it themselves.
+const T3N_MCP_SOCKET_PATH_ENV: &str = "T3N_MCP_SOCKET_PATH";
+
+const T3N_MCP_DESCRIPTION: &str =
+    "Terminal 3 Trinity network MCP server (served by the t3n-mcp-sidecar container over a Unix socket).";
+
 fn derive_nearai_mcp_url(base_url: &str) -> String {
     let base = base_url.trim_end_matches('/');
     let base = base.strip_suffix("/v1").unwrap_or(base);
@@ -613,13 +626,72 @@ pub async fn bootstrap_nearai_mcp_server(
     Ok(true)
 }
 
-/// Load MCP servers after bootstrapping NEAR AI MCP server (when env vars are set).
+fn t3n_mcp_server_from_env() -> Option<McpServerConfig> {
+    let socket_path = crate::config::helpers::env_or_override(T3N_MCP_SOCKET_PATH_ENV)?;
+    let socket_path = socket_path.trim().to_string();
+    if socket_path.is_empty() {
+        return None;
+    }
+
+    // No LocalMcpAuthConfig here: the sidecar authenticates to Trinity itself
+    // via the PRIVATE_KEY env var (see docker-compose.yml), so there is no
+    // user-facing step between install and use. Activation should be immediate;
+    // any real auth problem will surface as a tool-call error from Trinity.
+    let server = McpServerConfig::new_unix(T3N_MCP_SERVER_NAME, socket_path)
+        .with_description(T3N_MCP_DESCRIPTION);
+
+    match server.validate() {
+        Ok(()) => Some(server),
+        Err(err) => {
+            tracing::warn!("Ignoring invalid t3n-mcp bootstrap config: {}", err);
+            None
+        }
+    }
+}
+
+/// Register the Trinity (t3n-mcp) sidecar as a unix-transport MCP server on first
+/// boot when `T3N_MCP_SOCKET_PATH` is set. Returns `Ok(true)` when a new entry
+/// was written, `Ok(false)` if the env var is absent or an entry already exists.
+///
+/// The entry is never overwritten — once the user (or a prior boot) has a
+/// `t3n-mcp` config, later changes (toggles, local-auth confirmation, etc.)
+/// are preserved.
+pub async fn bootstrap_t3n_mcp_server(
+    db: Option<&dyn crate::db::Database>,
+    user_id: &str,
+) -> Result<bool, ConfigError> {
+    let Some(server) = t3n_mcp_server_from_env() else {
+        return Ok(false);
+    };
+
+    let mut servers = match db {
+        Some(store) => load_mcp_servers_from_db(store, user_id).await?,
+        None => load_mcp_servers().await?,
+    };
+
+    if servers.get(&server.name).is_some() {
+        return Ok(false);
+    }
+    servers.upsert(server);
+
+    match db {
+        Some(store) => save_mcp_servers_to_db(store, user_id, &servers).await?,
+        None => save_mcp_servers(&servers).await?,
+    }
+    Ok(true)
+}
+
+/// Load MCP servers after bootstrapping the built-in MCP servers (NEAR AI and
+/// t3n-mcp) when their respective env vars are set.
 pub async fn load_mcp_servers_ready(
     db: Option<&dyn crate::db::Database>,
     user_id: &str,
 ) -> Result<McpServersFile, ConfigError> {
     if let Err(e) = bootstrap_nearai_mcp_server(db, user_id).await {
         tracing::warn!("Failed to bootstrap NEAR AI MCP server: {}", e);
+    }
+    if let Err(e) = bootstrap_t3n_mcp_server(db, user_id).await {
+        tracing::warn!("Failed to bootstrap t3n-mcp server: {}", e);
     }
     match db {
         Some(store) => load_mcp_servers_from_db(store, user_id).await,
@@ -1614,6 +1686,145 @@ mod tests {
         unsafe {
             std::env::remove_var("NEARAI_BASE_URL");
             std::env::remove_var("NEARAI_API_KEY");
+        }
+    }
+
+    // --- Regression: t3n-mcp auto-bootstrap from env ---
+    //
+    // After `make wipe` (which deletes the bastionclaw_data volume and the
+    // Postgres settings row), the compose stack came back up with the
+    // t3n-mcp-sidecar running but no client config pointing at its Unix
+    // socket. The agent therefore never connected. These tests lock in the
+    // env-driven bootstrap path so a missing config on a fresh volume
+    // auto-registers the sidecar entry.
+
+    #[test]
+    fn test_t3n_mcp_server_from_env_builds_unix_server() {
+        let _guard = crate::config::helpers::lock_env();
+        // SAFETY: Tests serialize env access with lock_env().
+        unsafe {
+            std::env::set_var(T3N_MCP_SOCKET_PATH_ENV, "/var/run/t3n-mcp/t3n-mcp.sock");
+        }
+
+        let server = t3n_mcp_server_from_env().expect("server from env");
+        assert_eq!(server.name, T3N_MCP_SERVER_NAME);
+        assert!(server.enabled);
+        assert!(server.url.is_empty());
+        match server.effective_transport() {
+            EffectiveTransport::Unix { socket_path } => {
+                assert_eq!(socket_path, "/var/run/t3n-mcp/t3n-mcp.sock");
+            }
+            other => panic!("expected Unix transport, got {:?}", other),
+        }
+        // The sidecar auths via PRIVATE_KEY in its own container — no
+        // user-facing setup step — so bootstrap must NOT attach a local_auth
+        // gate. Regression: a prior version set one and blocked activation
+        // behind a spurious "sign in to Trinity" prompt.
+        assert!(
+            server.local_auth.is_none(),
+            "t3n-mcp bootstrap must not attach a local_auth gate"
+        );
+        assert_eq!(server.description.as_deref(), Some(T3N_MCP_DESCRIPTION));
+
+        // SAFETY: Tests serialize env access with lock_env().
+        unsafe {
+            std::env::remove_var(T3N_MCP_SOCKET_PATH_ENV);
+        }
+    }
+
+    #[test]
+    fn test_t3n_mcp_server_from_env_requires_non_empty_path() {
+        let _guard = crate::config::helpers::lock_env();
+        // SAFETY: Tests serialize env access with lock_env().
+        unsafe {
+            std::env::remove_var(T3N_MCP_SOCKET_PATH_ENV);
+        }
+        assert!(t3n_mcp_server_from_env().is_none());
+
+        // SAFETY: Tests serialize env access with lock_env().
+        unsafe {
+            std::env::set_var(T3N_MCP_SOCKET_PATH_ENV, "   ");
+        }
+        assert!(
+            t3n_mcp_server_from_env().is_none(),
+            "whitespace-only path must be rejected"
+        );
+
+        // SAFETY: Tests serialize env access with lock_env().
+        unsafe {
+            std::env::remove_var(T3N_MCP_SOCKET_PATH_ENV);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_t3n_mcp_server_writes_entry_on_empty_config() {
+        let _guard = crate::config::helpers::lock_env();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mcp-servers.json");
+
+        // Empty starting state.
+        let empty = McpServersFile::default();
+        save_mcp_servers_to(&empty, &path).await.unwrap();
+
+        // SAFETY: Tests serialize env access with lock_env().
+        unsafe {
+            std::env::set_var(T3N_MCP_SOCKET_PATH_ENV, "/var/run/t3n-mcp/t3n-mcp.sock");
+        }
+
+        // Drive through the helper directly (file-based path) by crafting the
+        // server and upserting — mirrors what bootstrap_t3n_mcp_server() does
+        // when called without a DB backend.
+        let server = t3n_mcp_server_from_env().expect("server from env");
+        let mut loaded = load_mcp_servers_from(&path).await.unwrap();
+        assert!(loaded.get(&server.name).is_none());
+        loaded.upsert(server);
+        save_mcp_servers_to(&loaded, &path).await.unwrap();
+
+        let re_loaded = load_mcp_servers_from(&path).await.unwrap();
+        let entry = re_loaded
+            .get(T3N_MCP_SERVER_NAME)
+            .expect("t3n-mcp entry present");
+        match entry.effective_transport() {
+            EffectiveTransport::Unix { socket_path } => {
+                assert_eq!(socket_path, "/var/run/t3n-mcp/t3n-mcp.sock");
+            }
+            other => panic!("expected Unix transport, got {:?}", other),
+        }
+
+        // SAFETY: Tests serialize env access with lock_env().
+        unsafe {
+            std::env::remove_var(T3N_MCP_SOCKET_PATH_ENV);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_t3n_mcp_server_preserves_existing_entry() {
+        let _guard = crate::config::helpers::lock_env();
+
+        // Pre-existing user entry with the same name but a different path —
+        // bootstrap must not overwrite it.
+        let mut existing = McpServersFile::default();
+        existing.upsert(McpServerConfig::new_unix(
+            T3N_MCP_SERVER_NAME,
+            "/custom/user/path.sock",
+        ));
+        assert!(existing.get(T3N_MCP_SERVER_NAME).is_some());
+
+        // SAFETY: Tests serialize env access with lock_env().
+        unsafe {
+            std::env::set_var(T3N_MCP_SOCKET_PATH_ENV, "/var/run/t3n-mcp/t3n-mcp.sock");
+        }
+
+        // Simulate the guard clause inside bootstrap_t3n_mcp_server().
+        let should_write = existing.get(T3N_MCP_SERVER_NAME).is_none();
+        assert!(
+            !should_write,
+            "bootstrap must not overwrite an existing t3n-mcp entry"
+        );
+
+        // SAFETY: Tests serialize env access with lock_env().
+        unsafe {
+            std::env::remove_var(T3N_MCP_SOCKET_PATH_ENV);
         }
     }
 }

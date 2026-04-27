@@ -1,0 +1,30 @@
+[Unit]
+Description=BastionClaw AI Assistant
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/bastionclaw
+
+# Pull latest images before starting so every restart picks up a new push.
+ExecStartPre=/usr/bin/docker compose --profile app pull
+
+# Start all services defined in docker-compose.yml (postgres, bastionclaw, t3n-mcp-sidecar).
+# --no-deps is intentionally omitted so compose manages the postgres dependency.
+ExecStart=/usr/bin/docker compose --profile app up --remove-orphans
+
+# Bring down containers cleanly on stop/restart.
+ExecStop=/usr/bin/docker compose --profile app down
+
+Restart=always
+RestartSec=10
+
+# Forward container stdout/stderr to the journal.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bastionclaw
+
+[Install]
+WantedBy=multi-user.target
