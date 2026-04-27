@@ -775,6 +775,40 @@ mod libsql_trace_corpus_store {
                 .iter()
                 .all(|ref_| ref_.deleted_at.is_none())
         );
+        let deleted_count = backend
+            .mark_trace_object_ref_deleted(
+                tenant_id,
+                submission_id,
+                "s3://private-corpus",
+                "tenant-alpha/submission.json",
+            )
+            .await
+            .expect("mark exact object ref deleted");
+        assert_eq!(deleted_count, 1);
+        let object_refs_after_delete = backend
+            .list_trace_object_refs(tenant_id, submission_id)
+            .await
+            .expect("list object refs after exact delete");
+        let deleted_ref = object_refs_after_delete
+            .iter()
+            .find(|ref_| ref_.object_ref_id == object_ref_id)
+            .expect("deleted object ref remains listed");
+        assert!(deleted_ref.deleted_at.is_some());
+        let untouched_ref = object_refs_after_delete
+            .iter()
+            .find(|ref_| ref_.object_ref_id == latest_object_ref_id)
+            .expect("untouched object ref remains listed");
+        assert!(untouched_ref.deleted_at.is_none());
+        let idempotent_delete = backend
+            .mark_trace_object_ref_deleted(
+                tenant_id,
+                submission_id,
+                "s3://private-corpus",
+                "tenant-alpha/submission.json",
+            )
+            .await
+            .expect("repeat exact object ref delete");
+        assert_eq!(idempotent_delete, 0);
 
         let idempotent = backend
             .invalidate_trace_submission_artifacts(

@@ -1226,6 +1226,40 @@ async fn store_facade_invalidates_object_refs_and_tombstones_by_tenant_scope() {
             .iter()
             .all(|object_ref| object_ref.deleted_at.is_none())
     );
+    let deleted_count = backend
+        .mark_trace_object_ref_deleted(
+            &tenant_a,
+            submission_id,
+            "s3://private-corpus",
+            &format!("{tenant_a}/submission.json"),
+        )
+        .await
+        .expect("mark tenant A exact object ref deleted");
+    assert_eq!(deleted_count, 1);
+    let tenant_a_object_refs_after_delete = backend
+        .list_trace_object_refs(&tenant_a, submission_id)
+        .await
+        .expect("list tenant A object refs after exact delete");
+    let deleted_ref = tenant_a_object_refs_after_delete
+        .iter()
+        .find(|object_ref| object_ref.object_ref_id == tenant_a_first_object_ref_id)
+        .expect("tenant A deleted object ref remains listed");
+    assert!(deleted_ref.deleted_at.is_some());
+    let untouched_ref = tenant_a_object_refs_after_delete
+        .iter()
+        .find(|object_ref| object_ref.object_ref_id == tenant_a_latest_object_ref_id)
+        .expect("tenant A untouched object ref remains listed");
+    assert!(untouched_ref.deleted_at.is_none());
+    let idempotent_delete = backend
+        .mark_trace_object_ref_deleted(
+            &tenant_a,
+            submission_id,
+            "s3://private-corpus",
+            &format!("{tenant_a}/submission.json"),
+        )
+        .await
+        .expect("repeat tenant A exact object ref delete");
+    assert_eq!(idempotent_delete, 0);
 
     let tenant_b_still_active = backend
         .get_latest_active_trace_object_ref(

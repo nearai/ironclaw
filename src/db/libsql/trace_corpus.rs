@@ -2465,4 +2465,33 @@ impl TraceCorpusStore for LibSqlBackend {
             derived_records_invalidated,
         })
     }
+
+    async fn mark_trace_object_ref_deleted(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        object_store: &str,
+        object_key: &str,
+    ) -> Result<u64, DatabaseError> {
+        let conn = self.connect().await?;
+        conn.execute(
+            "UPDATE trace_object_refs
+             SET invalidated_at = COALESCE(invalidated_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                 deleted_at = COALESCE(deleted_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE tenant_id = ?1
+               AND submission_id = ?2
+               AND object_store = ?3
+               AND object_key = ?4
+               AND deleted_at IS NULL",
+            libsql::params![
+                tenant_id,
+                submission_id.to_string(),
+                object_store,
+                object_key
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))
+    }
 }

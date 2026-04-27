@@ -868,4 +868,12 @@ pub trait TraceCorpusStore: Send + Sync {
         submission_id: Uuid,
         derived_status: TraceDerivedStatus,
     ) -> Result<TraceArtifactInvalidationCounts, DatabaseError>;
+
+    async fn mark_trace_object_ref_deleted(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        object_store: &str,
+        object_key: &str,
+    ) -> Result<u64, DatabaseError>;
 }

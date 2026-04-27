@@ -2188,4 +2188,32 @@ impl TraceCorpusStore for PgBackend {
             derived_records_invalidated,
         })
     }
+
+    async fn mark_trace_object_ref_deleted(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        object_store: &str,
+        object_key: &str,
+    ) -> Result<u64, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let deleted = tx
+            .execute(
+                "UPDATE trace_object_refs
+                 SET invalidated_at = COALESCE(invalidated_at, NOW()),
+                     deleted_at = COALESCE(deleted_at, NOW()),
+                     updated_at = NOW()
+                 WHERE tenant_id = $1
+                   AND submission_id = $2
+                   AND object_store = $3
+                   AND object_key = $4
+                   AND deleted_at IS NULL",
+                &[&tenant_id, &submission_id, &object_store, &object_key],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(deleted)
+    }
 }

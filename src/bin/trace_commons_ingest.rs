@@ -7818,6 +7818,7 @@ async fn mirror_revocation_to_db(
     {
         let action_counts = lifecycle_invalidation_action_counts(
             invalidation_counts,
+            0,
             vector_entries_invalidated,
             export_manifests_invalidated,
             export_manifest_items_invalidated,
@@ -7927,6 +7928,7 @@ async fn mirror_expiration_to_db(
             "retention_expired",
             lifecycle_invalidation_action_counts(
                 invalidation_counts,
+                0,
                 vector_entries_invalidated,
                 export_manifests_invalidated,
                 export_manifest_items_invalidated,
@@ -7944,6 +7946,7 @@ async fn mirror_expiration_to_db(
             reason: "retention_expired_artifact_invalidation",
             status_count_label: "records_marked_expired",
             invalidation_counts,
+            object_refs_deleted: 0,
             vector_entries_invalidated,
             export_manifests_invalidated,
             export_manifest_items_invalidated,
@@ -7957,6 +7960,7 @@ async fn mirror_purge_to_db(
     state: &AppState,
     tenant: &TenantAuth,
     submission_id: Uuid,
+    deleted_object_targets: &[TraceObjectDeletionTarget],
     retention_ledger: Option<&mut TraceMaintenanceLedgerAccumulator>,
 ) -> anyhow::Result<()> {
     let Some(db) = state.db_mirror.as_ref() else {
@@ -7986,6 +7990,23 @@ async fn mirror_purge_to_db(
         )
         .await
         .context("failed to mirror trace purge artifact invalidation")?;
+    let mut object_refs_deleted = 0u64;
+    for target in deleted_object_targets {
+        object_refs_deleted += db
+            .mark_trace_object_ref_deleted(
+                &tenant.tenant_id,
+                submission_id,
+                &target.object_store,
+                &target.object_key,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to mark purged trace object ref deleted for {}",
+                    target.object_key
+                )
+            })?;
+    }
     let vector_entries_invalidated = db
         .invalidate_trace_vector_entries_for_submission(&tenant.tenant_id, submission_id)
         .await
@@ -8009,6 +8030,7 @@ async fn mirror_purge_to_db(
             "retention_purged",
             lifecycle_invalidation_action_counts(
                 invalidation_counts,
+                object_refs_deleted,
                 vector_entries_invalidated,
                 export_manifests_invalidated,
                 export_manifest_items_invalidated,
@@ -8026,6 +8048,7 @@ async fn mirror_purge_to_db(
             reason: "retention_purged_artifact_invalidation",
             status_count_label: "records_marked_purged",
             invalidation_counts,
+            object_refs_deleted,
             vector_entries_invalidated,
             export_manifests_invalidated,
             export_manifest_items_invalidated,
@@ -8041,6 +8064,7 @@ struct TraceLifecycleInvalidationAuditInput {
     reason: &'static str,
     status_count_label: &'static str,
     invalidation_counts: StorageTraceArtifactInvalidationCounts,
+    object_refs_deleted: u64,
     vector_entries_invalidated: u64,
     export_manifests_invalidated: u64,
     export_manifest_items_invalidated: u64,
@@ -8086,6 +8110,7 @@ async fn append_lifecycle_invalidation_audit_to_db(
 ) -> anyhow::Result<()> {
     let mut action_counts = lifecycle_invalidation_action_counts(
         input.invalidation_counts,
+        input.object_refs_deleted,
         input.vector_entries_invalidated,
         input.export_manifests_invalidated,
         input.export_manifest_items_invalidated,
@@ -8123,6 +8148,7 @@ async fn append_lifecycle_invalidation_audit_to_db(
 
 fn lifecycle_invalidation_action_counts(
     invalidation_counts: StorageTraceArtifactInvalidationCounts,
+    object_refs_deleted: u64,
     vector_entries_invalidated: u64,
     export_manifests_invalidated: u64,
     export_manifest_items_invalidated: u64,
@@ -8139,6 +8165,10 @@ fn lifecycle_invalidation_action_counts(
         invalidation_counts
             .derived_records_invalidated
             .min(u64::from(u32::MAX)) as u32,
+    );
+    action_counts.insert(
+        "object_refs_deleted".to_string(),
+        object_refs_deleted.min(u64::from(u32::MAX)) as u32,
     );
     action_counts.insert(
         "vector_entries_invalidated".to_string(),
@@ -9213,6 +9243,13 @@ fn trace_object_ref_file_path(root: &Path, object_key: &str) -> anyhow::Result<P
 struct TraceObjectDeletionCounts {
     file_deleted: bool,
     encrypted_artifact_deleted: bool,
+    deleted_targets: Vec<TraceObjectDeletionTarget>,
+}
+
+#[derive(Debug)]
+struct TraceObjectDeletionTarget {
+    object_store: String,
+    object_key: String,
 }
 
 fn delete_trace_objects_for_record(
@@ -9225,6 +9262,10 @@ fn delete_trace_objects_for_record(
         std::fs::remove_file(&path)
             .with_context(|| format!("failed to delete trace object {}", path.display()))?;
         counts.file_deleted = true;
+        counts.deleted_targets.push(TraceObjectDeletionTarget {
+            object_store: TRACE_COMMONS_FILE_OBJECT_STORE.to_string(),
+            object_key: record.object_key.clone(),
+        });
     }
     if let (Some(store), Some(receipt)) = (
         state.artifact_store.as_ref(),
@@ -9232,6 +9273,12 @@ fn delete_trace_objects_for_record(
     ) {
         counts.encrypted_artifact_deleted =
             store.delete_artifact(&record.tenant_storage_ref, receipt)?;
+        if counts.encrypted_artifact_deleted {
+            counts.deleted_targets.push(TraceObjectDeletionTarget {
+                object_store: store.object_store_name().to_string(),
+                object_key: receipt.object_key.clone(),
+            });
+        }
     }
     Ok(counts)
 }
@@ -10583,6 +10630,7 @@ async fn run_maintenance(
                 state,
                 tenant,
                 record.submission_id,
+                &deletion_counts.deleted_targets,
                 Some(&mut retention_ledger),
             )
             .await?;
@@ -23606,7 +23654,7 @@ mod tests {
 
         let Json(response) = maintenance_handler(
             State(state),
-            auth_headers("review-token-a"),
+            auth_headers("admin-token-a"),
             Json(TraceMaintenanceRequest {
                 purpose: Some("test_db_expiration".to_string()),
                 dry_run: false,
@@ -23640,6 +23688,7 @@ mod tests {
                 .iter()
                 .all(|record| record.invalidated_at.is_some())
         );
+        assert!(object_refs.iter().all(|record| record.deleted_at.is_none()));
         let derived = db
             .list_trace_derived_records("tenant-a")
             .await
@@ -23686,6 +23735,13 @@ mod tests {
                         .copied()
                         .unwrap_or_default()
                         >= 1
+                );
+                assert_eq!(
+                    action_counts
+                        .get("object_refs_deleted")
+                        .copied()
+                        .unwrap_or_default(),
+                    0
                 );
             }
             metadata => panic!("unexpected expiration audit metadata: {metadata:?}"),
@@ -23738,7 +23794,7 @@ mod tests {
 
         let Json(response) = maintenance_handler(
             State(state.clone()),
-            auth_headers("review-token-a"),
+            auth_headers("admin-token-a"),
             Json(TraceMaintenanceRequest {
                 purpose: Some("test_db_purge".to_string()),
                 dry_run: false,
@@ -23773,6 +23829,7 @@ mod tests {
                 .iter()
                 .all(|record| record.invalidated_at.is_some())
         );
+        assert!(object_refs.iter().all(|record| record.deleted_at.is_some()));
         let derived = db
             .list_trace_derived_records("tenant-a")
             .await
@@ -23807,6 +23864,13 @@ mod tests {
                     1
                 );
                 assert!(action_counts.contains_key("object_refs_invalidated"));
+                assert!(
+                    action_counts
+                        .get("object_refs_deleted")
+                        .copied()
+                        .unwrap_or_default()
+                        >= 1
+                );
             }
             metadata => panic!("unexpected purge audit metadata: {metadata:?}"),
         }
@@ -24201,7 +24265,7 @@ mod tests {
 
         let Json(response) = maintenance_handler(
             State(state),
-            auth_headers("review-token-a"),
+            auth_headers("admin-token-a"),
             Json(TraceMaintenanceRequest {
                 purpose: Some("test_service_object_store_purge".to_string()),
                 dry_run: false,
@@ -24233,6 +24297,7 @@ mod tests {
             TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
         );
         assert!(object_refs[0].invalidated_at.is_some());
+        assert!(object_refs[0].deleted_at.is_some());
     }
 
     #[tokio::test]
