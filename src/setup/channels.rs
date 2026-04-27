@@ -6,6 +6,7 @@
 //! 3. Validates the configuration
 //! 4. Saves secrets to the database
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use base64::Engine;
@@ -728,6 +729,7 @@ pub async fn setup_signal(_settings: &Settings) -> Result<SignalSetupResult, Cha
 pub struct WasmChannelSetupResult {
     pub enabled: bool,
     pub channel_name: String,
+    pub config_overrides: HashMap<String, serde_json::Value>,
 }
 
 /// Set up a WASM channel using its capabilities file setup schema.
@@ -834,11 +836,19 @@ pub async fn setup_wasm_channel(
         }
     }
 
+    let config_overrides = if channel_name.eq_ignore_ascii_case("wecom") {
+        println!();
+        setup_wecom_channel_runtime_overrides()?
+    } else {
+        HashMap::new()
+    };
+
     print_success(&format!("{} channel configured", channel_name));
 
     Ok(WasmChannelSetupResult {
         enabled: true,
         channel_name: channel_name.to_string(),
+        config_overrides,
     })
 }
 
@@ -853,6 +863,60 @@ fn setup_mode_note(channel_name: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+fn parse_comma_separated_values(input: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    for value in input
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if !values.iter().any(|existing| existing == value) {
+            values.push(value.to_string());
+        }
+    }
+    values
+}
+
+fn setup_wecom_channel_runtime_overrides()
+-> Result<HashMap<String, serde_json::Value>, ChannelSetupError> {
+    print_info("WeCom access policy (applies to DM sender authorization):");
+    let dm_policy = optional_input(
+        "DM policy (pairing/open/allowlist)",
+        Some("default: pairing"),
+    )?
+    .unwrap_or_else(|| "pairing".to_string());
+    let dm_policy = dm_policy.trim().to_ascii_lowercase();
+
+    if !matches!(dm_policy.as_str(), "pairing" | "open" | "allowlist") {
+        return Err(ChannelSetupError::Validation(format!(
+            "Invalid DM policy '{}'; expected one of: pairing, open, allowlist",
+            dm_policy
+        )));
+    }
+
+    let allow_from_raw = optional_input(
+        "Allow from (comma-separated WeCom user IDs)",
+        Some("leave empty to require pairing when dm_policy=pairing"),
+    )?
+    .unwrap_or_default();
+    let allow_from = parse_comma_separated_values(&allow_from_raw);
+
+    print_info(&format!("DM policy: {}", dm_policy));
+    if allow_from.is_empty() {
+        print_info("Allow from: (none)");
+    } else {
+        print_info(&format!("Allow from: {}", allow_from.join(", ")));
+    }
+
+    let mut overrides = HashMap::new();
+    overrides.insert(
+        "dm_policy".to_string(),
+        serde_json::Value::String(dm_policy),
+    );
+    overrides.insert("allow_from".to_string(), serde_json::json!(allow_from));
+    Ok(overrides)
 }
 
 async fn validate_channel_credentials(

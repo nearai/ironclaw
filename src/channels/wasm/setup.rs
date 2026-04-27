@@ -12,7 +12,7 @@
 //!
 //! See `docs/superpowers/specs/2026-04-01-ownership-model-design.md`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::channels::wasm::{
@@ -309,6 +309,11 @@ async fn register_channel(
                 serde_json::json!(username),
             );
         }
+
+        config_updates.extend(load_wasm_channel_runtime_overrides(
+            &config.channels.wasm_channel_runtime_overrides,
+            &channel_name,
+        ));
         // Inject channel-specific secrets into config for channels that need
         // credentials in API request bodies (e.g., Feishu token exchange).
         // The credential injection system only replaces placeholders in URLs
@@ -646,6 +651,51 @@ pub(crate) async fn inject_wasm_channel_secret_config_mappings(
             }
         }
     }
+}
+
+fn load_wasm_channel_runtime_overrides(
+    stored_overrides: &HashMap<String, serde_json::Value>,
+    channel_name: &str,
+) -> HashMap<String, serde_json::Value> {
+    let mut result = HashMap::new();
+    let prefix = format!("{channel_name}:");
+
+    for (stored_key, value) in stored_overrides {
+        let Some(config_key) = stored_key.strip_prefix(&prefix) else {
+            continue;
+        };
+        let config_key = config_key.trim();
+        if config_key.is_empty() {
+            tracing::warn!(
+                channel = %channel_name,
+                key = %stored_key,
+                "Ignoring empty wasm channel runtime override key"
+            );
+            continue;
+        }
+
+        if is_reserved_wasm_runtime_config_key(config_key) {
+            tracing::warn!(
+                channel = %channel_name,
+                key = %config_key,
+                "Ignoring reserved wasm channel runtime override key"
+            );
+            continue;
+        }
+
+        result.insert(config_key.to_string(), value.clone());
+    }
+
+    result
+}
+
+fn is_reserved_wasm_runtime_config_key(key: &str) -> bool {
+    matches!(
+        key,
+        crate::channels::wasm::RUNTIME_CONFIG_KEY_TUNNEL_URL
+            | crate::channels::wasm::RUNTIME_CONFIG_KEY_WEBHOOK_SECRET
+            | crate::channels::wasm::RUNTIME_CONFIG_KEY_OWNER_ID
+    )
 }
 
 #[cfg(test)]
@@ -1072,6 +1122,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_channel_injects_runtime_overrides_for_matching_channel() {
+        let (mut config, _temp_dir) = test_config();
+        config.channels.wasm_channel_runtime_overrides.insert(
+            "wecom:dm_policy".to_string(),
+            serde_json::json!("allowlist"),
+        );
+        config.channels.wasm_channel_runtime_overrides.insert(
+            "wecom:allow_from".to_string(),
+            serde_json::json!(["zhangsan"]),
+        );
+        config.channels.wasm_channel_runtime_overrides.insert(
+            format!(
+                "wecom:{}",
+                crate::channels::wasm::RUNTIME_CONFIG_KEY_OWNER_ID
+            ),
+            serde_json::json!("blocked"),
+        );
+
+        let loaded = test_loaded_channel("wecom", serde_json::json!({}));
+        let wasm_router = Arc::new(WasmChannelRouter::new());
+        let pairing_store = Arc::new(PairingStore::new_noop());
+
+        let (_name, _channel) =
+            super::register_channel(loaded, &config, &None, None, &pairing_store, &wasm_router)
+                .await;
+
+        let registered = wasm_router
+            .get_channel_for_path("/webhook/wecom")
+            .await
+            .expect("wecom channel should be registered");
+        let runtime_config = registered.get_config().await;
+        assert_eq!(
+            runtime_config.get("dm_policy"),
+            Some(&serde_json::json!("allowlist"))
+        );
+        assert_eq!(
+            runtime_config.get("allow_from"),
+            Some(&serde_json::json!(["zhangsan"]))
+        );
+        assert_ne!(
+            runtime_config.get(crate::channels::wasm::RUNTIME_CONFIG_KEY_OWNER_ID),
+            Some(&serde_json::json!("blocked"))
+        );
+    }
+
+    #[tokio::test]
     async fn inject_channel_secrets_uses_owner_scope() {
         let crypto =
             Arc::new(SecretsCrypto::new(SecretString::from(TEST_CRYPTO_KEY.to_string())).unwrap());
@@ -1146,5 +1242,38 @@ mod tests {
             config_updates.get("app_secret"),
             Some(&serde_json::json!("owner-app-secret"))
         );
+    }
+
+    #[test]
+    fn load_wasm_channel_runtime_overrides_uses_channel_prefix_and_blocks_reserved_keys() {
+        let mut stored = HashMap::new();
+        stored.insert(
+            "wecom:dm_policy".to_string(),
+            serde_json::json!("allowlist"),
+        );
+        stored.insert(
+            "wecom:allow_from".to_string(),
+            serde_json::json!(["zhangsan", "lisi"]),
+        );
+        stored.insert(
+            format!(
+                "wecom:{}",
+                crate::channels::wasm::RUNTIME_CONFIG_KEY_OWNER_ID
+            ),
+            serde_json::json!("123"),
+        );
+        stored.insert("telegram:dm_policy".to_string(), serde_json::json!("open"));
+
+        let overrides = super::load_wasm_channel_runtime_overrides(&stored, "wecom");
+        assert_eq!(
+            overrides.get("dm_policy"),
+            Some(&serde_json::json!("allowlist"))
+        );
+        assert_eq!(
+            overrides.get("allow_from"),
+            Some(&serde_json::json!(["zhangsan", "lisi"]))
+        );
+        assert!(!overrides.contains_key(crate::channels::wasm::RUNTIME_CONFIG_KEY_OWNER_ID));
+        assert!(!overrides.contains_key("telegram:dm_policy"));
     }
 }

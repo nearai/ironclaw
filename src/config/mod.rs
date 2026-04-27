@@ -200,6 +200,7 @@ impl Config {
                 wasm_channels_enabled: false,
                 configured_wasm_channels: Vec::new(),
                 wasm_channel_owner_ids: HashMap::new(),
+                wasm_channel_runtime_overrides: HashMap::new(),
             },
             agent: AgentConfig::for_testing(),
             safety: SafetyConfig {

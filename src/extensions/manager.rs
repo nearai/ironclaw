@@ -94,6 +94,15 @@ fn oauth_refresh_secret_name(secret_name: &str) -> String {
     format!("{}_refresh_token", secret_name.to_lowercase())
 }
 
+fn is_reserved_wasm_runtime_config_key(key: &str) -> bool {
+    matches!(
+        key,
+        crate::channels::wasm::RUNTIME_CONFIG_KEY_TUNNEL_URL
+            | crate::channels::wasm::RUNTIME_CONFIG_KEY_WEBHOOK_SECRET
+            | crate::channels::wasm::RUNTIME_CONFIG_KEY_OWNER_ID
+    )
+}
+
 fn oauth_scopes_secret_name(secret_name: &str) -> String {
     format!("{}_scopes", secret_name.to_lowercase())
 }
@@ -1032,6 +1041,39 @@ impl ExtensionManager {
         name: &str,
     ) -> HashMap<String, serde_json::Value> {
         let mut overrides = HashMap::new();
+
+        if let Some(store) = self.settings_store() {
+            let prefix = format!("channels.wasm_channel_runtime_overrides.{name}:");
+            match store.get_all_settings(&self.user_id).await {
+                Ok(settings) => {
+                    for (setting_key, value) in settings {
+                        let Some(config_key) = setting_key.strip_prefix(&prefix) else {
+                            continue;
+                        };
+                        let config_key = config_key.trim();
+                        if config_key.is_empty() {
+                            continue;
+                        }
+                        if is_reserved_wasm_runtime_config_key(config_key) {
+                            tracing::warn!(
+                                channel = %name,
+                                key = %config_key,
+                                "Ignoring reserved wasm runtime config override key"
+                            );
+                            continue;
+                        }
+                        overrides.insert(config_key.to_string(), value);
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        channel = %name,
+                        error = %e,
+                        "Failed to load persisted wasm runtime config overrides"
+                    );
+                }
+            }
+        }
 
         if name == TELEGRAM_CHANNEL_NAME
             && let Some(store) = self.settings_store()

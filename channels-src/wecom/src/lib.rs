@@ -25,7 +25,7 @@ use xmlparser::{ElementEnd, Token, Tokenizer};
 
 use exports::near::agent::channel::{
     AgentResponse, Attachment, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
-    OutgoingHttpResponse, PollConfig, StatusUpdate,
+    OutgoingHttpResponse, PollConfig, StatusType, StatusUpdate,
 };
 use near::agent::channel_host::{self, EmittedMessage, InboundAttachment};
 
@@ -57,6 +57,7 @@ const WECOM_WS_UPLOAD_MEDIA_FINISH_CMD: &str = "aibot_upload_media_finish";
 
 const TEXT_CHUNK_LIMIT_BYTES: usize = 1800;
 const STREAM_CHUNK_LIMIT_BYTES: usize = 20_000;
+const STATUS_MESSAGE_MAX_CHARS: usize = 1200;
 const WEBSOCKET_MEDIA_CHUNK_SIZE: usize = 512 * 1024;
 const MAX_WEBSOCKET_MEDIA_CHUNKS: usize = 100;
 const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
@@ -1876,6 +1877,81 @@ fn send_websocket_stream_reply(req_id: &str, reply_cmd: &str, content: &str) -> 
     send_websocket_response(req_id, reply_cmd, content)
 }
 
+fn truncate_status_message(message: &str, max_chars: usize) -> String {
+    let mut chars = message.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    if chars.clone().count() < max_chars {
+        return message.to_string();
+    }
+
+    let keep = max_chars.saturating_sub(3).max(1);
+    let mut out = String::new();
+    out.push(first);
+    out.extend(chars.take(keep.saturating_sub(1)));
+    out.push_str("...");
+    out
+}
+
+fn status_message_for_user(message: &str) -> Option<String> {
+    let message = message.trim();
+    if message.is_empty() {
+        None
+    } else {
+        Some(truncate_status_message(message, STATUS_MESSAGE_MAX_CHARS))
+    }
+}
+
+fn classify_status_update(update: &StatusUpdate) -> Option<String> {
+    match update.status {
+        StatusType::Thinking => None,
+        StatusType::Done => None,
+        StatusType::Interrupted => status_message_for_user(&update.message)
+            .or_else(|| Some("Request interrupted. Please try again.".to_string())),
+        // Tool-level telemetry is too noisy in chat UX.
+        StatusType::ToolStarted | StatusType::ToolCompleted | StatusType::ToolResult => None,
+        StatusType::Status => {
+            let message = update.message.trim();
+            if message.eq_ignore_ascii_case("Done")
+                || message.eq_ignore_ascii_case("Interrupted")
+                || message.eq_ignore_ascii_case("Awaiting approval")
+                || message.eq_ignore_ascii_case("Rejected")
+            {
+                None
+            } else {
+                status_message_for_user(message)
+            }
+        }
+        StatusType::ApprovalNeeded
+        | StatusType::JobStarted
+        | StatusType::AuthRequired
+        | StatusType::AuthCompleted => status_message_for_user(&update.message),
+    }
+}
+
+fn send_status_notification(metadata: &WecomMessageMetadata, content: &str) -> Result<(), String> {
+    if let Some(req_id) = metadata.ws_req_id.as_deref() {
+        let reply_cmd = metadata
+            .ws_reply_cmd
+            .as_deref()
+            .unwrap_or(WECOM_WS_REPLY_CMD);
+        return send_websocket_stream_reply(req_id, reply_cmd, content);
+    }
+
+    let target = metadata
+        .target
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            let to_user = metadata.to_user.trim();
+            (!to_user.is_empty()).then_some(to_user)
+        })
+        .ok_or_else(|| "WeCom status update missing route target".to_string())?;
+    send_text_message(target, content)
+}
+
 fn build_websocket_command_payload(
     cmd: &str,
     req_id: &str,
@@ -3286,7 +3362,27 @@ impl Guest for WecomChannel {
         Ok(())
     }
 
-    fn on_status(_update: StatusUpdate) {}
+    fn on_status(update: StatusUpdate) {
+        let Some(content) = classify_status_update(&update) else {
+            return;
+        };
+        let metadata: WecomMessageMetadata = match serde_json::from_str(&update.metadata_json) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                channel_host::log(
+                    channel_host::LogLevel::Debug,
+                    &format!("Failed to parse WeCom status metadata: {error}"),
+                );
+                return;
+            }
+        };
+        if let Err(error) = send_status_notification(&metadata, &content) {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!("Failed to send WeCom status notification: {error}"),
+            );
+        }
+    }
 
     fn on_shutdown() {
         channel_host::log(channel_host::LogLevel::Info, "WeCom channel shutting down");
@@ -3534,6 +3630,141 @@ mod tests {
         assert_eq!(metadata.ws_chat_id.as_deref(), Some("chat-1"));
         assert_eq!(metadata.ws_chat_type.as_deref(), Some("group"));
         assert_eq!(metadata.ws_reply_cmd.as_deref(), Some(WECOM_WS_REPLY_CMD));
+    }
+
+    #[test]
+    fn classify_status_update_surfaces_failures_and_ignores_noise() {
+        let thinking = StatusUpdate {
+            status: StatusType::Thinking,
+            message: "Thinking".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+        assert!(classify_status_update(&thinking).is_none());
+
+        let tool_started = StatusUpdate {
+            status: StatusType::ToolStarted,
+            message: "Tool started".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+        assert!(classify_status_update(&tool_started).is_none());
+
+        let status_done = StatusUpdate {
+            status: StatusType::Status,
+            message: "Done".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+        assert!(classify_status_update(&status_done).is_none());
+
+        let provider_error = StatusUpdate {
+            status: StatusType::Status,
+            message: "Provider error: upstream 502".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+        assert_eq!(
+            classify_status_update(&provider_error).as_deref(),
+            Some("Provider error: upstream 502")
+        );
+
+        let interrupted = StatusUpdate {
+            status: StatusType::Interrupted,
+            message: "".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+        assert_eq!(
+            classify_status_update(&interrupted).as_deref(),
+            Some("Request interrupted. Please try again.")
+        );
+    }
+
+    #[test]
+    fn parse_realistic_websocket_group_mixed_payload() {
+        let raw = r#"{
+            "cmd":"aibot_msg_callback",
+            "headers":{"req_id":"req-group-1"},
+            "body":{
+                "msgid":"msg-group-1",
+                "chatid":"wr7NnM9z0",
+                "chattype":"group",
+                "from":{"userid":"ZhangSan"},
+                "msgtype":"mixed",
+                "mixed":{
+                    "msgItem":[
+                        {"itemtype":"text","text":{"content":"请看这张图"}},
+                        {"itemtype":"image","image":{"url":"https://openws.work.weixin.qq.com/image/1","aeskey":"dGVzdGtleQ=="}}
+                    ]
+                },
+                "quote":{
+                    "msgtype":"text",
+                    "text":{"content":"上一条消息"}
+                }
+            }
+        }"#;
+
+        let frame: WecomWsFrame<WecomWsMessageBody> =
+            serde_json::from_str(raw).expect("frame parse");
+        assert_eq!(frame.headers.req_id, "req-group-1");
+        assert_eq!(frame.body.msgtype, "mixed");
+        assert_eq!(frame.body.chatid.as_deref(), Some("wr7NnM9z0"));
+        assert_eq!(frame.body.chattype.as_deref(), Some("group"));
+        assert_eq!(frame.body.from.userid, "ZhangSan");
+
+        let (content, attachments) = websocket_mixed_content_parts(
+            &frame.body.msgid,
+            frame.body.mixed.as_ref().expect("mixed"),
+        );
+        assert_eq!(content, "请看这张图");
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].id, "msg-group-1:1:image");
+        assert_eq!(
+            attachments[0].source_url.as_deref(),
+            Some("https://openws.work.weixin.qq.com/image/1")
+        );
+        assert_eq!(
+            with_websocket_quote_context(content, frame.body.quote.as_ref()),
+            "Quoted text: 上一条消息\n\n请看这张图"
+        );
+        assert_eq!(
+            wecom_conversation_scope(
+                &frame.body.from.userid,
+                frame.body.chatid.as_deref(),
+                frame.body.chattype.as_deref()
+            ),
+            "wecom:group:wr7NnM9z0"
+        );
+    }
+
+    #[test]
+    fn parse_realistic_websocket_event_payload_with_event_key_alias() {
+        let raw = r#"{
+            "cmd":"aibot_event_callback",
+            "headers":{"req_id":"req-event-2"},
+            "body":{
+                "msgid":"evt-group-1",
+                "chatid":"wr7NnM9z0",
+                "chattype":"group",
+                "from":{"userid":"LiSi"},
+                "event":{
+                    "eventtype":"template_card_event",
+                    "eventKey":"approve_order"
+                }
+            }
+        }"#;
+
+        let frame: WecomWsFrame<WecomWsEventBody> = serde_json::from_str(raw).expect("event parse");
+        assert_eq!(frame.headers.req_id, "req-event-2");
+        assert_eq!(frame.body.event.eventtype, "template_card_event");
+        assert_eq!(
+            websocket_event_summary(&frame.body.event).as_deref(),
+            Some("User clicked a WeCom template card action: approve_order")
+        );
+        assert_eq!(
+            wecom_conversation_scope(
+                &frame.body.from.userid,
+                frame.body.chatid.as_deref(),
+                frame.body.chattype.as_deref()
+            ),
+            "wecom:group:wr7NnM9z0"
+        );
     }
 
     #[test]
