@@ -58,6 +58,7 @@ Userland responsibilities include:
 ```text
 agent-loop strategy and model/provider heuristics
 prompt assembly strategy over authorized memory reads
+PM-facing product-function orchestration for user-facing workflows
 routine engines and mission orchestration
 skill selection and planning policy
 channel-specific user experience
@@ -66,7 +67,7 @@ reference loop implementations such as lightweight loop or CodeAct loop
 provider-specific behavior above the network/secrets/resource boundaries
 ```
 
-Userland code may be shipped by the project, installed as an extension, or configured by deployment. In every case it runs through kernel-mediated surfaces and receives only the grants, mounts, leases, policies, and resource budget allowed by host policy.
+Userland code may be shipped by the project, installed as an extension, or configured by deployment. Product functions are the PM-facing way to describe user outcomes and workflows; they map product promises to loops, memory, capabilities, process APIs, settings/extensions/skills services, and events. They are not authority grants. In every case userland runs through kernel-mediated surfaces and receives only the grants, mounts, leases, policies, and resource budget allowed by host policy.
 
 ---
 
