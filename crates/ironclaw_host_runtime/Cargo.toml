@@ -24,10 +24,10 @@ ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_scripts = { path = "../ironclaw_scripts" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
 ironclaw_wasm = { path = "../ironclaw_wasm" }
+serde_json = "1"
 url = "2"
 
 [dev-dependencies]
-serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "time"] }
 wat = "1"

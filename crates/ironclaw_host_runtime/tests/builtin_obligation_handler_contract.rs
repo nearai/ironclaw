@@ -61,6 +61,168 @@ async fn builtin_obligation_handler_emits_metadata_only_audit_before() {
 }
 
 #[tokio::test]
+async fn builtin_obligation_handler_emits_metadata_only_audit_after() {
+    let audit = Arc::new(InMemoryAuditSink::new());
+    let handler = BuiltinObligationHandler::new().with_audit_sink(audit.clone());
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = CapabilityId::new("echo.say").unwrap();
+    let estimate = ResourceEstimate::default();
+    let obligations = vec![Obligation::AuditAfter];
+    let dispatch = sample_dispatch(&context.resource_scope, &capability_id, json!({"ok": true}));
+
+    handler
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .unwrap();
+    let completed = handler
+        .complete_dispatch(CapabilityObligationCompletionRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+            dispatch: &dispatch,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(completed.output, json!({"ok": true}));
+    let records = audit.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].stage, AuditStage::After);
+    assert_eq!(records[0].action.kind, "capability_invoke");
+    assert_eq!(records[0].action.target.as_deref(), Some("echo.say"));
+    assert_eq!(
+        records[0]
+            .result
+            .as_ref()
+            .and_then(|result| result.output_bytes),
+        Some(serde_json::to_vec(&dispatch.output).unwrap().len() as u64)
+    );
+    let serialized = serde_json::to_string(&records[0]).unwrap();
+    assert!(!serialized.contains("raw output"));
+    assert!(!serialized.contains("secret"));
+}
+
+#[tokio::test]
+async fn builtin_obligation_handler_enforces_output_limit_after_dispatch() {
+    let handler = BuiltinObligationHandler::new();
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = CapabilityId::new("echo.say").unwrap();
+    let estimate = ResourceEstimate::default();
+    let obligations = vec![Obligation::EnforceOutputLimit { bytes: 8 }];
+    let dispatch = sample_dispatch(
+        &context.resource_scope,
+        &capability_id,
+        json!({"message": "this output is too large"}),
+    );
+
+    handler
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .unwrap();
+    let err = handler
+        .complete_dispatch(CapabilityObligationCompletionRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+            dispatch: &dispatch,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityObligationError::Failed {
+            kind: CapabilityObligationFailureKind::Output
+        }
+    ));
+}
+
+#[tokio::test]
+async fn builtin_obligation_handler_redacts_output_after_dispatch() {
+    let handler = BuiltinObligationHandler::new();
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = CapabilityId::new("echo.say").unwrap();
+    let estimate = ResourceEstimate::default();
+    let obligations = vec![Obligation::RedactOutput];
+    let leaked = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let dispatch = sample_dispatch(
+        &context.resource_scope,
+        &capability_id,
+        json!({"authorization": leaked}),
+    );
+
+    handler
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .unwrap();
+    let completed = handler
+        .complete_dispatch(CapabilityObligationCompletionRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+            dispatch: &dispatch,
+        })
+        .await
+        .unwrap();
+
+    let serialized = serde_json::to_string(&completed.output).unwrap();
+    assert!(serialized.contains("[REDACTED]"));
+    assert!(!serialized.contains(leaked));
+}
+
+#[tokio::test]
+async fn builtin_obligation_handler_rejects_post_output_obligations_for_spawn() {
+    let handler = BuiltinObligationHandler::new();
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = CapabilityId::new("echo.say").unwrap();
+    let estimate = ResourceEstimate::default();
+    let obligations = vec![Obligation::RedactOutput, Obligation::AuditAfter];
+
+    let err = handler
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Spawn,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .unwrap_err();
+
+    let CapabilityObligationError::Unsupported { obligations } = err else {
+        panic!("expected unsupported obligations");
+    };
+    assert_eq!(
+        obligations,
+        vec![Obligation::RedactOutput, Obligation::AuditAfter]
+    );
+}
+
+#[tokio::test]
 async fn builtin_obligation_handler_stores_network_policy_for_runtime_handoff() {
     let policy_store = Arc::new(NetworkObligationPolicyStore::new());
     let handler = BuiltinObligationHandler::new().with_network_policy_store(policy_store.clone());
@@ -395,8 +557,11 @@ async fn builtin_obligation_handler_keeps_other_runtime_plumbing_obligations_fai
     let estimate = ResourceEstimate::default();
     let obligations = vec![
         Obligation::AuditBefore,
-        Obligation::InjectSecretOnce {
-            handle: SecretHandle::new("api_token").unwrap(),
+        Obligation::ReserveResources {
+            reservation_id: ResourceReservationId::new(),
+        },
+        Obligation::UseScopedMounts {
+            mounts: MountView::default(),
         },
         Obligation::AuditAfter,
         Obligation::RedactOutput,
@@ -417,11 +582,16 @@ async fn builtin_obligation_handler_keeps_other_runtime_plumbing_obligations_fai
     let CapabilityObligationError::Unsupported { obligations } = err else {
         panic!("expected unsupported obligations");
     };
-    assert_eq!(obligations.len(), 3);
+    assert_eq!(obligations.len(), 2);
     assert!(
-        !obligations
+        obligations
             .iter()
-            .any(|obligation| matches!(obligation, Obligation::InjectSecretOnce { .. }))
+            .any(|obligation| matches!(obligation, Obligation::ReserveResources { .. }))
+    );
+    assert!(
+        obligations
+            .iter()
+            .any(|obligation| matches!(obligation, Obligation::UseScopedMounts { .. }))
     );
     assert!(audit.records().is_empty());
 }
@@ -456,6 +626,27 @@ async fn host_runtime_services_can_install_builtin_obligation_handler() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].action.kind, "capability_spawn");
     assert_eq!(records[0].action.target.as_deref(), Some("echo-script.say"));
+}
+
+fn sample_dispatch(
+    scope: &ResourceScope,
+    capability_id: &CapabilityId,
+    output: serde_json::Value,
+) -> CapabilityDispatchResult {
+    CapabilityDispatchResult {
+        capability_id: capability_id.clone(),
+        provider: ExtensionId::new("echo").unwrap(),
+        runtime: RuntimeKind::Wasm,
+        output,
+        usage: ResourceUsage::default(),
+        receipt: ResourceReceipt {
+            id: ResourceReservationId::new(),
+            scope: scope.clone(),
+            status: ReservationStatus::Reconciled,
+            estimate: ResourceEstimate::default(),
+            actual: Some(ResourceUsage::default()),
+        },
+    }
 }
 
 fn allowed_network_policy() -> NetworkPolicy {

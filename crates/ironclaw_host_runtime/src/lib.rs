@@ -16,9 +16,9 @@ use chrono::Utc;
 use ironclaw_approvals::ApprovalResolver;
 use ironclaw_authorization::{CapabilityDispatchAuthorizer, CapabilityLeaseStore};
 use ironclaw_capabilities::{
-    CapabilityHost, CapabilityObligationError, CapabilityObligationFailureKind,
-    CapabilityObligationHandler, CapabilityObligationPhase, CapabilityObligationRequest,
-    DispatchProcessExecutor,
+    CapabilityHost, CapabilityObligationCompletionRequest, CapabilityObligationError,
+    CapabilityObligationFailureKind, CapabilityObligationHandler, CapabilityObligationPhase,
+    CapabilityObligationRequest, DispatchProcessExecutor,
 };
 use ironclaw_dispatcher::{
     RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
@@ -28,8 +28,9 @@ use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AuditEnvelope, AuditEventId, AuditStage,
-    CapabilityDispatcher, CapabilityId, DecisionSummary, DispatchError, EffectKind, NetworkPolicy,
-    Obligation, ResourceScope, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
+    CapabilityDispatchResult, CapabilityDispatcher, CapabilityId, DecisionSummary, DispatchError,
+    EffectKind, NetworkPolicy, Obligation, ResourceScope, RuntimeDispatchErrorKind, RuntimeKind,
+    SecretHandle,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_network::{
@@ -757,6 +758,8 @@ impl NetworkPolicyKey {
 /// - `InjectSecretOnce`: requires a configured [`SecretStore`] and
 ///   [`RuntimeSecretInjectionStore`], leases the scoped handle once, consumes it,
 ///   and stages the material for one runtime take.
+/// - `AuditAfter`, `RedactOutput`, and `EnforceOutputLimit`: preflight before
+///   dispatch, then complete against the dispatch result before returning output.
 ///
 /// Remaining runtime/input/output plumbing obligations remain unsupported and
 /// fail closed.
@@ -896,6 +899,25 @@ impl BuiltinObligationHandler {
         }
         Ok(())
     }
+
+    async fn emit_audit_after(
+        &self,
+        request: &CapabilityObligationCompletionRequest<'_>,
+        output_bytes: u64,
+    ) -> Result<(), CapabilityObligationError> {
+        let Some(audit_sink) = &self.audit_sink else {
+            return Err(CapabilityObligationError::Failed {
+                kind: CapabilityObligationFailureKind::Audit,
+            });
+        };
+
+        audit_sink
+            .emit_audit(audit_after_record(request, output_bytes))
+            .await
+            .map_err(|_| CapabilityObligationError::Failed {
+                kind: CapabilityObligationFailureKind::Audit,
+            })
+    }
 }
 
 #[async_trait]
@@ -904,7 +926,7 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
         &self,
         request: CapabilityObligationRequest<'_>,
     ) -> Result<(), CapabilityObligationError> {
-        let unsupported = unsupported_obligations(request.obligations);
+        let unsupported = unsupported_obligations(request.phase, request.obligations);
         if !unsupported.is_empty() {
             return Err(CapabilityObligationError::Unsupported {
                 obligations: unsupported,
@@ -942,21 +964,102 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
 
         Ok(())
     }
+
+    async fn complete_dispatch(
+        &self,
+        request: CapabilityObligationCompletionRequest<'_>,
+    ) -> Result<CapabilityDispatchResult, CapabilityObligationError> {
+        let unsupported = unsupported_completion_obligations(request.phase, request.obligations);
+        if !unsupported.is_empty() {
+            return Err(CapabilityObligationError::Unsupported {
+                obligations: unsupported,
+            });
+        }
+
+        let mut dispatch = request.dispatch.clone();
+        if request
+            .obligations
+            .iter()
+            .any(|obligation| matches!(obligation, Obligation::RedactOutput))
+        {
+            dispatch.output = redact_output(dispatch.output)?;
+        }
+
+        let output_bytes = dispatch_output_bytes(&dispatch.output)?;
+        for obligation in request.obligations {
+            if let Obligation::EnforceOutputLimit { bytes } = obligation
+                && output_bytes > *bytes
+            {
+                return Err(output_obligation_failed());
+            }
+        }
+
+        if request
+            .obligations
+            .iter()
+            .any(|obligation| matches!(obligation, Obligation::AuditAfter))
+        {
+            self.emit_audit_after(&request, output_bytes).await?;
+        }
+
+        Ok(dispatch)
+    }
 }
 
-fn unsupported_obligations(obligations: &[Obligation]) -> Vec<Obligation> {
+fn unsupported_obligations(
+    phase: CapabilityObligationPhase,
+    obligations: &[Obligation],
+) -> Vec<Obligation> {
     obligations
         .iter()
-        .filter(|obligation| {
-            !matches!(
-                obligation,
-                Obligation::AuditBefore
-                    | Obligation::ApplyNetworkPolicy { .. }
-                    | Obligation::InjectSecretOnce { .. }
-            )
-        })
+        .filter(|obligation| !obligation_supported_before_dispatch(phase, obligation))
         .cloned()
         .collect()
+}
+
+fn obligation_supported_before_dispatch(
+    phase: CapabilityObligationPhase,
+    obligation: &Obligation,
+) -> bool {
+    match obligation {
+        Obligation::AuditBefore
+        | Obligation::ApplyNetworkPolicy { .. }
+        | Obligation::InjectSecretOnce { .. } => true,
+        Obligation::AuditAfter
+        | Obligation::RedactOutput
+        | Obligation::EnforceOutputLimit { .. } => {
+            !matches!(phase, CapabilityObligationPhase::Spawn)
+        }
+        Obligation::ReserveResources { .. } | Obligation::UseScopedMounts { .. } => false,
+    }
+}
+
+fn unsupported_completion_obligations(
+    phase: CapabilityObligationPhase,
+    obligations: &[Obligation],
+) -> Vec<Obligation> {
+    obligations
+        .iter()
+        .filter(|obligation| !obligation_supported_after_dispatch(phase, obligation))
+        .cloned()
+        .collect()
+}
+
+fn obligation_supported_after_dispatch(
+    phase: CapabilityObligationPhase,
+    obligation: &Obligation,
+) -> bool {
+    match obligation {
+        Obligation::AuditBefore
+        | Obligation::ApplyNetworkPolicy { .. }
+        | Obligation::InjectSecretOnce { .. } => true,
+        Obligation::AuditAfter
+        | Obligation::RedactOutput
+        | Obligation::EnforceOutputLimit { .. } => {
+            !matches!(phase, CapabilityObligationPhase::Spawn)
+        }
+        Obligation::ReserveResources { .. } | Obligation::UseScopedMounts { .. } => false,
+    }
 }
 
 fn secret_injection_obligations(obligations: &[Obligation]) -> Vec<SecretHandle> {
@@ -1021,6 +1124,40 @@ fn secret_obligation_failed() -> CapabilityObligationError {
     }
 }
 
+fn output_obligation_failed() -> CapabilityObligationError {
+    CapabilityObligationError::Failed {
+        kind: CapabilityObligationFailureKind::Output,
+    }
+}
+
+fn dispatch_output_bytes(output: &serde_json::Value) -> Result<u64, CapabilityObligationError> {
+    serde_json::to_vec(output)
+        .map(|bytes| bytes.len() as u64)
+        .map_err(|_| output_obligation_failed())
+}
+
+fn redact_output(
+    output: serde_json::Value,
+) -> Result<serde_json::Value, CapabilityObligationError> {
+    match output {
+        serde_json::Value::String(value) => LeakDetector::new()
+            .scan_and_clean(&value)
+            .map(serde_json::Value::String)
+            .map_err(|_| output_obligation_failed()),
+        serde_json::Value::Array(values) => values
+            .into_iter()
+            .map(redact_output)
+            .collect::<Result<Vec<_>, _>>()
+            .map(serde_json::Value::Array),
+        serde_json::Value::Object(entries) => entries
+            .into_iter()
+            .map(|(key, value)| redact_output(value).map(|value| (key, value)))
+            .collect::<Result<serde_json::Map<_, _>, _>>()
+            .map(serde_json::Value::Object),
+        value => Ok(value),
+    }
+}
+
 fn audit_before_record(request: &CapabilityObligationRequest<'_>) -> AuditEnvelope {
     AuditEnvelope {
         event_id: AuditEventId::new(),
@@ -1055,6 +1192,43 @@ fn audit_before_record(request: &CapabilityObligationRequest<'_>) -> AuditEnvelo
     }
 }
 
+fn audit_after_record(
+    request: &CapabilityObligationCompletionRequest<'_>,
+    output_bytes: u64,
+) -> AuditEnvelope {
+    AuditEnvelope {
+        event_id: AuditEventId::new(),
+        correlation_id: request.context.correlation_id,
+        stage: AuditStage::After,
+        timestamp: Utc::now(),
+        tenant_id: request.context.tenant_id.clone(),
+        user_id: request.context.user_id.clone(),
+        agent_id: request.context.agent_id.clone(),
+        project_id: request.context.project_id.clone(),
+        mission_id: request.context.mission_id.clone(),
+        thread_id: request.context.thread_id.clone(),
+        invocation_id: request.context.invocation_id,
+        process_id: request.context.process_id,
+        approval_request_id: None,
+        extension_id: Some(request.context.extension_id.clone()),
+        action: ActionSummary {
+            kind: capability_action_kind(request.phase).to_string(),
+            target: Some(request.capability_id.as_str().to_string()),
+            effects: capability_action_effects(request.phase),
+        },
+        decision: DecisionSummary {
+            kind: "obligation_satisfied".to_string(),
+            reason: None,
+            actor: None,
+        },
+        result: Some(ActionResultSummary {
+            success: true,
+            status: Some(obligation_status(request.obligations)),
+            output_bytes: Some(output_bytes),
+        }),
+    }
+}
+
 fn capability_action_kind(phase: CapabilityObligationPhase) -> &'static str {
     match phase {
         CapabilityObligationPhase::Invoke => "capability_invoke",
@@ -1085,8 +1259,11 @@ fn obligation_status(obligations: &[Obligation]) -> String {
 fn obligation_label(obligation: &Obligation) -> Option<&'static str> {
     match obligation {
         Obligation::AuditBefore => Some("audit_before"),
+        Obligation::AuditAfter => Some("audit_after"),
+        Obligation::RedactOutput => Some("redact_output"),
         Obligation::ApplyNetworkPolicy { .. } => Some("apply_network_policy"),
         Obligation::InjectSecretOnce { .. } => Some("inject_secret_once"),
+        Obligation::EnforceOutputLimit { .. } => Some("enforce_output_limit"),
         _ => None,
     }
 }

@@ -76,6 +76,72 @@ async fn capability_host_still_fails_closed_when_handler_rejects_obligations() {
 }
 
 #[tokio::test]
+async fn capability_host_uses_post_dispatch_obligation_handler_before_returning() {
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(package_from_manifest(WASM_MANIFEST))
+        .unwrap();
+    let dispatcher = RecordingDispatcher::with_output(json!({"token": "secret-token"}));
+    let authorizer = ObligatingAuthorizer::redact_output();
+    let handler = RedactingObligationHandler;
+    let host =
+        CapabilityHost::new(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
+    let context = execution_context(CapabilitySet::default());
+
+    let result = host
+        .invoke_json(CapabilityInvocationRequest {
+            context,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: ResourceEstimate::default(),
+            input: json!({"message": "post dispatch"}),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.dispatch.output, json!({"token": "[REDACTED]"}));
+    assert!(dispatcher.has_request());
+}
+
+#[tokio::test]
+async fn capability_host_fails_run_when_post_dispatch_obligation_fails() {
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(package_from_manifest(WASM_MANIFEST))
+        .unwrap();
+    let dispatcher = RecordingDispatcher::with_output(json!({"too": "large"}));
+    let authorizer = ObligatingAuthorizer::enforce_output_limit(4);
+    let handler = FailingPostDispatchHandler;
+    let run_state = InMemoryRunStateStore::new();
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+        .with_run_state(&run_state)
+        .with_obligation_handler(&handler);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+
+    let err = host
+        .invoke_json(CapabilityInvocationRequest {
+            context,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: ResourceEstimate::default(),
+            input: json!({"message": "post dispatch fails"}),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::ObligationFailed {
+            kind: CapabilityObligationFailureKind::Output,
+            ..
+        }
+    ));
+    let record = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(record.status, RunStatus::Failed);
+    assert_eq!(record.error_kind.as_deref(), Some("ObligationFailed"));
+}
+
+#[tokio::test]
 async fn capability_host_uses_obligation_handler_before_process_start() {
     let mut registry = ExtensionRegistry::new();
     registry
@@ -107,6 +173,41 @@ async fn capability_host_uses_obligation_handler_before_process_start() {
 
     assert_eq!(result.process.status, ProcessStatus::Running);
     assert!(observed.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn capability_host_rejects_post_output_obligations_for_spawn_before_handler_or_process() {
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(package_from_manifest(WASM_MANIFEST))
+        .unwrap();
+    let dispatcher = RecordingDispatcher::default();
+    let authorizer = ObligatingAuthorizer::redact_output();
+    let observed = Arc::new(AtomicBool::new(false));
+    let handler = FlaggingObligationHandler {
+        observed: Arc::clone(&observed),
+    };
+    let process_manager = PanicProcessManager;
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+        .with_obligation_handler(&handler)
+        .with_process_manager(&process_manager);
+    let context = execution_context(CapabilitySet::default());
+
+    let err = host
+        .spawn_json(CapabilitySpawnRequest {
+            context,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: ResourceEstimate::default(),
+            input: json!({"message": "must not spawn"}),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::UnsupportedObligations { .. }
+    ));
+    assert!(!observed.load(Ordering::SeqCst));
 }
 
 #[tokio::test]
@@ -182,12 +283,94 @@ async fn capability_host_uses_obligation_handler_on_approved_resume() {
     );
 }
 
-#[derive(Default)]
+#[tokio::test]
+async fn capability_host_uses_post_dispatch_obligation_handler_on_approved_resume() {
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(package_from_manifest(WASM_MANIFEST))
+        .unwrap();
+    let dispatcher = RecordingDispatcher::with_output(json!({"token": "secret-token"}));
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "approved post dispatch"});
+
+    block_host
+        .invoke_json(CapabilityInvocationRequest {
+            context: context.clone(),
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+        })
+        .await
+        .unwrap_err();
+    let blocked = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    let approval_request_id = blocked.approval_request_id.unwrap();
+    let lease = ApprovalResolver::new(&approval_requests, &leases)
+        .approve_dispatch(
+            &scope,
+            approval_request_id,
+            LeaseApproval {
+                issued_by: Principal::User(scope.user_id.clone()),
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                expires_at: None,
+                max_invocations: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+    let handler = RedactingObligationHandler;
+    let resume_authorizer = ObligatingAuthorizer::redact_output();
+    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases)
+        .with_obligation_handler(&handler);
+
+    let result = resume_host
+        .resume_json(CapabilityResumeRequest {
+            context,
+            approval_request_id,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate,
+            input,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.dispatch.output, json!({"token": "[REDACTED]"}));
+    assert_eq!(
+        leases.get(&scope, lease.grant.id).await.unwrap().status,
+        CapabilityLeaseStatus::Consumed
+    );
+}
+
 struct RecordingDispatcher {
     request: Mutex<Option<CapabilityDispatchRequest>>,
+    output: serde_json::Value,
+}
+
+impl Default for RecordingDispatcher {
+    fn default() -> Self {
+        Self::with_output(json!({"ok": true}))
+    }
 }
 
 impl RecordingDispatcher {
+    fn with_output(output: serde_json::Value) -> Self {
+        Self {
+            request: Mutex::new(None),
+            output,
+        }
+    }
+
     fn has_request(&self) -> bool {
         self.request.lock().unwrap().is_some()
     }
@@ -204,7 +387,7 @@ impl CapabilityDispatcher for RecordingDispatcher {
             capability_id: request.capability_id,
             provider: ExtensionId::new("echo").unwrap(),
             runtime: RuntimeKind::Wasm,
-            output: json!({"ok": true}),
+            output: self.output.clone(),
             usage: ResourceUsage::default(),
             receipt: ResourceReceipt {
                 id: ResourceReservationId::new(),
@@ -233,6 +416,12 @@ impl ObligatingAuthorizer {
             obligations: vec![Obligation::RedactOutput],
         }
     }
+
+    fn enforce_output_limit(bytes: u64) -> Self {
+        Self {
+            obligations: vec![Obligation::EnforceOutputLimit { bytes }],
+        }
+    }
 }
 
 #[async_trait]
@@ -257,6 +446,66 @@ impl CapabilityDispatchAuthorizer for ObligatingAuthorizer {
         Decision::Allow {
             obligations: self.obligations.clone(),
         }
+    }
+}
+
+struct RedactingObligationHandler;
+
+#[async_trait]
+impl CapabilityObligationHandler for RedactingObligationHandler {
+    async fn satisfy(
+        &self,
+        request: CapabilityObligationRequest<'_>,
+    ) -> Result<(), CapabilityObligationError> {
+        assert!(matches!(
+            request.phase,
+            CapabilityObligationPhase::Invoke | CapabilityObligationPhase::Resume
+        ));
+        assert_eq!(request.obligations, &[Obligation::RedactOutput]);
+        Ok(())
+    }
+
+    async fn complete_dispatch(
+        &self,
+        request: CapabilityObligationCompletionRequest<'_>,
+    ) -> Result<CapabilityDispatchResult, CapabilityObligationError> {
+        assert!(matches!(
+            request.phase,
+            CapabilityObligationPhase::Invoke | CapabilityObligationPhase::Resume
+        ));
+        assert_eq!(request.obligations, &[Obligation::RedactOutput]);
+        let mut dispatch = request.dispatch.clone();
+        dispatch.output = json!({"token": "[REDACTED]"});
+        Ok(dispatch)
+    }
+}
+
+struct FailingPostDispatchHandler;
+
+#[async_trait]
+impl CapabilityObligationHandler for FailingPostDispatchHandler {
+    async fn satisfy(
+        &self,
+        request: CapabilityObligationRequest<'_>,
+    ) -> Result<(), CapabilityObligationError> {
+        assert_eq!(
+            request.obligations,
+            &[Obligation::EnforceOutputLimit { bytes: 4 }]
+        );
+        Ok(())
+    }
+
+    async fn complete_dispatch(
+        &self,
+        request: CapabilityObligationCompletionRequest<'_>,
+    ) -> Result<CapabilityDispatchResult, CapabilityObligationError> {
+        assert_eq!(
+            request.obligations,
+            &[Obligation::EnforceOutputLimit { bytes: 4 }]
+        );
+        Err(CapabilityObligationError::Failed {
+            kind: CapabilityObligationFailureKind::Output,
+        })
     }
 }
 
@@ -317,6 +566,15 @@ impl CapabilityObligationHandler for FlaggingObligationHandler {
         assert_eq!(request.phase, CapabilityObligationPhase::Spawn);
         self.observed.store(true, Ordering::SeqCst);
         Ok(())
+    }
+}
+
+struct PanicProcessManager;
+
+#[async_trait]
+impl ProcessManager for PanicProcessManager {
+    async fn spawn(&self, _start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
+        panic!("process manager must not be called for unsupported post-output spawn obligations")
     }
 }
 
