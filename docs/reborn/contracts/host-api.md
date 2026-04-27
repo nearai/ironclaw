@@ -403,8 +403,8 @@ This function is pure lexical resolution. Backend symlink containment remains th
 pub enum Principal {
     Tenant(TenantId),
     User(UserId),
-    Project(ProjectId),
     Agent(AgentId),
+    Project(ProjectId),
     Mission(MissionId),
     Thread(ThreadId),
     Extension(ExtensionId),
@@ -420,8 +420,8 @@ Resource scope is a cascade, not a single owner.
 pub struct ResourceScope {
     pub tenant_id: TenantId,
     pub user_id: UserId,
-    pub project_id: Option<ProjectId>,
     pub agent_id: Option<AgentId>,
+    pub project_id: Option<ProjectId>,
     pub mission_id: Option<MissionId>,
     pub thread_id: Option<ThreadId>,
     pub invocation_id: InvocationId,
@@ -431,8 +431,30 @@ pub struct ResourceScope {
 Rules:
 
 - tenant and user are mandatory
-- project/agent/mission/thread can be absent for system/bootstrap work, but absence must be explicit
-- child invocation resource scope must preserve tenant, user, and any active agent from parent unless an explicit admin-scoped transition changes scope
+- agent/project/mission/thread can be absent for host-system work, but absence must be explicit
+- child invocation resource scope must preserve tenant, user, agent, and project from parent unless a trusted host workflow intentionally changes scope
+- `_none` path partitions represent an intentionally absent optional scope, not the default local tenant/agent/project
+
+#### Local single-user convention
+
+Local or single-user deployments still normalize scope into concrete IDs so durable paths stay stable across backends. The recommended defaults are:
+
+```text
+tenant_id  = "default"
+user_id    = the stable local user id, username, or hosted identity subject
+agent_id   = Some("default") for the default local agent
+project_id = Some("bootstrap") for the default local/bootstrap project
+```
+
+With those defaults, optional path partitions render as:
+
+```text
+/tenants/default/users/{user}/agents/default/projects/bootstrap/...
+```
+
+Use `agents/_none` or `projects/_none` only for deliberately unscoped/shared records. Do not use `_none` as a shorthand for the default single-agent or default-project experience; otherwise future additional agents or projects may accidentally share state that should have remained isolated.
+
+The host API exposes these defaults as `LOCAL_DEFAULT_TENANT_ID`, `LOCAL_DEFAULT_AGENT_ID`, `LOCAL_DEFAULT_PROJECT_ID`, `ResourceScope::local_default(...)`, and `ExecutionContext::local_default(...)` so bootstrap/local callers do not hand-roll divergent defaults.
 
 ### 9.3 Execution context
 
@@ -445,8 +467,8 @@ pub struct ExecutionContext {
 
     pub tenant_id: TenantId,
     pub user_id: UserId,
-    pub project_id: Option<ProjectId>,
     pub agent_id: Option<AgentId>,
+    pub project_id: Option<ProjectId>,
     pub mission_id: Option<MissionId>,
     pub thread_id: Option<ThreadId>,
 
@@ -466,6 +488,7 @@ Rules:
 - `resource_scope.tenant_id == tenant_id`
 - `resource_scope.user_id == user_id`
 - `resource_scope.agent_id == agent_id`
+- `resource_scope.project_id == project_id`
 - `process_id` may be absent for pure host calls or WASM invocations that are not process-backed
 - every audit/event/budget decision must include `correlation_id`
 
@@ -615,7 +638,14 @@ pub struct SandboxQuota {
 `ironclaw_host_api` owns the neutral already-authorized dispatch port so caller-facing workflow crates can avoid depending on the concrete dispatcher implementation:
 
 ```rust
-pub struct CapabilityDispatchRequest;
+pub struct CapabilityDispatchRequest {
+    pub capability_id: CapabilityId,
+    pub scope: ResourceScope,
+    pub estimate: ResourceEstimate,
+    pub mounts: Option<MountView>,
+    pub resource_reservation: Option<ResourceReservation>,
+    pub input: serde_json::Value,
+}
 pub struct CapabilityDispatchResult;
 pub trait CapabilityDispatcher;
 pub enum DispatchError;
@@ -624,7 +654,7 @@ pub enum RuntimeDispatchErrorKind;
 
 Rules:
 
-- `CapabilityDispatchRequest` is already authorized; grant checks and approvals happen before this boundary.
+- `CapabilityDispatchRequest` is already authorized; grant checks and approvals happen before this boundary. Optional `mounts` and `resource_reservation` fields are prepared obligation effects, not new authority grants.
 - `CapabilityDispatchResult` exposes normalized host facts: capability ID, provider, runtime, output, usage, and resource receipt.
 - `DispatchError` uses stable control-plane variants for registry/routing failures and `RuntimeDispatchErrorKind` for WASM/Script/MCP failures.
 - Runtime/backend detail strings, stderr, host paths, and secret-bearing messages must not cross this port.

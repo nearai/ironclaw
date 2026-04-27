@@ -133,7 +133,7 @@ The dispatcher fails before execution when:
 
 Configured event sink failures are not dispatch failures. Event emission is best-effort observability and must not alter the success value or mask the original runtime/control-plane error.
 
-These failures must not reserve resources or perform external effects.
+These failures must not reserve resources or perform external effects. If a caller supplies a prepared `ResourceReservation` from obligation handling and dispatcher validation fails before a runtime adapter takes ownership, the dispatcher releases that reservation before returning the failure so pre-dispatch handoff cannot leak budget.
 
 ---
 

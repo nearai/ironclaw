@@ -105,7 +105,7 @@ Rules:
 1. Reservation uses estimated resource demand.
 2. Missing estimate dimensions count as zero for that dimension.
 3. Reservation succeeds only if all applicable account limits can absorb the estimate plus current active reservations plus reconciled usage.
-4. Reservation returns a unique `ResourceReservationId`.
+4. Reservation returns a unique `ResourceReservationId`; obligation handoff may request a specific reservation id through `reserve_with_id(scope, estimate, reservation_id)` so authorization obligations, dispatch receipts, and runtime reconciliation refer to the same durable id.
 5. Active reservations count against limits until reconciled or released.
 6. Reconcile replaces reserved estimate with actual usage and closes the reservation.
 7. Release removes the reservation without recording spend.
@@ -247,6 +247,12 @@ pub trait ResourceGovernor {
         &self,
         scope: ResourceScope,
         estimate: ResourceEstimate,
+    ) -> Result<ResourceReservation, ResourceError>;
+    fn reserve_with_id(
+        &self,
+        scope: ResourceScope,
+        estimate: ResourceEstimate,
+        reservation_id: ResourceReservationId,
     ) -> Result<ResourceReservation, ResourceError>;
     fn reconcile(
         &self,

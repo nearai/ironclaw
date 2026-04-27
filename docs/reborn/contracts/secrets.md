@@ -47,6 +47,13 @@ InMemoryEncryptedSecretRepository
 FilesystemEncryptedSecretRepository
 CredentialLocation
 CredentialMapping
+CredentialSlotId
+CredentialAccountId
+CredentialSecretRef
+CredentialAccountRecord
+CredentialAccountRepository
+InMemoryCredentialAccountRepository
+FilesystemCredentialAccountRepository
 ```
 
 `SecretMaterial` is backed by `secrecy::SecretString`, so access to raw values is explicit through `ExposeSecret`. Metadata, lease records, credential mappings, encrypted records, repository errors, and debug output never contain raw secret values.
@@ -58,8 +65,8 @@ host_api       -> opaque SecretHandle and Action::UseSecret shapes
 filesystem     -> virtual-path storage abstraction plus PostgreSQL/libSQL/local backend implementations
 secrets        -> scoped storage, AES-256-GCM/HKDF encryption, metadata, one-shot leases, encrypted-row repository boundary, filesystem-backed encrypted persistence, and credential mapping metadata
 authorization  -> whether a caller may use a SecretHandle
-capabilities   -> caller-facing workflow; currently fails closed on InjectSecretOnce obligations
-host_runtime   -> composition of already-resolved credential material into hardened runtime egress; future secret lease consumption in obligation handlers
+capabilities   -> caller-facing workflow; calls host-provided obligation handlers before dispatch/process/approval-lease side effects
+host_runtime   -> direct-handle InjectSecretOnce lease/consume composition plus already-resolved credential material in hardened runtime egress
 runtimes        -> consume injected values only after host-side authorization and lease handling
 ```
 
@@ -99,13 +106,15 @@ Rules:
 
 - no global handle lookup
 - the same `SecretHandle` in another tenant/user/agent/project is a distinct secret
+- local/single-user deployments should use concrete defaults: tenant `default`, agent `default`, and project `bootstrap`
+- `_none` means intentionally absent/shared optional scope; it is not the default local agent or default local project
 - cross-scope lease consumption returns `UnknownLease`
 - missing secrets return `UnknownSecret` and do not create leases
 - consumed leases cannot be consumed again
 - revoked leases cannot be consumed
 - metadata includes usage counters and timestamps, but never raw material
 
-This is the minimum shape needed before wiring secret lease consumption into obligation handling.
+This is the minimum shape used by the direct-handle `InjectSecretOnce` obligation path.
 
 ---
 
@@ -117,7 +126,15 @@ This is the minimum shape needed before wiring secret lease consumption into obl
 /engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/projects/{project_id-or-_none}/secrets/{handle}.json
 ```
 
-Repository records contain only metadata, ciphertext, salt, and a small tombstone flag for compatibility with projections/backends that represent delete as a redacted marker. `list`, `get`, `record_usage`, `delete`, and `any_exist` operate through `RootFilesystem` only. There are no direct PostgreSQL/libSQL dependencies in the repository; DB durability is supplied by composing this repository with `PostgresRootFilesystem` or `LibSqlRootFilesystem` from `ironclaw_filesystem`.
+For a single local user with one default agent and no selected project, use concrete defaults rather than `_none` for tenant/agent/project identity:
+
+```text
+/engine/tenants/default/users/alice/agents/default/projects/bootstrap/secrets/gmail.work.refresh_token.json
+```
+
+Use `agents/_none` or `projects/_none` only for intentionally unscoped/shared records.
+
+Repository records contain only metadata, ciphertext, salt, and a small tombstone flag used for delete semantics on filesystems that do not expose physical deletion yet. `list`, `get`, `record_usage`, `delete`, and `any_exist` operate through `RootFilesystem` only. There are no direct PostgreSQL/libSQL dependencies in the repository; DB durability is supplied by composing this repository with `PostgresRootFilesystem` or `LibSqlRootFilesystem` from `ironclaw_filesystem`.
 
 ## 6. Current API flow
 
@@ -151,7 +168,86 @@ Runtime composition must obtain material through explicit scoped secret access b
 
 ---
 
-## 7. Non-goals
+## 7. Credential slots and accounts
+
+Extensions often need a credential *kind* rather than one hard-coded secret. For example, a Gmail extension may need a Google OAuth credential while a user has personal, work, and client Gmail accounts. Reborn models this as metadata-only credential accounts:
+
+```text
+Extension declares or implies a credential slot:
+  extension_id = gmail
+  slot_id      = google_oauth
+
+User stores multiple scoped accounts for that slot:
+  account_id   = personal
+  label        = Personal Gmail
+  subject_hint = me@gmail.com
+  secret_refs  = refresh_token -> SecretHandle("gmail.personal.refresh_token")
+
+  account_id   = work
+  label        = Work Gmail
+  subject_hint = me@company.com
+  secret_refs  = refresh_token -> SecretHandle("gmail.work.refresh_token")
+```
+
+`ironclaw_secrets` owns only the account metadata and secret-handle references:
+
+```rust
+pub struct CredentialAccountRecord {
+    pub scope: ResourceScope,
+    pub extension_id: ExtensionId,
+    pub slot_id: CredentialSlotId,
+    pub account_id: CredentialAccountId,
+    pub label: String,
+    pub subject_hint: Option<String>,
+    pub secret_refs: Vec<CredentialSecretRef>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+```
+
+A credential account is **not** an authority grant. It does not contain raw material and does not bypass `SecretStore` lease consumption. Runtime composition must still authorize the capability, resolve the selected credential account, check that every referenced `SecretHandle` is allowed for the invocation, call `lease_once(scope, handle)`, consume each lease exactly once, and inject material only inside the approved runtime/provider path.
+
+Boundary rules:
+
+- `CredentialAccountRepository` is keyed by tenant/user/agent/project + extension + slot + account.
+- The same extension and slot may have many accounts under the same scope.
+- Account labels and subject hints are UI metadata only; they are not secret material and not authorization decisions.
+- `CredentialSecretRef` contains a reference name and `SecretHandle` only, never plaintext, OAuth access tokens, refresh tokens, cookies, or API keys.
+- Account selection/defaults are product workflow or settings concerns. The secrets crate may persist account records, but it does not choose an account for a prompt, remember defaults, ask users, or resolve policy.
+- OAuth refresh/repair, provider HTTP calls, token exchange, and account verification must go through host/runtime composition and `ironclaw_network`; they do not belong in `ironclaw_secrets`.
+- Auditing account use belongs to host/control-plane event sinks. The secrets crate must not emit events or depend on `ironclaw_events`.
+
+Filesystem-backed credential account metadata uses redacted JSON under:
+
+```text
+/engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/projects/{project_id-or-_none}/credential-accounts/{extension_id}/{slot_id}/{account_id}.json
+```
+
+For a single local user with three Gmail accounts, this becomes:
+
+```text
+/engine/tenants/default/users/alice/agents/default/projects/bootstrap/credential-accounts/gmail/google_oauth/personal.json
+/engine/tenants/default/users/alice/agents/default/projects/bootstrap/credential-accounts/gmail/google_oauth/work.json
+/engine/tenants/default/users/alice/agents/default/projects/bootstrap/credential-accounts/gmail/google_oauth/client.json
+```
+
+This path stores only labels, subject hints, secret handles, and timestamps. Secret material remains exclusively in encrypted secret records and is only exposed by `SecretStore::consume(...)` after an explicit scoped lease.
+
+V1 direct-handle obligation handling uses `InjectSecretOnce { handle }`. Future obligation handling may add a richer host-api obligation such as:
+
+```rust
+InjectCredentialOnce {
+    extension_id: ExtensionId,
+    slot_id: CredentialSlotId,
+    account_id: CredentialAccountId,
+}
+```
+
+for credential-account lookup. For now, account metadata remains support data and does not grant authority; callers that choose a credential account must resolve its secret handle(s) before authorizing direct `InjectSecretOnce` obligations.
+
+---
+
+## 8. Non-goals
 
 This slice does not implement:
 
@@ -161,16 +257,18 @@ This slice does not implement:
 - secret audit emission
 - authorization policy for secret use
 - approval prompts for secret use
-- production `InjectSecretOnce` obligation handling
-- runtime environment/request injection
+- account selection UI, account defaults, or per-project remembered choices
+- production `InjectCredentialOnce` obligation handling
+- generic runtime environment/request injection beyond the one-shot direct secret injection staging store
 - OAuth/token refresh flows
+- provider account verification
 - network policy enforcement
 
 Those should be added as separate service/composition slices without moving runtime or product workflow semantics into this crate. Concrete durable adapters must preserve the same tenant/user/agent/project keying and sanitized error behavior.
 
 ---
 
-## 8. Contract tests
+## 9. Contract tests
 
 The crate tests cover:
 
@@ -179,6 +277,9 @@ The crate tests cover:
 - same-handle secrets are tenant/user/agent/project isolated
 - missing secrets fail without creating leases
 - credential mapping constructors carry handles and host patterns but no secret material
+- credential account records allow multiple accounts for the same extension slot without storing material
+- credential account repositories isolate tenant/user/agent/project scopes and list only selected extension-slot accounts
+- filesystem-backed credential account records persist redacted metadata and survive new repository instances
 - encrypted store persists ciphertext rather than plaintext
 - identical plaintext uses distinct salts/ciphertext
 - a new store instance can read through the same encrypted repository with the same master key
