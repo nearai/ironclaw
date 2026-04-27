@@ -127,23 +127,30 @@ type DedupKey = (MissionId, String);
 /// Returns true if `mission.threads_today` carries over from a previous
 /// calendar day and must be reset before the daily-budget gate.
 ///
-/// Day boundary is the cron mission's configured timezone if any, otherwise
-/// UTC. A user with `cron timezone = "America/Los_Angeles"` expects the
-/// budget to refresh at LA midnight, not UTC midnight (which would be 5 PM
-/// local), and a UTC reset would leave that mission idle for ~17 hours
-/// after their local day rolled over.
+/// Day boundary is the cron mission's configured timezone when set,
+/// otherwise UTC. A user with `cron timezone = "America/Los_Angeles"`
+/// expects the budget to refresh at LA midnight; a UTC reset would leave
+/// that mission idle for many hours into their local day (UTC midnight
+/// lands in the previous afternoon/evening local time, with the exact hour
+/// shifting under DST).
 ///
 /// `last_fire_at = None` with a non-zero counter is treated as stale —
-/// either the persisted timestamp was lost or the counter was nudged
-/// out-of-band, and resetting is the safe direction.
-fn threads_today_is_stale(mission: &Mission) -> bool {
+/// the two fields are written together by `fire_mission`, so this state
+/// only arises from data corruption / migration / out-of-band edits, and
+/// resetting is the recovery direction. Returning `false` here would
+/// reintroduce the permanent-exhaustion bug this helper exists to fix.
+///
+/// `now` is injected so the call site can pin a single instant across
+/// the staleness check and downstream fire-accounting (avoiding a
+/// midnight-boundary race) and so unit tests can assert the timezone
+/// boundary against fixed synthetic timestamps.
+fn threads_today_is_stale(mission: &Mission, now: chrono::DateTime<chrono::Utc>) -> bool {
     if mission.threads_today == 0 {
         return false;
     }
     let Some(last) = mission.last_fire_at else {
         return true;
     };
-    let now = chrono::Utc::now();
     if let MissionCadence::Cron {
         timezone: Some(tz), ..
     } = &mission.cadence
@@ -661,7 +668,10 @@ impl MissionManager {
         // Best-effort persist: a transient store failure must not prevent the
         // mission from firing — the in-memory reset is sufficient for this
         // call, and the next successful fire will persist the counter naturally.
-        if threads_today_is_stale(&mission) {
+        // Pin `now` once so the staleness check and the cooldown comparison
+        // below cannot disagree across a midnight tick.
+        let now = chrono::Utc::now();
+        if threads_today_is_stale(&mission, now) {
             debug!(
                 mission_id = %id,
                 old_threads_today = mission.threads_today,
@@ -688,7 +698,7 @@ impl MissionManager {
         if mission.cooldown_secs > 0
             && let Some(last) = mission.last_fire_at
         {
-            let elapsed = chrono::Utc::now().signed_duration_since(last).num_seconds();
+            let elapsed = now.signed_duration_since(last).num_seconds();
             if elapsed >= 0 && (elapsed as u64) < mission.cooldown_secs {
                 debug!(
                     mission_id = %id,
@@ -7417,110 +7427,94 @@ mod tests {
         );
     }
 
-    /// Regression: a cron mission with a non-UTC timezone resets at the
-    /// mission's local midnight, not UTC midnight. Setup constructs a
-    /// last_fire_at that is on the *same UTC date* as `now` but on the
-    /// *previous local date* in `Pacific/Auckland` (UTC+12/+13). Without the
-    /// timezone-aware boundary, `last.date_naive() < now.date_naive()` is
-    /// false in UTC and the reset is skipped. Fixes #1945.
-    #[tokio::test]
-    async fn threads_today_resets_at_cron_local_midnight() {
-        let store = Arc::new(TestStore::new());
-        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
-        let project_id = ProjectId::new();
-
-        let tz = ironclaw_common::ValidTimezone::parse("Pacific/Auckland").unwrap();
-        let id = mgr
-            .create_mission(
-                project_id,
-                "test-user",
-                "tz cron mission",
-                "periodic goal",
-                MissionCadence::Cron {
-                    expression: "* * * * *".into(),
-                    timezone: Some(tz),
-                },
-                Vec::new(),
-            )
-            .await
-            .unwrap();
-
-        // Pick a `last_fire_at` that is "yesterday" in Auckland but the same
-        // UTC date as `now`. Auckland is UTC+12 (NZST) or UTC+13 (NZDT). At
-        // 02:00 UTC on day D, Auckland local time is 14:00–15:00 on day D;
-        // at 23:00 UTC on day D-1 (3 hours earlier), Auckland local time is
-        // 11:00–12:00 on day D, so that's the same local day. We need
-        // last_fire_at to be in Auckland's *previous* local day while still
-        // being on the same UTC day as now. Compute that explicitly.
-        let now = chrono::Utc::now();
-        let local_now = now.with_timezone(&tz.tz());
-        let yesterday_local = local_now.date_naive() - chrono::Duration::days(1);
-        // Pick 23:00 local on yesterday — converts back to a UTC instant
-        // that may or may not match today's UTC date depending on DST. The
-        // test's invariant is "last local day < now local day", which is
-        // independent of the UTC comparison, so this works regardless.
-        let last_local = yesterday_local
-            .and_hms_opt(23, 0, 0)
-            .expect("valid local datetime")
-            .and_local_timezone(tz.tz())
-            .single()
-            .expect("unambiguous local time");
-        let last_utc = last_local.with_timezone(&chrono::Utc);
-
-        {
-            let mut missions = store.missions.write().await;
-            let mission = missions.get_mut(&id).expect("mission should exist");
-            mission.threads_today = mission.max_threads_per_day;
-            mission.last_fire_at = Some(last_utc);
-            mission.next_fire_at = Some(now - chrono::Duration::seconds(60));
-            mission.cooldown_secs = 0;
-        }
-
-        let spawned = mgr.tick("test-user").await.unwrap();
-        assert_eq!(
-            spawned.len(),
-            1,
-            "tick should fire after reset at Auckland local midnight \
-             (last_local={last_local}, now_local={local_now})"
-        );
-
-        let reloaded = mgr.get_mission(id).await.unwrap().unwrap();
-        assert_eq!(
-            reloaded.threads_today, 1,
-            "threads_today should be 1 after reset + new fire"
-        );
-    }
-
-    /// Unit-tests the day-staleness predicate directly so the boundary logic
-    /// stays decoupled from the larger fire path.
+    /// Unit-tests the day-staleness predicate against fixed synthetic
+    /// instants so the boundary logic is locked independent of wall-clock
+    /// time. The timezone case here is the regression that motivated the
+    /// fix: `last_fire_at` and `now` share a UTC date, so the old
+    /// UTC-only check would not have reset, but they straddle the local
+    /// midnight in `Pacific/Auckland`. Fixes #1945.
     #[test]
     fn threads_today_is_stale_predicate() {
+        use chrono::TimeZone;
+
         let mk =
             |cadence: MissionCadence| Mission::new(ProjectId::new(), "user1", "m", "goal", cadence);
 
         // threads_today = 0 → never stale, regardless of last_fire_at.
+        let now = chrono::Utc.with_ymd_and_hms(2026, 4, 28, 12, 0, 0).unwrap();
         let mut m = mk(MissionCadence::Manual);
         m.threads_today = 0;
-        m.last_fire_at = Some(chrono::Utc::now() - chrono::Duration::days(7));
-        assert!(!threads_today_is_stale(&m));
+        m.last_fire_at = Some(now - chrono::Duration::days(7));
+        assert!(!threads_today_is_stale(&m, now));
 
-        // counter > 0 with no last_fire_at → stale (safe direction).
+        // counter > 0 with no last_fire_at → stale (recovery direction).
+        // Returning false here would re-introduce the original
+        // permanent-exhaustion bug for missions whose `last_fire_at` was
+        // dropped by data corruption / migration.
         let mut m = mk(MissionCadence::Manual);
         m.threads_today = 5;
         m.last_fire_at = None;
-        assert!(threads_today_is_stale(&m));
+        assert!(threads_today_is_stale(&m, now));
 
         // counter > 0, last_fire_at today UTC → not stale.
         let mut m = mk(MissionCadence::Manual);
         m.threads_today = 5;
-        m.last_fire_at = Some(chrono::Utc::now());
-        assert!(!threads_today_is_stale(&m));
+        m.last_fire_at = Some(now - chrono::Duration::hours(1));
+        assert!(!threads_today_is_stale(&m, now));
 
-        // counter > 0, last_fire_at >24h ago → stale by UTC.
+        // counter > 0, last_fire_at on previous UTC day → stale.
         let mut m = mk(MissionCadence::Manual);
         m.threads_today = 5;
-        m.last_fire_at = Some(chrono::Utc::now() - chrono::Duration::hours(25));
-        assert!(threads_today_is_stale(&m));
+        m.last_fire_at = Some(now - chrono::Duration::hours(25));
+        assert!(threads_today_is_stale(&m, now));
+
+        // Timezone-aware boundary — the regression case. Pick instants that
+        // are on the *same* UTC date but on *different* local dates in
+        // Pacific/Auckland (UTC+12 / +13 with DST). With Auckland's offset,
+        // the local-day rollover happens at UTC noon (NZST) — so:
+        //   now_utc = 2026-04-28 14:00 UTC → Auckland 2026-04-29 02:00
+        //   last_utc = 2026-04-28 06:00 UTC → Auckland 2026-04-28 18:00
+        // Both share UTC date 2026-04-28; in Auckland they straddle local
+        // midnight. The old UTC-only check would say "not stale"; the
+        // timezone-aware check must say "stale".
+        let tz = ironclaw_common::ValidTimezone::parse("Pacific/Auckland").unwrap();
+        let now_utc = chrono::Utc.with_ymd_and_hms(2026, 4, 28, 14, 0, 0).unwrap();
+        let last_utc = chrono::Utc.with_ymd_and_hms(2026, 4, 28, 6, 0, 0).unwrap();
+        assert_eq!(
+            last_utc.date_naive(),
+            now_utc.date_naive(),
+            "test invariant: instants must share a UTC date so the UTC-only \
+             check would not trigger",
+        );
+        assert!(
+            last_utc.with_timezone(&tz.tz()).date_naive()
+                < now_utc.with_timezone(&tz.tz()).date_naive(),
+            "test invariant: instants must straddle the Auckland day boundary",
+        );
+        let mut m = mk(MissionCadence::Cron {
+            expression: "* * * * *".into(),
+            timezone: Some(tz),
+        });
+        m.threads_today = 5;
+        m.last_fire_at = Some(last_utc);
+        assert!(
+            threads_today_is_stale(&m, now_utc),
+            "cron mission with non-UTC timezone must reset at local midnight",
+        );
+
+        // Same instants on a cron mission *without* a timezone fall back
+        // to UTC and report not-stale — confirms the tz path is what
+        // actually moves the boundary.
+        let mut m = mk(MissionCadence::Cron {
+            expression: "* * * * *".into(),
+            timezone: None,
+        });
+        m.threads_today = 5;
+        m.last_fire_at = Some(last_utc);
+        assert!(
+            !threads_today_is_stale(&m, now_utc),
+            "untimezoned cron mission must use UTC boundary",
+        );
     }
 
     /// Regression: `is_event_driven` correctly classifies cadence variants.
