@@ -421,28 +421,28 @@ pub struct ResourceScope {
 Rules:
 
 - tenant and user are mandatory
-- agent/project/mission/thread can be absent for system/bootstrap work, but absence must be explicit
-- child invocation resource scope must preserve tenant, user, and agent from parent unless a trusted host workflow intentionally changes agent scope
-- `_none` path partitions represent an intentionally absent optional scope, not the default local tenant/agent
+- agent/project/mission/thread can be absent for host-system work, but absence must be explicit
+- child invocation resource scope must preserve tenant, user, agent, and project from parent unless a trusted host workflow intentionally changes scope
+- `_none` path partitions represent an intentionally absent optional scope, not the default local tenant/agent/project
 
 #### Local single-user convention
 
 Local or single-user deployments still normalize scope into concrete IDs so durable paths stay stable across backends. The recommended defaults are:
 
 ```text
-tenant_id = "default"
-user_id   = the stable local user id, username, or hosted identity subject
-agent_id  = Some("default") for the default local agent
-project_id = None when no project/workspace is selected
+tenant_id  = "default"
+user_id    = the stable local user id, username, or hosted identity subject
+agent_id   = Some("default") for the default local agent
+project_id = Some("bootstrap") for the default local/bootstrap project
 ```
 
 With those defaults, optional path partitions render as:
 
 ```text
-/tenants/default/users/{user}/agents/default/projects/_none/...
+/tenants/default/users/{user}/agents/default/projects/bootstrap/...
 ```
 
-Use `agents/_none` only for deliberately shared/no-agent records. Do not use `_none` as a shorthand for the default single-agent experience; otherwise future additional agents may accidentally share state that should have remained isolated.
+Use `agents/_none` or `projects/_none` only for deliberately unscoped/shared records. Do not use `_none` as a shorthand for the default single-agent or default-project experience; otherwise future additional agents or projects may accidentally share state that should have remained isolated.
 
 ### 9.3 Execution context
 
