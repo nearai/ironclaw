@@ -8,7 +8,7 @@
 use ironclaw_events::{
     AuditSink, DurableAuditLog, DurableEventLog, EventCursor, EventError, EventSink,
     EventStreamKey, InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog,
-    InMemoryEventSink, RuntimeEvent, RuntimeEventKind, parse_jsonl, replay_jsonl,
+    InMemoryEventSink, ReadScope, RuntimeEvent, RuntimeEventKind, parse_jsonl, replay_jsonl,
     sanitize_error_kind,
 };
 use ironclaw_host_api::{
@@ -70,7 +70,7 @@ async fn durable_event_log_appends_and_replays_in_order() {
 
     let stream = EventStreamKey::from_scope(&scope);
     let replay = log
-        .read_after_cursor(&stream, None, 10)
+        .read_after_cursor(&stream, &ReadScope::any(), None, 10)
         .await
         .expect("replay from origin");
     assert_eq!(replay.entries.len(), 3);
@@ -103,13 +103,13 @@ async fn read_after_next_cursor_returns_empty_replay() {
     .expect("append");
 
     let first = log
-        .read_after_cursor(&stream, None, 10)
+        .read_after_cursor(&stream, &ReadScope::any(), None, 10)
         .await
         .expect("first replay");
     let after = first.next_cursor;
 
     let second = log
-        .read_after_cursor(&stream, Some(after), 10)
+        .read_after_cursor(&stream, &ReadScope::any(), Some(after), 10)
         .await
         .expect("second replay");
 
@@ -133,21 +133,21 @@ async fn replay_respects_limit_and_resumes_cleanly() {
     }
 
     let first = log
-        .read_after_cursor(&stream, None, 3)
+        .read_after_cursor(&stream, &ReadScope::any(), None, 3)
         .await
         .expect("limited replay");
     assert_eq!(first.entries.len(), 3);
     assert_eq!(first.next_cursor, EventCursor::new(3));
 
     let second = log
-        .read_after_cursor(&stream, Some(first.next_cursor), 3)
+        .read_after_cursor(&stream, &ReadScope::any(), Some(first.next_cursor), 3)
         .await
         .expect("second limited replay");
     assert_eq!(second.entries.len(), 3);
     assert_eq!(second.next_cursor, EventCursor::new(6));
 
     let third = log
-        .read_after_cursor(&stream, Some(second.next_cursor), 3)
+        .read_after_cursor(&stream, &ReadScope::any(), Some(second.next_cursor), 3)
         .await
         .expect("third limited replay");
     assert_eq!(third.entries.len(), 1);
@@ -187,15 +187,30 @@ async fn streams_partition_by_tenant_user_agent() {
     .expect("alice research append");
 
     let alice_replay = log
-        .read_after_cursor(&EventStreamKey::from_scope(&alice), None, 10)
+        .read_after_cursor(
+            &EventStreamKey::from_scope(&alice),
+            &ReadScope::any(),
+            None,
+            10,
+        )
         .await
         .expect("alice replay");
     let bob_replay = log
-        .read_after_cursor(&EventStreamKey::from_scope(&bob), None, 10)
+        .read_after_cursor(
+            &EventStreamKey::from_scope(&bob),
+            &ReadScope::any(),
+            None,
+            10,
+        )
         .await
         .expect("bob replay");
     let alice_research_replay = log
-        .read_after_cursor(&EventStreamKey::from_scope(&alice_other_agent), None, 10)
+        .read_after_cursor(
+            &EventStreamKey::from_scope(&alice_other_agent),
+            &ReadScope::any(),
+            None,
+            10,
+        )
         .await
         .expect("alice research replay");
 
@@ -217,7 +232,7 @@ async fn read_empty_stream_at_origin_returns_empty_replay() {
     let stream = EventStreamKey::from_scope(&scope);
 
     let replay = log
-        .read_after_cursor(&stream, None, 10)
+        .read_after_cursor(&stream, &ReadScope::any(), None, 10)
         .await
         .expect("replay empty");
     assert!(replay.entries.is_empty());
@@ -225,7 +240,7 @@ async fn read_empty_stream_at_origin_returns_empty_replay() {
 
     // Origin cursor is equivalent to None — also empty, not a gap.
     let replay = log
-        .read_after_cursor(&stream, Some(EventCursor::origin()), 10)
+        .read_after_cursor(&stream, &ReadScope::any(), Some(EventCursor::origin()), 10)
         .await
         .expect("origin cursor on empty stream");
     assert!(replay.entries.is_empty());
@@ -242,7 +257,7 @@ async fn future_cursor_on_empty_stream_returns_replay_gap() {
     let stream = EventStreamKey::from_scope(&scope);
 
     let result = log
-        .read_after_cursor(&stream, Some(EventCursor::new(42)), 10)
+        .read_after_cursor(&stream, &ReadScope::any(), Some(EventCursor::new(42)), 10)
         .await;
     match result {
         Err(EventError::ReplayGap {
@@ -277,7 +292,7 @@ async fn future_cursor_beyond_head_returns_replay_gap() {
     .expect("append 2");
 
     let result = log
-        .read_after_cursor(&stream, Some(EventCursor::new(99)), 10)
+        .read_after_cursor(&stream, &ReadScope::any(), Some(EventCursor::new(99)), 10)
         .await;
     match result {
         Err(EventError::ReplayGap {
@@ -315,7 +330,7 @@ async fn replay_gap_after_truncation_forces_snapshot_rebase() {
     // Reading from origin (or any cursor before the new earliest_retained)
     // must surface a gap with earliest = 4 (one past the truncated cursor).
     let result = log
-        .read_after_cursor(&stream, Some(EventCursor::new(0)), 10)
+        .read_after_cursor(&stream, &ReadScope::any(), Some(EventCursor::new(0)), 10)
         .await;
     match result {
         Err(EventError::ReplayGap {
@@ -331,7 +346,7 @@ async fn replay_gap_after_truncation_forces_snapshot_rebase() {
     // Reading after the truncation point continues to work with the live
     // tail.
     let replay = log
-        .read_after_cursor(&stream, Some(EventCursor::new(4)), 10)
+        .read_after_cursor(&stream, &ReadScope::any(), Some(EventCursor::new(4)), 10)
         .await
         .expect("post-truncation replay");
     assert_eq!(replay.entries.len(), 1);
@@ -344,7 +359,9 @@ async fn replay_with_zero_limit_is_rejected() {
     let scope = local_scope("alice", Some("default"));
     let stream = EventStreamKey::from_scope(&scope);
 
-    let result = log.read_after_cursor(&stream, None, 0).await;
+    let result = log
+        .read_after_cursor(&stream, &ReadScope::any(), None, 0)
+        .await;
     assert!(matches!(
         result,
         Err(EventError::InvalidReplayRequest { .. })
@@ -525,7 +542,7 @@ async fn durable_audit_log_appends_and_replays() {
     assert_eq!(entry.cursor, EventCursor::new(1));
 
     let replay = log
-        .read_after_cursor(&stream, None, 10)
+        .read_after_cursor(&stream, &ReadScope::any(), None, 10)
         .await
         .expect("replay audit");
     assert_eq!(replay.entries.len(), 1);
@@ -580,11 +597,21 @@ async fn approval_audit_records_partition_by_stream_key() {
     log.append(bob_audit).await.expect("bob audit");
 
     let alice_replay = log
-        .read_after_cursor(&EventStreamKey::from_scope(&alice_scope), None, 10)
+        .read_after_cursor(
+            &EventStreamKey::from_scope(&alice_scope),
+            &ReadScope::any(),
+            None,
+            10,
+        )
         .await
         .expect("alice replay");
     let bob_replay = log
-        .read_after_cursor(&EventStreamKey::from_scope(&bob_scope), None, 10)
+        .read_after_cursor(
+            &EventStreamKey::from_scope(&bob_scope),
+            &ReadScope::any(),
+            None,
+            10,
+        )
         .await
         .expect("bob replay");
 
@@ -716,4 +743,181 @@ async fn replay_jsonl_with_zero_limit_is_rejected() {
         result,
         Err(EventError::InvalidReplayRequest { .. })
     ));
+}
+
+#[tokio::test]
+async fn replay_jsonl_with_future_cursor_returns_replay_gap() {
+    // Symmetric to the in-memory log: a JSONL-backed durable log must not
+    // silently echo a cursor beyond the file head. Without this, a future
+    // filesystem JSONL backend would accept stale or foreign cursors and
+    // hide records once new lines are appended.
+    let scope = local_scope("alice", Some("default"));
+    let mut bytes = Vec::new();
+    for _ in 0..2 {
+        let event = RuntimeEvent::dispatch_requested(scope.clone(), capability_id());
+        bytes.extend(serde_json::to_vec(&event).expect("serialize"));
+        bytes.push(b'\n');
+    }
+
+    let result: Result<ironclaw_events::EventReplay<RuntimeEvent>, _> =
+        replay_jsonl(&bytes, Some(EventCursor::new(99)), 10);
+    match result {
+        Err(EventError::ReplayGap {
+            requested,
+            earliest,
+        }) => {
+            assert_eq!(requested, EventCursor::new(99));
+            assert_eq!(earliest, EventCursor::new(2));
+        }
+        other => panic!("expected ReplayGap, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn direct_construction_serialize_path_resanitizes_error_kind() {
+    // An in-process caller can build RuntimeEvent { error_kind: Some(raw),
+    // .. } directly without going through the typed constructors. The
+    // custom Serialize impl must re-run sanitize_error_kind on the way out
+    // so the redaction guard fires on every wire crossing, not only on
+    // construction or deserialization.
+    let scope = local_scope("alice", Some("default"));
+    let event = RuntimeEvent {
+        event_id: ironclaw_events::RuntimeEventId::new(),
+        timestamp: chrono::Utc::now(),
+        kind: RuntimeEventKind::DispatchFailed,
+        scope,
+        capability_id: capability_id(),
+        provider: Some(extension_id()),
+        runtime: Some(RuntimeKind::Wasm),
+        process_id: None,
+        output_bytes: None,
+        // Free-form raw text with a path-like fragment — exactly what the
+        // redaction invariant forbids in durable storage.
+        error_kind: Some("/Users/alice/token=secret raw error".to_string()),
+    };
+
+    let json = serde_json::to_string(&event).expect("serialize");
+
+    assert!(
+        json.contains("\"error_kind\":\"Unclassified\""),
+        "Serialize must re-run sanitize_error_kind; got: {json}"
+    );
+    assert!(!json.contains("/Users/alice"));
+    assert!(!json.contains("token=secret"));
+}
+
+#[tokio::test]
+async fn read_scope_filter_isolates_project_within_same_stream() {
+    // Same (tenant, user, agent) stream, two projects. A consumer scoped to
+    // project A must not see project B records, even though they share the
+    // stream key. The implementation enforces this via ReadScope; the
+    // caller does not have to remember to post-filter.
+    let log = InMemoryDurableEventLog::new();
+    let user_id = UserId::new("alice").expect("user id");
+    let agent_id = AgentId::new("default").expect("agent id");
+    let tenant_id = TenantId::new("default").expect("tenant id");
+    let project_a = ProjectId::new("project-a").expect("project a");
+    let project_b = ProjectId::new("project-b").expect("project b");
+
+    let scope_for = |project: ProjectId| ResourceScope {
+        tenant_id: tenant_id.clone(),
+        user_id: user_id.clone(),
+        agent_id: Some(agent_id.clone()),
+        project_id: Some(project),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    };
+
+    log.append(RuntimeEvent::dispatch_requested(
+        scope_for(project_a.clone()),
+        capability_id(),
+    ))
+    .await
+    .expect("project a #1");
+    log.append(RuntimeEvent::dispatch_requested(
+        scope_for(project_b.clone()),
+        capability_id(),
+    ))
+    .await
+    .expect("project b #1");
+    log.append(RuntimeEvent::dispatch_requested(
+        scope_for(project_a.clone()),
+        capability_id(),
+    ))
+    .await
+    .expect("project a #2");
+
+    let stream = EventStreamKey::new(tenant_id, user_id, Some(agent_id));
+
+    let project_a_filter = ReadScope {
+        project_id: Some(project_a.clone()),
+        ..ReadScope::default()
+    };
+    let project_a_replay = log
+        .read_after_cursor(&stream, &project_a_filter, None, 10)
+        .await
+        .expect("project a replay");
+
+    assert_eq!(project_a_replay.entries.len(), 2);
+    for entry in &project_a_replay.entries {
+        assert_eq!(entry.record.scope.project_id.as_ref(), Some(&project_a));
+    }
+    // Cursor advances past the project-B record so the consumer's resume
+    // cursor reflects the position they've already considered.
+    assert_eq!(project_a_replay.next_cursor, EventCursor::new(3));
+
+    let project_b_filter = ReadScope {
+        project_id: Some(project_b.clone()),
+        ..ReadScope::default()
+    };
+    let project_b_replay = log
+        .read_after_cursor(&stream, &project_b_filter, None, 10)
+        .await
+        .expect("project b replay");
+    assert_eq!(project_b_replay.entries.len(), 1);
+    assert_eq!(
+        project_b_replay.entries[0].record.scope.project_id.as_ref(),
+        Some(&project_b)
+    );
+}
+
+#[tokio::test]
+async fn read_scope_filter_excludes_records_with_none_field_when_filter_is_some() {
+    // Filter is a tightening, never a permissive default: a record with
+    // None in a field cannot match a filter that asks for Some(...).
+    let log = InMemoryDurableEventLog::new();
+    let scope_with_project = local_scope("alice", Some("default"));
+    let scope_without_project = ResourceScope {
+        project_id: None,
+        ..scope_with_project.clone()
+    };
+
+    log.append(RuntimeEvent::dispatch_requested(
+        scope_with_project.clone(),
+        capability_id(),
+    ))
+    .await
+    .expect("with project");
+    log.append(RuntimeEvent::dispatch_requested(
+        scope_without_project,
+        capability_id(),
+    ))
+    .await
+    .expect("without project");
+
+    let stream = EventStreamKey::from_scope(&scope_with_project);
+    let filter = ReadScope {
+        project_id: scope_with_project.project_id.clone(),
+        ..ReadScope::default()
+    };
+    let replay = log
+        .read_after_cursor(&stream, &filter, None, 10)
+        .await
+        .expect("project replay");
+    assert_eq!(replay.entries.len(), 1);
+    assert_eq!(
+        replay.entries[0].record.scope.project_id,
+        scope_with_project.project_id
+    );
 }

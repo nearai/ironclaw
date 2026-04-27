@@ -39,8 +39,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{
-    AgentId, AuditEnvelope, CapabilityId, ExtensionId, ProcessId, ResourceScope, RuntimeKind,
-    TenantId, Timestamp, UserId,
+    AgentId, AuditEnvelope, CapabilityId, ExtensionId, MissionId, ProcessId, ProjectId,
+    ResourceScope, RuntimeKind, TenantId, ThreadId, Timestamp, UserId,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
@@ -92,13 +92,23 @@ pub enum RuntimeEventKind {
 /// Redacted runtime event payload.
 ///
 /// All optional fields are absent unless meaningful for the event kind.
-/// `error_kind` is constrained by [`sanitize_error_kind`] both at construction
-/// time (through the typed `dispatch_failed` / `process_failed` constructors)
-/// and at deserialization time (a custom serde hook re-runs the sanitizer on
-/// any inbound JSONL/wire payload), so a JSONL replay or a hand-built record
-/// cannot smuggle raw error text, paths, or token-shaped secrets through this
-/// field.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `error_kind` is constrained by [`sanitize_error_kind`] on every wire
+/// crossing:
+///
+/// - the typed `dispatch_failed` / `process_failed` constructors apply
+///   sanitization at construction time;
+/// - the custom [`Deserialize`] impl re-runs the sanitizer on any inbound
+///   JSONL/wire payload;
+/// - the custom [`Serialize`] impl re-runs the sanitizer before emitting the
+///   wire payload, so an in-process caller that builds the struct directly
+///   (`RuntimeEvent { error_kind: Some(raw), .. }`) still cannot smuggle raw
+///   error text, paths, or token-shaped secrets through any
+///   `serde_json::to_*` / durable-log `append` path.
+///
+/// The struct's fields remain `pub` for ergonomic in-memory inspection, but
+/// the redaction invariant is enforced wherever the value crosses an I/O
+/// boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeEvent {
     pub event_id: RuntimeEventId,
     pub timestamp: Timestamp,
@@ -109,18 +119,72 @@ pub struct RuntimeEvent {
     pub runtime: Option<RuntimeKind>,
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
-    #[serde(default, deserialize_with = "deserialize_error_kind")]
     pub error_kind: Option<String>,
 }
 
-/// Re-runs [`sanitize_error_kind`] on any inbound `error_kind` value so a
-/// hand-rolled or replayed JSONL record cannot bypass the redaction guard.
-fn deserialize_error_kind<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let raw = Option::<String>::deserialize(deserializer)?;
-    Ok(raw.map(sanitize_error_kind))
+#[derive(Serialize, Deserialize)]
+struct RuntimeEventWire {
+    event_id: RuntimeEventId,
+    timestamp: Timestamp,
+    kind: RuntimeEventKind,
+    scope: ResourceScope,
+    capability_id: CapabilityId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider: Option<ExtensionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime: Option<RuntimeKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    process_id: Option<ProcessId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    output_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error_kind: Option<String>,
+}
+
+impl Serialize for RuntimeEvent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Re-run the redaction guard on the way out. This is the symmetric
+        // partner to the Deserialize hook below; together they enforce that
+        // `error_kind` is sanitized on every wire crossing regardless of
+        // which constructor or direct field assignment produced the value.
+        let wire = RuntimeEventWire {
+            event_id: self.event_id,
+            timestamp: self.timestamp,
+            kind: self.kind,
+            scope: self.scope.clone(),
+            capability_id: self.capability_id.clone(),
+            provider: self.provider.clone(),
+            runtime: self.runtime,
+            process_id: self.process_id,
+            output_bytes: self.output_bytes,
+            error_kind: self.error_kind.clone().map(sanitize_error_kind),
+        };
+        wire.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for RuntimeEvent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = RuntimeEventWire::deserialize(deserializer)?;
+        Ok(Self {
+            event_id: wire.event_id,
+            timestamp: wire.timestamp,
+            kind: wire.kind,
+            scope: wire.scope,
+            capability_id: wire.capability_id,
+            provider: wire.provider,
+            runtime: wire.runtime,
+            process_id: wire.process_id,
+            output_bytes: wire.output_bytes,
+            error_kind: wire.error_kind.map(sanitize_error_kind),
+        })
+    }
 }
 
 impl RuntimeEvent {
@@ -459,6 +523,71 @@ impl EventStreamKey {
     }
 }
 
+/// Authorized read filter applied to durable replay.
+///
+/// `EventStreamKey` partitions cursors by `(tenant, user, agent)` per the
+/// durable-log path contract. Within a single stream, multiple
+/// projects/missions/threads/processes can co-exist; a project-scoped
+/// consumer must still see only its own project's events. `ReadScope`
+/// carries the deeper-scope dimensions and is enforced by the durable-log
+/// implementation, not by the caller.
+///
+/// `ReadScope::any()` disables filtering and is intended for tests or
+/// admin/aggregate paths that already hold authority for the whole stream.
+/// Production callers must construct a tightened filter.
+///
+/// Filter semantics: a `Some(want)` field in the filter matches only
+/// records whose corresponding scope field is `Some(want)`. A record with
+/// `None` in that field does **not** match a filter that asks for
+/// `Some(...)` — the filter is a tightening, never a permissive default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadScope {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<ProjectId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission_id: Option<MissionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<ThreadId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_id: Option<ProcessId>,
+}
+
+impl ReadScope {
+    /// Filter that matches every record in the stream. Use only when the
+    /// caller already holds authority for the whole stream (tests,
+    /// admin/aggregate paths).
+    pub fn any() -> Self {
+        Self::default()
+    }
+
+    /// True iff every `Some` field in the filter has a matching value in the
+    /// supplied [`ResourceScope`]. `process_id` is checked against the
+    /// caller-supplied `process_id` because runtime events carry it on the
+    /// record rather than inside the scope.
+    pub fn matches_event(&self, event: &RuntimeEvent) -> bool {
+        matches_optional(self.project_id.as_ref(), event.scope.project_id.as_ref())
+            && matches_optional(self.mission_id.as_ref(), event.scope.mission_id.as_ref())
+            && matches_optional(self.thread_id.as_ref(), event.scope.thread_id.as_ref())
+            && matches_optional(self.process_id.as_ref(), event.process_id.as_ref())
+    }
+
+    /// True iff every `Some` field in the filter matches the corresponding
+    /// top-level field on the audit envelope.
+    pub fn matches_audit(&self, record: &AuditEnvelope) -> bool {
+        matches_optional(self.project_id.as_ref(), record.project_id.as_ref())
+            && matches_optional(self.mission_id.as_ref(), record.mission_id.as_ref())
+            && matches_optional(self.thread_id.as_ref(), record.thread_id.as_ref())
+            && matches_optional(self.process_id.as_ref(), record.process_id.as_ref())
+    }
+}
+
+fn matches_optional<T: PartialEq>(want: Option<&T>, have: Option<&T>) -> bool {
+    match want {
+        None => true,
+        Some(want) => have == Some(want),
+    }
+}
+
 /// One replayed record and its durable cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventLogEntry<T> {
@@ -522,10 +651,17 @@ pub trait AuditSink: Send + Sync {
 /// replay-after semantics.
 ///
 /// `append` failures must be propagated. `read_after_cursor` is gated on
-/// stream key authority: callers must validate that the requested
-/// [`EventStreamKey`] matches the consumer's authorized scope before serving
-/// the result, and the implementation rejects cursors that predate the
-/// earliest retained entry with [`EventError::ReplayGap`].
+/// two-tier authority:
+///
+/// 1. The caller must validate that the requested [`EventStreamKey`] matches
+///    the consumer's authorized stream before serving the result.
+/// 2. The supplied [`ReadScope`] is enforced **by the implementation**, not
+///    by the caller, so a project-scoped or thread-scoped consumer cannot
+///    receive records from another project/thread within the same stream.
+///
+/// The implementation rejects cursors that predate the earliest retained
+/// entry, or that exceed the current stream head, with
+/// [`EventError::ReplayGap`].
 #[async_trait]
 pub trait DurableEventLog: Send + Sync {
     async fn append(&self, event: RuntimeEvent) -> Result<EventLogEntry<RuntimeEvent>, EventError>;
@@ -533,6 +669,7 @@ pub trait DurableEventLog: Send + Sync {
     async fn read_after_cursor(
         &self,
         stream: &EventStreamKey,
+        filter: &ReadScope,
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<EventReplay<RuntimeEvent>, EventError>;
@@ -551,6 +688,7 @@ pub trait DurableAuditLog: Send + Sync {
     async fn read_after_cursor(
         &self,
         stream: &EventStreamKey,
+        filter: &ReadScope,
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<EventReplay<AuditEnvelope>, EventError>;
@@ -646,7 +784,12 @@ impl<T: Clone> StreamState<T> {
         Ok(entry)
     }
 
-    fn read_after(&self, after: EventCursor, limit: usize) -> Result<EventReplay<T>, EventError> {
+    fn read_after(
+        &self,
+        after: EventCursor,
+        limit: usize,
+        is_match: impl Fn(&T) -> bool,
+    ) -> Result<EventReplay<T>, EventError> {
         // A cursor that points beyond the current head is a contract
         // violation, not a benign no-op: returning empty would silently lose
         // every event 1..=head once it lands. Surface as ReplayGap so the
@@ -664,17 +807,29 @@ impl<T: Clone> StreamState<T> {
                 earliest: EventCursor::new(self.earliest_retained),
             });
         }
+        // Walk every entry past the cursor; advance the scanned-cursor
+        // marker even when a record is filtered out so the consumer's
+        // resume cursor moves forward and they don't see filtered records
+        // again on the next call.
         let mut entries = Vec::new();
+        let mut last_scanned = after;
         for entry in &self.entries {
             if entry.cursor.as_u64() <= after.as_u64() {
                 continue;
             }
+            last_scanned = entry.cursor;
+            if !is_match(&entry.record) {
+                continue;
+            }
+            entries.push(entry.clone());
             if entries.len() >= limit {
                 break;
             }
-            entries.push(entry.clone());
         }
-        let next_cursor = entries.last().map(|entry| entry.cursor).unwrap_or(after);
+        let next_cursor = entries
+            .last()
+            .map(|entry| entry.cursor)
+            .unwrap_or(last_scanned);
         Ok(EventReplay {
             entries,
             next_cursor,
@@ -743,6 +898,7 @@ impl DurableEventLog for InMemoryDurableEventLog {
     async fn read_after_cursor(
         &self,
         stream: &EventStreamKey,
+        filter: &ReadScope,
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<EventReplay<RuntimeEvent>, EventError> {
@@ -756,7 +912,7 @@ impl DurableEventLog for InMemoryDurableEventLog {
             reason: "in-memory durable event log lock poisoned".to_string(),
         })?;
         match streams.get(stream) {
-            Some(state) => state.read_after(after, limit),
+            Some(state) => state.read_after(after, limit, |event| filter.matches_event(event)),
             None => {
                 // An absent stream is at head-zero. Any cursor beyond origin
                 // is a foreign cursor that this stream has never issued, so
@@ -826,6 +982,7 @@ impl DurableAuditLog for InMemoryDurableAuditLog {
     async fn read_after_cursor(
         &self,
         stream: &EventStreamKey,
+        filter: &ReadScope,
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<EventReplay<AuditEnvelope>, EventError> {
@@ -839,7 +996,7 @@ impl DurableAuditLog for InMemoryDurableAuditLog {
             reason: "in-memory durable audit log lock poisoned".to_string(),
         })?;
         match streams.get(stream) {
-            Some(state) => state.read_after(after, limit),
+            Some(state) => state.read_after(after, limit, |record| filter.matches_audit(record)),
             None => {
                 if after.as_u64() > 0 {
                     Err(EventError::ReplayGap {
@@ -918,10 +1075,21 @@ where
             });
         }
     }
+    // A cursor beyond the JSONL head is a foreign or stale cursor; the
+    // contract requires explicit ReplayGap signaling rather than silently
+    // echoing it, mirroring InMemoryDurableEventLog. Without this guard a
+    // future filesystem JSONL backend would accept cursors this stream
+    // never issued and hide records once new lines are appended.
+    if after > current_cursor {
+        return Err(EventError::ReplayGap {
+            requested: EventCursor::new(after),
+            earliest: EventCursor::new(current_cursor),
+        });
+    }
     let next_cursor = entries
         .last()
         .map(|entry| entry.cursor)
-        .unwrap_or_else(|| EventCursor::new(after.max(current_cursor)));
+        .unwrap_or_else(|| EventCursor::new(after));
     Ok(EventReplay {
         entries,
         next_cursor,
