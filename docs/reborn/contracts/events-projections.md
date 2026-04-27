@@ -168,3 +168,42 @@ When an event references sensitive data, use:
 ## 9. Non-goals
 
 This contract does not define the final event store backend, wire protocol, UI schema, or audit retention policy. It defines the ownership boundaries and minimum invariants needed before those implementation choices are made.
+
+
+---
+
+## Contract freeze addendum — durable streams and projections (2026-04-25)
+
+V1 includes projection and SSE/WebSocket APIs backed by a durable append log with replay cursors.
+
+Minimum event-store contract:
+
+```text
+append redacted event
+read after cursor
+read scoped stream snapshot
+ack/track cursor where transport needs it
+retention/replay-gap reporting
+projection rebuild from durable events/state
+```
+
+Cursor rules:
+
+- cursors are monotonic within a scoped stream;
+- a cursor is not global authority and must be validated against tenant/user/thread/process scope;
+- replay gaps return an explicit snapshot/rebase marker, not silent loss;
+- SSE/WebSocket transports resume from the last accepted cursor and then tail live events.
+
+V1 event streams must cover at least:
+
+```text
+turn/run progress
+process lifecycle/output refs
+approval state
+runtime invocation state
+memory significant events
+extension lifecycle
+resource/network/security audit summaries
+```
+
+Event delivery failures are best-effort for live transports; durable append failures are domain-specific and must be explicit where the event is required audit/history.

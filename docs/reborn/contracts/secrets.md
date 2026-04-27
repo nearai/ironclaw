@@ -191,3 +191,25 @@ The crate tests cover:
 - filesystem-backed repository records usage and tombstones deletes without plaintext
 - filesystem-backed repository has feature-gated type contracts for libSQL and PostgreSQL `RootFilesystem` backends without direct SQL adapters in this crate
 - crate boundary remains low-level and does not depend on workflow/runtime/observability crates
+
+
+---
+
+## Contract freeze addendum — production source of truth (2026-04-25)
+
+Production secrets use a typed encrypted secret repository as source of truth.
+
+`FilesystemEncryptedSecretRepository` remains a verified reference/projection/backend experiment, but the production contract is structured encrypted records with scoped lease/usage metadata. Generic `/secrets` file listing must not expose source secret records.
+
+V1 must implement `InjectSecretOnce` obligation handling through explicit secret lease consumption:
+
+```text
+CapabilityHost obligation handler
+  -> authorize/use secret handle
+  -> lease_once(scope, handle)
+  -> consume exactly once
+  -> inject into approved runtime/provider location
+  -> redact output/events/audit
+```
+
+Master-key/keychain resolution is required before production secret injection is considered complete.

@@ -190,3 +190,14 @@ The crate test suite covers:
 - runtime failure details redacted to `RuntimeDispatchErrorKind`
 
 These tests are intentionally caller-level: they drive `RuntimeDispatcher::dispatch_json`, not only helper functions.
+
+
+---
+
+## Contract freeze addendum — first-class runtime lanes (2026-04-25)
+
+WASM, Script, and MCP are all first-class V1 runtime lanes.
+
+`ironclaw_dispatcher` still remains an already-authorized router only. It must not take dependencies on authorization, approvals, run-state, memory, secrets, network workflow, process lifecycle, or concrete host-runtime composition. Runtime lanes are registered through `RuntimeAdapter`.
+
+Because Script and MCP are first-class, their adapters must satisfy the same redaction, resource, process, event, and network-enforcement contracts as WASM. If a required obligation cannot be enforced for a lane, that invocation fails closed before dispatch.

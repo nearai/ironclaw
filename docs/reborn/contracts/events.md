@@ -202,3 +202,12 @@ This contract does not implement:
 - durable process event projections beyond JSONL sinks
 
 Those belong to later event/projection/audit slices.
+
+
+---
+
+## Contract freeze addendum — V1 stream scope (2026-04-25)
+
+The event system must support durable append-log streams with replay cursors for SSE/WebSocket clients. Event records must carry tenant/user/project/agent/process/thread/invocation scope where relevant, and stream authorization must be checked on replay as well as live subscription.
+
+Runtime/process/control-plane events remain redacted metadata. User-visible transcript/reply content is a separate durable product record and is not a license to include raw secrets, host paths, approval reasons, or unapproved runtime payloads in low-level events.

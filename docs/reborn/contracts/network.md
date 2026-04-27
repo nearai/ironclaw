@@ -145,3 +145,25 @@ The crate tests cover:
 - response-size cap enforcement while reading
 - fail-closed empty policy behavior
 - crate boundary remains low-level and does not depend on workflow/runtime/secret/observability crates
+
+
+---
+
+## Contract freeze addendum — provider HTTP boundary (2026-04-25)
+
+All host-side and provider-side HTTP in V1 must go through `ironclaw_network` or an adapter explicitly built on top of its policy/hardening primitives.
+
+This includes:
+
+```text
+embedding providers
+external memory adapters such as Mem0/Letta/Zep
+OAuth/token repair clients
+first-party provider SDK wrappers
+host-mediated MCP/provider HTTP calls
+runtime HTTP egress
+```
+
+A provider crate must not instantiate an unrestricted HTTP client that bypasses scoped network policy, DNS/private-address checks, redirect revalidation, response-size limits, credential leak scanning, or sanitized error handling.
+
+Script and MCP are first-class V1 runtime lanes. Their network behavior must therefore be enforceable through `ironclaw_network`; otherwise network-capable Script/MCP operations fail closed.

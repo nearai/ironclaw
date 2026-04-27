@@ -212,3 +212,26 @@ This slice does not implement:
 - approval resume for `Action::SpawnCapability`
 
 Those should be layered on this capability-backed process record and manager boundary.
+
+
+---
+
+## Contract freeze addendum — V1 process/output API (2026-04-25)
+
+The V1 process contract includes:
+
+```text
+status
+kill/cancel
+await completion
+subscribe to lifecycle/progress events
+result record
+output refs
+streaming output/progress through durable events
+```
+
+Large or binary outputs are represented by artifact refs, not embedded in process records or event payloads.
+
+Process scope must include tenant/user/project/agent where available. Process events and result records must not leak raw input, raw output beyond allowed output refs, host paths, secret material, or backend detail strings.
+
+Terminal-like raw stdout/stderr streams, forced abort handles, and advanced binary streaming are V2 unless implemented behind the same redacted event/artifact-ref contract.

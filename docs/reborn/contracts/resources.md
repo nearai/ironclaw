@@ -291,3 +291,21 @@ Do not add in `ironclaw_resources` V1:
 - network clients
 - product workflows
 - retry/stuck-loop heuristics except as future input signals
+
+
+---
+
+## Contract freeze addendum — V1 quota coverage (2026-04-25)
+
+V1 resource reservation/enforcement covers:
+
+```text
+runtime/process execution
+network egress estimates and reconciled usage
+embedding/provider calls
+artifact/storage quotas
+```
+
+Memory indexing/search may initially report usage without hard reservation, but embedding provider calls and artifact writes must participate in resource accounting.
+
+Every reservation should carry tenant/user/project/agent/invocation/process scope where relevant. Reservation release/reconcile must be owned by the service that owns the side effect lifecycle.

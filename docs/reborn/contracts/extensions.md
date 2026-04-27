@@ -314,3 +314,26 @@ Do not add in `ironclaw_extensions` V1:
 - OAuth/authentication
 - product workflows
 - agent loop behavior
+
+
+---
+
+## Contract freeze addendum — lifecycle scope (2026-04-25)
+
+The V1 extension contract freezes the full lifecycle even if implementation lands in slices:
+
+```text
+discover
+install
+authenticate
+configure
+activate
+deactivate
+remove
+upgrade
+failed/retry
+```
+
+The extension registry/package source of truth is typed extension state with optional `/system/extensions/...` file projections. Extension config/state projections must validate through the typed repository and must not bypass lifecycle authorization.
+
+WASM, Script, and MCP are all first-class V1 runtime lanes; extension manifests and lifecycle state must be able to describe each lane without making dispatcher depend on concrete runtime crates.

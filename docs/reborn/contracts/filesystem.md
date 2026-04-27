@@ -450,3 +450,43 @@ Do not add in `ironclaw_filesystem`:
 - secret material storage
 
 Those are separate services using filesystem contracts.
+
+
+---
+
+## Contract freeze addendum — V1 filesystem API and placement (2026-04-25)
+
+The V1 `RootFilesystem` contract includes exactly these operations:
+
+```rust
+read_file
+write_file
+list_dir
+stat
+delete
+create_dir_all
+```
+
+`ScopedFilesystem` must expose the same operation set and enforce `MountPermissions` for each operation:
+
+| Operation | Permission |
+| --- | --- |
+| `read_file` | `read` |
+| `write_file` | `write` |
+| `list_dir` | `list` |
+| `stat` | `read` or `list` |
+| `delete` | `delete` |
+| `create_dir_all` | `write` |
+
+Deferred from V1:
+
+```text
+compare-and-swap writes
+append
+rename/copy
+streaming/range reads
+checksums/content-addressed storage
+persistent mount registry
+```
+
+The source-of-truth namespace map is frozen in [`storage-placement.md`](storage-placement.md). This filesystem crate remains generic: it may route `/memory`, `/system`, `/engine`, `/artifacts`, and `/projects` mounts, but it must not encode memory metadata/search semantics, secret repository semantics, approval/process schemas, or event projection logic.

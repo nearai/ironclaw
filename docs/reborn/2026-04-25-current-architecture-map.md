@@ -17,6 +17,19 @@ Legend:
 [not yet]  intentionally missing or deferred
 ```
 
+Contract freeze packet:
+
+```text
+docs/reborn/contracts/_contract-freeze-index.md
+docs/reborn/contracts/storage-placement.md
+docs/reborn/contracts/memory.md
+docs/reborn/contracts/settings-config.md
+docs/reborn/contracts/turns-agent-loop.md
+docs/reborn/contracts/migration-compatibility.md
+```
+
+These docs record the delegation-ready system decisions: first-class optional `AgentId`, hybrid storage placement, typed repositories for structured state, split memory services over shared backends, durable event streams with replay cursors, all built-in obligations for V1, all three runtime lanes as first-class, and schema reuse where viable.
+
 ---
 
 ## 1. One host core, many ports/adapters

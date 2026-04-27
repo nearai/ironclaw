@@ -191,3 +191,43 @@ This slice does not implement:
 - transcript/job history
 
 Those belong to later capability-host/run-state/auth slices.
+
+
+---
+
+## Contract freeze addendum — obligations and workflow completeness (2026-04-25)
+
+V1 must implement all built-in obligations:
+
+```text
+AuditBefore
+AuditAfter
+ApplyNetworkPolicy
+InjectSecretOnce
+RedactOutput
+EnforceOutputLimit
+ReserveResources
+UseScopedMounts
+```
+
+The existing fail-closed invariant remains stronger than implementation convenience:
+
+```text
+unsupported, unconfigured, or failed obligation handling fails before runtime dispatch,
+process start, approval lease claim, secret consumption, network execution, or output publication.
+```
+
+Ownership table:
+
+| Obligation | Owner/composition boundary |
+| --- | --- |
+| `AuditBefore` | host-runtime/events before side effects |
+| `AuditAfter` | host-runtime/events after result classification |
+| `ApplyNetworkPolicy` | `ironclaw_network` + runtime/provider adapters |
+| `InjectSecretOnce` | `ironclaw_secrets` lease consumption + host-runtime/runtime injection |
+| `RedactOutput` | process/output service before result/event publication |
+| `EnforceOutputLimit` | process/output service and runtime adapters |
+| `ReserveResources` | `ironclaw_resources` via `CapabilityHost` before work starts |
+| `UseScopedMounts` | filesystem + host-runtime/runtime adapters |
+
+Exact-invocation approval leases are the only approval lease shape for V1. Reusable scoped approval grants are V2.

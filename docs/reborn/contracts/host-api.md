@@ -1033,3 +1033,41 @@ impl ExtensionId {
 ```
 
 Avoid public tuple fields for any type where invalid strings would break authorization or path invariants.
+
+
+---
+
+## Contract freeze addendum — global scope model (2026-04-25)
+
+The global Reborn scope model must preserve `AgentId` as a first-class optional scope.
+
+Required scope-bearing contracts should be updated to include:
+
+```rust
+pub struct AgentId(pub String);
+
+pub struct ExecutionContext {
+    pub tenant_id: TenantId,
+    pub user_id: UserId,
+    pub project_id: Option<ProjectId>,
+    pub agent_id: Option<AgentId>,
+    pub mission_id: Option<MissionId>,
+    pub thread_id: Option<ThreadId>,
+    pub process_id: Option<ProcessId>,
+    pub invocation_id: InvocationId,
+    pub correlation_id: CorrelationId,
+    // ...runtime/trust/grants/mounts/resources...
+}
+```
+
+`AgentId` exists for production parity with current workspace memory partitioning. Every contract that persists or emits scoped user/project state must either carry `agent_id` or explicitly document why it is not agent-scoped.
+
+Required propagation targets:
+
+- memory documents/search/versions/layers;
+- settings overrides when agent-scoped settings are allowed;
+- events/audit/projections;
+- resources/quotas;
+- approvals/leases/run-state;
+- process records/results/output refs;
+- network/provider/secret usage records when tied to an agent invocation.

@@ -247,3 +247,25 @@ This slice intentionally keeps approval resolution narrow:
 - no reusable approval-scope expansion yet; V1 leases are exact-invocation only
 
 Before a durable/user-facing approval resume UI ships, the host should revisit whether approval records, lease writes, and run-state transitions should share one transactional persistence boundary.
+
+
+---
+
+## Contract freeze addendum — V1 lease scope (2026-04-25)
+
+V1 approvals resolve to exact-invocation leases only.
+
+A valid approval lease is bound to:
+
+```text
+tenant_id
+user_id
+project_id, if present
+agent_id, if present
+invocation_id
+capability_id
+invocation fingerprint
+expiry/status
+```
+
+It authorizes one replay of the exact blocked invocation. It does not grant reusable scoped permission for future invocations. Scoped reusable approvals may be designed in V2 but must not be implied by V1 approval records.

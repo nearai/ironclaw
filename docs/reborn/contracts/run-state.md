@@ -186,3 +186,12 @@ This slice does not implement:
 - websocket/SSE projections
 
 Those should be follow-on slices built on this scoped current-state and approval-request contract.
+
+
+---
+
+## Contract freeze addendum — scope and history split (2026-04-25)
+
+Run-state remains current-state storage, not transition history. Durable history and UI replay are owned by the event/audit append log and projections.
+
+Run-state records must include `agent_id` where the owning execution context carries one, and must preserve exact invocation identity for V1 approval/resume flows.
