@@ -50,6 +50,119 @@ Plain-language layers:
 
 The kernel is not the product brain. It makes product workflows safe.
 
+### User flow at a glance
+
+```text
+USER
+  |
+  | asks / clicks / approves / installs / uploads
+  v
+CHANNEL OR UI
+  |  Web, CLI, Slack, Telegram, API
+  |  "Who is the user and where should the reply go?"
+  v
+PRODUCT WORKFLOW
+  |  User promise, UX states, retries, success/failure copy
+  |  Examples: answer chat, run task, remember preference, install extension
+  v
+AGENT LOOP OR WORKFLOW LOGIC
+  |  Decide what to say, ask, remember, or request as a capability
+  |  Loop behavior can change without changing kernel guarantees
+  v
+KERNEL SAFETY SURFACE
+  |  authorize -> approve/auth if needed -> apply obligations
+  |  mounts, secrets, network policy, resources, redaction, audit/events
+  v
+CAPABILITY / MEMORY / PROCESS / PROVIDER
+  |  Extension runtime, memory backend, long-running process, external API
+  v
+RESULT + EVENTS
+  |  User-visible reply/status/result
+  |  Redacted event/audit trail for support, QA, replay, and debugging
+  v
+USER / SUPPORT / QA
+```
+
+### High-level component interaction
+
+```text
++------------------+       +----------------------+       +------------------+
+| User / Customer  | ----> | Channel or UI        | ----> | Product workflow |
+|                  | <---- | Web/CLI/Slack/etc.   | <---- | UX + orchestration|
++------------------+       +----------------------+       +---------+--------+
+                                                                  |
+                                                                  v
+                                                        +-------------------+
+                                                        | Agent loop /      |
+                                                        | workflow logic    |
+                                                        +---------+---------+
+                                                                  |
+                                  requested capability / memory / provider call
+                                                                  |
+                                                                  v
++--------------------------------------------------------------------------------+
+| KERNEL SAFETY SURFACE                                                          |
+| CapabilityHost | Authorization | Approvals/leases | Run-state | Redaction      |
+| Scoped mounts  | Secret leases | Network policy   | Resources | Audit/events   |
++---------+----------------+--------------------+--------------------+-----------+
+          |                |                    |                    |
+          v                v                    v                    v
++----------------+  +----------------+  +----------------+  +--------------------+
+| Extensions /   |  | Memory /        |  | Process /      |  | Provider / network |
+| capabilities   |  | workspace       |  | runtime lanes   |  | clients            |
+| WASM/Script/MCP|  | docs/search     |  | bg work/results |  | APIs via policy    |
++-------+--------+  +-------+--------+  +-------+--------+  +---------+----------+
+        |                   |                   |                     |
+        +-------------------+-------------------+---------------------+
+                            |
+                            v
+                  +---------------------+
+                  | Durable events /    |
+                  | audit / projections |
+                  +----------+----------+
+                             |
+                             v
+                  Support, QA, replay, user-facing status
+```
+
+Read this diagram top-down for user experience and left/right across the bottom for architecture ownership. Product managers usually own the top three boxes: user promise, channel/UI experience, and product workflow. Engineering/kernel reviewers own the safety surface and every privileged dependency below it.
+
+### Example: “Run a task for me”
+
+```text
+User asks: "Book this meeting and tell me when done"
+  |
+  v
+Channel/UI records the request and thread
+  |
+  v
+Product workflow decides the UX:
+  - show task started
+  - ask approval if calendar write is risky
+  - show progress while background work runs
+  - show final result or failure reason
+  |
+  v
+Agent loop chooses capability calls:
+  - calendar.search_availability
+  - calendar.create_event
+  - maybe email.send_summary
+  |
+  v
+Kernel safety checks:
+  - is this user/agent/project allowed to call these capabilities?
+  - does it need approval or auth repair?
+  - which Gmail/calendar account is selected?
+  - what secrets/network/resource budget are allowed?
+  - what must be redacted in output/events?
+  |
+  v
+Extensions/providers do the work through mediated runtimes/network
+  |
+  v
+Process/events/reporting return status to user and support tools
+```
+
 ---
 
 ## 3. Feature mapping template
