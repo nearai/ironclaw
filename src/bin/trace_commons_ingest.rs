@@ -137,6 +137,8 @@ const TRACE_COMMONS_SIGNED_TOKEN_MAX_TTL_SECONDS: &str =
     "TRACE_COMMONS_SIGNED_TOKEN_MAX_TTL_SECONDS";
 const TRACE_COMMONS_SIGNED_TOKEN_REQUIRE_JTI: &str = "TRACE_COMMONS_SIGNED_TOKEN_REQUIRE_JTI";
 const TRACE_COMMONS_REQUIRE_EDDSA_SIGNED_TOKENS: &str = "TRACE_COMMONS_REQUIRE_EDDSA_SIGNED_TOKENS";
+const TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS: &str =
+    "TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS";
 const TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR: &str =
     "TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR";
 const TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR: &str =
@@ -169,6 +171,7 @@ struct AppState {
     tokens: Arc<BTreeMap<String, TenantAuth>>,
     signed_token_verifier: Option<TraceCommonsSignedTokenVerifier>,
     require_eddsa_signed_tokens: bool,
+    require_managed_eddsa_signed_tokens: bool,
     tenant_policies: Arc<BTreeMap<String, TenantSubmissionPolicy>>,
     require_tenant_submission_policy: bool,
     db_mirror: Option<Arc<dyn Database>>,
@@ -524,6 +527,7 @@ struct TraceCommonsSignedTokenVerifier {
     keyed_secrets: BTreeMap<String, SecretString>,
     default_eddsa_public_key: Option<TraceCommonsSignedEddsaPublicKey>,
     keyed_eddsa_public_keys: BTreeMap<String, TraceCommonsSignedEddsaPublicKey>,
+    managed_eddsa_key_ids: BTreeSet<String>,
     issuer: Option<String>,
     audience: Option<String>,
     revoked_jtis: BTreeSet<String>,
@@ -733,6 +737,8 @@ impl AppState {
         let tokens = parse_tenant_tokens_from_env()?;
         let signed_token_verifier = trace_commons_signed_token_verifier_from_env()?;
         let require_eddsa_signed_tokens = env_truthy(TRACE_COMMONS_REQUIRE_EDDSA_SIGNED_TOKENS);
+        let require_managed_eddsa_signed_tokens =
+            env_truthy(TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS);
         if tokens.is_empty() && signed_token_verifier.is_none() {
             anyhow::bail!(
                 "TRACE_COMMONS_TENANT_TOKENS, TRACE_COMMONS_INGEST_TOKEN, or signed token verification must be configured"
@@ -740,6 +746,10 @@ impl AppState {
         }
         validate_required_eddsa_signed_tokens_config(
             require_eddsa_signed_tokens,
+            signed_token_verifier.as_ref(),
+        )?;
+        validate_required_managed_eddsa_signed_tokens_config(
+            require_managed_eddsa_signed_tokens,
             signed_token_verifier.as_ref(),
         )?;
         let tenant_policies = parse_tenant_submission_policies_from_env()?;
@@ -956,6 +966,7 @@ impl AppState {
             tokens: Arc::new(tokens),
             signed_token_verifier,
             require_eddsa_signed_tokens,
+            require_managed_eddsa_signed_tokens,
             tenant_policies: Arc::new(tenant_policies),
             require_tenant_submission_policy,
             db_mirror,
@@ -1444,7 +1455,9 @@ fn trace_commons_signed_token_verifier_from_env()
     let keyed_secrets = parse_signed_token_keyed_secrets_from_env()?;
     let default_eddsa_public_key = parse_signed_token_default_eddsa_public_key_from_env()?;
     let mut keyed_eddsa_public_keys = parse_signed_token_keyed_eddsa_public_key_files_from_env()?;
-    for (kid, key) in parse_signed_token_eddsa_keyset_from_env()? {
+    let managed_eddsa_public_keys = parse_signed_token_eddsa_keyset_from_env()?;
+    let managed_eddsa_key_ids = managed_eddsa_public_keys.keys().cloned().collect();
+    for (kid, key) in managed_eddsa_public_keys {
         if keyed_eddsa_public_keys.insert(kid.clone(), key).is_some() {
             anyhow::bail!("signed tenant token EdDSA key id {kid} is configured more than once");
         }
@@ -1469,6 +1482,7 @@ fn trace_commons_signed_token_verifier_from_env()
         keyed_secrets,
         default_eddsa_public_key,
         keyed_eddsa_public_keys,
+        managed_eddsa_key_ids,
         issuer: optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_ISSUER)?,
         audience: optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE)?,
         revoked_jtis: parse_signed_token_revoked_jtis_from_env()?,
@@ -1491,6 +1505,60 @@ fn validate_required_eddsa_signed_tokens_config(
     anyhow::ensure!(
         eddsa_key_count > 0,
         "{TRACE_COMMONS_REQUIRE_EDDSA_SIGNED_TOKENS} requires a configured EdDSA/Ed25519 public key"
+    );
+    Ok(())
+}
+
+fn validate_required_managed_eddsa_signed_tokens_config(
+    enabled: bool,
+    verifier: Option<&TraceCommonsSignedTokenVerifier>,
+) -> anyhow::Result<()> {
+    if !enabled {
+        return Ok(());
+    }
+    let verifier = verifier.ok_or_else(|| {
+        anyhow::anyhow!(
+            "{TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS} requires signed token verification"
+        )
+    })?;
+    anyhow::ensure!(
+        verifier.default_secret.is_none() && verifier.keyed_secrets.is_empty(),
+        "{TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS} rejects HS256 signed-token secrets"
+    );
+    anyhow::ensure!(
+        verifier.default_eddsa_public_key.is_none(),
+        "{TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS} requires keyed EdDSA keyset keys, not a default EdDSA key"
+    );
+    anyhow::ensure!(
+        !verifier.managed_eddsa_key_ids.is_empty(),
+        "{TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS} requires TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_JSON or TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_FILE"
+    );
+    anyhow::ensure!(
+        verifier.keyed_eddsa_public_keys.len() == verifier.managed_eddsa_key_ids.len()
+            && verifier
+                .keyed_eddsa_public_keys
+                .keys()
+                .all(|kid| verifier.managed_eddsa_key_ids.contains(kid)),
+        "{TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS} requires all EdDSA keys to come from the managed keyset"
+    );
+    anyhow::ensure!(
+        verifier
+            .issuer
+            .as_ref()
+            .is_some_and(|issuer| !issuer.is_empty()),
+        "{TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS} requires TRACE_COMMONS_SIGNED_TOKEN_ISSUER"
+    );
+    anyhow::ensure!(
+        verifier
+            .audience
+            .as_ref()
+            .is_some_and(|audience| !audience.is_empty()),
+        "{TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS} requires TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE"
+    );
+    let active_managed_keys = verifier.configured_active_managed_eddsa_key_count(Utc::now());
+    anyhow::ensure!(
+        active_managed_keys > 0,
+        "{TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS} requires at least one active managed EdDSA key"
     );
     Ok(())
 }
@@ -1720,11 +1788,15 @@ impl TraceCommonsSignedTokenVerifier {
         &self,
         token: &str,
         require_eddsa_signed_tokens: bool,
+        require_managed_eddsa_signed_tokens: bool,
     ) -> ApiResult<TenantAuth> {
         let header = jsonwebtoken::decode_header(token)
             .map_err(|_| api_error(StatusCode::FORBIDDEN, "invalid signed tenant token"))?;
-        let (algorithm, decoding_key) =
-            self.verification_key_for_header(&header, require_eddsa_signed_tokens)?;
+        let (algorithm, decoding_key) = self.verification_key_for_header(
+            &header,
+            require_eddsa_signed_tokens,
+            require_managed_eddsa_signed_tokens,
+        )?;
         let mut validation = Validation::new(algorithm);
         validation.validate_nbf = true;
         let mut required_claims = vec!["exp".to_string(), "tenant_id".to_string()];
@@ -1787,10 +1859,11 @@ impl TraceCommonsSignedTokenVerifier {
         &self,
         header: &jsonwebtoken::Header,
         require_eddsa_signed_tokens: bool,
+        require_managed_eddsa_signed_tokens: bool,
     ) -> ApiResult<(Algorithm, DecodingKey)> {
         match header.alg {
             Algorithm::HS256 => {
-                if require_eddsa_signed_tokens {
+                if require_eddsa_signed_tokens || require_managed_eddsa_signed_tokens {
                     return Err(api_error(
                         StatusCode::FORBIDDEN,
                         "Trace Commons requires EdDSA signed tenant tokens",
@@ -1808,7 +1881,10 @@ impl TraceCommonsSignedTokenVerifier {
                 ))
             }
             Algorithm::EdDSA => {
-                let Some(public_key) = self.eddsa_public_key_for_kid(header.kid.as_deref()) else {
+                let Some(public_key) = self.eddsa_public_key_for_kid(
+                    header.kid.as_deref(),
+                    require_managed_eddsa_signed_tokens,
+                ) else {
                     return Err(api_error(
                         StatusCode::FORBIDDEN,
                         "invalid signed tenant token",
@@ -1864,9 +1940,17 @@ impl TraceCommonsSignedTokenVerifier {
     fn eddsa_public_key_for_kid(
         &self,
         kid: Option<&str>,
+        require_managed_eddsa_signed_tokens: bool,
     ) -> Option<&TraceCommonsSignedEddsaPublicKey> {
         match kid.map(str::trim).filter(|kid| !kid.is_empty()) {
-            Some(kid) => self.keyed_eddsa_public_keys.get(kid),
+            Some(kid) if !require_managed_eddsa_signed_tokens => {
+                self.keyed_eddsa_public_keys.get(kid)
+            }
+            Some(kid) if self.managed_eddsa_key_ids.contains(kid) => {
+                self.keyed_eddsa_public_keys.get(kid)
+            }
+            Some(_) => None,
+            None if require_managed_eddsa_signed_tokens => None,
             None => self.default_eddsa_public_key.as_ref(),
         }
     }
@@ -1891,6 +1975,18 @@ impl TraceCommonsSignedTokenVerifier {
                 .values()
                 .filter(|key| key.is_active_at(now))
                 .count()
+    }
+
+    fn configured_managed_eddsa_key_count(&self) -> usize {
+        self.managed_eddsa_key_ids.len()
+    }
+
+    fn configured_active_managed_eddsa_key_count(&self, now: DateTime<Utc>) -> usize {
+        self.managed_eddsa_key_ids
+            .iter()
+            .filter_map(|kid| self.keyed_eddsa_public_keys.get(kid))
+            .filter(|key| key.is_active_at(now))
+            .count()
     }
 
     fn configured_inactive_eddsa_key_count(&self, now: DateTime<Utc>) -> usize {
@@ -2188,12 +2284,15 @@ struct TraceCommonsConfigStatusResponse {
     signed_token_eddsa_key_count: usize,
     signed_token_eddsa_active_key_count: usize,
     signed_token_eddsa_inactive_key_count: usize,
+    signed_token_managed_eddsa_key_count: usize,
+    signed_token_managed_eddsa_active_key_count: usize,
     signed_token_issuer_configured: bool,
     signed_token_audience_configured: bool,
     signed_token_revoked_jti_count: usize,
     signed_token_max_ttl_seconds: Option<i64>,
     signed_token_require_jti: bool,
     require_eddsa_signed_tokens: bool,
+    require_managed_eddsa_signed_tokens: bool,
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
     db_reviewer_require_object_refs: bool,
@@ -2246,6 +2345,16 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .map_or(0, |verifier| {
                 verifier.configured_inactive_eddsa_key_count(now)
             }),
+        signed_token_managed_eddsa_key_count: state.signed_token_verifier.as_ref().map_or(
+            0,
+            TraceCommonsSignedTokenVerifier::configured_managed_eddsa_key_count,
+        ),
+        signed_token_managed_eddsa_active_key_count: state
+            .signed_token_verifier
+            .as_ref()
+            .map_or(0, |verifier| {
+                verifier.configured_active_managed_eddsa_key_count(now)
+            }),
         signed_token_issuer_configured: state
             .signed_token_verifier
             .as_ref()
@@ -2267,6 +2376,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .as_ref()
             .is_some_and(|verifier| verifier.require_jti),
         require_eddsa_signed_tokens: state.require_eddsa_signed_tokens,
+        require_managed_eddsa_signed_tokens: state.require_managed_eddsa_signed_tokens,
         db_contributor_reads: state.db_contributor_reads,
         db_reviewer_reads: state.db_reviewer_reads,
         db_reviewer_require_object_refs: state.db_reviewer_require_object_refs,
@@ -6819,7 +6929,7 @@ fn authenticate(state: &AppState, headers: &HeaderMap) -> ApiResult<TenantAuth> 
         .strip_prefix("Bearer ")
         .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "missing bearer token"))?
         .trim();
-    if state.require_eddsa_signed_tokens {
+    if state.require_eddsa_signed_tokens || state.require_managed_eddsa_signed_tokens {
         if state.tokens.contains_key(token) {
             return Err(api_error(
                 StatusCode::FORBIDDEN,
@@ -6832,7 +6942,11 @@ fn authenticate(state: &AppState, headers: &HeaderMap) -> ApiResult<TenantAuth> 
                 "Trace Commons requires EdDSA signed tenant tokens",
             ));
         };
-        return verifier.authenticate(token, true);
+        return verifier.authenticate(
+            token,
+            state.require_eddsa_signed_tokens,
+            state.require_managed_eddsa_signed_tokens,
+        );
     }
     if let Some(auth) = state.tokens.get(token).cloned() {
         if auth
@@ -6844,7 +6958,7 @@ fn authenticate(state: &AppState, headers: &HeaderMap) -> ApiResult<TenantAuth> 
         return Ok(auth);
     }
     if let Some(verifier) = &state.signed_token_verifier {
-        return verifier.authenticate(token, false);
+        return verifier.authenticate(token, false, false);
     }
     Err(api_error(StatusCode::FORBIDDEN, "unknown tenant token"))
 }
@@ -16021,6 +16135,7 @@ mod tests {
             tokens: Arc::new(tokens),
             signed_token_verifier: None,
             require_eddsa_signed_tokens: false,
+            require_managed_eddsa_signed_tokens: false,
             tenant_policies: Arc::new(BTreeMap::new()),
             require_tenant_submission_policy: false,
             db_mirror,
@@ -16195,6 +16310,7 @@ mod tests {
             keyed_secrets: BTreeMap::new(),
             default_eddsa_public_key: None,
             keyed_eddsa_public_keys: BTreeMap::new(),
+            managed_eddsa_key_ids: BTreeSet::new(),
             issuer: issuer.map(str::to_string),
             audience: audience.map(str::to_string),
             revoked_jtis: BTreeSet::new(),
@@ -16217,11 +16333,38 @@ mod tests {
                 not_after: None,
             }),
             keyed_eddsa_public_keys: BTreeMap::new(),
+            managed_eddsa_key_ids: BTreeSet::new(),
             issuer: None,
             audience: None,
             revoked_jtis: BTreeSet::new(),
             max_ttl_seconds: None,
             require_jti: false,
+        }
+    }
+
+    fn test_managed_eddsa_signed_token_verifier(
+        kid: &str,
+        not_before: Option<DateTime<Utc>>,
+        not_after: Option<DateTime<Utc>>,
+    ) -> TraceCommonsSignedTokenVerifier {
+        TraceCommonsSignedTokenVerifier {
+            default_secret: None,
+            keyed_secrets: BTreeMap::new(),
+            default_eddsa_public_key: None,
+            keyed_eddsa_public_keys: BTreeMap::from([(
+                kid.to_string(),
+                TraceCommonsSignedEddsaPublicKey {
+                    pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
+                    not_before,
+                    not_after,
+                },
+            )]),
+            managed_eddsa_key_ids: BTreeSet::from([kid.to_string()]),
+            issuer: Some("trace-commons-test-issuer".to_string()),
+            audience: Some("trace-commons-test-audience".to_string()),
+            revoked_jtis: BTreeSet::new(),
+            max_ttl_seconds: Some(900),
+            require_jti: true,
         }
     }
 
@@ -16234,6 +16377,20 @@ mod tests {
     fn test_state_with_required_eddsa_signed_token_verifier(root: PathBuf) -> Arc<AppState> {
         let mut state = test_state_with_eddsa_signed_token_verifier(root);
         Arc::make_mut(&mut state).require_eddsa_signed_tokens = true;
+        state
+    }
+
+    fn test_state_with_required_managed_eddsa_signed_token_verifier(
+        root: PathBuf,
+    ) -> Arc<AppState> {
+        let mut state = test_state_with_tokens(root, BTreeMap::new());
+        let state_mut = Arc::make_mut(&mut state);
+        state_mut.signed_token_verifier = Some(test_managed_eddsa_signed_token_verifier(
+            "managed-eddsa-1",
+            Some(Utc::now() - Duration::minutes(1)),
+            Some(Utc::now() + Duration::minutes(10)),
+        ));
+        state_mut.require_managed_eddsa_signed_tokens = true;
         state
     }
 
@@ -16278,6 +16435,22 @@ mod tests {
                 .expect("test EdDSA key parses"),
         )
         .expect("EdDSA signed tenant token encodes")
+    }
+
+    fn managed_eddsa_signed_claim(sub: &str) -> serde_json::Value {
+        let now = Utc::now();
+        serde_json::json!({
+            "tenant_id": "tenant-a",
+            "role": "contributor",
+            "sub": sub,
+            "iss": "trace-commons-test-issuer",
+            "aud": "trace-commons-test-audience",
+            "iat": now.timestamp(),
+            "exp": (now + Duration::minutes(5)).timestamp(),
+            "jti": format!("{sub}-jti"),
+            "allowed_consent_scopes": ["debugging_evaluation"],
+            "allowed_uses": ["debugging", "evaluation", "aggregate_analytics"]
+        })
     }
 
     fn test_state_with_required_db_mirror_writes(
@@ -16488,6 +16661,7 @@ mod tests {
             tokens: Arc::new(tokens),
             signed_token_verifier: None,
             require_eddsa_signed_tokens: false,
+            require_managed_eddsa_signed_tokens: false,
             tenant_policies: Arc::new(tenant_policies),
             require_tenant_submission_policy,
             db_mirror,
@@ -16548,6 +16722,7 @@ mod tests {
             tokens: Arc::new(tokens),
             signed_token_verifier: None,
             require_eddsa_signed_tokens: false,
+            require_managed_eddsa_signed_tokens: false,
             tenant_policies: Arc::new(BTreeMap::new()),
             require_tenant_submission_policy: false,
             db_mirror: Some(db_mirror),
@@ -16594,6 +16769,7 @@ mod tests {
             tokens: Arc::new(tokens),
             signed_token_verifier: None,
             require_eddsa_signed_tokens: false,
+            require_managed_eddsa_signed_tokens: false,
             tenant_policies: Arc::new(BTreeMap::new()),
             require_tenant_submission_policy: false,
             db_mirror: Some(db_mirror),
@@ -16637,6 +16813,7 @@ mod tests {
             tokens: Arc::new(tokens),
             signed_token_verifier: None,
             require_eddsa_signed_tokens: false,
+            require_managed_eddsa_signed_tokens: false,
             tenant_policies: Arc::new(BTreeMap::new()),
             require_tenant_submission_policy: false,
             db_mirror: Some(db_mirror),
@@ -17822,6 +17999,7 @@ mod tests {
                     },
                 ),
             ]),
+            managed_eddsa_key_ids: BTreeSet::new(),
             issuer: Some("config-status-issuer".to_string()),
             audience: Some("config-status-audience".to_string()),
             revoked_jtis: BTreeSet::from(["revoked-config-jti".to_string()]),
@@ -17875,6 +18053,14 @@ mod tests {
             serde_json::json!(1)
         );
         assert_eq!(
+            value["signed_token_managed_eddsa_key_count"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            value["signed_token_managed_eddsa_active_key_count"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
             value["signed_token_issuer_configured"],
             serde_json::json!(true)
         );
@@ -17893,6 +18079,10 @@ mod tests {
         assert_eq!(value["signed_token_require_jti"], serde_json::json!(true));
         assert_eq!(
             value["require_eddsa_signed_tokens"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["require_managed_eddsa_signed_tokens"],
             serde_json::json!(false)
         );
         assert_eq!(
@@ -18014,6 +18204,62 @@ mod tests {
         assert!(!body_text.contains("admin-token-a"));
         assert!(!body_text.contains("BEGIN PUBLIC KEY"));
         assert!(!body_text.contains("required-eddsa-admin"));
+    }
+
+    #[tokio::test]
+    async fn config_status_respects_required_managed_eddsa_signed_tokens() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state =
+            test_state_with_required_managed_eddsa_signed_token_verifier(temp.path().to_path_buf());
+        let now = Utc::now();
+        let admin_token = eddsa_signed_tenant_token_with_kid(
+            Some("managed-eddsa-1"),
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "admin",
+                "sub": "required-managed-eddsa-admin",
+                "iss": "trace-commons-test-issuer",
+                "aud": "trace-commons-test-audience",
+                "iat": now.timestamp(),
+                "exp": (now + Duration::minutes(5)).timestamp(),
+                "jti": "required-managed-eddsa-admin-jti"
+            }),
+        );
+        let admin_response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/config-status")
+                    .header(AUTHORIZATION, format!("Bearer {admin_token}"))
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("managed EdDSA admin response");
+        assert_eq!(admin_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(admin_response.into_body(), 4096)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("status json parses");
+        assert_eq!(
+            value["require_managed_eddsa_signed_tokens"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["signed_token_managed_eddsa_key_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            value["signed_token_managed_eddsa_active_key_count"],
+            serde_json::json!(1)
+        );
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("managed-eddsa-1"));
+        assert!(!body_text.contains("required-managed-eddsa-admin"));
+        assert!(!body_text.contains("BEGIN PUBLIC KEY"));
     }
 
     #[cfg(feature = "libsql")]
@@ -25806,6 +26052,7 @@ mod tests {
             tokens: Arc::new(tokens),
             signed_token_verifier: None,
             require_eddsa_signed_tokens: false,
+            require_managed_eddsa_signed_tokens: false,
             tenant_policies: Arc::new(BTreeMap::new()),
             require_tenant_submission_policy: false,
             db_mirror: None,
@@ -31990,6 +32237,7 @@ mod tests {
             keyed_secrets: BTreeMap::new(),
             default_eddsa_public_key: None,
             keyed_eddsa_public_keys: BTreeMap::new(),
+            managed_eddsa_key_ids: BTreeSet::new(),
             issuer: None,
             audience: None,
             revoked_jtis: BTreeSet::new(),
@@ -32009,6 +32257,109 @@ mod tests {
             .expect("EdDSA verifier satisfies production auth gate");
     }
 
+    #[test]
+    fn managed_eddsa_signed_token_config_requires_issuer_audience_and_managed_keyset() {
+        assert!(validate_required_managed_eddsa_signed_tokens_config(false, None).is_ok());
+        let no_verifier = validate_required_managed_eddsa_signed_tokens_config(true, None)
+            .expect_err("missing verifier is rejected");
+        assert!(
+            no_verifier
+                .to_string()
+                .contains(TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS)
+        );
+
+        let hmac_only = TraceCommonsSignedTokenVerifier {
+            default_secret: Some(SecretString::from("bridge-secret".to_string())),
+            keyed_secrets: BTreeMap::new(),
+            default_eddsa_public_key: None,
+            keyed_eddsa_public_keys: BTreeMap::new(),
+            managed_eddsa_key_ids: BTreeSet::new(),
+            issuer: Some("trace-commons-test-issuer".to_string()),
+            audience: Some("trace-commons-test-audience".to_string()),
+            revoked_jtis: BTreeSet::new(),
+            max_ttl_seconds: None,
+            require_jti: false,
+        };
+        let hmac_error =
+            validate_required_managed_eddsa_signed_tokens_config(true, Some(&hmac_only))
+                .expect_err("HMAC bridge credentials are rejected");
+        assert!(hmac_error.to_string().contains("rejects HS256"));
+
+        let default_eddsa = TraceCommonsSignedTokenVerifier {
+            issuer: Some("trace-commons-test-issuer".to_string()),
+            audience: Some("trace-commons-test-audience".to_string()),
+            ..test_eddsa_signed_token_verifier()
+        };
+        let default_error =
+            validate_required_managed_eddsa_signed_tokens_config(true, Some(&default_eddsa))
+                .expect_err("default EdDSA key is rejected");
+        assert!(
+            default_error
+                .to_string()
+                .contains("not a default EdDSA key")
+        );
+
+        let mut unmanaged_extra = test_managed_eddsa_signed_token_verifier(
+            "managed-eddsa-1",
+            Some(Utc::now() - Duration::minutes(1)),
+            Some(Utc::now() + Duration::minutes(10)),
+        );
+        unmanaged_extra.keyed_eddsa_public_keys.insert(
+            "unmanaged-eddsa-1".to_string(),
+            TraceCommonsSignedEddsaPublicKey {
+                pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
+                not_before: None,
+                not_after: None,
+            },
+        );
+        let unmanaged_error =
+            validate_required_managed_eddsa_signed_tokens_config(true, Some(&unmanaged_extra))
+                .expect_err("unmanaged keyed EdDSA keys are rejected");
+        assert!(
+            unmanaged_error
+                .to_string()
+                .contains("all EdDSA keys to come from the managed keyset")
+        );
+
+        let mut missing_issuer = test_managed_eddsa_signed_token_verifier(
+            "managed-eddsa-1",
+            Some(Utc::now() - Duration::minutes(1)),
+            Some(Utc::now() + Duration::minutes(10)),
+        );
+        missing_issuer.issuer = None;
+        let issuer_error =
+            validate_required_managed_eddsa_signed_tokens_config(true, Some(&missing_issuer))
+                .expect_err("missing issuer is rejected");
+        assert!(
+            issuer_error
+                .to_string()
+                .contains(TRACE_COMMONS_SIGNED_TOKEN_ISSUER)
+        );
+
+        let mut missing_audience = test_managed_eddsa_signed_token_verifier(
+            "managed-eddsa-1",
+            Some(Utc::now() - Duration::minutes(1)),
+            Some(Utc::now() + Duration::minutes(10)),
+        );
+        missing_audience.audience = None;
+        let audience_error =
+            validate_required_managed_eddsa_signed_tokens_config(true, Some(&missing_audience))
+                .expect_err("missing audience is rejected");
+        assert!(
+            audience_error
+                .to_string()
+                .contains(TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE)
+        );
+
+        let verifier = test_managed_eddsa_signed_token_verifier(
+            "managed-eddsa-1",
+            Some(Utc::now() - Duration::minutes(1)),
+            Some(Utc::now() + Duration::minutes(10)),
+        );
+        validate_required_managed_eddsa_signed_tokens_config(true, Some(&verifier))
+            .expect("issuer managed EdDSA verifier satisfies production auth gate");
+    }
+
     #[tokio::test]
     async fn rejects_static_tenant_token_when_eddsa_required() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -32018,6 +32369,30 @@ mod tests {
         let error = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
             .await
             .expect_err("static tenant token is rejected when EdDSA is required");
+
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            error.1.0.error,
+            "Trace Commons requires EdDSA signed tenant tokens"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_static_tenant_token_when_managed_eddsa_required() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let state_mut = Arc::make_mut(&mut state);
+        state_mut.signed_token_verifier = Some(test_managed_eddsa_signed_token_verifier(
+            "managed-eddsa-1",
+            Some(Utc::now() - Duration::minutes(1)),
+            Some(Utc::now() + Duration::minutes(10)),
+        ));
+        state_mut.require_managed_eddsa_signed_tokens = true;
+        let envelope = sample_envelope().await;
+
+        let error = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
+            .await
+            .expect_err("static tenant token is rejected when managed EdDSA is required");
 
         assert_eq!(error.0, StatusCode::FORBIDDEN);
         assert_eq!(
@@ -32040,6 +32415,7 @@ mod tests {
                 not_after: None,
             }),
             keyed_eddsa_public_keys: BTreeMap::new(),
+            managed_eddsa_key_ids: BTreeSet::new(),
             issuer: None,
             audience: None,
             revoked_jtis: BTreeSet::new(),
@@ -32061,6 +32437,39 @@ mod tests {
         let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
             .await
             .expect_err("HS256 signed tenant claim is rejected when EdDSA is required");
+
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            error.1.0.error,
+            "Trace Commons requires EdDSA signed tenant tokens"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_hs256_signed_claim_when_managed_eddsa_required() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state_with_tokens(temp.path().to_path_buf(), BTreeMap::new());
+        let state_mut = Arc::make_mut(&mut state);
+        state_mut.signed_token_verifier = Some(test_managed_eddsa_signed_token_verifier(
+            "managed-eddsa-1",
+            Some(Utc::now() - Duration::minutes(1)),
+            Some(Utc::now() + Duration::minutes(10)),
+        ));
+        state_mut.require_managed_eddsa_signed_tokens = true;
+        let token = signed_tenant_token(
+            "signed-secret",
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "contributor",
+                "sub": "actor-hs-managed",
+                "exp": (Utc::now() + Duration::minutes(5)).timestamp()
+            }),
+        );
+        let envelope = sample_envelope().await;
+
+        let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+            .await
+            .expect_err("HS256 signed tenant claim is rejected when managed EdDSA is required");
 
         assert_eq!(error.0, StatusCode::FORBIDDEN);
         assert_eq!(
@@ -32104,6 +32513,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accepts_managed_eddsa_signed_claim_when_managed_eddsa_required() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state =
+            test_state_with_required_managed_eddsa_signed_token_verifier(temp.path().to_path_buf());
+        let token = eddsa_signed_tenant_token_with_kid(
+            Some("managed-eddsa-1"),
+            managed_eddsa_signed_claim("actor-required-managed-eddsa"),
+        );
+        let envelope = sample_envelope().await;
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+            .await
+            .expect("managed EdDSA signed tenant token is accepted when required");
+
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("tenant-a metadata read")
+            .expect("tenant-a record exists");
+        assert_eq!(record.tenant_id, "tenant-a");
+        assert_eq!(
+            record.auth_principal_ref,
+            principal_storage_ref("signed:tenant-a:actor-required-managed-eddsa")
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_eddsa_signed_claim_requires_managed_kid() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state =
+            test_state_with_required_managed_eddsa_signed_token_verifier(temp.path().to_path_buf());
+        let missing_kid_token =
+            eddsa_signed_tenant_token_with_kid(None, managed_eddsa_signed_claim("actor-no-kid"));
+        let missing_kid_error = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(&missing_kid_token),
+            Json(sample_envelope().await),
+        )
+        .await
+        .expect_err("managed EdDSA requires a key id");
+        assert_eq!(missing_kid_error.0, StatusCode::FORBIDDEN);
+        assert_eq!(missing_kid_error.1.0.error, "invalid signed tenant token");
+
+        let unmanaged_kid_token = eddsa_signed_tenant_token_with_kid(
+            Some("unmanaged-eddsa-1"),
+            managed_eddsa_signed_claim("actor-unmanaged-kid"),
+        );
+        let unmanaged_kid_error = submit_trace_handler(
+            State(state),
+            auth_headers(&unmanaged_kid_token),
+            Json(sample_envelope().await),
+        )
+        .await
+        .expect_err("managed EdDSA rejects unmanaged key ids");
+        assert_eq!(unmanaged_kid_error.0, StatusCode::FORBIDDEN);
+        assert_eq!(unmanaged_kid_error.1.0.error, "invalid signed tenant token");
+    }
+
+    #[tokio::test]
     async fn accepts_keyed_eddsa_signed_tenant_token_for_rotation() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state_with_tokens(temp.path().to_path_buf(), BTreeMap::new());
@@ -32119,6 +32586,7 @@ mod tests {
                     not_after: None,
                 },
             )]),
+            managed_eddsa_key_ids: BTreeSet::new(),
             issuer: None,
             audience: None,
             revoked_jtis: BTreeSet::new(),
@@ -32157,6 +32625,7 @@ mod tests {
                     not_after: Some(Utc::now() + Duration::minutes(10)),
                 },
             )]),
+            managed_eddsa_key_ids: BTreeSet::from(["managed-eddsa-1".to_string()]),
             issuer: None,
             audience: None,
             revoked_jtis: BTreeSet::new(),
@@ -32195,6 +32664,7 @@ mod tests {
                     not_after: Some(Utc::now() - Duration::minutes(1)),
                 },
             )]),
+            managed_eddsa_key_ids: BTreeSet::from(["managed-eddsa-inactive".to_string()]),
             issuer: None,
             audience: None,
             revoked_jtis: BTreeSet::new(),
