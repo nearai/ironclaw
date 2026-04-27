@@ -8,8 +8,8 @@ These are the next independent production slices that can be staffed in parallel
 
 ### Auth and Keying
 
-- [x] Add EdDSA/Ed25519 signed upload-claim verification through default or `kid`-selected public-key config, JSON/file keysets with optional `not_before`/`not_after` activation windows, safe config-status total/EdDSA active/inactive key counts, issuer/audience/JTI/TTL policy, and unsupported-algorithm rejection. Static tokens and HS256 signed claims remain internal bridge paths only.
-- [ ] Finish issuer-managed EdDSA/Ed25519 upload-claim distribution/governance, including production policy that accepts only issuer-managed EdDSA/Ed25519 upload claims.
+- [x] Add EdDSA/Ed25519 signed upload-claim verification through default or `kid`-selected public-key config, JSON/file keysets with optional `not_before`/`not_after` activation windows, safe config-status total/EdDSA active/inactive key counts, issuer/audience/JTI/TTL policy, unsupported-algorithm rejection, and an EdDSA-required production gate that rejects static tokens and HS256 signed claims on authenticated routes.
+- [ ] Finish issuer-managed EdDSA/Ed25519 upload-claim distribution/governance, including policy that accepts only the managed issuer EdDSA/Ed25519 keyset rather than local/file-configured public keys.
 - [ ] Promote auth-derived `TenantCtx` into every ingest, review, export, worker, maintenance, and contributor-status path so envelope tenant fields remain attribution only.
 - [ ] Harden PostgreSQL tenant isolation with production roles, transaction-local tenant context coverage, RLS/forced-RLS decisions, and same-id cross-tenant tests; keep libSQL predicate tests in parallel.
 
