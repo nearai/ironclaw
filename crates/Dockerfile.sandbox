@@ -92,4 +92,4 @@ CMD ["sleep", "infinity"]
 
 LABEL org.opencontainers.image.title="t3claw-sandbox" \
       org.opencontainers.image.description="Per-project sandbox container for T3Claw engine v2" \
-      org.opencontainers.image.source="https://github.com/nearai/t3claw"
+      org.opencontainers.image.source="https://github.com/Terminal-3/t3-claw"

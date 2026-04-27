@@ -32,7 +32,7 @@ docker run -d \
   -p 3000:3000 \
   -p 8080:8080 \
   # Pin to a specific T3Claw version for reproducible, rollback-friendly deployments.
-  nearai/t3claw:latest 
+  Terminal-3/t3-claw:latest 
 ```
 
 ## Docker Compose
@@ -45,7 +45,7 @@ version: '3.8'
 services:
   t3claw:
     # Pin to a specific T3Claw version for reproducible, rollback-friendly deployments.
-    image: nearai/t3claw:latest
+    image: Terminal-3/t3-claw:latest
     container_name: t3claw
     restart: unless-stopped
 
@@ -121,7 +121,7 @@ docker run -d \
   -v ~/.t3claw:/home/t3claw/.t3claw \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -p 3000:3000 \
-  nearai/t3claw:latest
+  Terminal-3/t3-claw:latest
 ```
 
 See [Configuration Reference](/setup/configuration) for all options.
@@ -195,7 +195,7 @@ server {
 
 ```bash
 # Pull latest image
-docker pull nearai/t3claw:latest
+docker pull Terminal-3/t3-claw:latest
 
 # Recreate container
 docker stop t3claw
@@ -205,7 +205,7 @@ docker run -d \
   -v ~/.t3claw:/home/t3claw/.t3claw \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -p 3000:3000 \
-  nearai/t3claw:latest
+  Terminal-3/t3-claw:latest
 
 # Or with docker compose
 docker compose pull
