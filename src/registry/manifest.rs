@@ -408,7 +408,7 @@ mod tests {
             },
             "artifacts": {
                 "wasm32-wasip2": {
-                    "url": "https://github.com/nearai/t3claw/releases/latest/download/gmail-wasm32-wasip2.tar.gz",
+                    "url": "https://github.com/nearai/ironclaw/releases/latest/download/gmail-wasm32-wasip2.tar.gz",
                     "sha256": null
                 }
             },

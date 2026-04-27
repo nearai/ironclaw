@@ -4,7 +4,7 @@
 //! properties are missing `type` (intentional freeform is allowed), or nested
 //! objects/arrays are malformed.
 //!
-//! See: <https://github.com/nearai/t3claw/issues/352> (QA plan, item 1.1)
+//! See: <https://github.com/nearai/ironclaw/issues/352> (QA plan, item 1.1)
 
 use t3claw::tools::validate_tool_schema;
 use t3claw::tools::{Tool, ToolRegistry};

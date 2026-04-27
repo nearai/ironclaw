@@ -294,7 +294,7 @@ mod tests {
             database_backend: Some("libsql".into()),
             active_channels: vec!["telegram".into(), "cli".into()],
             owner_id: Some("alice.near".into()),
-            repo_url: Some("https://github.com/nearai/t3claw".into()),
+            repo_url: Some("https://github.com/nearai/ironclaw".into()),
         };
         let prompt =
             build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), Some(&info)).await;
@@ -305,7 +305,7 @@ mod tests {
         assert!(prompt.contains("libsql"));
         assert!(prompt.contains("telegram"));
         assert!(prompt.contains("alice.near"));
-        assert!(prompt.contains("github.com/nearai/t3claw"));
+        assert!(prompt.contains("github.com/nearai/ironclaw"));
     }
 
     #[tokio::test]

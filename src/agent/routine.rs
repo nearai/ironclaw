@@ -955,7 +955,7 @@ mod tests {
     #[test]
     fn test_system_event_trigger_roundtrip() {
         let mut filters = std::collections::HashMap::new();
-        filters.insert("repo".to_string(), "nearai/t3claw".to_string());
+        filters.insert("repo".to_string(), "nearai/ironclaw".to_string());
         filters.insert("action".to_string(), "opened".to_string());
         let trigger = Trigger::SystemEvent {
             source: "github".to_string(),
@@ -1097,12 +1097,12 @@ mod tests {
     #[test]
     fn test_system_event_fingerprint_is_stable_when_filter_insertion_order_differs() {
         let mut first_filters = std::collections::HashMap::new();
-        first_filters.insert("repo".to_string(), "nearai/t3claw".to_string());
+        first_filters.insert("repo".to_string(), "nearai/ironclaw".to_string());
         first_filters.insert("action".to_string(), "opened".to_string());
 
         let mut second_filters = std::collections::HashMap::new();
         second_filters.insert("action".to_string(), "opened".to_string());
-        second_filters.insert("repo".to_string(), "nearai/t3claw".to_string());
+        second_filters.insert("repo".to_string(), "nearai/ironclaw".to_string());
 
         let mut first = make_verification_test_routine();
         first.trigger = Trigger::SystemEvent {

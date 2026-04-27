@@ -471,7 +471,7 @@ mod tests {
 
     /// Adversarial tests for validator whitespace ratio, repetition detection,
     /// and Unicode edge cases.
-    /// See <https://github.com/nearai/t3claw/issues/1025>.
+    /// See <https://github.com/nearai/ironclaw/issues/1025>.
     mod adversarial {
         use super::*;
 

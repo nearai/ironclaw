@@ -1612,7 +1612,7 @@ mod tests {
     }
 
     /// Regression test: tool names with hyphens must be resolvable when the
-    /// LLM provider normalises hyphens to underscores (nearai/t3claw#NNN).
+    /// LLM provider normalises hyphens to underscores (nearai/ironclaw#NNN).
     #[tokio::test]
     async fn get_resolves_hyphen_to_underscore_alias() {
         let registry = ToolRegistry::new();

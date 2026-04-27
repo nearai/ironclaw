@@ -301,7 +301,7 @@ class TestV2EngineAuthCancel:
 
         await api_post(
             cancel_server, "/api/chat/send",
-            json={"content": "list issues in nearai/t3claw github repo", "thread_id": thread_id},
+            json={"content": "list issues in nearai/ironclaw github repo", "thread_id": thread_id},
             timeout=30,
         )
         try:

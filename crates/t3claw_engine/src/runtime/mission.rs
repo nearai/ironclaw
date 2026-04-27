@@ -6576,7 +6576,7 @@ mod tests {
             step_id: StepId::new(),
             action_name: "shell".to_string(),
             call_id: "call_1".to_string(),
-            params_summary: Some("gh pr list --repo nearai/t3claw".to_string()),
+            params_summary: Some("gh pr list --repo nearai/ironclaw".to_string()),
             duration_ms: 15,
         });
 

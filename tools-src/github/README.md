@@ -90,7 +90,7 @@ search, branches, file reads and writes, releases, and workflows.
 ```json
 {
   "action": "search_code",
-  "query": "repo:nearai/t3claw tool_info",
+  "query": "repo:nearai/ironclaw tool_info",
   "limit": 5
 }
 ```
@@ -100,7 +100,7 @@ search, branches, file reads and writes, releases, and workflows.
 ```json
 {
   "action": "search_issues_pull_requests",
-  "query": "repo:nearai/t3claw is:pr label:bug",
+  "query": "repo:nearai/ironclaw is:pr label:bug",
   "limit": 10
 }
 ```

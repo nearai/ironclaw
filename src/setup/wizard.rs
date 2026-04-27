@@ -3106,7 +3106,7 @@ impl SetupWizard {
         println!();
 
         // Images that contain '/' look like registry references (e.g.
-        // "ghcr.io/nearai/t3claw-worker:v1"). For those, or when
+        // "ghcr.io/nearai/ironclaw-worker:v1"). For those, or when
         // auto_pull_image is enabled, attempt a pull before offering a
         // local build — the runtime would do the same thing via
         // SandboxManager::ensure_ready().

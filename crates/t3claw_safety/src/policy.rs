@@ -302,7 +302,7 @@ mod tests {
     }
 
     /// Adversarial tests for policy regex patterns.
-    /// See <https://github.com/nearai/t3claw/issues/1025>.
+    /// See <https://github.com/nearai/ironclaw/issues/1025>.
     mod adversarial {
         use super::*;
 

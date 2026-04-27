@@ -6,8 +6,8 @@ rust-version = "1.92"
 description = "Shared types and utilities for the T3Claw workspace"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
-homepage = "https://github.com/nearai/t3claw"
-repository = "https://github.com/nearai/t3claw"
+homepage = "https://github.com/Terminal-3/t3-claw"
+repository = "https://github.com/Terminal-3/t3-claw"
 
 [package.metadata.dist]
 dist = false

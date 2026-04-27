@@ -238,13 +238,13 @@ TOOL_CALL_PATTERNS = [
     ),
     (
         re.compile(
-            r"create (?:an )?issue.*(?:nearai|t3claw)|issue in nearai/t3claw",
+            r"create (?:an )?issue.*(?:nearai|t3claw)|issue in nearai/ironclaw",
             re.IGNORECASE,
         ),
         "http",
         lambda _: {
             "method": "POST",
-            "url": f"{_github_api_url}/repos/nearai/t3claw/issues",
+            "url": f"{_github_api_url}/repos/nearai/ironclaw/issues",
             "body": {
                 "title": "E2E auth flow test issue",
                 "body": "Created by the E2E mock LLM auth-flow scenario.",
@@ -256,7 +256,7 @@ TOOL_CALL_PATTERNS = [
         "http",
         lambda _: {
             "method": "GET",
-            "url": f"{_github_api_url}/repos/nearai/t3claw/issues?per_page=5",
+            "url": f"{_github_api_url}/repos/nearai/ironclaw/issues?per_page=5",
         },
     ),
     # For max iterations test: always returns a tool call, never FINAL

@@ -517,7 +517,7 @@ fn test_http_tool_requires_approval_for_credentialed_host() {
 
     // Credentialed host → requires approval
     let params = serde_json::json!({
-        "url": "https://api.github.com/repos/nearai/t3claw/issues",
+        "url": "https://api.github.com/repos/nearai/ironclaw/issues",
         "method": "GET"
     });
     assert_eq!(
@@ -640,7 +640,7 @@ credentials:
 
     // Before storing secret: credentialed host requires approval
     let params = serde_json::json!({
-        "url": "https://api.github.com/repos/nearai/t3claw",
+        "url": "https://api.github.com/repos/nearai/ironclaw",
         "method": "GET"
     });
     assert_eq!(
@@ -715,7 +715,7 @@ async fn test_credentialed_host_rejects_llm_authorization_header() {
     for (name, value) in cases {
         let params = serde_json::json!({
             "method": "GET",
-            "url": "https://api.github.com/repos/nearai/t3claw/issues",
+            "url": "https://api.github.com/repos/nearai/ironclaw/issues",
             "headers": [{ "name": *name, "value": *value }],
         });
         let err = tool
@@ -750,7 +750,7 @@ async fn test_credentialed_host_allows_non_auth_headers() {
 
     let params = serde_json::json!({
         "method": "GET",
-        "url": "https://api.github.com/repos/nearai/t3claw/issues",
+        "url": "https://api.github.com/repos/nearai/ironclaw/issues",
         "headers": [
             { "name": "Accept", "value": "application/vnd.github+json" },
             { "name": "Content-Type", "value": "application/json" },

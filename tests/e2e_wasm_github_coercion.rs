@@ -83,12 +83,12 @@ mod tests {
     #[ignore] // requires pre-compiled WASM binary
     async fn wasm_github_list_issues_coerces_string_limit() {
         let expected_url =
-            "https://api.github.com/repos/nearai/t3claw/issues?state=open&per_page=50";
+            "https://api.github.com/repos/nearai/ironclaw/issues?state=open&per_page=50";
 
         let trace = LlmTrace {
             model_name: "test-wasm-coercion-list-issues".to_string(),
             turns: vec![crate::support::trace_llm::TraceTurn {
-                user_input: "List issues in nearai/t3claw with limit 50".to_string(),
+                user_input: "List issues in nearai/ironclaw with limit 50".to_string(),
                 steps: vec![
                     TraceStep {
                         request_hint: None,
@@ -141,7 +141,7 @@ mod tests {
             steps: Vec::new(),
         };
 
-        run_trace(trace, "List issues in nearai/t3claw with limit 50").await;
+        run_trace(trace, "List issues in nearai/ironclaw with limit 50").await;
     }
 
     /// LLM sends `issue_number: "42"` (string) to `get_issue`. Coercion converts
@@ -149,12 +149,12 @@ mod tests {
     #[tokio::test]
     #[ignore] // requires pre-compiled WASM binary
     async fn wasm_github_get_issue_coerces_string_issue_number() {
-        let expected_url = "https://api.github.com/repos/nearai/t3claw/issues/42";
+        let expected_url = "https://api.github.com/repos/nearai/ironclaw/issues/42";
 
         let trace = LlmTrace {
             model_name: "test-wasm-coercion-get-issue".to_string(),
             turns: vec![crate::support::trace_llm::TraceTurn {
-                user_input: "Get issue 42 from nearai/t3claw".to_string(),
+                user_input: "Get issue 42 from nearai/ironclaw".to_string(),
                 steps: vec![
                     TraceStep {
                         request_hint: None,
@@ -206,7 +206,7 @@ mod tests {
             steps: Vec::new(),
         };
 
-        run_trace(trace, "Get issue 42 from nearai/t3claw").await;
+        run_trace(trace, "Get issue 42 from nearai/ironclaw").await;
     }
 
     /// LLM sends `limit: "25"` (string) to `list_pull_requests`. URL must
@@ -215,12 +215,12 @@ mod tests {
     #[ignore] // requires pre-compiled WASM binary
     async fn wasm_github_list_prs_coerces_string_limit() {
         let expected_url =
-            "https://api.github.com/repos/nearai/t3claw/pulls?state=open&per_page=25";
+            "https://api.github.com/repos/nearai/ironclaw/pulls?state=open&per_page=25";
 
         let trace = LlmTrace {
             model_name: "test-wasm-coercion-list-prs".to_string(),
             turns: vec![crate::support::trace_llm::TraceTurn {
-                user_input: "List PRs in nearai/t3claw".to_string(),
+                user_input: "List PRs in nearai/ironclaw".to_string(),
                 steps: vec![
                     TraceStep {
                         request_hint: None,
@@ -272,7 +272,7 @@ mod tests {
             steps: Vec::new(),
         };
 
-        run_trace(trace, "List PRs in nearai/t3claw").await;
+        run_trace(trace, "List PRs in nearai/ironclaw").await;
     }
 
     /// LLM sends pagination as strings to `search_code`. Coercion converts them
@@ -285,7 +285,7 @@ mod tests {
         let trace = LlmTrace {
             model_name: "test-wasm-coercion-search-code".to_string(),
             turns: vec![crate::support::trace_llm::TraceTurn {
-                user_input: "Search code in nearai/t3claw".to_string(),
+                user_input: "Search code in nearai/ironclaw".to_string(),
                 steps: vec![
                     TraceStep {
                         request_hint: None,
@@ -295,7 +295,7 @@ mod tests {
                                 name: "github".to_string(),
                                 arguments: json!({
                                     "action": "search_code",
-                                    "query": "repo:nearai/t3claw path:src Tool",
+                                    "query": "repo:nearai/ironclaw path:src Tool",
                                     "limit": "10",
                                     "page": "2",
                                     "sort": "indexed",
@@ -336,7 +336,7 @@ mod tests {
             steps: Vec::new(),
         };
 
-        run_trace(trace, "Search code in nearai/t3claw").await;
+        run_trace(trace, "Search code in nearai/ironclaw").await;
     }
 
     /// `create_repo` must target the org repos endpoint and send the expected
@@ -419,8 +419,8 @@ mod tests {
     #[tokio::test]
     #[ignore] // requires pre-compiled WASM binary
     async fn wasm_github_create_branch_replays_two_step_ref_flow() {
-        let source_ref_url = "https://api.github.com/repos/nearai/t3claw/git/ref/heads/main";
-        let create_ref_url = "https://api.github.com/repos/nearai/t3claw/git/refs";
+        let source_ref_url = "https://api.github.com/repos/nearai/ironclaw/git/ref/heads/main";
+        let create_ref_url = "https://api.github.com/repos/nearai/ironclaw/git/refs";
         let create_ref_body = json!({
             "ref": "refs/heads/feature/replay-test",
             "sha": "abc123def4567890abc123def4567890abc123de"
@@ -497,7 +497,7 @@ mod tests {
     #[ignore] // requires pre-compiled WASM binary
     async fn wasm_github_create_or_update_file_puts_contents_payload() {
         let expected_url =
-            "https://api.github.com/repos/nearai/t3claw/contents/docs/replay.md";
+            "https://api.github.com/repos/nearai/ironclaw/contents/docs/replay.md";
         let expected_body = json!({
             "message": "Add replay doc",
             "content": "IyBSZXBsYXkgZG9jCg==",
@@ -577,7 +577,7 @@ mod tests {
     #[ignore] // requires pre-compiled WASM binary
     async fn wasm_github_delete_file_deletes_contents_with_sha() {
         let expected_url =
-            "https://api.github.com/repos/nearai/t3claw/contents/docs/replay.md";
+            "https://api.github.com/repos/nearai/ironclaw/contents/docs/replay.md";
         let expected_body = json!({
             "message": "Remove replay doc",
             "sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
@@ -647,7 +647,7 @@ mod tests {
     #[tokio::test]
     #[ignore] // requires pre-compiled WASM binary
     async fn wasm_github_create_release_posts_expected_payload() {
-        let expected_url = "https://api.github.com/repos/nearai/t3claw/releases";
+        let expected_url = "https://api.github.com/repos/nearai/ironclaw/releases";
         let expected_body = json!({
             "tag_name": "v1.2.3",
             "draft": false,

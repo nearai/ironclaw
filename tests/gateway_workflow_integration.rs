@@ -69,7 +69,7 @@ mod tests {
                         "trigger_type": "system_event",
                         "event_source": "github",
                         "event_type": "issue.opened",
-                        "event_filters": {"repository": "nearai/t3claw"},
+                        "event_filters": {"repository": "nearai/ironclaw"},
                         // This test fires the same routine via event_emit and then the
                         // webhook endpoint back-to-back, so cooldown must not suppress
                         // the second path.
@@ -88,7 +88,7 @@ mod tests {
                         "source": "github",
                         "event_type": "issue.opened",
                         "payload": {
-                            "repository": "nearai/t3claw",
+                            "repository": "nearai/ironclaw",
                             "issue": {"number": 777, "title": "Infra test"}
                         }
                     }),
@@ -149,7 +149,7 @@ mod tests {
                 "issues",
                 serde_json::json!({
                     "action": "opened",
-                    "repository": {"full_name": "nearai/t3claw"},
+                    "repository": {"full_name": "nearai/ironclaw"},
                     "issue": {"number": 778, "title": "Webhook endpoint test"}
                 }),
             )
@@ -501,7 +501,7 @@ mod tests {
                         "trigger_type": "system_event",
                         "event_source": "github",
                         "event_type": "issue.opened",
-                        "event_filters": {"repository": "nearai/t3claw"},
+                        "event_filters": {"repository": "nearai/ironclaw"},
                         "action_type": "lightweight",
                         "prompt": "summarize issue"
                     }),
@@ -564,7 +564,7 @@ mod tests {
                 "issues",
                 serde_json::json!({
                     "action": "opened",
-                    "repository": {"full_name": "nearai/t3claw"},
+                    "repository": {"full_name": "nearai/ironclaw"},
                     "issue": {"number": 881, "title": "Toggle disable regression"}
                 }),
             )

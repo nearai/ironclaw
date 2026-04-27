@@ -257,7 +257,7 @@ class TestAuthenticationRequiredFlow:
             t3claw_server,
             "/api/chat/send",
             json={
-                "content": "create an issue in nearai/t3claw github repo",
+                "content": "create an issue in nearai/ironclaw github repo",
                 "thread_id": thread_id,
             },
             timeout=30,
@@ -301,7 +301,7 @@ class TestTokenSubmissionAndRetry:
             t3claw_server,
             "/api/chat/send",
             json={
-                "content": "create an issue in nearai/t3claw to track oauth testing",
+                "content": "create an issue in nearai/ironclaw to track oauth testing",
                 "thread_id": thread_id,
             },
             timeout=30,
@@ -399,7 +399,7 @@ class TestSSEAuthEvents:
             t3claw_server,
             "/api/chat/send",
             json={
-                "content": "show github issues for nearai/t3claw",
+                "content": "show github issues for nearai/ironclaw",
                 "thread_id": thread_id,
             },
             timeout=30,

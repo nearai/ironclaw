@@ -27,7 +27,7 @@
       },
       {
         "action": "search_code",
-        "query": "repo:nearai/t3claw tool_info",
+        "query": "repo:nearai/ironclaw tool_info",
         "limit": 5
       },
       {

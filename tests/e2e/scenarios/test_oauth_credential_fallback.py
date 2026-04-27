@@ -2,7 +2,7 @@
 
 Tests that OAuth tokens stored globally under 'default' user are properly
 injected when WASM tools make HTTP requests. This validates the fix for:
-https://github.com/nearai/t3claw/issues/999
+https://github.com/nearai/ironclaw/issues/999
 
 Note: Full routine execution testing is limited because routines are disabled
 in the e2e test environment (ROUTINES_ENABLED=false in conftest.py). This test

@@ -20,7 +20,7 @@
   "artifacts": {
     "wasm32-wasip2": {
       "sha256": "edddd28d478a73add695315b99485cfb00656e1682b1f45e6f3a0a90c56e5378",
-      "url": "https://github.com/nearai/t3claw/releases/download/t3claw-v0.26.0/channel-feishu-0.2.2-wasm32-wasip2.tar.gz"
+      "url": "https://github.com/Terminal-3/t3-claw/releases/download/t3claw-v0.26.0/channel-feishu-0.2.2-wasm32-wasip2.tar.gz"
     }
   },
   "auth_summary": {

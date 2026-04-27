@@ -2451,7 +2451,7 @@ mod tests {
         let payload = serde_json::json!({
             "action": "created",
             "repository": {
-                "full_name": "nearai/t3claw",
+                "full_name": "nearai/ironclaw",
                 "owner": { "login": "nearai" }
             },
             "sender": { "login": "maintainer1" },
@@ -2466,7 +2466,7 @@ mod tests {
             github_enriched_payload("issue_comment", &headers, &payload, "issue.comment.created");
         assert_eq!(
             enriched.get("repository_name").and_then(|v| v.as_str()),
-            Some("nearai/t3claw")
+            Some("nearai/ironclaw")
         );
         // Original repository object is preserved
         assert!(enriched
@@ -2490,10 +2490,10 @@ mod tests {
             "action": "created",
             "issue": {
                 "number": 42,
-                "pull_request": { "url": "https://api.github.com/repos/nearai/t3claw/pulls/42" }
+                "pull_request": { "url": "https://api.github.com/repos/nearai/ironclaw/pulls/42" }
             },
             "comment": { "body": "LGTM", "user": { "login": "reviewer" } },
-            "repository": { "full_name": "nearai/t3claw", "owner": { "login": "nearai" } },
+            "repository": { "full_name": "nearai/ironclaw", "owner": { "login": "nearai" } },
             "sender": { "login": "reviewer" }
         });
 
@@ -2528,7 +2528,7 @@ mod tests {
             body_json: Some(serde_json::json!({
                 "action":"opened",
                 "issue":{"number":42},
-                "repository":{"full_name":"nearai/t3claw"},
+                "repository":{"full_name":"nearai/ironclaw"},
                 "sender":{"login":"maintainer1"}
             })),
         })

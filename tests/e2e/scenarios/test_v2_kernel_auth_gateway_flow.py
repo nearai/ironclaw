@@ -385,7 +385,7 @@ class TestGatewayAuthCard:
                 v2_server,
                 "/api/chat/send",
                 json={
-                    "content": "list issues in nearai/t3claw github repo",
+                    "content": "list issues in nearai/ironclaw github repo",
                     "thread_id": thread_id,
                 },
                 timeout=30,
@@ -447,7 +447,7 @@ class TestGatewayAuthCard:
             v2_server,
             "/api/chat/send",
             json={
-                "content": "list issues in nearai/t3claw github repo",
+                "content": "list issues in nearai/ironclaw github repo",
                 "thread_id": thread_id,
             },
             timeout=30,
@@ -486,7 +486,7 @@ class TestGatewayAuthCard:
             v2_server,
             "/api/chat/send",
             json={
-                "content": "list issues in nearai/t3claw github repo",
+                "content": "list issues in nearai/ironclaw github repo",
                 "thread_id": thread_id2,
             },
             timeout=30,
@@ -522,7 +522,7 @@ class TestGatewayAuthCard:
             v2_server,
             "/api/chat/send",
             json={
-                "content": "list issues in nearai/t3claw github repo",
+                "content": "list issues in nearai/ironclaw github repo",
                 "thread_id": thread_id,
             },
             timeout=30,

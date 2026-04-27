@@ -1,6 +1,6 @@
 //! Direct regression tests for `Workspace::scoped_to_user()` rebinding.
 //!
-//! Issue: <https://github.com/nearai/t3claw/issues/1652>
+//! Issue: <https://github.com/nearai/ironclaw/issues/1652>
 //!
 //! `scoped_to_user()` rebinds a workspace to a different primary user while
 //! preserving shared read scopes. These 7 tests verify the rebinding contracts

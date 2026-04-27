@@ -267,7 +267,7 @@ async def test_auth_required_sse_without_duplicate_response(auth_sse_server):
         base_url,
         "/api/chat/send",
         json={
-            "content": "list issues in nearai/t3claw github repo",
+            "content": "list issues in nearai/ironclaw github repo",
             "thread_id": thread_id,
         },
         timeout=30,

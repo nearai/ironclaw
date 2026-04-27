@@ -130,5 +130,5 @@ Create commitment in `projects/commitments/open/` with `tags: [tech-debt]` and `
 ## Filename conventions
 
 Slugify: lowercase, hyphens, max 50 chars. Prefix with repo slug if known:
-- "Auth module needs refactor" in nearai/t3claw → `nearai-t3claw-auth-refactor.md`
+- "Auth module needs refactor" in nearai/ironclaw → `nearai-t3claw-auth-refactor.md`
 - Generic debt → `caching-ttl-eviction.md`

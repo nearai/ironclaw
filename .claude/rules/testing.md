@@ -34,9 +34,9 @@ Real examples (do not let these recur):
 
 | Bug | Helper | What got lost | How a caller-level test would have caught it |
 |-----|--------|--------------|------------------------------------------------|
-| nearai/t3claw#1948 | `McpServerConfig::has_custom_auth_header()` | Helper existed but `requires_auth()` never consulted it, so MCP triggered OAuth/DCR even with a user-set `Authorization` header | A test driving `mcp::factory::create_client_from_config()` with a header-bearing config and asserting zero OAuth-state side effects |
-| nearai/t3claw#1921 | `derive_activation_status(ext, has_owner_binding)` | Wrapper hardcodes the underlying classifier's `has_paired` axis to `false`, even though `classify_wasm_channel_activation` takes both bools | A test driving `extensions_list_handler` against a DB with a real `channel_identities` row and asserting `Active`, not `Pairing` |
-| nearai/t3claw#1502 | `window.open` mock `(url) => { window._lastOpenedUrl = url }` | Mock captured only the URL, silently swallowing `target` and `windowFeatures`; a regression to same-tab open would not fail | A mock capturing all three args plus an assert that `target === '_blank'` |
+| nearai/ironclaw#1948 | `McpServerConfig::has_custom_auth_header()` | Helper existed but `requires_auth()` never consulted it, so MCP triggered OAuth/DCR even with a user-set `Authorization` header | A test driving `mcp::factory::create_client_from_config()` with a header-bearing config and asserting zero OAuth-state side effects |
+| nearai/ironclaw#1921 | `derive_activation_status(ext, has_owner_binding)` | Wrapper hardcodes the underlying classifier's `has_paired` axis to `false`, even though `classify_wasm_channel_activation` takes both bools | A test driving `extensions_list_handler` against a DB with a real `channel_identities` row and asserting `Active`, not `Pairing` |
+| nearai/ironclaw#1502 | `window.open` mock `(url) => { window._lastOpenedUrl = url }` | Mock captured only the URL, silently swallowing `target` and `windowFeatures`; a regression to same-tab open would not fail | A mock capturing all three args plus an assert that `target === '_blank'` |
 
 ### When the rule applies
 

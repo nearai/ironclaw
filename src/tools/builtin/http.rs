@@ -46,7 +46,7 @@ const MAX_REDIRECTS: usize = 3;
 const USER_AGENT: &str = concat!(
     "T3Claw-Agent/",
     env!("CARGO_PKG_VERSION"),
-    " (https://github.com/nearai/t3claw)"
+    " (https://github.com/Terminal-3/t3-claw)"
 );
 
 /// Tool for making HTTP requests.

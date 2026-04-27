@@ -381,7 +381,7 @@ mod tests {
 
     /// Adversarial tests for credential detection with Unicode, control chars,
     /// and case folding edge cases.
-    /// See <https://github.com/nearai/t3claw/issues/1025>.
+    /// See <https://github.com/nearai/ironclaw/issues/1025>.
     mod adversarial {
         use super::*;
 

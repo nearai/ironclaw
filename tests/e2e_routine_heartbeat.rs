@@ -758,7 +758,7 @@ mod tests {
         ));
 
         let mut filters = std::collections::HashMap::new();
-        filters.insert("repository".to_string(), "nearai/t3claw".to_string());
+        filters.insert("repository".to_string(), "nearai/ironclaw".to_string());
 
         let routine = make_routine(
             "github-issue-opened",
@@ -778,7 +778,7 @@ mod tests {
                 "github",
                 "issue.opened",
                 &serde_json::json!({
-                    "repository": "nearai/t3claw",
+                    "repository": "nearai/ironclaw",
                     "issue_number": 42
                 }),
                 Some("default"),
@@ -802,7 +802,7 @@ mod tests {
             .emit_system_event(
                 "github",
                 "issue.closed",
-                &serde_json::json!({"repository": "nearai/t3claw"}),
+                &serde_json::json!({"repository": "nearai/ironclaw"}),
                 Some("default"),
             )
             .await;
@@ -831,7 +831,7 @@ mod tests {
                 "GitHub",
                 "Issue.Opened",
                 &serde_json::json!({
-                    "repository": "nearai/t3claw",
+                    "repository": "nearai/ironclaw",
                     "issue_number": 99
                 }),
                 Some("default"),

@@ -139,7 +139,7 @@ async def _start_mock_api():
         return web.json_response({
             "total_count": 1,
             "items": [{
-                "full_name": "nearai/t3claw",
+                "full_name": "nearai/ironclaw",
                 "description": "AI assistant",
                 "stargazers_count": 42,
             }],
@@ -1019,7 +1019,7 @@ class TestV2EngineSkillActivation:
             v2_server,
             "/api/chat/send",
             json={
-                "content": "/github create an issue in nearai/t3claw repo",
+                "content": "/github create an issue in nearai/ironclaw repo",
                 "thread_id": thread_id,
             },
             timeout=30,
@@ -1746,7 +1746,7 @@ class TestV2EngineAuthMainFlow:
             v2_server,
             "/api/chat/send",
             json={
-                "content": "list issues in nearai/t3claw github repo",
+                "content": "list issues in nearai/ironclaw github repo",
                 "thread_id": thread_id,
             },
             timeout=30,
@@ -1826,7 +1826,7 @@ class TestV2EngineAuthMainFlow:
             v2_server,
             "/api/chat/send",
             json={
-                "content": "list issues in nearai/t3claw github repo",
+                "content": "list issues in nearai/ironclaw github repo",
                 "thread_id": thread_id,
             },
             timeout=30,
@@ -1886,7 +1886,7 @@ class TestV2EngineAuthEdgeCases:
 
         await api_post(
             v2_server, "/api/chat/send",
-            json={"content": "list issues in nearai/t3claw github repo", "thread_id": thread_id},
+            json={"content": "list issues in nearai/ironclaw github repo", "thread_id": thread_id},
             timeout=30,
         )
 

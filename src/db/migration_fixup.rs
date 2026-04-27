@@ -12,7 +12,7 @@
 //!   Error: Migration failed: applied migration V6__routines is different
 //!   than filesystem one V6__routines
 //!
-//! See [issue #1328](https://github.com/nearai/t3claw/issues/1328).
+//! See [issue #1328](https://github.com/nearai/ironclaw/issues/1328).
 //!
 //! ## Why a runtime fix-up is required
 //!

@@ -97,7 +97,7 @@ async def _start_mock_api():
         state["request_count"] += 1
         return web.json_response({
             "total_count": 1,
-            "items": [{"full_name": "nearai/t3claw", "stargazers_count": 42}],
+            "items": [{"full_name": "nearai/ironclaw", "stargazers_count": 42}],
         })
 
     async def handle_state(request: web.Request) -> web.Response:
@@ -363,7 +363,7 @@ class TestPreflightAuthGate:
             base_url,
             "/api/chat/send",
             json={
-                "content": "list issues in nearai/t3claw github repo",
+                "content": "list issues in nearai/ironclaw github repo",
                 "thread_id": thread_id,
             },
             timeout=30,
@@ -445,7 +445,7 @@ class TestPreflightAuthGate:
             v2_server["url"],
             "/api/chat/send",
             json={
-                "content": "list issues in nearai/t3claw github repo",
+                "content": "list issues in nearai/ironclaw github repo",
                 "thread_id": thread_id,
             },
             timeout=30,
@@ -487,7 +487,7 @@ class TestPreflightAuthGate:
             v2_server["url"],
             "/api/chat/send",
             json={
-                "content": "list issues in nearai/t3claw github repo",
+                "content": "list issues in nearai/ironclaw github repo",
                 "thread_id": thread_id,
             },
             timeout=30,
