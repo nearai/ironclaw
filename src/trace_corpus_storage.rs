@@ -569,6 +569,14 @@ pub enum TraceAuditSafeMetadata {
         allowed_use_count: u32,
         policy_projection_hash: String,
     },
+    TenantAccessGrant {
+        action: String,
+        role: TraceTenantAccessGrantRole,
+        status: TraceTenantAccessGrantStatus,
+        allowed_consent_scope_count: u32,
+        allowed_use_count: u32,
+        grant_projection_hash: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -74,6 +74,8 @@ use ironclaw::trace_corpus_storage::{
     TraceSubmissionWrite as StorageTraceSubmissionWrite,
     TraceTenantAccessGrantRecord as StorageTraceTenantAccessGrantRecord,
     TraceTenantAccessGrantRole as StorageTraceTenantAccessGrantRole,
+    TraceTenantAccessGrantStatus as StorageTraceTenantAccessGrantStatus,
+    TraceTenantAccessGrantWrite as StorageTraceTenantAccessGrantWrite,
     TraceTenantPolicyRecord as StorageTraceTenantPolicyRecord,
     TraceTenantPolicyWrite as StorageTraceTenantPolicyWrite,
     TraceTombstoneRecord as StorageTraceTombstoneRecord,
@@ -1840,6 +1842,14 @@ fn app(state: Arc<AppState>) -> Router {
                 .post(put_tenant_policy_handler)
                 .put(put_tenant_policy_handler),
         )
+        .route(
+            "/v1/admin/tenant-access-grants",
+            get(tenant_access_grants_handler).post(create_tenant_access_grant_handler),
+        )
+        .route(
+            "/v1/admin/tenant-access-grants/{grant_id}/revoke",
+            post(revoke_tenant_access_grant_handler),
+        )
         .route("/v1/admin/retention/jobs", get(retention_jobs_handler))
         .route(
             "/v1/admin/retention/jobs/{retention_job_id}/items",
@@ -3204,6 +3214,43 @@ struct TraceTenantPolicyRequest {
     allowed_uses: Vec<TraceAllowedUse>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TraceTenantAccessGrantRequest {
+    grant_id: Option<Uuid>,
+    principal_ref: String,
+    role: StorageTraceTenantAccessGrantRole,
+    #[serde(default)]
+    allowed_consent_scopes: Vec<ConsentScope>,
+    #[serde(default)]
+    allowed_uses: Vec<TraceAllowedUse>,
+    #[serde(default)]
+    issuer: Option<String>,
+    #[serde(default)]
+    audience: Option<String>,
+    #[serde(default)]
+    subject: Option<String>,
+    #[serde(default)]
+    issued_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    expires_at: Option<DateTime<Utc>>,
+    reason: String,
+    #[serde(default)]
+    metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceTenantAccessGrantRevokeRequest {
+    reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceTenantAccessGrantsQuery {
+    limit: Option<usize>,
+    status: Option<StorageTraceTenantAccessGrantStatus>,
+    role: Option<StorageTraceTenantAccessGrantRole>,
+    principal_ref: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct TraceTenantPolicyResponse {
     tenant_id: String,
@@ -3211,6 +3258,30 @@ struct TraceTenantPolicyResponse {
     allowed_consent_scopes: Vec<String>,
     allowed_uses: Vec<String>,
     updated_by_principal_ref: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceTenantAccessGrantResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    grant_id: Uuid,
+    principal_ref: String,
+    role: StorageTraceTenantAccessGrantRole,
+    status: StorageTraceTenantAccessGrantStatus,
+    allowed_consent_scopes: Vec<String>,
+    allowed_uses: Vec<String>,
+    issuer: Option<String>,
+    audience: Option<String>,
+    subject: Option<String>,
+    issued_at: DateTime<Utc>,
+    expires_at: Option<DateTime<Utc>>,
+    revoked_at: Option<DateTime<Utc>>,
+    created_by_principal_ref: Option<String>,
+    revoked_by_principal_ref: Option<String>,
+    reason: Option<String>,
+    metadata: BTreeMap<String, String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -3536,11 +3607,185 @@ async fn put_tenant_policy_handler(
     Ok(Json(response))
 }
 
+async fn tenant_access_grants_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<TraceTenantAccessGrantsQuery>,
+) -> ApiResult<Json<Vec<TraceTenantAccessGrantResponse>>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_admin(&tenant)?;
+    let db = trace_tenant_access_grants_db(state.as_ref())?;
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let principal_ref = query
+        .principal_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|principal_ref| !principal_ref.is_empty());
+    let grants = db
+        .list_trace_tenant_access_grants(&tenant.tenant_id)
+        .await
+        .map_err(internal_error)?;
+    let summaries = grants
+        .into_iter()
+        .rev()
+        .filter(|grant| query.status.is_none_or(|status| grant.status == status))
+        .filter(|grant| query.role.is_none_or(|role| grant.role == role))
+        .filter(|grant| {
+            principal_ref.is_none_or(|principal_ref| grant.principal_ref == principal_ref)
+        })
+        .take(limit)
+        .map(trace_tenant_access_grant_response)
+        .collect::<Vec<_>>();
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::read(&tenant, "tenant_access_grants", summaries.len()),
+        StorageTraceAuditAction::Read,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(summaries))
+}
+
+async fn create_tenant_access_grant_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceTenantAccessGrantRequest>,
+) -> ApiResult<Json<TraceTenantAccessGrantResponse>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_admin(&tenant)?;
+    let db = trace_tenant_access_grants_db(state.as_ref())?;
+    let principal_ref = request.principal_ref.trim();
+    if principal_ref.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "trace tenant access grant requires principal_ref",
+        ));
+    }
+    let reason = request.reason.trim();
+    if reason.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "trace tenant access grant requires reason",
+        ));
+    }
+    let issued_at = request.issued_at.unwrap_or_else(Utc::now);
+    if let Some(expires_at) = request.expires_at
+        && expires_at <= issued_at
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "trace tenant access grant expires_at must be after issued_at",
+        ));
+    }
+    let allowed_consent_scopes = request
+        .allowed_consent_scopes
+        .iter()
+        .map(serde_storage_string)
+        .collect::<anyhow::Result<Vec<_>>>()
+        .map_err(internal_error)?;
+    let allowed_uses = request
+        .allowed_uses
+        .iter()
+        .map(serde_storage_string)
+        .collect::<anyhow::Result<Vec<_>>>()
+        .map_err(internal_error)?;
+    let record = db
+        .upsert_trace_tenant_access_grant(StorageTraceTenantAccessGrantWrite {
+            tenant_id: tenant.tenant_id.clone(),
+            grant_id: request.grant_id.unwrap_or_else(Uuid::new_v4),
+            principal_ref: principal_ref.to_string(),
+            role: request.role,
+            status: StorageTraceTenantAccessGrantStatus::Active,
+            allowed_consent_scopes,
+            allowed_uses,
+            issuer: trimmed_optional_string(request.issuer),
+            audience: trimmed_optional_string(request.audience),
+            subject: trimmed_optional_string(request.subject),
+            issued_at,
+            expires_at: request.expires_at,
+            revoked_at: None,
+            created_by_principal_ref: Some(tenant.principal_ref.clone()),
+            revoked_by_principal_ref: None,
+            reason: Some(reason.to_string()),
+            metadata: request.metadata,
+        })
+        .await
+        .map_err(internal_error)?;
+    let response = trace_tenant_access_grant_response(record);
+    append_tenant_access_grant_update_audit(state.as_ref(), &tenant, &response, "created")
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(response))
+}
+
+async fn revoke_tenant_access_grant_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(grant_id): AxumPath<Uuid>,
+    Json(request): Json<TraceTenantAccessGrantRevokeRequest>,
+) -> ApiResult<Json<TraceTenantAccessGrantResponse>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_admin(&tenant)?;
+    let reason = request.reason.trim();
+    if reason.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "trace tenant access grant revocation requires reason",
+        ));
+    }
+    let db = trace_tenant_access_grants_db(state.as_ref())?;
+    let existing = db
+        .list_trace_tenant_access_grants(&tenant.tenant_id)
+        .await
+        .map_err(internal_error)?
+        .into_iter()
+        .find(|grant| grant.grant_id == grant_id)
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "trace tenant access grant not found"))?;
+    let record = db
+        .upsert_trace_tenant_access_grant(StorageTraceTenantAccessGrantWrite {
+            tenant_id: existing.tenant_id,
+            grant_id: existing.grant_id,
+            principal_ref: existing.principal_ref,
+            role: existing.role,
+            status: StorageTraceTenantAccessGrantStatus::Revoked,
+            allowed_consent_scopes: existing.allowed_consent_scopes,
+            allowed_uses: existing.allowed_uses,
+            issuer: existing.issuer,
+            audience: existing.audience,
+            subject: existing.subject,
+            issued_at: existing.issued_at,
+            expires_at: existing.expires_at,
+            revoked_at: Some(Utc::now()),
+            created_by_principal_ref: existing.created_by_principal_ref,
+            revoked_by_principal_ref: Some(tenant.principal_ref.clone()),
+            reason: Some(reason.to_string()),
+            metadata: existing.metadata,
+        })
+        .await
+        .map_err(internal_error)?;
+    let response = trace_tenant_access_grant_response(record);
+    append_tenant_access_grant_update_audit(state.as_ref(), &tenant, &response, "revoked")
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(response))
+}
+
 fn trace_tenant_policy_db(state: &AppState) -> ApiResult<Arc<dyn Database>> {
     state.db_mirror.as_ref().cloned().ok_or_else(|| {
         api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "trace tenant policy DB is not configured",
+        )
+    })
+}
+
+fn trace_tenant_access_grants_db(state: &AppState) -> ApiResult<Arc<dyn Database>> {
+    state.db_mirror.as_ref().cloned().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trace tenant access grants DB is not configured",
         )
     })
 }
@@ -3577,6 +3822,39 @@ fn trace_tenant_policy_response(
     }
 }
 
+fn trace_tenant_access_grant_response(
+    grant: StorageTraceTenantAccessGrantRecord,
+) -> TraceTenantAccessGrantResponse {
+    TraceTenantAccessGrantResponse {
+        tenant_storage_ref: tenant_storage_ref(&grant.tenant_id),
+        tenant_id: grant.tenant_id,
+        grant_id: grant.grant_id,
+        principal_ref: grant.principal_ref,
+        role: grant.role,
+        status: grant.status,
+        allowed_consent_scopes: grant.allowed_consent_scopes,
+        allowed_uses: grant.allowed_uses,
+        issuer: grant.issuer,
+        audience: grant.audience,
+        subject: grant.subject,
+        issued_at: grant.issued_at,
+        expires_at: grant.expires_at,
+        revoked_at: grant.revoked_at,
+        created_by_principal_ref: grant.created_by_principal_ref,
+        revoked_by_principal_ref: grant.revoked_by_principal_ref,
+        reason: grant.reason,
+        metadata: grant.metadata,
+        created_at: grant.created_at,
+        updated_at: grant.updated_at,
+    }
+}
+
+fn trimmed_optional_string(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn trace_tenant_policy_projection_hash(
     policy_version: &str,
     allowed_consent_scopes: &[String],
@@ -3597,6 +3875,68 @@ fn trace_tenant_policy_projection_hash(
     let json = serde_json::to_string(&projection)
         .context("failed to serialize trace tenant policy audit projection")?;
     Ok(sha256_prefixed(&json))
+}
+
+fn trace_tenant_access_grant_projection_hash(
+    action: &str,
+    grant: &TraceTenantAccessGrantResponse,
+) -> anyhow::Result<String> {
+    #[derive(Serialize)]
+    struct TenantAccessGrantAuditProjection<'a> {
+        action: &'a str,
+        grant_id: Uuid,
+        principal_ref: &'a str,
+        role: StorageTraceTenantAccessGrantRole,
+        status: StorageTraceTenantAccessGrantStatus,
+        allowed_consent_scope_count: usize,
+        allowed_use_count: usize,
+        issuer_configured: bool,
+        audience_configured: bool,
+        subject_configured: bool,
+        expires_at: Option<DateTime<Utc>>,
+        revoked_at: Option<DateTime<Utc>>,
+    }
+    let projection = TenantAccessGrantAuditProjection {
+        action,
+        grant_id: grant.grant_id,
+        principal_ref: &grant.principal_ref,
+        role: grant.role,
+        status: grant.status,
+        allowed_consent_scope_count: grant.allowed_consent_scopes.len(),
+        allowed_use_count: grant.allowed_uses.len(),
+        issuer_configured: grant.issuer.is_some(),
+        audience_configured: grant.audience.is_some(),
+        subject_configured: grant.subject.is_some(),
+        expires_at: grant.expires_at,
+        revoked_at: grant.revoked_at,
+    };
+    let json = serde_json::to_string(&projection)
+        .context("failed to serialize trace tenant access grant audit projection")?;
+    Ok(sha256_prefixed(&json))
+}
+
+async fn append_tenant_access_grant_update_audit(
+    state: &AppState,
+    tenant: &TenantAuth,
+    grant: &TraceTenantAccessGrantResponse,
+    action: &'static str,
+) -> anyhow::Result<()> {
+    let projection_hash = trace_tenant_access_grant_projection_hash(action, grant)?;
+    append_audit_event_with_db_mirror(
+        state,
+        tenant,
+        TraceCommonsAuditEvent::tenant_access_grant_update(tenant, action, grant, &projection_hash),
+        StorageTraceAuditAction::PolicyUpdate,
+        StorageTraceAuditSafeMetadata::TenantAccessGrant {
+            action: action.to_string(),
+            role: grant.role,
+            status: grant.status,
+            allowed_consent_scope_count: grant.allowed_consent_scopes.len() as u32,
+            allowed_use_count: grant.allowed_uses.len() as u32,
+            grant_projection_hash: projection_hash,
+        },
+    )
+    .await
 }
 
 async fn submit_trace_handler(
@@ -9640,6 +9980,14 @@ fn trace_commons_audit_event_from_storage(
             allowed_use_count: _,
             policy_projection_hash: _,
         } => (None, event.reason.clone(), None),
+        StorageTraceAuditSafeMetadata::TenantAccessGrant {
+            action: _,
+            role: _,
+            status: _,
+            allowed_consent_scope_count: _,
+            allowed_use_count: _,
+            grant_projection_hash: _,
+        } => (None, event.reason.clone(), None),
         StorageTraceAuditSafeMetadata::Empty => (None, event.reason.clone(), None),
     };
     Ok(TraceCommonsAuditEvent {
@@ -9680,6 +10028,14 @@ fn storage_audit_event_kind(
         && matches!(metadata, StorageTraceAuditSafeMetadata::ReviewLease { .. })
     {
         return "review_lease".to_string();
+    }
+    if let StorageTraceAuditAction::PolicyUpdate = action
+        && matches!(
+            metadata,
+            StorageTraceAuditSafeMetadata::TenantAccessGrant { .. }
+        )
+    {
+        return "tenant_access_grant_update".to_string();
     }
     storage_audit_action_kind(action).to_string()
 }
@@ -18132,6 +18488,37 @@ impl TraceCommonsAuditEvent {
         }
     }
 
+    fn tenant_access_grant_update(
+        auth: &TenantAuth,
+        action: &str,
+        grant: &TraceTenantAccessGrantResponse,
+        projection_hash: &str,
+    ) -> Self {
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: "tenant_access_grant_update".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: Some(format!(
+                "action={action};grant_id={grant_id};role={};status={};allowed_consent_scope_count={allowed_consent_scope_count};allowed_use_count={allowed_use_count};grant_projection_hash={projection_hash}",
+                serde_enum_tag(&grant.role),
+                serde_enum_tag(&grant.status),
+                grant_id = grant.grant_id,
+                allowed_consent_scope_count = grant.allowed_consent_scopes.len(),
+                allowed_use_count = grant.allowed_uses.len()
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: Some(projection_hash.to_string()),
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
     fn dataset_export(
         auth: &TenantAuth,
         export_id: Uuid,
@@ -21209,6 +21596,184 @@ mod tests {
                 .await
                 .expect_err("tenant access grant scopes/uses restrict submissions");
         assert_eq!(disallowed_error.0, StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn admin_can_manage_tenant_access_grants() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-tenant-access-admin.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(temp.path().to_path_buf(), Some(db.clone()));
+
+        let create_request = TraceTenantAccessGrantRequest {
+            grant_id: Some(Uuid::new_v4()),
+            principal_ref: principal_storage_ref("token-a"),
+            role: StorageTraceTenantAccessGrantRole::Contributor,
+            allowed_consent_scopes: vec![ConsentScope::DebuggingEvaluation],
+            allowed_uses: vec![TraceAllowedUse::Debugging],
+            issuer: Some("https://issuer.near.com".to_string()),
+            audience: Some("trace-commons".to_string()),
+            subject: Some("tenant-a-agent".to_string()),
+            issued_at: None,
+            expires_at: Some(Utc::now() + Duration::minutes(30)),
+            reason: "hosted tenant verified".to_string(),
+            metadata: BTreeMap::from([("hosted_surface".to_string(), "near.com".to_string())]),
+        };
+        let contributor_error = create_tenant_access_grant_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(create_request),
+        )
+        .await
+        .expect_err("contributors cannot create tenant access grants");
+        assert_eq!(contributor_error.0, StatusCode::FORBIDDEN);
+
+        let grant_id = Uuid::new_v4();
+        let Json(created) = create_tenant_access_grant_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceTenantAccessGrantRequest {
+                grant_id: Some(grant_id),
+                principal_ref: principal_storage_ref("token-a"),
+                role: StorageTraceTenantAccessGrantRole::Contributor,
+                allowed_consent_scopes: vec![ConsentScope::DebuggingEvaluation],
+                allowed_uses: vec![TraceAllowedUse::Debugging],
+                issuer: Some("https://issuer.near.com".to_string()),
+                audience: Some("trace-commons".to_string()),
+                subject: Some("tenant-a-agent".to_string()),
+                issued_at: None,
+                expires_at: Some(Utc::now() + Duration::minutes(30)),
+                reason: "hosted tenant verified".to_string(),
+                metadata: BTreeMap::from([("hosted_surface".to_string(), "near.com".to_string())]),
+            }),
+        )
+        .await
+        .expect("admin can create tenant access grant");
+        assert_eq!(created.tenant_id, "tenant-a");
+        assert_eq!(created.grant_id, grant_id);
+        assert_eq!(created.principal_ref, principal_storage_ref("token-a"));
+        assert_eq!(created.status, StorageTraceTenantAccessGrantStatus::Active);
+        assert_eq!(created.role, StorageTraceTenantAccessGrantRole::Contributor);
+
+        let contributor_list_error = tenant_access_grants_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Query(TraceTenantAccessGrantsQuery {
+                limit: None,
+                status: None,
+                role: None,
+                principal_ref: None,
+            }),
+        )
+        .await
+        .expect_err("contributors cannot list tenant access grants");
+        assert_eq!(contributor_list_error.0, StatusCode::FORBIDDEN);
+
+        let Json(listed) = tenant_access_grants_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Query(TraceTenantAccessGrantsQuery {
+                limit: Some(10),
+                status: Some(StorageTraceTenantAccessGrantStatus::Active),
+                role: Some(StorageTraceTenantAccessGrantRole::Contributor),
+                principal_ref: Some(principal_storage_ref("token-a")),
+            }),
+        )
+        .await
+        .expect("admin can list tenant access grants");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].grant_id, grant_id);
+
+        let Json(other_tenant_list) = tenant_access_grants_handler(
+            State(state.clone()),
+            auth_headers("admin-token-b"),
+            Query(TraceTenantAccessGrantsQuery {
+                limit: None,
+                status: None,
+                role: None,
+                principal_ref: None,
+            }),
+        )
+        .await
+        .expect("other tenant admin can list only own tenant grants");
+        assert!(other_tenant_list.is_empty());
+
+        let Json(revoked) = revoke_tenant_access_grant_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            AxumPath(grant_id),
+            Json(TraceTenantAccessGrantRevokeRequest {
+                reason: "tenant deprovisioned".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can revoke tenant access grant");
+        assert_eq!(revoked.status, StorageTraceTenantAccessGrantStatus::Revoked);
+        assert_eq!(
+            revoked.revoked_by_principal_ref.as_deref(),
+            Some(principal_storage_ref("admin-token-a").as_str())
+        );
+
+        let mut enforced_state = state.clone();
+        Arc::make_mut(&mut enforced_state).require_tenant_access_grants = true;
+        let mut allowed = sample_envelope().await;
+        make_metadata_only_low_risk(&mut allowed);
+        allowed.consent.scopes = vec![ConsentScope::DebuggingEvaluation];
+        allowed.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
+        allowed.trace_card.allowed_uses = vec![TraceAllowedUse::Debugging];
+        let revoked_submit_error = submit_trace_handler(
+            State(enforced_state),
+            auth_headers("token-a"),
+            Json(allowed),
+        )
+        .await
+        .expect_err("revoked tenant access grant no longer authorizes submit");
+        assert_eq!(revoked_submit_error.0, StatusCode::FORBIDDEN);
+
+        let file_audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("file audit events read");
+        assert!(file_audit_events.iter().any(|event| {
+            event.kind == "tenant_access_grant_update"
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("action=created"))
+        }));
+        assert!(file_audit_events.iter().any(|event| {
+            event.kind == "tenant_access_grant_update"
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("action=revoked"))
+        }));
+
+        let db_audit_events = db
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("tenant access grant audit events read");
+        assert!(db_audit_events.iter().any(|event| {
+            matches!(
+                &event.metadata,
+                StorageTraceAuditSafeMetadata::TenantAccessGrant { action, .. }
+                    if action == "created"
+            )
+        }));
+        assert!(db_audit_events.iter().any(|event| {
+            matches!(
+                &event.metadata,
+                StorageTraceAuditSafeMetadata::TenantAccessGrant { action, .. }
+                    if action == "revoked"
+            )
+        }));
     }
 
     #[cfg(feature = "libsql")]
