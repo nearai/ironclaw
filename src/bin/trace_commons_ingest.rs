@@ -5492,9 +5492,18 @@ async fn run_dataset_replay_export_with_grant(
     .await
     .map_err(internal_error)?;
     let TraceCommonsMetadataView { records, derived } =
-        read_replay_export_metadata_view(state, tenant)
-            .await
-            .map_err(internal_error)?;
+        match read_replay_export_metadata_view(state, tenant).await {
+            Ok(view) => view,
+            Err(error) => {
+                return fail_export_job_with_internal_error(
+                    state,
+                    &job,
+                    "replay export job failure",
+                    error,
+                )
+                .await;
+            }
+        };
     let derived_by_submission = derived
         .into_iter()
         .map(|record| (record.submission_id, record))
@@ -5521,7 +5530,7 @@ async fn run_dataset_replay_export_with_grant(
         .filter(TraceCommonsSubmissionRecord::is_export_eligible)
         .take(limit)
     {
-        let body_read = read_envelope_for_replay_export(
+        let body_read = match read_envelope_for_replay_export(
             state,
             tenant,
             &record,
@@ -5529,7 +5538,18 @@ async fn run_dataset_replay_export_with_grant(
             Some(&purpose),
         )
         .await
-        .map_err(internal_error)?;
+        {
+            Ok(body_read) => body_read,
+            Err(error) => {
+                return fail_export_job_with_internal_error(
+                    state,
+                    &job,
+                    "replay export job failure",
+                    error,
+                )
+                .await;
+            }
+        };
         items.push(TraceReplayDatasetItem::from_record(
             &record,
             derived_by_submission.get(&record.submission_id),
@@ -7655,6 +7675,58 @@ async fn mirror_export_job_finished_to_db(
         );
     }
     Ok(())
+}
+
+async fn mirror_export_job_failed_to_db(
+    state: &AppState,
+    job: &TraceExportJobSlice,
+    error: &anyhow::Error,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    let mut metadata = BTreeMap::new();
+    metadata.insert("state".to_string(), "failed".to_string());
+    let updated = db
+        .update_trace_export_job_status(
+            &job.tenant_id,
+            job.job_id,
+            StorageTraceExportJobStatusUpdate {
+                status: StorageTraceExportJobStatus::Failed,
+                started_at: job.started_at,
+                finished_at: Some(Utc::now()),
+                result_manifest_id: None,
+                item_count: None,
+                last_error: Some(safe_worker_error(error)),
+                metadata,
+            },
+        )
+        .await
+        .context("failed to mirror trace export job failure")?;
+    if updated.is_none() {
+        anyhow::bail!(
+            "trace export job {} was not found for failure mirror",
+            job.job_id
+        );
+    }
+    Ok(())
+}
+
+async fn fail_export_job_with_internal_error<T>(
+    state: &AppState,
+    job: &TraceExportJobSlice,
+    operation: &str,
+    error: anyhow::Error,
+) -> ApiResult<T> {
+    let api_error = internal_error(&error);
+    enforce_export_job_mirror_result(
+        state,
+        operation,
+        mirror_export_job_failed_to_db(state, job, &error).await,
+    )
+    .await
+    .map_err(internal_error)?;
+    Err(api_error)
 }
 
 async fn enforce_export_job_mirror_result(
@@ -31345,6 +31417,85 @@ mod tests {
         .await
         .expect_err("missing active DB object ref prevents replay body read");
         assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn replay_export_marks_started_job_failed_when_body_read_fails() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-export-job-failure.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let submit_state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.replay.replayable = true;
+        let submission_id = envelope.submission_id;
+
+        let Json(receipt) =
+            submit_trace_handler(State(submit_state), auth_headers("token-a"), Json(envelope))
+                .await
+                .expect("submission dual-writes to DB mirror");
+        assert_eq!(receipt.status, "accepted");
+
+        let invalidation_counts = db
+            .invalidate_trace_submission_artifacts(
+                "tenant-a",
+                submission_id,
+                StorageTraceDerivedStatus::Current,
+            )
+            .await
+            .expect("invalidate submitted envelope object ref");
+        assert_eq!(invalidation_counts.object_refs_invalidated, 1);
+
+        let export_state = test_state_with_db_replay_export_reads_require_object_refs(
+            temp.path().to_path_buf(),
+            Some(db.clone()),
+        );
+        let error = dataset_replay_handler(
+            State(export_state),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("failed_body_read".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect_err("required object-ref replay export fails on body read");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let jobs = db
+            .list_trace_export_jobs("tenant-a")
+            .await
+            .expect("list export jobs after failure");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].purpose, "failed_body_read");
+        assert_eq!(jobs[0].status, StorageTraceExportJobStatus::Failed);
+        assert!(jobs[0].finished_at.is_some());
+        assert_eq!(jobs[0].result_manifest_id, None);
+        assert_eq!(jobs[0].item_count, None);
+        assert!(jobs[0].last_error.as_deref().is_some_and(|error| {
+            error.contains("missing active submitted envelope object ref for replay export")
+        }));
+
+        let manifests = db
+            .list_trace_export_manifests("tenant-a")
+            .await
+            .expect("list export manifests after failure");
+        assert!(manifests.is_empty());
     }
 
     #[cfg(feature = "libsql")]
