@@ -1,9 +1,10 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
 
 use anyhow::Context;
 use axum::extract::{DefaultBodyLimit, Query};
@@ -130,6 +131,14 @@ const TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_JSON: &str =
     "TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_JSON";
 const TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_FILE: &str =
     "TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_FILE";
+const TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL: &str =
+    "TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL";
+const TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_ALLOWED_HOSTS: &str =
+    "TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_ALLOWED_HOSTS";
+const TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_BEARER_TOKEN: &str =
+    "TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_BEARER_TOKEN";
+const TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_TIMEOUT_MS: &str =
+    "TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_TIMEOUT_MS";
 const TRACE_COMMONS_SIGNED_TOKEN_ISSUER: &str = "TRACE_COMMONS_SIGNED_TOKEN_ISSUER";
 const TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE: &str = "TRACE_COMMONS_SIGNED_TOKEN_AUDIENCE";
 const TRACE_COMMONS_SIGNED_TOKEN_REVOKED_JTIS: &str = "TRACE_COMMONS_SIGNED_TOKEN_REVOKED_JTIS";
@@ -143,6 +152,8 @@ const TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR: &str =
     "TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR";
 const TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR: &str =
     "TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR";
+const DEFAULT_EDDSA_KEYSET_URL_TIMEOUT_MS: u64 = 5_000;
+const MAX_EDDSA_KEYSET_URL_BYTES: usize = 256 * 1024;
 const TRACE_BACKFILL_FAILURE_DETAIL_LIMIT: usize = 20;
 const TRACE_REVIEW_DUE_AFTER_HOURS: i64 = 24;
 const TRACE_REVIEW_OVERDUE_AFTER_HOURS: i64 = 72;
@@ -735,7 +746,7 @@ impl AppState {
             .map(PathBuf::from)
             .unwrap_or_else(|_| default_data_dir());
         let tokens = parse_tenant_tokens_from_env()?;
-        let signed_token_verifier = trace_commons_signed_token_verifier_from_env()?;
+        let signed_token_verifier = trace_commons_signed_token_verifier_from_env().await?;
         let require_eddsa_signed_tokens = env_truthy(TRACE_COMMONS_REQUIRE_EDDSA_SIGNED_TOKENS);
         let require_managed_eddsa_signed_tokens =
             env_truthy(TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS);
@@ -1436,7 +1447,7 @@ fn parse_token_secret_and_expiry(raw: &str) -> anyhow::Result<(String, Option<Da
     Ok((token.to_string(), expires_at))
 }
 
-fn trace_commons_signed_token_verifier_from_env()
+async fn trace_commons_signed_token_verifier_from_env()
 -> anyhow::Result<Option<TraceCommonsSignedTokenVerifier>> {
     let default_secret = match std::env::var(TRACE_COMMONS_SIGNED_TOKEN_SECRET) {
         Ok(secret) => {
@@ -1455,7 +1466,7 @@ fn trace_commons_signed_token_verifier_from_env()
     let keyed_secrets = parse_signed_token_keyed_secrets_from_env()?;
     let default_eddsa_public_key = parse_signed_token_default_eddsa_public_key_from_env()?;
     let mut keyed_eddsa_public_keys = parse_signed_token_keyed_eddsa_public_key_files_from_env()?;
-    let managed_eddsa_public_keys = parse_signed_token_eddsa_keyset_from_env()?;
+    let managed_eddsa_public_keys = parse_signed_token_eddsa_keyset_from_env().await?;
     let managed_eddsa_key_ids = managed_eddsa_public_keys.keys().cloned().collect();
     for (kid, key) in managed_eddsa_public_keys {
         if keyed_eddsa_public_keys.insert(kid.clone(), key).is_some() {
@@ -1531,7 +1542,7 @@ fn validate_required_managed_eddsa_signed_tokens_config(
     );
     anyhow::ensure!(
         !verifier.managed_eddsa_key_ids.is_empty(),
-        "{TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS} requires TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_JSON or TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_FILE"
+        "{TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS} requires TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_JSON, TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_FILE, or TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL"
     );
     anyhow::ensure!(
         verifier.keyed_eddsa_public_keys.len() == verifier.managed_eddsa_key_ids.len()
@@ -1663,22 +1674,273 @@ fn parse_signed_token_keyed_eddsa_public_key_files_from_env()
     Ok(keys)
 }
 
-fn parse_signed_token_eddsa_keyset_from_env()
+async fn parse_signed_token_eddsa_keyset_from_env()
 -> anyhow::Result<BTreeMap<String, TraceCommonsSignedEddsaPublicKey>> {
     let inline = optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_JSON)?;
     let file = optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_FILE)?;
-    match (inline, file) {
-        (Some(_), Some(_)) => anyhow::bail!(
-            "{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_JSON} and {TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_FILE} cannot both be configured"
-        ),
-        (Some(configured), None) => parse_signed_token_eddsa_keyset_config(&configured),
-        (None, Some(path)) => {
+    let url = optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL)?;
+    ensure_single_eddsa_keyset_source(inline.is_some(), file.is_some(), url.is_some())?;
+    match (inline, file, url) {
+        (Some(configured), None, None) => parse_signed_token_eddsa_keyset_config(&configured),
+        (None, Some(path), None) => {
             let configured = std::fs::read_to_string(&path)
                 .with_context(|| format!("failed to read EdDSA keyset file {path}"))?;
             parse_signed_token_eddsa_keyset_config(&configured)
         }
-        (None, None) => Ok(BTreeMap::new()),
+        (None, None, Some(url)) => {
+            let configured = fetch_signed_token_eddsa_keyset_url(&url).await?;
+            parse_signed_token_eddsa_keyset_config(&configured)
+        }
+        (None, None, None) => Ok(BTreeMap::new()),
+        _ => unreachable!("ensure_single_eddsa_keyset_source rejects multiple keyset sources"),
     }
+}
+
+fn ensure_single_eddsa_keyset_source(inline: bool, file: bool, url: bool) -> anyhow::Result<()> {
+    let configured_count = usize::from(inline) + usize::from(file) + usize::from(url);
+    anyhow::ensure!(
+        configured_count <= 1,
+        "{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_JSON}, {TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_FILE}, and {TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL} are mutually exclusive"
+    );
+    Ok(())
+}
+
+async fn fetch_signed_token_eddsa_keyset_url(url: &str) -> anyhow::Result<String> {
+    let parsed = reqwest::Url::parse(url)
+        .with_context(|| format!("invalid {TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL}"))?;
+    let allowed_hosts = parse_signed_token_eddsa_keyset_url_allowed_hosts_from_env()?;
+    validate_signed_token_eddsa_keyset_url(&parsed, &allowed_hosts)?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| {
+            anyhow::anyhow!("{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL} requires a host")
+        })?
+        .to_ascii_lowercase();
+    let port = parsed.port_or_known_default().ok_or_else(|| {
+        anyhow::anyhow!("{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL} requires a known port")
+    })?;
+    let resolved_addrs = resolve_signed_token_eddsa_keyset_url_host(&host, port).await?;
+    let timeout = parse_signed_token_eddsa_keyset_url_timeout_from_env()?;
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout.min(StdDuration::from_secs(3)))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("ironclaw-trace-commons-keyset/0.1")
+        .resolve_to_addrs(&host, &resolved_addrs)
+        .build()
+        .context("failed to build EdDSA keyset HTTP client")?;
+    let mut request = client
+        .get(parsed.clone())
+        .header(reqwest::header::ACCEPT, "application/json");
+    if let Some(bearer_token) =
+        optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_BEARER_TOKEN)?
+    {
+        request = request.bearer_auth(bearer_token);
+    }
+    let response = request.send().await.with_context(|| {
+        format!(
+            "failed to fetch EdDSA keyset from {}",
+            safe_keyset_url_label(&parsed)
+        )
+    })?;
+    let status = response.status();
+    anyhow::ensure!(
+        status.is_success(),
+        "failed to fetch EdDSA keyset from {}: HTTP {}",
+        safe_keyset_url_label(&parsed),
+        status.as_u16()
+    );
+    if let Some(content_length) = response.content_length() {
+        anyhow::ensure!(
+            content_length <= MAX_EDDSA_KEYSET_URL_BYTES as u64,
+            "EdDSA keyset response from {} exceeded {} bytes",
+            safe_keyset_url_label(&parsed),
+            MAX_EDDSA_KEYSET_URL_BYTES
+        );
+    }
+    let mut response = response;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.with_context(|| {
+        format!(
+            "failed to read EdDSA keyset response from {}",
+            safe_keyset_url_label(&parsed)
+        )
+    })? {
+        bytes.extend_from_slice(&chunk);
+        anyhow::ensure!(
+            bytes.len() <= MAX_EDDSA_KEYSET_URL_BYTES,
+            "EdDSA keyset response from {} exceeded {} bytes",
+            safe_keyset_url_label(&parsed),
+            MAX_EDDSA_KEYSET_URL_BYTES
+        );
+    }
+    anyhow::ensure!(
+        bytes.len() <= MAX_EDDSA_KEYSET_URL_BYTES,
+        "EdDSA keyset response from {} exceeded {} bytes",
+        safe_keyset_url_label(&parsed),
+        MAX_EDDSA_KEYSET_URL_BYTES
+    );
+    String::from_utf8(bytes).with_context(|| {
+        format!(
+            "EdDSA keyset response from {} was not valid UTF-8",
+            safe_keyset_url_label(&parsed)
+        )
+    })
+}
+
+fn parse_signed_token_eddsa_keyset_url_allowed_hosts_from_env() -> anyhow::Result<BTreeSet<String>>
+{
+    let configured =
+        match optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_ALLOWED_HOSTS)? {
+            Some(configured) => configured,
+            None => return Ok(BTreeSet::new()),
+        };
+    parse_signed_token_eddsa_keyset_url_allowed_hosts(&configured)
+}
+
+fn parse_signed_token_eddsa_keyset_url_allowed_hosts(
+    configured: &str,
+) -> anyhow::Result<BTreeSet<String>> {
+    let mut hosts = BTreeSet::new();
+    for host in configured
+        .split(',')
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+    {
+        anyhow::ensure!(
+            !host.contains('/') && !host.contains(':') && !host.contains('@'),
+            "{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_ALLOWED_HOSTS} entries must be hostnames without scheme, port, or credentials"
+        );
+        hosts.insert(host.to_ascii_lowercase());
+    }
+    Ok(hosts)
+}
+
+fn validate_signed_token_eddsa_keyset_url(
+    url: &reqwest::Url,
+    allowed_hosts: &BTreeSet<String>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        url.scheme() == "https",
+        "{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL} must use https"
+    );
+    anyhow::ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL} must not include embedded credentials"
+    );
+    anyhow::ensure!(
+        url.query().is_none() && url.fragment().is_none(),
+        "{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL} must not include query strings or fragments"
+    );
+    let host = url.host_str().map(str::to_ascii_lowercase).ok_or_else(|| {
+        anyhow::anyhow!("{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL} requires a host")
+    })?;
+    anyhow::ensure!(
+        !is_internal_keyset_hostname(&host),
+        "{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL} must not use localhost or internal hostnames"
+    );
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        anyhow::ensure!(
+            !is_disallowed_keyset_ip(ip),
+            "{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL} must not use private, local, or reserved IP addresses"
+        );
+    }
+    anyhow::ensure!(
+        !allowed_hosts.is_empty(),
+        "{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL} requires {TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_ALLOWED_HOSTS}"
+    );
+    anyhow::ensure!(
+        allowed_hosts.contains(&host),
+        "{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL} host is not allowlisted"
+    );
+    Ok(())
+}
+
+async fn resolve_signed_token_eddsa_keyset_url_host(
+    host: &str,
+    port: u16,
+) -> anyhow::Result<Vec<SocketAddr>> {
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+        .await
+        .with_context(|| format!("failed to resolve EdDSA keyset host {host}"))?
+        .collect();
+    anyhow::ensure!(
+        !addrs.is_empty(),
+        "EdDSA keyset host {host} resolved to no addresses"
+    );
+    for addr in &addrs {
+        anyhow::ensure!(
+            !is_disallowed_keyset_ip(addr.ip()),
+            "EdDSA keyset host {host} resolved to disallowed address"
+        );
+    }
+    Ok(addrs)
+}
+
+fn is_internal_keyset_hostname(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+        || host == "metadata.google.internal"
+}
+
+fn is_disallowed_keyset_ip(ip: IpAddr) -> bool {
+    match normalize_keyset_ip(ip) {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            octets[0] == 0
+                || octets[0] == 10
+                || octets[0] == 127
+                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+                || (octets[0] == 169 && octets[1] == 254)
+                || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+                || (octets[0] == 192 && octets[1] == 168)
+                || (octets[0] == 198 && (18..=19).contains(&octets[1]))
+                || octets[0] >= 224
+        }
+        IpAddr::V6(v6) => {
+            let segments = v6.segments();
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (segments[0] & 0xfe00) == 0xfc00
+                || (segments[0] & 0xffc0) == 0xfe80
+                || (segments[0] & 0xff00) == 0xff00
+        }
+    }
+}
+
+fn normalize_keyset_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(v4) => IpAddr::V4(v4),
+        IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(v6)),
+    }
+}
+
+fn parse_signed_token_eddsa_keyset_url_timeout_from_env() -> anyhow::Result<StdDuration> {
+    let timeout_ms =
+        match optional_trimmed_env(TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_TIMEOUT_MS)? {
+            Some(configured) => configured.parse::<u64>().with_context(|| {
+                format!(
+                    "{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_TIMEOUT_MS} must be milliseconds"
+                )
+            })?,
+            None => DEFAULT_EDDSA_KEYSET_URL_TIMEOUT_MS,
+        };
+    anyhow::ensure!(
+        (1..=30_000).contains(&timeout_ms),
+        "{TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_TIMEOUT_MS} must be between 1 and 30000"
+    );
+    Ok(StdDuration::from_millis(timeout_ms))
+}
+
+fn safe_keyset_url_label(url: &reqwest::Url) -> String {
+    let host = url.host_str().unwrap_or("<unknown-host>");
+    format!("{}://{}", url.scheme(), host)
 }
 
 fn parse_signed_token_eddsa_keyset_config(
@@ -18121,6 +18383,9 @@ mod tests {
             "signed_token_eddsa_public_key_files",
             "signed_token_eddsa_keyset_json",
             "signed_token_eddsa_keyset_file",
+            "signed_token_eddsa_keyset_url",
+            "signed_token_eddsa_keyset_url_allowed_hosts",
+            "signed_token_eddsa_keyset_bearer_token",
             "signed_token_issuer",
             "signed_token_audience",
             "signed_token_revoked_jtis",
@@ -32726,6 +32991,129 @@ mod tests {
                 .expect_err("duplicate kid is rejected")
                 .to_string()
                 .contains("duplicate kid dup")
+        );
+    }
+
+    #[test]
+    fn remote_managed_eddsa_keyset_source_is_mutually_exclusive() {
+        ensure_single_eddsa_keyset_source(false, false, false).expect("no keyset source is ok");
+        ensure_single_eddsa_keyset_source(true, false, false).expect("inline keyset source is ok");
+        ensure_single_eddsa_keyset_source(false, true, false).expect("file keyset source is ok");
+        ensure_single_eddsa_keyset_source(false, false, true).expect("URL keyset source is ok");
+
+        let err = ensure_single_eddsa_keyset_source(true, false, true)
+            .expect_err("inline and URL sources conflict");
+        assert!(err.to_string().contains("mutually exclusive"));
+
+        let err = ensure_single_eddsa_keyset_source(false, true, true)
+            .expect_err("file and URL sources conflict");
+        assert!(err.to_string().contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn remote_managed_eddsa_keyset_url_requires_https_allowlist_and_safe_host() {
+        let allowed = BTreeSet::from(["issuer.example".to_string()]);
+        validate_signed_token_eddsa_keyset_url(
+            &reqwest::Url::parse("https://issuer.example/.well-known/trace-keyset.json")
+                .expect("URL parses"),
+            &allowed,
+        )
+        .expect("allowlisted HTTPS issuer URL is accepted");
+
+        let http_err = validate_signed_token_eddsa_keyset_url(
+            &reqwest::Url::parse("http://issuer.example/keyset.json").expect("URL parses"),
+            &allowed,
+        )
+        .expect_err("plain HTTP keyset URL is rejected");
+        assert!(http_err.to_string().contains("must use https"));
+
+        let userinfo_err = validate_signed_token_eddsa_keyset_url(
+            &reqwest::Url::parse("https://user:pass@issuer.example/keyset.json")
+                .expect("URL parses"),
+            &allowed,
+        )
+        .expect_err("embedded credentials are rejected");
+        assert!(userinfo_err.to_string().contains("embedded credentials"));
+
+        let query_err = validate_signed_token_eddsa_keyset_url(
+            &reqwest::Url::parse("https://issuer.example/keyset.json?token=secret")
+                .expect("URL parses"),
+            &allowed,
+        )
+        .expect_err("query strings are rejected");
+        assert!(query_err.to_string().contains("query strings"));
+
+        let allowlist_err = validate_signed_token_eddsa_keyset_url(
+            &reqwest::Url::parse("https://issuer.example/keyset.json").expect("URL parses"),
+            &BTreeSet::new(),
+        )
+        .expect_err("empty allowlist is rejected");
+        assert!(
+            allowlist_err
+                .to_string()
+                .contains(TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_ALLOWED_HOSTS)
+        );
+
+        let host_err = validate_signed_token_eddsa_keyset_url(
+            &reqwest::Url::parse("https://issuer.example/keyset.json").expect("URL parses"),
+            &BTreeSet::from(["other.example".to_string()]),
+        )
+        .expect_err("non-allowlisted host is rejected");
+        assert!(host_err.to_string().contains("not allowlisted"));
+
+        let localhost_err = validate_signed_token_eddsa_keyset_url(
+            &reqwest::Url::parse("https://localhost/keyset.json").expect("URL parses"),
+            &BTreeSet::from(["localhost".to_string()]),
+        )
+        .expect_err("localhost is rejected even when allowlisted");
+        assert!(localhost_err.to_string().contains("internal hostnames"));
+
+        let private_ip_err = validate_signed_token_eddsa_keyset_url(
+            &reqwest::Url::parse("https://10.0.0.1/keyset.json").expect("URL parses"),
+            &BTreeSet::from(["10.0.0.1".to_string()]),
+        )
+        .expect_err("private IP literal is rejected even when allowlisted");
+        assert!(private_ip_err.to_string().contains("reserved IP"));
+    }
+
+    #[test]
+    fn remote_managed_eddsa_keyset_allowed_hosts_are_exact_hosts_only() {
+        let hosts =
+            parse_signed_token_eddsa_keyset_url_allowed_hosts("Issuer.Example,keys.example")
+                .expect("allowed hosts parse");
+        assert!(hosts.contains("issuer.example"));
+        assert!(hosts.contains("keys.example"));
+
+        for invalid in [
+            "https://issuer.example",
+            "issuer.example:443",
+            "user@issuer.example",
+            "issuer.example/keyset.json",
+        ] {
+            let err = parse_signed_token_eddsa_keyset_url_allowed_hosts(invalid)
+                .expect_err("invalid allowlist host is rejected");
+            assert!(
+                err.to_string()
+                    .contains("without scheme, port, or credentials")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_managed_eddsa_keyset_dns_resolution_rejects_disallowed_addresses() {
+        let loopback_err = resolve_signed_token_eddsa_keyset_url_host("127.0.0.1", 443)
+            .await
+            .expect_err("loopback IP resolution is rejected");
+        assert!(loopback_err.to_string().contains("disallowed address"));
+
+        let mapped_loopback_err =
+            resolve_signed_token_eddsa_keyset_url_host("::ffff:127.0.0.1", 443)
+                .await
+                .expect_err("IPv4-mapped loopback resolution is rejected");
+        assert!(
+            mapped_loopback_err
+                .to_string()
+                .contains("disallowed address")
         );
     }
 
