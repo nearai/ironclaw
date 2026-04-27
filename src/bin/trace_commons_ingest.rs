@@ -92,6 +92,8 @@ const TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS";
 const TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN: &str =
     "TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN";
+const TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY: &str =
+    "TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY";
 const TRACE_COMMONS_DB_CONTRIBUTOR_READS_TENANT_IDS: &str =
     "TRACE_COMMONS_DB_CONTRIBUTOR_READS_TENANT_IDS";
 const TRACE_COMMONS_DB_REVIEWER_READS_TENANT_IDS: &str =
@@ -523,6 +525,102 @@ struct TenantAuth {
     allowed_uses: BTreeSet<TraceAllowedUse>,
 }
 
+#[derive(Debug, Clone)]
+struct TenantCtx {
+    auth: TenantAuth,
+}
+
+impl TenantCtx {
+    fn from_auth(auth: TenantAuth) -> Self {
+        Self { auth }
+    }
+
+    fn auth(&self) -> &TenantAuth {
+        &self.auth
+    }
+
+    fn tenant_id(&self) -> &str {
+        &self.auth.tenant_id
+    }
+
+    fn role(&self) -> TokenRole {
+        self.auth.role
+    }
+
+    fn principal_ref(&self) -> &str {
+        &self.auth.principal_ref
+    }
+
+    fn tenant_storage_ref(&self) -> String {
+        tenant_storage_ref(self.tenant_id())
+    }
+
+    fn safe_auth_method(&self) -> TraceAuthMethod {
+        self.auth.auth_method
+    }
+
+    fn auth_method_reason(&self) -> String {
+        format!("auth_method={}", self.safe_auth_method().storage_name())
+    }
+
+    fn submitted_tenant_scope_ref(&self) -> Option<String> {
+        Some(self.tenant_storage_ref())
+    }
+
+    fn allowed_consent_scopes(&self) -> &BTreeSet<ConsentScope> {
+        &self.auth.allowed_consent_scopes
+    }
+
+    fn allowed_uses(&self) -> &BTreeSet<TraceAllowedUse> {
+        &self.auth.allowed_uses
+    }
+
+    fn can_access_submission(&self, record: &TraceCommonsSubmissionRecord) -> bool {
+        can_access_submission(self.auth(), record)
+    }
+
+    fn can_access_storage_submission(&self, record: &StorageTraceSubmissionRecord) -> bool {
+        can_access_storage_submission(self.auth(), record)
+    }
+
+    fn read_submission_record(
+        &self,
+        root: &Path,
+        submission_id: Uuid,
+    ) -> anyhow::Result<Option<TraceCommonsSubmissionRecord>> {
+        read_submission_record(root, self.tenant_id(), submission_id)
+    }
+
+    fn read_derived_record(
+        &self,
+        root: &Path,
+        submission_id: Uuid,
+    ) -> anyhow::Result<Option<TraceCommonsDerivedRecord>> {
+        read_derived_record(root, self.tenant_id(), submission_id)
+    }
+
+    fn idempotent_submit_audit_event(&self, submission_id: Uuid) -> TraceCommonsAuditEvent {
+        TraceCommonsAuditEvent::idempotent_submit(self.auth(), submission_id)
+    }
+
+    fn submitted_audit_event(
+        &self,
+        record: &TraceCommonsSubmissionRecord,
+    ) -> TraceCommonsAuditEvent {
+        let mut event = TraceCommonsAuditEvent::submitted(record, self.auth());
+        event.reason = Some(self.auth_method_reason());
+        event
+    }
+
+    fn revoked_audit_event(&self, submission_id: Uuid) -> TraceCommonsAuditEvent {
+        TraceCommonsAuditEvent::revoked(self.auth(), submission_id)
+    }
+
+    fn read_audit_event(&self, surface: &str, item_count: usize) -> TraceCommonsAuditEvent {
+        TraceCommonsAuditEvent::read(self.auth(), surface, item_count)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum TraceAuthMethod {
@@ -803,6 +901,9 @@ impl AppState {
         let require_tenant_submission_policy =
             env_truthy("TRACE_COMMONS_REQUIRE_TENANT_SUBMISSION_POLICY");
         let db_mirror = trace_corpus_db_mirror_from_env().await?;
+        if env_truthy(TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY) {
+            validate_required_postgres_trace_rls_ready(db_mirror.as_ref()).await?;
+        }
         let tenant_rollout_gates = TraceTenantRolloutGates::from_env()?;
         let db_contributor_reads = env_truthy("TRACE_COMMONS_DB_CONTRIBUTOR_READS");
         if tenant_rollout_gates.configured(
@@ -1257,6 +1358,46 @@ async fn trace_corpus_db_mirror_from_env() -> anyhow::Result<Option<Arc<dyn Data
         .context("failed to connect Trace Commons DB dual-write mirror")?;
     tracing::info!(backend = %backend, "Trace Commons DB dual-write mirror enabled");
     Ok(Some(db))
+}
+
+async fn validate_required_postgres_trace_rls_ready(
+    db_mirror: Option<&Arc<dyn Database>>,
+) -> anyhow::Result<()> {
+    let Some(db) = db_mirror else {
+        anyhow::bail!(
+            "{TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY} requires TRACE_COMMONS_DB_DUAL_WRITE with DATABASE_BACKEND=postgres"
+        );
+    };
+    let diagnostics = db
+        .trace_corpus_rls_diagnostics()
+        .await
+        .context("failed to inspect Trace Commons PostgreSQL RLS diagnostics")?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY} requires DATABASE_BACKEND=postgres"
+            )
+        })?;
+    validate_required_postgres_trace_rls_diagnostics(&diagnostics)
+}
+
+fn validate_required_postgres_trace_rls_diagnostics(
+    diagnostics: &TraceCorpusRlsDiagnostics,
+) -> anyhow::Result<()> {
+    if diagnostics.production_ready() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY} requires complete Trace Commons RLS policy coverage, enabled RLS, FORCE ROW LEVEL SECURITY on every Trace Commons table, and a non-bypassing runtime role; expected_tables={}, policies={}, rls_enabled={}, force_rls_enabled={}, missing_policies={}, rls_disabled={}, force_rls_disabled={}, expression_mismatches={}, bypass_role={}",
+        diagnostics.expected_table_count,
+        diagnostics.policy_installed_count,
+        diagnostics.rls_enabled_count,
+        diagnostics.force_rls_enabled_count,
+        diagnostics.missing_policy_tables.len(),
+        diagnostics.rls_disabled_tables.len(),
+        diagnostics.force_rls_disabled_tables.len(),
+        diagnostics.policy_expression_mismatch_tables.len(),
+        diagnostics.current_role_bypasses_rls,
+    )
 }
 
 fn env_truthy(key: &str) -> bool {
@@ -2729,12 +2870,15 @@ struct TraceTenantPolicyResponse {
 #[derive(Debug, Serialize)]
 struct TraceCommonsRlsConfigStatus {
     rls_ready: bool,
+    force_rls_ready: bool,
+    production_ready: bool,
     expected_table_count: usize,
     rls_enabled_count: usize,
     force_rls_enabled_count: usize,
     policy_installed_count: usize,
     missing_policy_tables: Vec<String>,
     rls_disabled_tables: Vec<String>,
+    force_rls_disabled_tables: Vec<String>,
     policy_expression_mismatch_tables: Vec<String>,
     current_role_bypasses_rls: bool,
 }
@@ -2743,12 +2887,15 @@ impl From<TraceCorpusRlsDiagnostics> for TraceCommonsRlsConfigStatus {
     fn from(diagnostics: TraceCorpusRlsDiagnostics) -> Self {
         Self {
             rls_ready: diagnostics.rls_ready(),
+            force_rls_ready: diagnostics.force_rls_ready(),
+            production_ready: diagnostics.production_ready(),
             expected_table_count: diagnostics.expected_table_count,
             rls_enabled_count: diagnostics.rls_enabled_count,
             force_rls_enabled_count: diagnostics.force_rls_enabled_count,
             policy_installed_count: diagnostics.policy_installed_count,
             missing_policy_tables: diagnostics.missing_policy_tables,
             rls_disabled_tables: diagnostics.rls_disabled_tables,
+            force_rls_disabled_tables: diagnostics.force_rls_disabled_tables,
             policy_expression_mismatch_tables: diagnostics.policy_expression_mismatch_tables,
             current_role_bypasses_rls: diagnostics.current_role_bypasses_rls,
         }
@@ -3098,14 +3245,14 @@ async fn submit_trace_handler(
     headers: HeaderMap,
     Json(mut envelope): Json<TraceContributionEnvelope>,
 ) -> ApiResult<Json<TraceSubmissionReceipt>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_ctx(state.as_ref(), &headers)?;
     validate_envelope(&envelope)?;
 
-    if let Some(existing) =
-        read_submission_record(&state.root, &tenant.tenant_id, envelope.submission_id)
-            .map_err(internal_error)?
+    if let Some(existing) = tenant
+        .read_submission_record(&state.root, envelope.submission_id)
+        .map_err(internal_error)?
     {
-        if !can_access_submission(&tenant, &existing) {
+        if !tenant.can_access_submission(&existing) {
             return Err(api_error(
                 StatusCode::CONFLICT,
                 "submission id already belongs to another principal",
@@ -3114,28 +3261,28 @@ async fn submit_trace_handler(
         let receipt = receipt_from_record(&existing);
         append_audit_event(
             &state.root,
-            &tenant.tenant_id,
-            TraceCommonsAuditEvent::idempotent_submit(&tenant, envelope.submission_id),
+            tenant.tenant_id(),
+            tenant.idempotent_submit_audit_event(envelope.submission_id),
         )
         .map_err(internal_error)?;
         return Ok(Json(receipt));
     }
 
-    let tenant_policy = tenant_submission_policy_for_request(state.as_ref(), &tenant).await?;
+    let tenant_policy = tenant_submission_policy_for_request(state.as_ref(), tenant.auth()).await?;
     enforce_signed_claim_submission_restrictions(&tenant, &envelope)?;
     enforce_tenant_submission_policy(
-        &tenant,
+        tenant.auth(),
         &envelope,
         tenant_policy.as_ref(),
         state.require_tenant_submission_policy,
     )?;
 
     rescrub_trace_envelope(&mut envelope);
-    let existing_revocations = read_revocations_for_submit(state.as_ref(), &tenant.tenant_id)
+    let existing_revocations = read_revocations_for_submit(state.as_ref(), tenant.tenant_id())
         .await
         .map_err(internal_error)?;
     let existing_derived =
-        read_all_derived_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+        read_all_derived_records(&state.root, tenant.tenant_id()).map_err(internal_error)?;
     let derived_precheck = build_derived_precheck(&envelope, &existing_derived);
     ensure_not_revoked_by_tombstone(
         &existing_revocations,
@@ -3158,14 +3305,14 @@ async fn submit_trace_handler(
 
     let stored_envelope = store_envelope(
         &state,
-        &tenant.tenant_id,
+        tenant.tenant_id(),
         corpus_status,
         "submitted-envelope",
         &envelope,
     )
     .map_err(internal_error)?;
     let derived_record = build_derived_record(
-        &tenant.tenant_id,
+        tenant.tenant_id(),
         corpus_status,
         &envelope,
         derived_precheck,
@@ -3176,10 +3323,10 @@ async fn submit_trace_handler(
         .max_age_days
         .map(|days| received_at + Duration::days(i64::from(days)));
     let record = TraceCommonsSubmissionRecord {
-        tenant_id: tenant.tenant_id.clone(),
-        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-        auth_principal_ref: tenant.principal_ref.clone(),
-        submitted_tenant_scope_ref: envelope.contributor.tenant_scope_ref.clone(),
+        tenant_id: tenant.tenant_id().to_string(),
+        tenant_storage_ref: tenant.tenant_storage_ref(),
+        auth_principal_ref: tenant.principal_ref().to_string(),
+        submitted_tenant_scope_ref: tenant.submitted_tenant_scope_ref(),
         contributor_pseudonym: envelope.contributor.pseudonymous_contributor_id.clone(),
         submission_id: envelope.submission_id,
         trace_id: envelope.trace_id,
@@ -3204,7 +3351,8 @@ async fn submit_trace_handler(
     };
     if state.require_db_mirror_writes {
         let mirror_result =
-            mirror_submission_to_db(&state, &tenant, &record, &derived_record, &envelope).await;
+            mirror_submission_to_db(&state, tenant.auth(), &record, &derived_record, &envelope)
+                .await;
         if let Err(error) = &mirror_result {
             tracing::warn!(%error, submission_id = %record.submission_id, "Trace Commons DB dual-write mirror failed");
             cleanup_submission_file_side_writes(state.as_ref(), &record).map_err(internal_error)?;
@@ -3215,8 +3363,8 @@ async fn submit_trace_handler(
         write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
         append_audit_event(
             &state.root,
-            &tenant.tenant_id,
-            TraceCommonsAuditEvent::submitted(&record, &tenant),
+            tenant.tenant_id(),
+            tenant.submitted_audit_event(&record),
         )
         .map_err(internal_error)?;
     } else {
@@ -3224,12 +3372,13 @@ async fn submit_trace_handler(
         write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
         append_audit_event(
             &state.root,
-            &tenant.tenant_id,
-            TraceCommonsAuditEvent::submitted(&record, &tenant),
+            tenant.tenant_id(),
+            tenant.submitted_audit_event(&record),
         )
         .map_err(internal_error)?;
         let mirror_result =
-            mirror_submission_to_db(&state, &tenant, &record, &derived_record, &envelope).await;
+            mirror_submission_to_db(&state, tenant.auth(), &record, &derived_record, &envelope)
+                .await;
         if let Err(error) = &mirror_result {
             tracing::warn!(%error, submission_id = %record.submission_id, "Trace Commons DB dual-write mirror failed");
         }
@@ -3266,11 +3415,12 @@ async fn revoke_submission(
     headers: &HeaderMap,
     submission_id: Uuid,
 ) -> ApiResult<StatusCode> {
-    let tenant = authenticate(state, headers)?;
-    let mut record = read_submission_record(&state.root, &tenant.tenant_id, submission_id)
+    let tenant = authenticate_ctx(state, headers)?;
+    let mut record = tenant
+        .read_submission_record(&state.root, submission_id)
         .map_err(internal_error)?;
     if let Some(record) = record.as_ref()
-        && !can_access_submission(&tenant, record)
+        && !tenant.can_access_submission(record)
     {
         return Err(api_error(
             StatusCode::NOT_FOUND,
@@ -3278,25 +3428,32 @@ async fn revoke_submission(
         ));
     }
     let db_record = if record.is_none() {
-        db_submission_record_for_revocation(state, &tenant.tenant_id, submission_id)
+        db_submission_record_for_revocation(state, tenant.tenant_id(), submission_id)
             .await
             .map_err(internal_error)?
     } else {
         None
     };
     if let Some(db_record) = db_record.as_ref()
-        && !can_access_storage_submission(&tenant, db_record)
+        && !tenant.can_access_storage_submission(db_record)
     {
         return Err(api_error(
             StatusCode::NOT_FOUND,
             "trace submission not found",
         ));
     }
-    let mut derived = read_derived_record(&state.root, &tenant.tenant_id, submission_id)
+    if record.is_none() && db_record.is_none() {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "trace submission not found",
+        ));
+    }
+    let mut derived = tenant
+        .read_derived_record(&state.root, submission_id)
         .map_err(internal_error)?;
     let tombstone = TraceCommonsRevocation {
-        tenant_id: tenant.tenant_id.clone(),
-        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        tenant_id: tenant.tenant_id().to_string(),
+        tenant_storage_ref: tenant.tenant_storage_ref(),
         submission_id,
         revoked_at: Utc::now(),
         reason: "contributor_revocation".to_string(),
@@ -3322,7 +3479,7 @@ async fn revoke_submission(
     }
     invalidate_export_provenance_for_source(
         &state.root,
-        &tenant.tenant_id,
+        tenant.tenant_id(),
         submission_id,
         "contributor_revocation",
     )
@@ -3331,7 +3488,7 @@ async fn revoke_submission(
     benchmark_revocation_reasons.insert(submission_id, "contributor_revocation".to_string());
     propagate_benchmark_artifact_source_invalidation(
         state,
-        &tenant,
+        tenant.auth(),
         &benchmark_revocation_reasons,
         &BTreeSet::new(),
         false,
@@ -3341,13 +3498,13 @@ async fn revoke_submission(
 
     append_audit_event(
         &state.root,
-        &tenant.tenant_id,
-        TraceCommonsAuditEvent::revoked(&tenant, submission_id),
+        tenant.tenant_id(),
+        tenant.revoked_audit_event(submission_id),
     )
     .map_err(internal_error)?;
     let mirror_result = mirror_revocation_to_db(
         state,
-        &tenant,
+        tenant.auth(),
         submission_id,
         mirrored_record.as_ref(),
         db_record.as_ref(),
@@ -3417,7 +3574,7 @@ async fn submission_status_handler(
     headers: HeaderMap,
     Json(body): Json<TraceSubmissionStatusRequest>,
 ) -> ApiResult<Json<Vec<TraceSubmissionStatusUpdate>>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant = authenticate_ctx(state.as_ref(), &headers)?;
     if body.submission_ids.len() > 500 {
         return Err(api_error(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -3425,7 +3582,7 @@ async fn submission_status_handler(
         ));
     }
 
-    let credit_view = read_contributor_credit_view(state.as_ref(), &tenant)
+    let credit_view = read_contributor_credit_view(state.as_ref(), tenant.auth())
         .await
         .map_err(internal_error)?;
     let visible_by_submission = credit_view
@@ -3434,7 +3591,7 @@ async fn submission_status_handler(
         .map(|record| (record.submission_id, record))
         .collect::<BTreeMap<_, _>>();
     let status_credit_events =
-        read_contributor_status_credit_events(state.as_ref(), &tenant, &credit_view.records)
+        read_contributor_status_credit_events(state.as_ref(), tenant.auth(), &credit_view.records)
             .await
             .map_err(internal_error)?;
     let mut statuses = Vec::new();
@@ -3446,8 +3603,8 @@ async fn submission_status_handler(
 
     append_audit_event_with_db_mirror(
         state.as_ref(),
-        &tenant,
-        TraceCommonsAuditEvent::read(&tenant, "submission_status", statuses.len()),
+        tenant.auth(),
+        tenant.read_audit_event("submission_status", statuses.len()),
         StorageTraceAuditAction::Read,
         StorageTraceAuditSafeMetadata::Empty,
     )
@@ -6807,10 +6964,10 @@ where
 }
 
 fn enforce_signed_claim_submission_restrictions(
-    tenant: &TenantAuth,
+    tenant: &TenantCtx,
     envelope: &TraceContributionEnvelope,
 ) -> ApiResult<()> {
-    if !tenant.allowed_consent_scopes.is_empty() {
+    if !tenant.allowed_consent_scopes().is_empty() {
         let mut requested_scopes = envelope
             .consent
             .scopes
@@ -6820,10 +6977,10 @@ fn enforce_signed_claim_submission_restrictions(
         requested_scopes.insert(envelope.trace_card.consent_scope);
         if let Some(scope) = requested_scopes
             .iter()
-            .find(|scope| !tenant.allowed_consent_scopes.contains(scope))
+            .find(|scope| !tenant.allowed_consent_scopes().contains(scope))
         {
             tracing::warn!(
-                tenant_id = %tenant.tenant_id,
+                tenant_id = %tenant.tenant_id(),
                 ?scope,
                 "Trace Commons signed token rejected disallowed consent scope"
             );
@@ -6834,7 +6991,7 @@ fn enforce_signed_claim_submission_restrictions(
         }
     }
 
-    if !tenant.allowed_uses.is_empty() {
+    if !tenant.allowed_uses().is_empty() {
         if envelope.trace_card.allowed_uses.is_empty() {
             return Err(api_error(
                 StatusCode::FORBIDDEN,
@@ -6845,10 +7002,10 @@ fn enforce_signed_claim_submission_restrictions(
             .trace_card
             .allowed_uses
             .iter()
-            .find(|allowed_use| !tenant.allowed_uses.contains(allowed_use))
+            .find(|allowed_use| !tenant.allowed_uses().contains(allowed_use))
         {
             tracing::warn!(
-                tenant_id = %tenant.tenant_id,
+                tenant_id = %tenant.tenant_id(),
                 ?allowed_use,
                 "Trace Commons signed token rejected disallowed allowed use"
             );
@@ -6940,15 +7097,15 @@ fn enforce_tenant_submission_policy(
     Ok(())
 }
 
-fn enforce_submission_quota(state: &AppState, tenant: &TenantAuth) -> ApiResult<()> {
+fn enforce_submission_quota(state: &AppState, tenant: &TenantCtx) -> ApiResult<()> {
     let quota = state.submission_quota;
-    if quota.is_disabled() || tenant.role != TokenRole::Contributor {
+    if quota.is_disabled() || tenant.role() != TokenRole::Contributor {
         return Ok(());
     }
 
     let window_start = Utc::now() - Duration::hours(1);
     let records =
-        read_all_submission_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+        read_all_submission_records(&state.root, tenant.tenant_id()).map_err(internal_error)?;
     if quota.max_per_tenant_per_hour > 0 {
         let tenant_count = records
             .iter()
@@ -6957,7 +7114,7 @@ fn enforce_submission_quota(state: &AppState, tenant: &TenantAuth) -> ApiResult<
             .count();
         if tenant_count >= quota.max_per_tenant_per_hour {
             tracing::warn!(
-                tenant_id = %tenant.tenant_id,
+                tenant_id = %tenant.tenant_id(),
                 limit = quota.max_per_tenant_per_hour,
                 "Trace Commons tenant submission quota exceeded"
             );
@@ -6973,14 +7130,14 @@ fn enforce_submission_quota(state: &AppState, tenant: &TenantAuth) -> ApiResult<
             .iter()
             .filter(|record| submission_counts_toward_quota(record))
             .filter(|record| {
-                record.auth_principal_ref == tenant.principal_ref
+                record.auth_principal_ref == tenant.principal_ref()
                     && record.received_at >= window_start
             })
             .count();
         if principal_count >= quota.max_per_principal_per_hour {
             tracing::warn!(
-                tenant_id = %tenant.tenant_id,
-                principal_ref = %tenant.principal_ref,
+                tenant_id = %tenant.tenant_id(),
+                principal_ref = %tenant.principal_ref(),
                 limit = quota.max_per_principal_per_hour,
                 "Trace Commons principal submission quota exceeded"
             );
@@ -7494,6 +7651,10 @@ fn authenticate(state: &AppState, headers: &HeaderMap) -> ApiResult<TenantAuth> 
         return verifier.authenticate(token, false, false);
     }
     Err(api_error(StatusCode::FORBIDDEN, "unknown tenant token"))
+}
+
+fn authenticate_ctx(state: &AppState, headers: &HeaderMap) -> ApiResult<TenantCtx> {
+    authenticate(state, headers).map(TenantCtx::from_auth)
 }
 
 fn require_reviewer(auth: &TenantAuth) -> ApiResult<()> {
@@ -17712,6 +17873,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_ignores_forged_envelope_tenant_scope_at_store_boundary() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        let submission_id = envelope.submission_id;
+        envelope.contributor.tenant_scope_ref = Some(tenant_storage_ref("tenant-b"));
+
+        let _ = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
+            .await
+            .expect("submission succeeds under authenticated tenant");
+
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("tenant-a record reads")
+            .expect("tenant-a record exists");
+        assert_eq!(record.tenant_id, "tenant-a");
+        assert_eq!(
+            record.submitted_tenant_scope_ref.as_deref(),
+            Some(tenant_storage_ref("tenant-a").as_str())
+        );
+        assert!(
+            read_submission_record(temp.path(), "tenant-b", submission_id)
+                .expect("tenant-b record lookup succeeds")
+                .is_none()
+        );
+        assert!(!audit_log_path(temp.path(), "tenant-b").exists());
+    }
+
+    #[tokio::test]
+    async fn revoke_rejects_cross_tenant_submission_before_writing_tombstone() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let envelope = sample_envelope().await;
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("tenant-a submission succeeds");
+
+        let error = revoke_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            AxumPath(submission_id),
+        )
+        .await
+        .expect_err("cross-tenant revoke is rejected");
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+        assert!(
+            read_revocation(temp.path(), "tenant-b", submission_id)
+                .expect("tenant-b tombstone lookup succeeds")
+                .is_none()
+        );
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("tenant-a record reads")
+            .expect("tenant-a record exists");
+        assert_ne!(record.status, TraceCorpusStatus::Revoked);
+
+        let status = revoke_trace_handler(
+            State(state),
+            auth_headers("token-a"),
+            AxumPath(submission_id),
+        )
+        .await
+        .expect("owner can still revoke");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
     async fn submit_quota_limits_tenant_new_submissions_but_allows_idempotent_retry() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state_with_submission_quota(
@@ -18509,6 +18741,43 @@ mod tests {
                 .await
                 .expect("tenant with policy can submit");
         assert_eq!(receipt.status, "quarantined");
+    }
+
+    fn production_ready_rls_diagnostics_for_tests() -> TraceCorpusRlsDiagnostics {
+        TraceCorpusRlsDiagnostics {
+            expected_table_count: 2,
+            rls_enabled_count: 2,
+            force_rls_enabled_count: 2,
+            policy_installed_count: 2,
+            missing_policy_tables: Vec::new(),
+            rls_disabled_tables: Vec::new(),
+            force_rls_disabled_tables: Vec::new(),
+            policy_expression_mismatch_tables: Vec::new(),
+            current_role_bypasses_rls: false,
+        }
+    }
+
+    #[test]
+    fn required_postgres_trace_rls_gate_requires_force_rls_and_non_bypassing_role() {
+        validate_required_postgres_trace_rls_diagnostics(
+            &production_ready_rls_diagnostics_for_tests(),
+        )
+        .expect("production-ready diagnostics pass");
+
+        let mut missing_force_rls = production_ready_rls_diagnostics_for_tests();
+        missing_force_rls.force_rls_enabled_count = 1;
+        missing_force_rls
+            .force_rls_disabled_tables
+            .push("trace_object_refs".to_string());
+        let error = validate_required_postgres_trace_rls_diagnostics(&missing_force_rls)
+            .expect_err("missing FORCE RLS blocks production gate");
+        assert!(error.to_string().contains("FORCE ROW LEVEL SECURITY"));
+
+        let mut bypassing_role = production_ready_rls_diagnostics_for_tests();
+        bypassing_role.current_role_bypasses_rls = true;
+        let error = validate_required_postgres_trace_rls_diagnostics(&bypassing_role)
+            .expect_err("bypassing role blocks production gate");
+        assert!(error.to_string().contains("bypass_role=true"));
     }
 
     #[tokio::test]

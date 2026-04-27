@@ -102,10 +102,11 @@ fn ready_rls_diagnostics() -> TraceCorpusRlsDiagnostics {
     TraceCorpusRlsDiagnostics {
         expected_table_count: 2,
         rls_enabled_count: 2,
-        force_rls_enabled_count: 0,
+        force_rls_enabled_count: 2,
         policy_installed_count: 2,
         missing_policy_tables: Vec::new(),
         rls_disabled_tables: Vec::new(),
+        force_rls_disabled_tables: Vec::new(),
         policy_expression_mismatch_tables: Vec::new(),
         current_role_bypasses_rls: false,
     }
@@ -640,6 +641,15 @@ fn trace_corpus_rls_diagnostics_ready_requires_complete_safe_policy_state() {
     let mut bypass_role = ready_rls_diagnostics();
     bypass_role.current_role_bypasses_rls = true;
     assert!(!bypass_role.rls_ready());
+
+    let mut force_rls_disabled = ready_rls_diagnostics();
+    force_rls_disabled.force_rls_enabled_count = 1;
+    force_rls_disabled
+        .force_rls_disabled_tables
+        .push("trace_object_refs".to_string());
+    assert!(force_rls_disabled.rls_ready());
+    assert!(!force_rls_disabled.force_rls_ready());
+    assert!(!force_rls_disabled.production_ready());
 }
 
 #[tokio::test]
@@ -1821,6 +1831,14 @@ async fn pg_trace_corpus_rls_diagnostics_report_policy_coverage() {
     assert!(diagnostics.rls_disabled_tables.is_empty());
     assert!(diagnostics.policy_expression_mismatch_tables.is_empty());
     assert!(diagnostics.force_rls_enabled_count <= diagnostics.expected_table_count);
+    assert_eq!(
+        diagnostics.force_rls_ready(),
+        diagnostics.force_rls_enabled_count == diagnostics.expected_table_count
+    );
+    assert_eq!(
+        diagnostics.production_ready(),
+        diagnostics.rls_ready() && diagnostics.force_rls_ready()
+    );
     assert_eq!(
         diagnostics.rls_ready(),
         !diagnostics.current_role_bypasses_rls,

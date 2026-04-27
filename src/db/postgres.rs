@@ -153,6 +153,7 @@ impl Database for PgBackend {
         let mut force_rls_enabled_count = 0usize;
         let mut policy_installed_count = 0usize;
         let mut rls_disabled_tables = Vec::new();
+        let mut force_rls_disabled_tables = Vec::new();
         let mut missing_policy_tables = Vec::new();
         let mut policy_expression_mismatch_tables = Vec::new();
         for row in rows {
@@ -169,6 +170,8 @@ impl Database for PgBackend {
             }
             if force_rls_enabled {
                 force_rls_enabled_count += 1;
+            } else {
+                force_rls_disabled_tables.push(table.clone());
             }
             if has_policy {
                 policy_installed_count += 1;
@@ -183,12 +186,15 @@ impl Database for PgBackend {
             if !seen_tables.contains(table) {
                 missing_policy_tables.push(table.clone());
                 rls_disabled_tables.push(table.clone());
+                force_rls_disabled_tables.push(table.clone());
             }
         }
         missing_policy_tables.sort();
         missing_policy_tables.dedup();
         rls_disabled_tables.sort();
         rls_disabled_tables.dedup();
+        force_rls_disabled_tables.sort();
+        force_rls_disabled_tables.dedup();
         policy_expression_mismatch_tables.sort();
         policy_expression_mismatch_tables.dedup();
 
@@ -201,6 +207,7 @@ impl Database for PgBackend {
             policy_installed_count,
             missing_policy_tables,
             rls_disabled_tables,
+            force_rls_disabled_tables,
             policy_expression_mismatch_tables,
             current_role_bypasses_rls: owns_trace_tables || bypass_role,
         }))

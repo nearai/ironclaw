@@ -7110,18 +7110,24 @@ function loadTraceCommonsSettings() {
     apiFetch('/api/traces/policy'),
     apiFetch('/api/traces/credit').catch(function() { return { summary: {}, records: [] }; }),
     apiFetch('/api/traces/submissions').catch(function() { return []; }),
+    apiFetch('/api/traces/queue-status').catch(function() { return null; }),
+    apiFetch('/api/traces/credit-notice').catch(function() { return { credit_notice: null }; }),
   ]).then(function(results) {
     var policyResponse = results[0] || {};
     var credit = results[1] || {};
     var submissions = results[2] || [];
+    var queueStatus = results[3] || null;
+    var creditNotice = (results[4] || {}).credit_notice || null;
     var policy = policyResponse.policy || {};
     var summary = credit.summary || {};
     var report = credit.report || {};
-    var persistedHolds = Array.isArray(policyResponse.held_queue) ? policyResponse.held_queue : [];
+    var persistedHolds = queueStatus && Array.isArray(queueStatus.held_queue)
+      ? queueStatus.held_queue
+      : (Array.isArray(policyResponse.held_queue) ? policyResponse.held_queue : []);
     var latestCredit = traceLastFlushReport && traceLastFlushReport.credit_notice
       ? traceLastFlushReport.credit_notice
-      : summary;
-    var queuedCount = policyResponse.queued_envelopes || 0;
+      : (creditNotice || summary);
+    var queuedCount = traceQueueCount(queueStatus, policyResponse.queued_envelopes || 0);
     var selectedTools = Array.isArray(policy.selected_tools) ? policy.selected_tools.join(', ') : '';
     var scopes = ['debugging_evaluation', 'benchmark_only', 'ranking_training', 'model_training'];
     var scopeOptions = scopes.map(function(scope) {
@@ -7139,6 +7145,10 @@ function loadTraceCommonsSettings() {
       + traceActionsRow('<button id="trace-commons-save-btn" class="btn-primary">Save</button>')
       + '</div>'
       + '<div class="settings-group">'
+      + '<div class="settings-group-title">EdDSA Upload Claim Issuer</div>'
+      + traceUploadIssuerRows(policy)
+      + '</div>'
+      + '<div class="settings-group">'
       + '<div class="settings-group-title">Autonomous Submission</div>'
       + traceCheckboxRow('trace-commons-text', 'Include redacted message text', policy.include_message_text === true)
       + traceCheckboxRow('trace-commons-payloads', 'Include redacted tool payloads', policy.include_tool_payloads === true)
@@ -7151,10 +7161,13 @@ function loadTraceCommonsSettings() {
       + '</div>'
       + '<div class="settings-group">'
       + '<div class="settings-group-title">Queue / Submit</div>'
-      + traceDisplayRow('Queue state', traceQueueStateText(policy, queuedCount))
-      + traceDisplayRow('Queued locally', queuedCount)
+      + traceQueueDiagnosticRows(queueStatus, policy, queuedCount)
       + traceHeldRows(traceLastFlushReport, persistedHolds)
       + traceActionsRow('<button id="trace-commons-flush-btn" class="btn-secondary">Submit / Flush Queue</button>')
+      + '</div>'
+      + '<div class="settings-group">'
+      + '<div class="settings-group-title">Credit Notice</div>'
+      + traceCreditNoticeRows(creditNotice)
       + '</div>'
       + '<div class="settings-group">'
       + '<div class="settings-group-title">Credit</div>'
@@ -7170,6 +7183,17 @@ function loadTraceCommonsSettings() {
 
     document.getElementById('trace-commons-save-btn').addEventListener('click', saveTraceCommonsSettings);
     document.getElementById('trace-commons-flush-btn').addEventListener('click', flushTraceCommonsQueue);
+    var creditAckBtn = document.getElementById('trace-commons-credit-ack-btn');
+    if (creditAckBtn) {
+      creditAckBtn.addEventListener('click', function() {
+        updateTraceCreditNotice('acknowledge');
+      });
+    }
+    document.querySelectorAll('[data-action="trace-credit-snooze"]').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        updateTraceCreditNotice('snooze', parseInt(btn.dataset.hours || '24', 10));
+      });
+    });
     document.querySelectorAll('[data-action^="trace-operator-"]').forEach(function(btn) {
       btn.addEventListener('click', function() {
         runTraceOperatorAction(btn.dataset.action.replace('trace-operator-', ''));
@@ -7215,6 +7239,16 @@ function traceTextRow(id, label, value, placeholder) {
     + '</div>';
 }
 
+function traceSensitiveTextRow(id, label, configured, placeholder, description) {
+  var resolvedPlaceholder = configured ? 'configured; enter a replacement value' : (placeholder || '');
+  return '<div class="settings-row">'
+    + '<div class="settings-label-wrap"><div class="settings-label">' + escapeHtml(label) + '</div>'
+    + (description ? '<div class="settings-description">' + escapeHtml(description) + '</div>' : '')
+    + '</div>'
+    + '<input class="settings-input" type="password" id="' + id + '" value="" placeholder="' + escapeHtml(resolvedPlaceholder) + '" autocomplete="off" data-configured="' + (configured ? 'true' : 'false') + '">'
+    + '</div>';
+}
+
 function traceNumberRow(id, label, value, step, min, max) {
   var normalizedValue = value === undefined || value === null ? '' : String(value);
   return '<div class="settings-row">'
@@ -7234,10 +7268,139 @@ function traceActionsRow(actionsHtml) {
   return '<div class="settings-row"><div class="settings-label-wrap"></div><div class="trace-actions">' + actionsHtml + '</div></div>';
 }
 
-function traceQueueStateText(policy, queuedCount) {
+function traceUploadIssuerRows(policy) {
+  policy = policy || {};
+  var hosts = Array.isArray(policy.upload_token_issuer_allowed_hosts)
+    ? policy.upload_token_issuer_allowed_hosts.join(', ')
+    : '';
+  var tenantConfigured = !!policy.upload_token_tenant_id;
+  return ''
+    + traceTextRow('trace-commons-upload-issuer-url', 'Issuer URL', policy.upload_token_issuer_url || '', 'https://issuer.example/v1/upload-claims')
+    + traceTextRow('trace-commons-upload-issuer-hosts', 'Allowed issuer hosts', hosts, 'issuer.example, claims.internal')
+    + traceTextRow('trace-commons-upload-audience', 'Audience claim', policy.upload_token_audience || '', 'trace-commons')
+    + traceSensitiveTextRow('trace-commons-upload-tenant-id', 'Tenant claim', tenantConfigured, 'tenant claim value', 'Stored values are masked after saving.')
+    + traceCheckboxRow('trace-commons-upload-tenant-clear', 'Clear stored tenant claim', false)
+    + traceTextRow('trace-commons-upload-workload-env', 'Workload token env', policy.upload_token_workload_token_env || '', 'IRONCLAW_TRACE_WORKLOAD_TOKEN')
+    + traceNumberRow('trace-commons-upload-timeout-ms', 'Issuer timeout ms', policy.upload_token_issuer_timeout_ms || 5000, '100', '1', '60000')
+    + traceDisplayRow('Issuer config status', traceUploadIssuerStatusText(policy, tenantConfigured));
+}
+
+function traceUploadIssuerStatusText(policy, tenantConfigured) {
+  policy = policy || {};
+  if (!policy.upload_token_issuer_url) return 'disabled';
+  var parts = ['issuer configured'];
+  var hosts = Array.isArray(policy.upload_token_issuer_allowed_hosts)
+    ? policy.upload_token_issuer_allowed_hosts.length
+    : 0;
+  parts.push(hosts + ' allowed host' + (hosts === 1 ? '' : 's'));
+  parts.push(policy.upload_token_audience ? 'audience set' : 'audience unset');
+  parts.push(tenantConfigured ? 'tenant claim set' : 'tenant claim unset');
+  parts.push(policy.upload_token_workload_token_env ? 'workload env set' : 'workload env unset');
+  return parts.join(' | ');
+}
+
+function traceQueueCount(queueStatus, fallback) {
+  if (queueStatus && queueStatus.queued_envelopes !== undefined) return queueStatus.queued_envelopes || 0;
+  if (queueStatus && queueStatus.queued_count !== undefined) return queueStatus.queued_count || 0;
+  return fallback || 0;
+}
+
+function traceQueueDiagnosticRows(queueStatus, policy, queuedCount) {
+  var diagnostics = queueStatus && queueStatus.diagnostics ? queueStatus.diagnostics : (queueStatus || {});
+  var heldCount = queueStatus && queueStatus.held_envelopes !== undefined
+    ? queueStatus.held_envelopes
+    : (diagnostics.held_count || 0);
+  var rows = ''
+    + traceDisplayRow('Queue state', traceQueueStateText(policy, queuedCount, diagnostics))
+    + traceDisplayRow('Queued locally', queuedCount)
+    + traceDisplayRow('Held locally', heldCount);
+  if (!queueStatus) {
+    return rows + traceDisplayRow('Diagnostics', 'not available from this gateway');
+  }
+  rows += traceDisplayRow('Ready to flush', diagnostics.ready_to_flush ? 'yes' : 'no')
+    + traceDisplayRow('Submitted / revoked / expired', [
+      diagnostics.submitted_count || 0,
+      diagnostics.revoked_count || 0,
+      diagnostics.expired_count || 0,
+    ].join(' / '))
+    + traceDisplayRow('Manual / policy / retry holds', [
+      diagnostics.manual_review_hold_count || 0,
+      diagnostics.policy_hold_count || 0,
+      diagnostics.retry_scheduled_count || 0,
+    ].join(' / '))
+    + traceDisplayRow('Next retry', traceDateLabel(diagnostics.next_retry_at))
+    + traceQueueTelemetryRows(diagnostics.telemetry || {})
+    + traceQueueWarningRows(diagnostics.warnings || []);
+  return rows;
+}
+
+function traceQueueStateText(policy, queuedCount, diagnostics) {
+  if (diagnostics && diagnostics.policy_enabled === false) return 'disabled';
   if (!policy || !policy.enabled) return 'disabled';
+  if (diagnostics && diagnostics.endpoint_configured === false) return 'enabled, missing ingestion endpoint';
   if (!policy.ingestion_endpoint) return 'enabled, missing ingestion endpoint';
+  if (diagnostics && diagnostics.ready_to_flush === false && queuedCount > 0) return 'queued, waiting on policy or retry';
   return queuedCount > 0 ? 'ready to flush, ' + queuedCount + ' queued' : 'enabled, queue idle';
+}
+
+function traceQueueTelemetryRows(telemetry) {
+  telemetry = telemetry || {};
+  var rows = ''
+    + traceDisplayRow('Last flush attempt', traceDateLabel(telemetry.last_flush_attempt_at))
+    + traceDisplayRow('Last successful flush', traceDateLabel(telemetry.last_successful_flush_at))
+    + traceDisplayRow('Last failed flush', traceDateLabel(telemetry.last_failed_flush_at))
+    + traceDisplayRow('Consecutive flush failures', telemetry.consecutive_flush_failures || 0)
+    + traceDisplayRow('Last credit status sync', traceDateLabel(telemetry.last_status_sync_at))
+    + traceDisplayRow('Last compaction', traceCompactionLabel(telemetry));
+  if (telemetry.last_failure) {
+    rows += traceDisplayRow('Last failure', traceFailureLabel(telemetry.last_failure));
+  }
+  return rows;
+}
+
+function traceCompactionLabel(telemetry) {
+  var compaction = telemetry.last_compaction || {};
+  var reclaimed = (compaction.duplicate_envelopes_removed || 0) + (compaction.orphan_hold_sidecars_removed || 0);
+  var parts = [traceDateLabel(telemetry.last_compaction_at)];
+  if (reclaimed || telemetry.compaction_reclaimed_items_total) {
+    parts.push('reclaimed ' + reclaimed + ' last / ' + (telemetry.compaction_reclaimed_items_total || 0) + ' total');
+  }
+  return parts.join(' | ');
+}
+
+function traceFailureLabel(failure) {
+  if (!failure) return 'none';
+  return [
+    failure.kind || 'unknown',
+    failure.error_hash ? 'hash ' + failure.error_hash : '',
+    traceDateLabel(failure.at),
+  ].filter(Boolean).join(' | ');
+}
+
+function traceQueueWarningRows(warnings) {
+  if (!Array.isArray(warnings) || warnings.length === 0) return traceDisplayRow('Queue warnings', 'none');
+  return traceDisplayRow('Queue warnings', warnings.map(function(warning) {
+    return [
+      warning.severity || 'warning',
+      warning.count || 0,
+      traceSafeStatusText(warning.message || warning.kind || 'queue warning'),
+      warning.promotion_blocking ? 'blocks promotion' : '',
+      traceSafeStatusText(warning.recommended_action || ''),
+    ].filter(Boolean).join(': ');
+  }).join(' | '));
+}
+
+function traceCreditNoticeRows(summary) {
+  if (!summary) return traceDisplayRow('Notice status', 'none due');
+  var explanations = Array.isArray(summary.recent_explanations)
+    ? summary.recent_explanations.slice(0, 3).map(traceSafeStatusText)
+    : [];
+  return ''
+    + traceDisplayRow('Notice status', 'due')
+    + traceDisplayRow('Notice credit', 'pending +' + Number(summary.pending_credit || 0).toFixed(2) + ' | final +' + Number(summary.final_credit || 0).toFixed(2))
+    + traceDisplayRow('Notice records', (summary.submissions_submitted || 0) + ' submitted | ' + (summary.submissions_revoked || 0) + ' revoked | ' + (summary.submissions_expired || 0) + ' expired')
+    + (explanations.length ? traceDisplayRow('Notice reasons', explanations.join(' | ')) : '')
+    + traceActionsRow('<button id="trace-commons-credit-ack-btn" class="btn-secondary">Acknowledge</button><button class="btn-secondary" data-action="trace-credit-snooze" data-hours="24">Snooze 24h</button><button class="btn-secondary" data-action="trace-credit-snooze" data-hours="168">Snooze 7d</button>');
 }
 
 function traceMetricRows(summary, submissions, report) {
@@ -7293,12 +7456,12 @@ function traceHeldRows(report, persistedHolds) {
   if (report && report.held !== undefined) rows += traceDisplayRow('Held last flush', report.held || 0);
   if (Array.isArray(persistedHolds) && persistedHolds.length > 0) {
     rows += traceDisplayRow('Held queue', persistedHolds.map(function(hold) {
-      return (hold.submission_id ? String(hold.submission_id).substring(0, 8) + ': ' : '') + (hold.reason || 'held');
+      return (hold.submission_id ? String(hold.submission_id).substring(0, 8) + ': ' : '') + traceSafeStatusText(hold.reason || 'held');
     }).join(' | '));
   }
   if (report && Array.isArray(report.holds) && report.holds.length > 0) {
     rows += traceDisplayRow('Held reasons', report.holds.map(function(hold) {
-      return (hold.submission_id ? String(hold.submission_id).substring(0, 8) + ': ' : '') + (hold.reason || 'held');
+      return (hold.submission_id ? String(hold.submission_id).substring(0, 8) + ': ' : '') + traceSafeStatusText(hold.reason || 'held');
     }).join(' | '));
   }
   return rows;
@@ -7316,6 +7479,13 @@ function traceDisplayRow(label, value) {
     + '<div class="settings-label-wrap"><div class="settings-label">' + escapeHtml(label) + '</div></div>'
     + '<div class="settings-display-value trace-display-value">' + escapeHtml(String(value)) + '</div>'
     + '</div>';
+}
+
+function traceSafeStatusText(value) {
+  return String(value || '')
+    .replace(/https?:\/\/[^\s"'<>]+/gi, '[endpoint]')
+    .replace(/\b(bearer|token|secret|authorization)\s*[:=]\s*[^\s,;]+/gi, '$1=[redacted]')
+    .replace(/\b[A-Za-z0-9._~+/=]{32,}\b/g, '[redacted]');
 }
 
 function traceSubmissionFilterControls(submissions) {
@@ -7744,8 +7914,9 @@ function traceOperatorFetch(request, bearerToken) {
 }
 
 function traceOperatorFormatResult(data) {
-  var highlights = traceOperatorHighlights(data);
-  var body = data === undefined ? 'undefined' : JSON.stringify(data, null, 2);
+  var safeData = traceRedactTraceResultData(data);
+  var highlights = traceOperatorHighlights(safeData);
+  var body = safeData === undefined ? 'undefined' : JSON.stringify(safeData, null, 2);
   return (highlights ? highlights + '\n\n' : '') + body;
 }
 
@@ -7753,8 +7924,6 @@ function traceOperatorHighlights(data) {
   var labels = {
     submission_id: 'submission ids',
     trace_id: 'trace ids',
-    tenant_id: 'tenant ids',
-    tenant_storage_ref: 'tenant storage refs',
     status: 'statuses',
     review_assigned_to_principal_ref: 'review assignees',
     review_assigned_at: 'review assigned at',
@@ -7806,6 +7975,28 @@ function traceOperatorHighlights(data) {
   return lines.length ? 'Highlights\n' + lines.join('\n') : '';
 }
 
+function traceRedactTraceResultData(value) {
+  if (typeof value === 'string') return traceSafeStatusText(value);
+  if (!value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(traceRedactTraceResultData);
+  var redacted = {};
+  Object.keys(value).forEach(function(key) {
+    var lower = key.toLowerCase();
+    if (lower === 'tenant_id' || lower === 'tenant_storage_ref') {
+      redacted[key] = '[tenant redacted]';
+    } else if (lower.indexOf('token') !== -1 || lower.indexOf('secret') !== -1 || lower === 'authorization') {
+      redacted[key] = '[redacted]';
+    } else if (lower === 'raw_trace' || lower === 'raw_trace_body' || lower === 'trace_body' || lower === 'body') {
+      redacted[key] = '[trace body redacted]';
+    } else if (lower === 'endpoint_secret' || lower === 'endpoint_token') {
+      redacted[key] = '[redacted]';
+    } else {
+      redacted[key] = traceRedactTraceResultData(value[key]);
+    }
+  });
+  return redacted;
+}
+
 function traceCollectFields(value, labels, hits) {
   if (!value || typeof value !== 'object') return;
   if (Array.isArray(value)) {
@@ -7829,22 +8020,39 @@ function saveTraceCommonsSettings() {
     .split(/[\n,]/)
     .map(function(tool) { return tool.trim(); })
     .filter(Boolean);
+  var uploadTenantInput = document.getElementById('trace-commons-upload-tenant-id');
+  var uploadTenantClear = document.getElementById('trace-commons-upload-tenant-clear');
+  var uploadTimeout = parseInt(document.getElementById('trace-commons-upload-timeout-ms').value || '5000', 10);
+  var payload = {
+    enabled: document.getElementById('trace-commons-enabled').checked,
+    endpoint: document.getElementById('trace-commons-endpoint').value.trim(),
+    bearer_token_env: document.getElementById('trace-commons-token-env').value.trim() || 'IRONCLAW_TRACE_SUBMIT_TOKEN',
+    upload_token_issuer_url: document.getElementById('trace-commons-upload-issuer-url').value.trim(),
+    upload_token_issuer_allowed_hosts: (document.getElementById('trace-commons-upload-issuer-hosts').value || '')
+      .split(/[\n,]/)
+      .map(function(host) { return host.trim(); })
+      .filter(Boolean),
+    upload_token_audience: document.getElementById('trace-commons-upload-audience').value.trim(),
+    upload_token_workload_token_env: document.getElementById('trace-commons-upload-workload-env').value.trim(),
+    upload_token_issuer_timeout_ms: Number.isFinite(uploadTimeout) ? Math.max(1, uploadTimeout) : 5000,
+    include_message_text: document.getElementById('trace-commons-text').checked,
+    include_tool_payloads: document.getElementById('trace-commons-payloads').checked,
+    auto_submit_failed_traces: document.getElementById('trace-commons-auto-failed').checked,
+    auto_submit_high_value_traces: document.getElementById('trace-commons-auto-high-value').checked,
+    selected_tools: selectedTools,
+    require_manual_approval_when_pii_detected: document.getElementById('trace-commons-pii-review').checked,
+    min_submission_score: parseFloat(document.getElementById('trace-commons-min-score').value || '0.35'),
+    credit_notice_interval_hours: parseInt(document.getElementById('trace-commons-credit-hours').value || '168', 10),
+    default_scope: document.getElementById('trace-commons-scope').value,
+  };
+  if (uploadTenantClear && uploadTenantClear.checked) {
+    payload.upload_token_tenant_id = '';
+  } else if (uploadTenantInput && uploadTenantInput.value.trim()) {
+    payload.upload_token_tenant_id = uploadTenantInput.value.trim();
+  }
   apiFetch('/api/traces/policy', {
     method: 'PUT',
-    body: {
-      enabled: document.getElementById('trace-commons-enabled').checked,
-      endpoint: document.getElementById('trace-commons-endpoint').value.trim(),
-      bearer_token_env: document.getElementById('trace-commons-token-env').value.trim() || 'IRONCLAW_TRACE_SUBMIT_TOKEN',
-      include_message_text: document.getElementById('trace-commons-text').checked,
-      include_tool_payloads: document.getElementById('trace-commons-payloads').checked,
-      auto_submit_failed_traces: document.getElementById('trace-commons-auto-failed').checked,
-      auto_submit_high_value_traces: document.getElementById('trace-commons-auto-high-value').checked,
-      selected_tools: selectedTools,
-      require_manual_approval_when_pii_detected: document.getElementById('trace-commons-pii-review').checked,
-      min_submission_score: parseFloat(document.getElementById('trace-commons-min-score').value || '0.35'),
-      credit_notice_interval_hours: parseInt(document.getElementById('trace-commons-credit-hours').value || '168', 10),
-      default_scope: document.getElementById('trace-commons-scope').value,
-    },
+    body: payload,
   }).then(function() {
     showToast('Trace Commons policy saved', 'success');
     loadTraceCommonsSettings();
@@ -7873,6 +8081,23 @@ function traceCreditNoticeToast(summary) {
   if (!summary) return '';
   return '. Credit: pending +' + Number(summary.pending_credit || 0).toFixed(2)
     + ', final +' + Number(summary.final_credit || 0).toFixed(2);
+}
+
+function updateTraceCreditNotice(action, snoozeHours) {
+  var body = { action: action };
+  if (action === 'snooze') body.snooze_hours = snoozeHours || 24;
+  apiFetch('/api/traces/credit-notice', {
+    method: 'POST',
+    body: body,
+  }).then(function(response) {
+    showToast(action === 'snooze' ? 'Trace credit notice snoozed' : 'Trace credit notice acknowledged', 'success');
+    if (response && Object.prototype.hasOwnProperty.call(response, 'credit_notice')) {
+      traceLastFlushReport = response.credit_notice ? { credit_notice: response.credit_notice } : null;
+    }
+    loadTraceCommonsSettings();
+  }).catch(function(err) {
+    showToast('Trace credit notice update failed: ' + err.message, 'error');
+  });
 }
 
 function revokeTraceSubmission(submissionId) {

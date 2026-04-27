@@ -1210,6 +1210,7 @@ pub struct TraceCorpusRlsDiagnostics {
     pub policy_installed_count: usize,
     pub missing_policy_tables: Vec<String>,
     pub rls_disabled_tables: Vec<String>,
+    pub force_rls_disabled_tables: Vec<String>,
     pub policy_expression_mismatch_tables: Vec<String>,
     pub current_role_bypasses_rls: bool,
 }
@@ -1222,6 +1223,15 @@ impl TraceCorpusRlsDiagnostics {
             && self.policy_installed_count == self.expected_table_count
             && self.rls_enabled_count == self.expected_table_count
             && !self.current_role_bypasses_rls
+    }
+
+    pub fn force_rls_ready(&self) -> bool {
+        self.force_rls_disabled_tables.is_empty()
+            && self.force_rls_enabled_count == self.expected_table_count
+    }
+
+    pub fn production_ready(&self) -> bool {
+        self.rls_ready() && self.force_rls_ready()
     }
 }
 

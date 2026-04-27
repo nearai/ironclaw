@@ -27,6 +27,109 @@ pub struct EncryptedTraceArtifactReceipt {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceArtifactProviderConfig {
+    pub kind: TraceArtifactProviderKind,
+    pub object_store: String,
+}
+
+impl TraceArtifactProviderConfig {
+    pub fn local_encrypted(object_store: impl Into<String>) -> anyhow::Result<Self> {
+        Self::new(TraceArtifactProviderKind::LocalEncrypted, object_store)
+    }
+
+    pub fn service_owned_remote(object_store: impl Into<String>) -> anyhow::Result<Self> {
+        Self::new(TraceArtifactProviderKind::ServiceOwnedRemote, object_store)
+    }
+
+    fn new(
+        kind: TraceArtifactProviderKind,
+        object_store: impl Into<String>,
+    ) -> anyhow::Result<Self> {
+        let object_store = object_store.into();
+        validate_non_empty_ref("trace artifact object store", &object_store)?;
+        anyhow::ensure!(
+            object_store
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')),
+            "trace artifact object store contains unsupported characters"
+        );
+        Ok(Self { kind, object_store })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceArtifactProviderKind {
+    LocalEncrypted,
+    ServiceOwnedRemote,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceArtifactScope {
+    pub tenant_storage_ref: String,
+    pub submission_storage_ref: String,
+}
+
+impl TraceArtifactScope {
+    pub fn new(
+        tenant_storage_ref: impl Into<String>,
+        submission_storage_ref: impl Into<String>,
+    ) -> Self {
+        Self {
+            tenant_storage_ref: tenant_storage_ref.into(),
+            submission_storage_ref: submission_storage_ref.into(),
+        }
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        validate_non_empty_ref("tenant storage ref", &self.tenant_storage_ref)?;
+        validate_non_empty_ref("submission storage ref", &self.submission_storage_ref)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceArtifactObjectRef {
+    pub provider_kind: TraceArtifactProviderKind,
+    pub object_store: String,
+    pub tenant_storage_ref: String,
+    pub submission_storage_ref: String,
+    pub artifact_kind: TraceArtifactKind,
+    pub object_key: String,
+    pub ciphertext_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceArtifactPutReceipt {
+    pub object_ref: TraceArtifactObjectRef,
+    pub encrypted_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceArtifactDeleteReceipt {
+    pub object_ref: TraceArtifactObjectRef,
+    pub deleted: bool,
+    pub deleted_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceArtifactInvalidationReceipt {
+    pub object_ref: TraceArtifactObjectRef,
+    pub reason: TraceArtifactInvalidationReason,
+    pub invalidated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceArtifactInvalidationReason {
+    Revoked,
+    RetentionExpired,
+    Replaced,
+    OperatorRequested,
+    Other,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TraceArtifactKind {
     ContributionEnvelope,
@@ -96,6 +199,192 @@ pub trait TraceArtifactStore: Send + Sync {
         expected_tenant_storage_ref: &str,
         receipt: &EncryptedTraceArtifactReceipt,
     ) -> anyhow::Result<bool>;
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteTraceArtifactRecord {
+    pub object_ref: TraceArtifactObjectRef,
+    pub artifact: EncryptedTraceArtifact,
+    pub invalidated_at: Option<DateTime<Utc>>,
+}
+
+pub trait RemoteTraceArtifactProvider: Send + Sync {
+    fn put_encrypted_artifact(
+        &self,
+        object_ref: TraceArtifactObjectRef,
+        artifact: EncryptedTraceArtifact,
+    ) -> anyhow::Result<()>;
+
+    fn read_encrypted_artifact(
+        &self,
+        object_ref: &TraceArtifactObjectRef,
+    ) -> anyhow::Result<RemoteTraceArtifactRecord>;
+
+    fn invalidate_encrypted_artifact(
+        &self,
+        object_ref: &TraceArtifactObjectRef,
+        reason: TraceArtifactInvalidationReason,
+        invalidated_at: DateTime<Utc>,
+    ) -> anyhow::Result<()>;
+
+    fn delete_encrypted_artifact(
+        &self,
+        object_ref: &TraceArtifactObjectRef,
+        deleted_at: DateTime<Utc>,
+    ) -> anyhow::Result<bool>;
+}
+
+pub struct ServiceOwnedTraceArtifactStore<P> {
+    config: TraceArtifactProviderConfig,
+    crypto: SecretsCrypto,
+    provider: P,
+}
+
+impl<P: RemoteTraceArtifactProvider> ServiceOwnedTraceArtifactStore<P> {
+    pub fn new(config: TraceArtifactProviderConfig, crypto: SecretsCrypto, provider: P) -> Self {
+        Self {
+            config,
+            crypto,
+            provider,
+        }
+    }
+
+    pub fn put_scoped_json<T: Serialize>(
+        &self,
+        scope: &TraceArtifactScope,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        value: &T,
+    ) -> anyhow::Result<TraceArtifactPutReceipt> {
+        let plaintext = serde_json::to_vec(value).context("failed to serialize trace artifact")?;
+        self.put_scoped_serialized_json(scope, artifact_kind, object_id, &plaintext)
+    }
+
+    pub fn put_scoped_serialized_json(
+        &self,
+        scope: &TraceArtifactScope,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<TraceArtifactPutReceipt> {
+        self.validate_remote_config()?;
+        scope.validate()?;
+        validate_non_empty_ref("trace artifact object id", object_id)?;
+        serde_json::from_slice::<serde_json::Value>(serialized_json)
+            .context("failed to parse serialized trace artifact")?;
+        let (ciphertext, salt) = self
+            .crypto
+            .encrypt(serialized_json)
+            .context("failed to encrypt trace artifact")?;
+        let ciphertext_sha256 = sha256_hex(&ciphertext);
+        let object_key = remote_artifact_object_key(&self.config, scope, &artifact_kind, object_id);
+        let encrypted_at = Utc::now();
+        let legacy_receipt = EncryptedTraceArtifactReceipt {
+            tenant_storage_ref: scope.tenant_storage_ref.clone(),
+            artifact_kind: artifact_kind.clone(),
+            object_key: object_key.clone(),
+            ciphertext_sha256: ciphertext_sha256.clone(),
+            encrypted_at,
+        };
+        let artifact = EncryptedTraceArtifact {
+            schema_version: TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_VERSION.to_string(),
+            receipt: legacy_receipt,
+            salt_base64: base64::engine::general_purpose::STANDARD.encode(salt),
+            ciphertext_base64: base64::engine::general_purpose::STANDARD.encode(ciphertext),
+        };
+        let object_ref = TraceArtifactObjectRef {
+            provider_kind: self.config.kind,
+            object_store: self.config.object_store.clone(),
+            tenant_storage_ref: scope.tenant_storage_ref.clone(),
+            submission_storage_ref: scope.submission_storage_ref.clone(),
+            artifact_kind,
+            object_key,
+            ciphertext_sha256,
+        };
+        validate_remote_object_ref(scope, &self.config, &object_ref)?;
+        self.provider
+            .put_encrypted_artifact(object_ref.clone(), artifact)?;
+        Ok(TraceArtifactPutReceipt {
+            object_ref,
+            encrypted_at,
+        })
+    }
+
+    pub fn read_scoped_artifact(
+        &self,
+        expected_scope: &TraceArtifactScope,
+        object_ref: &TraceArtifactObjectRef,
+    ) -> anyhow::Result<EncryptedTraceArtifact> {
+        validate_remote_object_ref(expected_scope, &self.config, object_ref)?;
+        let record = self.provider.read_encrypted_artifact(object_ref)?;
+        anyhow::ensure!(
+            record.object_ref == *object_ref,
+            "remote trace artifact object ref mismatch"
+        );
+        anyhow::ensure!(
+            record.invalidated_at.is_none(),
+            "remote trace artifact object ref invalidated"
+        );
+        verify_encrypted_artifact(
+            &record.artifact,
+            expected_scope.tenant_storage_ref.as_str(),
+            &object_ref.artifact_kind,
+            object_ref.object_key.as_str(),
+            object_ref.ciphertext_sha256.as_str(),
+        )?;
+        Ok(record.artifact)
+    }
+
+    pub fn read_scoped_json<T: DeserializeOwned>(
+        &self,
+        expected_scope: &TraceArtifactScope,
+        object_ref: &TraceArtifactObjectRef,
+    ) -> anyhow::Result<T> {
+        let artifact = self.read_scoped_artifact(expected_scope, object_ref)?;
+        decrypt_artifact_json(&self.crypto, &artifact)
+    }
+
+    pub fn invalidate_scoped_artifact(
+        &self,
+        expected_scope: &TraceArtifactScope,
+        object_ref: &TraceArtifactObjectRef,
+        reason: TraceArtifactInvalidationReason,
+    ) -> anyhow::Result<TraceArtifactInvalidationReceipt> {
+        validate_remote_object_ref(expected_scope, &self.config, object_ref)?;
+        let invalidated_at = Utc::now();
+        self.provider
+            .invalidate_encrypted_artifact(object_ref, reason, invalidated_at)?;
+        Ok(TraceArtifactInvalidationReceipt {
+            object_ref: object_ref.clone(),
+            reason,
+            invalidated_at,
+        })
+    }
+
+    pub fn delete_scoped_artifact(
+        &self,
+        expected_scope: &TraceArtifactScope,
+        object_ref: &TraceArtifactObjectRef,
+    ) -> anyhow::Result<TraceArtifactDeleteReceipt> {
+        validate_remote_object_ref(expected_scope, &self.config, object_ref)?;
+        let deleted_at = Utc::now();
+        let deleted = self
+            .provider
+            .delete_encrypted_artifact(object_ref, deleted_at)?;
+        Ok(TraceArtifactDeleteReceipt {
+            object_ref: object_ref.clone(),
+            deleted,
+            deleted_at,
+        })
+    }
+
+    fn validate_remote_config(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.config.kind == TraceArtifactProviderKind::ServiceOwnedRemote,
+            "trace artifact provider config is not remote service-owned"
+        );
+        validate_non_empty_ref("trace artifact object store", &self.config.object_store)
+    }
 }
 
 pub struct LocalEncryptedTraceArtifactStore {
@@ -380,10 +669,119 @@ fn decrypt_artifact_json<T: DeserializeOwned>(
     serde_json::from_slice(plaintext).context("failed to deserialize trace artifact")
 }
 
+fn verify_encrypted_artifact(
+    artifact: &EncryptedTraceArtifact,
+    expected_tenant_storage_ref: &str,
+    expected_artifact_kind: &TraceArtifactKind,
+    expected_object_key: &str,
+    expected_ciphertext_sha256: &str,
+) -> anyhow::Result<()> {
+    let expected_ciphertext_sha256 = expected_ciphertext_sha256
+        .strip_prefix("sha256:")
+        .unwrap_or(expected_ciphertext_sha256);
+    anyhow::ensure!(
+        artifact.schema_version == TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_VERSION,
+        "unsupported encrypted trace artifact schema version"
+    );
+    anyhow::ensure!(
+        artifact.receipt.tenant_storage_ref == expected_tenant_storage_ref,
+        "encrypted trace artifact tenant mismatch"
+    );
+    anyhow::ensure!(
+        artifact.receipt.artifact_kind == *expected_artifact_kind,
+        "encrypted trace artifact kind mismatch"
+    );
+    anyhow::ensure!(
+        artifact.receipt.object_key == expected_object_key,
+        "encrypted trace artifact object key mismatch"
+    );
+    anyhow::ensure!(
+        artifact.receipt.ciphertext_sha256 == expected_ciphertext_sha256,
+        "encrypted trace artifact receipt hash mismatch"
+    );
+    let ciphertext = base64::engine::general_purpose::STANDARD
+        .decode(artifact.ciphertext_base64.as_bytes())
+        .context("failed to decode trace artifact ciphertext for hash check")?;
+    anyhow::ensure!(
+        sha256_hex(&ciphertext) == expected_ciphertext_sha256,
+        "trace artifact ciphertext hash mismatch"
+    );
+    Ok(())
+}
+
+fn validate_remote_object_ref(
+    expected_scope: &TraceArtifactScope,
+    expected_config: &TraceArtifactProviderConfig,
+    object_ref: &TraceArtifactObjectRef,
+) -> anyhow::Result<()> {
+    expected_scope.validate()?;
+    validate_remote_object_key(&object_ref.object_key)?;
+    validate_object_hash(&object_ref.ciphertext_sha256)?;
+    anyhow::ensure!(
+        object_ref.provider_kind == TraceArtifactProviderKind::ServiceOwnedRemote,
+        "remote trace artifact provider kind mismatch"
+    );
+    anyhow::ensure!(
+        object_ref.provider_kind == expected_config.kind,
+        "remote trace artifact config kind mismatch"
+    );
+    anyhow::ensure!(
+        object_ref.object_store == expected_config.object_store,
+        "remote trace artifact object store mismatch"
+    );
+    anyhow::ensure!(
+        object_ref.tenant_storage_ref == expected_scope.tenant_storage_ref,
+        "remote trace artifact tenant mismatch"
+    );
+    anyhow::ensure!(
+        object_ref.submission_storage_ref == expected_scope.submission_storage_ref,
+        "remote trace artifact submission mismatch"
+    );
+    Ok(())
+}
+
+fn validate_non_empty_ref(label: &str, value: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!value.trim().is_empty(), "{label} must not be empty");
+    anyhow::ensure!(
+        !value.bytes().any(|byte| byte.is_ascii_control()),
+        "{label} must not contain control characters"
+    );
+    Ok(())
+}
+
+fn validate_object_hash(value: &str) -> anyhow::Result<()> {
+    let value = value.strip_prefix("sha256:").unwrap_or(value);
+    anyhow::ensure!(
+        value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "trace artifact ciphertext hash must be a 64-character hex digest"
+    );
+    Ok(())
+}
+
 fn validate_object_key(object_key: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
         object_key.len() == 64 && object_key.bytes().all(|byte| byte.is_ascii_hexdigit()),
         "trace artifact object key must be a 64-character hex digest"
+    );
+    Ok(())
+}
+
+fn validate_remote_object_key(object_key: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        object_key.starts_with("v1/tenants/"),
+        "remote trace artifact object key must use the v1 tenant partition"
+    );
+    anyhow::ensure!(
+        !object_key
+            .split('/')
+            .any(|segment| segment.is_empty() || matches!(segment, "." | "..")),
+        "remote trace artifact object key contains unsafe path components"
+    );
+    anyhow::ensure!(
+        object_key.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.')
+        }),
+        "remote trace artifact object key contains unsupported characters"
     );
     Ok(())
 }
@@ -399,6 +797,29 @@ fn artifact_object_key(
         artifact_kind.as_path_segment(),
         object_id
     ))
+}
+
+fn remote_artifact_object_key(
+    config: &TraceArtifactProviderConfig,
+    scope: &TraceArtifactScope,
+    artifact_kind: &TraceArtifactKind,
+    object_id: &str,
+) -> String {
+    let tenant_partition = sha256_text_hex(scope.tenant_storage_ref.as_str());
+    let submission_partition = sha256_text_hex(scope.submission_storage_ref.as_str());
+    let object_digest = sha256_text_hex(&format!(
+        "{}\n{}\n{}\n{}\n{}",
+        config.object_store,
+        scope.tenant_storage_ref,
+        scope.submission_storage_ref,
+        artifact_kind.as_path_segment(),
+        object_id
+    ));
+    format!(
+        "v1/tenants/{tenant_partition}/submissions/{submission_partition}/{}/{}.json",
+        artifact_kind.as_path_segment(),
+        object_digest
+    )
 }
 
 fn sha256_text_hex(input: &str) -> String {
@@ -423,6 +844,109 @@ fn write_json_file<T: Serialize + ?Sized>(path: &Path, value: &T) -> anyhow::Res
             path.display()
         )
     })
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub struct InMemoryRemoteTraceArtifactProvider {
+    objects:
+        std::sync::RwLock<std::collections::HashMap<String, InMemoryRemoteTraceArtifactRecord>>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct InMemoryRemoteTraceArtifactRecord {
+    object_ref: TraceArtifactObjectRef,
+    artifact: EncryptedTraceArtifact,
+    invalidated_at: Option<DateTime<Utc>>,
+    invalidation_reason: Option<TraceArtifactInvalidationReason>,
+}
+
+#[cfg(test)]
+impl RemoteTraceArtifactProvider for InMemoryRemoteTraceArtifactProvider {
+    fn put_encrypted_artifact(
+        &self,
+        object_ref: TraceArtifactObjectRef,
+        artifact: EncryptedTraceArtifact,
+    ) -> anyhow::Result<()> {
+        let mut objects = self
+            .objects
+            .write()
+            .map_err(|_| anyhow::anyhow!("remote trace artifact provider lock poisoned"))?;
+        objects.insert(
+            object_ref.object_key.clone(),
+            InMemoryRemoteTraceArtifactRecord {
+                object_ref,
+                artifact,
+                invalidated_at: None,
+                invalidation_reason: None,
+            },
+        );
+        Ok(())
+    }
+
+    fn read_encrypted_artifact(
+        &self,
+        object_ref: &TraceArtifactObjectRef,
+    ) -> anyhow::Result<RemoteTraceArtifactRecord> {
+        let objects = self
+            .objects
+            .read()
+            .map_err(|_| anyhow::anyhow!("remote trace artifact provider lock poisoned"))?;
+        let record = objects.get(&object_ref.object_key).with_context(|| {
+            format!(
+                "remote trace artifact object not found: {}",
+                object_ref.object_key
+            )
+        })?;
+        anyhow::ensure!(
+            record.object_ref == *object_ref,
+            "remote trace artifact object ref mismatch"
+        );
+        let _ = record.invalidation_reason;
+        Ok(RemoteTraceArtifactRecord {
+            object_ref: record.object_ref.clone(),
+            artifact: record.artifact.clone(),
+            invalidated_at: record.invalidated_at,
+        })
+    }
+
+    fn invalidate_encrypted_artifact(
+        &self,
+        object_ref: &TraceArtifactObjectRef,
+        reason: TraceArtifactInvalidationReason,
+        invalidated_at: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        let mut objects = self
+            .objects
+            .write()
+            .map_err(|_| anyhow::anyhow!("remote trace artifact provider lock poisoned"))?;
+        let record = objects.get_mut(&object_ref.object_key).with_context(|| {
+            format!(
+                "remote trace artifact object not found: {}",
+                object_ref.object_key
+            )
+        })?;
+        anyhow::ensure!(
+            record.object_ref == *object_ref,
+            "remote trace artifact object ref mismatch"
+        );
+        record.invalidated_at = Some(invalidated_at);
+        record.invalidation_reason = Some(reason);
+        Ok(())
+    }
+
+    fn delete_encrypted_artifact(
+        &self,
+        object_ref: &TraceArtifactObjectRef,
+        _deleted_at: DateTime<Utc>,
+    ) -> anyhow::Result<bool> {
+        let mut objects = self
+            .objects
+            .write()
+            .map_err(|_| anyhow::anyhow!("remote trace artifact provider lock poisoned"))?;
+        Ok(objects.remove(&object_ref.object_key).is_some())
+    }
 }
 
 #[cfg(test)]
@@ -515,6 +1039,118 @@ mod tests {
         let store = test_store(&temp);
 
         assert_trace_artifact_store_contract(&store);
+    }
+
+    #[test]
+    fn service_owned_remote_store_binds_refs_to_tenant_and_submission() {
+        let key = crate::secrets::keychain::generate_master_key_hex();
+        let crypto = SecretsCrypto::new(SecretString::from(key)).expect("test crypto");
+        let config = TraceArtifactProviderConfig::service_owned_remote("trace-commons-prod")
+            .expect("remote provider config");
+        let store = ServiceOwnedTraceArtifactStore::new(
+            config,
+            crypto,
+            InMemoryRemoteTraceArtifactProvider::default(),
+        );
+        let scope = TraceArtifactScope::new("tenant:sha256:alpha", "submission-alpha");
+        let payload = json!({"safe": true, "summary": "<redacted>"});
+
+        let receipt = store
+            .put_scoped_json(
+                &scope,
+                TraceArtifactKind::ContributionEnvelope,
+                "submitted-envelope",
+                &payload,
+            )
+            .expect("remote artifact writes");
+
+        assert_eq!(
+            receipt.object_ref.provider_kind,
+            TraceArtifactProviderKind::ServiceOwnedRemote
+        );
+        assert_eq!(receipt.object_ref.object_store, "trace-commons-prod");
+        assert_eq!(receipt.object_ref.tenant_storage_ref, "tenant:sha256:alpha");
+        assert_eq!(
+            receipt.object_ref.submission_storage_ref,
+            "submission-alpha"
+        );
+        assert!(
+            !receipt
+                .object_ref
+                .object_key
+                .contains("tenant:sha256:alpha")
+        );
+        assert!(!receipt.object_ref.object_key.contains("submission-alpha"));
+
+        let round_trip: serde_json::Value = store
+            .read_scoped_json(&scope, &receipt.object_ref)
+            .expect("remote artifact reads with matching scope");
+        assert_eq!(round_trip, payload);
+
+        let wrong_tenant = TraceArtifactScope::new("tenant:sha256:beta", "submission-alpha");
+        let error = store
+            .read_scoped_json::<serde_json::Value>(&wrong_tenant, &receipt.object_ref)
+            .expect_err("remote refs must not cross tenants");
+        assert!(error.to_string().contains("tenant mismatch"));
+
+        let wrong_submission = TraceArtifactScope::new("tenant:sha256:alpha", "submission-beta");
+        let error = store
+            .read_scoped_json::<serde_json::Value>(&wrong_submission, &receipt.object_ref)
+            .expect_err("remote refs must not cross submissions");
+        assert!(error.to_string().contains("submission mismatch"));
+    }
+
+    #[test]
+    fn service_owned_remote_store_returns_invalidate_and_delete_receipts() {
+        let key = crate::secrets::keychain::generate_master_key_hex();
+        let crypto = SecretsCrypto::new(SecretString::from(key)).expect("test crypto");
+        let config = TraceArtifactProviderConfig::service_owned_remote("trace-commons-prod")
+            .expect("remote provider config");
+        let store = ServiceOwnedTraceArtifactStore::new(
+            config,
+            crypto,
+            InMemoryRemoteTraceArtifactProvider::default(),
+        );
+        let scope = TraceArtifactScope::new("tenant:sha256:alpha", "submission-alpha");
+        let payload = json!({"safe": true});
+        let receipt = store
+            .put_scoped_json(
+                &scope,
+                TraceArtifactKind::BenchmarkConversion,
+                "conversion-artifact",
+                &payload,
+            )
+            .expect("remote artifact writes");
+
+        let invalidation = store
+            .invalidate_scoped_artifact(
+                &scope,
+                &receipt.object_ref,
+                TraceArtifactInvalidationReason::Revoked,
+            )
+            .expect("remote artifact invalidates");
+        assert_eq!(invalidation.object_ref, receipt.object_ref);
+        assert_eq!(
+            invalidation.reason,
+            TraceArtifactInvalidationReason::Revoked
+        );
+
+        let error = store
+            .read_scoped_json::<serde_json::Value>(&scope, &receipt.object_ref)
+            .expect_err("invalidated remote artifact must fail closed");
+        assert!(error.to_string().contains("invalidated"));
+
+        let delete_receipt = store
+            .delete_scoped_artifact(&scope, &receipt.object_ref)
+            .expect("remote artifact deletes");
+        assert_eq!(delete_receipt.object_ref, receipt.object_ref);
+        assert!(delete_receipt.deleted);
+
+        let repeat_delete = store
+            .delete_scoped_artifact(&scope, &receipt.object_ref)
+            .expect("remote artifact delete is idempotent");
+        assert_eq!(repeat_delete.object_ref, receipt.object_ref);
+        assert!(!repeat_delete.deleted);
     }
 
     #[test]

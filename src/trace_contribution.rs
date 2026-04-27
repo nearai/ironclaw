@@ -6,6 +6,7 @@
 //! before a trace can leave a user's machine.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::error::Error;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -4215,10 +4216,46 @@ struct TraceUploadClaimIssuerResponse {
 #[derive(Debug)]
 struct TraceRemoteRequestFailure {
     status: Option<reqwest::StatusCode>,
+    kind: TraceQueueTelemetryFailureKind,
     message: String,
+    source: Option<reqwest::Error>,
 }
 
 impl TraceRemoteRequestFailure {
+    fn request_failed(operation: &'static str, error: reqwest::Error) -> Self {
+        let status = error.status();
+        let kind = trace_remote_request_failure_kind_for_reqwest_error(&error);
+        Self {
+            status,
+            kind,
+            message: format!("{operation} request failed: {error}"),
+            source: Some(error),
+        }
+    }
+
+    fn http_rejection(operation: &'static str, status: reqwest::StatusCode, body: String) -> Self {
+        let safe_body = safe_trace_remote_rejection_body(&body);
+        let message = if safe_body.is_empty() {
+            format!("{operation} rejected by {status}")
+        } else {
+            format!("{operation} rejected by {status}: {safe_body}")
+        };
+        let kind = if matches!(
+            status,
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+        ) {
+            TraceQueueTelemetryFailureKind::Credential
+        } else {
+            TraceQueueTelemetryFailureKind::HttpRejection
+        };
+        Self {
+            status: Some(status),
+            kind,
+            message,
+            source: None,
+        }
+    }
+
     fn auth_rejection(&self) -> bool {
         matches!(
             self.status,
@@ -4233,7 +4270,74 @@ impl std::fmt::Display for TraceRemoteRequestFailure {
     }
 }
 
-impl std::error::Error for TraceRemoteRequestFailure {}
+impl std::error::Error for TraceRemoteRequestFailure {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.source
+            .as_ref()
+            .map(|error| error as &(dyn Error + 'static))
+    }
+}
+
+const TRACE_REMOTE_REJECTION_BODY_MAX_CHARS: usize = 512;
+
+fn safe_trace_remote_rejection_body(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let sanitized = serde_json::from_str::<Value>(trimmed)
+        .map(|value| redact_sensitive_json(&value).to_string())
+        .unwrap_or_else(|_| trimmed.split_whitespace().collect::<Vec<_>>().join(" "));
+    let mut chars = sanitized.chars();
+    let mut bounded = chars
+        .by_ref()
+        .take(TRACE_REMOTE_REJECTION_BODY_MAX_CHARS)
+        .collect::<String>();
+    if chars.next().is_some() {
+        bounded.push_str("...");
+    }
+    bounded
+}
+
+fn trace_remote_request_failure_kind_for_reqwest_error(
+    error: &reqwest::Error,
+) -> TraceQueueTelemetryFailureKind {
+    let message = error_chain_message(error).to_ascii_lowercase();
+    if error.is_timeout()
+        || message.contains("timed out")
+        || message.contains("timeout")
+        || message.contains("deadline elapsed")
+    {
+        TraceQueueTelemetryFailureKind::NetworkTimeout
+    } else if message.contains("network is unreachable")
+        || message.contains("no route to host")
+        || message.contains("offline")
+        || message.contains("internet connection appears to be offline")
+    {
+        TraceQueueTelemetryFailureKind::NetworkOffline
+    } else if message.contains("dns")
+        || message.contains("failed to lookup")
+        || message.contains("failed to resolve")
+        || message.contains("name or service not known")
+        || message.contains("nodename nor servname")
+    {
+        TraceQueueTelemetryFailureKind::NetworkDns
+    } else if message.contains("connection refused") || message.contains("refused") {
+        TraceQueueTelemetryFailureKind::NetworkConnectionRefused
+    } else {
+        TraceQueueTelemetryFailureKind::Network
+    }
+}
+
+fn error_chain_message(error: &(dyn Error + 'static)) -> String {
+    let mut messages = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(error) = source {
+        messages.push(error.to_string());
+        source = error.source();
+    }
+    messages.join("\n")
+}
 
 #[async_trait]
 impl TraceUploadCredentialProvider for StaticEnvTraceUploadCredentialProvider<'_> {
@@ -4697,17 +4801,15 @@ async fn submit_trace_envelope_to_endpoint_with_token(
         .json(envelope)
         .send()
         .await
-        .map_err(|e| TraceRemoteRequestFailure {
-            status: None,
-            message: format!("trace submission request failed: {e}"),
-        })?;
+        .map_err(|error| TraceRemoteRequestFailure::request_failed("trace submission", error))?;
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(TraceRemoteRequestFailure {
-            status: Some(status),
-            message: format!("trace submission rejected by {status}: {body}"),
-        });
+        return Err(TraceRemoteRequestFailure::http_rejection(
+            "trace submission",
+            status,
+            body,
+        ));
     }
 
     Ok(
@@ -5168,18 +5270,16 @@ async fn fetch_trace_submission_statuses_chunk_with_token(
         })
         .send()
         .await
-        .map_err(|e| TraceRemoteRequestFailure {
-            status: None,
-            message: format!("trace status sync request failed: {e}"),
-        })?;
+        .map_err(|error| TraceRemoteRequestFailure::request_failed("trace status sync", error))?;
 
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(TraceRemoteRequestFailure {
-            status: Some(status),
-            message: format!("trace status sync rejected by {status}: {body}"),
-        });
+        return Err(TraceRemoteRequestFailure::http_rejection(
+            "trace status sync",
+            status,
+            body,
+        ));
     }
     Ok(body)
 }
@@ -5555,17 +5655,15 @@ async fn revoke_trace_submission_at_endpoint_with_token(
         .json(&serde_json::json!({ "submission_id": submission_id }))
         .send()
         .await
-        .map_err(|e| TraceRemoteRequestFailure {
-            status: None,
-            message: format!("trace revocation request failed: {e}"),
-        })?;
+        .map_err(|error| TraceRemoteRequestFailure::request_failed("trace revocation", error))?;
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(TraceRemoteRequestFailure {
-            status: Some(status),
-            message: format!("trace revocation rejected by {status}: {body}"),
-        });
+        return Err(TraceRemoteRequestFailure::http_rejection(
+            "trace revocation",
+            status,
+            body,
+        ));
     }
     Ok(())
 }
@@ -6339,12 +6437,11 @@ fn record_trace_queue_status_sync_failure_for_scope_unlocked(
     error: &anyhow::Error,
     now: DateTime<Utc>,
 ) -> anyhow::Result<()> {
-    let failure = trace_queue_telemetry_failure_with_kind(
-        error,
-        now,
-        TraceQueueTelemetryFailureKind::StatusSync,
-        "status sync failed",
-    );
+    let kind = match trace_queue_telemetry_failure_kind(error) {
+        TraceQueueTelemetryFailureKind::Unknown => TraceQueueTelemetryFailureKind::StatusSync,
+        kind => kind,
+    };
+    let failure = trace_queue_telemetry_failure_with_kind(error, now, kind, "status sync failed");
     mutate_trace_queue_telemetry_for_scope_unlocked(scope, |telemetry| {
         telemetry.status_sync_failure_count = telemetry.status_sync_failure_count.saturating_add(1);
         telemetry.last_status_sync_failed_at = Some(now);
@@ -6371,13 +6468,11 @@ fn trace_queue_telemetry_failure_with_label(
 
 fn trace_queue_telemetry_failure_kind(error: &anyhow::Error) -> TraceQueueTelemetryFailureKind {
     for cause in error.chain() {
+        if let Some(remote_failure) = cause.downcast_ref::<TraceRemoteRequestFailure>() {
+            return remote_failure.kind;
+        }
         if let Some(reqwest_error) = cause.downcast_ref::<reqwest::Error>() {
-            if reqwest_error.is_timeout() {
-                return TraceQueueTelemetryFailureKind::NetworkTimeout;
-            }
-            if reqwest_error.is_connect() {
-                return TraceQueueTelemetryFailureKind::NetworkConnectionRefused;
-            }
+            return trace_remote_request_failure_kind_for_reqwest_error(reqwest_error);
         }
     }
     let message = error
@@ -8839,6 +8934,173 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queue_flush_classifies_upload_http_rejection_through_submit_call_site() {
+        let scope = format!("trace-upload-http-classification-test-{}", Uuid::new_v4());
+        let _token_guard = EnvVarRestore::set("TRACE_COMMONS_TEST_TOKEN", "super-secret-token");
+        let app = axum::Router::new().route(
+            "/v1/traces",
+            axum::routing::post(|| async {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(serde_json::json!({"error": "token expired"})),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock trace commons listener binds");
+        let endpoint = format!(
+            "http://{}/v1/traces",
+            listener.local_addr().expect("local addr")
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        write_trace_policy_for_scope(
+            Some(&scope),
+            &StandingTraceContributionPolicy {
+                enabled: true,
+                ingestion_endpoint: Some(endpoint),
+                bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
+                auto_submit_high_value_traces: true,
+                min_submission_score: 0.0,
+                ..Default::default()
+            },
+        )
+        .expect("policy writes");
+        let raw = RawTraceContribution::from_recorded_trace(
+            &sample_trace(),
+            RecordedTraceContributionOptions::default(),
+        );
+        let mut envelope = DeterministicTraceRedactor::default()
+            .redact_trace(raw)
+            .await
+            .expect("redaction should succeed");
+        apply_credit_estimate_to_envelope(&mut envelope);
+        queue_trace_envelope_for_scope(Some(&scope), &envelope).expect("queued envelope writes");
+
+        flush_trace_contribution_queue_for_scope(Some(&scope), 10)
+            .await
+            .expect("upload HTTP rejection is held for retry");
+        let diagnostics = trace_queue_diagnostics_for_scope(Some(&scope)).expect("diagnostics");
+        let failure = diagnostics
+            .telemetry
+            .last_failure
+            .as_ref()
+            .expect("upload rejection recorded");
+        assert_eq!(failure.kind, TraceQueueTelemetryFailureKind::HttpRejection);
+        assert!(failure.reason.contains("error_hash="));
+        assert!(!failure.reason.contains("token expired"));
+        assert!(!failure.reason.contains("super-secret-token"));
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[tokio::test]
+    async fn queue_flush_classifies_status_sync_request_failure_through_call_site() {
+        let scope = format!("trace-status-sync-classification-test-{}", Uuid::new_v4());
+        let _token_guard = EnvVarRestore::set("TRACE_COMMONS_TEST_TOKEN", "super-secret-token");
+        write_trace_policy_for_scope(
+            Some(&scope),
+            &StandingTraceContributionPolicy {
+                enabled: true,
+                ingestion_endpoint: Some("http://127.0.0.1:9/v1/traces".to_string()),
+                bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
+                auto_submit_high_value_traces: true,
+                min_submission_score: 0.0,
+                ..Default::default()
+            },
+        )
+        .expect("policy writes");
+        write_local_trace_records_for_scope(
+            Some(&scope),
+            &[submitted_credit_record(1.0, None, None, Vec::new())],
+        )
+        .expect("local record writes");
+
+        flush_trace_contribution_queue_for_scope(Some(&scope), 10)
+            .await
+            .expect("status sync failure is nonfatal during flush");
+        let diagnostics = trace_queue_diagnostics_for_scope(Some(&scope)).expect("diagnostics");
+        let failure = diagnostics
+            .telemetry
+            .last_failure
+            .as_ref()
+            .expect("status sync failure recorded");
+        assert_eq!(
+            failure.kind,
+            TraceQueueTelemetryFailureKind::NetworkConnectionRefused
+        );
+        assert!(failure.reason.contains("status sync failed"));
+        assert!(!failure.reason.contains("127.0.0.1"));
+        assert!(!failure.reason.contains("super-secret-token"));
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[tokio::test]
+    async fn queue_flush_classifies_status_sync_auth_rejection_as_credential() {
+        let scope = format!(
+            "trace-status-sync-auth-classification-test-{}",
+            Uuid::new_v4()
+        );
+        let _token_guard = EnvVarRestore::set("TRACE_COMMONS_TEST_TOKEN", "super-secret-token");
+        let app = axum::Router::new().route(
+            "/v1/contributors/me/submission-status",
+            axum::routing::post(|| async {
+                (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    axum::Json(serde_json::json!({"error": "not authorized"})),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock trace commons listener binds");
+        let endpoint = format!(
+            "http://{}/v1/traces",
+            listener.local_addr().expect("local addr")
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        write_trace_policy_for_scope(
+            Some(&scope),
+            &StandingTraceContributionPolicy {
+                enabled: true,
+                ingestion_endpoint: Some(endpoint),
+                bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
+                auto_submit_high_value_traces: true,
+                min_submission_score: 0.0,
+                ..Default::default()
+            },
+        )
+        .expect("policy writes");
+        write_local_trace_records_for_scope(
+            Some(&scope),
+            &[submitted_credit_record(1.0, None, None, Vec::new())],
+        )
+        .expect("local record writes");
+
+        flush_trace_contribution_queue_for_scope(Some(&scope), 10)
+            .await
+            .expect("status sync auth failure is nonfatal during flush");
+        let diagnostics = trace_queue_diagnostics_for_scope(Some(&scope)).expect("diagnostics");
+        let failure = diagnostics
+            .telemetry
+            .last_failure
+            .as_ref()
+            .expect("status sync auth failure recorded");
+        assert_eq!(failure.kind, TraceQueueTelemetryFailureKind::Credential);
+        assert!(failure.reason.contains("status sync failed"));
+        assert!(!failure.reason.contains("super-secret-token"));
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[tokio::test]
     async fn revoke_trace_submission_uses_refreshed_upload_claim() {
         let scope = format!("trace-revoke-refresh-test-{}", Uuid::new_v4());
         let submission_id = Uuid::new_v4();
@@ -8927,6 +9189,81 @@ mod tests {
         let records = read_local_trace_records_for_scope(Some(&scope)).expect("records read");
         assert_eq!(records[0].status, LocalTraceSubmissionStatus::Revoked);
         assert!(records[0].revoked_at.is_some());
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[tokio::test]
+    async fn revoke_trace_submission_classifies_http_rejection_through_call_site() {
+        let scope = format!("trace-revoke-http-classification-test-{}", Uuid::new_v4());
+        let submission_id = Uuid::new_v4();
+        let app = axum::Router::new().route(
+            "/v1/traces/revoke",
+            axum::routing::delete(|| async {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(serde_json::json!({"error": "token expired"})),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock trace commons listener binds");
+        let endpoint = format!(
+            "http://{}/v1/traces/revoke",
+            listener.local_addr().expect("local addr")
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        write_local_trace_records_for_scope(
+            Some(&scope),
+            &[LocalTraceSubmissionRecord {
+                submission_id,
+                trace_id: Uuid::new_v4(),
+                endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                status: LocalTraceSubmissionStatus::Submitted,
+                server_status: Some("accepted".to_string()),
+                submitted_at: Some(Utc::now()),
+                revoked_at: None,
+                privacy_risk: "low".to_string(),
+                redaction_counts: BTreeMap::new(),
+                credit_points_pending: 1.0,
+                credit_points_final: None,
+                credit_explanation: Vec::new(),
+                credit_events: Vec::new(),
+                last_credit_notice_at: None,
+                credit_notice_state: TraceCreditNoticeState::default(),
+            }],
+        )
+        .expect("local record writes");
+
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            ingestion_endpoint: Some(endpoint.clone()),
+            ..Default::default()
+        };
+        let provider =
+            RefreshingTestUploadCredentialProvider::new("stale-upload-claim", "fresh-upload-claim");
+        let error = revoke_trace_submission_for_scope_with_credential_provider(
+            Some(&scope),
+            submission_id,
+            Some(&endpoint),
+            &policy,
+            &provider,
+        )
+        .await
+        .expect_err("revoke HTTP rejection should surface to caller");
+
+        assert_eq!(
+            trace_queue_telemetry_failure_kind(&error),
+            TraceQueueTelemetryFailureKind::HttpRejection
+        );
+        assert!(!error.to_string().contains("stale-upload-claim"));
+        assert!(!error.to_string().contains("fresh-upload-claim"));
+        let records = read_local_trace_records_for_scope(Some(&scope)).expect("records read");
+        assert_eq!(records[0].status, LocalTraceSubmissionStatus::Submitted);
+        assert!(records[0].revoked_at.is_none());
 
         let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
     }
