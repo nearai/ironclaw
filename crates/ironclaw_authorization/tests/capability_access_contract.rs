@@ -1,0 +1,250 @@
+use ironclaw_authorization::*;
+use ironclaw_host_api::*;
+use serde_json::json;
+
+#[tokio::test]
+async fn capability_access_denies_without_matching_grant() {
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = wasm_descriptor();
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch(&context, &descriptor, &ResourceEstimate::default())
+        .await;
+
+    assert_eq!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::MissingGrant
+        }
+    );
+}
+
+#[tokio::test]
+async fn capability_access_allows_matching_extension_grant() {
+    let descriptor = wasm_descriptor();
+    let grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![EffectKind::DispatchCapability],
+    );
+    let context = execution_context(CapabilitySet {
+        grants: vec![grant],
+    });
+
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch(
+            &context,
+            &descriptor,
+            &ResourceEstimate {
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+        )
+        .await;
+
+    assert_eq!(
+        decision,
+        Decision::Allow {
+            obligations: Default::default()
+        }
+    );
+}
+
+#[tokio::test]
+async fn capability_access_denies_when_grant_is_for_different_principal_or_capability() {
+    let descriptor = wasm_descriptor();
+    let wrong_principal = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(ExtensionId::new("other-extension").unwrap()),
+        vec![EffectKind::DispatchCapability],
+    );
+    let wrong_capability = grant_for(
+        CapabilityId::new("echo.other").unwrap(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![EffectKind::DispatchCapability],
+    );
+    let authorizer = GrantAuthorizer::new();
+
+    assert_eq!(
+        authorizer
+            .authorize_dispatch(
+                &execution_context(CapabilitySet {
+                    grants: vec![wrong_principal]
+                }),
+                &descriptor,
+                &ResourceEstimate::default(),
+            )
+            .await,
+        Decision::Deny {
+            reason: DenyReason::MissingGrant
+        }
+    );
+    assert_eq!(
+        authorizer
+            .authorize_dispatch(
+                &execution_context(CapabilitySet {
+                    grants: vec![wrong_capability]
+                }),
+                &descriptor,
+                &ResourceEstimate::default(),
+            )
+            .await,
+        Decision::Deny {
+            reason: DenyReason::MissingGrant
+        }
+    );
+}
+
+#[tokio::test]
+async fn capability_access_denies_when_grant_does_not_cover_declared_effects() {
+    let descriptor = CapabilityDescriptor {
+        effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+        ..wasm_descriptor()
+    };
+    let grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![EffectKind::DispatchCapability],
+    );
+    let context = execution_context(CapabilitySet {
+        grants: vec![grant],
+    });
+
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch(&context, &descriptor, &ResourceEstimate::default())
+        .await;
+
+    assert_eq!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::PolicyDenied
+        }
+    );
+}
+
+#[tokio::test]
+async fn spawn_access_requires_spawn_process_effect_in_addition_to_capability_effects() {
+    let descriptor = wasm_descriptor();
+    let dispatch_only = execution_context(CapabilitySet {
+        grants: vec![grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(ExtensionId::new("caller").unwrap()),
+            vec![EffectKind::DispatchCapability],
+        )],
+    });
+    let spawn_grant = execution_context(CapabilitySet {
+        grants: vec![grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(ExtensionId::new("caller").unwrap()),
+            vec![EffectKind::DispatchCapability, EffectKind::SpawnProcess],
+        )],
+    });
+    let authorizer = GrantAuthorizer::new();
+
+    assert_eq!(
+        authorizer
+            .authorize_spawn(&dispatch_only, &descriptor, &ResourceEstimate::default())
+            .await,
+        Decision::Deny {
+            reason: DenyReason::PolicyDenied
+        }
+    );
+    assert_eq!(
+        authorizer
+            .authorize_spawn(&spawn_grant, &descriptor, &ResourceEstimate::default())
+            .await,
+        Decision::Allow {
+            obligations: Default::default()
+        }
+    );
+}
+
+#[tokio::test]
+async fn capability_access_denies_invalid_execution_context() {
+    let grant = grant_for(
+        CapabilityId::new("echo.say").unwrap(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![EffectKind::DispatchCapability],
+    );
+    let mut context = execution_context(CapabilitySet {
+        grants: vec![grant],
+    });
+    context.resource_scope.tenant_id = TenantId::new("wrong-tenant").unwrap();
+
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch(&context, &wasm_descriptor(), &ResourceEstimate::default())
+        .await;
+
+    assert_eq!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::InternalInvariantViolation
+        }
+    );
+}
+
+fn wasm_descriptor() -> CapabilityDescriptor {
+    CapabilityDescriptor {
+        id: CapabilityId::new("echo.say").unwrap(),
+        provider: ExtensionId::new("echo").unwrap(),
+        runtime: RuntimeKind::Wasm,
+        trust_ceiling: TrustClass::Sandbox,
+        description: "Echo text".to_string(),
+        parameters_schema: json!({"type": "object"}),
+        effects: vec![EffectKind::DispatchCapability],
+        default_permission: PermissionMode::Allow,
+        resource_profile: None,
+    }
+}
+
+fn grant_for(
+    capability: CapabilityId,
+    grantee: Principal,
+    allowed_effects: Vec<EffectKind>,
+) -> CapabilityGrant {
+    CapabilityGrant {
+        id: CapabilityGrantId::new(),
+        capability,
+        grantee,
+        issued_by: Principal::HostRuntime,
+        constraints: GrantConstraints {
+            allowed_effects,
+            mounts: MountView::default(),
+            network: NetworkPolicy::default(),
+            secrets: Vec::new(),
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: None,
+        },
+    }
+}
+
+fn execution_context(grants: CapabilitySet) -> ExecutionContext {
+    let invocation_id = InvocationId::new();
+    let resource_scope = ResourceScope {
+        tenant_id: TenantId::new("tenant1").unwrap(),
+        user_id: UserId::new("user1").unwrap(),
+        agent_id: None,
+        project_id: Some(ProjectId::new("project1").unwrap()),
+        mission_id: None,
+        thread_id: None,
+        invocation_id,
+    };
+    ExecutionContext {
+        invocation_id,
+        correlation_id: CorrelationId::new(),
+        process_id: None,
+        parent_process_id: None,
+        tenant_id: resource_scope.tenant_id.clone(),
+        user_id: resource_scope.user_id.clone(),
+        agent_id: resource_scope.agent_id.clone(),
+        project_id: resource_scope.project_id.clone(),
+        mission_id: resource_scope.mission_id.clone(),
+        thread_id: resource_scope.thread_id.clone(),
+        extension_id: ExtensionId::new("caller").unwrap(),
+        runtime: RuntimeKind::Wasm,
+        trust: TrustClass::Sandbox,
+        grants,
+        mounts: MountView::default(),
+        resource_scope,
+    }
+}

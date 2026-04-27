@@ -1,0 +1,19 @@
+[package]
+name = "ironclaw_approvals"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ironclaw_authorization = { path = "../ironclaw_authorization" }
+ironclaw_events = { path = "../ironclaw_events" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_run_state = { path = "../ironclaw_run_state" }
+thiserror = "2"
+
+[dev-dependencies]
+async-trait = "0.1"
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }
