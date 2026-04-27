@@ -1201,6 +1201,30 @@ pub trait IdentityStore: Send + Sync {
     ) -> Result<(), DatabaseError>;
 }
 
+/// Safe structural diagnostics for PostgreSQL Trace Commons RLS readiness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceCorpusRlsDiagnostics {
+    pub expected_table_count: usize,
+    pub rls_enabled_count: usize,
+    pub force_rls_enabled_count: usize,
+    pub policy_installed_count: usize,
+    pub missing_policy_tables: Vec<String>,
+    pub rls_disabled_tables: Vec<String>,
+    pub policy_expression_mismatch_tables: Vec<String>,
+    pub current_role_bypasses_rls: bool,
+}
+
+impl TraceCorpusRlsDiagnostics {
+    pub fn rls_ready(&self) -> bool {
+        self.missing_policy_tables.is_empty()
+            && self.rls_disabled_tables.is_empty()
+            && self.policy_expression_mismatch_tables.is_empty()
+            && self.policy_installed_count == self.expected_table_count
+            && self.rls_enabled_count == self.expected_table_count
+            && !self.current_role_bypasses_rls
+    }
+}
+
 /// Backend-agnostic database supertrait.
 ///
 /// Combines all sub-traits into one. Existing `Arc<dyn Database>` consumers
@@ -1223,6 +1247,14 @@ pub trait Database:
 {
     /// Run schema migrations for this backend.
     async fn run_migrations(&self) -> Result<(), DatabaseError>;
+
+    /// Return safe structural Trace Commons RLS diagnostics when the backend
+    /// can report them. Non-PostgreSQL backends return `None`.
+    async fn trace_corpus_rls_diagnostics(
+        &self,
+    ) -> Result<Option<TraceCorpusRlsDiagnostics>, DatabaseError> {
+        Ok(None)
+    }
 
     /// Rewrite all rows where user_id = 'default' to owner_id across all
     /// affected tables. Idempotent — safe to call on every startup.

@@ -14,7 +14,7 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router, extract::Path as AxumPath, extract::State};
 use chrono::{DateTime, Duration, Utc};
 use ironclaw::config::{DatabaseBackend, DatabaseConfig};
-use ironclaw::db::Database;
+use ironclaw::db::{Database, TraceCorpusRlsDiagnostics};
 use ironclaw::secrets::SecretsCrypto;
 use ironclaw::trace_artifact_store::{
     EncryptedTraceArtifactReceipt, LocalEncryptedTraceArtifactStore, TraceArtifactKind,
@@ -1726,6 +1726,35 @@ struct TraceTenantPolicyResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct TraceCommonsRlsConfigStatus {
+    rls_ready: bool,
+    expected_table_count: usize,
+    rls_enabled_count: usize,
+    force_rls_enabled_count: usize,
+    policy_installed_count: usize,
+    missing_policy_tables: Vec<String>,
+    rls_disabled_tables: Vec<String>,
+    policy_expression_mismatch_tables: Vec<String>,
+    current_role_bypasses_rls: bool,
+}
+
+impl From<TraceCorpusRlsDiagnostics> for TraceCommonsRlsConfigStatus {
+    fn from(diagnostics: TraceCorpusRlsDiagnostics) -> Self {
+        Self {
+            rls_ready: diagnostics.rls_ready(),
+            expected_table_count: diagnostics.expected_table_count,
+            rls_enabled_count: diagnostics.rls_enabled_count,
+            force_rls_enabled_count: diagnostics.force_rls_enabled_count,
+            policy_installed_count: diagnostics.policy_installed_count,
+            missing_policy_tables: diagnostics.missing_policy_tables,
+            rls_disabled_tables: diagnostics.rls_disabled_tables,
+            policy_expression_mismatch_tables: diagnostics.policy_expression_mismatch_tables,
+            current_role_bypasses_rls: diagnostics.current_role_bypasses_rls,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
 struct TraceCommonsConfigStatusResponse {
     schema_version: &'static str,
     db_mirror_configured: bool,
@@ -1761,6 +1790,8 @@ struct TraceCommonsConfigStatusResponse {
     legal_hold_retention_policy_ids: Vec<String>,
     artifact_store_configured: bool,
     artifact_object_store: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trace_corpus_rls: Option<TraceCommonsRlsConfigStatus>,
 }
 
 fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigStatusResponse {
@@ -1838,6 +1869,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .artifact_store
             .as_ref()
             .map(|store| store.object_store_name().to_string()),
+        trace_corpus_rls: None,
     }
 }
 
@@ -1847,7 +1879,14 @@ async fn config_status_handler(
 ) -> ApiResult<Json<TraceCommonsConfigStatusResponse>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_admin(&tenant)?;
-    let response = trace_commons_config_status_response(state.as_ref());
+    let mut response = trace_commons_config_status_response(state.as_ref());
+    if let Some(db) = &state.db_mirror {
+        response.trace_corpus_rls = db
+            .trace_corpus_rls_diagnostics()
+            .await
+            .map_err(internal_error)?
+            .map(TraceCommonsRlsConfigStatus::from);
+    }
     append_audit_event_with_db_mirror(
         state.as_ref(),
         &tenant,

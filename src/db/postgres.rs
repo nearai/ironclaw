@@ -3,7 +3,7 @@
 //! Delegates to the existing `Store` (history) and `Repository` (workspace)
 //! implementations, avoiding SQL duplication.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -18,7 +18,7 @@ use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
     ApiTokenRecord, ChannelPairingStore, ConversationStore, Database, IdentityStore, JobStore,
     PairingRequestRecord, RoutineStore, SandboxStore, SettingsStore, ToolFailureStore,
-    UserIdentityRecord, UserRecord, UserStore, WorkspaceStore,
+    TraceCorpusRlsDiagnostics, UserIdentityRecord, UserRecord, UserStore, WorkspaceStore,
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
@@ -39,6 +39,22 @@ pub struct PgBackend {
     store: Store,
     repo: Repository,
 }
+
+const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
+    "trace_tenants",
+    "trace_tenant_policies",
+    "trace_submissions",
+    "trace_object_refs",
+    "trace_derived_records",
+    "trace_audit_events",
+    "trace_credit_ledger",
+    "trace_tombstones",
+    "trace_vector_entries",
+    "trace_export_manifests",
+    "trace_export_manifest_items",
+    "trace_retention_jobs",
+    "trace_retention_job_items",
+];
 
 impl PgBackend {
     /// Create a new PostgreSQL backend from configuration.
@@ -62,6 +78,132 @@ impl PgBackend {
 impl Database for PgBackend {
     async fn run_migrations(&self) -> Result<(), DatabaseError> {
         self.store.run_migrations().await
+    }
+
+    async fn trace_corpus_rls_diagnostics(
+        &self,
+    ) -> Result<Option<TraceCorpusRlsDiagnostics>, DatabaseError> {
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let expected_tables = TRACE_COMMONS_RLS_TABLES
+            .iter()
+            .map(|table| (*table).to_string())
+            .collect::<Vec<_>>();
+        let rows = client
+            .query(
+                "SELECT
+                    c.relname,
+                    c.relrowsecurity,
+                    c.relforcerowsecurity,
+                    p.has_policy,
+                    COALESCE(p.expression_matches, false) AS expression_matches
+                 FROM pg_class c
+                 JOIN pg_namespace n ON n.oid = c.relnamespace
+                 LEFT JOIN LATERAL (
+                    SELECT
+                        true AS has_policy,
+                        pol.cmd = '*'
+                            AND pg_get_expr(pol.qual, pol.polrelid) = '(tenant_id = current_setting(''ironclaw.trace_tenant_id''::text, true))'
+                            AND pg_get_expr(pol.with_check, pol.polrelid) = '(tenant_id = current_setting(''ironclaw.trace_tenant_id''::text, true))'
+                            AS expression_matches
+                        FROM pg_policies p
+                        JOIN pg_policy pol
+                          ON pol.polname = p.policyname
+                         AND pol.polrelid = c.oid
+                        WHERE p.schemaname = n.nspname
+                          AND p.tablename = c.relname
+                          AND p.policyname = 'trace_corpus_tenant_isolation'
+                        LIMIT 1
+                 ) p ON true
+                 WHERE n.nspname = current_schema()
+                   AND c.relkind = 'r'
+                   AND c.relname = ANY($1)",
+                &[&expected_tables],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let current_role = client
+            .query_one(
+                "SELECT
+                    EXISTS (
+                        SELECT 1
+                        FROM pg_class c
+                        JOIN pg_namespace n ON n.oid = c.relnamespace
+                        JOIN pg_roles r ON r.oid = c.relowner
+                        WHERE n.nspname = current_schema()
+                          AND c.relkind = 'r'
+                          AND c.relname = ANY($1)
+                          AND r.rolname = current_user
+                    ) AS owns_trace_tables,
+                    COALESCE((
+                        SELECT rolsuper OR rolbypassrls
+                        FROM pg_roles
+                        WHERE rolname = current_user
+                    ), false) AS bypass_role",
+                &[&expected_tables],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+
+        let mut seen_tables = HashSet::new();
+        let mut rls_enabled_count = 0usize;
+        let mut force_rls_enabled_count = 0usize;
+        let mut policy_installed_count = 0usize;
+        let mut rls_disabled_tables = Vec::new();
+        let mut missing_policy_tables = Vec::new();
+        let mut policy_expression_mismatch_tables = Vec::new();
+        for row in rows {
+            let table: String = row.get("relname");
+            let rls_enabled: bool = row.get("relrowsecurity");
+            let force_rls_enabled: bool = row.get("relforcerowsecurity");
+            let has_policy: bool = row.get("has_policy");
+            let expression_matches: bool = row.get("expression_matches");
+            seen_tables.insert(table.clone());
+            if rls_enabled {
+                rls_enabled_count += 1;
+            } else {
+                rls_disabled_tables.push(table.clone());
+            }
+            if force_rls_enabled {
+                force_rls_enabled_count += 1;
+            }
+            if has_policy {
+                policy_installed_count += 1;
+                if !expression_matches {
+                    policy_expression_mismatch_tables.push(table.clone());
+                }
+            } else {
+                missing_policy_tables.push(table.clone());
+            }
+        }
+        for table in &expected_tables {
+            if !seen_tables.contains(table) {
+                missing_policy_tables.push(table.clone());
+                rls_disabled_tables.push(table.clone());
+            }
+        }
+        missing_policy_tables.sort();
+        missing_policy_tables.dedup();
+        rls_disabled_tables.sort();
+        rls_disabled_tables.dedup();
+        policy_expression_mismatch_tables.sort();
+        policy_expression_mismatch_tables.dedup();
+
+        let owns_trace_tables: bool = current_role.get("owns_trace_tables");
+        let bypass_role: bool = current_role.get("bypass_role");
+        Ok(Some(TraceCorpusRlsDiagnostics {
+            expected_table_count: expected_tables.len(),
+            rls_enabled_count,
+            force_rls_enabled_count,
+            policy_installed_count,
+            missing_policy_tables,
+            rls_disabled_tables,
+            policy_expression_mismatch_tables,
+            current_role_bypasses_rls: owns_trace_tables || bypass_role,
+        }))
     }
 
     async fn migrate_default_owner(&self, owner_id: &str) -> Result<(), DatabaseError> {

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use ironclaw::config::{DatabaseBackend, DatabaseConfig, SslMode};
-use ironclaw::db::{Database, postgres::PgBackend};
+use ironclaw::db::{Database, TraceCorpusRlsDiagnostics, postgres::PgBackend};
 use ironclaw::trace_corpus_storage::{
     TenantScopedTraceObjectRef, TraceAuditAction, TraceAuditEventWrite, TraceAuditSafeMetadata,
     TraceCorpusStatus, TraceCorpusStore, TraceCreditEventType, TraceCreditEventWrite,
@@ -94,6 +94,19 @@ fn sample_submission(tenant_id: &str, submission_id: Uuid) -> TraceSubmissionWri
         credit_points_pending: Some(1.0),
         credit_points_final: None,
         expires_at: None,
+    }
+}
+
+fn ready_rls_diagnostics() -> TraceCorpusRlsDiagnostics {
+    TraceCorpusRlsDiagnostics {
+        expected_table_count: 2,
+        rls_enabled_count: 2,
+        force_rls_enabled_count: 0,
+        policy_installed_count: 2,
+        missing_policy_tables: Vec::new(),
+        rls_disabled_tables: Vec::new(),
+        policy_expression_mismatch_tables: Vec::new(),
+        current_role_bypasses_rls: false,
     }
 }
 
@@ -469,6 +482,35 @@ async fn assert_trace_rls_policies_installed(backend: &PgBackend) {
     let mut expected_tables = expected_tables;
     expected_tables.sort();
     assert_eq!(actual_tables, expected_tables);
+}
+
+#[test]
+fn trace_corpus_rls_diagnostics_ready_requires_complete_safe_policy_state() {
+    assert!(ready_rls_diagnostics().rls_ready());
+
+    let mut missing_policy = ready_rls_diagnostics();
+    missing_policy.policy_installed_count = 1;
+    missing_policy
+        .missing_policy_tables
+        .push("trace_submissions".to_string());
+    assert!(!missing_policy.rls_ready());
+
+    let mut disabled_rls = ready_rls_diagnostics();
+    disabled_rls.rls_enabled_count = 1;
+    disabled_rls
+        .rls_disabled_tables
+        .push("trace_object_refs".to_string());
+    assert!(!disabled_rls.rls_ready());
+
+    let mut expression_mismatch = ready_rls_diagnostics();
+    expression_mismatch
+        .policy_expression_mismatch_tables
+        .push("trace_credit_ledger".to_string());
+    assert!(!expression_mismatch.rls_ready());
+
+    let mut bypass_role = ready_rls_diagnostics();
+    bypass_role.current_role_bypasses_rls = true;
+    assert!(!bypass_role.rls_ready());
 }
 
 #[tokio::test]
@@ -1261,6 +1303,33 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
             .await;
         tx.commit().await.expect("commit cleanup transaction");
     }
+}
+
+#[tokio::test]
+async fn pg_trace_corpus_rls_diagnostics_report_policy_coverage() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+    assert_trace_rls_policies_installed(&backend).await;
+
+    let diagnostics = backend
+        .trace_corpus_rls_diagnostics()
+        .await
+        .expect("read RLS diagnostics")
+        .expect("PostgreSQL reports RLS diagnostics");
+    assert_eq!(diagnostics.expected_table_count, 13);
+    assert_eq!(diagnostics.policy_installed_count, 13);
+    assert_eq!(diagnostics.rls_enabled_count, 13);
+    assert!(diagnostics.missing_policy_tables.is_empty());
+    assert!(diagnostics.rls_disabled_tables.is_empty());
+    assert!(diagnostics.policy_expression_mismatch_tables.is_empty());
+    assert!(diagnostics.force_rls_enabled_count <= diagnostics.expected_table_count);
+    assert_eq!(
+        diagnostics.rls_ready(),
+        !diagnostics.current_role_bypasses_rls,
+        "RLS readiness should be blocked only when the current test role bypasses RLS"
+    );
 }
 
 #[tokio::test]

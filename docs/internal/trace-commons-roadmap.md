@@ -11,7 +11,7 @@ These are the next independent production slices that can be staffed in parallel
 - [x] Add EdDSA/Ed25519 signed upload-claim verification through default or `kid`-selected public-key config, JSON/file keysets with optional `not_before`/`not_after` activation windows, safe config-status total/EdDSA active/inactive key counts, issuer/audience/JTI/TTL policy, unsupported-algorithm rejection, and an EdDSA-required production gate that rejects static tokens and HS256 signed claims on authenticated routes.
 - [ ] Finish issuer-managed EdDSA/Ed25519 upload-claim distribution/governance, including policy that accepts only the managed issuer EdDSA/Ed25519 keyset rather than local/file-configured public keys.
 - [ ] Promote auth-derived `TenantCtx` into every ingest, review, export, worker, maintenance, and contributor-status path so envelope tenant fields remain attribution only.
-- [ ] Harden PostgreSQL tenant isolation with production roles, transaction-local tenant context coverage, RLS/forced-RLS decisions, and same-id cross-tenant tests; keep libSQL predicate tests in parallel.
+- [ ] Harden PostgreSQL tenant isolation with production roles, transaction-local tenant context coverage, RLS/forced-RLS decisions, and same-id cross-tenant tests; keep libSQL predicate tests in parallel. Admin config-status now exposes safe PostgreSQL RLS readiness diagnostics for policy coverage, expression drift, disabled RLS, force-RLS count, and role bypass state.
 
 ### Autonomous Client
 
@@ -41,7 +41,7 @@ These are the next independent production slices that can be staffed in parallel
 ### Observability
 
 - [ ] Add operational dashboards or API summaries for queue throughput, accept/quarantine/reject rates, redaction risk, review SLA, export volume, retention jobs, vector coverage, and delayed credit settlement.
-- [ ] Emit structured metrics/logs for every promotion gate: DB/file parity, object-ref readability/hash failures, RLS/predicate denials, signed-claim failures, worker skips, and revoked-source invalidations.
+- [ ] Emit structured metrics/logs for every promotion gate: DB/file parity, object-ref readability/hash failures, RLS/predicate denials, signed-claim failures, worker skips, and revoked-source invalidations. PostgreSQL RLS catalog readiness is now available through safe admin config-status diagnostics; runtime metrics remain.
 - [ ] Build runbooks and smoke checks for per-tenant rollout, rollback, key rotation, object-store migration, retention purge dry runs, and audit-chain verification.
 
 ## Current Gecko-Pass Status
