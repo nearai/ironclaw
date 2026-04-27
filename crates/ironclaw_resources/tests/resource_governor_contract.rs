@@ -345,15 +345,88 @@ fn tenant_limit_applies_across_projects() {
     ));
 }
 
+#[test]
+fn resource_governor_enforces_agent_scoped_limits_independently() {
+    let governor = InMemoryResourceGovernor::new();
+    let tenant = TenantId::new("tenant1").unwrap();
+    let user = UserId::new("user1").unwrap();
+    let agent_a = AgentId::new("agent-a").unwrap();
+    let agent_b = AgentId::new("agent-b").unwrap();
+    governor.set_limit(
+        ResourceAccount::agent(tenant.clone(), user.clone(), None, agent_a.clone()),
+        ResourceLimits {
+            max_output_bytes: Some(10),
+            ..ResourceLimits::default()
+        },
+    );
+
+    let estimate = ResourceEstimate {
+        output_bytes: Some(8),
+        ..ResourceEstimate::default()
+    };
+    governor
+        .reserve(
+            sample_scope_with_agent("tenant1", "user1", None, Some("agent-a")),
+            estimate.clone(),
+        )
+        .unwrap();
+    governor
+        .reserve(
+            sample_scope_with_agent("tenant1", "user1", None, Some("agent-b")),
+            estimate.clone(),
+        )
+        .unwrap();
+
+    let denial = governor
+        .reserve(
+            sample_scope_with_agent("tenant1", "user1", None, Some("agent-a")),
+            estimate,
+        )
+        .unwrap_err();
+
+    assert!(matches!(denial, ResourceError::LimitExceeded(_)));
+    assert_eq!(
+        governor.reserved_for(&ResourceAccount::agent(tenant, user, None, agent_a)),
+        ResourceTally {
+            output_bytes: 8,
+            ..ResourceTally::default()
+        }
+    );
+    assert_eq!(
+        governor.reserved_for(&ResourceAccount::agent(
+            TenantId::new("tenant1").unwrap(),
+            UserId::new("user1").unwrap(),
+            None,
+            agent_b,
+        )),
+        ResourceTally {
+            output_bytes: 8,
+            ..ResourceTally::default()
+        }
+    );
+}
+
 fn sample_scope(tenant: &str, user: &str, project: Option<&str>) -> ResourceScope {
     ResourceScope {
         tenant_id: TenantId::new(tenant).unwrap(),
         user_id: UserId::new(user).unwrap(),
+        agent_id: None,
         project_id: project.map(|value| ProjectId::new(value).unwrap()),
         mission_id: None,
         thread_id: None,
         invocation_id: InvocationId::new(),
     }
+}
+
+fn sample_scope_with_agent(
+    tenant: &str,
+    user: &str,
+    project: Option<&str>,
+    agent: Option<&str>,
+) -> ResourceScope {
+    let mut scope = sample_scope(tenant, user, project);
+    scope.agent_id = agent.map(|id| AgentId::new(id).unwrap());
+    scope
 }
 
 #[test]

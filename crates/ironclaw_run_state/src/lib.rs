@@ -12,8 +12,8 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    ApprovalRequest, ApprovalRequestId, CapabilityId, HostApiError, InvocationId, ResourceScope,
-    TenantId, UserId, VirtualPath,
+    AgentId, ApprovalRequest, ApprovalRequestId, CapabilityId, HostApiError, InvocationId,
+    ResourceScope, TenantId, UserId, VirtualPath,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -70,6 +70,7 @@ pub struct ApprovalRecord {
 struct RunStateKey {
     tenant_id: TenantId,
     user_id: UserId,
+    agent_id: Option<AgentId>,
     invocation_id: InvocationId,
 }
 
@@ -78,6 +79,7 @@ impl RunStateKey {
         Self {
             tenant_id: scope.tenant_id.clone(),
             user_id: scope.user_id.clone(),
+            agent_id: scope.agent_id.clone(),
             invocation_id,
         }
     }
@@ -87,6 +89,7 @@ impl RunStateKey {
 struct ApprovalKey {
     tenant_id: TenantId,
     user_id: UserId,
+    agent_id: Option<AgentId>,
     request_id: ApprovalRequestId,
 }
 
@@ -95,6 +98,7 @@ impl ApprovalKey {
         Self {
             tenant_id: scope.tenant_id.clone(),
             user_id: scope.user_id.clone(),
+            agent_id: scope.agent_id.clone(),
             request_id,
         }
     }
@@ -134,7 +138,7 @@ impl From<FilesystemError> for RunStateError {
 /// Current-state store for invocation lifecycle.
 #[async_trait]
 pub trait RunStateStore: Send + Sync {
-    /// Creates a running invocation record in the exact tenant/user scope.
+    /// Creates a running invocation record in the exact tenant/user/agent scope.
     async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError>;
 
     /// Marks an invocation blocked on an approval request without granting authority by itself.
@@ -175,7 +179,7 @@ pub trait RunStateStore: Send + Sync {
         invocation_id: InvocationId,
     ) -> Result<Option<RunRecord>, RunStateError>;
 
-    /// Lists invocation records visible to the tenant/user scope only.
+    /// Lists invocation records visible to the tenant/user/agent scope only.
     async fn records_for_scope(
         &self,
         scope: &ResourceScope,
@@ -185,7 +189,7 @@ pub trait RunStateStore: Send + Sync {
 /// Store for approval requests emitted by authorization decisions.
 #[async_trait]
 pub trait ApprovalRequestStore: Send + Sync {
-    /// Persists a pending approval request in the tenant/user scope without resolving it.
+    /// Persists a pending approval request in the tenant/user/agent scope without resolving it.
     async fn save_pending(
         &self,
         scope: ResourceScope,
@@ -213,7 +217,7 @@ pub trait ApprovalRequestStore: Send + Sync {
         request_id: ApprovalRequestId,
     ) -> Result<ApprovalRecord, RunStateError>;
 
-    /// Lists approval records visible to the tenant/user scope only.
+    /// Lists approval records visible to the tenant/user/agent scope only.
     async fn records_for_scope(
         &self,
         scope: &ResourceScope,
@@ -341,7 +345,7 @@ impl RunStateStore for InMemoryRunStateStore {
         let mut records = self
             .records_guard()
             .values()
-            .filter(|record| same_tenant_user(&record.scope, scope))
+            .filter(|record| same_scope_owner(&record.scope, scope))
             .cloned()
             .collect::<Vec<_>>();
         records.sort_by_key(|record| record.invocation_id.as_uuid());
@@ -434,7 +438,7 @@ impl ApprovalRequestStore for InMemoryApprovalRequestStore {
         let mut records = self
             .records_guard()
             .values()
-            .filter(|record| same_tenant_user(&record.scope, scope))
+            .filter(|record| same_scope_owner(&record.scope, scope))
             .cloned()
             .collect::<Vec<_>>();
         records.sort_by_key(|record| record.request.id.as_uuid());
@@ -442,7 +446,7 @@ impl ApprovalRequestStore for InMemoryApprovalRequestStore {
     }
 }
 
-/// Filesystem-backed run-state store under tenant/user-scoped `/engine/tenants/.../runs`.
+/// Filesystem-backed run-state store under tenant/user/agent-scoped `/engine` paths.
 pub struct FilesystemRunStateStore<'a, F>
 where
     F: RootFilesystem,
@@ -565,7 +569,7 @@ where
             Err(error) => return Err(error.into()),
         };
         let record = deserialize::<RunRecord>(&bytes)?;
-        if same_tenant_user(&record.scope, scope) {
+        if same_scope_owner(&record.scope, scope) {
             Ok(Some(record))
         } else {
             Ok(None)
@@ -587,7 +591,7 @@ where
             if entry.name.ends_with(".json") {
                 let bytes = self.filesystem.read_file(&entry.path).await?;
                 let record = deserialize::<RunRecord>(&bytes)?;
-                if same_tenant_user(&record.scope, scope) {
+                if same_scope_owner(&record.scope, scope) {
                     records.push(record);
                 }
             }
@@ -597,7 +601,7 @@ where
     }
 }
 
-/// Filesystem-backed approval request store under tenant/user-scoped `/engine/tenants/.../approvals`.
+/// Filesystem-backed approval request store under tenant/user/agent-scoped `/engine` paths.
 pub struct FilesystemApprovalRequestStore<'a, F>
 where
     F: RootFilesystem,
@@ -667,7 +671,7 @@ where
             Err(error) => return Err(error.into()),
         };
         let record = deserialize::<ApprovalRecord>(&bytes)?;
-        if same_tenant_user(&record.scope, scope) {
+        if same_scope_owner(&record.scope, scope) {
             Ok(Some(record))
         } else {
             Ok(None)
@@ -707,7 +711,7 @@ where
             if entry.name.ends_with(".json") {
                 let bytes = self.filesystem.read_file(&entry.path).await?;
                 let record = deserialize::<ApprovalRecord>(&bytes)?;
-                if same_tenant_user(&record.scope, scope) {
+                if same_scope_owner(&record.scope, scope) {
                     records.push(record);
                 }
             }
@@ -748,15 +752,21 @@ fn approval_records_root(scope: &ResourceScope) -> Result<VirtualPath, RunStateE
 }
 
 fn tenant_user_root(scope: &ResourceScope) -> String {
-    format!(
+    let base = format!(
         "/engine/tenants/{}/users/{}",
         scope.tenant_id.as_str(),
         scope.user_id.as_str()
-    )
+    );
+    match &scope.agent_id {
+        Some(agent_id) => format!("{base}/agents/{}", agent_id.as_str()),
+        None => base,
+    }
 }
 
-fn same_tenant_user(left: &ResourceScope, right: &ResourceScope) -> bool {
-    left.tenant_id == right.tenant_id && left.user_id == right.user_id
+fn same_scope_owner(left: &ResourceScope, right: &ResourceScope) -> bool {
+    left.tenant_id == right.tenant_id
+        && left.user_id == right.user_id
+        && left.agent_id == right.agent_id
 }
 
 fn serialize_pretty<T>(value: &T) -> Result<Vec<u8>, RunStateError>

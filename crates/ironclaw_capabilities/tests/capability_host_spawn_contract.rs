@@ -850,6 +850,7 @@ fn sample_scope(invocation_id: InvocationId) -> ResourceScope {
     ResourceScope {
         tenant_id: TenantId::new("tenant1").unwrap(),
         user_id: UserId::new("user1").unwrap(),
+        agent_id: None,
         project_id: Some(ProjectId::new("project1").unwrap()),
         mission_id: None,
         thread_id: None,
@@ -862,6 +863,7 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
     let resource_scope = ResourceScope {
         tenant_id: TenantId::new("tenant1").unwrap(),
         user_id: UserId::new("user1").unwrap(),
+        agent_id: None,
         project_id: Some(ProjectId::new("project1").unwrap()),
         mission_id: None,
         thread_id: None,
@@ -874,6 +876,7 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
         parent_process_id: None,
         tenant_id: resource_scope.tenant_id.clone(),
         user_id: resource_scope.user_id.clone(),
+        agent_id: resource_scope.agent_id.clone(),
         project_id: resource_scope.project_id.clone(),
         mission_id: resource_scope.mission_id.clone(),
         thread_id: resource_scope.thread_id.clone(),

@@ -235,6 +235,20 @@ async fn jsonl_event_sink_persists_redacted_runtime_events_without_host_paths() 
     );
 }
 
+#[test]
+fn runtime_events_and_log_paths_preserve_agent_scope() {
+    let scope = sample_scope_with_agent(Some("agent-a"));
+    let event =
+        RuntimeEvent::dispatch_requested(scope.clone(), CapabilityId::new("echo.say").unwrap());
+    assert_eq!(event.scope.agent_id, Some(AgentId::new("agent-a").unwrap()));
+    assert_eq!(
+        scoped_runtime_event_log_path(&scope, "reborn-demo.jsonl")
+            .unwrap()
+            .as_str(),
+        "/engine/tenants/tenant1/users/user1/agents/agent-a/events/runtime/reborn-demo.jsonl"
+    );
+}
+
 fn engine_filesystem(storage: std::path::PathBuf) -> LocalFilesystem {
     let mut fs = LocalFilesystem::new();
     fs.mount_local(
@@ -317,10 +331,17 @@ impl RootFilesystem for ReadFailFilesystem {
     }
 }
 
+fn sample_scope_with_agent(agent: Option<&str>) -> ResourceScope {
+    let mut scope = sample_scope();
+    scope.agent_id = agent.map(|id| AgentId::new(id).unwrap());
+    scope
+}
+
 fn sample_scope() -> ResourceScope {
     ResourceScope {
         tenant_id: TenantId::new("tenant1").unwrap(),
         user_id: UserId::new("user1").unwrap(),
+        agent_id: None,
         project_id: Some(ProjectId::new("project1").unwrap()),
         mission_id: None,
         thread_id: None,

@@ -1,7 +1,7 @@
 //! Authority-bearing identifier contracts.
 //!
 //! This module defines the newtypes used to prevent stringly-typed authority
-//! flow: tenant/user/project/thread scope IDs, extension and capability IDs,
+//! flow: tenant/user/agent/project/thread scope IDs, extension and capability IDs,
 //! secret handles, and UUID-backed invocation/process/grant/reservation/audit
 //! IDs. Constructors validate path-adjacent strings so invalid names cannot be
 //! smuggled into manifests, mount paths, approvals, or audit records.
@@ -167,6 +167,7 @@ macro_rules! uuid_id {
 
 string_id!(TenantId, "tenant", validate_scope_id);
 string_id!(UserId, "user", validate_scope_id);
+string_id!(AgentId, "agent", validate_scope_id);
 string_id!(ProjectId, "project", validate_scope_id);
 string_id!(MissionId, "mission", validate_scope_id);
 string_id!(ThreadId, "thread", validate_scope_id);

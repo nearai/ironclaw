@@ -52,6 +52,7 @@ fn sample_scope(invocation_id: InvocationId, tenant: &str, user: &str) -> Resour
     ResourceScope {
         tenant_id: TenantId::new(tenant).unwrap(),
         user_id: UserId::new(user).unwrap(),
+        agent_id: None,
         project_id: Some(ProjectId::new("project1").unwrap()),
         mission_id: None,
         thread_id: None,

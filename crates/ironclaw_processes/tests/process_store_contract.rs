@@ -95,6 +95,43 @@ async fn process_store_hides_records_from_other_tenants_and_users() {
 }
 
 #[tokio::test]
+async fn process_store_hides_records_from_other_agents() {
+    let store = InMemoryProcessStore::new();
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let agent_a = sample_scope_with_agent(invocation_id, "tenant1", "user1", Some("agent-a"));
+    let agent_b = sample_scope_with_agent(invocation_id, "tenant1", "user1", Some("agent-b"));
+    store
+        .start(process_start(process_id, invocation_id, agent_a.clone()))
+        .await
+        .unwrap();
+
+    assert!(store.get(&agent_b, process_id).await.unwrap().is_none());
+    assert_eq!(store.records_for_scope(&agent_b).await.unwrap(), Vec::new());
+    assert!(matches!(
+        store.kill(&agent_b, process_id).await.unwrap_err(),
+        ProcessError::UnknownProcess { .. }
+    ));
+}
+
+#[tokio::test]
+async fn process_result_store_hides_records_from_other_agents() {
+    let store = InMemoryProcessResultStore::new();
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let agent_a = sample_scope_with_agent(invocation_id, "tenant1", "user1", Some("agent-a"));
+    let agent_b = sample_scope_with_agent(invocation_id, "tenant1", "user1", Some("agent-b"));
+
+    store
+        .complete(&agent_a, process_id, serde_json::json!({"ok": true}))
+        .await
+        .unwrap();
+
+    assert!(store.get(&agent_b, process_id).await.unwrap().is_none());
+    assert!(store.output(&agent_b, process_id).await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn process_store_rejects_terminal_status_overwrite() {
     let store = InMemoryProcessStore::new();
     let invocation_id = InvocationId::new();
@@ -1584,10 +1621,22 @@ fn engine_filesystem() -> LocalFilesystem {
     fs
 }
 
+fn sample_scope_with_agent(
+    invocation_id: InvocationId,
+    tenant: &str,
+    user: &str,
+    agent: Option<&str>,
+) -> ResourceScope {
+    let mut scope = sample_scope(invocation_id, tenant, user);
+    scope.agent_id = agent.map(|id| AgentId::new(id).unwrap());
+    scope
+}
+
 fn sample_scope(invocation_id: InvocationId, tenant: &str, user: &str) -> ResourceScope {
     ResourceScope {
         tenant_id: TenantId::new(tenant).unwrap(),
         user_id: UserId::new(user).unwrap(),
+        agent_id: None,
         project_id: Some(ProjectId::new("project1").unwrap()),
         mission_id: None,
         thread_id: None,

@@ -17,9 +17,9 @@ use async_trait::async_trait;
 use ironclaw_events::{EventSink, RuntimeEvent};
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilityId, CapabilitySet, ExtensionId, HostApiError, InvocationId, MountView, ProcessId,
-    ResourceEstimate, ResourceReservationId, ResourceScope, ResourceUsage, RuntimeKind, TenantId,
-    UserId, VirtualPath,
+    AgentId, CapabilityId, CapabilitySet, ExtensionId, HostApiError, InvocationId, MountView,
+    ProcessId, ResourceEstimate, ResourceReservationId, ResourceScope, ResourceUsage, RuntimeKind,
+    TenantId, UserId, VirtualPath,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor};
 use serde::{Deserialize, Serialize};
@@ -1267,7 +1267,7 @@ pub trait ProcessStore: Send + Sync {
         process_id: ProcessId,
     ) -> Result<Option<ProcessRecord>, ProcessError>;
 
-    /// Lists process lifecycle records visible to the tenant/user scope only.
+    /// Lists process lifecycle records visible to the tenant/user/agent scope only.
     async fn records_for_scope(
         &self,
         scope: &ResourceScope,
@@ -1278,6 +1278,7 @@ pub trait ProcessStore: Send + Sync {
 struct ProcessKey {
     tenant_id: TenantId,
     user_id: UserId,
+    agent_id: Option<AgentId>,
     process_id: ProcessId,
 }
 
@@ -1286,6 +1287,7 @@ impl ProcessKey {
         Self {
             tenant_id: scope.tenant_id.clone(),
             user_id: scope.user_id.clone(),
+            agent_id: scope.agent_id.clone(),
             process_id,
         }
     }
@@ -1398,7 +1400,7 @@ impl ProcessStore for InMemoryProcessStore {
         let mut records = self
             .records_guard()
             .values()
-            .filter(|record| same_tenant_user(&record.scope, scope))
+            .filter(|record| same_scope_owner(&record.scope, scope))
             .cloned()
             .collect::<Vec<_>>();
         records.sort_by_key(|record| record.process_id.as_uuid());
@@ -1556,7 +1558,7 @@ where
             Err(error) => return Err(error.into()),
         };
         let record = deserialize::<ProcessRecord>(&bytes)?;
-        if same_tenant_user(&record.scope, scope) {
+        if same_scope_owner(&record.scope, scope) {
             Ok(Some(record))
         } else {
             Ok(None)
@@ -1578,7 +1580,7 @@ where
             if entry.name.ends_with(".json") {
                 let bytes = self.filesystem.as_ref().read_file(&entry.path).await?;
                 let record = deserialize::<ProcessRecord>(&bytes)?;
-                if same_tenant_user(&record.scope, scope) {
+                if same_scope_owner(&record.scope, scope) {
                     records.push(record);
                 }
             }
@@ -1713,7 +1715,7 @@ where
             Err(error) => return Err(error.into()),
         };
         let record = deserialize::<ProcessResultRecord>(&bytes)?;
-        if same_tenant_user(&record.scope, scope) {
+        if same_scope_owner(&record.scope, scope) {
             Ok(Some(record))
         } else {
             Ok(None)
@@ -1811,15 +1813,21 @@ fn process_outputs_root(
 }
 
 fn tenant_user_root(scope: &ResourceScope) -> String {
-    format!(
+    let base = format!(
         "/engine/tenants/{}/users/{}",
         scope.tenant_id.as_str(),
         scope.user_id.as_str()
-    )
+    );
+    match &scope.agent_id {
+        Some(agent_id) => format!("{base}/agents/{}", agent_id.as_str()),
+        None => base,
+    }
 }
 
-fn same_tenant_user(left: &ResourceScope, right: &ResourceScope) -> bool {
-    left.tenant_id == right.tenant_id && left.user_id == right.user_id
+fn same_scope_owner(left: &ResourceScope, right: &ResourceScope) -> bool {
+    left.tenant_id == right.tenant_id
+        && left.user_id == right.user_id
+        && left.agent_id == right.agent_id
 }
 
 fn serialize_pretty<T>(value: &T) -> Result<Vec<u8>, ProcessError>

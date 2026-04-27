@@ -168,6 +168,7 @@ async fn lease_authorizer_hides_leases_across_tenant_scope() {
     let other_scope = ResourceScope {
         tenant_id: TenantId::new("tenant2").unwrap(),
         user_id: context.resource_scope.user_id.clone(),
+        agent_id: None,
         project_id: context.resource_scope.project_id.clone(),
         mission_id: None,
         thread_id: None,
@@ -201,12 +202,77 @@ async fn lease_authorizer_hides_leases_across_tenant_scope() {
 }
 
 #[tokio::test]
+async fn lease_store_hides_leases_across_agent_scope() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let mut context = execution_context(CapabilitySet::default());
+    context.agent_id = Some(AgentId::new("agent-a").unwrap());
+    context.resource_scope.agent_id = context.agent_id.clone();
+    let mut other_scope = context.resource_scope.clone();
+    other_scope.agent_id = Some(AgentId::new("agent-b").unwrap());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let lease = CapabilityLease::new(
+        context.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    let lease_id = lease.grant.id;
+    leases.issue(lease).await.unwrap();
+
+    assert!(leases.get(&other_scope, lease_id).await.is_none());
+    assert_eq!(leases.leases_for_scope(&other_scope).await, Vec::new());
+    assert!(matches!(
+        leases.revoke(&other_scope, lease_id).await.unwrap_err(),
+        CapabilityLeaseError::UnknownLease { .. }
+    ));
+}
+
+#[tokio::test]
+async fn lease_authorizer_denies_other_agent_context() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let mut context = execution_context(CapabilitySet::default());
+    context.agent_id = Some(AgentId::new("agent-a").unwrap());
+    context.resource_scope.agent_id = context.agent_id.clone();
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    leases
+        .issue(CapabilityLease::new(
+            context.resource_scope.clone(),
+            grant_for(
+                descriptor.id.clone(),
+                Principal::Extension(context.extension_id.clone()),
+                vec![EffectKind::DispatchCapability],
+            ),
+        ))
+        .await
+        .unwrap();
+
+    let mut other_context = context.clone();
+    other_context.agent_id = Some(AgentId::new("agent-b").unwrap());
+    other_context.resource_scope.agent_id = other_context.agent_id.clone();
+
+    let authorizer = LeaseBackedAuthorizer::new(&leases);
+    let decision = authorizer
+        .authorize_dispatch(&other_context, &descriptor, &ResourceEstimate::default())
+        .await;
+
+    assert!(matches!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::MissingGrant
+        }
+    ));
+}
+
+#[tokio::test]
 async fn revocation_is_scoped_to_tenant_and_user() {
     let leases = InMemoryCapabilityLeaseStore::new();
     let context = execution_context(CapabilitySet::default());
     let other_scope = ResourceScope {
         tenant_id: TenantId::new("tenant2").unwrap(),
         user_id: context.resource_scope.user_id.clone(),
+        agent_id: None,
         project_id: context.resource_scope.project_id.clone(),
         mission_id: None,
         thread_id: None,
@@ -666,6 +732,7 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
     let resource_scope = ResourceScope {
         tenant_id: TenantId::new("tenant1").unwrap(),
         user_id: UserId::new("user1").unwrap(),
+        agent_id: None,
         project_id: Some(ProjectId::new("project1").unwrap()),
         mission_id: None,
         thread_id: None,
@@ -678,6 +745,7 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
         parent_process_id: None,
         tenant_id: resource_scope.tenant_id.clone(),
         user_id: resource_scope.user_id.clone(),
+        agent_id: resource_scope.agent_id.clone(),
         project_id: resource_scope.project_id.clone(),
         mission_id: resource_scope.mission_id.clone(),
         thread_id: resource_scope.thread_id.clone(),

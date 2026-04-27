@@ -167,6 +167,71 @@ fn execution_context_validation_rejects_mismatched_resource_scope() {
 }
 
 #[test]
+fn agent_id_is_first_class_optional_execution_scope() {
+    let mut ctx = sample_context_with_agent(Some("agent1"));
+    assert!(ctx.validate().is_ok());
+    assert_eq!(ctx.agent_id.as_ref().unwrap().as_str(), "agent1");
+    assert_eq!(ctx.resource_scope.agent_id, ctx.agent_id);
+
+    ctx.resource_scope.agent_id = Some(AgentId::new("other-agent").unwrap());
+    assert!(ctx.validate().is_err());
+}
+
+#[test]
+fn audit_envelope_carries_agent_scope_without_leaking_payloads() {
+    let ctx = sample_context_with_agent(Some("agent1"));
+    let envelope = AuditEnvelope::denied(
+        &ctx,
+        AuditStage::Denied,
+        ActionSummary {
+            kind: "dispatch".to_string(),
+            target: Some("echo.say".to_string()),
+            effects: vec![EffectKind::DispatchCapability],
+        },
+        DenyReason::MissingGrant,
+    );
+
+    assert_eq!(envelope.agent_id, Some(AgentId::new("agent1").unwrap()));
+    let json = serde_json::to_value(&envelope).unwrap();
+    assert_eq!(json["agent_id"], "agent1");
+    assert!(json.get("host_path").is_none());
+}
+
+#[test]
+fn invocation_fingerprint_changes_when_agent_scope_changes() {
+    let capability = CapabilityId::new("echo.say").unwrap();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message":"same"});
+    let agent_a = sample_context_with_agent(Some("agent-a"));
+    let agent_b = sample_context_with_agent(Some("agent-b"));
+
+    let first = InvocationFingerprint::for_dispatch(
+        &agent_a.resource_scope,
+        &capability,
+        &estimate,
+        &input,
+    )
+    .unwrap();
+    let second = InvocationFingerprint::for_dispatch(
+        &agent_b.resource_scope,
+        &capability,
+        &estimate,
+        &input,
+    )
+    .unwrap();
+
+    assert_ne!(first, second);
+}
+
+#[test]
+fn principal_agent_serializes_as_first_class_principal() {
+    let principal = Principal::Agent(AgentId::new("agent-a").unwrap());
+    let json = serde_json::to_value(&principal).unwrap();
+
+    assert_eq!(json, json!({"type":"agent","id":"agent-a"}));
+}
+
+#[test]
 fn invocation_fingerprint_is_stable_and_input_redacted() {
     let ctx = sample_context();
     let capability = CapabilityId::new("echo.say").unwrap();
@@ -305,6 +370,14 @@ fn audit_envelope_serializes_redacted_summary_shape() {
     assert!(json.get("host_path").is_none());
 }
 
+fn sample_context_with_agent(agent: Option<&str>) -> ExecutionContext {
+    let mut ctx = sample_context();
+    let agent_id = agent.map(|id| AgentId::new(id).unwrap());
+    ctx.agent_id = agent_id.clone();
+    ctx.resource_scope.agent_id = agent_id;
+    ctx
+}
+
 fn sample_context() -> ExecutionContext {
     let invocation_id = InvocationId::new();
     let tenant_id = TenantId::new("tenant1").unwrap();
@@ -319,6 +392,7 @@ fn sample_context() -> ExecutionContext {
         parent_process_id: None,
         tenant_id: tenant_id.clone(),
         user_id: user_id.clone(),
+        agent_id: None,
         project_id: Some(project_id.clone()),
         mission_id: None,
         thread_id: None,
@@ -335,6 +409,7 @@ fn sample_context() -> ExecutionContext {
         resource_scope: ResourceScope {
             tenant_id,
             user_id,
+            agent_id: None,
             project_id: Some(project_id),
             mission_id: None,
             thread_id: None,

@@ -2,19 +2,21 @@
 //!
 //! `ironclaw_resources` owns enforcement, but this module defines the shared
 //! shapes used by callers and audit records. [`ResourceScope`] captures the
-//! tenant/user/project/mission/thread/invocation cascade. [`ResourceEstimate`]
+//! tenant/user/agent/project/mission/thread/invocation cascade. [`ResourceEstimate`]
 //! and [`ResourceUsage`] describe budgeted work, while [`SandboxQuota`] and
 //! [`ResourceCeiling`] describe runtime limits that sandbox providers enforce.
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::{InvocationId, MissionId, ProjectId, TenantId, ThreadId, UserId};
+use crate::{AgentId, InvocationId, MissionId, ProjectId, TenantId, ThreadId, UserId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceScope {
     pub tenant_id: TenantId,
     pub user_id: UserId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<AgentId>,
     pub project_id: Option<ProjectId>,
     pub mission_id: Option<MissionId>,
     pub thread_id: Option<ThreadId>,

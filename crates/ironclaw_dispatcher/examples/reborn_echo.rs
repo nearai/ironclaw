@@ -197,6 +197,7 @@ fn sample_scope() -> Result<ResourceScope, Box<dyn Error>> {
     Ok(ResourceScope {
         tenant_id: TenantId::new("tenant1")?,
         user_id: UserId::new("user1")?,
+        agent_id: None,
         project_id: Some(ProjectId::new("project1")?),
         mission_id: None,
         thread_id: None,

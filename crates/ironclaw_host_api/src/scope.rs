@@ -9,8 +9,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CapabilitySet, CorrelationId, ExtensionId, HostApiError, InvocationId, MissionId, MountView,
-    ProcessId, ProjectId, ResourceScope, RuntimeKind, TenantId, ThreadId, TrustClass, UserId,
+    AgentId, CapabilitySet, CorrelationId, ExtensionId, HostApiError, InvocationId, MissionId,
+    MountView, ProcessId, ProjectId, ResourceScope, RuntimeKind, TenantId, ThreadId, TrustClass,
+    UserId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -18,6 +19,7 @@ use crate::{
 pub enum Principal {
     Tenant(TenantId),
     User(UserId),
+    Agent(AgentId),
     Project(ProjectId),
     Mission(MissionId),
     Thread(ThreadId),
@@ -34,6 +36,8 @@ pub struct ExecutionContext {
 
     pub tenant_id: TenantId,
     pub user_id: UserId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<AgentId>,
     pub project_id: Option<ProjectId>,
     pub mission_id: Option<MissionId>,
     pub thread_id: Option<ThreadId>,
@@ -62,6 +66,11 @@ impl ExecutionContext {
         if self.resource_scope.user_id != self.user_id {
             return Err(HostApiError::invariant(
                 "resource_scope.user_id must match execution context user_id",
+            ));
+        }
+        if self.resource_scope.agent_id != self.agent_id {
+            return Err(HostApiError::invariant(
+                "resource_scope.agent_id must match execution context agent_id",
             ));
         }
         if self.resource_scope.project_id != self.project_id {

@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, Decision, DenyReason, EffectKind,
-    ExecutionContext, HostApiError, InvocationFingerprint, InvocationId, Principal,
+    AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, Decision, DenyReason,
+    EffectKind, ExecutionContext, HostApiError, InvocationFingerprint, InvocationId, Principal,
     ResourceEstimate, ResourceScope, TenantId, UserId, VirtualPath,
 };
 use serde::{Deserialize, Serialize};
@@ -133,7 +133,7 @@ pub trait CapabilityLeaseStore: Send + Sync {
     /// Persists a scoped lease before any approval record is marked approved.
     async fn issue(&self, lease: CapabilityLease) -> Result<CapabilityLease, CapabilityLeaseError>;
 
-    /// Revokes a lease only within the exact tenant/user/invocation scope that owns it.
+    /// Revokes a lease only within the exact tenant/user/agent/invocation scope that owns it.
     async fn revoke(
         &self,
         scope: &ResourceScope,
@@ -162,7 +162,7 @@ pub trait CapabilityLeaseStore: Send + Sync {
         lease_id: CapabilityGrantId,
     ) -> Result<CapabilityLease, CapabilityLeaseError>;
 
-    /// Lists leases visible to the tenant/user scope without exposing cross-tenant records.
+    /// Lists leases visible to the tenant/user/agent scope without exposing cross-scope records.
     async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease>;
 
     /// Returns active, unexpired, unexhausted leases for the exact invocation context.
@@ -275,7 +275,7 @@ impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
         let mut leases = self
             .leases_guard()
             .values()
-            .filter(|lease| same_tenant_user(&lease.scope, scope))
+            .filter(|lease| same_scope_owner(&lease.scope, scope))
             .cloned()
             .collect::<Vec<_>>();
         leases.sort_by_key(|lease| lease.grant.id.as_uuid());
@@ -291,7 +291,7 @@ impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
     }
 }
 
-/// Filesystem-backed capability lease store under tenant/user/invocation-scoped `/engine` paths.
+/// Filesystem-backed capability lease store under tenant/user/agent/invocation-scoped `/engine` paths.
 pub struct FilesystemCapabilityLeaseStore<'a, F>
 where
     F: RootFilesystem,
@@ -474,7 +474,7 @@ where
         }
         let mut leases = leases
             .into_iter()
-            .filter(|lease| same_tenant_user(&lease.scope, scope))
+            .filter(|lease| same_scope_owner(&lease.scope, scope))
             .collect::<Vec<_>>();
         leases.sort_by_key(|lease| lease.grant.id.as_uuid());
         leases
@@ -493,6 +493,7 @@ where
 struct CapabilityLeaseKey {
     tenant_id: TenantId,
     user_id: UserId,
+    agent_id: Option<AgentId>,
     invocation_id: InvocationId,
     lease_id: CapabilityGrantId,
 }
@@ -502,6 +503,7 @@ impl CapabilityLeaseKey {
         Self {
             tenant_id: scope.tenant_id.clone(),
             user_id: scope.user_id.clone(),
+            agent_id: scope.agent_id.clone(),
             invocation_id: scope.invocation_id,
             lease_id,
         }
@@ -614,6 +616,7 @@ fn principal_matches_context(principal: &Principal, context: &ExecutionContext) 
     match principal {
         Principal::Tenant(id) => id == &context.tenant_id,
         Principal::User(id) => id == &context.user_id,
+        Principal::Agent(id) => context.agent_id.as_ref() == Some(id),
         Principal::Project(id) => context.project_id.as_ref() == Some(id),
         Principal::Mission(id) => context.mission_id.as_ref() == Some(id),
         Principal::Thread(id) => context.thread_id.as_ref() == Some(id),
@@ -689,8 +692,10 @@ fn lease_is_expired(lease: &CapabilityLease) -> bool {
         .is_some_and(|expires_at| expires_at <= Utc::now())
 }
 
-fn same_tenant_user(left: &ResourceScope, right: &ResourceScope) -> bool {
-    left.tenant_id == right.tenant_id && left.user_id == right.user_id
+fn same_scope_owner(left: &ResourceScope, right: &ResourceScope) -> bool {
+    left.tenant_id == right.tenant_id
+        && left.user_id == right.user_id
+        && left.agent_id == right.agent_id
 }
 
 fn lease_path(
@@ -714,11 +719,19 @@ fn lease_invocation_root(scope: &ResourceScope) -> Result<VirtualPath, Capabilit
 }
 
 fn lease_tenant_user_root(scope: &ResourceScope) -> Result<VirtualPath, CapabilityLeaseError> {
-    VirtualPath::new(format!(
-        "/engine/tenants/{}/users/{}/capability-leases",
+    VirtualPath::new(format!("{}/capability-leases", scoped_owner_root(scope)))
+        .map_err(lease_host_api_error)
+}
+
+fn scoped_owner_root(scope: &ResourceScope) -> String {
+    let base = format!(
+        "/engine/tenants/{}/users/{}",
         scope.tenant_id, scope.user_id
-    ))
-    .map_err(lease_host_api_error)
+    );
+    match &scope.agent_id {
+        Some(agent_id) => format!("{base}/agents/{agent_id}"),
+        None => base,
+    }
 }
 
 fn serialize_pretty<T>(value: &T) -> Result<Vec<u8>, CapabilityLeaseError>

@@ -303,15 +303,26 @@ fn scoped_jsonl_path(
         });
     }
     VirtualPath::new(format!(
-        "/engine/tenants/{}/users/{}/events/{}/{}",
-        scope.tenant_id.as_str(),
-        scope.user_id.as_str(),
+        "{}/events/{}/{}",
+        scoped_owner_root(scope),
         category,
         file_name
     ))
     .map_err(|error| EventError::InvalidPath {
         reason: error.to_string(),
     })
+}
+
+fn scoped_owner_root(scope: &ResourceScope) -> String {
+    let base = format!(
+        "/engine/tenants/{}/users/{}",
+        scope.tenant_id.as_str(),
+        scope.user_id.as_str()
+    );
+    match &scope.agent_id {
+        Some(agent_id) => format!("{base}/agents/{}", agent_id.as_str()),
+        None => base,
+    }
 }
 
 fn is_safe_jsonl_file_name(file_name: &str) -> bool {

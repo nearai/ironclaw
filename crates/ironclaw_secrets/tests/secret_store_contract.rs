@@ -115,6 +115,7 @@ fn sample_scope(tenant: &str, user: &str) -> ResourceScope {
     ResourceScope {
         tenant_id: TenantId::new(tenant).unwrap(),
         user_id: UserId::new(user).unwrap(),
+        agent_id: None,
         project_id: Some(ProjectId::new("project-a").unwrap()),
         mission_id: Some(MissionId::new("mission-a").unwrap()),
         thread_id: Some(ThreadId::new("thread-a").unwrap()),

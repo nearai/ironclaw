@@ -801,6 +801,7 @@ fn audit_before_record(request: &CapabilityObligationRequest<'_>) -> AuditEnvelo
         timestamp: Utc::now(),
         tenant_id: request.context.tenant_id.clone(),
         user_id: request.context.user_id.clone(),
+        agent_id: request.context.agent_id.clone(),
         project_id: request.context.project_id.clone(),
         mission_id: request.context.mission_id.clone(),
         thread_id: request.context.thread_id.clone(),

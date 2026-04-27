@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
 
 use ironclaw_host_api::{
-    MissionId, ProjectId, ResourceEstimate, ResourceReservationId, ResourceScope, ResourceUsage,
-    TenantId, ThreadId, UserId,
+    AgentId, MissionId, ProjectId, ResourceEstimate, ResourceReservationId, ResourceScope,
+    ResourceUsage, TenantId, ThreadId, UserId,
 };
 pub use ironclaw_host_api::{ReservationStatus, ResourceReceipt, ResourceReservation};
 use rust_decimal::Decimal;
@@ -30,6 +30,12 @@ pub enum ResourceAccount {
         tenant_id: TenantId,
         user_id: UserId,
         project_id: ProjectId,
+    },
+    Agent {
+        tenant_id: TenantId,
+        user_id: UserId,
+        project_id: Option<ProjectId>,
+        agent_id: AgentId,
     },
     Mission {
         tenant_id: TenantId,
@@ -60,6 +66,20 @@ impl ResourceAccount {
             tenant_id,
             user_id,
             project_id,
+        }
+    }
+
+    pub fn agent(
+        tenant_id: TenantId,
+        user_id: UserId,
+        project_id: Option<ProjectId>,
+        agent_id: AgentId,
+    ) -> Self {
+        Self::Agent {
+            tenant_id,
+            user_id,
+            project_id,
+            agent_id,
         }
     }
 
@@ -104,6 +124,15 @@ impl ResourceAccount {
                 scope.tenant_id.clone(),
                 scope.user_id.clone(),
                 project_id.clone(),
+            ));
+        }
+
+        if let Some(agent_id) = &scope.agent_id {
+            accounts.push(Self::agent(
+                scope.tenant_id.clone(),
+                scope.user_id.clone(),
+                scope.project_id.clone(),
+                agent_id.clone(),
             ));
         }
 
