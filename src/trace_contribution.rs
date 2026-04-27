@@ -6,11 +6,13 @@
 //! before a trace can leave a user's machine.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use anyhow::Context;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use regex::Regex;
@@ -35,6 +37,9 @@ pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES: usize = 1024 * 1024;
 pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDOUT_BYTES: usize = 1024 * 1024;
 pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDERR_BYTES: usize = 64 * 1024;
 pub const TRACE_CREDIT_NOTICE_MAX_SNOOZE_HOURS: u32 = 24 * 365;
+pub const TRACE_UPLOAD_CLAIM_DEFAULT_TIMEOUT_MS: u64 = 5_000;
+pub const TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES: usize = 64 * 1024;
+const TRACE_UPLOAD_CLAIM_REFRESH_SKEW_SECONDS: i64 = 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceContributionEnvelope {
@@ -625,6 +630,18 @@ pub struct StandingTraceContributionPolicy {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ingestion_endpoint: Option<String>,
     pub bearer_token_env: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_token_issuer_url: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub upload_token_issuer_allowed_hosts: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_token_audience: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_token_tenant_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_token_workload_token_env: Option<String>,
+    #[serde(default = "default_trace_upload_claim_issuer_timeout_ms")]
+    pub upload_token_issuer_timeout_ms: u64,
     pub include_message_text: bool,
     pub include_tool_payloads: bool,
     pub auto_submit_failed_traces: bool,
@@ -684,6 +701,12 @@ impl Default for StandingTraceContributionPolicy {
             enabled: false,
             ingestion_endpoint: None,
             bearer_token_env: "IRONCLAW_TRACE_SUBMIT_TOKEN".to_string(),
+            upload_token_issuer_url: None,
+            upload_token_issuer_allowed_hosts: BTreeSet::new(),
+            upload_token_audience: None,
+            upload_token_tenant_id: None,
+            upload_token_workload_token_env: None,
+            upload_token_issuer_timeout_ms: TRACE_UPLOAD_CLAIM_DEFAULT_TIMEOUT_MS,
             include_message_text: false,
             include_tool_payloads: false,
             auto_submit_failed_traces: true,
@@ -695,6 +718,10 @@ impl Default for StandingTraceContributionPolicy {
             default_scope: ConsentScope::DebuggingEvaluation,
         }
     }
+}
+
+fn default_trace_upload_claim_issuer_timeout_ms() -> u64 {
+    TRACE_UPLOAD_CLAIM_DEFAULT_TIMEOUT_MS
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -4093,18 +4120,553 @@ pub fn apply_credit_estimate_to_envelope(envelope: &mut TraceContributionEnvelop
     envelope.value_card.user_visible_explanation = envelope.value.explanation.clone();
 }
 
+#[derive(Debug, Clone)]
+struct TraceUploadClaimContext {
+    trace_id: Option<Uuid>,
+    submission_id: Option<Uuid>,
+    consent_scopes: Vec<ConsentScope>,
+    allowed_uses: Vec<TraceAllowedUse>,
+}
+
+impl TraceUploadClaimContext {
+    fn for_envelope(envelope: &TraceContributionEnvelope) -> Self {
+        Self {
+            trace_id: Some(envelope.trace_id),
+            submission_id: Some(envelope.submission_id),
+            consent_scopes: envelope.consent.scopes.clone(),
+            allowed_uses: envelope.trace_card.allowed_uses.clone(),
+        }
+    }
+
+    fn for_status_sync() -> Self {
+        Self {
+            trace_id: None,
+            submission_id: None,
+            consent_scopes: Vec::new(),
+            allowed_uses: Vec::new(),
+        }
+    }
+}
+
+#[async_trait]
+trait TraceUploadCredentialProvider: Send + Sync {
+    async fn bearer_token(
+        &self,
+        policy: &StandingTraceContributionPolicy,
+        context: &TraceUploadClaimContext,
+        force_refresh: bool,
+    ) -> anyhow::Result<String>;
+}
+
+struct DefaultTraceUploadCredentialProvider;
+
+struct StaticEnvTraceUploadCredentialProvider<'a> {
+    bearer_token_env: &'a str,
+}
+
+#[derive(Debug, Clone)]
+struct CachedTraceUploadClaim {
+    token: String,
+    refresh_after: DateTime<Utc>,
+}
+
+static TRACE_UPLOAD_CLAIM_CACHE: LazyLock<
+    std::sync::Mutex<BTreeMap<String, CachedTraceUploadClaim>>,
+> = LazyLock::new(|| std::sync::Mutex::new(BTreeMap::new()));
+
+#[derive(Debug, Serialize)]
+struct TraceUploadClaimIssuerRequest {
+    schema_version: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tenant_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audience: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trace_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    submission_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    consent_scopes: Vec<ConsentScope>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    allowed_uses: Vec<TraceAllowedUse>,
+    requested_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceUploadClaimIssuerResponse {
+    access_token: String,
+    #[serde(default)]
+    token_type: Option<String>,
+    #[serde(default)]
+    expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    expires_in: Option<i64>,
+}
+
+#[derive(Debug)]
+struct TraceRemoteRequestFailure {
+    status: Option<reqwest::StatusCode>,
+    message: String,
+}
+
+impl TraceRemoteRequestFailure {
+    fn auth_rejection(&self) -> bool {
+        matches!(
+            self.status,
+            Some(reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN)
+        )
+    }
+}
+
+impl std::fmt::Display for TraceRemoteRequestFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for TraceRemoteRequestFailure {}
+
+#[async_trait]
+impl TraceUploadCredentialProvider for StaticEnvTraceUploadCredentialProvider<'_> {
+    async fn bearer_token(
+        &self,
+        _policy: &StandingTraceContributionPolicy,
+        _context: &TraceUploadClaimContext,
+        _force_refresh: bool,
+    ) -> anyhow::Result<String> {
+        trace_upload_static_env_bearer_token(self.bearer_token_env)
+    }
+}
+
+#[async_trait]
+impl TraceUploadCredentialProvider for DefaultTraceUploadCredentialProvider {
+    async fn bearer_token(
+        &self,
+        policy: &StandingTraceContributionPolicy,
+        context: &TraceUploadClaimContext,
+        force_refresh: bool,
+    ) -> anyhow::Result<String> {
+        if policy
+            .upload_token_issuer_url
+            .as_deref()
+            .is_some_and(|url| !url.trim().is_empty())
+        {
+            return trace_upload_issuer_claim_bearer_token(policy, context, force_refresh).await;
+        }
+        trace_upload_static_env_bearer_token(&policy.bearer_token_env)
+    }
+}
+
+fn trace_upload_static_env_bearer_token(bearer_token_env: &str) -> anyhow::Result<String> {
+    std::env::var(bearer_token_env).map_err(|_| {
+        anyhow::anyhow!(
+            "{} is not set; refusing to call Trace Commons without explicit API credentials",
+            bearer_token_env
+        )
+    })
+}
+
+async fn trace_upload_issuer_claim_bearer_token(
+    policy: &StandingTraceContributionPolicy,
+    context: &TraceUploadClaimContext,
+    force_refresh: bool,
+) -> anyhow::Result<String> {
+    let cache_key = trace_upload_claim_cache_key(policy, context)?;
+    if !force_refresh && let Some(cached) = trace_upload_cached_claim(&cache_key, Utc::now()) {
+        return Ok(cached);
+    }
+
+    let claim = fetch_trace_upload_claim_from_issuer(policy, context).await?;
+    if let Some(refresh_after) = trace_upload_claim_refresh_after(&claim, Utc::now()) {
+        let mut cache = match TRACE_UPLOAD_CLAIM_CACHE.lock() {
+            Ok(cache) => cache,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        cache.insert(
+            cache_key,
+            CachedTraceUploadClaim {
+                token: claim.access_token.clone(),
+                refresh_after,
+            },
+        );
+    }
+    Ok(claim.access_token)
+}
+
+fn trace_upload_cached_claim(cache_key: &str, now: DateTime<Utc>) -> Option<String> {
+    let cache = match TRACE_UPLOAD_CLAIM_CACHE.lock() {
+        Ok(cache) => cache,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    cache
+        .get(cache_key)
+        .filter(|cached| cached.refresh_after > now)
+        .map(|cached| cached.token.clone())
+}
+
+fn trace_upload_claim_cache_key(
+    policy: &StandingTraceContributionPolicy,
+    context: &TraceUploadClaimContext,
+) -> anyhow::Result<String> {
+    let issuer = policy
+        .upload_token_issuer_url
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("Trace Commons upload token issuer URL is not configured"))?
+        .trim();
+    Ok(format!(
+        "{}|tenant={}|audience={}|scopes={}|uses={}|workload_env={}",
+        issuer,
+        policy.upload_token_tenant_id.as_deref().unwrap_or_default(),
+        policy.upload_token_audience.as_deref().unwrap_or_default(),
+        trace_upload_claim_scope_key(&context.consent_scopes),
+        trace_upload_claim_use_key(&context.allowed_uses),
+        policy
+            .upload_token_workload_token_env
+            .as_deref()
+            .unwrap_or_default()
+    ))
+}
+
+fn trace_upload_claim_scope_key(scopes: &[ConsentScope]) -> String {
+    scopes
+        .iter()
+        .map(|scope| format!("{scope:?}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn trace_upload_claim_use_key(uses: &[TraceAllowedUse]) -> String {
+    uses.iter()
+        .map(|allowed_use| format!("{allowed_use:?}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn trace_upload_claim_refresh_after(
+    response: &TraceUploadClaimIssuerResponse,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    let expires_at = match response.expires_at {
+        Some(expires_at) => expires_at,
+        None => {
+            let seconds = response.expires_in?;
+            if seconds <= 0 {
+                return None;
+            }
+            now.checked_add_signed(chrono::Duration::seconds(seconds))?
+        }
+    };
+    let refresh_after =
+        expires_at - chrono::Duration::seconds(TRACE_UPLOAD_CLAIM_REFRESH_SKEW_SECONDS);
+    (refresh_after > now).then_some(refresh_after)
+}
+
+async fn fetch_trace_upload_claim_from_issuer(
+    policy: &StandingTraceContributionPolicy,
+    context: &TraceUploadClaimContext,
+) -> anyhow::Result<TraceUploadClaimIssuerResponse> {
+    let issuer_url = policy.upload_token_issuer_url.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("Trace Commons upload token issuer URL is not configured")
+    })?;
+    let parsed =
+        reqwest::Url::parse(issuer_url).context("invalid Trace Commons upload token issuer URL")?;
+    validate_trace_upload_claim_issuer_url(&parsed, &policy.upload_token_issuer_allowed_hosts)?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("Trace Commons upload token issuer URL requires a host"))?
+        .to_ascii_lowercase();
+    let port = parsed.port_or_known_default().ok_or_else(|| {
+        anyhow::anyhow!("Trace Commons upload token issuer URL requires a known port")
+    })?;
+    let resolved_addrs = resolve_trace_upload_claim_issuer_host(&host, port).await?;
+    let timeout = trace_upload_claim_issuer_timeout(policy)?;
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout.min(Duration::from_secs(3)))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("ironclaw-trace-commons-upload-claim/0.1")
+        .resolve_to_addrs(&host, &resolved_addrs)
+        .build()
+        .context("failed to build Trace Commons upload token issuer HTTP client")?;
+    let request_body = TraceUploadClaimIssuerRequest {
+        schema_version: "ironclaw.trace_upload_claim_request.v1",
+        tenant_id: policy.upload_token_tenant_id.clone(),
+        audience: policy.upload_token_audience.clone(),
+        trace_id: context.trace_id,
+        submission_id: context.submission_id,
+        consent_scopes: context.consent_scopes.clone(),
+        allowed_uses: context.allowed_uses.clone(),
+        requested_at: Utc::now(),
+    };
+    let mut request = client
+        .post(parsed.clone())
+        .header(reqwest::header::ACCEPT, "application/json")
+        .json(&request_body);
+    if let Some(env_name) = policy.upload_token_workload_token_env.as_deref()
+        && !env_name.trim().is_empty()
+    {
+        let workload_token = std::env::var(env_name).map_err(|_| {
+            anyhow::anyhow!(
+                "{} is not set; refusing to fetch Trace Commons upload claim without workload credentials",
+                env_name
+            )
+        })?;
+        request = request.bearer_auth(workload_token);
+    }
+
+    let response = request.send().await.with_context(|| {
+        format!(
+            "failed to fetch Trace Commons upload claim from {}",
+            safe_trace_upload_claim_issuer_url_label(&parsed)
+        )
+    })?;
+    let status = response.status();
+    anyhow::ensure!(
+        status.is_success(),
+        "failed to fetch Trace Commons upload claim from {}: HTTP {}",
+        safe_trace_upload_claim_issuer_url_label(&parsed),
+        status.as_u16()
+    );
+    if let Some(content_length) = response.content_length() {
+        anyhow::ensure!(
+            content_length <= TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES as u64,
+            "Trace Commons upload claim response from {} exceeded {} bytes",
+            safe_trace_upload_claim_issuer_url_label(&parsed),
+            TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES
+        );
+    }
+    let body = read_bounded_trace_upload_claim_response(response, &parsed).await?;
+    let claim: TraceUploadClaimIssuerResponse = serde_json::from_str(&body).with_context(|| {
+        format!(
+            "Trace Commons upload claim response from {} was not valid JSON",
+            safe_trace_upload_claim_issuer_url_label(&parsed)
+        )
+    })?;
+    validate_trace_upload_claim_response(&claim)?;
+    Ok(claim)
+}
+
+async fn read_bounded_trace_upload_claim_response(
+    mut response: reqwest::Response,
+    issuer_url: &reqwest::Url,
+) -> anyhow::Result<String> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.with_context(|| {
+        format!(
+            "failed to read Trace Commons upload claim response from {}",
+            safe_trace_upload_claim_issuer_url_label(issuer_url)
+        )
+    })? {
+        bytes.extend_from_slice(&chunk);
+        anyhow::ensure!(
+            bytes.len() <= TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES,
+            "Trace Commons upload claim response from {} exceeded {} bytes",
+            safe_trace_upload_claim_issuer_url_label(issuer_url),
+            TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES
+        );
+    }
+    String::from_utf8(bytes).with_context(|| {
+        format!(
+            "Trace Commons upload claim response from {} was not valid UTF-8",
+            safe_trace_upload_claim_issuer_url_label(issuer_url)
+        )
+    })
+}
+
+fn validate_trace_upload_claim_response(
+    response: &TraceUploadClaimIssuerResponse,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !response.access_token.trim().is_empty(),
+        "Trace Commons upload claim response did not include an access token"
+    );
+    if let Some(token_type) = response.token_type.as_deref() {
+        anyhow::ensure!(
+            token_type.eq_ignore_ascii_case("bearer"),
+            "Trace Commons upload claim response token_type must be bearer"
+        );
+    }
+    let header = jsonwebtoken::decode_header(response.access_token.trim())
+        .context("Trace Commons upload claim access token is not a JWT")?;
+    anyhow::ensure!(
+        header.alg == jsonwebtoken::Algorithm::EdDSA,
+        "Trace Commons upload claim access token must use EdDSA"
+    );
+    anyhow::ensure!(
+        header
+            .kid
+            .as_deref()
+            .is_some_and(|kid| !kid.trim().is_empty()),
+        "Trace Commons upload claim access token must include a kid"
+    );
+    Ok(())
+}
+
+fn validate_trace_upload_claim_issuer_url(
+    url: &reqwest::Url,
+    allowed_hosts: &BTreeSet<String>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        url.scheme() == "https",
+        "Trace Commons upload token issuer URL must use https"
+    );
+    anyhow::ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "Trace Commons upload token issuer URL must not include embedded credentials"
+    );
+    anyhow::ensure!(
+        url.query().is_none() && url.fragment().is_none(),
+        "Trace Commons upload token issuer URL must not include query strings or fragments"
+    );
+    let host = url
+        .host_str()
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| anyhow::anyhow!("Trace Commons upload token issuer URL requires a host"))?;
+    anyhow::ensure!(
+        !is_internal_trace_upload_claim_issuer_hostname(&host),
+        "Trace Commons upload token issuer URL must not use localhost or internal hostnames"
+    );
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        anyhow::ensure!(
+            !is_disallowed_trace_upload_claim_issuer_ip(ip),
+            "Trace Commons upload token issuer URL must not use private, local, or reserved IP addresses"
+        );
+    }
+    anyhow::ensure!(
+        !allowed_hosts.is_empty(),
+        "Trace Commons upload token issuer URL requires an allowed-host list"
+    );
+    anyhow::ensure!(
+        allowed_hosts.contains(&host),
+        "Trace Commons upload token issuer URL host is not allowlisted"
+    );
+    Ok(())
+}
+
+async fn resolve_trace_upload_claim_issuer_host(
+    host: &str,
+    port: u16,
+) -> anyhow::Result<Vec<SocketAddr>> {
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+        .await
+        .with_context(|| {
+            format!("failed to resolve Trace Commons upload token issuer host {host}")
+        })?
+        .collect();
+    anyhow::ensure!(
+        !addrs.is_empty(),
+        "Trace Commons upload token issuer host {host} resolved to no addresses"
+    );
+    for addr in &addrs {
+        anyhow::ensure!(
+            !is_disallowed_trace_upload_claim_issuer_ip(addr.ip()),
+            "Trace Commons upload token issuer host {host} resolved to disallowed address"
+        );
+    }
+    Ok(addrs)
+}
+
+fn is_internal_trace_upload_claim_issuer_hostname(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+        || host == "metadata.google.internal"
+}
+
+fn is_disallowed_trace_upload_claim_issuer_ip(ip: IpAddr) -> bool {
+    match normalize_trace_upload_claim_issuer_ip(ip) {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            octets[0] == 0
+                || octets[0] == 10
+                || octets[0] == 127
+                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+                || (octets[0] == 169 && octets[1] == 254)
+                || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+                || (octets[0] == 192 && octets[1] == 168)
+                || (octets[0] == 198 && (18..=19).contains(&octets[1]))
+                || octets[0] >= 224
+        }
+        IpAddr::V6(v6) => {
+            let segments = v6.segments();
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (segments[0] & 0xfe00) == 0xfc00
+                || (segments[0] & 0xffc0) == 0xfe80
+                || (segments[0] & 0xff00) == 0xff00
+        }
+    }
+}
+
+fn normalize_trace_upload_claim_issuer_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(v4) => IpAddr::V4(v4),
+        IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(v6)),
+    }
+}
+
+fn trace_upload_claim_issuer_timeout(
+    policy: &StandingTraceContributionPolicy,
+) -> anyhow::Result<Duration> {
+    let timeout_ms = policy.upload_token_issuer_timeout_ms;
+    anyhow::ensure!(
+        (1..=30_000).contains(&timeout_ms),
+        "Trace Commons upload token issuer timeout must be between 1 and 30000 milliseconds"
+    );
+    Ok(Duration::from_millis(timeout_ms))
+}
+
+fn safe_trace_upload_claim_issuer_url_label(url: &reqwest::Url) -> String {
+    let host = url.host_str().unwrap_or("<unknown-host>");
+    format!("{}://{}", url.scheme(), host)
+}
+
 pub async fn submit_trace_envelope_to_endpoint(
     envelope: &TraceContributionEnvelope,
     endpoint: &str,
     bearer_token_env: &str,
 ) -> anyhow::Result<TraceSubmissionReceipt> {
-    let token = std::env::var(bearer_token_env).map_err(|_| {
-        anyhow::anyhow!(
-            "{} is not set; refusing to submit without explicit API credentials",
-            bearer_token_env
-        )
-    })?;
+    let provider = StaticEnvTraceUploadCredentialProvider { bearer_token_env };
+    let policy = StandingTraceContributionPolicy {
+        bearer_token_env: bearer_token_env.to_string(),
+        ..Default::default()
+    };
+    submit_trace_envelope_to_endpoint_with_credential_provider(
+        envelope, endpoint, &policy, &provider,
+    )
+    .await
+}
 
+async fn submit_trace_envelope_to_endpoint_with_credential_provider(
+    envelope: &TraceContributionEnvelope,
+    endpoint: &str,
+    policy: &StandingTraceContributionPolicy,
+    provider: &dyn TraceUploadCredentialProvider,
+) -> anyhow::Result<TraceSubmissionReceipt> {
+    let context = TraceUploadClaimContext::for_envelope(envelope);
+    let token = provider.bearer_token(policy, &context, false).await?;
+    match submit_trace_envelope_to_endpoint_with_token(envelope, endpoint, &token).await {
+        Ok(receipt) => Ok(receipt),
+        Err(error) if error.auth_rejection() => {
+            let refreshed = provider.bearer_token(policy, &context, true).await?;
+            submit_trace_envelope_to_endpoint_with_token(envelope, endpoint, &refreshed)
+                .await
+                .map_err(anyhow::Error::from)
+        }
+        Err(error) => Err(anyhow::Error::from(error)),
+    }
+}
+
+async fn submit_trace_envelope_to_endpoint_with_token(
+    envelope: &TraceContributionEnvelope,
+    endpoint: &str,
+    token: &str,
+) -> Result<TraceSubmissionReceipt, TraceRemoteRequestFailure> {
     let response = reqwest::Client::new()
         .post(endpoint)
         .bearer_auth(token)
@@ -4112,12 +4674,17 @@ pub async fn submit_trace_envelope_to_endpoint(
         .json(envelope)
         .send()
         .await
-        .map_err(|e| anyhow::Error::new(e).context("trace submission request failed"))?;
-
+        .map_err(|e| TraceRemoteRequestFailure {
+            status: None,
+            message: format!("trace submission request failed: {e}"),
+        })?;
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        anyhow::bail!("trace submission rejected by {}: {}", status, body);
+        return Err(TraceRemoteRequestFailure {
+            status: Some(status),
+            message: format!("trace submission rejected by {status}: {body}"),
+        });
     }
 
     Ok(
@@ -4194,6 +4761,19 @@ pub async fn flush_trace_contribution_queue_for_scope(
     scope: Option<&str>,
     limit: usize,
 ) -> anyhow::Result<TraceQueueFlushReport> {
+    flush_trace_contribution_queue_for_scope_with_credential_provider(
+        scope,
+        limit,
+        &DefaultTraceUploadCredentialProvider,
+    )
+    .await
+}
+
+async fn flush_trace_contribution_queue_for_scope_with_credential_provider(
+    scope: Option<&str>,
+    limit: usize,
+    provider: &dyn TraceUploadCredentialProvider,
+) -> anyhow::Result<TraceQueueFlushReport> {
     let _guard = lock_trace_scope_for_mutation(scope).await;
     let flush_started_at = Utc::now();
     record_trace_queue_flush_attempt_for_scope_unlocked(scope, flush_started_at)?;
@@ -4239,10 +4819,8 @@ pub async fn flush_trace_contribution_queue_for_scope(
                     holds.push(hold);
                     continue;
                 }
-                let receipt = match submit_trace_envelope_to_endpoint(
-                    &envelope,
-                    endpoint,
-                    &policy.bearer_token_env,
+                let receipt = match submit_trace_envelope_to_endpoint_with_credential_provider(
+                    &envelope, endpoint, &policy, provider,
                 )
                 .await
                 {
@@ -4297,7 +4875,11 @@ pub async fn flush_trace_contribution_queue_for_scope(
 
     // Flush keeps the scoped lock through submission and status-sync network calls
     // so another same-scope flush cannot submit or remove the same queue file.
-    match sync_remote_trace_submission_records_for_scope_unlocked(scope).await {
+    match sync_remote_trace_submission_records_for_scope_unlocked_with_credential_provider(
+        scope, provider,
+    )
+    .await
+    {
         Ok(_) => record_trace_queue_status_sync_success_for_scope_unlocked(scope, Utc::now())?,
         Err(error) => {
             record_trace_queue_status_sync_failure_for_scope_unlocked(scope, &error, Utc::now())?;
@@ -4369,6 +4951,17 @@ where
 pub async fn sync_remote_trace_submission_records_for_scope(
     scope: Option<&str>,
 ) -> anyhow::Result<usize> {
+    sync_remote_trace_submission_records_for_scope_with_credential_provider(
+        scope,
+        &DefaultTraceUploadCredentialProvider,
+    )
+    .await
+}
+
+async fn sync_remote_trace_submission_records_for_scope_with_credential_provider(
+    scope: Option<&str>,
+    provider: &dyn TraceUploadCredentialProvider,
+) -> anyhow::Result<usize> {
     let policy = read_trace_policy_for_scope(scope)?;
     if !policy.enabled {
         return Ok(0);
@@ -4391,9 +4984,10 @@ pub async fn sync_remote_trace_submission_records_for_scope(
     }
 
     let status_endpoint = trace_submission_status_endpoint(endpoint)?;
-    let updates = fetch_trace_submission_statuses(
+    let updates = fetch_trace_submission_statuses_with_credential_provider(
         &status_endpoint,
-        &policy.bearer_token_env,
+        &policy,
+        provider,
         &submission_ids,
     )
     .await?;
@@ -4401,8 +4995,9 @@ pub async fn sync_remote_trace_submission_records_for_scope(
     apply_remote_trace_submission_statuses_for_scope_unlocked(scope, &updates)
 }
 
-async fn sync_remote_trace_submission_records_for_scope_unlocked(
+async fn sync_remote_trace_submission_records_for_scope_unlocked_with_credential_provider(
     scope: Option<&str>,
+    provider: &dyn TraceUploadCredentialProvider,
 ) -> anyhow::Result<usize> {
     let policy = read_trace_policy_for_scope(scope)?;
     if !policy.enabled {
@@ -4423,9 +5018,10 @@ async fn sync_remote_trace_submission_records_for_scope_unlocked(
     }
 
     let status_endpoint = trace_submission_status_endpoint(endpoint)?;
-    let updates = fetch_trace_submission_statuses(
+    let updates = fetch_trace_submission_statuses_with_credential_provider(
         &status_endpoint,
-        &policy.bearer_token_env,
+        &policy,
+        provider,
         &submission_ids,
     )
     .await?;
@@ -4472,38 +5068,83 @@ pub async fn fetch_trace_submission_statuses(
     bearer_token_env: &str,
     submission_ids: &[Uuid],
 ) -> anyhow::Result<Vec<TraceSubmissionStatusUpdate>> {
-    let token = std::env::var(bearer_token_env).map_err(|_| {
-        anyhow::anyhow!(
-            "{} is not set; refusing to sync Trace Commons credit without credentials",
-            bearer_token_env
-        )
-    })?;
-    let client = reqwest::Client::new();
+    let provider = StaticEnvTraceUploadCredentialProvider { bearer_token_env };
+    let policy = StandingTraceContributionPolicy {
+        bearer_token_env: bearer_token_env.to_string(),
+        ..Default::default()
+    };
+    fetch_trace_submission_statuses_with_credential_provider(
+        status_endpoint,
+        &policy,
+        &provider,
+        submission_ids,
+    )
+    .await
+}
+
+async fn fetch_trace_submission_statuses_with_credential_provider(
+    status_endpoint: &str,
+    policy: &StandingTraceContributionPolicy,
+    provider: &dyn TraceUploadCredentialProvider,
+    submission_ids: &[Uuid],
+) -> anyhow::Result<Vec<TraceSubmissionStatusUpdate>> {
+    let context = TraceUploadClaimContext::for_status_sync();
     let mut updates = Vec::new();
 
     for chunk in submission_ids.chunks(200) {
-        let response = client
-            .post(status_endpoint)
-            .bearer_auth(&token)
-            .json(&TraceSubmissionStatusRequest {
-                submission_ids: chunk.to_vec(),
-            })
-            .send()
-            .await
-            .map_err(|e| anyhow::Error::new(e).context("trace status sync request failed"))?;
-
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        if !status.is_success() {
-            anyhow::bail!("trace status sync rejected by {}: {}", status, body);
-        }
-
+        let token = provider.bearer_token(policy, &context, false).await?;
+        let body =
+            match fetch_trace_submission_statuses_chunk_with_token(status_endpoint, chunk, &token)
+                .await
+            {
+                Ok(body) => body,
+                Err(error) if error.auth_rejection() => {
+                    let refreshed = provider.bearer_token(policy, &context, true).await?;
+                    fetch_trace_submission_statuses_chunk_with_token(
+                        status_endpoint,
+                        chunk,
+                        &refreshed,
+                    )
+                    .await
+                    .map_err(anyhow::Error::from)?
+                }
+                Err(error) => return Err(anyhow::Error::from(error)),
+            };
         let mut page: Vec<TraceSubmissionStatusUpdate> = serde_json::from_str(&body)
             .map_err(|e| anyhow::anyhow!("failed to parse trace status sync response: {}", e))?;
         updates.append(&mut page);
     }
 
     Ok(updates)
+}
+
+async fn fetch_trace_submission_statuses_chunk_with_token(
+    status_endpoint: &str,
+    submission_ids: &[Uuid],
+    token: &str,
+) -> Result<String, TraceRemoteRequestFailure> {
+    let response = reqwest::Client::new()
+        .post(status_endpoint)
+        .bearer_auth(token)
+        .json(&TraceSubmissionStatusRequest {
+            submission_ids: submission_ids.to_vec(),
+        })
+        .send()
+        .await
+        .map_err(|e| TraceRemoteRequestFailure {
+            status: None,
+            message: format!("trace status sync request failed: {e}"),
+        })?;
+
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(TraceRemoteRequestFailure {
+            status: Some(status),
+            message: format!("trace status sync rejected by {status}: {body}"),
+        });
+    }
+    Ok(body)
 }
 
 pub fn apply_remote_trace_submission_statuses_for_scope(
@@ -5950,6 +6591,7 @@ fn scope_hash(scope: &str) -> String {
 mod tests {
     use super::*;
     use crate::llm::recording::{TraceStep, TraceToolCall};
+    use base64::Engine;
 
     #[test]
     fn trace_policy_preflight_gates_queue_and_submit_intents() {
@@ -6103,6 +6745,36 @@ mod tests {
                     std::env::remove_var(self.name);
                 }
             }
+        }
+    }
+
+    struct RefreshingTestUploadCredentialProvider {
+        current: std::sync::Mutex<String>,
+        fresh: String,
+    }
+
+    impl RefreshingTestUploadCredentialProvider {
+        fn new(stale: &str, fresh: &str) -> Self {
+            Self {
+                current: std::sync::Mutex::new(stale.to_string()),
+                fresh: fresh.to_string(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl TraceUploadCredentialProvider for RefreshingTestUploadCredentialProvider {
+        async fn bearer_token(
+            &self,
+            _policy: &StandingTraceContributionPolicy,
+            _context: &TraceUploadClaimContext,
+            force_refresh: bool,
+        ) -> anyhow::Result<String> {
+            let mut current = self.current.lock().expect("test provider lock");
+            if force_refresh {
+                *current = self.fresh.clone();
+            }
+            Ok(current.clone())
         }
     }
 
@@ -7930,6 +8602,196 @@ mod tests {
         assert!(hold_body.contains("\"attempts\": 1"));
         assert!(!hold_body.contains("127.0.0.1"));
         assert!(!hold_body.contains("super-secret-token"));
+    }
+
+    #[tokio::test]
+    async fn queue_flush_uses_refreshed_upload_claim_for_submit_and_status_sync() {
+        let scope = format!("trace-issuer-refresh-test-{}", Uuid::new_v4());
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen_for_submit = seen.clone();
+        let seen_for_status = seen.clone();
+        let app = axum::Router::new()
+            .route(
+                "/v1/traces",
+                axum::routing::post(
+                    move |headers: axum::http::HeaderMap,
+                          axum::Json(_body): axum::Json<TraceContributionEnvelope>| {
+                        let seen = seen_for_submit.clone();
+                        async move {
+                            let authorization = headers
+                                .get(axum::http::header::AUTHORIZATION)
+                                .and_then(|value| value.to_str().ok())
+                                .unwrap_or("<missing>")
+                                .to_string();
+                            seen.lock().expect("seen lock").push(authorization.clone());
+                            if authorization == "Bearer stale-upload-claim" {
+                                return (
+                                    axum::http::StatusCode::UNAUTHORIZED,
+                                    axum::Json(serde_json::json!({"error": "expired"})),
+                                );
+                            }
+                            (
+                                axum::http::StatusCode::OK,
+                                axum::Json(serde_json::json!({
+                                    "status": "accepted",
+                                    "credit_points_pending": 1.0,
+                                    "explanation": ["accepted"]
+                                })),
+                            )
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/v1/contributors/me/submission-status",
+                axum::routing::post(move |headers: axum::http::HeaderMap| {
+                    let seen = seen_for_status.clone();
+                    async move {
+                        let authorization = headers
+                            .get(axum::http::header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or("<missing>")
+                            .to_string();
+                        seen.lock().expect("seen lock").push(authorization);
+                        axum::Json(Vec::<TraceSubmissionStatusUpdate>::new())
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock trace commons listener binds");
+        let endpoint = format!(
+            "http://{}/v1/traces",
+            listener.local_addr().expect("local addr")
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        write_trace_policy_for_scope(
+            Some(&scope),
+            &StandingTraceContributionPolicy {
+                enabled: true,
+                ingestion_endpoint: Some(endpoint),
+                auto_submit_high_value_traces: true,
+                min_submission_score: 0.0,
+                ..Default::default()
+            },
+        )
+        .expect("policy writes");
+        let raw = RawTraceContribution::from_recorded_trace(
+            &sample_trace(),
+            RecordedTraceContributionOptions::default(),
+        );
+        let mut envelope = DeterministicTraceRedactor::default()
+            .redact_trace(raw)
+            .await
+            .expect("redaction should succeed");
+        apply_credit_estimate_to_envelope(&mut envelope);
+        queue_trace_envelope_for_scope(Some(&scope), &envelope).expect("queued envelope writes");
+
+        let provider =
+            RefreshingTestUploadCredentialProvider::new("stale-upload-claim", "fresh-upload-claim");
+        let report = flush_trace_contribution_queue_for_scope_with_credential_provider(
+            Some(&scope),
+            10,
+            &provider,
+        )
+        .await
+        .expect("flush retries with refreshed claim");
+
+        assert_eq!(report.submitted, 1);
+        assert_eq!(report.held, 0);
+        assert_eq!(
+            *seen.lock().expect("seen lock"),
+            vec![
+                "Bearer stale-upload-claim".to_string(),
+                "Bearer fresh-upload-claim".to_string(),
+                "Bearer fresh-upload-claim".to_string()
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[test]
+    fn upload_claim_issuer_url_validation_rejects_unsafe_targets() {
+        let allowed_hosts = BTreeSet::from(["issuer.example.com".to_string()]);
+        assert!(
+            validate_trace_upload_claim_issuer_url(
+                &reqwest::Url::parse("https://issuer.example.com/v1/claims").expect("url"),
+                &allowed_hosts,
+            )
+            .is_ok()
+        );
+
+        for unsafe_url in [
+            "http://issuer.example.com/v1/claims",
+            "https://user:secret@issuer.example.com/v1/claims",
+            "https://issuer.example.com/v1/claims?token=secret",
+            "https://issuer.example.com/v1/claims#fragment",
+            "https://localhost/v1/claims",
+            "https://127.0.0.1/v1/claims",
+            "https://metadata.google.internal/v1/claims",
+        ] {
+            assert!(
+                validate_trace_upload_claim_issuer_url(
+                    &reqwest::Url::parse(unsafe_url).expect("url"),
+                    &allowed_hosts,
+                )
+                .is_err(),
+                "{unsafe_url} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn upload_claim_response_requires_eddsa_jwt_with_kid() {
+        let token = test_jwt_with_header(serde_json::json!({
+            "alg": "EdDSA",
+            "kid": "managed-key-1"
+        }));
+        validate_trace_upload_claim_response(&TraceUploadClaimIssuerResponse {
+            access_token: token,
+            token_type: Some("Bearer".to_string()),
+            expires_at: None,
+            expires_in: Some(300),
+        })
+        .expect("EdDSA token with kid is accepted for client-side transport");
+
+        let non_eddsa = test_jwt_with_header(serde_json::json!({
+            "alg": "HS256",
+            "kid": "managed-key-1"
+        }));
+        let error = validate_trace_upload_claim_response(&TraceUploadClaimIssuerResponse {
+            access_token: non_eddsa,
+            token_type: Some("Bearer".to_string()),
+            expires_at: None,
+            expires_in: Some(300),
+        })
+        .expect_err("non-EdDSA upload claims are rejected");
+        assert!(error.to_string().contains("EdDSA"));
+
+        let missing_kid = test_jwt_with_header(serde_json::json!({
+            "alg": "EdDSA"
+        }));
+        let error = validate_trace_upload_claim_response(&TraceUploadClaimIssuerResponse {
+            access_token: missing_kid,
+            token_type: Some("Bearer".to_string()),
+            expires_at: None,
+            expires_in: Some(300),
+        })
+        .expect_err("managed upload claims require kid");
+        assert!(error.to_string().contains("kid"));
+    }
+
+    fn test_jwt_with_header(header: serde_json::Value) -> String {
+        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        format!(
+            "{}.{}.signature",
+            engine.encode(header.to_string().as_bytes()),
+            engine.encode(b"{}")
+        )
     }
 
     #[tokio::test]

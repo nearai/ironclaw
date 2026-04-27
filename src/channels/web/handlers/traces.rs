@@ -36,6 +36,12 @@ pub struct TracePolicyRequest {
     pub enabled: Option<bool>,
     pub endpoint: Option<String>,
     pub bearer_token_env: Option<String>,
+    pub upload_token_issuer_url: Option<String>,
+    pub upload_token_issuer_allowed_hosts: Option<Vec<String>>,
+    pub upload_token_audience: Option<String>,
+    pub upload_token_tenant_id: Option<String>,
+    pub upload_token_workload_token_env: Option<String>,
+    pub upload_token_issuer_timeout_ms: Option<u64>,
     pub include_message_text: Option<bool>,
     pub include_tool_payloads: Option<bool>,
     pub auto_submit_failed_traces: Option<bool>,
@@ -192,6 +198,44 @@ pub async fn traces_policy_put_handler(
     }
     if let Some(env) = body.bearer_token_env {
         policy.bearer_token_env = env;
+    }
+    if let Some(url) = body.upload_token_issuer_url {
+        policy.upload_token_issuer_url = if url.trim().is_empty() {
+            None
+        } else {
+            Some(url)
+        };
+    }
+    if let Some(allowed_hosts) = body.upload_token_issuer_allowed_hosts {
+        policy.upload_token_issuer_allowed_hosts = allowed_hosts
+            .into_iter()
+            .map(|host| host.trim().to_ascii_lowercase())
+            .filter(|host| !host.is_empty())
+            .collect::<BTreeSet<_>>();
+    }
+    if let Some(audience) = body.upload_token_audience {
+        policy.upload_token_audience = if audience.trim().is_empty() {
+            None
+        } else {
+            Some(audience)
+        };
+    }
+    if let Some(tenant_id) = body.upload_token_tenant_id {
+        policy.upload_token_tenant_id = if tenant_id.trim().is_empty() {
+            None
+        } else {
+            Some(tenant_id)
+        };
+    }
+    if let Some(env) = body.upload_token_workload_token_env {
+        policy.upload_token_workload_token_env = if env.trim().is_empty() {
+            None
+        } else {
+            Some(env)
+        };
+    }
+    if let Some(timeout_ms) = body.upload_token_issuer_timeout_ms {
+        policy.upload_token_issuer_timeout_ms = timeout_ms;
     }
     if let Some(include) = body.include_message_text {
         policy.include_message_text = include;

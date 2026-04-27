@@ -38,6 +38,30 @@ pub enum TracesCommand {
         #[arg(long, default_value = "IRONCLAW_TRACE_SUBMIT_TOKEN")]
         bearer_token_env: String,
 
+        /// HTTPS issuer URL that returns short-lived EdDSA upload claims
+        #[arg(long)]
+        upload_token_issuer_url: Option<String>,
+
+        /// Exact allowed issuer hostnames for upload claim refresh
+        #[arg(long, value_delimiter = ',')]
+        upload_token_issuer_allowed_hosts: Vec<String>,
+
+        /// Audience to request from the upload claim issuer
+        #[arg(long)]
+        upload_token_audience: Option<String>,
+
+        /// Tenant ID to request from the upload claim issuer
+        #[arg(long)]
+        upload_token_tenant_id: Option<String>,
+
+        /// Environment variable containing workload credentials for the issuer
+        #[arg(long)]
+        upload_token_workload_token_env: Option<String>,
+
+        /// Upload claim issuer timeout in milliseconds
+        #[arg(long, default_value_t = crate::trace_contribution::TRACE_UPLOAD_CLAIM_DEFAULT_TIMEOUT_MS)]
+        upload_token_issuer_timeout_ms: u64,
+
         /// Include locally redacted user/assistant message text
         #[arg(long)]
         include_message_text: bool,
@@ -1428,6 +1452,12 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
         TracesCommand::OptIn {
             endpoint,
             bearer_token_env,
+            upload_token_issuer_url,
+            upload_token_issuer_allowed_hosts,
+            upload_token_audience,
+            upload_token_tenant_id,
+            upload_token_workload_token_env,
+            upload_token_issuer_timeout_ms,
             include_message_text,
             include_tool_payloads,
             scope,
@@ -1437,6 +1467,12 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
         } => opt_in(OptInOptions {
             endpoint,
             bearer_token_env,
+            upload_token_issuer_url,
+            upload_token_issuer_allowed_hosts,
+            upload_token_audience,
+            upload_token_tenant_id,
+            upload_token_workload_token_env,
+            upload_token_issuer_timeout_ms,
             include_message_text,
             include_tool_payloads,
             scope,
@@ -1989,6 +2025,12 @@ struct PreviewOptions {
 struct OptInOptions {
     endpoint: String,
     bearer_token_env: String,
+    upload_token_issuer_url: Option<String>,
+    upload_token_issuer_allowed_hosts: Vec<String>,
+    upload_token_audience: Option<String>,
+    upload_token_tenant_id: Option<String>,
+    upload_token_workload_token_env: Option<String>,
+    upload_token_issuer_timeout_ms: u64,
     include_message_text: bool,
     include_tool_payloads: bool,
     scope: TraceScopeArg,
@@ -2004,6 +2046,13 @@ struct TraceQueueStatusDiagnostics {
     policy_ready: bool,
     bearer_token_env: String,
     bearer_token_present: bool,
+    upload_token_issuer_configured: bool,
+    upload_token_issuer_allowed_hosts_count: usize,
+    upload_token_audience_configured: bool,
+    upload_token_tenant_configured: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    upload_token_workload_token_env: Option<String>,
+    upload_token_workload_token_present: bool,
     include_message_text: bool,
     include_tool_payloads: bool,
     require_manual_approval_when_pii_detected: bool,
@@ -2015,10 +2064,31 @@ struct TraceQueueStatusDiagnostics {
 }
 
 fn opt_in(options: OptInOptions) -> anyhow::Result<()> {
+    let issuer_url = options
+        .upload_token_issuer_url
+        .and_then(|url| (!url.trim().is_empty()).then_some(url));
+    let workload_token_env = options
+        .upload_token_workload_token_env
+        .and_then(|env| (!env.trim().is_empty()).then_some(env));
     let policy = StandingTraceContributionPolicy {
         enabled: true,
         ingestion_endpoint: Some(options.endpoint),
         bearer_token_env: options.bearer_token_env,
+        upload_token_issuer_url: issuer_url,
+        upload_token_issuer_allowed_hosts: options
+            .upload_token_issuer_allowed_hosts
+            .into_iter()
+            .map(|host| host.trim().to_ascii_lowercase())
+            .filter(|host| !host.is_empty())
+            .collect::<BTreeSet<_>>(),
+        upload_token_audience: options
+            .upload_token_audience
+            .and_then(|audience| (!audience.trim().is_empty()).then_some(audience)),
+        upload_token_tenant_id: options
+            .upload_token_tenant_id
+            .and_then(|tenant_id| (!tenant_id.trim().is_empty()).then_some(tenant_id)),
+        upload_token_workload_token_env: workload_token_env,
+        upload_token_issuer_timeout_ms: options.upload_token_issuer_timeout_ms,
         include_message_text: options.include_message_text,
         include_tool_payloads: options.include_tool_payloads,
         selected_tools: options
@@ -2067,6 +2137,31 @@ fn show_policy_status(json: bool) -> anyhow::Result<()> {
             .unwrap_or("not configured")
     );
     println!("  bearer token env: {}", policy.bearer_token_env);
+    println!(
+        "  upload claim issuer configured: {}",
+        policy.upload_token_issuer_url.is_some()
+    );
+    if policy.upload_token_issuer_url.is_some() {
+        println!(
+            "  upload claim allowed hosts: {}",
+            policy.upload_token_issuer_allowed_hosts.len()
+        );
+        println!(
+            "  upload claim audience configured: {}",
+            policy.upload_token_audience.is_some()
+        );
+        println!(
+            "  upload claim tenant configured: {}",
+            policy.upload_token_tenant_id.is_some()
+        );
+        println!(
+            "  upload claim workload token env: {}",
+            policy
+                .upload_token_workload_token_env
+                .as_deref()
+                .unwrap_or("not configured")
+        );
+    }
     println!("  include message text: {}", policy.include_message_text);
     println!("  include tool payloads: {}", policy.include_tool_payloads);
     println!(
@@ -2114,6 +2209,36 @@ fn show_queue_status(json: bool, scope: Option<&str>) -> anyhow::Result<()> {
             "not set"
         }
     );
+    println!(
+        "  upload claim issuer configured: {}",
+        diagnostics.upload_token_issuer_configured
+    );
+    if diagnostics.upload_token_issuer_configured {
+        println!(
+            "  upload claim allowed hosts: {}",
+            diagnostics.upload_token_issuer_allowed_hosts_count
+        );
+        println!(
+            "  upload claim audience configured: {}",
+            diagnostics.upload_token_audience_configured
+        );
+        println!(
+            "  upload claim tenant configured: {}",
+            diagnostics.upload_token_tenant_configured
+        );
+        println!(
+            "  upload claim workload token env: {} ({})",
+            diagnostics
+                .upload_token_workload_token_env
+                .as_deref()
+                .unwrap_or("not configured"),
+            if diagnostics.upload_token_workload_token_present {
+                "set"
+            } else {
+                "not set"
+            }
+        );
+    }
     println!(
         "  include message text: {}",
         diagnostics.include_message_text
@@ -2246,14 +2371,35 @@ fn trace_queue_status_diagnostics(
     let policy = read_trace_policy_for_scope(scope_ref)?;
     let bearer_token_present = !policy.bearer_token_env.trim().is_empty()
         && std::env::var_os(&policy.bearer_token_env).is_some();
+    let upload_token_issuer_configured = policy
+        .upload_token_issuer_url
+        .as_deref()
+        .is_some_and(|url| !url.trim().is_empty());
+    let upload_token_workload_token_present = policy
+        .upload_token_workload_token_env
+        .as_deref()
+        .filter(|env| !env.trim().is_empty())
+        .is_some_and(|env| std::env::var_os(env).is_some());
+    let issuer_credentials_ready = upload_token_issuer_configured
+        && (!policy.upload_token_issuer_allowed_hosts.is_empty())
+        && policy
+            .upload_token_workload_token_env
+            .as_deref()
+            .is_none_or(|env| env.trim().is_empty() || std::env::var_os(env).is_some());
     let queue = trace_queue_diagnostics_for_scope(scope_ref)?;
     let local_records = read_local_trace_records_for_scope(scope_ref)?;
 
     Ok(TraceQueueStatusDiagnostics {
         scope: normalized_scope,
-        policy_ready: queue.ready_to_flush && bearer_token_present,
+        policy_ready: queue.ready_to_flush && (bearer_token_present || issuer_credentials_ready),
         bearer_token_env: policy.bearer_token_env,
         bearer_token_present,
+        upload_token_issuer_configured,
+        upload_token_issuer_allowed_hosts_count: policy.upload_token_issuer_allowed_hosts.len(),
+        upload_token_audience_configured: policy.upload_token_audience.is_some(),
+        upload_token_tenant_configured: policy.upload_token_tenant_id.is_some(),
+        upload_token_workload_token_env: policy.upload_token_workload_token_env,
+        upload_token_workload_token_present,
         include_message_text: policy.include_message_text,
         include_tool_payloads: policy.include_tool_payloads,
         require_manual_approval_when_pii_detected: policy.require_manual_approval_when_pii_detected,
@@ -5619,6 +5765,55 @@ mod tests {
 
         assert!(json);
         assert_eq!(scope.as_deref(), Some("tenant-a:user-alice"));
+    }
+
+    #[test]
+    fn opt_in_upload_claim_issuer_flags_parse_through_cli() {
+        let cli = parse_cli([
+            "ironclaw",
+            "traces",
+            "opt-in",
+            "--endpoint",
+            "https://trace.example/v1/traces",
+            "--upload-token-issuer-url",
+            "https://issuer.example/v1/trace-upload-claim",
+            "--upload-token-issuer-allowed-hosts",
+            "issuer.example",
+            "--upload-token-audience",
+            "trace-commons",
+            "--upload-token-tenant-id",
+            "tenant-a",
+            "--upload-token-workload-token-env",
+            "IRONCLAW_TRACE_WORKLOAD_TOKEN",
+            "--upload-token-issuer-timeout-ms",
+            "7000",
+        ]);
+
+        let TracesCommand::OptIn {
+            upload_token_issuer_url,
+            upload_token_issuer_allowed_hosts,
+            upload_token_audience,
+            upload_token_tenant_id,
+            upload_token_workload_token_env,
+            upload_token_issuer_timeout_ms,
+            ..
+        } = unwrap_traces_command(cli)
+        else {
+            panic!("expected traces opt-in command");
+        };
+
+        assert_eq!(
+            upload_token_issuer_url.as_deref(),
+            Some("https://issuer.example/v1/trace-upload-claim")
+        );
+        assert_eq!(upload_token_issuer_allowed_hosts, vec!["issuer.example"]);
+        assert_eq!(upload_token_audience.as_deref(), Some("trace-commons"));
+        assert_eq!(upload_token_tenant_id.as_deref(), Some("tenant-a"));
+        assert_eq!(
+            upload_token_workload_token_env.as_deref(),
+            Some("IRONCLAW_TRACE_WORKLOAD_TOKEN")
+        );
+        assert_eq!(upload_token_issuer_timeout_ms, 7000);
     }
 
     #[test]
