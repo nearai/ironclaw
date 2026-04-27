@@ -1448,8 +1448,8 @@ mod tests {
             Ok(ActionResult {
                 call_id: String::new(),
                 action_name: name.replace('-', "_"),
+                is_error: output.get("error").is_some(),
                 output,
-                is_error: false,
                 duration: Duration::from_millis(1),
             })
         }
@@ -1596,6 +1596,53 @@ mod tests {
         assert_eq!(
             result.results[0].output["schema"]["required"],
             serde_json::json!(["name", "goal", "cadence"])
+        );
+    }
+
+    #[tokio::test]
+    async fn structured_execution_marks_missing_tool_info_action_as_error() {
+        let thread = Thread::new(
+            "test",
+            ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            ThreadConfig::default(),
+        );
+        let effects: Arc<dyn EffectExecutor> = Arc::new(StructuredToolInfoEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+        let ctx = make_exec_context(&thread);
+
+        leases
+            .grant(
+                thread.id,
+                "tools",
+                GrantedActions::Specific(vec!["tool_info".into()]),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let calls = vec![ActionCall {
+            id: "call_tool_info_missing_action".into(),
+            action_name: "tool_info".into(),
+            parameters: serde_json::json!({"name": "missing-action", "detail": "schema"}),
+        }];
+
+        let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
+            .await
+            .unwrap();
+
+        assert_eq!(result.results.len(), 1);
+        assert!(
+            result.results[0].is_error,
+            "tool_info missing-action output must be marked as an error: {:?}",
+            result.results[0].output
+        );
+        assert_eq!(
+            result.results[0].output["error"],
+            serde_json::json!("missing_action:missing-action")
         );
     }
 
