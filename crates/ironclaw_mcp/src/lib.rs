@@ -8,8 +8,8 @@
 use async_trait::async_trait;
 use ironclaw_extensions::{ExtensionPackage, ExtensionRuntime};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, ResourceEstimate, ResourceReservationId, ResourceScope,
-    ResourceUsage, RuntimeKind,
+    CapabilityId, ExtensionId, ResourceEstimate, ResourceReservation, ResourceReservationId,
+    ResourceScope, ResourceUsage, RuntimeKind,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use serde_json::Value;
@@ -50,6 +50,7 @@ pub struct McpExecutionRequest<'a> {
     pub capability_id: &'a CapabilityId,
     pub scope: ResourceScope,
     pub estimate: ResourceEstimate,
+    pub resource_reservation: Option<ResourceReservation>,
     pub invocation: McpInvocation,
 }
 
@@ -161,9 +162,17 @@ where
     where
         G: ResourceGovernor + ?Sized,
     {
-        let client_request = self.prepare_client_request(&request)?;
+        let reservation = reserve_or_use_existing(
+            governor,
+            request.scope.clone(),
+            request.estimate.clone(),
+            request.resource_reservation.clone(),
+        )?;
+        let client_request = match self.prepare_client_request(&request) {
+            Ok(client_request) => client_request,
+            Err(error) => return Err(release_after_failure(governor, reservation.id, error)),
+        };
         let transport = client_request.transport.clone();
-        let reservation = governor.reserve(request.scope, request.estimate)?;
 
         let output = match self.client.call_tool(client_request).await {
             Ok(output) => output,
@@ -309,6 +318,26 @@ where
     ) -> Result<McpExecutionResult, McpError> {
         McpRuntime::execute_extension_json(self, governor, request).await
     }
+}
+
+fn reserve_or_use_existing<G>(
+    governor: &G,
+    scope: ResourceScope,
+    estimate: ResourceEstimate,
+    reservation: Option<ResourceReservation>,
+) -> Result<ResourceReservation, McpError>
+where
+    G: ResourceGovernor + ?Sized,
+{
+    if let Some(reservation) = reservation {
+        if reservation.scope != scope || reservation.estimate != estimate {
+            return Err(McpError::Resource(Box::new(
+                ResourceError::ReservationMismatch { id: reservation.id },
+            )));
+        }
+        return Ok(reservation);
+    }
+    governor.reserve(scope, estimate).map_err(McpError::from)
 }
 
 fn release_after_failure<G>(

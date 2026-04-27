@@ -16,9 +16,10 @@ use chrono::Utc;
 use ironclaw_approvals::ApprovalResolver;
 use ironclaw_authorization::{CapabilityDispatchAuthorizer, CapabilityLeaseStore};
 use ironclaw_capabilities::{
-    CapabilityHost, CapabilityObligationCompletionRequest, CapabilityObligationError,
-    CapabilityObligationFailureKind, CapabilityObligationHandler, CapabilityObligationPhase,
-    CapabilityObligationRequest, DispatchProcessExecutor,
+    CapabilityHost, CapabilityObligationAbortRequest, CapabilityObligationCompletionRequest,
+    CapabilityObligationError, CapabilityObligationFailureKind, CapabilityObligationHandler,
+    CapabilityObligationOutcome, CapabilityObligationPhase, CapabilityObligationRequest,
+    DispatchProcessExecutor,
 };
 use ironclaw_dispatcher::{
     RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
@@ -29,8 +30,8 @@ use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AuditEnvelope, AuditEventId, AuditStage,
     CapabilityDispatchResult, CapabilityDispatcher, CapabilityId, DecisionSummary, DispatchError,
-    EffectKind, NetworkPolicy, Obligation, ResourceScope, RuntimeDispatchErrorKind, RuntimeKind,
-    SecretHandle,
+    EffectKind, MountView, NetworkPolicy, Obligation, ResourceReservation, ResourceScope,
+    RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_network::{
@@ -260,6 +261,7 @@ where
             capability_id: request.capability_id,
             scope: request.scope,
             estimate: request.estimate,
+            resource_reservation: request.resource_reservation,
             invocation: CapabilityInvocation {
                 input: request.input,
             },
@@ -587,6 +589,7 @@ where
                     capability_id: request.capability_id,
                     scope: request.scope,
                     estimate: request.estimate,
+                    resource_reservation: request.resource_reservation,
                     invocation: ScriptInvocation {
                         input: request.input,
                     },
@@ -664,6 +667,7 @@ where
                     capability_id: request.capability_id,
                     scope: request.scope,
                     estimate: request.estimate,
+                    resource_reservation: request.resource_reservation,
                     invocation: McpInvocation {
                         input: request.input,
                     },
@@ -758,6 +762,13 @@ impl NetworkPolicyKey {
 /// - `InjectSecretOnce`: requires a configured [`SecretStore`] and
 ///   [`RuntimeSecretInjectionStore`], leases the scoped handle once, consumes it,
 ///   and stages the material for one runtime take.
+/// - `UseScopedMounts`: validates the requested mount view is a subset of the
+///   execution context and returns it as the effective mount view for downstream
+///   dispatch/process start.
+/// - `ReserveResources`: for immediate dispatch/resume, reserves the exact
+///   requested reservation id through the configured [`ResourceGovernor`] and
+///   returns the reservation for runtime handoff/cleanup. Spawn reservations stay
+///   owned by process services and fail closed here until process-level handoff exists.
 /// - `AuditAfter`, `RedactOutput`, and `EnforceOutputLimit`: preflight before
 ///   dispatch, then complete against the dispatch result before returning output.
 ///
@@ -769,6 +780,7 @@ pub struct BuiltinObligationHandler {
     network_policies: Option<Arc<NetworkObligationPolicyStore>>,
     secret_store: Option<Arc<dyn SecretStore>>,
     secret_injections: Option<Arc<RuntimeSecretInjectionStore>>,
+    resource_governor: Option<Arc<dyn ResourceGovernor>>,
 }
 
 impl BuiltinObligationHandler {
@@ -811,6 +823,20 @@ impl BuiltinObligationHandler {
 
     pub fn with_secret_injection_store(mut self, store: Arc<RuntimeSecretInjectionStore>) -> Self {
         self.secret_injections = Some(store);
+        self
+    }
+
+    pub fn with_resource_governor<T>(mut self, governor: Arc<T>) -> Self
+    where
+        T: ResourceGovernor + 'static,
+    {
+        let governor: Arc<dyn ResourceGovernor> = governor;
+        self.resource_governor = Some(governor);
+        self
+    }
+
+    pub fn with_resource_governor_dyn(mut self, governor: Arc<dyn ResourceGovernor>) -> Self {
+        self.resource_governor = Some(governor);
         self
     }
 
@@ -900,6 +926,65 @@ impl BuiltinObligationHandler {
         Ok(())
     }
 
+    fn reserve_resource_obligation(
+        &self,
+        request: &CapabilityObligationRequest<'_>,
+    ) -> Result<Option<ResourceReservation>, CapabilityObligationError> {
+        let mut reservation_id = None;
+        for obligation in request.obligations {
+            if let Obligation::ReserveResources { reservation_id: id } = obligation {
+                if reservation_id.is_some() {
+                    return Err(resource_obligation_failed());
+                }
+                reservation_id = Some(*id);
+            }
+        }
+        let Some(reservation_id) = reservation_id else {
+            return Ok(None);
+        };
+        let Some(governor) = &self.resource_governor else {
+            return Err(resource_obligation_failed());
+        };
+        governor
+            .reserve_with_id(
+                request.context.resource_scope.clone(),
+                request.estimate.clone(),
+                reservation_id,
+            )
+            .map(Some)
+            .map_err(|_| resource_obligation_failed())
+    }
+
+    async fn finish_prepare(
+        &self,
+        request: &CapabilityObligationRequest<'_>,
+        secret_handles: &[SecretHandle],
+        network_policy: Option<NetworkPolicy>,
+    ) -> Result<(), CapabilityObligationError> {
+        if request
+            .obligations
+            .iter()
+            .any(|obligation| matches!(obligation, Obligation::AuditBefore))
+        {
+            self.emit_audit_before(request).await?;
+        }
+
+        self.inject_secrets(request, secret_handles).await?;
+
+        if let Some(policy) = network_policy {
+            let Some(store) = &self.network_policies else {
+                return Err(network_obligation_failed());
+            };
+            store.insert(
+                &request.context.resource_scope,
+                request.capability_id,
+                policy,
+            );
+        }
+
+        Ok(())
+    }
+
     async fn emit_audit_after(
         &self,
         request: &CapabilityObligationCompletionRequest<'_>,
@@ -926,6 +1011,33 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
         &self,
         request: CapabilityObligationRequest<'_>,
     ) -> Result<(), CapabilityObligationError> {
+        let outcome = self
+            .prepare(CapabilityObligationRequest {
+                phase: request.phase,
+                context: request.context,
+                capability_id: request.capability_id,
+                estimate: request.estimate,
+                obligations: request.obligations,
+            })
+            .await?;
+        if outcome.resource_reservation.is_some() {
+            self.abort(CapabilityObligationAbortRequest {
+                phase: request.phase,
+                context: request.context,
+                capability_id: request.capability_id,
+                estimate: request.estimate,
+                obligations: request.obligations,
+                outcome: &outcome,
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn prepare(
+        &self,
+        request: CapabilityObligationRequest<'_>,
+    ) -> Result<CapabilityObligationOutcome, CapabilityObligationError> {
         let unsupported = unsupported_obligations(request.phase, request.obligations);
         if !unsupported.is_empty() {
             return Err(CapabilityObligationError::Unsupported {
@@ -937,31 +1049,47 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
         if network_policy.is_some() && self.network_policies.is_none() {
             return Err(network_obligation_failed());
         }
+        let scoped_mounts = scoped_mount_obligation(request.context, request.obligations)?;
         let secret_handles = secret_injection_obligations(request.obligations);
         self.preflight_secret_injection(&request, &secret_handles)
             .await?;
+        let resource_reservation = self.reserve_resource_obligation(&request)?;
+        let outcome = CapabilityObligationOutcome {
+            mounts: scoped_mounts,
+            resource_reservation,
+        };
 
-        if request
-            .obligations
-            .iter()
-            .any(|obligation| matches!(obligation, Obligation::AuditBefore))
+        if let Err(error) = self
+            .finish_prepare(&request, &secret_handles, network_policy)
+            .await
         {
-            self.emit_audit_before(&request).await?;
+            self.abort(CapabilityObligationAbortRequest {
+                phase: request.phase,
+                context: request.context,
+                capability_id: request.capability_id,
+                estimate: request.estimate,
+                obligations: request.obligations,
+                outcome: &outcome,
+            })
+            .await?;
+            return Err(error);
         }
 
-        self.inject_secrets(&request, &secret_handles).await?;
+        Ok(outcome)
+    }
 
-        if let Some(policy) = network_policy {
-            let Some(store) = &self.network_policies else {
-                return Err(network_obligation_failed());
+    async fn abort(
+        &self,
+        request: CapabilityObligationAbortRequest<'_>,
+    ) -> Result<(), CapabilityObligationError> {
+        if let Some(reservation) = &request.outcome.resource_reservation {
+            let Some(governor) = &self.resource_governor else {
+                return Err(resource_obligation_failed());
             };
-            store.insert(
-                &request.context.resource_scope,
-                request.capability_id,
-                policy,
-            );
+            governor
+                .release(reservation.id)
+                .map_err(|_| resource_obligation_failed())?;
         }
-
         Ok(())
     }
 
@@ -1024,13 +1152,14 @@ fn obligation_supported_before_dispatch(
     match obligation {
         Obligation::AuditBefore
         | Obligation::ApplyNetworkPolicy { .. }
-        | Obligation::InjectSecretOnce { .. } => true,
+        | Obligation::InjectSecretOnce { .. }
+        | Obligation::UseScopedMounts { .. } => true,
+        Obligation::ReserveResources { .. } => !matches!(phase, CapabilityObligationPhase::Spawn),
         Obligation::AuditAfter
         | Obligation::RedactOutput
         | Obligation::EnforceOutputLimit { .. } => {
             !matches!(phase, CapabilityObligationPhase::Spawn)
         }
-        Obligation::ReserveResources { .. } | Obligation::UseScopedMounts { .. } => false,
     }
 }
 
@@ -1052,13 +1181,14 @@ fn obligation_supported_after_dispatch(
     match obligation {
         Obligation::AuditBefore
         | Obligation::ApplyNetworkPolicy { .. }
-        | Obligation::InjectSecretOnce { .. } => true,
+        | Obligation::InjectSecretOnce { .. }
+        | Obligation::ReserveResources { .. }
+        | Obligation::UseScopedMounts { .. } => true,
         Obligation::AuditAfter
         | Obligation::RedactOutput
         | Obligation::EnforceOutputLimit { .. } => {
             !matches!(phase, CapabilityObligationPhase::Spawn)
         }
-        Obligation::ReserveResources { .. } | Obligation::UseScopedMounts { .. } => false,
     }
 }
 
@@ -1086,6 +1216,26 @@ fn network_policy_obligation(
         }
     }
     Ok(policy)
+}
+
+fn scoped_mount_obligation(
+    context: &ironclaw_host_api::ExecutionContext,
+    obligations: &[Obligation],
+) -> Result<Option<MountView>, CapabilityObligationError> {
+    let mut mounts = None;
+    for obligation in obligations {
+        if let Obligation::UseScopedMounts { mounts: next } = obligation {
+            if mounts.is_some() {
+                return Err(mount_obligation_failed());
+            }
+            next.validate().map_err(|_| mount_obligation_failed())?;
+            if !next.is_subset_of(&context.mounts) {
+                return Err(mount_obligation_failed());
+            }
+            mounts = Some(next.clone());
+        }
+    }
+    Ok(mounts)
 }
 
 fn validate_network_policy_metadata(
@@ -1121,6 +1271,18 @@ fn network_obligation_failed() -> CapabilityObligationError {
 fn secret_obligation_failed() -> CapabilityObligationError {
     CapabilityObligationError::Failed {
         kind: CapabilityObligationFailureKind::Secret,
+    }
+}
+
+fn resource_obligation_failed() -> CapabilityObligationError {
+    CapabilityObligationError::Failed {
+        kind: CapabilityObligationFailureKind::Resource,
+    }
+}
+
+fn mount_obligation_failed() -> CapabilityObligationError {
+    CapabilityObligationError::Failed {
+        kind: CapabilityObligationFailureKind::Mount,
     }
 }
 
@@ -1514,9 +1676,11 @@ where
     }
 
     pub fn with_builtin_obligation_handler(mut self) -> Self {
+        let resource_governor: Arc<dyn ResourceGovernor> = self.governor.clone();
         let mut handler = BuiltinObligationHandler::new()
             .with_network_policy_store(Arc::clone(&self.network_obligation_policies))
-            .with_secret_injection_store(Arc::clone(&self.runtime_secret_injections));
+            .with_secret_injection_store(Arc::clone(&self.runtime_secret_injections))
+            .with_resource_governor_dyn(resource_governor);
         if let Some(audit_sink) = &self.audit_sink {
             handler = handler.with_audit_sink_dyn(Arc::clone(audit_sink));
         }

@@ -39,6 +39,8 @@ async fn dispatcher_routes_wasm_capability_through_registered_adapter() {
                 output_bytes: Some(10_000),
                 ..ResourceEstimate::default()
             },
+            mounts: None,
+            resource_reservation: None,
             input: json!({"message": "hello dispatcher"}),
         })
         .await
@@ -101,6 +103,8 @@ async fn dispatcher_routes_script_capability_through_registered_adapter() {
                 output_bytes: Some(10_000),
                 ..ResourceEstimate::default()
             },
+            mounts: None,
+            resource_reservation: None,
             input: json!({"message": "hello script dispatcher"}),
         })
         .await
@@ -151,6 +155,8 @@ async fn dispatcher_redacts_runtime_adapter_failure_details() {
                 output_bytes: Some(10_000),
                 ..ResourceEstimate::default()
             },
+            mounts: None,
+            resource_reservation: None,
             input: json!({"message": "redact stderr"}),
         })
         .await
@@ -205,6 +211,8 @@ async fn dispatcher_routes_mcp_capability_through_registered_adapter() {
                 output_bytes: Some(10_000),
                 ..ResourceEstimate::default()
             },
+            mounts: None,
+            resource_reservation: None,
             input: json!({"query": "ironclaw"}),
         })
         .await
@@ -241,6 +249,8 @@ async fn dispatcher_fails_unknown_capability_without_reserving_resources() {
                 concurrency_slots: Some(1),
                 ..ResourceEstimate::default()
             },
+            mounts: None,
+            resource_reservation: None,
             input: json!({"message": "nope"}),
         })
         .await
@@ -250,6 +260,38 @@ async fn dispatcher_fails_unknown_capability_without_reserving_resources() {
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert_eq!(governor.usage_for(&account), ResourceTally::default());
     assert!(adapter.requests().is_empty());
+}
+
+#[tokio::test]
+async fn dispatcher_releases_prepared_reservation_when_validation_fails_before_adapter() {
+    let fs = mounted_empty_extension_root();
+    let registry = ExtensionRegistry::new();
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    let estimate = ResourceEstimate {
+        concurrency_slots: Some(1),
+        ..ResourceEstimate::default()
+    };
+    let reservation = governor.reserve(scope.clone(), estimate.clone()).unwrap();
+    assert_eq!(governor.reserved_for(&account).concurrency_slots, 1);
+
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
+    let err = dispatcher
+        .dispatch_json(CapabilityDispatchRequest {
+            capability_id: CapabilityId::new("missing.say").unwrap(),
+            scope,
+            estimate,
+            mounts: None,
+            resource_reservation: Some(reservation),
+            input: json!({"message": "release on validation failure"}),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, DispatchError::UnknownCapability { .. }));
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(governor.usage_for(&account), ResourceTally::default());
 }
 
 #[tokio::test]
@@ -274,6 +316,8 @@ async fn dispatcher_fails_closed_when_descriptor_runtime_does_not_match_package_
                 concurrency_slots: Some(1),
                 ..ResourceEstimate::default()
             },
+            mounts: None,
+            resource_reservation: None,
             input: json!({"message": "blocked"}),
         })
         .await
@@ -316,6 +360,8 @@ async fn dispatcher_requires_registered_adapter_for_host_lanes_before_reserving_
                     concurrency_slots: Some(1),
                     ..ResourceEstimate::default()
                 },
+                mounts: None,
+                resource_reservation: None,
                 input: json!({}),
             })
             .await
@@ -351,6 +397,8 @@ async fn dispatcher_requires_mcp_backend_before_reserving_resources() {
                 process_count: Some(1),
                 ..ResourceEstimate::default()
             },
+            mounts: None,
+            resource_reservation: None,
             input: json!({"query": "blocked"}),
         })
         .await
@@ -387,6 +435,8 @@ async fn dispatcher_requires_script_backend_before_reserving_resources() {
                 process_count: Some(1),
                 ..ResourceEstimate::default()
             },
+            mounts: None,
+            resource_reservation: None,
             input: json!({"message": "blocked"}),
         })
         .await
@@ -422,6 +472,8 @@ async fn dispatcher_requires_wasm_backend_before_reserving_resources() {
                 concurrency_slots: Some(1),
                 ..ResourceEstimate::default()
             },
+            mounts: None,
+            resource_reservation: None,
             input: json!({"message": "blocked"}),
         })
         .await

@@ -15,7 +15,10 @@ use ironclaw_processes::{
     ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor,
     ProcessServices,
 };
-use ironclaw_resources::InMemoryResourceGovernor;
+use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
+use ironclaw_scripts::{
+    ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
+};
 use ironclaw_secrets::{ExposeSecret, InMemorySecretStore, SecretMaterial, SecretStore};
 use serde_json::json;
 
@@ -549,27 +552,61 @@ async fn host_runtime_services_can_wire_builtin_secret_obligation_handler() {
 }
 
 #[tokio::test]
-async fn builtin_obligation_handler_keeps_other_runtime_plumbing_obligations_fail_closed() {
-    let audit = Arc::new(InMemoryAuditSink::new());
-    let handler = BuiltinObligationHandler::new().with_audit_sink(audit.clone());
-    let context = execution_context(CapabilitySet::default());
+async fn builtin_obligation_handler_returns_scoped_mount_outcome_when_subset() {
+    let handler = BuiltinObligationHandler::new();
+    let mut context = execution_context(CapabilitySet::default());
+    context.mounts = mount_view(
+        "/workspace",
+        "/projects/demo",
+        MountPermissions::read_write(),
+    );
+    let scoped_mounts = mount_view(
+        "/workspace",
+        "/projects/demo",
+        MountPermissions::read_only(),
+    );
     let capability_id = CapabilityId::new("echo.say").unwrap();
     let estimate = ResourceEstimate::default();
-    let obligations = vec![
-        Obligation::AuditBefore,
-        Obligation::ReserveResources {
-            reservation_id: ResourceReservationId::new(),
-        },
-        Obligation::UseScopedMounts {
-            mounts: MountView::default(),
-        },
-        Obligation::AuditAfter,
-        Obligation::RedactOutput,
-        Obligation::EnforceOutputLimit { bytes: 1024 },
-    ];
+    let obligations = vec![Obligation::UseScopedMounts {
+        mounts: scoped_mounts.clone(),
+    }];
+
+    let outcome = handler
+        .prepare(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.mounts, Some(scoped_mounts));
+}
+
+#[tokio::test]
+async fn builtin_obligation_handler_rejects_scoped_mounts_that_broaden_context() {
+    let handler = BuiltinObligationHandler::new();
+    let mut context = execution_context(CapabilitySet::default());
+    context.mounts = mount_view(
+        "/workspace",
+        "/projects/demo",
+        MountPermissions::read_only(),
+    );
+    let broader_mounts = mount_view(
+        "/workspace",
+        "/projects/demo",
+        MountPermissions::read_write(),
+    );
+    let capability_id = CapabilityId::new("echo.say").unwrap();
+    let estimate = ResourceEstimate::default();
+    let obligations = vec![Obligation::UseScopedMounts {
+        mounts: broader_mounts,
+    }];
 
     let err = handler
-        .satisfy(CapabilityObligationRequest {
+        .prepare(CapabilityObligationRequest {
             phase: CapabilityObligationPhase::Invoke,
             context: &context,
             capability_id: &capability_id,
@@ -579,21 +616,111 @@ async fn builtin_obligation_handler_keeps_other_runtime_plumbing_obligations_fai
         .await
         .unwrap_err();
 
-    let CapabilityObligationError::Unsupported { obligations } = err else {
-        panic!("expected unsupported obligations");
+    assert!(matches!(
+        err,
+        CapabilityObligationError::Failed {
+            kind: CapabilityObligationFailureKind::Mount
+        }
+    ));
+}
+
+#[tokio::test]
+async fn builtin_obligation_handler_reserves_requested_resources_and_releases_on_abort() {
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let handler = BuiltinObligationHandler::new().with_resource_governor(governor.clone());
+    let context = execution_context(CapabilitySet::default());
+    let account = ResourceAccount::tenant(context.resource_scope.tenant_id.clone());
+    let capability_id = CapabilityId::new("echo.say").unwrap();
+    let estimate = ResourceEstimate {
+        concurrency_slots: Some(1),
+        ..ResourceEstimate::default()
     };
-    assert_eq!(obligations.len(), 2);
-    assert!(
-        obligations
-            .iter()
-            .any(|obligation| matches!(obligation, Obligation::ReserveResources { .. }))
+    let reservation_id = ResourceReservationId::new();
+    let obligations = vec![Obligation::ReserveResources { reservation_id }];
+
+    let outcome = handler
+        .prepare(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome
+            .resource_reservation
+            .as_ref()
+            .map(|reservation| reservation.id),
+        Some(reservation_id)
     );
-    assert!(
-        obligations
-            .iter()
-            .any(|obligation| matches!(obligation, Obligation::UseScopedMounts { .. }))
+    assert_eq!(governor.reserved_for(&account).concurrency_slots, 1);
+
+    handler
+        .abort(CapabilityObligationAbortRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+            outcome: &outcome,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(governor.reserved_for(&account).concurrency_slots, 0);
+}
+
+#[tokio::test]
+async fn host_runtime_services_hands_reserved_resources_to_runtime_dispatch() {
+    let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
+    let filesystem = Arc::new(LocalFilesystem::new());
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let reservation_id = ResourceReservationId::new();
+    let authorizer = Arc::new(ResourceReservationAuthorizer { reservation_id });
+    let process_services = ProcessServices::in_memory();
+    let script_runtime = Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        JsonScriptBackend,
+    ));
+    let services = HostRuntimeServices::new(
+        registry,
+        filesystem,
+        governor.clone(),
+        authorizer,
+        process_services,
+    )
+    .with_script_runtime(script_runtime)
+    .with_builtin_obligation_handler();
+    let dispatcher = services.runtime_dispatcher_arc();
+    let capability_host = services.capability_host_for_runtime_dispatcher(&dispatcher);
+    let mut context = execution_context(CapabilitySet::default());
+    context.runtime = RuntimeKind::Script;
+    let account = ResourceAccount::tenant(context.resource_scope.tenant_id.clone());
+    let estimate = ResourceEstimate {
+        concurrency_slots: Some(1),
+        ..ResourceEstimate::default()
+    };
+
+    let result = capability_host
+        .invoke_json(CapabilityInvocationRequest {
+            context,
+            capability_id: CapabilityId::new("echo-script.say").unwrap(),
+            estimate,
+            input: json!({"message": "reserved"}),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.dispatch.receipt.id, reservation_id);
+    assert_eq!(
+        result.dispatch.receipt.status,
+        ReservationStatus::Reconciled
     );
-    assert!(audit.records().is_empty());
+    assert_eq!(governor.reserved_for(&account).concurrency_slots, 0);
+    assert_eq!(governor.usage_for(&account).process_count, 1);
 }
 
 #[tokio::test]
@@ -649,6 +776,15 @@ fn sample_dispatch(
     }
 }
 
+fn mount_view(alias: &str, target: &str, permissions: MountPermissions) -> MountView {
+    MountView::new(vec![MountGrant::new(
+        MountAlias::new(alias).unwrap(),
+        VirtualPath::new(target).unwrap(),
+        permissions,
+    )])
+    .unwrap()
+}
+
 fn allowed_network_policy() -> NetworkPolicy {
     NetworkPolicy {
         allowed_targets: vec![NetworkTargetPattern {
@@ -662,6 +798,39 @@ fn allowed_network_policy() -> NetworkPolicy {
 }
 
 struct AuditBeforeAuthorizer;
+
+struct ResourceReservationAuthorizer {
+    reservation_id: ResourceReservationId,
+}
+
+#[async_trait]
+impl CapabilityDispatchAuthorizer for ResourceReservationAuthorizer {
+    async fn authorize_dispatch(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+    ) -> Decision {
+        Decision::Allow {
+            obligations: vec![Obligation::ReserveResources {
+                reservation_id: self.reservation_id,
+            }],
+        }
+    }
+
+    async fn authorize_spawn(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+    ) -> Decision {
+        Decision::Allow {
+            obligations: vec![Obligation::ReserveResources {
+                reservation_id: self.reservation_id,
+            }],
+        }
+    }
+}
 
 struct SecretInjectionAuthorizer;
 
@@ -716,6 +885,14 @@ impl CapabilityDispatchAuthorizer for AuditBeforeAuthorizer {
         Decision::Allow {
             obligations: vec![Obligation::AuditBefore],
         }
+    }
+}
+
+struct JsonScriptBackend;
+
+impl ScriptBackend for JsonScriptBackend {
+    fn execute(&self, _request: ScriptBackendRequest) -> Result<ScriptBackendOutput, String> {
+        Ok(ScriptBackendOutput::json(json!({"ok": true})))
     }
 }
 

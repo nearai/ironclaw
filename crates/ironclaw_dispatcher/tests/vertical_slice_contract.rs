@@ -36,6 +36,8 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
                 output_bytes: Some(10_000),
                 ..ResourceEstimate::default()
             },
+            mounts: None,
+            resource_reservation: None,
             input: json!({"message": "hello wasm"}),
         })
         .await
@@ -62,6 +64,8 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
                 output_bytes: Some(10_000),
                 ..ResourceEstimate::default()
             },
+            mounts: None,
+            resource_reservation: None,
             input: json!({"message": "hello script"}),
         })
         .await
@@ -90,6 +94,8 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
                 output_bytes: Some(10_000),
                 ..ResourceEstimate::default()
             },
+            mounts: None,
+            resource_reservation: None,
             input: json!({"message": "hello mcp"}),
         })
         .await

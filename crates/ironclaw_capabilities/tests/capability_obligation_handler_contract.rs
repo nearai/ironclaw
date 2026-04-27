@@ -76,6 +76,166 @@ async fn capability_host_still_fails_closed_when_handler_rejects_obligations() {
 }
 
 #[tokio::test]
+async fn capability_host_passes_prepared_mounts_and_reservation_to_dispatch() {
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(package_from_manifest(WASM_MANIFEST))
+        .unwrap();
+    let reservation_id = ResourceReservationId::new();
+    let narrowed_mounts = mount_view(
+        "/workspace",
+        "/projects/demo",
+        MountPermissions::read_only(),
+    );
+    let dispatcher = RecordingDispatcher::default();
+    let mut context = execution_context(CapabilitySet::default());
+    context.mounts = mount_view(
+        "/workspace",
+        "/projects/demo",
+        MountPermissions::read_write(),
+    );
+    let estimate = ResourceEstimate {
+        concurrency_slots: Some(1),
+        ..ResourceEstimate::default()
+    };
+    let scope = context.resource_scope.clone();
+    let authorizer = ObligatingAuthorizer {
+        obligations: vec![
+            Obligation::UseScopedMounts {
+                mounts: narrowed_mounts.clone(),
+            },
+            Obligation::ReserveResources { reservation_id },
+        ],
+    };
+    let handler = EffectObligationHandler {
+        mounts: Some(narrowed_mounts.clone()),
+        reservation: Some(ResourceReservation {
+            id: reservation_id,
+            scope: scope.clone(),
+            estimate: estimate.clone(),
+        }),
+        aborted: Arc::new(AtomicBool::new(false)),
+    };
+    let host =
+        CapabilityHost::new(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
+
+    host.invoke_json(CapabilityInvocationRequest {
+        context,
+        capability_id: CapabilityId::new("echo.say").unwrap(),
+        estimate: estimate.clone(),
+        input: json!({"message": "prepared effects"}),
+    })
+    .await
+    .unwrap();
+
+    let request = dispatcher
+        .last_request()
+        .expect("dispatch request recorded");
+    assert_eq!(request.scope, scope);
+    assert_eq!(request.estimate, estimate);
+    assert_eq!(request.mounts, Some(narrowed_mounts));
+    assert_eq!(
+        request
+            .resource_reservation
+            .as_ref()
+            .map(|reservation| reservation.id),
+        Some(reservation_id)
+    );
+}
+
+#[tokio::test]
+async fn capability_host_passes_prepared_mounts_to_process_start() {
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(package_from_manifest(WASM_MANIFEST))
+        .unwrap();
+    let narrowed_mounts = mount_view(
+        "/workspace",
+        "/projects/demo",
+        MountPermissions::read_only(),
+    );
+    let dispatcher = RecordingDispatcher::default();
+    let authorizer = ObligatingAuthorizer {
+        obligations: vec![Obligation::UseScopedMounts {
+            mounts: narrowed_mounts.clone(),
+        }],
+    };
+    let handler = EffectObligationHandler {
+        mounts: Some(narrowed_mounts.clone()),
+        reservation: None,
+        aborted: Arc::new(AtomicBool::new(false)),
+    };
+    let process_manager = MountRecordingProcessManager::default();
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+        .with_obligation_handler(&handler)
+        .with_process_manager(&process_manager);
+    let mut context = execution_context(CapabilitySet::default());
+    context.mounts = mount_view(
+        "/workspace",
+        "/projects/demo",
+        MountPermissions::read_write(),
+    );
+
+    host.spawn_json(CapabilitySpawnRequest {
+        context,
+        capability_id: CapabilityId::new("echo.say").unwrap(),
+        estimate: ResourceEstimate::default(),
+        input: json!({"message": "prepared mount"}),
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(process_manager.mounts(), Some(narrowed_mounts));
+}
+
+#[tokio::test]
+async fn capability_host_aborts_prepared_obligations_when_process_start_fails() {
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(package_from_manifest(WASM_MANIFEST))
+        .unwrap();
+    let dispatcher = RecordingDispatcher::default();
+    let context = execution_context(CapabilitySet::default());
+    let estimate = ResourceEstimate::default();
+    let aborted = Arc::new(AtomicBool::new(false));
+    let handler = EffectObligationHandler {
+        mounts: None,
+        reservation: Some(ResourceReservation {
+            id: ResourceReservationId::new(),
+            scope: context.resource_scope.clone(),
+            estimate: estimate.clone(),
+        }),
+        aborted: Arc::clone(&aborted),
+    };
+    let authorizer = ObligatingAuthorizer {
+        obligations: vec![Obligation::ReserveResources {
+            reservation_id: ResourceReservationId::new(),
+        }],
+    };
+    let process_manager = FailingProcessManager;
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+        .with_obligation_handler(&handler)
+        .with_process_manager(&process_manager);
+
+    let err = host
+        .spawn_json(CapabilitySpawnRequest {
+            context,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate,
+            input: json!({"message": "spawn fails"}),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::ObligationFailed { .. }
+    ));
+    assert!(aborted.load(Ordering::SeqCst));
+    assert!(!dispatcher.has_request());
+}
+
+#[tokio::test]
 async fn capability_host_uses_post_dispatch_obligation_handler_before_returning() {
     let mut registry = ExtensionRegistry::new();
     registry
@@ -374,6 +534,10 @@ impl RecordingDispatcher {
     fn has_request(&self) -> bool {
         self.request.lock().unwrap().is_some()
     }
+
+    fn last_request(&self) -> Option<CapabilityDispatchRequest> {
+        self.request.lock().unwrap().clone()
+    }
 }
 
 #[async_trait]
@@ -446,6 +610,73 @@ impl CapabilityDispatchAuthorizer for ObligatingAuthorizer {
         Decision::Allow {
             obligations: self.obligations.clone(),
         }
+    }
+}
+
+struct EffectObligationHandler {
+    mounts: Option<MountView>,
+    reservation: Option<ResourceReservation>,
+    aborted: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl CapabilityObligationHandler for EffectObligationHandler {
+    async fn satisfy(
+        &self,
+        _request: CapabilityObligationRequest<'_>,
+    ) -> Result<(), CapabilityObligationError> {
+        Ok(())
+    }
+
+    async fn prepare(
+        &self,
+        _request: CapabilityObligationRequest<'_>,
+    ) -> Result<CapabilityObligationOutcome, CapabilityObligationError> {
+        Ok(CapabilityObligationOutcome {
+            mounts: self.mounts.clone(),
+            resource_reservation: self.reservation.clone(),
+        })
+    }
+
+    async fn abort(
+        &self,
+        _request: CapabilityObligationAbortRequest<'_>,
+    ) -> Result<(), CapabilityObligationError> {
+        self.aborted.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct MountRecordingProcessManager {
+    mounts: Mutex<Option<MountView>>,
+}
+
+impl MountRecordingProcessManager {
+    fn mounts(&self) -> Option<MountView> {
+        self.mounts.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ProcessManager for MountRecordingProcessManager {
+    async fn spawn(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
+        *self.mounts.lock().unwrap() = Some(start.mounts.clone());
+        Ok(ProcessRecord {
+            process_id: start.process_id,
+            parent_process_id: start.parent_process_id,
+            invocation_id: start.invocation_id,
+            scope: start.scope,
+            extension_id: start.extension_id,
+            capability_id: start.capability_id,
+            runtime: start.runtime,
+            status: ProcessStatus::Running,
+            grants: start.grants,
+            mounts: start.mounts,
+            estimated_resources: start.estimated_resources,
+            resource_reservation_id: start.resource_reservation_id,
+            error_kind: None,
+        })
     }
 }
 
@@ -569,6 +800,17 @@ impl CapabilityObligationHandler for FlaggingObligationHandler {
     }
 }
 
+struct FailingProcessManager;
+
+#[async_trait]
+impl ProcessManager for FailingProcessManager {
+    async fn spawn(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
+        Err(ProcessError::ProcessAlreadyExists {
+            process_id: start.process_id,
+        })
+    }
+}
+
 struct PanicProcessManager;
 
 #[async_trait]
@@ -638,6 +880,15 @@ fn package_from_manifest(manifest: &str) -> ExtensionPackage {
     let manifest = ExtensionManifest::parse(manifest).unwrap();
     let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
     ExtensionPackage::from_manifest(manifest, root).unwrap()
+}
+
+fn mount_view(alias: &str, target: &str, permissions: MountPermissions) -> MountView {
+    MountView::new(vec![MountGrant::new(
+        MountAlias::new(alias).unwrap(),
+        VirtualPath::new(target).unwrap(),
+        permissions,
+    )])
+    .unwrap()
 }
 
 fn execution_context(grants: CapabilitySet) -> ExecutionContext {

@@ -102,6 +102,7 @@ async fn resource_executor_returns_logs_from_core_imports() {
                     concurrency_slots: Some(1),
                     ..ResourceEstimate::default()
                 },
+                resource_reservation: None,
                 invocation: CapabilityInvocation {
                     input: json!({"message": "hello"}),
                 },

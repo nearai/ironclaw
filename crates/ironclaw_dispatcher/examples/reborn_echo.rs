@@ -44,6 +44,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 output_bytes: Some(10_000),
                 ..ResourceEstimate::default()
             },
+            mounts: None,
+            resource_reservation: None,
             input: json!({"message": "hello wasm"}),
         })
         .await?;
@@ -58,6 +60,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 output_bytes: Some(10_000),
                 ..ResourceEstimate::default()
             },
+            mounts: None,
+            resource_reservation: None,
             input: json!({"message": "hello script"}),
         })
         .await?;
@@ -72,6 +76,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 output_bytes: Some(10_000),
                 ..ResourceEstimate::default()
             },
+            mounts: None,
+            resource_reservation: None,
             input: json!({"message": "hello mcp"}),
         })
         .await?;

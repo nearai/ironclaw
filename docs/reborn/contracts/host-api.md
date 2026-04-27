@@ -628,7 +628,14 @@ pub struct SandboxQuota {
 `ironclaw_host_api` owns the neutral already-authorized dispatch port so caller-facing workflow crates can avoid depending on the concrete dispatcher implementation:
 
 ```rust
-pub struct CapabilityDispatchRequest;
+pub struct CapabilityDispatchRequest {
+    pub capability_id: CapabilityId,
+    pub scope: ResourceScope,
+    pub estimate: ResourceEstimate,
+    pub mounts: Option<MountView>,
+    pub resource_reservation: Option<ResourceReservation>,
+    pub input: serde_json::Value,
+}
 pub struct CapabilityDispatchResult;
 pub trait CapabilityDispatcher;
 pub enum DispatchError;
@@ -637,7 +644,7 @@ pub enum RuntimeDispatchErrorKind;
 
 Rules:
 
-- `CapabilityDispatchRequest` is already authorized; grant checks and approvals happen before this boundary.
+- `CapabilityDispatchRequest` is already authorized; grant checks and approvals happen before this boundary. Optional `mounts` and `resource_reservation` fields are prepared obligation effects, not new authority grants.
 - `CapabilityDispatchResult` exposes normalized host facts: capability ID, provider, runtime, output, usage, and resource receipt.
 - `DispatchError` uses stable control-plane variants for registry/routing failures and `RuntimeDispatchErrorKind` for WASM/Script/MCP failures.
 - Runtime/backend detail strings, stderr, host paths, and secret-bearing messages must not cross this port.

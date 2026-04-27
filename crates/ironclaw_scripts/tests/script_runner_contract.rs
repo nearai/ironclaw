@@ -42,6 +42,7 @@ fn script_runtime_reserves_executes_and_reconciles_success() {
                     output_bytes: Some(10_000),
                     ..ResourceEstimate::default()
                 },
+                resource_reservation: None,
                 invocation: ScriptInvocation {
                     input: json!({"message":"hello script", "command":"malicious override"}),
                 },
@@ -93,6 +94,7 @@ fn script_runtime_denies_budget_before_backend_execution() {
                     output_bytes: Some(10_000),
                     ..ResourceEstimate::default()
                 },
+                resource_reservation: None,
                 invocation: ScriptInvocation { input: json!({}) },
             },
         )
@@ -136,6 +138,7 @@ fn script_runtime_releases_reservation_when_backend_exits_nonzero() {
                     concurrency_slots: Some(1),
                     ..ResourceEstimate::default()
                 },
+                resource_reservation: None,
                 invocation: ScriptInvocation { input: json!({}) },
             },
         )
@@ -184,6 +187,7 @@ fn script_runtime_releases_reservation_when_output_limit_fails() {
                     concurrency_slots: Some(1),
                     ..ResourceEstimate::default()
                 },
+                resource_reservation: None,
                 invocation: ScriptInvocation { input: json!({}) },
             },
         )
@@ -214,6 +218,7 @@ fn script_runtime_rejects_non_script_package_before_reserving() {
                     concurrency_slots: Some(1),
                     ..ResourceEstimate::default()
                 },
+                resource_reservation: None,
                 invocation: ScriptInvocation { input: json!({}) },
             },
         )
@@ -244,6 +249,7 @@ fn script_runtime_rejects_undeclared_capability_before_reserving() {
                     concurrency_slots: Some(1),
                     ..ResourceEstimate::default()
                 },
+                resource_reservation: None,
                 invocation: ScriptInvocation { input: json!({}) },
             },
         )

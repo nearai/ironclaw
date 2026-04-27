@@ -5,4 +5,4 @@
 - Do not absorb process lifecycle/result APIs; those belong in `ironclaw_processes::ProcessHost`.
 - Approval resume must validate and claim the matching fingerprinted lease before dispatch.
 - Authorization denial or unsupported/failed obligations must fail before runtime dispatch, process start, or approval lease claim.
-- Keep obligation handling behind the `CapabilityObligationHandler` seam; do not add direct dependencies on secrets, network, events, or concrete runtime crates for obligation semantics.
+- Keep obligation handling behind the `CapabilityObligationHandler` seam; do not add direct dependencies on secrets, network, events, resources, filesystem, or concrete runtime crates for obligation semantics. `prepare` may return neutral prepared effects such as narrowed `MountView` or `ResourceReservation`; call `abort` when downstream work fails before ownership transfers.

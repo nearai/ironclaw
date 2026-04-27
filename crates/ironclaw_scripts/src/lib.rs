@@ -13,8 +13,8 @@ use std::{
 
 use ironclaw_extensions::{ExtensionPackage, ExtensionRuntime};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, ResourceEstimate, ResourceReservationId, ResourceScope,
-    ResourceUsage, RuntimeKind,
+    CapabilityId, ExtensionId, ResourceEstimate, ResourceReservation, ResourceReservationId,
+    ResourceScope, ResourceUsage, RuntimeKind,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use serde_json::Value;
@@ -58,6 +58,7 @@ pub struct ScriptExecutionRequest<'a> {
     pub capability_id: &'a CapabilityId,
     pub scope: ResourceScope,
     pub estimate: ResourceEstimate,
+    pub resource_reservation: Option<ResourceReservation>,
     pub invocation: ScriptInvocation,
 }
 
@@ -232,8 +233,16 @@ where
     where
         G: ResourceGovernor + ?Sized,
     {
-        let backend_request = self.prepare_backend_request(&request)?;
-        let reservation = governor.reserve(request.scope, request.estimate)?;
+        let reservation = reserve_or_use_existing(
+            governor,
+            request.scope.clone(),
+            request.estimate.clone(),
+            request.resource_reservation.clone(),
+        )?;
+        let backend_request = match self.prepare_backend_request(&request) {
+            Ok(backend_request) => backend_request,
+            Err(error) => return Err(release_after_failure(governor, reservation.id, error)),
+        };
 
         let output = match self.backend.execute(backend_request) {
             Ok(output) => output,
@@ -388,6 +397,26 @@ where
     ) -> Result<ScriptExecutionResult, ScriptError> {
         ScriptRuntime::execute_extension_json(self, governor, request)
     }
+}
+
+fn reserve_or_use_existing<G>(
+    governor: &G,
+    scope: ResourceScope,
+    estimate: ResourceEstimate,
+    reservation: Option<ResourceReservation>,
+) -> Result<ResourceReservation, ScriptError>
+where
+    G: ResourceGovernor + ?Sized,
+{
+    if let Some(reservation) = reservation {
+        if reservation.scope != scope || reservation.estimate != estimate {
+            return Err(ScriptError::Resource(Box::new(
+                ResourceError::ReservationMismatch { id: reservation.id },
+            )));
+        }
+        return Ok(reservation);
+    }
+    governor.reserve(scope, estimate).map_err(ScriptError::from)
 }
 
 fn release_after_failure<G>(

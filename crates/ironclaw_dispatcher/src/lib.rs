@@ -12,8 +12,8 @@ use ironclaw_events::{EventSink, RuntimeEvent};
 use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, ExtensionId, ResourceEstimate, ResourceReceipt,
-    ResourceScope, ResourceUsage, RuntimeKind,
+    CapabilityDescriptor, CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReceipt,
+    ResourceReservation, ResourceScope, ResourceUsage, RuntimeKind,
 };
 pub use ironclaw_host_api::{
     CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher, DispatchError,
@@ -47,6 +47,8 @@ where
 /// The dispatcher has already validated the capability descriptor, provider
 /// package, runtime kind, and configured backend presence before building this
 /// request. Adapters own concrete runtime semantics and resource accounting.
+/// If `resource_reservation` is present, the adapter must reconcile or release
+/// that prepared reservation instead of creating a second reservation.
 pub struct RuntimeAdapterRequest<'a, F, G>
 where
     F: RootFilesystem,
@@ -59,6 +61,8 @@ where
     pub capability_id: &'a CapabilityId,
     pub scope: ResourceScope,
     pub estimate: ResourceEstimate,
+    pub mounts: Option<MountView>,
+    pub resource_reservation: Option<ResourceReservation>,
     pub input: Value,
 }
 
@@ -186,8 +190,9 @@ where
             Some(descriptor) => descriptor,
             None => {
                 let error = DispatchError::UnknownCapability {
-                    capability: request.capability_id,
+                    capability: capability_id.clone(),
                 };
+                self.release_request_reservation(&request);
                 self.emit_dispatch_failure(scope, capability_id, None, None, &error)
                     .await?;
                 return Err(error);
@@ -197,9 +202,10 @@ where
             Some(package) => package,
             None => {
                 let error = DispatchError::UnknownProvider {
-                    capability: request.capability_id,
+                    capability: capability_id.clone(),
                     provider: descriptor.provider.clone(),
                 };
+                self.release_request_reservation(&request);
                 self.emit_dispatch_failure(
                     scope,
                     capability_id,
@@ -214,10 +220,11 @@ where
         let package_runtime = package.manifest.runtime_kind();
         if descriptor.runtime != package_runtime {
             let error = DispatchError::RuntimeMismatch {
-                capability: request.capability_id,
+                capability: capability_id.clone(),
                 descriptor_runtime: descriptor.runtime,
                 package_runtime,
             };
+            self.release_request_reservation(&request);
             self.emit_dispatch_failure(
                 scope,
                 capability_id,
@@ -232,6 +239,7 @@ where
         let runtime = descriptor.runtime;
         let Some(adapter) = self.runtime_adapters.get(&runtime) else {
             let error = DispatchError::MissingRuntimeBackend { runtime };
+            self.release_request_reservation(&request);
             self.emit_dispatch_failure(
                 scope,
                 capability_id,
@@ -261,6 +269,8 @@ where
                 capability_id: &request.capability_id,
                 scope: request.scope,
                 estimate: request.estimate,
+                mounts: request.mounts,
+                resource_reservation: request.resource_reservation,
                 input: request.input,
             })
             .await
@@ -296,6 +306,12 @@ where
             usage: execution.usage,
             receipt: execution.receipt,
         })
+    }
+
+    fn release_request_reservation(&self, request: &CapabilityDispatchRequest) {
+        if let Some(reservation) = &request.resource_reservation {
+            let _ = self.governor.as_ref().release(reservation.id);
+        }
     }
 
     async fn emit_dispatch_failure(

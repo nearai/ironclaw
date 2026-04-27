@@ -35,6 +35,7 @@ async fn executor_reserves_invokes_and_reconciles_success() {
                     output_bytes: Some(10_000),
                     ..ResourceEstimate::default()
                 },
+                resource_reservation: None,
                 invocation: CapabilityInvocation {
                     input: json!({"message": "hello executor"}),
                 },
@@ -81,6 +82,7 @@ async fn executor_returns_resource_error_without_reserving_when_budget_denied() 
                     output_bytes: Some(10_000),
                     ..ResourceEstimate::default()
                 },
+                resource_reservation: None,
                 invocation: CapabilityInvocation {
                     input: json!({"message": "hello executor"}),
                 },
@@ -122,6 +124,7 @@ async fn executor_releases_reservation_when_module_prepare_fails() {
                     concurrency_slots: Some(1),
                     ..ResourceEstimate::default()
                 },
+                resource_reservation: None,
                 invocation: CapabilityInvocation {
                     input: json!({"message": "hello executor"}),
                 },
@@ -163,6 +166,7 @@ async fn executor_releases_reservation_when_guest_traps() {
                     concurrency_slots: Some(1),
                     ..ResourceEstimate::default()
                 },
+                resource_reservation: None,
                 invocation: CapabilityInvocation {
                     input: json!({"message": "hello executor"}),
                 },
@@ -210,6 +214,7 @@ async fn executor_releases_reservation_when_output_limit_fails() {
                     output_bytes: Some(10_000),
                     ..ResourceEstimate::default()
                 },
+                resource_reservation: None,
                 invocation: CapabilityInvocation {
                     input: json!({"message": "hello executor"}),
                 },

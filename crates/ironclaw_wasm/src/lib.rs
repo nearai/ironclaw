@@ -17,10 +17,10 @@ use ironclaw_extensions::{ExtensionError, ExtensionPackage, ExtensionRuntime};
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, ExtensionId, MountView, NetworkMethod, NetworkPolicy,
-    NetworkScheme, NetworkTarget, NetworkTargetPattern, ResourceEstimate, ResourceReservationId,
-    ResourceScope, ResourceUsage, RuntimeKind, ScopedPath, VirtualPath,
+    NetworkScheme, NetworkTarget, NetworkTargetPattern, ResourceEstimate, ResourceReservation,
+    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeKind, ScopedPath, VirtualPath,
 };
-use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt, ResourceReservation};
+use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use rust_decimal::Decimal;
 use serde_json::Value;
 use thiserror::Error;
@@ -338,6 +338,7 @@ pub struct WasmExecutionRequest<'a> {
     pub capability_id: &'a CapabilityId,
     pub scope: ResourceScope,
     pub estimate: ResourceEstimate,
+    pub resource_reservation: Option<ResourceReservation>,
     pub invocation: CapabilityInvocation,
 }
 
@@ -586,9 +587,12 @@ impl WasmRuntime {
         F: RootFilesystem,
         G: ResourceGovernor,
     {
-        let reservation = governor
-            .reserve(request.scope, request.estimate)
-            .map_err(|error| WasmError::Resource(Box::new(error)))?;
+        let reservation = reserve_or_use_existing(
+            governor,
+            request.scope.clone(),
+            request.estimate.clone(),
+            request.resource_reservation,
+        )?;
 
         let prepared = match self
             .prepare_extension_capability(fs, request.package, request.capability_id)
@@ -626,9 +630,12 @@ impl WasmRuntime {
         F: RootFilesystem,
         G: ResourceGovernor,
     {
-        let reservation = governor
-            .reserve(request.scope, request.estimate)
-            .map_err(|error| WasmError::Resource(Box::new(error)))?;
+        let reservation = reserve_or_use_existing(
+            governor,
+            request.scope.clone(),
+            request.estimate.clone(),
+            request.resource_reservation,
+        )?;
 
         let prepared = match self
             .prepare_extension_capability(fs, request.package, request.capability_id)
@@ -1493,6 +1500,28 @@ fn unix_time_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn reserve_or_use_existing<G>(
+    governor: &G,
+    scope: ResourceScope,
+    estimate: ResourceEstimate,
+    reservation: Option<ResourceReservation>,
+) -> Result<ResourceReservation, WasmError>
+where
+    G: ResourceGovernor + ?Sized,
+{
+    if let Some(reservation) = reservation {
+        if reservation.scope != scope || reservation.estimate != estimate {
+            return Err(WasmError::Resource(Box::new(
+                ResourceError::ReservationMismatch { id: reservation.id },
+            )));
+        }
+        return Ok(reservation);
+    }
+    governor
+        .reserve(scope, estimate)
+        .map_err(|error| WasmError::Resource(Box::new(error)))
 }
 
 fn release_after_failure<G>(

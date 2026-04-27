@@ -40,6 +40,7 @@ async fn mcp_runtime_reserves_calls_adapter_and_reconciles_success() {
                     output_bytes: Some(10_000),
                     ..ResourceEstimate::default()
                 },
+                resource_reservation: None,
                 invocation: McpInvocation {
                     input: json!({"query": "ironclaw"}),
                 },
@@ -98,6 +99,7 @@ async fn mcp_runtime_denies_budget_before_adapter_call() {
                     concurrency_slots: Some(1),
                     ..ResourceEstimate::default()
                 },
+                resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
         )
@@ -129,6 +131,7 @@ async fn mcp_runtime_releases_reservation_when_adapter_fails() {
                     concurrency_slots: Some(1),
                     ..ResourceEstimate::default()
                 },
+                resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
         )
@@ -162,6 +165,7 @@ async fn mcp_runtime_rejects_non_mcp_or_undeclared_capability_before_reserving()
                     concurrency_slots: Some(1),
                     ..ResourceEstimate::default()
                 },
+                resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
         )
@@ -186,6 +190,7 @@ async fn mcp_runtime_rejects_non_mcp_or_undeclared_capability_before_reserving()
                     concurrency_slots: Some(1),
                     ..ResourceEstimate::default()
                 },
+                resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
         )
@@ -227,6 +232,7 @@ async fn mcp_runtime_enforces_output_limit_and_releases_reservation() {
                     output_bytes: Some(10_000),
                     ..ResourceEstimate::default()
                 },
+                resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
         )

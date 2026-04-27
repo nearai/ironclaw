@@ -223,6 +223,10 @@ pub struct ResourceDenial {
 pub enum ResourceError {
     #[error("resource limit exceeded for {dimension} at {account:?}", account = .0.account, dimension = .0.dimension)]
     LimitExceeded(Box<ResourceDenial>),
+    #[error("resource reservation {id} already exists")]
+    ReservationAlreadyExists { id: ResourceReservationId },
+    #[error("resource reservation {id} does not match requested scope or estimate")]
+    ReservationMismatch { id: ResourceReservationId },
     #[error("unknown resource reservation {id}")]
     UnknownReservation { id: ResourceReservationId },
     #[error("resource reservation {id} is already {status:?}")]
@@ -315,6 +319,14 @@ pub trait ResourceGovernor: Send + Sync {
         estimate: ResourceEstimate,
     ) -> Result<ResourceReservation, ResourceError>;
 
+    /// Reserves estimated resources with a caller-supplied reservation id for obligation handoff.
+    fn reserve_with_id(
+        &self,
+        scope: ResourceScope,
+        estimate: ResourceEstimate,
+        reservation_id: ResourceReservationId,
+    ) -> Result<ResourceReservation, ResourceError>;
+
     /// Reconciles an active reservation with actual usage and releases reserved capacity exactly once.
     fn reconcile(
         &self,
@@ -390,7 +402,19 @@ impl ResourceGovernor for InMemoryResourceGovernor {
         scope: ResourceScope,
         estimate: ResourceEstimate,
     ) -> Result<ResourceReservation, ResourceError> {
+        self.reserve_with_id(scope, estimate, ResourceReservationId::new())
+    }
+
+    fn reserve_with_id(
+        &self,
+        scope: ResourceScope,
+        estimate: ResourceEstimate,
+        reservation_id: ResourceReservationId,
+    ) -> Result<ResourceReservation, ResourceError> {
         let mut state = self.lock_state();
+        if state.reservations.contains_key(&reservation_id) {
+            return Err(ResourceError::ReservationAlreadyExists { id: reservation_id });
+        }
         let accounts = ResourceAccount::cascade(&scope);
         let requested = ResourceTally::from_estimate(&estimate);
 
@@ -413,7 +437,7 @@ impl ResourceGovernor for InMemoryResourceGovernor {
         }
 
         let reservation = ResourceReservation {
-            id: ResourceReservationId::new(),
+            id: reservation_id,
             scope,
             estimate,
         };

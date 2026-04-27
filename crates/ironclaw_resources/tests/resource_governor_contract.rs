@@ -38,6 +38,29 @@ fn reserve_succeeds_when_budget_is_available() {
 }
 
 #[test]
+fn reserve_with_id_uses_requested_identifier_and_rejects_duplicates() {
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope("tenant1", "user1", Some("project1"));
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    let reservation_id = ResourceReservationId::new();
+    let estimate = ResourceEstimate {
+        concurrency_slots: Some(1),
+        ..ResourceEstimate::default()
+    };
+
+    let reservation = governor
+        .reserve_with_id(scope.clone(), estimate.clone(), reservation_id)
+        .unwrap();
+
+    assert_eq!(reservation.id, reservation_id);
+    assert_eq!(governor.reserved_for(&account).concurrency_slots, 1);
+    assert!(matches!(
+        governor.reserve_with_id(scope, estimate, reservation_id),
+        Err(ResourceError::ReservationAlreadyExists { id }) if id == reservation_id
+    ));
+}
+
+#[test]
 fn reserve_denies_when_usd_limit_would_be_exceeded() {
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope("tenant1", "user1", Some("project1"));
