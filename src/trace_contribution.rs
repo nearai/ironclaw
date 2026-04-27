@@ -3697,6 +3697,10 @@ pub enum TraceQueueTelemetryFailureKind {
     Endpoint,
     Credential,
     Network,
+    NetworkOffline,
+    NetworkDns,
+    NetworkTimeout,
+    NetworkConnectionRefused,
     HttpRejection,
     StatusSync,
     Submission,
@@ -3708,7 +3712,17 @@ pub enum TraceQueueTelemetryFailureKind {
 pub struct TraceQueueWarning {
     pub kind: TraceQueueWarningKind,
     pub count: u32,
+    pub severity: TraceQueueWarningSeverity,
+    pub promotion_blocking: bool,
     pub message: String,
+    pub recommended_action: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceQueueWarningSeverity {
+    Warning,
+    Blocking,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -4098,7 +4112,7 @@ pub async fn submit_trace_envelope_to_endpoint(
         .json(envelope)
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("trace submission request failed: {}", e))?;
+        .map_err(|e| anyhow::Error::new(e).context("trace submission request failed"))?;
 
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
@@ -4476,7 +4490,7 @@ pub async fn fetch_trace_submission_statuses(
             })
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("trace status sync request failed: {}", e))?;
+            .map_err(|e| anyhow::Error::new(e).context("trace status sync request failed"))?;
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
@@ -4779,7 +4793,7 @@ pub async fn revoke_trace_submission_for_scope(
             .json(&serde_json::json!({ "submission_id": submission_id }))
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("trace revocation request failed: {}", e))?;
+            .map_err(|e| anyhow::Error::new(e).context("trace revocation request failed"))?;
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         if !status.is_success() {
@@ -5354,9 +5368,35 @@ fn trace_queue_warnings_for_scope_unlocked(
         .map(|(kind, count)| TraceQueueWarning {
             kind,
             count,
+            severity: trace_queue_warning_severity(kind),
+            promotion_blocking: trace_queue_warning_promotion_blocking(kind),
             message: trace_queue_warning_message(kind, count),
+            recommended_action: trace_queue_warning_recommended_action(kind).to_string(),
         })
         .collect())
+}
+
+fn trace_queue_warning_severity(kind: TraceQueueWarningKind) -> TraceQueueWarningSeverity {
+    match kind {
+        TraceQueueWarningKind::MalformedEnvelope => TraceQueueWarningSeverity::Blocking,
+        TraceQueueWarningKind::SchemaVersionMismatch
+        | TraceQueueWarningKind::PolicyVersionMismatch
+        | TraceQueueWarningKind::RedactionPipelineMismatch
+        | TraceQueueWarningKind::TraceCardRedactionPipelineMismatch => {
+            TraceQueueWarningSeverity::Warning
+        }
+    }
+}
+
+fn trace_queue_warning_promotion_blocking(kind: TraceQueueWarningKind) -> bool {
+    matches!(
+        kind,
+        TraceQueueWarningKind::SchemaVersionMismatch
+            | TraceQueueWarningKind::PolicyVersionMismatch
+            | TraceQueueWarningKind::RedactionPipelineMismatch
+            | TraceQueueWarningKind::TraceCardRedactionPipelineMismatch
+            | TraceQueueWarningKind::MalformedEnvelope
+    )
 }
 
 fn trace_queue_warning_message(kind: TraceQueueWarningKind, count: u32) -> String {
@@ -5370,6 +5410,26 @@ fn trace_queue_warning_message(kind: TraceQueueWarningKind, count: u32) -> Strin
         TraceQueueWarningKind::MalformedEnvelope => "malformed queued envelope",
     };
     format!("{count} queued trace(s) have {label}")
+}
+
+fn trace_queue_warning_recommended_action(kind: TraceQueueWarningKind) -> &'static str {
+    match kind {
+        TraceQueueWarningKind::SchemaVersionMismatch => {
+            "Re-preview or regenerate queued traces with the current contribution schema before production promotion."
+        }
+        TraceQueueWarningKind::PolicyVersionMismatch => {
+            "Refresh user consent for queued traces under the current Trace Commons policy before production promotion."
+        }
+        TraceQueueWarningKind::RedactionPipelineMismatch => {
+            "Re-run local redaction with an approved redaction pipeline before allowing autonomous promotion."
+        }
+        TraceQueueWarningKind::TraceCardRedactionPipelineMismatch => {
+            "Rebuild trace-card metadata so it matches the envelope redaction pipeline before promotion."
+        }
+        TraceQueueWarningKind::MalformedEnvelope => {
+            "Remove, quarantine, or regenerate malformed queue files before enabling production autonomous uploads."
+        }
+    }
 }
 
 fn trace_queue_redaction_pipeline_supported(version: &str) -> bool {
@@ -5545,7 +5605,22 @@ fn trace_queue_telemetry_failure_with_label(
 }
 
 fn trace_queue_telemetry_failure_kind(error: &anyhow::Error) -> TraceQueueTelemetryFailureKind {
-    let message = error.to_string().to_ascii_lowercase();
+    for cause in error.chain() {
+        if let Some(reqwest_error) = cause.downcast_ref::<reqwest::Error>() {
+            if reqwest_error.is_timeout() {
+                return TraceQueueTelemetryFailureKind::NetworkTimeout;
+            }
+            if reqwest_error.is_connect() {
+                return TraceQueueTelemetryFailureKind::NetworkConnectionRefused;
+            }
+        }
+    }
+    let message = error
+        .chain()
+        .map(|cause| cause.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase();
     if message.contains("endpoint") || message.contains("invalid trace contribution") {
         TraceQueueTelemetryFailureKind::Endpoint
     } else if message.contains("not set")
@@ -5556,11 +5631,29 @@ fn trace_queue_telemetry_failure_kind(error: &anyhow::Error) -> TraceQueueTeleme
         TraceQueueTelemetryFailureKind::Credential
     } else if message.contains("rejected by") {
         TraceQueueTelemetryFailureKind::HttpRejection
+    } else if message.contains("network is unreachable")
+        || message.contains("no route to host")
+        || message.contains("offline")
+        || message.contains("internet connection appears to be offline")
+    {
+        TraceQueueTelemetryFailureKind::NetworkOffline
+    } else if message.contains("dns")
+        || message.contains("failed to lookup")
+        || message.contains("failed to resolve")
+        || message.contains("name or service not known")
+        || message.contains("nodename nor servname")
+    {
+        TraceQueueTelemetryFailureKind::NetworkDns
+    } else if message.contains("timed out")
+        || message.contains("timeout")
+        || message.contains("deadline elapsed")
+    {
+        TraceQueueTelemetryFailureKind::NetworkTimeout
+    } else if message.contains("connection refused") || message.contains("refused") {
+        TraceQueueTelemetryFailureKind::NetworkConnectionRefused
     } else if message.contains("request failed")
         || message.contains("connection")
         || message.contains("tcp")
-        || message.contains("dns")
-        || message.contains("timed out")
         || message.contains("error trying to connect")
     {
         TraceQueueTelemetryFailureKind::Network
@@ -8068,8 +8161,21 @@ mod tests {
                 .iter()
                 .any(|warning| warning.kind == TraceQueueWarningKind::RedactionPipelineMismatch)
         );
+        assert!(
+            diagnostics
+                .warnings
+                .iter()
+                .all(|warning| warning.promotion_blocking)
+        );
+        assert!(
+            diagnostics
+                .warnings
+                .iter()
+                .all(|warning| !warning.recommended_action.trim().is_empty())
+        );
         let serialized = serde_json::to_string(&diagnostics).expect("diagnostics serialize");
         assert!(!serialized.contains("legacy-redactor"));
+        assert!(!serialized.contains("2025-01-01"));
 
         let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
     }
@@ -8170,12 +8276,46 @@ mod tests {
                 .as_ref()
                 .expect("network failure recorded")
                 .kind,
-            TraceQueueTelemetryFailureKind::Network
+            TraceQueueTelemetryFailureKind::NetworkConnectionRefused
         );
 
         let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&endpoint_scope)));
         let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&credential_scope)));
         let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&network_scope)));
+    }
+
+    #[test]
+    fn queue_telemetry_classifies_network_subtypes_without_raw_error_details() {
+        let now = Utc::now();
+        let cases = [
+            (
+                anyhow::anyhow!(
+                    "request failed: DNS lookup failed for https://private.example/v1/traces"
+                ),
+                TraceQueueTelemetryFailureKind::NetworkDns,
+            ),
+            (
+                anyhow::anyhow!("request failed: operation timed out contacting trace service"),
+                TraceQueueTelemetryFailureKind::NetworkTimeout,
+            ),
+            (
+                anyhow::anyhow!("request failed: connection refused by 127.0.0.1:9"),
+                TraceQueueTelemetryFailureKind::NetworkConnectionRefused,
+            ),
+            (
+                anyhow::anyhow!("request failed: network is unreachable while offline"),
+                TraceQueueTelemetryFailureKind::NetworkOffline,
+            ),
+        ];
+
+        for (error, expected) in cases {
+            let failure =
+                trace_queue_telemetry_failure_with_label(&error, now, "submission retry scheduled");
+            assert_eq!(failure.kind, expected);
+            assert!(failure.reason.contains("error_hash="));
+            assert!(!failure.reason.contains("private.example"));
+            assert!(!failure.reason.contains("127.0.0.1"));
+        }
     }
 
     #[tokio::test]

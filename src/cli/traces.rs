@@ -2209,7 +2209,11 @@ fn show_queue_status(json: bool, scope: Option<&str>) -> anyhow::Result<()> {
     if !diagnostics.queue.warnings.is_empty() {
         println!("  queue warnings:");
         for warning in &diagnostics.queue.warnings {
-            println!("    {:?}: {}", warning.kind, warning.message);
+            println!(
+                "    {:?} ({:?}, promotion blocking: {}): {}",
+                warning.kind, warning.severity, warning.promotion_blocking, warning.message
+            );
+            println!("      action: {}", warning.recommended_action);
         }
     }
     println!("  submitted records: {}", diagnostics.queue.submitted_count);
