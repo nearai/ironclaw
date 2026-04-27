@@ -4094,10 +4094,6 @@ async fn run_benchmark_conversion(
         item_count: candidates.len(),
         candidates,
     };
-    if !state.object_primary_derived_exports {
-        write_benchmark_artifact(&state.root, &tenant.tenant_id, &artifact)
-            .map_err(internal_error)?;
-    }
     let provenance = TraceExportProvenanceManifest::new(
         &tenant.tenant_id,
         conversion_id,
@@ -4107,43 +4103,89 @@ async fn run_benchmark_conversion(
         artifact.source_submission_ids.clone(),
         artifact.source_submission_ids_hash.clone(),
     );
-    if !state.object_primary_derived_exports {
-        write_export_provenance(
-            &benchmark_provenance_path(&state.root, &tenant.tenant_id, conversion_id),
-            &provenance,
+    let artifact_path = benchmark_artifact_path(&state.root, &tenant.tenant_id, conversion_id);
+    let provenance_path = benchmark_provenance_path(&state.root, &tenant.tenant_id, conversion_id);
+    if state.require_db_mirror_writes {
+        let artifact_object_ref_material = if state.db_mirror.is_some() {
+            Some(
+                trace_export_artifact_object_ref_material(
+                    state,
+                    &tenant.tenant_id,
+                    TraceArtifactKind::BenchmarkConversion,
+                    conversion_id,
+                    &artifact_path,
+                    &artifact,
+                )
+                .map_err(internal_error)?,
+            )
+        } else {
+            None
+        };
+        let mirror_result = mirror_benchmark_export_provenance_to_db(
+            state,
+            &artifact,
+            artifact_object_ref_material.as_ref(),
         )
-        .map_err(internal_error)?;
-    }
-    let artifact_object_ref_material = if state.db_mirror.is_some() {
-        Some(
-            trace_export_artifact_object_ref_material(
+        .await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                %error,
+                export_id = %conversion_id,
+                "Trace Commons DB dual-write benchmark provenance mirror failed"
+            );
+            cleanup_export_artifact_publication(
                 state,
                 &tenant.tenant_id,
                 TraceArtifactKind::BenchmarkConversion,
-                conversion_id,
-                &benchmark_artifact_path(&state.root, &tenant.tenant_id, conversion_id),
-                &artifact,
+                artifact_object_ref_material.as_ref(),
+                &[artifact_path.clone(), provenance_path.clone()],
             )
-            .map_err(internal_error)?,
-        )
+            .map_err(internal_error)?;
+        }
+        enforce_db_mirror_write_result(state, "benchmark provenance", mirror_result)
+            .map_err(internal_error)?;
+        if !state.object_primary_derived_exports {
+            write_benchmark_artifact(&state.root, &tenant.tenant_id, &artifact)
+                .map_err(internal_error)?;
+            write_export_provenance(&provenance_path, &provenance).map_err(internal_error)?;
+        }
     } else {
-        None
-    };
-    let mirror_result = mirror_benchmark_export_provenance_to_db(
-        state,
-        &artifact,
-        artifact_object_ref_material.as_ref(),
-    )
-    .await;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(
-            %error,
-            export_id = %conversion_id,
-            "Trace Commons DB dual-write benchmark provenance mirror failed"
-        );
+        if !state.object_primary_derived_exports {
+            write_benchmark_artifact(&state.root, &tenant.tenant_id, &artifact)
+                .map_err(internal_error)?;
+            write_export_provenance(&provenance_path, &provenance).map_err(internal_error)?;
+        }
+        let artifact_object_ref_material = if state.db_mirror.is_some() {
+            Some(
+                trace_export_artifact_object_ref_material(
+                    state,
+                    &tenant.tenant_id,
+                    TraceArtifactKind::BenchmarkConversion,
+                    conversion_id,
+                    &artifact_path,
+                    &artifact,
+                )
+                .map_err(internal_error)?,
+            )
+        } else {
+            None
+        };
+        let mirror_result = mirror_benchmark_export_provenance_to_db(
+            state,
+            &artifact,
+            artifact_object_ref_material.as_ref(),
+        )
+        .await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                %error,
+                export_id = %conversion_id,
+                "Trace Commons DB dual-write benchmark provenance mirror failed"
+            );
+        }
+        enforce_db_mirror_write_result(state, "benchmark provenance", mirror_result)
+            .map_err(internal_error)?;
     }
-    enforce_db_mirror_write_result(state, "benchmark provenance", mirror_result)
-        .map_err(internal_error)?;
     append_audit_event_with_db_mirror(
         state,
         tenant,
@@ -4355,44 +4397,94 @@ async fn ranker_training_candidates_handler(
         source_submission_ids,
         source_item_list_hash.clone(),
     );
-    if !state.object_primary_derived_exports {
-        write_export_provenance(
-            &ranker_provenance_path(&state.root, &tenant.tenant_id, export_id),
+    let provenance_path = ranker_provenance_path(&state.root, &tenant.tenant_id, export_id);
+    if state.require_db_mirror_writes {
+        let artifact_object_ref_material = if state.db_mirror.is_some() {
+            Some(
+                trace_export_artifact_object_ref_material(
+                    state.as_ref(),
+                    &tenant.tenant_id,
+                    TraceArtifactKind::RankerTrainingExport,
+                    export_id,
+                    &provenance_path,
+                    &provenance,
+                )
+                .map_err(internal_error)?,
+            )
+        } else {
+            None
+        };
+        let mirror_result = mirror_ranker_candidate_export_provenance_to_db(
+            state.as_ref(),
             &provenance,
+            &candidates,
+            artifact_object_ref_material.as_ref(),
         )
-        .map_err(internal_error)?;
-    }
-    let artifact_object_ref_material = if state.db_mirror.is_some() {
-        Some(
-            trace_export_artifact_object_ref_material(
+        .await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                %error,
+                export_id = %export_id,
+                "Trace Commons DB dual-write ranker candidate provenance mirror failed"
+            );
+            cleanup_export_artifact_publication(
                 state.as_ref(),
                 &tenant.tenant_id,
                 TraceArtifactKind::RankerTrainingExport,
-                export_id,
-                &ranker_provenance_path(&state.root, &tenant.tenant_id, export_id),
-                &provenance,
+                artifact_object_ref_material.as_ref(),
+                std::slice::from_ref(&provenance_path),
             )
-            .map_err(internal_error)?,
+            .map_err(internal_error)?;
+        }
+        enforce_db_mirror_write_result(
+            state.as_ref(),
+            "ranker candidate provenance",
+            mirror_result,
         )
-    } else {
-        None
-    };
-    let mirror_result = mirror_ranker_candidate_export_provenance_to_db(
-        state.as_ref(),
-        &provenance,
-        &candidates,
-        artifact_object_ref_material.as_ref(),
-    )
-    .await;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(
-            %error,
-            export_id = %export_id,
-            "Trace Commons DB dual-write ranker candidate provenance mirror failed"
-        );
-    }
-    enforce_db_mirror_write_result(state.as_ref(), "ranker candidate provenance", mirror_result)
         .map_err(internal_error)?;
+        if !state.object_primary_derived_exports {
+            write_export_provenance(&provenance_path, &provenance).map_err(internal_error)?;
+        }
+    } else {
+        if !state.object_primary_derived_exports {
+            write_export_provenance(&provenance_path, &provenance).map_err(internal_error)?;
+        }
+        let artifact_object_ref_material = if state.db_mirror.is_some() {
+            Some(
+                trace_export_artifact_object_ref_material(
+                    state.as_ref(),
+                    &tenant.tenant_id,
+                    TraceArtifactKind::RankerTrainingExport,
+                    export_id,
+                    &provenance_path,
+                    &provenance,
+                )
+                .map_err(internal_error)?,
+            )
+        } else {
+            None
+        };
+        let mirror_result = mirror_ranker_candidate_export_provenance_to_db(
+            state.as_ref(),
+            &provenance,
+            &candidates,
+            artifact_object_ref_material.as_ref(),
+        )
+        .await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                %error,
+                export_id = %export_id,
+                "Trace Commons DB dual-write ranker candidate provenance mirror failed"
+            );
+        }
+        enforce_db_mirror_write_result(
+            state.as_ref(),
+            "ranker candidate provenance",
+            mirror_result,
+        )
+        .map_err(internal_error)?;
+    }
     append_audit_event_with_db_mirror(
         state.as_ref(),
         &tenant,
@@ -4512,44 +4604,86 @@ async fn ranker_training_pairs_handler(
         source_submission_ids,
         source_item_list_hash.clone(),
     );
-    if !state.object_primary_derived_exports {
-        write_export_provenance(
-            &ranker_provenance_path(&state.root, &tenant.tenant_id, export_id),
+    let provenance_path = ranker_provenance_path(&state.root, &tenant.tenant_id, export_id);
+    if state.require_db_mirror_writes {
+        let artifact_object_ref_material = if state.db_mirror.is_some() {
+            Some(
+                trace_export_artifact_object_ref_material(
+                    state.as_ref(),
+                    &tenant.tenant_id,
+                    TraceArtifactKind::RankerTrainingExport,
+                    export_id,
+                    &provenance_path,
+                    &provenance,
+                )
+                .map_err(internal_error)?,
+            )
+        } else {
+            None
+        };
+        let mirror_result = mirror_ranker_pair_export_provenance_to_db(
+            state.as_ref(),
             &provenance,
+            &pairs,
+            artifact_object_ref_material.as_ref(),
         )
-        .map_err(internal_error)?;
-    }
-    let artifact_object_ref_material = if state.db_mirror.is_some() {
-        Some(
-            trace_export_artifact_object_ref_material(
+        .await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                %error,
+                export_id = %export_id,
+                "Trace Commons DB dual-write ranker pair provenance mirror failed"
+            );
+            cleanup_export_artifact_publication(
                 state.as_ref(),
                 &tenant.tenant_id,
                 TraceArtifactKind::RankerTrainingExport,
-                export_id,
-                &ranker_provenance_path(&state.root, &tenant.tenant_id, export_id),
-                &provenance,
+                artifact_object_ref_material.as_ref(),
+                std::slice::from_ref(&provenance_path),
             )
-            .map_err(internal_error)?,
-        )
+            .map_err(internal_error)?;
+        }
+        enforce_db_mirror_write_result(state.as_ref(), "ranker pair provenance", mirror_result)
+            .map_err(internal_error)?;
+        if !state.object_primary_derived_exports {
+            write_export_provenance(&provenance_path, &provenance).map_err(internal_error)?;
+        }
     } else {
-        None
-    };
-    let mirror_result = mirror_ranker_pair_export_provenance_to_db(
-        state.as_ref(),
-        &provenance,
-        &pairs,
-        artifact_object_ref_material.as_ref(),
-    )
-    .await;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(
-            %error,
-            export_id = %export_id,
-            "Trace Commons DB dual-write ranker pair provenance mirror failed"
-        );
+        if !state.object_primary_derived_exports {
+            write_export_provenance(&provenance_path, &provenance).map_err(internal_error)?;
+        }
+        let artifact_object_ref_material = if state.db_mirror.is_some() {
+            Some(
+                trace_export_artifact_object_ref_material(
+                    state.as_ref(),
+                    &tenant.tenant_id,
+                    TraceArtifactKind::RankerTrainingExport,
+                    export_id,
+                    &provenance_path,
+                    &provenance,
+                )
+                .map_err(internal_error)?,
+            )
+        } else {
+            None
+        };
+        let mirror_result = mirror_ranker_pair_export_provenance_to_db(
+            state.as_ref(),
+            &provenance,
+            &pairs,
+            artifact_object_ref_material.as_ref(),
+        )
+        .await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                %error,
+                export_id = %export_id,
+                "Trace Commons DB dual-write ranker pair provenance mirror failed"
+            );
+        }
+        enforce_db_mirror_write_result(state.as_ref(), "ranker pair provenance", mirror_result)
+            .map_err(internal_error)?;
     }
-    enforce_db_mirror_write_result(state.as_ref(), "ranker pair provenance", mirror_result)
-        .map_err(internal_error)?;
     append_audit_event_with_db_mirror(
         state.as_ref(),
         &tenant,
@@ -9000,6 +9134,41 @@ fn cleanup_submission_file_side_writes(
         record.submission_id,
     ))?;
     delete_trace_objects_for_record(state, record)?;
+    Ok(())
+}
+
+fn cleanup_export_artifact_publication(
+    state: &AppState,
+    tenant_id: &str,
+    artifact_kind: TraceArtifactKind,
+    artifact_object_ref_material: Option<&TraceExportArtifactObjectRefMaterial>,
+    file_paths: &[PathBuf],
+) -> anyhow::Result<()> {
+    for path in file_paths {
+        remove_file_if_exists(path)?;
+    }
+
+    let (Some(store), Some(material)) =
+        (state.artifact_store.as_ref(), artifact_object_ref_material)
+    else {
+        return Ok(());
+    };
+    if material.object_store != store.object_store_name() {
+        return Ok(());
+    }
+    let tenant_ref = tenant_storage_ref(tenant_id);
+    let receipt = EncryptedTraceArtifactReceipt {
+        tenant_storage_ref: tenant_ref.clone(),
+        artifact_kind,
+        object_key: material.object_key.clone(),
+        ciphertext_sha256: material
+            .content_sha256
+            .strip_prefix("sha256:")
+            .unwrap_or(&material.content_sha256)
+            .to_string(),
+        encrypted_at: Utc::now(),
+    };
+    store.delete_artifact(&tenant_ref, &receipt)?;
     Ok(())
 }
 
@@ -15639,6 +15808,40 @@ mod tests {
         Arc::new(LocalEncryptedTraceArtifactStore::new(root, crypto))
     }
 
+    fn regular_file_set(root: &Path) -> BTreeSet<PathBuf> {
+        let mut files = BTreeSet::new();
+        if root.exists() {
+            collect_regular_files(root, root, &mut files).expect("regular file set reads");
+        }
+        files
+    }
+
+    fn collect_regular_files(
+        root: &Path,
+        dir: &Path,
+        files: &mut BTreeSet<PathBuf>,
+    ) -> anyhow::Result<()> {
+        for entry in
+            std::fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?
+        {
+            let entry = entry.context("failed to read dir entry")?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("failed to inspect {}", path.display()))?;
+            if file_type.is_dir() {
+                collect_regular_files(root, &path, files)?;
+            } else if file_type.is_file() {
+                files.insert(
+                    path.strip_prefix(root)
+                        .with_context(|| format!("{} escaped {}", path.display(), root.display()))?
+                        .to_path_buf(),
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn auth_headers(token: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
         let value = format!("Bearer {token}");
@@ -18397,6 +18600,14 @@ mod tests {
         .await
         .expect_err("required DB mirror writes fail closed when benchmark provenance fails");
         assert_eq!(benchmark_error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        let tenant_root = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"));
+        assert!(
+            !tenant_root.join("benchmarks").exists(),
+            "failed required DB mirror benchmark conversion must not publish file artifacts"
+        );
 
         let candidates_error = ranker_training_candidates_handler(
             State(state.clone()),
@@ -18412,6 +18623,10 @@ mod tests {
         .await
         .expect_err("required DB mirror writes fail closed when ranker candidate provenance fails");
         assert_eq!(candidates_error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            !tenant_root.join("ranker_exports").exists(),
+            "failed required DB mirror ranker candidate export must not publish file provenance"
+        );
 
         let pairs_error = ranker_training_pairs_handler(
             State(state),
@@ -18427,6 +18642,120 @@ mod tests {
         .await
         .expect_err("required DB mirror writes fail closed when ranker pair provenance fails");
         assert_eq!(pairs_error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            !tenant_root.join("ranker_exports").exists(),
+            "failed required DB mirror ranker pair export must not publish file provenance"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn required_db_mirror_writes_clean_export_object_store_artifacts_on_provenance_failure() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_root = temp.path().join("service-object-store");
+        let artifact_store = test_artifact_store(&artifact_root);
+        let configured_store = ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            artifact_store,
+        );
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp
+            .path()
+            .join("trace-required-export-object-cleanup.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state =
+            test_state_with_configured_artifact_store_policies_export_guardrails_and_required_db_writes(
+                temp.path().to_path_buf(),
+                Some(db.clone() as Arc<dyn Database>),
+                Some(configured_store),
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                BTreeMap::new(),
+                false,
+                false,
+                true,
+                false,
+            );
+
+        let mut first = sample_envelope().await;
+        make_metadata_only_low_risk(&mut first);
+        first.consent.scopes = vec![
+            ConsentScope::DebuggingEvaluation,
+            ConsentScope::RankingTraining,
+        ];
+        first.trace_card.allowed_uses = vec![
+            TraceAllowedUse::BenchmarkGeneration,
+            TraceAllowedUse::RankingModelTraining,
+        ];
+        let mut second = sample_envelope().await;
+        make_metadata_only_low_risk(&mut second);
+        second.consent.scopes = vec![ConsentScope::RankingTraining];
+        second.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+
+        let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
+            .await
+            .expect("first export source submits");
+        let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(second))
+            .await
+            .expect("second export source submits");
+        let artifact_files_before_failure = regular_file_set(&artifact_root);
+
+        let conn = db.connect().await.expect("connect to mirror");
+        conn.execute("DROP TABLE trace_export_manifests", ())
+            .await
+            .expect("drop mirrored export manifests table");
+
+        let benchmark_error = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("required_db_object_cleanup_benchmark".to_string()),
+                consent_scope: Some("debugging-evaluation".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect_err("required DB mirror benchmark failure cleans object-store artifact");
+        assert_eq!(benchmark_error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            regular_file_set(&artifact_root),
+            artifact_files_before_failure,
+            "failed benchmark provenance mirror must not leave a new encrypted artifact"
+        );
+
+        let candidates_error = ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("required_db_object_cleanup_candidates".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking_training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect_err("required DB mirror ranker candidate failure cleans object-store artifact");
+        assert_eq!(candidates_error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            regular_file_set(&artifact_root),
+            artifact_files_before_failure,
+            "failed ranker provenance mirror must not leave a new encrypted artifact"
+        );
     }
 
     #[cfg(feature = "libsql")]
@@ -26985,10 +27314,15 @@ mod tests {
             ConsentScope::DebuggingEvaluation,
             ConsentScope::RankingTraining,
         ];
+        benchmark_source.trace_card.allowed_uses = vec![
+            TraceAllowedUse::BenchmarkGeneration,
+            TraceAllowedUse::RankingModelTraining,
+        ];
         let benchmark_submission_id = benchmark_source.submission_id;
         let mut ranker_source = sample_envelope().await;
         make_metadata_only_low_risk(&mut ranker_source);
         ranker_source.consent.scopes = vec![ConsentScope::RankingTraining];
+        ranker_source.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
 
         let _ = submit_trace_handler(
             State(state.clone()),
@@ -27142,10 +27476,15 @@ mod tests {
             ConsentScope::DebuggingEvaluation,
             ConsentScope::RankingTraining,
         ];
+        first_source.trace_card.allowed_uses = vec![
+            TraceAllowedUse::BenchmarkGeneration,
+            TraceAllowedUse::RankingModelTraining,
+        ];
         let first_submission_id = first_source.submission_id;
         let mut second_source = sample_envelope().await;
         make_metadata_only_low_risk(&mut second_source);
         second_source.consent.scopes = vec![ConsentScope::RankingTraining];
+        second_source.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
 
         let _ = submit_trace_handler(
             State(state.clone()),
