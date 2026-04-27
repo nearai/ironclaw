@@ -47,7 +47,7 @@ impl InvocationFingerprint {
             input: &'a serde_json::Value,
         }
 
-        let canonical_input = canonical_json(input);
+        let canonical_input = canonical_json(input)?;
         let payload = Payload {
             version: 1,
             kind: "dispatch",
@@ -67,21 +67,38 @@ impl InvocationFingerprint {
     }
 }
 
-fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
+const MAX_CANONICAL_JSON_DEPTH: usize = 64;
+
+fn canonical_json(value: &serde_json::Value) -> Result<serde_json::Value, HostApiError> {
+    canonical_json_at_depth(value, 0)
+}
+
+fn canonical_json_at_depth(
+    value: &serde_json::Value,
+    depth: usize,
+) -> Result<serde_json::Value, HostApiError> {
+    if depth > MAX_CANONICAL_JSON_DEPTH {
+        return Err(HostApiError::invariant(
+            "canonical_json: max depth exceeded",
+        ));
+    }
+
     match value {
-        serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.iter().map(canonical_json).collect())
-        }
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(|item| canonical_json_at_depth(item, depth + 1))
+            .collect::<Result<Vec<_>, _>>()
+            .map(serde_json::Value::Array),
         serde_json::Value::Object(map) => {
             let mut entries = map.iter().collect::<Vec<_>>();
             entries.sort_by_key(|(key, _)| *key);
             let mut canonical = serde_json::Map::new();
             for (key, value) in entries {
-                canonical.insert(key.clone(), canonical_json(value));
+                canonical.insert(key.clone(), canonical_json_at_depth(value, depth + 1)?);
             }
-            serde_json::Value::Object(canonical)
+            Ok(serde_json::Value::Object(canonical))
         }
-        _ => value.clone(),
+        _ => Ok(value.clone()),
     }
 }
 

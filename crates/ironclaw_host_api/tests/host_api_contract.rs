@@ -396,6 +396,34 @@ fn invocation_fingerprint_is_stable_and_input_hashed() {
 }
 
 #[test]
+fn invocation_fingerprint_rejects_deeply_nested_input() {
+    let ctx = sample_context();
+    let capability = CapabilityId::new("echo.say").unwrap();
+    let estimate = ResourceEstimate::default();
+    let mut input = serde_json::Value::String("leaf".to_string());
+
+    for _ in 0..10_000 {
+        let mut object = serde_json::Map::new();
+        object.insert("a".to_string(), input);
+        input = serde_json::Value::Object(object);
+    }
+
+    // serde_json::Value drops nested objects recursively; leak this intentionally
+    // so the test exercises fingerprint rejection rather than Value teardown.
+    let input = Box::leak(Box::new(input));
+
+    let err =
+        InvocationFingerprint::for_dispatch(&ctx.resource_scope, &capability, &estimate, input)
+            .unwrap_err();
+
+    assert!(matches!(
+        err,
+        HostApiError::InvariantViolation { reason }
+            if reason == "canonical_json: max depth exceeded"
+    ));
+}
+
+#[test]
 fn invocation_fingerprint_changes_when_authorized_invocation_changes() {
     let ctx = sample_context();
     let capability = CapabilityId::new("echo.say").unwrap();

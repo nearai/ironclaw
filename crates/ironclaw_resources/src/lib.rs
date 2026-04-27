@@ -232,6 +232,11 @@ pub enum ResourceError {
     LimitExceeded(Box<ResourceDenial>),
     #[error("resource reservation {id} already exists")]
     ReservationAlreadyExists { id: ResourceReservationId },
+    #[error("invalid resource estimate for {dimension}: {reason}")]
+    InvalidEstimate {
+        dimension: ResourceDimension,
+        reason: &'static str,
+    },
     #[error("resource reservation {id} does not match requested scope or estimate")]
     ReservationMismatch { id: ResourceReservationId },
     #[error("unknown resource reservation {id}")]
@@ -427,6 +432,8 @@ impl ResourceGovernor for InMemoryResourceGovernor {
         estimate: ResourceEstimate,
         reservation_id: ResourceReservationId,
     ) -> Result<ResourceReservation, ResourceError> {
+        validate_estimate(&estimate)?;
+
         let mut state = self.lock_state();
         if state.reservations.contains_key(&reservation_id) {
             return Err(ResourceError::ReservationAlreadyExists { id: reservation_id });
@@ -564,6 +571,19 @@ impl ResourceGovernor for InMemoryResourceGovernor {
         state.reservations.insert(reservation_id, record);
         Ok(receipt)
     }
+}
+
+fn validate_estimate(estimate: &ResourceEstimate) -> Result<(), ResourceError> {
+    if let Some(usd) = estimate.usd
+        && usd < Decimal::ZERO
+    {
+        return Err(ResourceError::InvalidEstimate {
+            dimension: ResourceDimension::Usd,
+            reason: "must be non-negative",
+        });
+    }
+
+    Ok(())
 }
 
 /// Returns the first denied dimension in canonical resource order.

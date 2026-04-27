@@ -61,6 +61,33 @@ fn reserve_with_id_uses_requested_identifier_and_rejects_duplicates() {
 }
 
 #[test]
+fn reserve_with_id_rejects_negative_usd_estimates() {
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope("tenant1", "user1", Some("project1"));
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+
+    let err = governor
+        .reserve_with_id(
+            scope,
+            ResourceEstimate {
+                usd: Some(dec!(-100.00)),
+                ..ResourceEstimate::default()
+            },
+            ResourceReservationId::new(),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ResourceError::InvalidEstimate {
+            dimension: ResourceDimension::Usd,
+            reason: "must be non-negative"
+        }
+    ));
+    assert_eq!(governor.reserved_for(&account).usd, dec!(0));
+}
+
+#[test]
 fn usd_tally_saturates_instead_of_panicking_on_decimal_overflow() {
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope("tenant1", "user1", Some("project1"));
