@@ -24,11 +24,11 @@ These are the next independent production slices that can be staffed in parallel
 
 - [ ] Promote DB/object-primary submit, review, replay, benchmark, and ranker paths from pilot flags to per-tenant rollout flags after reconciliation parity is green.
 - [ ] Replace service-local encrypted artifact storage with a service-owned object-store provider abstraction, KMS/key-ref strategy, tenant-hashed object keys, hash/decrypt verification, and migration/backfill tooling.
-- [ ] Add PostgreSQL integration coverage matching the current libSQL `TraceCorpusStore` slices for submissions, object refs, derived records, vectors, audit, credit, retention jobs, export manifests/items, policies, and tombstones. Retention job/item facade scope plus raw RLS visibility now have PostgreSQL coverage.
+- [ ] Add PostgreSQL integration coverage matching the current libSQL `TraceCorpusStore` slices for submissions, object refs, derived records, vectors, audit, credit, retention jobs, export manifests/items, policies, and tombstones. Retention job/item facade scope, tenant-policy update/scope behavior, review-lease claim/release/audit behavior, and raw RLS visibility now have PostgreSQL coverage.
 
 ### Review and Governance
 
-- [ ] Extend review leases into a fuller assignment/escalation workflow with SLA filters, batch actions, privacy-review reasons, and central reviewer routing. Review finalization now rejects non-quarantined, terminal, expired, and aggregate-only approval records before trace content is read.
+- [ ] Extend review leases into a fuller assignment/escalation workflow with SLA filters, batch actions, privacy-review reasons, and central reviewer routing. Review finalization now rejects non-quarantined, terminal, expired, and aggregate-only approval records before trace content is read, while PostgreSQL facade tests cover tenant-scoped lease claim/release ownership and typed lease audit metadata.
 - [ ] Complete privileged-action ABAC for review override, delayed credit, export, process evaluation, utility credit, purge, and tombstone changes using tenant policy plus signed-claim allowed scopes/uses.
 - [ ] Make audit append/read paths production-grade: DB-primary hash-chain verification, per-source content-read rows, reason enforcement, sampled reconciliation, and no broad corpus download path.
 

@@ -12,7 +12,8 @@ use ironclaw::trace_corpus_storage::{
     TraceExportManifestItemInvalidationReason, TraceExportManifestItemWrite,
     TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefWrite,
     TraceRetentionJobItemAction, TraceRetentionJobItemStatus, TraceRetentionJobItemWrite,
-    TraceRetentionJobStatus, TraceRetentionJobWrite, TraceSubmissionWrite, TraceTombstoneWrite,
+    TraceRetentionJobStatus, TraceRetentionJobWrite, TraceReviewLeaseAuditAction,
+    TraceSubmissionWrite, TraceTenantPolicyWrite, TraceTombstoneWrite,
     TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
     TraceWorkerKind,
 };
@@ -448,6 +449,134 @@ async fn assert_raw_sql_trace_rows_visible_only_with_matching_tenant_context(
         .expect("commit raw tenant B RLS assertion");
 }
 
+async fn assert_raw_sql_tenant_policies_visible_only_with_matching_tenant_context(
+    database_url: &str,
+    tenant_a: &str,
+    tenant_b: &str,
+) {
+    let (mut client, connection) = match tokio_postgres::connect(database_url, NoTls).await {
+        Ok(parts) => parts,
+        Err(e) => {
+            eprintln!("skipping raw tenant policy RLS assertion: database unavailable ({e})");
+            return;
+        }
+    };
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    match current_role_bypasses_trace_rls(&mut client).await {
+        Ok(true) => {
+            eprintln!("skipping raw tenant policy RLS assertion: current role bypasses RLS");
+            return;
+        }
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("skipping raw tenant policy RLS assertion: could not inspect role ({e})");
+            return;
+        }
+    }
+
+    let tx = client
+        .transaction()
+        .await
+        .expect("start raw tenant policy no-context assertion transaction");
+    let no_context_count: i64 = tx
+        .query_one("SELECT COUNT(*) FROM trace_tenant_policies", &[])
+        .await
+        .expect("count tenant policies without context")
+        .get(0);
+    assert_eq!(
+        no_context_count, 0,
+        "tenant policy rows must be invisible without tenant context"
+    );
+    tx.commit()
+        .await
+        .expect("commit raw tenant policy no-context assertion");
+
+    let tx = client
+        .transaction()
+        .await
+        .expect("start raw tenant policy tenant A assertion transaction");
+    tx.execute(
+        "SELECT set_config('ironclaw.trace_tenant_id', $1, true)",
+        &[&tenant_a],
+    )
+    .await
+    .expect("set tenant A context");
+    let tenant_a_visible_count: i64 = tx
+        .query_one("SELECT COUNT(*) FROM trace_tenant_policies", &[])
+        .await
+        .expect("count tenant policies for tenant A")
+        .get(0);
+    let tenant_b_from_a_count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_tenant_policies WHERE tenant_id = $1",
+            &[&tenant_b],
+        )
+        .await
+        .expect("count tenant B policy from tenant A context")
+        .get(0);
+    assert_eq!(tenant_a_visible_count, 1);
+    assert_eq!(tenant_b_from_a_count, 0);
+    tx.commit()
+        .await
+        .expect("commit raw tenant policy tenant A assertion");
+
+    let tx = client
+        .transaction()
+        .await
+        .expect("start raw tenant policy tenant B assertion transaction");
+    tx.execute(
+        "SELECT set_config('ironclaw.trace_tenant_id', $1, true)",
+        &[&tenant_b],
+    )
+    .await
+    .expect("set tenant B context");
+    let tenant_b_visible_count: i64 = tx
+        .query_one("SELECT COUNT(*) FROM trace_tenant_policies", &[])
+        .await
+        .expect("count tenant policies for tenant B")
+        .get(0);
+    let tenant_a_from_b_count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_tenant_policies WHERE tenant_id = $1",
+            &[&tenant_a],
+        )
+        .await
+        .expect("count tenant A policy from tenant B context")
+        .get(0);
+    assert_eq!(tenant_b_visible_count, 1);
+    assert_eq!(tenant_a_from_b_count, 0);
+    tx.commit()
+        .await
+        .expect("commit raw tenant policy tenant B assertion");
+}
+
+async fn cleanup_trace_tenants(backend: &PgBackend, tenant_ids: &[&str]) {
+    let mut client = backend.pool().get().await.expect("get cleanup connection");
+    for tenant_id in tenant_ids {
+        let tenant_id = *tenant_id;
+        let tx = client
+            .transaction()
+            .await
+            .expect("start cleanup transaction");
+        tx.execute(
+            "SELECT set_config('ironclaw.trace_tenant_id', $1, true)",
+            &[&tenant_id],
+        )
+        .await
+        .expect("set cleanup tenant context");
+        let _ = tx
+            .execute(
+                "DELETE FROM trace_tenants WHERE tenant_id = $1",
+                &[&tenant_id],
+            )
+            .await;
+        tx.commit().await.expect("commit cleanup transaction");
+    }
+}
+
 async fn assert_trace_rls_policies_installed(backend: &PgBackend) {
     let expected_tables = vec![
         "trace_tenants".to_string(),
@@ -795,6 +924,373 @@ async fn store_facade_keeps_same_submission_id_isolated_by_tenant() {
             .await;
         tx.commit().await.expect("commit cleanup transaction");
     }
+}
+
+#[tokio::test]
+async fn store_facade_preserves_tenant_policy_scope_and_updates() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+    assert_trace_rls_policies_installed(&backend).await;
+
+    let tenant_alpha = format!("rls-policy-alpha-{}", Uuid::new_v4());
+    let tenant_beta = format!("rls-policy-beta-{}", Uuid::new_v4());
+
+    let alpha_policy = backend
+        .upsert_trace_tenant_policy(TraceTenantPolicyWrite {
+            tenant_id: tenant_alpha.clone(),
+            policy_version: "tenant-policy-v1".to_string(),
+            allowed_consent_scopes: vec!["debugging_evaluation".to_string()],
+            allowed_uses: vec!["debugging".to_string(), "evaluation".to_string()],
+            updated_by_principal_ref: "admin:alpha".to_string(),
+        })
+        .await
+        .expect("insert alpha tenant policy");
+    assert_eq!(alpha_policy.tenant_id, tenant_alpha);
+    assert_eq!(alpha_policy.policy_version, "tenant-policy-v1");
+    assert_eq!(
+        alpha_policy.allowed_consent_scopes,
+        vec!["debugging_evaluation"]
+    );
+    assert_eq!(alpha_policy.allowed_uses, vec!["debugging", "evaluation"]);
+    assert_eq!(alpha_policy.updated_by_principal_ref, "admin:alpha");
+
+    let read_alpha_policy = backend
+        .get_trace_tenant_policy(&tenant_alpha)
+        .await
+        .expect("read alpha tenant policy")
+        .expect("alpha tenant policy exists");
+    assert_eq!(read_alpha_policy, alpha_policy);
+    assert!(
+        backend
+            .get_trace_tenant_policy(&tenant_beta)
+            .await
+            .expect("probe beta tenant policy")
+            .is_none()
+    );
+
+    let beta_policy = backend
+        .upsert_trace_tenant_policy(TraceTenantPolicyWrite {
+            tenant_id: tenant_beta.clone(),
+            policy_version: "tenant-policy-beta-v1".to_string(),
+            allowed_consent_scopes: vec!["benchmark_only".to_string()],
+            allowed_uses: vec!["benchmark".to_string()],
+            updated_by_principal_ref: "admin:beta".to_string(),
+        })
+        .await
+        .expect("insert beta tenant policy");
+
+    let updated_alpha_policy = backend
+        .upsert_trace_tenant_policy(TraceTenantPolicyWrite {
+            tenant_id: tenant_alpha.clone(),
+            policy_version: "tenant-policy-v2".to_string(),
+            allowed_consent_scopes: vec![
+                "debugging_evaluation".to_string(),
+                "benchmark_only".to_string(),
+            ],
+            allowed_uses: vec!["debugging".to_string()],
+            updated_by_principal_ref: "admin:alpha-second".to_string(),
+        })
+        .await
+        .expect("update alpha tenant policy");
+    assert_eq!(updated_alpha_policy.tenant_id, tenant_alpha);
+    assert_eq!(updated_alpha_policy.policy_version, "tenant-policy-v2");
+    assert_eq!(
+        updated_alpha_policy.allowed_consent_scopes,
+        vec!["debugging_evaluation", "benchmark_only"]
+    );
+    assert_eq!(updated_alpha_policy.allowed_uses, vec!["debugging"]);
+    assert_eq!(
+        updated_alpha_policy.updated_by_principal_ref,
+        "admin:alpha-second"
+    );
+
+    let read_beta_policy = backend
+        .get_trace_tenant_policy(&tenant_beta)
+        .await
+        .expect("read beta tenant policy")
+        .expect("beta tenant policy exists");
+    assert_eq!(read_beta_policy, beta_policy);
+    assert_ne!(
+        updated_alpha_policy.updated_by_principal_ref,
+        read_beta_policy.updated_by_principal_ref
+    );
+
+    if let Some(config) = postgres_test_config() {
+        assert_raw_sql_tenant_policies_visible_only_with_matching_tenant_context(
+            config.url.expose_secret(),
+            &tenant_alpha,
+            &tenant_beta,
+        )
+        .await;
+    }
+
+    cleanup_trace_tenants(&backend, &[&tenant_alpha, &tenant_beta]).await;
+}
+
+#[tokio::test]
+async fn store_facade_preserves_review_lease_audit_metadata() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+    assert_trace_rls_policies_installed(&backend).await;
+
+    let tenant_alpha = format!("rls-lease-audit-alpha-{}", Uuid::new_v4());
+    let tenant_beta = format!("rls-lease-audit-beta-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+
+    backend
+        .upsert_trace_submission(sample_submission(&tenant_alpha, submission_id))
+        .await
+        .expect("insert alpha submission");
+
+    backend
+        .append_trace_audit_event(TraceAuditEventWrite {
+            tenant_id: tenant_alpha.clone(),
+            audit_event_id: Uuid::new_v4(),
+            submission_id: Some(submission_id),
+            actor_principal_ref: "principal:contributor".to_string(),
+            actor_role: "contributor".to_string(),
+            action: TraceAuditAction::Submit,
+            reason: None,
+            request_id: Some("request:submit".to_string()),
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: Some("sha256:genesis".to_string()),
+            event_hash: Some("sha256:lease-audit-submit".to_string()),
+            canonical_event_json: Some("{\"kind\":\"submitted\"}".to_string()),
+            metadata: TraceAuditSafeMetadata::Submission {
+                status: TraceCorpusStatus::Accepted,
+                privacy_risk: "low".to_string(),
+            },
+        })
+        .await
+        .expect("append submit audit event");
+
+    let lease_expires_at = DateTime::parse_from_rfc3339("2026-04-25T12:15:00Z")
+        .expect("parse lease expiry")
+        .with_timezone(&Utc);
+    let review_due_at = DateTime::parse_from_rfc3339("2026-04-25T13:00:00Z")
+        .expect("parse review due")
+        .with_timezone(&Utc);
+    backend
+        .append_trace_audit_event(TraceAuditEventWrite {
+            tenant_id: tenant_alpha.clone(),
+            audit_event_id: Uuid::new_v4(),
+            submission_id: Some(submission_id),
+            actor_principal_ref: "principal:reviewer".to_string(),
+            actor_role: "reviewer".to_string(),
+            action: TraceAuditAction::Review,
+            reason: Some("action=claim".to_string()),
+            request_id: None,
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: Some("sha256:lease-audit-submit".to_string()),
+            event_hash: Some("sha256:lease-audit-claim".to_string()),
+            canonical_event_json: Some("{\"kind\":\"review_lease\"}".to_string()),
+            metadata: TraceAuditSafeMetadata::ReviewLease {
+                action: TraceReviewLeaseAuditAction::Claim,
+                lease_expires_at: Some(lease_expires_at),
+                review_due_at: Some(review_due_at),
+            },
+        })
+        .await
+        .expect("append review lease audit event");
+
+    let audit_events = backend
+        .list_trace_audit_events(&tenant_alpha)
+        .await
+        .expect("list alpha audit events");
+    assert_eq!(audit_events.len(), 2);
+    assert_eq!(audit_events[1].submission_id, Some(submission_id));
+    assert_eq!(audit_events[1].action, TraceAuditAction::Review);
+    assert_eq!(
+        audit_events[1].metadata,
+        TraceAuditSafeMetadata::ReviewLease {
+            action: TraceReviewLeaseAuditAction::Claim,
+            lease_expires_at: Some(lease_expires_at),
+            review_due_at: Some(review_due_at),
+        }
+    );
+
+    let beta_audit_events = backend
+        .list_trace_audit_events(&tenant_beta)
+        .await
+        .expect("list beta audit events");
+    assert!(beta_audit_events.is_empty());
+
+    cleanup_trace_tenants(&backend, &[&tenant_alpha, &tenant_beta]).await;
+}
+
+#[tokio::test]
+async fn store_facade_claims_releases_review_leases_by_tenant_and_reviewer() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+    assert_trace_rls_policies_installed(&backend).await;
+
+    let tenant_alpha = format!("rls-lease-alpha-{}", Uuid::new_v4());
+    let tenant_beta = format!("rls-lease-beta-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+
+    let mut alpha_submission = sample_submission(&tenant_alpha, submission_id);
+    alpha_submission.status = TraceCorpusStatus::Quarantined;
+    backend
+        .upsert_trace_submission(alpha_submission)
+        .await
+        .expect("insert alpha quarantined submission");
+    let mut beta_submission = sample_submission(&tenant_beta, submission_id);
+    beta_submission.status = TraceCorpusStatus::Quarantined;
+    backend
+        .upsert_trace_submission(beta_submission)
+        .await
+        .expect("insert beta quarantined submission with same submission id");
+
+    let now = DateTime::parse_from_rfc3339("2026-04-25T12:00:00Z")
+        .expect("parse lease now")
+        .with_timezone(&Utc);
+    let lease_expires_at = now + chrono::Duration::minutes(15);
+    let review_due_at = now + chrono::Duration::hours(1);
+    let alpha_claim = backend
+        .claim_trace_review_lease(
+            &tenant_alpha,
+            submission_id,
+            "principal:reviewer-alpha",
+            lease_expires_at,
+            Some(review_due_at),
+            now,
+        )
+        .await
+        .expect("claim alpha review lease")
+        .expect("alpha review lease is claimable");
+    assert_eq!(alpha_claim.tenant_id, tenant_alpha);
+    assert_eq!(alpha_claim.status, TraceCorpusStatus::Quarantined);
+    assert_eq!(
+        alpha_claim.review_assigned_to_principal_ref.as_deref(),
+        Some("principal:reviewer-alpha")
+    );
+    assert_eq!(alpha_claim.review_lease_expires_at, Some(lease_expires_at));
+    assert_eq!(alpha_claim.review_due_at, Some(review_due_at));
+
+    let blocked_claim = backend
+        .claim_trace_review_lease(
+            &tenant_alpha,
+            submission_id,
+            "principal:reviewer-other",
+            lease_expires_at + chrono::Duration::minutes(5),
+            Some(review_due_at + chrono::Duration::minutes(5)),
+            now + chrono::Duration::minutes(1),
+        )
+        .await
+        .expect("attempt conflicting alpha review lease claim");
+    assert!(blocked_claim.is_none());
+
+    let alpha_reclaim = backend
+        .claim_trace_review_lease(
+            &tenant_alpha,
+            submission_id,
+            "principal:reviewer-alpha",
+            lease_expires_at + chrono::Duration::minutes(10),
+            Some(review_due_at + chrono::Duration::minutes(10)),
+            now + chrono::Duration::minutes(2),
+        )
+        .await
+        .expect("same reviewer renews alpha review lease")
+        .expect("same reviewer can renew lease");
+    assert_eq!(
+        alpha_reclaim.review_assigned_to_principal_ref.as_deref(),
+        Some("principal:reviewer-alpha")
+    );
+    assert_eq!(
+        alpha_reclaim.review_lease_expires_at,
+        Some(lease_expires_at + chrono::Duration::minutes(10))
+    );
+
+    let wrong_release = backend
+        .release_trace_review_lease(&tenant_alpha, submission_id, "principal:reviewer-other")
+        .await
+        .expect("attempt conflicting alpha review lease release");
+    assert!(wrong_release.is_none());
+
+    let beta_claim = backend
+        .claim_trace_review_lease(
+            &tenant_beta,
+            submission_id,
+            "principal:reviewer-beta",
+            lease_expires_at,
+            Some(review_due_at),
+            now,
+        )
+        .await
+        .expect("claim beta review lease with same submission id")
+        .expect("beta review lease is independently claimable");
+    assert_eq!(beta_claim.tenant_id, tenant_beta);
+    assert_eq!(
+        beta_claim.review_assigned_to_principal_ref.as_deref(),
+        Some("principal:reviewer-beta")
+    );
+
+    let alpha_release = backend
+        .release_trace_review_lease(&tenant_alpha, submission_id, "principal:reviewer-alpha")
+        .await
+        .expect("release alpha review lease")
+        .expect("alpha review lease is releasable by owner");
+    assert!(alpha_release.review_assigned_to_principal_ref.is_none());
+    assert!(alpha_release.review_assigned_at.is_none());
+    assert!(alpha_release.review_lease_expires_at.is_none());
+    assert!(alpha_release.review_due_at.is_none());
+
+    let stored_beta = backend
+        .get_trace_submission(&tenant_beta, submission_id)
+        .await
+        .expect("read beta submission")
+        .expect("beta submission still exists");
+    assert_eq!(
+        stored_beta.review_assigned_to_principal_ref.as_deref(),
+        Some("principal:reviewer-beta")
+    );
+
+    let expired_alpha_claim = backend
+        .claim_trace_review_lease(
+            &tenant_alpha,
+            submission_id,
+            "principal:reviewer-alpha",
+            lease_expires_at,
+            Some(review_due_at),
+            now,
+        )
+        .await
+        .expect("reclaim alpha lease after release")
+        .expect("alpha lease is claimable after release");
+    assert_eq!(
+        expired_alpha_claim
+            .review_assigned_to_principal_ref
+            .as_deref(),
+        Some("principal:reviewer-alpha")
+    );
+    let alpha_handoff = backend
+        .claim_trace_review_lease(
+            &tenant_alpha,
+            submission_id,
+            "principal:reviewer-other",
+            lease_expires_at + chrono::Duration::minutes(30),
+            Some(review_due_at + chrono::Duration::minutes(30)),
+            lease_expires_at + chrono::Duration::seconds(1),
+        )
+        .await
+        .expect("claim expired alpha lease")
+        .expect("expired alpha lease can be claimed by another reviewer");
+    assert_eq!(
+        alpha_handoff.review_assigned_to_principal_ref.as_deref(),
+        Some("principal:reviewer-other")
+    );
+
+    cleanup_trace_tenants(&backend, &[&tenant_alpha, &tenant_beta]).await;
 }
 
 #[tokio::test]
