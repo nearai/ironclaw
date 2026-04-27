@@ -4225,7 +4225,9 @@ async fn credit_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> ApiResult<Json<TraceCommonsTenantCreditResponse>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant =
+        authorize_tenant_access_grant(state.as_ref(), authenticate(state.as_ref(), &headers)?)
+            .await?;
     let credit_view = read_contributor_credit_view(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
@@ -4252,7 +4254,9 @@ async fn credit_events_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<TraceCommonsCreditLedgerRecord>>> {
-    let tenant = authenticate(state.as_ref(), &headers)?;
+    let tenant =
+        authorize_tenant_access_grant(state.as_ref(), authenticate(state.as_ref(), &headers)?)
+            .await?;
     let credit_view = read_contributor_credit_view(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
@@ -4277,7 +4281,11 @@ async fn submission_status_handler(
     headers: HeaderMap,
     Json(body): Json<TraceSubmissionStatusRequest>,
 ) -> ApiResult<Json<Vec<TraceSubmissionStatusUpdate>>> {
-    let tenant = authenticate_ctx(state.as_ref(), &headers)?;
+    let tenant = authorize_tenant_access_grant_ctx(
+        state.as_ref(),
+        authenticate_ctx(state.as_ref(), &headers)?,
+    )
+    .await?;
     if body.submission_ids.len() > 500 {
         return Err(api_error(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -21707,6 +21715,31 @@ mod tests {
         .expect("other tenant admin can list only own tenant grants");
         assert!(other_tenant_list.is_empty());
 
+        let mut active_enforced_state = state.clone();
+        Arc::make_mut(&mut active_enforced_state).require_tenant_access_grants = true;
+        let _ = credit_handler(
+            State(active_enforced_state.clone()),
+            auth_headers("token-a"),
+        )
+        .await
+        .expect("active tenant access grant authorizes contributor credit reads");
+        let _ = credit_events_handler(
+            State(active_enforced_state.clone()),
+            auth_headers("token-a"),
+        )
+        .await
+        .expect("active tenant access grant authorizes contributor credit-event reads");
+        let Json(active_statuses) = submission_status_handler(
+            State(active_enforced_state),
+            auth_headers("token-a"),
+            Json(TraceSubmissionStatusRequest {
+                submission_ids: vec![],
+            }),
+        )
+        .await
+        .expect("active tenant access grant authorizes contributor status sync");
+        assert!(active_statuses.is_empty());
+
         let Json(revoked) = revoke_tenant_access_grant_handler(
             State(state.clone()),
             auth_headers("admin-token-a"),
@@ -21731,13 +21764,33 @@ mod tests {
         allowed.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
         allowed.trace_card.allowed_uses = vec![TraceAllowedUse::Debugging];
         let revoked_submit_error = submit_trace_handler(
-            State(enforced_state),
+            State(enforced_state.clone()),
             auth_headers("token-a"),
             Json(allowed),
         )
         .await
         .expect_err("revoked tenant access grant no longer authorizes submit");
         assert_eq!(revoked_submit_error.0, StatusCode::FORBIDDEN);
+        let revoked_credit_error =
+            credit_handler(State(enforced_state.clone()), auth_headers("token-a"))
+                .await
+                .expect_err("revoked tenant access grant no longer authorizes credit reads");
+        assert_eq!(revoked_credit_error.0, StatusCode::FORBIDDEN);
+        let revoked_credit_events_error =
+            credit_events_handler(State(enforced_state.clone()), auth_headers("token-a"))
+                .await
+                .expect_err("revoked tenant access grant no longer authorizes credit-event reads");
+        assert_eq!(revoked_credit_events_error.0, StatusCode::FORBIDDEN);
+        let revoked_status_error = submission_status_handler(
+            State(enforced_state),
+            auth_headers("token-a"),
+            Json(TraceSubmissionStatusRequest {
+                submission_ids: vec![],
+            }),
+        )
+        .await
+        .expect_err("revoked tenant access grant no longer authorizes status sync");
+        assert_eq!(revoked_status_error.0, StatusCode::FORBIDDEN);
 
         let file_audit_events =
             read_all_audit_events(temp.path(), "tenant-a").expect("file audit events read");
