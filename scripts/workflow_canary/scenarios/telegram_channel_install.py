@@ -21,7 +21,7 @@ from scripts.workflow_canary.telegram_setup import (
     BOT_TOKEN,
     WEBHOOK_SECRET,
     install_telegram_channel,
-    is_telegram_active,
+    wait_for_telegram_active,
     patch_capabilities,
     setup_telegram_channel,
 )
@@ -71,7 +71,7 @@ async def run(
             bot_token=BOT_TOKEN,
             webhook_secret=WEBHOOK_SECRET,
         )
-        active = await is_telegram_active(
+        active = await wait_for_telegram_active(
             stack.base_url, stack.gateway_token, timeout_secs=15.0
         )
     except Exception as exc:  # noqa: BLE001

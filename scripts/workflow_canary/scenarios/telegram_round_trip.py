@@ -31,7 +31,7 @@ from scripts.workflow_canary.telegram_setup import (
     BOT_TOKEN,
     WEBHOOK_SECRET,
     install_telegram_channel,
-    is_telegram_active,
+    wait_for_telegram_active,
     patch_capabilities,
     post_telegram_webhook,
     setup_telegram_channel,
@@ -42,7 +42,7 @@ INBOUND_MESSAGE_TEXT = "hi canary round-trip"
 
 
 async def _ensure_active(stack: Any) -> bool:
-    if await is_telegram_active(stack.base_url, stack.gateway_token, timeout_secs=2.0):
+    if await wait_for_telegram_active(stack.base_url, stack.gateway_token, timeout_secs=2.0):
         return True
     await install_telegram_channel(stack.base_url, stack.gateway_token)
     patch_capabilities(stack.channels_dir)
@@ -52,7 +52,7 @@ async def _ensure_active(stack: Any) -> bool:
         bot_token=BOT_TOKEN,
         webhook_secret=WEBHOOK_SECRET,
     )
-    return await is_telegram_active(
+    return await wait_for_telegram_active(
         stack.base_url, stack.gateway_token, timeout_secs=15.0
     )
 

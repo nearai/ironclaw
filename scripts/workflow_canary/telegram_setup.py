@@ -117,10 +117,40 @@ async def setup_telegram_channel(
     return body
 
 
-async def is_telegram_active(
+def _find_telegram(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Pull the telegram entry out of a `/api/extensions` response.
+
+    The list lives under different envelope keys depending on the
+    gateway version that produced the response — accept all three
+    historical shapes.
+    """
+    items = (
+        payload.get("extensions")
+        or payload.get("items")
+        or payload.get("installed")
+        or []
+    )
+    for ext in items:
+        if ext.get("name") == "telegram":
+            return ext
+    return None
+
+
+async def is_telegram_installed(
     base_url: str, gateway_token: str, *, timeout_secs: float = 30.0
 ) -> bool:
-    """Poll /api/extensions until telegram is in installed extensions."""
+    """Poll /api/extensions until the telegram entry is **present**.
+
+    "Installed" is a strictly weaker condition than "active" — an
+    extension can be installed but inactive (mid-setup, awaiting auth,
+    activation_error). Use ``wait_for_telegram_active`` instead when
+    callers need to gate on actual runtime readiness; the
+    distinction matters because skipping ``setup_telegram_channel()``
+    for an installed-but-inactive extension is exactly the bug
+    Copilot AI flagged on PR #2874.
+    """
+    import asyncio
+
     headers = {"Authorization": f"Bearer {gateway_token}"}
     deadline = time.monotonic() + timeout_secs
     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -129,19 +159,38 @@ async def is_telegram_active(
                 f"{base_url}/api/extensions", headers=headers
             )
             if response.status_code == 200:
-                payload = response.json()
-                # Tolerate either {"extensions": [...]} or {"items": [...]}
-                # shapes — not all channels surface the same envelope.
-                items = (
-                    payload.get("extensions")
-                    or payload.get("items")
-                    or payload.get("installed")
-                    or []
-                )
-                for ext in items:
-                    if ext.get("name") == "telegram":
-                        return True
-            await __import__("asyncio").sleep(0.5)
+                if _find_telegram(response.json()) is not None:
+                    return True
+            await asyncio.sleep(0.5)
+    return False
+
+
+async def wait_for_telegram_active(
+    base_url: str, gateway_token: str, *, timeout_secs: float = 30.0
+) -> bool:
+    """Poll /api/extensions until the telegram entry has ``active=true``.
+
+    Mirrors the contract the canary's setup flow expects after a
+    successful ``/api/extensions/telegram/setup`` call: the extension
+    is installed AND its runtime activation has succeeded (channel
+    opened, hooks registered, credentials bound — see
+    `.claude/rules/lifecycle.md`). An ``activation_error``-bearing or
+    needs-setup entry returns False so callers re-run setup.
+    """
+    import asyncio
+
+    headers = {"Authorization": f"Bearer {gateway_token}"}
+    deadline = time.monotonic() + timeout_secs
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        while time.monotonic() < deadline:
+            response = await client.get(
+                f"{base_url}/api/extensions", headers=headers
+            )
+            if response.status_code == 200:
+                ext = _find_telegram(response.json())
+                if ext is not None and ext.get("active") is True:
+                    return True
+            await asyncio.sleep(0.5)
     return False
 
 
