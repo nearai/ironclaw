@@ -371,6 +371,9 @@ jobs:
       LANE: workflow-canary
       PROVIDER: mock
       PLAYWRIGHT_INSTALL: skip
+      # Forwarded into run.sh's SCENARIO; translated to one or more
+      # --scenario flags on run_workflow_canary.py. Empty = full suite.
+      SCENARIO: ${{ inputs.scenario }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
