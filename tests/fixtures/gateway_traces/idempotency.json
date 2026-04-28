@@ -1,0 +1,15 @@
+{
+  "name": "idempotency",
+  "operations": [
+    {
+      "tool_name": "echo",
+      "params": { "message": "same-input" },
+      "expected": { "kind": "success", "assertions": { "contains_text": "same-input" } }
+    },
+    {
+      "tool_name": "echo",
+      "params": { "message": "same-input" },
+      "expected": { "kind": "success", "assertions": { "contains_text": "same-input" } }
+    }
+  ]
+}

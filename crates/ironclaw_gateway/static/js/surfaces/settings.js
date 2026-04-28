@@ -193,14 +193,6 @@ function loadInferenceSettings() {
     title.textContent = I18n.t('cfg.group.llm');
     group.appendChild(title);
 
-    var notice = document.createElement('div');
-    notice.className = 'config-notice';
-    notice.id = 'llm-restart-notice';
-    var restartNoticeEl = document.getElementById('config-restart-notice');
-    notice.style.display = (restartNoticeEl && restartNoticeEl.style.display !== 'none') ? 'flex' : 'none';
-    notice.innerHTML = '<span>\u26A0</span><span>' + escapeHtml(I18n.t('config.restartNotice')) + '</span>';
-    group.appendChild(notice);
-
     var backendRow = document.createElement('div');
     backendRow.className = 'settings-row';
     backendRow.innerHTML =

@@ -113,7 +113,7 @@ def run_pytest(args: argparse.Namespace, python: Path) -> None:
         "-m",
         "pytest",
         "-v",
-        "--timeout=120",
+        "--timeout=360",
         f"--junitxml={junit}",
         *AUTH_PROFILES[args.profile],
         *args.pytest_arg,

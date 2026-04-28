@@ -28,19 +28,6 @@
   transform: translateY(-1px);
 }
 
-.config-notice {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  background: rgba(245, 166, 35, 0.1);
-  border: 1px solid rgba(245, 166, 35, 0.3);
-  border-radius: var(--radius);
-  color: var(--warning);
-  font-size: 13px;
-  margin-bottom: 12px;
-}
-
 .providers-list {
   display: flex;
   flex-direction: column;

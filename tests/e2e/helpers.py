@@ -181,6 +181,25 @@ SEL = {
     "activity_thinking_text":   ".activity-thinking-text",
     # Thread processing indicator
     "thread_processing":        ".thread-processing",
+    # Projects control-room
+    "projects_cards":           "#cr-cards",
+    "projects_card":            ".cr-card",
+    "projects_card_by_id":      '.cr-card[data-id="{id}"]',
+    "projects_drill":           "#cr-drill",
+    "projects_drill_name":      ".cr-drill-name",
+    "projects_detail":          "#cr-detail",
+    "projects_mission_card":    ".cr-mission-card",
+    "projects_activity_row":    ".cr-activity-row",
+    "projects_activity_row_by_id": '.cr-activity-row[data-id="{id}"]',
+    "projects_thread_title":    ".cr-thread-title",
+    "projects_thread_subtitle": ".cr-thread-subtitle",
+    "projects_thread_brief":    ".cr-thread-brief",
+    "projects_thread_meta":     ".cr-thread-meta-grid",
+    "projects_thread_timeline": ".cr-thread-timeline",
+    "projects_thread_message":  ".cr-thread-message",
+    # Canonical Missions detail surface
+    "missions_detail":          "#mission-detail",
+    "missions_detail_title":    ".ms-detail-title",
 }
 
 TABS = ["chat", "memory", "jobs", "routines", "settings"]
@@ -354,12 +373,23 @@ async def send_chat_and_wait_for_terminal_message(
     message: str,
     *,
     timeout: int = 30000,
+    expected_text_contains: str | None = None,
 ) -> dict[str, str]:
     """Send a chat message and wait for the next terminal visible outcome.
 
     Returns a dict with:
     - ``role``: ``assistant`` or ``system``
     - ``text``: rendered text of the newest terminal message
+
+    The default predicate waits for the assistant message to fully settle —
+    ``data-streaming`` attribute cleared AND input re-enabled. On slow CI
+    runners under heavy parallelism that compound condition can race with
+    SSE reconnects (chunks arrive during the reconnect window, the
+    attribute-clearing delta is lost, predicate never flips). Callers that
+    already assert on specific response text can pass
+    ``expected_text_contains=`` to short-circuit as soon as that substring
+    appears in the assistant bubble. The test's own content assertion is
+    the correctness gate, not the streaming-attribute flag.
     """
     chat_input = await ensure_writable_chat_input(page)
 
@@ -378,6 +408,7 @@ async def send_chat_and_wait_for_terminal_message(
             chatInputSelector,
             assistantCount,
             systemCount,
+            expectedContains,
         }) => {
             const input = document.querySelector(chatInputSelector);
             const systems = document.querySelectorAll(systemSelector);
@@ -391,15 +422,19 @@ async def send_chat_and_wait_for_terminal_message(
             }
 
             const assistants = document.querySelectorAll(assistantSelector);
-            if (assistants.length > assistantCount && input && !input.disabled) {
+            if (assistants.length > assistantCount) {
                 const last = assistants[assistants.length - 1];
                 const content = last.querySelector('.message-content');
                 const text = ((content && content.innerText) || last.innerText || '').trim();
-                if (text.length > 0 && !last.hasAttribute('data-streaming')) {
-                    return {
-                        role: 'assistant',
-                        text,
-                    };
+                if (text.length > 0) {
+                    if (expectedContains && text.includes(expectedContains)) {
+                        return { role: 'assistant', text };
+                    }
+                    if (!expectedContains
+                        && input && !input.disabled
+                        && !last.hasAttribute('data-streaming')) {
+                        return { role: 'assistant', text };
+                    }
                 }
             }
 
@@ -411,6 +446,7 @@ async def send_chat_and_wait_for_terminal_message(
             "chatInputSelector": SEL["chat_input"],
             "assistantCount": before_assistant,
             "systemCount": before_system,
+            "expectedContains": expected_text_contains,
         },
         timeout=timeout,
     )
