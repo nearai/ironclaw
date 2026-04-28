@@ -517,12 +517,13 @@ mod tests {
         assert_eq!(transport.custom_headers.get("X-Custom").unwrap(), "value");
     }
 
-    /// Regression: new() must reject private/loopback IPs to prevent direct SSRF.
+    /// Regression: new() must reject private IPs to prevent SSRF.
+    ///
+    /// Loopback addresses (127.0.0.1, [::1]) are intentionally allowed
+    /// via the localhost exemption — they are common MCP dev servers.
     #[tokio::test]
     async fn new_rejects_private_ips() {
         let blocked_urls = [
-            "https://127.0.0.1:8080/mcp",
-            "https://[::1]:8080/mcp",
             "https://10.0.0.1/mcp",
             "https://192.168.1.1/mcp",
             "https://172.16.0.1/mcp",

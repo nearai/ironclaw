@@ -1657,7 +1657,7 @@ mod tests {
         let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
             Arc::new(crate::secrets::InMemorySecretsStore::new(crypto));
 
-        let config = McpServerConfig::new("bad name", "https://api.example.com");
+        let config = McpServerConfig::new("bad name", "https://1.2.3.4");
         let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user")
             .await
             .unwrap();
@@ -1677,7 +1677,7 @@ mod tests {
         let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
             Arc::new(crate::secrets::InMemorySecretsStore::new(crypto));
 
-        let config = McpServerConfig::new("good_name123", "https://api.example.com");
+        let config = McpServerConfig::new("good_name123", "https://1.2.3.4");
         let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user")
             .await
             .unwrap();
