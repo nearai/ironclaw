@@ -4025,6 +4025,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_dispatcher"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_events",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_resources",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "ironclaw_engine"
 version = "0.1.0"
 dependencies = [
