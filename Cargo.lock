@@ -4265,6 +4265,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_wasm"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "futures",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_resources",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "url",
+ "wasmtime",
+ "wat",
+]
+
+[[package]]
 name = "is-docker"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
