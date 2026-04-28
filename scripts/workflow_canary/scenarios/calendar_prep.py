@@ -69,9 +69,10 @@ async def _seed_calendar(mock_calendar_url: str) -> None:
         response.raise_for_status()
 
 
-async def _captured(mock_calendar_url: str) -> list[dict[str, Any]]:
+async def _captured(mock_url: str) -> list[dict[str, Any]]:
+    """Generic /__mock/captured drainer — works for any of our mocks."""
     async with httpx.AsyncClient(timeout=5.0) as client:
-        response = await client.get(f"{mock_calendar_url}/__mock/captured")
+        response = await client.get(f"{mock_url}/__mock/captured")
         response.raise_for_status()
         return response.json().get("captured", [])
 
@@ -133,6 +134,18 @@ async def run(
             for entry in calendar_captured
         )
 
+        # Verify web_search mock saw the company lookup (covers the
+        # "company background + recent news" assertion from Script 2).
+        web_search_seen = False
+        if mock_web_search_url:
+            web_search_captured = await _captured(mock_web_search_url)
+            web_search_seen = any(
+                entry.get("method") == "GET"
+                and "/res/v1/web/search" in entry.get("path", "")
+                and "acme" in (entry.get("query", {}).get("q", "") or "").lower()
+                for entry in web_search_captured
+            )
+
         # Verify telegram captured the prep message referencing the event
         telegram_match: dict[str, Any] | None = None
         if run_terminal:
@@ -152,7 +165,12 @@ async def run(
                 await asyncio.sleep(0.5)
 
         latency_ms = int((time.perf_counter() - started) * 1000)
-        success = run_terminal and events_list_seen and telegram_match is not None
+        success = (
+            run_terminal
+            and events_list_seen
+            and web_search_seen
+            and telegram_match is not None
+        )
 
         return [
             ProbeResult(
@@ -164,6 +182,7 @@ async def run(
                     "routine_id": routine_id,
                     "run_status": last_run["status"],
                     "events_list_seen": events_list_seen,
+                    "web_search_seen": web_search_seen,
                     "calendar_captured_count": len(calendar_captured),
                     "telegram_text": (
                         telegram_match.get("text") if telegram_match else None

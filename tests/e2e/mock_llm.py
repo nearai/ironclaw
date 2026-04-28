@@ -234,6 +234,19 @@ TOOL_CALL_PATTERNS = [
                     ),
                 },
             },
+            # Web-search lookup for the meeting attendee's company.
+            # Routes to web_search_mock via
+            # IRONCLAW_TEST_HTTP_REMAP=api.search.brave.com=<mock>.
+            {
+                "tool_name": "http",
+                "arguments": {
+                    "method": "GET",
+                    "url": (
+                        "https://api.search.brave.com/res/v1/web/search"
+                        "?q=Acme%20Corp%20company%20background"
+                    ),
+                },
+            },
             {
                 "tool_name": "http",
                 "arguments": {

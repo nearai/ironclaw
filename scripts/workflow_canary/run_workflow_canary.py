@@ -141,6 +141,11 @@ SCENARIOS: dict[str, tuple[str, str, str]] = {
         "run",
         "Cron */1 fires within ±15s of minute boundary",
     ),
+    "auth_recovery": (
+        "scripts.workflow_canary.scenarios.auth_recovery",
+        "run",
+        "Unauthenticated tool call surfaces graceful auth path (no 5xx / Error 400)",
+    ),
     # log_assertions intentionally registered LAST so it scans the
     # gateway log surface produced by every preceding probe.
     "log_assertions": (
