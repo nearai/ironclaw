@@ -71,7 +71,6 @@ fn contains_ascii_word(message: &str, word: &str) -> bool {
 
 pub(crate) fn is_auth_error_message(message: &str) -> bool {
     contains_ascii_word(message, "401")
-        || contains_ascii_word(message, "403")
         || contains_ascii_word(message, "unauthorized")
         || contains_ascii_word(message, "authentication")
         || (contains_ascii_word(message, "400")
@@ -79,24 +78,17 @@ pub(crate) fn is_auth_error_message(message: &str) -> bool {
                 || contains_ascii_word(message, "authenticate")))
 }
 
-pub(crate) fn http_auth_status_code(message: &str) -> Option<u16> {
-    if contains_ascii_word(message, "401") {
-        Some(401)
-    } else if contains_ascii_word(message, "403") {
-        Some(403)
-    } else {
-        None
-    }
+pub(crate) fn has_http_unauthorized_status(message: &str) -> bool {
+    contains_ascii_word(message, "401")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{http_auth_status_code, is_auth_error_message, normalize_server_name};
+    use super::{has_http_unauthorized_status, is_auth_error_message, normalize_server_name};
 
     #[test]
     fn test_is_auth_error_message_matches_whole_words() {
         assert!(is_auth_error_message("401 Unauthorized"));
-        assert!(is_auth_error_message("403 Forbidden"));
         assert!(is_auth_error_message(
             "MCP error: Unauthorized (code -32001)"
         ));
@@ -120,19 +112,16 @@ mod tests {
     }
 
     #[test]
-    fn http_auth_status_code_matches_401_and_403_only() {
-        assert_eq!(
-            http_auth_status_code("[nearai] MCP server returned status: 401 Unauthorized"),
-            Some(401)
-        );
-        assert_eq!(
-            http_auth_status_code("HTTP status 403. Update credential."),
-            Some(403)
-        );
-        assert_eq!(http_auth_status_code("MCP error: Unauthorized"), None);
-        assert_eq!(
-            http_auth_status_code("localhost:4010 did not respond"),
-            None
-        );
+    fn has_http_unauthorized_status_matches_401_only() {
+        assert!(has_http_unauthorized_status(
+            "[nearai] MCP server returned status: 401 Unauthorized"
+        ));
+        assert!(!has_http_unauthorized_status(
+            "HTTP status 403. Update credential."
+        ));
+        assert!(!has_http_unauthorized_status("MCP error: Unauthorized"));
+        assert!(!has_http_unauthorized_status(
+            "localhost:4010 did not respond"
+        ));
     }
 }

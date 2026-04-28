@@ -92,7 +92,7 @@ impl AppBackgroundTasks {
     fn spawn_startup_mcp_auth_retry(
         &mut self,
         manager: Arc<ExtensionManager>,
-        retry: StartupMcpAuthRetry,
+        retry: PendingStartupMcpAuthRetry,
         user_id: String,
     ) {
         self.startup_mcp_auth_retries.spawn(async move {
@@ -145,45 +145,45 @@ fn build_ephemeral_secrets_store()
 const MCP_STARTUP_AUTH_RETRY_ATTEMPTS: usize = 24;
 const MCP_STARTUP_AUTH_RETRY_DELAY: Duration = Duration::from_secs(5);
 
-struct StartupMcpAuthRetry {
+struct PendingStartupMcpAuthRetry {
     server_name: String,
     initial_error: String,
 }
 
-#[derive(Default)]
-struct StartupMcpLoadOutcome {
-    client: Option<(String, Arc<McpClient>)>,
-    auth_retry: Option<StartupMcpAuthRetry>,
+enum StartupMcpLoadResult {
+    Loaded {
+        server_name: String,
+        client: Arc<McpClient>,
+    },
+    RetryAuth(PendingStartupMcpAuthRetry),
+    Skipped,
 }
 
-impl StartupMcpLoadOutcome {
-    fn connected(raw_name: String, client: McpClient) -> Self {
-        Self {
-            client: Some((raw_name, Arc::new(client))),
-            auth_retry: None,
+impl StartupMcpLoadResult {
+    fn loaded(server_name: String, client: McpClient) -> Self {
+        Self::Loaded {
+            server_name,
+            client: Arc::new(client),
         }
     }
 
     fn retry_auth(server_name: String, initial_error: String) -> Self {
-        Self {
-            client: None,
-            auth_retry: Some(StartupMcpAuthRetry {
-                server_name,
-                initial_error,
-            }),
-        }
+        Self::RetryAuth(PendingStartupMcpAuthRetry {
+            server_name,
+            initial_error,
+        })
     }
 }
 
 fn should_retry_startup_mcp_auth_error(server: &McpServerConfig, error_message: &str) -> bool {
     server.has_custom_auth_header()
-        && crate::tools::mcp::http_auth_status_code(error_message).is_some()
+        && crate::tools::mcp::has_http_unauthorized_status(error_message)
 }
 
 fn spawn_startup_mcp_auth_retries(
     background_tasks: &mut AppBackgroundTasks,
     manager: Arc<ExtensionManager>,
-    retries: Vec<StartupMcpAuthRetry>,
+    retries: Vec<PendingStartupMcpAuthRetry>,
     user_id: String,
 ) {
     if retries.is_empty() {
@@ -206,7 +206,7 @@ fn spawn_startup_mcp_auth_retries(
 
 async fn retry_startup_mcp_auth_activation(
     manager: Arc<ExtensionManager>,
-    retry: StartupMcpAuthRetry,
+    retry: PendingStartupMcpAuthRetry,
     user_id: String,
 ) {
     let raw_server_name = retry.server_name;
@@ -255,7 +255,7 @@ async fn retry_startup_mcp_auth_activation(
         };
 
         // The initial startup failure already proved this was a custom-header
-        // HTTP 401/403. Keep the retry loop bounded instead of re-parsing the
+        // HTTP 401. Keep the retry loop bounded instead of re-parsing the
         // user-facing activation error after each failed attempt.
         match manager.activate_mcp(&activation_name, &user_id).await {
             Ok(result) => {
@@ -1021,7 +1021,7 @@ impl AppBuilder {
                                             server_name,
                                             e
                                         );
-                                        return StartupMcpLoadOutcome::default();
+                                        return StartupMcpLoadResult::Skipped;
                                     }
                                 };
 
@@ -1039,7 +1039,7 @@ impl AppBuilder {
                                         // at execute time. The store is owned by the
                                         // ExtensionManager, which isn't built yet — defer
                                         // registration to `manager.inject_mcp_client` below.
-                                        return StartupMcpLoadOutcome::connected(
+                                        return StartupMcpLoadResult::loaded(
                                             server_name,
                                             client,
                                         );
@@ -1055,7 +1055,7 @@ impl AppBuilder {
                                                     "MCP server '{}' rejected its configured Authorization header; startup will retry in the background in case the credential is still being bound.",
                                                     server_name
                                                 );
-                                                return StartupMcpLoadOutcome::retry_auth(
+                                                return StartupMcpLoadResult::retry_auth(
                                                     server_name,
                                                     err_str,
                                                 );
@@ -1089,7 +1089,7 @@ impl AppBuilder {
                                         }
                                     }
                                 }
-                                StartupMcpLoadOutcome::default()
+                                StartupMcpLoadResult::Skipped
                             });
                         }
 
@@ -1097,14 +1097,16 @@ impl AppBuilder {
                         let mut startup_auth_retries = Vec::new();
                         while let Some(result) = join_set.join_next().await {
                             match result {
-                                Ok(outcome) => {
-                                    if let Some(client_pair) = outcome.client {
-                                        startup_clients.push(client_pair);
-                                    }
-                                    if let Some(retry) = outcome.auth_retry {
-                                        startup_auth_retries.push(retry);
-                                    }
+                                Ok(StartupMcpLoadResult::Loaded {
+                                    server_name,
+                                    client,
+                                }) => {
+                                    startup_clients.push((server_name, client));
                                 }
+                                Ok(StartupMcpLoadResult::RetryAuth(retry)) => {
+                                    startup_auth_retries.push(retry);
+                                }
+                                Ok(StartupMcpLoadResult::Skipped) => {}
                                 Err(e) => {
                                     if e.is_panic() {
                                         tracing::error!("MCP server loading task panicked: {}", e);
@@ -1901,7 +1903,7 @@ mod tests {
         ));
         assert!(super::should_retry_startup_mcp_auth_error(
             &api_key_server,
-            "MCP server 'nearai' rejected its configured Authorization header. HTTP status 403. Update the configured credential and try again."
+            "[nearai] MCP server returned status: 401 Unauthorized"
         ));
 
         let oauth_server =
@@ -1914,6 +1916,10 @@ mod tests {
         assert!(!super::should_retry_startup_mcp_auth_error(
             &api_key_server,
             "connection refused"
+        ));
+        assert!(!super::should_retry_startup_mcp_auth_error(
+            &api_key_server,
+            "403 Forbidden"
         ));
         assert!(!super::should_retry_startup_mcp_auth_error(
             &api_key_server,
