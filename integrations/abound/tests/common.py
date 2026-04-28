@@ -33,6 +33,13 @@ def get_tool_calls(response) -> list[dict]:
     return calls
 
 
+def tool_output_ok(output: str | None) -> bool:
+    """Return True if the function_call_output indicates success (present, not an error)."""
+    if not output:
+        return False
+    return not output.startswith("Error:")
+
+
 def format_tool_calls(calls: list[dict], prefix: str) -> list[str]:
     lines = []
     for c in calls:
