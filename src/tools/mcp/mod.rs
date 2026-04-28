@@ -71,6 +71,7 @@ fn contains_ascii_word(message: &str, word: &str) -> bool {
 
 pub(crate) fn is_auth_error_message(message: &str) -> bool {
     contains_ascii_word(message, "401")
+        || contains_ascii_word(message, "403")
         || contains_ascii_word(message, "unauthorized")
         || contains_ascii_word(message, "authentication")
         || (contains_ascii_word(message, "400")
@@ -78,29 +79,24 @@ pub(crate) fn is_auth_error_message(message: &str) -> bool {
                 || contains_ascii_word(message, "authenticate")))
 }
 
-pub(crate) fn specific_auth_rejection_marker(message: &str) -> Option<&'static str> {
-    if contains_ascii_word(message, "401") && contains_ascii_word(message, "unauthorized") {
-        return Some("401 Unauthorized");
+pub(crate) fn http_auth_status_code(message: &str) -> Option<u16> {
+    if contains_ascii_word(message, "401") {
+        Some(401)
+    } else if contains_ascii_word(message, "403") {
+        Some(403)
+    } else {
+        None
     }
-
-    let lower = message.to_ascii_lowercase();
-    if lower.contains("invalid api key")
-        || lower.contains("invalid api-key")
-        || lower.contains("invalid_api_key")
-    {
-        return Some("invalid API key");
-    }
-
-    None
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_auth_error_message, normalize_server_name, specific_auth_rejection_marker};
+    use super::{http_auth_status_code, is_auth_error_message, normalize_server_name};
 
     #[test]
     fn test_is_auth_error_message_matches_whole_words() {
         assert!(is_auth_error_message("401 Unauthorized"));
+        assert!(is_auth_error_message("403 Forbidden"));
         assert!(is_auth_error_message(
             "MCP error: Unauthorized (code -32001)"
         ));
@@ -124,22 +120,18 @@ mod tests {
     }
 
     #[test]
-    fn specific_auth_rejection_marker_requires_precise_markers() {
+    fn http_auth_status_code_matches_401_and_403_only() {
         assert_eq!(
-            specific_auth_rejection_marker("HTTP 401: Unauthorized"),
-            Some("401 Unauthorized")
+            http_auth_status_code("[nearai] MCP server returned status: 401 Unauthorized"),
+            Some(401)
         );
         assert_eq!(
-            specific_auth_rejection_marker("Invalid API key"),
-            Some("invalid API key")
+            http_auth_status_code("HTTP status 403. Update credential."),
+            Some(403)
         );
-        assert_eq!(specific_auth_rejection_marker("tool unauthorized"), None);
+        assert_eq!(http_auth_status_code("MCP error: Unauthorized"), None);
         assert_eq!(
-            specific_auth_rejection_marker("MCP error: Unauthorized (code -32001)"),
-            None
-        );
-        assert_eq!(
-            specific_auth_rejection_marker("localhost:4010 unauthorized"),
+            http_auth_status_code("localhost:4010 did not respond"),
             None
         );
     }

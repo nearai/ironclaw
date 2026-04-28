@@ -176,13 +176,8 @@ impl StartupMcpLoadOutcome {
 }
 
 fn should_retry_startup_mcp_auth_error(server: &McpServerConfig, error_message: &str) -> bool {
-    // Some hosted MCP providers may reject a preconfigured API-key
-    // Authorization header during startup while the upstream credential is
-    // still being provisioned. Retry only that preconfigured-key case;
-    // OAuth/missing-auth MCP servers should still surface the normal
-    // "run mcp auth" path instead of spinning in the background.
     server.has_custom_auth_header()
-        && crate::tools::mcp::specific_auth_rejection_marker(error_message).is_some()
+        && crate::tools::mcp::http_auth_status_code(error_message).is_some()
 }
 
 fn spawn_startup_mcp_auth_retries(
@@ -1059,34 +1054,40 @@ impl AppBuilder {
                                     }
                                     Err(e) => {
                                         let err_str = e.to_string();
-                                        if crate::tools::mcp::is_auth_error_message(&err_str)
-                                        {
-                                            if has_custom_auth_header {
-                                                if should_retry_startup_mcp_auth_error(
-                                                    &retry_server,
-                                                    &err_str,
-                                                ) {
-                                                    tracing::warn!(
-                                                        "MCP server '{}' rejected its configured Authorization header; startup will retry in the background in case the credential is still being bound.",
-                                                        server_name
-                                                    );
-                                                    return StartupMcpLoadOutcome::retry_auth(
-                                                        server_name,
-                                                        err_str,
-                                                    );
-                                                }
+                                        if has_custom_auth_header {
+                                            if should_retry_startup_mcp_auth_error(
+                                                &retry_server,
+                                                &err_str,
+                                            ) {
+                                                tracing::warn!(
+                                                    "MCP server '{}' rejected its configured Authorization header; startup will retry in the background in case the credential is still being bound.",
+                                                    server_name
+                                                );
+                                                return StartupMcpLoadOutcome::retry_auth(
+                                                    server_name,
+                                                    err_str,
+                                                );
+                                            }
+                                            if crate::tools::mcp::is_auth_error_message(&err_str) {
                                                 tracing::warn!(
                                                     "MCP server '{}' rejected its configured Authorization header. Update the configured credential and try again.",
                                                     server_name
                                                 );
                                             } else {
                                                 tracing::warn!(
-                                                    "MCP server '{}' requires authentication. \
-                                                     Run: ironclaw mcp auth {}",
+                                                    "Failed to connect to MCP server '{}': {}",
                                                     server_name,
-                                                    server_name
+                                                    e
                                                 );
                                             }
+                                        } else if crate::tools::mcp::is_auth_error_message(&err_str)
+                                        {
+                                            tracing::warn!(
+                                                "MCP server '{}' requires authentication. \
+                                                 Run: ironclaw mcp auth {}",
+                                                server_name,
+                                                server_name
+                                            );
                                         } else {
                                             tracing::warn!(
                                                 "Failed to connect to MCP server '{}': {}",
@@ -1908,7 +1909,7 @@ mod tests {
         ));
         assert!(super::should_retry_startup_mcp_auth_error(
             &api_key_server,
-            "MCP server 'nearai' rejected its configured Authorization header. Upstream error: invalid API key. Update the configured credential and try again."
+            "MCP server 'nearai' rejected its configured Authorization header. HTTP status 403. Update the configured credential and try again."
         ));
 
         let oauth_server =
@@ -1925,10 +1926,6 @@ mod tests {
         assert!(!super::should_retry_startup_mcp_auth_error(
             &api_key_server,
             "MCP error: Unauthorized (code -32001)"
-        ));
-        assert!(!super::should_retry_startup_mcp_auth_error(
-            &api_key_server,
-            "tool permissions rejected unauthorized operation"
         ));
     }
 
