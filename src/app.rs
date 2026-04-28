@@ -209,7 +209,7 @@ async fn retry_startup_mcp_auth_activation(
     user_id: String,
 ) {
     let raw_server_name = retry.server_name;
-    let activation_name = crate::tools::mcp::normalize_server_name(&raw_server_name);
+    let server_name = crate::tools::mcp::normalize_server_name(&raw_server_name);
     tracing::debug!(
         server = %raw_server_name,
         error = %retry.initial_error,
@@ -219,7 +219,7 @@ async fn retry_startup_mcp_auth_activation(
     for attempt in 1..=MCP_STARTUP_AUTH_RETRY_ATTEMPTS {
         tokio::time::sleep(MCP_STARTUP_AUTH_RETRY_DELAY).await;
 
-        match manager.get_mcp_server(&activation_name, &user_id).await {
+        match manager.get_mcp_server(&server_name, &user_id).await {
             Ok(server) if !server.enabled => {
                 tracing::debug!(
                     server = %raw_server_name,
@@ -256,7 +256,7 @@ async fn retry_startup_mcp_auth_activation(
         // The initial startup failure already proved this was a custom-header
         // HTTP 401. Keep the retry loop bounded instead of re-parsing the
         // user-facing activation error after each failed attempt.
-        match manager.activate_mcp(&activation_name, &user_id).await {
+        match manager.activate_mcp(&server_name, &user_id).await {
             Ok(result) => {
                 tracing::info!(
                     server = %result.name,
