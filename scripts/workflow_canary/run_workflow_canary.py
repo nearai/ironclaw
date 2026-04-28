@@ -81,6 +81,21 @@ SCENARIOS: dict[str, tuple[str, str, str]] = {
         "run",
         "Script 5 — Email → CRM Inbound Tracker",
     ),
+    "manual_trigger": (
+        "scripts.workflow_canary.scenarios.manual_trigger",
+        "run",
+        "Manual trigger — POST /api/routines/<id>/trigger",
+    ),
+    "lifecycle": (
+        "scripts.workflow_canary.scenarios.lifecycle",
+        "run",
+        "Lifecycle — disable / enable / delete via routines API",
+    ),
+    "dedup_cooldown": (
+        "scripts.workflow_canary.scenarios.dedup_cooldown",
+        "run",
+        "Dedup — cooldown_secs suppresses back-to-back fires",
+    ),
 }
 
 

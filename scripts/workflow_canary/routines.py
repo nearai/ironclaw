@@ -1,22 +1,18 @@
-"""libSQL helpers for the workflow-canary lane.
+"""libSQL + REST helpers for the workflow-canary lane.
 
-The routine engine fires on its own internal tick — by default routines
-are picked up when `next_fire_at <= now()`. Rather than wait for
-real wall-clock cron schedules to elapse (would push lane wall-time
-to many minutes per scenario), the canary backdates `next_fire_at`
-directly in the libSQL DB so the engine fires on its very next tick
-(usually within seconds).
+Two surfaces:
 
-This is the same pattern auth-live-seeded uses for `expire_secret_in_db`
-in `scripts/auth_live_canary/run_live_canary.py`. Direct DB writes
-are appropriate here because:
+1. **Direct libSQL writes** — insert lightweight cron routines with
+   pre-controlled state (backdated `next_fire_at`, configurable
+   cooldown) so the engine fires deterministically without waiting
+   for wall-clock cron. Same pattern auth-live-seeded uses for
+   `expire_secret_in_db`.
 
-- The routine engine, telegram tool, and mock telegram are the system
-  under test; the agent's NL → routine_create flow is exercised by
-  separate tests at the conversation tier.
-- Determinism: cron timing tests are otherwise inherently flaky on
-  CI under runner load.
-- Speed: backdating + a 5 s poll loop replaces a 60 s cron interval.
+2. **Routine REST API** — drive `/api/routines/<id>/trigger`,
+   `/api/routines/<id>/toggle`, and `DELETE /api/routines/<id>`
+   from canary scenarios so we exercise the lifecycle paths that
+   real users hit (Scripts 1, 3, 4 manual trigger / disable / enable /
+   delete actions).
 """
 
 from __future__ import annotations
@@ -52,6 +48,8 @@ def insert_lightweight_cron_routine(
     schedule: str = "*/1 * * * *",
     description: str = "",
     fire_immediately: bool = True,
+    cooldown_secs: int = 0,
+    enabled: bool = True,
 ) -> str:
     """INSERT a new lightweight-cron routine. Returns the routine id.
 
@@ -99,12 +97,12 @@ def insert_lightweight_cron_routine(
                 name,
                 description,
                 user_id,
-                1,
+                1 if enabled else 0,
                 "cron",
                 trigger_config,
                 "lightweight",
                 action_config,
-                0,  # cooldown_secs — 0 so back-to-back fires aren't suppressed
+                cooldown_secs,
                 1,
                 "{}",
                 next_fire_at,
@@ -116,6 +114,84 @@ def insert_lightweight_cron_routine(
         )
         conn.commit()
     return routine_id
+
+
+# ── REST API helpers ────────────────────────────────────────────────
+
+
+async def trigger_routine_via_api(
+    base_url: str, gateway_token: str, routine_id: str
+) -> dict[str, Any]:
+    """POST /api/routines/<id>/trigger — manual fire.
+
+    Mirrors what the user does when clicking the "Run now" button in
+    the Routines tab, or what the agent does when handed Script 3's
+    "Run the first check immediately" / Script 4 PHASE 4.2's "trigger
+    my dog walk reminder now" instructions.
+    """
+    import httpx
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.post(
+            f"{base_url}/api/routines/{routine_id}/trigger",
+            headers={"Authorization": f"Bearer {gateway_token}"},
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+async def toggle_routine_via_api(
+    base_url: str, gateway_token: str, routine_id: str, *, enabled: bool
+) -> dict[str, Any]:
+    """POST /api/routines/<id>/toggle — enable or disable.
+
+    Body shape comes from `ToggleRequest` in
+    `src/channels/web/features/routines/mod.rs`. Sending `enabled=False`
+    halts further cron fires; `enabled=True` resumes.
+    """
+    import httpx
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.post(
+            f"{base_url}/api/routines/{routine_id}/toggle",
+            headers={"Authorization": f"Bearer {gateway_token}"},
+            json={"enabled": enabled},
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+async def delete_routine_via_api(
+    base_url: str, gateway_token: str, routine_id: str
+) -> None:
+    """DELETE /api/routines/<id> — remove a routine."""
+    import httpx
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.delete(
+            f"{base_url}/api/routines/{routine_id}",
+            headers={"Authorization": f"Bearer {gateway_token}"},
+        )
+        if response.status_code not in (200, 204):
+            response.raise_for_status()
+
+
+async def list_routines_via_api(
+    base_url: str, gateway_token: str
+) -> list[dict[str, Any]]:
+    """GET /api/routines — list all routines for the authenticated user."""
+    import httpx
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.get(
+            f"{base_url}/api/routines",
+            headers={"Authorization": f"Bearer {gateway_token}"},
+        )
+        response.raise_for_status()
+        body = response.json()
+    if isinstance(body, list):
+        return body
+    return body.get("routines", [])
 
 
 def backdate_routine(db_path: str | Path, routine_id: str, seconds_ago: int = 60) -> None:
