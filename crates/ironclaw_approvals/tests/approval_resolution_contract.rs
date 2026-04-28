@@ -26,6 +26,10 @@ async fn approving_pending_dispatch_request_issues_scoped_capability_lease() {
             LeaseApproval {
                 issued_by: Principal::User(scope.user_id.clone()),
                 allowed_effects: vec![EffectKind::DispatchCapability],
+                mounts: Default::default(),
+                network: Default::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
                 expires_at: None,
                 max_invocations: Some(1),
             },
@@ -60,6 +64,76 @@ async fn approving_pending_dispatch_request_issues_scoped_capability_lease() {
 }
 
 #[tokio::test]
+async fn approving_pending_dispatch_request_preserves_reviewed_grant_constraints() {
+    let approvals = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let resolver = ApprovalResolver::new(&approvals, &leases);
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id, CapabilityId::new("echo.say").unwrap());
+    let request_id = approval.id;
+    approvals
+        .save_pending(scope.clone(), approval)
+        .await
+        .unwrap();
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/project1").unwrap(),
+        MountPermissions::read_only(),
+    )])
+    .unwrap();
+    let network = NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "api.example.com".to_string(),
+            port: Some(443),
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(1024),
+    };
+    let secret = SecretHandle::new("api-key").unwrap();
+    let resource_ceiling = ResourceCeiling {
+        max_usd: None,
+        max_input_tokens: Some(10),
+        max_output_tokens: None,
+        max_wall_clock_ms: None,
+        max_output_bytes: Some(2048),
+        sandbox: None,
+    };
+
+    let lease = resolver
+        .approve_dispatch(
+            &scope,
+            request_id,
+            LeaseApproval {
+                issued_by: Principal::User(scope.user_id.clone()),
+                allowed_effects: vec![
+                    EffectKind::DispatchCapability,
+                    EffectKind::ReadFilesystem,
+                    EffectKind::Network,
+                    EffectKind::UseSecret,
+                ],
+                mounts: mounts.clone(),
+                network: network.clone(),
+                secrets: vec![secret.clone()],
+                resource_ceiling: Some(resource_ceiling.clone()),
+                expires_at: None,
+                max_invocations: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(lease.grant.constraints.mounts, mounts);
+    assert_eq!(lease.grant.constraints.network, network);
+    assert_eq!(lease.grant.constraints.secrets, vec![secret]);
+    assert_eq!(
+        lease.grant.constraints.resource_ceiling,
+        Some(resource_ceiling)
+    );
+}
+
+#[tokio::test]
 async fn approving_pending_request_keeps_pending_when_lease_issue_fails() {
     let approvals = InMemoryApprovalRequestStore::new();
     let leases = FailingIssueLeaseStore;
@@ -80,6 +154,10 @@ async fn approving_pending_request_keeps_pending_when_lease_issue_fails() {
             LeaseApproval {
                 issued_by: Principal::User(scope.user_id.clone()),
                 allowed_effects: vec![EffectKind::DispatchCapability],
+                mounts: Default::default(),
+                network: Default::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
                 expires_at: None,
                 max_invocations: Some(1),
             },
@@ -125,6 +203,10 @@ async fn approving_pending_request_revokes_issued_lease_when_approval_update_fai
             LeaseApproval {
                 issued_by: Principal::User(scope.user_id.clone()),
                 allowed_effects: vec![EffectKind::DispatchCapability],
+                mounts: Default::default(),
+                network: Default::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
                 expires_at: None,
                 max_invocations: Some(1),
             },
@@ -162,6 +244,10 @@ async fn approving_pending_request_revokes_issued_lease_when_status_was_resolved
             LeaseApproval {
                 issued_by: Principal::User(scope.user_id.clone()),
                 allowed_effects: vec![EffectKind::DispatchCapability],
+                mounts: Default::default(),
+                network: Default::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
                 expires_at: None,
                 max_invocations: Some(1),
             },
@@ -200,6 +286,10 @@ async fn lease_from_approved_request_is_resume_only_and_not_plain_authority() {
             LeaseApproval {
                 issued_by: Principal::User(context.user_id.clone()),
                 allowed_effects: descriptor.effects.clone(),
+                mounts: Default::default(),
+                network: Default::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
                 expires_at: None,
                 max_invocations: None,
             },
@@ -242,6 +332,10 @@ async fn approving_dispatch_without_fingerprint_fails_without_lease_or_status_ch
             LeaseApproval {
                 issued_by: Principal::User(scope.user_id.clone()),
                 allowed_effects: vec![EffectKind::DispatchCapability],
+                mounts: Default::default(),
+                network: Default::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
                 expires_at: None,
                 max_invocations: Some(1),
             },
@@ -287,6 +381,10 @@ async fn approving_pending_dispatch_request_emits_redacted_approval_audit_event(
             LeaseApproval {
                 issued_by: Principal::User(scope.user_id.clone()),
                 allowed_effects: vec![EffectKind::DispatchCapability],
+                mounts: Default::default(),
+                network: Default::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
                 expires_at: None,
                 max_invocations: Some(1),
             },
@@ -385,6 +483,10 @@ async fn approval_audit_event_sink_failure_does_not_change_resolution_outcome() 
             LeaseApproval {
                 issued_by: Principal::User(scope.user_id.clone()),
                 allowed_effects: vec![EffectKind::DispatchCapability],
+                mounts: Default::default(),
+                network: Default::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
                 expires_at: None,
                 max_invocations: Some(1),
             },
@@ -498,6 +600,10 @@ async fn approving_request_from_other_tenant_fails_closed() {
             LeaseApproval {
                 issued_by: Principal::User(tenant_b.user_id.clone()),
                 allowed_effects: vec![EffectKind::DispatchCapability],
+                mounts: Default::default(),
+                network: Default::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
                 expires_at: None,
                 max_invocations: None,
             },

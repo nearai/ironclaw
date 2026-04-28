@@ -477,6 +477,49 @@ async fn consumed_lease_no_longer_authorizes_dispatch() {
 }
 
 #[tokio::test]
+async fn fingerprinted_lease_cannot_be_consumed_before_claim() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let fingerprint = InvocationFingerprint::for_dispatch(
+        &context.resource_scope,
+        &descriptor.id,
+        &ResourceEstimate::default(),
+        &serde_json::json!({"message": "approved"}),
+    )
+    .unwrap();
+    let mut lease = CapabilityLease::new(
+        context.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    lease.invocation_fingerprint = Some(fingerprint);
+    let lease_id = lease.grant.id;
+    leases.issue(lease).await.unwrap();
+
+    let err = leases
+        .consume(&context.resource_scope, lease_id)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityLeaseError::UnclaimedFingerprintLease { lease_id: id } if id == lease_id
+    ));
+    assert_eq!(
+        leases
+            .get(&context.resource_scope, lease_id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Active
+    );
+}
+
+#[tokio::test]
 async fn fingerprinted_lease_without_invocation_limit_is_consumed_after_one_use() {
     let leases = InMemoryCapabilityLeaseStore::new();
     let context = execution_context(CapabilitySet::default());
@@ -721,6 +764,50 @@ async fn filesystem_lease_store_persists_revoke_claim_and_consume() {
             .unwrap()
             .status,
         CapabilityLeaseStatus::Revoked
+    );
+}
+
+#[tokio::test]
+async fn filesystem_fingerprinted_lease_cannot_be_consumed_before_claim() {
+    let fs = engine_filesystem();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let fingerprint = InvocationFingerprint::for_dispatch(
+        &context.resource_scope,
+        &descriptor.id,
+        &ResourceEstimate::default(),
+        &serde_json::json!({"message": "approved"}),
+    )
+    .unwrap();
+    let mut lease = CapabilityLease::new(
+        context.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    lease.invocation_fingerprint = Some(fingerprint);
+    let lease_id = lease.grant.id;
+    let store = FilesystemCapabilityLeaseStore::new(&fs);
+    store.issue(lease).await.unwrap();
+
+    let err = store
+        .consume(&context.resource_scope, lease_id)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityLeaseError::UnclaimedFingerprintLease { lease_id: id } if id == lease_id
+    ));
+    assert_eq!(
+        FilesystemCapabilityLeaseStore::new(&fs)
+            .get(&context.resource_scope, lease_id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Active
     );
 }
 

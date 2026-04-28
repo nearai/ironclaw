@@ -7,8 +7,8 @@
 use ironclaw_authorization::{CapabilityLease, CapabilityLeaseError, CapabilityLeaseStore};
 use ironclaw_events::AuditSink;
 use ironclaw_host_api::{
-    Action, CapabilityGrant, CapabilityGrantId, EffectKind, GrantConstraints, Principal,
-    ResourceScope, Timestamp,
+    Action, CapabilityGrant, CapabilityGrantId, EffectKind, GrantConstraints, MountView,
+    NetworkPolicy, Principal, ResourceCeiling, ResourceScope, SecretHandle, Timestamp,
 };
 use ironclaw_run_state::{ApprovalRecord, ApprovalRequestStore, ApprovalStatus, RunStateError};
 use thiserror::Error;
@@ -75,10 +75,10 @@ where
             issued_by: approval.issued_by,
             constraints: GrantConstraints {
                 allowed_effects: approval.allowed_effects,
-                mounts: Default::default(),
-                network: Default::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
+                mounts: approval.mounts,
+                network: approval.network,
+                secrets: approval.secrets,
+                resource_ceiling: approval.resource_ceiling,
                 expires_at: approval.expires_at,
                 max_invocations: approval.max_invocations,
             },
@@ -148,15 +148,20 @@ where
 
 /// Approval resolution input supplied by a trusted human/admin policy surface.
 ///
-/// `allowed_effects` is the final attenuated effect set that the resolver stamps
-/// onto the resume-only lease. The current [`ApprovalRequest`] shape does not
-/// carry the originating capability descriptor's effect list, so callers must
-/// derive this set from the same reviewed descriptor/request they presented to
-/// the approver rather than widening it in the UI layer.
+/// `allowed_effects` and the constraint fields are the final attenuated grant
+/// shape that the resolver stamps onto the resume-only lease. The current
+/// [`ApprovalRequest`] shape does not carry the originating capability
+/// descriptor's full grant constraints, so callers must derive these values from
+/// the same reviewed descriptor/request they presented to the approver rather
+/// than widening them in the UI layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeaseApproval {
     pub issued_by: Principal,
     pub allowed_effects: Vec<EffectKind>,
+    pub mounts: MountView,
+    pub network: NetworkPolicy,
+    pub secrets: Vec<SecretHandle>,
+    pub resource_ceiling: Option<ResourceCeiling>,
     pub expires_at: Option<Timestamp>,
     pub max_invocations: Option<u64>,
 }

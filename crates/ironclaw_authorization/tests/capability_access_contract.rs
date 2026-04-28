@@ -342,6 +342,56 @@ async fn capability_access_denies_when_grant_ceiling_dimension_has_no_estimate()
 }
 
 #[tokio::test]
+async fn capability_access_returns_full_resource_ceiling_as_runtime_obligation() {
+    let descriptor = wasm_descriptor();
+    let ceiling = ResourceCeiling {
+        max_usd: None,
+        max_input_tokens: Some(10),
+        max_output_tokens: Some(20),
+        max_wall_clock_ms: Some(1_000),
+        max_output_bytes: Some(2_048),
+        sandbox: Some(SandboxQuota {
+            cpu_time_ms: None,
+            memory_bytes: None,
+            disk_bytes: None,
+            network_egress_bytes: Some(4_096),
+            process_count: Some(1),
+        }),
+    };
+    let mut grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![EffectKind::DispatchCapability],
+    );
+    grant.constraints.resource_ceiling = Some(ceiling.clone());
+
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch(
+            &execution_context(CapabilitySet {
+                grants: vec![grant],
+            }),
+            &descriptor,
+            &ResourceEstimate {
+                input_tokens: Some(5),
+                output_tokens: Some(10),
+                wall_clock_ms: Some(500),
+                output_bytes: Some(1_024),
+                network_egress_bytes: Some(2_048),
+                process_count: Some(1),
+                ..ResourceEstimate::default()
+            },
+        )
+        .await;
+
+    let Decision::Allow { obligations } = decision else {
+        panic!("expected allow decision with resource ceiling obligation, got {decision:?}");
+    };
+    assert!(obligations.as_slice().iter().any(
+        |obligation| matches!(obligation, Obligation::EnforceResourceCeiling { ceiling: value } if value == &ceiling)
+    ));
+}
+
+#[tokio::test]
 async fn spawn_access_requires_spawn_process_effect_in_addition_to_capability_effects() {
     let descriptor = wasm_descriptor();
     let dispatch_only = execution_context(CapabilitySet {

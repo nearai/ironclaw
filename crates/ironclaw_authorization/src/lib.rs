@@ -118,6 +118,8 @@ pub enum CapabilityLeaseError {
     ExpiredLease { lease_id: CapabilityGrantId },
     #[error("capability lease {lease_id} has no remaining invocations")]
     ExhaustedLease { lease_id: CapabilityGrantId },
+    #[error("capability lease {lease_id} has not been claimed with its fingerprint")]
+    UnclaimedFingerprintLease { lease_id: CapabilityGrantId },
     #[error("capability lease {lease_id} fingerprint does not match")]
     FingerprintMismatch { lease_id: CapabilityGrantId },
     #[error("capability lease {lease_id} is not active: {status:?}")]
@@ -770,13 +772,13 @@ fn obligations_for_grant(
         }
     }
 
-    if let Some(bytes) = grant
-        .constraints
-        .resource_ceiling
-        .as_ref()
-        .and_then(|ceiling| ceiling.max_output_bytes)
-    {
-        obligations.push(Obligation::EnforceOutputLimit { bytes });
+    if let Some(ceiling) = grant.constraints.resource_ceiling.as_ref() {
+        obligations.push(Obligation::EnforceResourceCeiling {
+            ceiling: ceiling.clone(),
+        });
+        if let Some(bytes) = ceiling.max_output_bytes {
+            obligations.push(Obligation::EnforceOutputLimit { bytes });
+        }
     }
 
     Obligations::new(obligations).ok()
@@ -850,17 +852,13 @@ fn resource_estimate_is_covered(
             ceiling.max_output_bytes.as_ref(),
         )
         && ceiling.sandbox.as_ref().is_none_or(|sandbox| {
-            sandbox.cpu_time_ms.is_none()
-                && sandbox.memory_bytes.is_none()
-                && sandbox.disk_bytes.is_none()
-                && options_within_ceiling(
-                    estimate.network_egress_bytes.as_ref(),
-                    sandbox.network_egress_bytes.as_ref(),
-                )
-                && options_within_ceiling(
-                    estimate.process_count.as_ref(),
-                    sandbox.process_count.as_ref(),
-                )
+            options_within_ceiling(
+                estimate.network_egress_bytes.as_ref(),
+                sandbox.network_egress_bytes.as_ref(),
+            ) && options_within_ceiling(
+                estimate.process_count.as_ref(),
+                sandbox.process_count.as_ref(),
+            )
         })
 }
 
@@ -912,6 +910,10 @@ fn ensure_consumable(lease: &CapabilityLease) -> Result<(), CapabilityLeaseError
                 status: lease.status,
             });
         }
+    }
+
+    if lease.invocation_fingerprint.is_some() && lease.status != CapabilityLeaseStatus::Claimed {
+        return Err(CapabilityLeaseError::UnclaimedFingerprintLease { lease_id });
     }
 
     ensure_not_expired_or_exhausted(lease)
