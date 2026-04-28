@@ -2865,7 +2865,7 @@ impl ExtensionManager {
     /// `provider_extension_for_tool()` returns the normalized form, so
     /// callers like `ensure_extension_ready → activate_mcp` may pass
     /// `my_server` when the persisted config is keyed as `my-server`.
-    async fn get_mcp_server(
+    pub(crate) async fn get_mcp_server(
         &self,
         name: &str,
         user_id: &str,
