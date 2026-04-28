@@ -327,15 +327,37 @@ def main() -> int:
         print(f"[notify_slack] no lane artifacts under {artifacts_root}", file=sys.stderr)
         return 0
 
+    print(
+        f"[notify_slack] discovered {len(lane_dirs)} lane dir(s): "
+        f"{', '.join(d.parts[-3] + '/' + d.parts[-2] for d in lane_dirs)}",
+        file=sys.stderr,
+    )
+
     reports: list[LaneReport] = []
     for d in lane_dirs:
         r = collect_lane(d)
         if r is not None:
             reports.append(r)
+            print(
+                f"[notify_slack]   {r.lane}/{r.provider}: "
+                f"tests={r.tests} passed={r.passed} failed={r.failed} "
+                f"skipped={r.skipped} status={r.status}",
+                file=sys.stderr,
+            )
 
+    haiku_enriched = 0
     if args.anthropic_api_key and reports:
         for r in reports:
             run_haiku(args.anthropic_api_key, r)
+            # run_haiku stamps `notable` with the failure reason on
+            # network/JSON errors; treat anything starting with
+            # "haiku " as a failed enrichment for accounting.
+            if not r.notable.startswith("haiku "):
+                haiku_enriched += 1
+        print(
+            f"[notify_slack] haiku enriched {haiku_enriched}/{len(reports)} lane(s)",
+            file=sys.stderr,
+        )
     else:
         print("[notify_slack] no ANTHROPIC_API_KEY — skipping haiku enrichment",
               file=sys.stderr)
@@ -348,10 +370,15 @@ def main() -> int:
 
     try:
         post_json(args.slack_webhook, payload, {}, timeout=10)
+        print(
+            f"[notify_slack] posted Slack message for {len(reports)} lane(s)",
+            file=sys.stderr,
+        )
     except Exception as e:
         print(f"[notify_slack] slack post failed: {e} — sending fallback", file=sys.stderr)
         try:
             post_json(args.slack_webhook, fallback_payload(reports, args.run_url), {}, timeout=10)
+            print("[notify_slack] fallback posted", file=sys.stderr)
         except Exception as e2:
             print(f"[notify_slack] fallback also failed: {e2}", file=sys.stderr)
     return 0
