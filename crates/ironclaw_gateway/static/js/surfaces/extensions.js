@@ -598,6 +598,155 @@ function showConfigureModal(name, options) {
     });
 }
 
+function translateOrFallback(key, fallback) {
+  const value = I18n.t(key);
+  return value === key ? fallback : value;
+}
+
+function compactSetupPrompt(prompt) {
+  return String(prompt || '')
+    .replace(/^enter\s+(your\s+)?/i, '')
+    .replace(/\s*\((optional|for example|numeric|[0-9]+\s*chars?|leave empty).*?\)\s*/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function setupFieldLabel(item) {
+  const fallback = compactSetupPrompt(item.prompt || item.name);
+  return translateOrFallback('setup.secret.' + item.name, fallback || item.name);
+}
+
+function updateConfigureModalI18n(root) {
+  const scope = root || document;
+  scope.querySelectorAll('[data-configure-label-name]').forEach(function(label) {
+    const name = label.getAttribute('data-configure-label-name');
+    const prompt = label.getAttribute('data-configure-label-prompt') || name;
+    label.textContent = setupFieldLabel({ name: name, prompt: prompt });
+  });
+  scope.querySelectorAll('[data-configure-placeholder]').forEach(function(input) {
+    const key = input.getAttribute('data-configure-placeholder');
+    input.placeholder = I18n.t(key);
+  });
+  scope.querySelectorAll('[data-configure-title-name]').forEach(function(title) {
+    title.textContent = I18n.t('config.title', {
+      name: title.getAttribute('data-configure-title-name') || ''
+    });
+  });
+  scope.querySelectorAll('[data-configure-optional-summary]').forEach(function(summary) {
+    summary.textContent = I18n.t('config.optionalSectionSummary', {
+      count: summary.getAttribute('data-configure-optional-summary') || '0'
+    });
+  });
+}
+
+function basicConfigureValidationError(field, value) {
+  const label = setupFieldLabel(field);
+  if (/[\x00-\x1F\x7F]/.test(value)) {
+    return I18n.t('config.controlCharsNotAllowed', { name: label });
+  }
+
+  const validators = {
+    wecom_bot_id: /^[A-Za-z0-9_-]{3,128}$/,
+    wecom_bot_secret: /^[A-Za-z0-9_-]{16,128}$/,
+    wecom_corp_id: /^ww[a-zA-Z0-9]{16}$/,
+    wecom_corp_secret: /^[A-Za-z0-9_-]{16,128}$/,
+    wecom_agent_id: /^[1-9][0-9]{0,15}$/,
+    wecom_callback_token: /^[A-Za-z0-9._~-]{3,128}$/,
+    wecom_callback_encoding_aes_key: /^[A-Za-z0-9]{43}$/
+  };
+  const validator = validators[field.name];
+  if (validator && !validator.test(value)) {
+    return I18n.t('config.invalidField', { name: label });
+  }
+  return null;
+}
+
+function createConfigureField(item, kind, optionalGroup) {
+  const field = document.createElement('div');
+  field.className = 'configure-field';
+  if (kind === 'secret') field.dataset.secretName = item.name;
+
+  const label = document.createElement('label');
+  const labelText = document.createElement('span');
+  labelText.setAttribute('data-configure-label-name', item.name);
+  labelText.setAttribute('data-configure-label-prompt', item.prompt || item.name);
+  labelText.textContent = setupFieldLabel(item);
+  label.appendChild(labelText);
+  if (item.optional && !optionalGroup) {
+    const opt = document.createElement('span');
+    opt.className = 'field-optional';
+    opt.textContent = I18n.t('config.optional');
+    label.appendChild(opt);
+  }
+  field.appendChild(label);
+
+  const inputRow = document.createElement('div');
+  inputRow.className = 'configure-input-row';
+
+  const input = document.createElement('input');
+  input.type = kind === 'field' && item.input_type !== 'password' ? 'text' : 'password';
+  input.name = item.name;
+  const placeholderKey = item.provided
+    ? 'config.alreadySet'
+    : item.optional
+      ? 'config.optionalPlaceholder'
+      : 'config.requiredPlaceholder';
+  input.setAttribute('data-configure-placeholder', placeholderKey);
+  input.placeholder = I18n.t(placeholderKey);
+  // Do not copy extension-provided regexes into HTML pattern. Browser regex
+  // engines can backtrack catastrophically; server-side validation is the
+  // security boundary for manifest-provided secret.validation patterns.
+  inputRow.appendChild(input);
+
+  if (item.provided) {
+    const badge = document.createElement('span');
+    badge.className = 'field-provided';
+    badge.textContent = '\u2713';
+    badge.title = I18n.t('config.alreadyConfigured');
+    badge.setAttribute('data-i18n-title', 'config.alreadyConfigured');
+    inputRow.appendChild(badge);
+  }
+  if (item.auto_generate && !item.provided) {
+    const hint = document.createElement('span');
+    hint.className = 'field-autogen';
+    hint.textContent = I18n.t('config.autoGenerate');
+    hint.setAttribute('data-i18n', 'config.autoGenerate');
+    inputRow.appendChild(hint);
+  }
+
+  field.appendChild(inputRow);
+  return {
+    node: field,
+    field: {
+      kind: kind,
+      name: item.name,
+      input: input,
+      optional: !!item.optional,
+      provided: !!item.provided,
+      autoGenerate: !!item.auto_generate,
+      prompt: item.prompt || item.name
+    }
+  };
+}
+
+function appendConfigureFieldGroup(form, fields, items, kind, optionalGroup) {
+  for (const item of items) {
+    const built = createConfigureField(item, kind, optionalGroup);
+    built.field.input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submitConfigureModal(
+        form.closest('.configure-overlay')?.getAttribute('data-extension-name') || '',
+        fields
+      );
+    });
+    form.appendChild(built.node);
+    fields.push(built.field);
+  }
+}
+
+window.addEventListener('ironclaw:language-changed', function() {
+  updateConfigureModalI18n(document);
+});
+
 function renderConfigureModal(name, secrets, setupFields, onboarding, options) {
   // Cancel any existing auth-flow overlay before replacing it.
   // Remove directly (don't clear authFlowPending) since a new overlay is about to be appended.
@@ -630,6 +779,7 @@ function renderConfigureModal(name, secrets, setupFields, onboarding, options) {
 
   const header = document.createElement('h3');
   header.textContent = I18n.t('config.title', { name: name });
+  header.setAttribute('data-configure-title-name', name);
   modal.appendChild(header);
 
   if (onboarding && onboarding.credential_instructions) {
@@ -643,92 +793,30 @@ function renderConfigureModal(name, secrets, setupFields, onboarding, options) {
   form.className = 'configure-form';
 
   const fields = [];
-  for (const secret of secrets) {
-    const field = document.createElement('div');
-    field.className = 'configure-field';
-    field.dataset.secretName = secret.name;
+  const requiredSecrets = secrets.filter((secret) => !secret.optional);
+  const optionalSecrets = secrets.filter((secret) => secret.optional);
+  const requiredSetupFields = setupFields.filter((field) => !field.optional);
+  const optionalSetupFields = setupFields.filter((field) => field.optional);
 
-    const label = document.createElement('label');
-    label.textContent = secret.prompt;
-    if (secret.optional) {
-      const opt = document.createElement('span');
-      opt.className = 'field-optional';
-      opt.textContent = I18n.t('config.optional');
-      label.appendChild(opt);
-    }
-    field.appendChild(label);
+  appendConfigureFieldGroup(form, fields, requiredSecrets, 'secret', false);
+  appendConfigureFieldGroup(form, fields, requiredSetupFields, 'field', false);
 
-    const inputRow = document.createElement('div');
-    inputRow.className = 'configure-input-row';
+  const optionalCount = optionalSecrets.length + optionalSetupFields.length;
+  if (optionalCount > 0) {
+    const optionalDetails = document.createElement('details');
+    optionalDetails.className = 'configure-optional-group';
 
-    const input = document.createElement('input');
-    input.type = 'password';
-    input.name = secret.name;
-    input.placeholder = secret.provided ? I18n.t('config.alreadySet') : '';
-    // Do not copy extension-provided regexes into HTML pattern. Browser regex
-    // engines can backtrack catastrophically; server-side validation is the
-    // security boundary for manifest-provided secret.validation patterns.
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') submitConfigureModal(name, fields);
-    });
-    inputRow.appendChild(input);
+    const summary = document.createElement('summary');
+    summary.setAttribute('data-configure-optional-summary', String(optionalCount));
+    summary.textContent = I18n.t('config.optionalSectionSummary', { count: String(optionalCount) });
+    optionalDetails.appendChild(summary);
 
-    if (secret.provided) {
-      const badge = document.createElement('span');
-      badge.className = 'field-provided';
-      badge.textContent = '\u2713';
-      badge.title = I18n.t('config.alreadyConfigured');
-      inputRow.appendChild(badge);
-    }
-    if (secret.auto_generate && !secret.provided) {
-      const hint = document.createElement('span');
-      hint.className = 'field-autogen';
-      hint.textContent = I18n.t('config.autoGenerate');
-      inputRow.appendChild(hint);
-    }
-
-    field.appendChild(inputRow);
-    form.appendChild(field);
-    fields.push({ kind: 'secret', name: secret.name, input: input });
-  }
-
-  for (const setupField of setupFields) {
-    const field = document.createElement('div');
-    field.className = 'configure-field';
-
-    const label = document.createElement('label');
-    label.textContent = setupField.prompt;
-    if (setupField.optional) {
-      const opt = document.createElement('span');
-      opt.className = 'field-optional';
-      opt.textContent = I18n.t('config.optional');
-      label.appendChild(opt);
-    }
-    field.appendChild(label);
-
-    const inputRow = document.createElement('div');
-    inputRow.className = 'configure-input-row';
-
-    const input = document.createElement('input');
-    input.type = setupField.input_type === 'password' ? 'password' : 'text';
-    input.name = setupField.name;
-    input.placeholder = setupField.provided ? I18n.t('config.alreadySet') : '';
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') submitConfigureModal(name, fields);
-    });
-    inputRow.appendChild(input);
-
-    if (setupField.provided) {
-      const badge = document.createElement('span');
-      badge.className = 'field-provided';
-      badge.textContent = '\u2713';
-      badge.title = I18n.t('config.alreadyConfigured');
-      inputRow.appendChild(badge);
-    }
-
-    field.appendChild(inputRow);
-    form.appendChild(field);
-    fields.push({ kind: 'field', name: setupField.name, input: input });
+    const optionalBody = document.createElement('div');
+    optionalBody.className = 'configure-optional-fields';
+    appendConfigureFieldGroup(optionalBody, fields, optionalSecrets, 'secret', true);
+    appendConfigureFieldGroup(optionalBody, fields, optionalSetupFields, 'field', true);
+    optionalDetails.appendChild(optionalBody);
+    form.appendChild(optionalDetails);
   }
 
   modal.appendChild(form);
@@ -781,6 +869,33 @@ function submitConfigureModal(name, fields, options) {
   options = options || {};
   const secrets = {};
   const setupFields = {};
+  const overlay = getConfigureOverlay(name) || document.querySelector('.configure-overlay');
+  clearConfigureInlineError(overlay);
+
+  for (const f of fields) {
+    f.input.classList.remove('configure-input-invalid');
+    const value = f.input.value.trim();
+    const missingRequired = !f.optional && !f.provided && !f.autoGenerate && !value;
+    if (missingRequired) {
+      const message = I18n.t('config.requiredFieldMissing', { name: setupFieldLabel(f) });
+      f.input.classList.add('configure-input-invalid');
+      setConfigureInlineError(overlay, message);
+      showToast(message, 'error');
+      f.input.focus();
+      return;
+    }
+    if (value) {
+      const validationError = basicConfigureValidationError(f, value);
+      if (validationError) {
+        f.input.classList.add('configure-input-invalid');
+        setConfigureInlineError(overlay, validationError);
+        showToast(validationError, 'error');
+        f.input.focus();
+        return;
+      }
+    }
+  }
+
   for (const f of fields) {
     const value = f.input.value.trim();
     if (!value) {
@@ -793,10 +908,8 @@ function submitConfigureModal(name, fields, options) {
     }
   }
 
-  const overlay = getConfigureOverlay(name) || document.querySelector('.configure-overlay');
   const requestId = overlay ? overlay.getAttribute('data-request-id') : null;
   const threadId = overlay ? overlay.getAttribute('data-thread-id') : null;
-  clearConfigureInlineError(overlay);
 
   // Disable buttons to prevent double-submit
   var btns = overlay ? overlay.querySelectorAll('.configure-actions button') : [];

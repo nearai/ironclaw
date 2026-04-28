@@ -7586,6 +7586,26 @@ impl ExtensionManager {
                     }
                 }
             }
+
+            for secret_def in &channel_secret_defs {
+                if secret_def.optional {
+                    continue;
+                }
+                let submitted = secrets
+                    .get(&secret_def.name)
+                    .is_some_and(|v| !v.trim().is_empty());
+                let stored = self
+                    .secrets
+                    .exists(user_id, &secret_def.name)
+                    .await
+                    .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
+                if !submitted && !stored {
+                    return Err(ExtensionError::ValidationFailed(format!(
+                        "Required secret '{}' is missing for extension '{}'",
+                        secret_def.name, name
+                    )));
+                }
+            }
         }
 
         // Validate Telegram bot token and persist bot_username for mention detection.
@@ -12524,6 +12544,47 @@ mod tests {
             serde_json::json!("Verification received. Finishing setup..."),
             "text",
         )
+    }
+
+    #[tokio::test]
+    async fn test_configure_rejects_missing_required_channel_secret() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&channels_dir).unwrap();
+        std::fs::write(channels_dir.join("test-channel.wasm"), b"\0asm fake").unwrap();
+        std::fs::write(
+            channels_dir.join("test-channel.capabilities.json"),
+            serde_json::json!({
+                "type": "channel",
+                "name": "test-channel",
+                "setup": {
+                    "required_secrets": [
+                        {
+                            "name": "test_channel_token",
+                            "prompt": "Enter token",
+                            "optional": false
+                        }
+                    ]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mgr = make_manager_custom_dirs(dir.path().join("tools"), channels_dir);
+        let result = mgr
+            .configure(
+                "test-channel",
+                &std::collections::HashMap::new(),
+                &std::collections::HashMap::new(),
+                "test",
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(ExtensionError::ValidationFailed(_))),
+            "missing required channel secret should be a validation error: {result:?}"
+        );
     }
 
     #[tokio::test]
