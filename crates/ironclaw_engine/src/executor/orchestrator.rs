@@ -446,6 +446,7 @@ pub async fn execute_orchestrator(
     store: Option<&Arc<dyn Store>>,
     platform_info: Option<&crate::executor::prompt::PlatformInfo>,
     persisted_state: &serde_json::Value,
+    cancel_token: &tokio_util::sync::CancellationToken,
 ) -> Result<OrchestratorResult, EngineError> {
     let mut total_tokens = TokenUsage::default();
 
@@ -541,44 +542,60 @@ pub async fn execute_orchestrator(
 
                     // __llm_complete__(messages, actions, config)
                     "__llm_complete__" => {
-                        handle_llm_complete(
-                            args,
-                            kwargs,
-                            thread,
-                            LlmCompleteDeps {
-                                llm,
-                                effects,
-                                leases,
-                                store,
-                                platform_info,
-                            },
-                            &mut total_tokens,
-                        )
-                        .await
+                        tokio::select! {
+                            result = handle_llm_complete(
+                                args,
+                                kwargs,
+                                thread,
+                                LlmCompleteDeps {
+                                    llm,
+                                    effects,
+                                    leases,
+                                    store,
+                                    platform_info,
+                                },
+                                &mut total_tokens,
+                            ) => result,
+                            _ = cancel_token.cancelled() => {
+                                break;
+                            }
+                        }
                     }
 
                     // __execute_code_step__(code, state)
                     "__execute_code_step__" => {
-                        handle_execute_code_step(
-                            args, kwargs, thread, llm, effects, leases, policy, event_tx,
-                        )
-                        .await
+                        tokio::select! {
+                            result = handle_execute_code_step(
+                                args, kwargs, thread, llm, effects, leases, policy, event_tx,
+                            ) => result,
+                            _ = cancel_token.cancelled() => {
+                                break;
+                            }
+                        }
                     }
 
                     // __execute_action__(name, params, call_id=...)
                     "__execute_action__" => {
-                        handle_execute_action(
-                            args, kwargs, thread, effects, leases, policy, event_tx,
-                        )
-                        .await
+                        tokio::select! {
+                            result = handle_execute_action(
+                                args, kwargs, thread, effects, leases, policy, event_tx,
+                            ) => result,
+                            _ = cancel_token.cancelled() => {
+                                break;
+                            }
+                        }
                     }
 
                     // __execute_actions_parallel__(calls)
                     "__execute_actions_parallel__" => {
-                        handle_execute_actions_parallel(
-                            args, thread, effects, leases, policy, event_tx,
-                        )
-                        .await
+                        tokio::select! {
+                            result = handle_execute_actions_parallel(
+                                args, thread, effects, leases, policy, event_tx,
+                            ) => result,
+                            _ = cancel_token.cancelled() => {
+                                break;
+                            }
+                        }
                     }
 
                     // __check_signals__()
@@ -688,6 +705,12 @@ pub async fn execute_orchestrator(
             }
         }
     }
+
+    // Loop was broken by cancellation token
+    Ok(OrchestratorResult {
+        outcome: ThreadOutcome::Stopped,
+        tokens_used: total_tokens,
+    })
 }
 
 // ── Host function handlers ──────────────────────────────────

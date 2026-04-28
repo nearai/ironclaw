@@ -264,6 +264,10 @@ pub struct Agent {
     /// Engine v2 mission manager for firing learning missions (set after engine init).
     pub(crate) mission_manager_slot:
         Arc<tokio::sync::RwLock<Option<Arc<ironclaw_engine::MissionManager>>>>,
+    /// Cancellation token for the currently running chat turn. Set before
+    /// entering the agentic loop, cancelled by `process_interrupt`.
+    pub(super) active_cancel_token:
+        Arc<tokio::sync::Mutex<Option<tokio_util::sync::CancellationToken>>>,
 }
 
 impl Agent {
@@ -336,6 +340,7 @@ impl Agent {
             routine_config,
             routine_engine_slot: Arc::new(tokio::sync::RwLock::new(None)),
             mission_manager_slot: Arc::new(tokio::sync::RwLock::new(None)),
+            active_cancel_token: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -1173,7 +1178,47 @@ impl Agent {
             // Store successfully extracted document text in workspace for indexing
             self.store_extracted_documents(&message).await;
 
-            match self.handle_message(&message).await {
+            // Run handle_message while concurrently listening for interrupt
+            // messages. This allows `/stop` to cancel a running LLM call or
+            // tool execution mid-flight.
+            let handle_fut = self.handle_message(&message);
+            tokio::pin!(handle_fut);
+
+            let result = loop {
+                tokio::select! {
+                    biased;
+                    outcome = &mut handle_fut => {
+                        break outcome;
+                    }
+                    interrupt_msg = message_stream.next() => {
+                        match interrupt_msg {
+                            Some(imsg) => {
+                                let sub = imsg
+                                    .structured_submission
+                                    .as_ref()
+                                    .cloned()
+                                    .unwrap_or_else(|| SubmissionParser::parse(&imsg.content));
+                                if matches!(sub, Submission::Interrupt) {
+                                    // Cancel the active turn immediately
+                                    if let Some(token) = self.active_cancel_token.lock().await.take() {
+                                        token.cancel();
+                                    }
+                                    tracing::debug!("Interrupt received while turn in progress, cancelling");
+                                } else {
+                                    tracing::debug!(
+                                        "Non-interrupt message received while turn in progress, dropping"
+                                    );
+                                }
+                            }
+                            None => {
+                                // Stream ended — let handle_fut finish
+                            }
+                        }
+                    }
+                }
+            };
+
+            match result {
                 Ok(HandleOutcome::Respond(response)) => {
                     // Hook: BeforeOutbound — allow hooks to modify or suppress outbound
                     let event = crate::hooks::HookEvent::Outbound {

@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use tokio_util::sync::CancellationToken;
 
 use crate::agent::session::PendingApproval;
 use crate::error::Error;
@@ -135,6 +136,14 @@ pub trait LoopDelegate: Send + Sync {
 
     /// Called after each successful iteration (no error, no early return).
     async fn after_iteration(&self, _iteration: usize) {}
+
+    /// Return a cancellation token that, when cancelled, aborts the current
+    /// LLM call or tool execution mid-flight. The default returns a token
+    /// that is never cancelled (backward-compatible for delegates that don't
+    /// support interruption).
+    fn cancellation_token(&self) -> CancellationToken {
+        CancellationToken::new()
+    }
 }
 
 /// Warning injected after repeated identical failing tool calls.
@@ -237,8 +246,17 @@ pub async fn run_agentic_loop(
             return Ok(outcome);
         }
 
-        // Call LLM
-        let output = delegate.call_llm(reasoning, reason_ctx, iteration).await?;
+        // Call LLM — cancellable via the delegate's token
+        let cancel = delegate.cancellation_token();
+        let output = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                return Ok(LoopOutcome::Stopped);
+            }
+            result = delegate.call_llm(reasoning, reason_ctx, iteration) => {
+                result?
+            }
+        };
 
         match &output.result {
             RespondResult::Text(text) => {
@@ -344,10 +362,17 @@ pub async fn run_agentic_loop(
                 // Reset the flag before execution; delegates set it in execute_tool_calls.
                 reason_ctx.last_tool_batch_all_failed = false;
 
-                if let Some(outcome) = delegate
-                    .execute_tool_calls(tool_calls, content, reason_ctx)
-                    .await?
-                {
+                let cancel = delegate.cancellation_token();
+                let tool_outcome = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        return Ok(LoopOutcome::Stopped);
+                    }
+                    result = delegate.execute_tool_calls(tool_calls, content, reason_ctx) => {
+                        result?
+                    }
+                };
+                if let Some(outcome) = tool_outcome {
                     return Ok(outcome);
                 }
 
