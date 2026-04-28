@@ -4,7 +4,7 @@ initiate→execute skip seen in the 23:10:24.784 log."""
 
 import json
 
-from common import RESP_PAT, agent_text, get_tool_calls, format_tool_calls, fetch_account_info
+from common import RESP_PAT, agent_text, get_tool_calls, format_tool_calls, fetch_account_info, tool_output_ok
 
 MAX_TURNS = 20
 
@@ -87,6 +87,7 @@ def run_pipeline_replay_guided(
         initiate_call_args = {}
         send_response = None
         send_call_args = {}
+        send_output = None
         execute_seen = False
 
         for turn in range(1, MAX_TURNS + 1):
@@ -101,7 +102,9 @@ def run_pipeline_replay_guided(
             note(f"--- Turn {turn} ---", sub)
             note(f"  input: {next_input}", sub)
 
-            kwargs = {"model": "default", "input": next_input, "timeout": 180, "temperature": temperature}
+            kwargs = {"model": "default", "input": next_input, "timeout": 180}
+            if temperature is not None:
+                kwargs["temperature"] = temperature
             if prev_id:
                 kwargs["previous_response_id"] = prev_id
 
@@ -139,6 +142,7 @@ def run_pipeline_replay_guided(
                     if action == "send":
                         send_response = resp
                         send_call_args = c["args"]
+                        send_output = c.get("output")
                     if action == "execute":
                         execute_seen = True
                         note(f"  execute called (skipped send!): {json.dumps(c['args'])}", sub)
@@ -159,6 +163,9 @@ def run_pipeline_replay_guided(
         chk("action=initiate was called", initiate_seen, sub)
         chk("action=send was called (not skipped)", send_response is not None, sub,
             "model called execute directly, skipping send" if execute_seen else "model did not call send")
+        if send_response is not None:
+            chk("action=send tool executed", tool_output_ok(send_output), sub,
+                f"no output or tool error: {send_output!r}")
         chk("action=execute was NOT called directly", not execute_seen, sub,
             f"execute fired without send: {json.dumps(send_call_args)}")
 
