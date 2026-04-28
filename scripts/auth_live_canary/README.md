@@ -33,10 +33,11 @@ not model behavior.
   Runs through Responses API
 - `github`
   Uses `github_token`
-  Runs through Responses API and browser
+  Runs through Responses API only (PAT-only — not browser-OAuth; the
+  github WASM tool registers as `auth_summary.method = "manual"`)
 - `notion`
   Uses `mcp_notion_access_token`
-  Runs through Responses API
+  Runs through Responses API and browser
 
 ## Setup
 

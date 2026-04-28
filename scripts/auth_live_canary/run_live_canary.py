@@ -1005,7 +1005,9 @@ def parse_args() -> argparse.Namespace:
             "Mutating lifecycle cases — must be opted in explicitly, never "
             "run by default: gmail_roundtrip, google_calendar_lifecycle, "
             "notion_search_lifecycle. "
-            "For browser mode: google, github, notion."
+            "For browser mode: google, notion. "
+            "(github browser coverage is intentionally absent — the github "
+            "WASM tool is PAT-only, not OAuth; see SEEDED_CASES instead.)"
         ),
     )
     parser.add_argument(
