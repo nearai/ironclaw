@@ -240,11 +240,46 @@ def _write_results(results: list[ProbeResult], output_dir: Path) -> Path:
     return path
 
 
+REEXEC_ENV = "WORKFLOW_CANARY_REEXEC"
+
+
 def main() -> int:
     args = parse_args()
 
-    if not args.skip_python_bootstrap:
-        bootstrap_python(args.venv)
+    # Same bootstrap-then-reexec pattern as scripts/auth_live_canary/-
+    # run_live_canary.py: install/upgrade the venv (which includes
+    # httpx, aiohttp, etc.), then re-launch ourselves under that venv
+    # with --skip-python-bootstrap so the rest of the script runs with
+    # the right interpreter. Without this, the parent process keeps
+    # executing under whatever Python invoked us — typically the
+    # system one on CI runners, which doesn't have httpx.
+    if not args.skip_python_bootstrap and os.environ.get(REEXEC_ENV) != "1":
+        python = bootstrap_python(args.venv)
+        if args.playwright_install != "skip":
+            install_playwright(python, args.playwright_install)
+        if not args.skip_build:
+            cargo_build()
+        cmd = [
+            str(python),
+            str(Path(__file__).resolve()),
+            *sys.argv[1:],
+            "--skip-python-bootstrap",
+        ]
+        env = os.environ.copy()
+        env[REEXEC_ENV] = "1"
+        return subprocess.run(cmd, cwd=ROOT, env=env, check=False).returncode
+    if (
+        args.skip_python_bootstrap
+        and not venv_python(args.venv).exists()
+        and os.environ.get(REEXEC_ENV) != "1"
+    ):
+        print(
+            f"[workflow-canary] virtualenv not found at {venv_python(args.venv)}; "
+            "remove --skip-python-bootstrap to bootstrap it",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
     if args.playwright_install != "skip":
         install_playwright(venv_python(args.venv), args.playwright_install)
     if not args.skip_build:
