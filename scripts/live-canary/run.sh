@@ -269,9 +269,12 @@ main() {
     auth-browser-consent)
       run_python_lane scripts/auth_live_canary/run_live_canary.py --mode browser --playwright-install "${PLAYWRIGHT_INSTALL}"
       ;;
+    workflow-canary)
+      run_python_lane scripts/workflow_canary/run_workflow_canary.py --playwright-install "${PLAYWRIGHT_INSTALL}"
+      ;;
     *)
       echo "Unknown live canary lane: ${LANE}" >&2
-      echo "Known lanes: deterministic-replay, public-smoke, persona-rotating, private-oauth, provider-matrix, release-public-full, upgrade-canary, auth-smoke, auth-full, auth-channels, auth-live-seeded, auth-browser-consent" >&2
+      echo "Known lanes: deterministic-replay, public-smoke, persona-rotating, private-oauth, provider-matrix, release-public-full, upgrade-canary, auth-smoke, auth-full, auth-channels, auth-live-seeded, auth-browser-consent, workflow-canary" >&2
       return 2
       ;;
   esac

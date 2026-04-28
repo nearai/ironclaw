@@ -31,6 +31,7 @@ on:
           - auth-channels
           - auth-live-seeded
           - auth-browser-consent
+          - workflow-canary
       scenario:
         description: "Optional scenario/test filter. Use auto for rotating persona."
         type: string
@@ -356,6 +357,38 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: live-canary-auth-browser-consent
+          path: artifacts/live-canary/
+          if-no-files-found: ignore
+
+  workflow-canary:
+    name: Workflow Canary
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'workflow-canary'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      LANE: workflow-canary
+      PROVIDER: mock
+      PLAYWRIGHT_INSTALL: skip
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Run workflow canary lane
+        run: scripts/live-canary/run.sh
+      - name: Scrub artifacts
+        if: always()
+        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: live-canary-workflow-canary
           path: artifacts/live-canary/
           if-no-files-found: ignore
 
@@ -750,6 +783,7 @@ jobs:
       - auth-channels
       - auth-live-seeded
       - auth-browser-consent
+      - workflow-canary
       - deterministic-replay
       - public-smoke
       - persona-rotating
