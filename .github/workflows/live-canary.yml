@@ -269,17 +269,17 @@ jobs:
       # masks and ship them in every step's env, which is exactly the
       # surface the reviewer flagged.
       GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
-      # GitHub reserves the GITHUB_ prefix for repo-scoped secrets (cannot
-      # be created by users), so the secret is stored as
-      # AUTH_BROWSER_GITHUB_CLIENT_ID and re-exported here under the
-      # GITHUB_OAUTH_CLIENT_ID name that auth_registry.py / IronClaw expect.
-      GITHUB_OAUTH_CLIENT_ID: ${{ secrets.AUTH_BROWSER_GITHUB_CLIENT_ID }}
       AUTH_BROWSER_GOOGLE_USERNAME: ${{ secrets.AUTH_BROWSER_GOOGLE_USERNAME }}
-      AUTH_BROWSER_GITHUB_OWNER: ${{ secrets.AUTH_BROWSER_GITHUB_OWNER }}
-      AUTH_BROWSER_GITHUB_REPO: ${{ secrets.AUTH_BROWSER_GITHUB_REPO }}
-      AUTH_BROWSER_GITHUB_ISSUE_NUMBER: ${{ secrets.AUTH_BROWSER_GITHUB_ISSUE_NUMBER }}
-      AUTH_BROWSER_GITHUB_USERNAME: ${{ secrets.AUTH_BROWSER_GITHUB_USERNAME }}
       AUTH_BROWSER_NOTION_USERNAME: ${{ secrets.AUTH_BROWSER_NOTION_USERNAME }}
+      # GitHub-related secrets are intentionally NOT exported here.
+      # The browser-consent lane only drives Google + Notion (see
+      # `BROWSER_CASES` in scripts/live_canary/auth_registry.py); the
+      # github WASM tool registers as `auth_summary.method = "manual"`
+      # (PAT paste, not OAuth) so this lane has no consumer for any of
+      # AUTH_BROWSER_GITHUB_* / GITHUB_OAUTH_CLIENT_*. Re-add the
+      # secrets only when the github tool ships an OAuth flow and the
+      # entry comes back into `BROWSER_CASES`. Coverage for github
+      # lives in `SEEDED_CASES` (auth-live-seeded) instead.
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -292,7 +292,6 @@ jobs:
         shell: bash
         env:
           AUTH_BROWSER_GOOGLE_STORAGE_STATE_B64: ${{ secrets.AUTH_BROWSER_GOOGLE_STORAGE_STATE_B64 }}
-          AUTH_BROWSER_GITHUB_STORAGE_STATE_B64: ${{ secrets.AUTH_BROWSER_GITHUB_STORAGE_STATE_B64 }}
           AUTH_BROWSER_NOTION_STORAGE_STATE_B64: ${{ secrets.AUTH_BROWSER_NOTION_STORAGE_STATE_B64 }}
         run: |
           set +x
@@ -301,10 +300,6 @@ jobs:
           if [[ -n "${AUTH_BROWSER_GOOGLE_STORAGE_STATE_B64:-}" ]]; then
             printf '%s' "$AUTH_BROWSER_GOOGLE_STORAGE_STATE_B64" | base64 -d > .tmp/auth-browser-state/google.json
             echo "AUTH_BROWSER_GOOGLE_STORAGE_STATE_PATH=$PWD/.tmp/auth-browser-state/google.json" >> "$GITHUB_ENV"
-          fi
-          if [[ -n "${AUTH_BROWSER_GITHUB_STORAGE_STATE_B64:-}" ]]; then
-            printf '%s' "$AUTH_BROWSER_GITHUB_STORAGE_STATE_B64" | base64 -d > .tmp/auth-browser-state/github.json
-            echo "AUTH_BROWSER_GITHUB_STORAGE_STATE_PATH=$PWD/.tmp/auth-browser-state/github.json" >> "$GITHUB_ENV"
           fi
           if [[ -n "${AUTH_BROWSER_NOTION_STORAGE_STATE_B64:-}" ]]; then
             printf '%s' "$AUTH_BROWSER_NOTION_STORAGE_STATE_B64" | base64 -d > .tmp/auth-browser-state/notion.json
@@ -316,13 +311,12 @@ jobs:
         # Materialize step for the rationale.
         env:
           GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
-          # GitHub reserves the GITHUB_ secret-name prefix; stored as
-          # AUTH_BROWSER_GITHUB_CLIENT_SECRET and re-exposed here under the
-          # GITHUB_OAUTH_CLIENT_SECRET name the materialize/runtime expect.
-          GITHUB_OAUTH_CLIENT_SECRET: ${{ secrets.AUTH_BROWSER_GITHUB_CLIENT_SECRET }}
           AUTH_BROWSER_GOOGLE_PASSWORD: ${{ secrets.AUTH_BROWSER_GOOGLE_PASSWORD }}
-          AUTH_BROWSER_GITHUB_PASSWORD: ${{ secrets.AUTH_BROWSER_GITHUB_PASSWORD }}
           AUTH_BROWSER_NOTION_PASSWORD: ${{ secrets.AUTH_BROWSER_NOTION_PASSWORD }}
+          # Github-OAuth and -password secrets removed: this lane no
+          # longer drives a GitHub OAuth flow (see env: block above for
+          # the BROWSER_CASES context). Re-add the secrets only when
+          # the github tool ships an OAuth flow.
         run: |
           set +x
           set -euo pipefail
@@ -341,9 +335,7 @@ jobs:
             echo "${name}_PATH=${path}" >> "${GITHUB_ENV}"
           }
           write_secret "GOOGLE_OAUTH_CLIENT_SECRET" "${GOOGLE_OAUTH_CLIENT_SECRET:-}"
-          write_secret "GITHUB_OAUTH_CLIENT_SECRET" "${GITHUB_OAUTH_CLIENT_SECRET:-}"
           write_secret "AUTH_BROWSER_GOOGLE_PASSWORD" "${AUTH_BROWSER_GOOGLE_PASSWORD:-}"
-          write_secret "AUTH_BROWSER_GITHUB_PASSWORD" "${AUTH_BROWSER_GITHUB_PASSWORD:-}"
           write_secret "AUTH_BROWSER_NOTION_PASSWORD" "${AUTH_BROWSER_NOTION_PASSWORD:-}"
       - name: Run browser-consent auth lane
         run: |
