@@ -765,12 +765,5 @@ fn lease_persistence_error(error: FilesystemError) -> CapabilityLeaseError {
 }
 
 fn is_not_found(error: &FilesystemError) -> bool {
-    match error {
-        FilesystemError::Backend { reason, .. } => {
-            reason.contains("No such file")
-                || reason.contains("not found")
-                || reason.contains("entity not found")
-        }
-        _ => false,
-    }
+    matches!(error, FilesystemError::NotFound { .. })
 }

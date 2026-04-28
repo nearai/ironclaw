@@ -11,6 +11,7 @@ ironclaw_host_api = { path = "../ironclaw_host_api" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+tokio = { version = "1", features = ["sync"] }
 
 [dev-dependencies]
 tempfile = "3"

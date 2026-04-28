@@ -123,12 +123,6 @@ pub enum RunStateError {
     Deserialization(String),
 }
 
-impl From<HostApiError> for RunStateError {
-    fn from(error: HostApiError) -> Self {
-        Self::InvalidPath(error.to_string())
-    }
-}
-
 impl From<FilesystemError> for RunStateError {
     fn from(error: FilesystemError) -> Self {
         Self::Filesystem(error.to_string())
@@ -452,6 +446,7 @@ where
     F: RootFilesystem,
 {
     filesystem: &'a F,
+    lock: tokio::sync::Mutex<()>,
 }
 
 impl<'a, F> FilesystemRunStateStore<'a, F>
@@ -459,7 +454,10 @@ where
     F: RootFilesystem,
 {
     pub fn new(filesystem: &'a F) -> Self {
-        Self { filesystem }
+        Self {
+            filesystem,
+            lock: tokio::sync::Mutex::new(()),
+        }
     }
 
     async fn write_record(&self, record: &RunRecord) -> Result<(), RunStateError> {
@@ -476,6 +474,7 @@ where
     F: RootFilesystem,
 {
     async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
+        let _guard = self.lock.lock().await;
         if self.get(&start.scope, start.invocation_id).await?.is_some() {
             return Err(RunStateError::InvocationAlreadyExists {
                 invocation_id: start.invocation_id,
@@ -499,6 +498,7 @@ where
         invocation_id: InvocationId,
         approval: ApprovalRequest,
     ) -> Result<RunRecord, RunStateError> {
+        let _guard = self.lock.lock().await;
         let mut record = self
             .get(scope, invocation_id)
             .await?
@@ -516,6 +516,7 @@ where
         invocation_id: InvocationId,
         error_kind: String,
     ) -> Result<RunRecord, RunStateError> {
+        let _guard = self.lock.lock().await;
         let mut record = self
             .get(scope, invocation_id)
             .await?
@@ -531,6 +532,7 @@ where
         scope: &ResourceScope,
         invocation_id: InvocationId,
     ) -> Result<RunRecord, RunStateError> {
+        let _guard = self.lock.lock().await;
         let mut record = self
             .get(scope, invocation_id)
             .await?
@@ -547,6 +549,7 @@ where
         invocation_id: InvocationId,
         error_kind: String,
     ) -> Result<RunRecord, RunStateError> {
+        let _guard = self.lock.lock().await;
         let mut record = self
             .get(scope, invocation_id)
             .await?
@@ -607,6 +610,7 @@ where
     F: RootFilesystem,
 {
     filesystem: &'a F,
+    lock: tokio::sync::Mutex<()>,
 }
 
 impl<'a, F> FilesystemApprovalRequestStore<'a, F>
@@ -614,7 +618,10 @@ where
     F: RootFilesystem,
 {
     pub fn new(filesystem: &'a F) -> Self {
-        Self { filesystem }
+        Self {
+            filesystem,
+            lock: tokio::sync::Mutex::new(()),
+        }
     }
 
     async fn update_status(
@@ -623,6 +630,7 @@ where
         request_id: ApprovalRequestId,
         status: ApprovalStatus,
     ) -> Result<ApprovalRecord, RunStateError> {
+        let _guard = self.lock.lock().await;
         let mut record = self
             .get(scope, request_id)
             .await?
@@ -650,6 +658,7 @@ where
         scope: ResourceScope,
         request: ApprovalRequest,
     ) -> Result<ApprovalRecord, RunStateError> {
+        let _guard = self.lock.lock().await;
         let record = ApprovalRecord {
             scope,
             request,
@@ -729,11 +738,11 @@ fn run_record_path(
         "{}/{invocation_id}.json",
         run_records_root(scope)?.as_str()
     ))
-    .map_err(Into::into)
+    .map_err(invalid_path)
 }
 
 fn run_records_root(scope: &ResourceScope) -> Result<VirtualPath, RunStateError> {
-    VirtualPath::new(format!("{}/runs", tenant_user_root(scope))).map_err(Into::into)
+    VirtualPath::new(format!("{}/runs", tenant_user_root(scope))).map_err(invalid_path)
 }
 
 fn approval_record_path(
@@ -744,11 +753,11 @@ fn approval_record_path(
         "{}/{request_id}.json",
         approval_records_root(scope)?.as_str()
     ))
-    .map_err(Into::into)
+    .map_err(invalid_path)
 }
 
 fn approval_records_root(scope: &ResourceScope) -> Result<VirtualPath, RunStateError> {
-    VirtualPath::new(format!("{}/approvals", tenant_user_root(scope))).map_err(Into::into)
+    VirtualPath::new(format!("{}/approvals", tenant_user_root(scope))).map_err(invalid_path)
 }
 
 fn tenant_user_root(scope: &ResourceScope) -> String {
@@ -761,6 +770,10 @@ fn tenant_user_root(scope: &ResourceScope) -> String {
         Some(agent_id) => format!("{base}/agents/{}", agent_id.as_str()),
         None => base,
     }
+}
+
+fn invalid_path(error: HostApiError) -> RunStateError {
+    RunStateError::InvalidPath(error.to_string())
 }
 
 fn same_scope_owner(left: &ResourceScope, right: &ResourceScope) -> bool {
@@ -785,12 +798,5 @@ where
 }
 
 fn is_not_found(error: &FilesystemError) -> bool {
-    match error {
-        FilesystemError::Backend { reason, .. } => {
-            reason.contains("No such file")
-                || reason.contains("not found")
-                || reason.contains("os error 2")
-        }
-        _ => false,
-    }
+    matches!(error, FilesystemError::NotFound { .. })
 }

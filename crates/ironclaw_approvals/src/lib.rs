@@ -62,6 +62,11 @@ where
             return Err(ApprovalResolutionError::UnsupportedAction);
         };
 
+        let invocation_fingerprint = record
+            .request
+            .invocation_fingerprint
+            .clone()
+            .ok_or(ApprovalResolutionError::MissingInvocationFingerprint)?;
         let resolved_by = approval.issued_by.clone();
         let grant = CapabilityGrant {
             id: CapabilityGrantId::new(),
@@ -79,7 +84,7 @@ where
             },
         };
         let mut lease = CapabilityLease::new(record.scope.clone(), grant);
-        lease.invocation_fingerprint = record.request.invocation_fingerprint.clone();
+        lease.invocation_fingerprint = Some(invocation_fingerprint);
         let lease = self.leases.issue(lease).await?;
         if let Err(error) = self.approvals.approve(scope, request_id).await {
             let _ = self.leases.revoke(&lease.scope, lease.grant.id).await;
@@ -130,6 +135,13 @@ where
     }
 }
 
+/// Approval resolution input supplied by a trusted human/admin policy surface.
+///
+/// `allowed_effects` is the final attenuated effect set that the resolver stamps
+/// onto the resume-only lease. The current [`ApprovalRequest`] shape does not
+/// carry the originating capability descriptor's effect list, so callers must
+/// derive this set from the same reviewed descriptor/request they presented to
+/// the approver rather than widening it in the UI layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeaseApproval {
     pub issued_by: Principal,
@@ -149,6 +161,8 @@ pub enum ApprovalResolutionError {
     RunState(#[from] RunStateError),
     #[error("approval request is not pending: {status:?}")]
     NotPending { status: ApprovalStatus },
+    #[error("approval request is missing an invocation fingerprint")]
+    MissingInvocationFingerprint,
     #[error("approval action cannot issue a dispatch lease")]
     UnsupportedAction,
     #[error("capability lease failed: {0}")]

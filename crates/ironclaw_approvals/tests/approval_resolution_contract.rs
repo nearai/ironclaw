@@ -179,6 +179,51 @@ async fn lease_from_approved_request_is_resume_only_and_not_plain_authority() {
 }
 
 #[tokio::test]
+async fn approving_dispatch_without_fingerprint_fails_without_lease_or_status_change() {
+    let approvals = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let resolver = ApprovalResolver::new(&approvals, &leases);
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let mut approval = approval_request(invocation_id, CapabilityId::new("echo.say").unwrap());
+    approval.invocation_fingerprint = None;
+    let request_id = approval.id;
+    approvals
+        .save_pending(scope.clone(), approval)
+        .await
+        .unwrap();
+
+    let err = resolver
+        .approve_dispatch(
+            &scope,
+            request_id,
+            LeaseApproval {
+                issued_by: Principal::User(scope.user_id.clone()),
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                expires_at: None,
+                max_invocations: Some(1),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ApprovalResolutionError::MissingInvocationFingerprint
+    ));
+    assert_eq!(leases.leases_for_scope(&scope).await, Vec::new());
+    assert_eq!(
+        approvals
+            .get(&scope, request_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        ApprovalStatus::Pending
+    );
+}
+
+#[tokio::test]
 async fn approving_pending_dispatch_request_emits_redacted_approval_audit_event() {
     let approvals = InMemoryApprovalRequestStore::new();
     let leases = InMemoryCapabilityLeaseStore::new();
