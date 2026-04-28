@@ -51,7 +51,7 @@ impl ExecutionGate for ApprovalGate {
             Some((_, t)) => t,
             None => return GateDecision::Allow, // unknown tool — let execution handle it
         };
-
+        let is_auto_approved = ctx.auto_approved.contains(ctx.action_name);
         // Use original parameters for approval check (the adapter normalizes
         // params before execution, but the approval check should use the
         // parameters the LLM provided so destructive detection works).
@@ -61,7 +61,7 @@ impl ExecutionGate for ApprovalGate {
             ExecutionMode::Interactive => match requirement {
                 ApprovalRequirement::Never => GateDecision::Allow,
                 ApprovalRequirement::UnlessAutoApproved => {
-                    if ctx.auto_approved.contains(ctx.action_name) {
+                    if is_auto_approved {
                         GateDecision::Allow
                     } else {
                         // Check credential-backed HTTP auto-approve
@@ -81,17 +81,21 @@ impl ExecutionGate for ApprovalGate {
                         }
                     }
                 }
-                ApprovalRequirement::Always => GateDecision::Pause {
-                    reason: format!(
-                        "Tool '{}' requires explicit approval for this operation.",
-                        ctx.action_name
-                    ),
-                    // Always-gated tools should NOT offer "always" button
-                    // (regression fix: 09e1c97a)
-                    resume_kind: ResumeKind::Approval {
-                        allow_always: false,
-                    },
-                },
+                ApprovalRequirement::Always => {
+                    if is_auto_approved {
+                        GateDecision::Allow
+                    } else {
+                        GateDecision::Pause {
+                            reason: format!(
+                                "Tool '{}' requires explicit approval for this operation.",
+                                ctx.action_name
+                            ),
+                            resume_kind: ResumeKind::Approval {
+                                allow_always: false,
+                            },
+                        }
+                    }
+                }
             },
             ExecutionMode::InteractiveAutoApprove => match requirement {
                 ApprovalRequirement::Never | ApprovalRequirement::UnlessAutoApproved => {
@@ -101,16 +105,18 @@ impl ExecutionGate for ApprovalGate {
                     GateDecision::Allow
                 }
                 ApprovalRequirement::Always => {
-                    // Always-gated tools still require explicit approval even
-                    // in auto-approve mode — these are truly destructive operations.
-                    GateDecision::Pause {
-                        reason: format!(
-                            "Tool '{}' requires explicit approval (auto-approve does not cover this operation).",
-                            ctx.action_name
-                        ),
-                        resume_kind: ResumeKind::Approval {
-                            allow_always: false,
-                        },
+                    if is_auto_approved {
+                        GateDecision::Allow
+                    } else {
+                        GateDecision::Pause {
+                            reason: format!(
+                                "Tool '{}' requires explicit approval (auto-approve does not cover this operation).",
+                                ctx.action_name
+                            ),
+                            resume_kind: ResumeKind::Approval {
+                                allow_always: false,
+                            },
+                        }
                     }
                 }
             },
@@ -121,12 +127,15 @@ impl ExecutionGate for ApprovalGate {
                     GateDecision::Allow
                 }
                 ApprovalRequirement::Always => {
-                    // Always-gated tools cannot run autonomously
-                    GateDecision::Deny {
-                        reason: format!(
-                            "Tool '{}' requires explicit approval and cannot run autonomously.",
-                            ctx.action_name
-                        ),
+                    if is_auto_approved {
+                        GateDecision::Allow
+                    } else {
+                        GateDecision::Deny {
+                            reason: format!(
+                                "Tool '{}' requires explicit approval and cannot run autonomously.",
+                                ctx.action_name
+                            ),
+                        }
                     }
                 }
             },
