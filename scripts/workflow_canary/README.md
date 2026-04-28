@@ -12,88 +12,108 @@ tool dispatch, Telegram round-trips, Sheets writes, etc.
 
 ```
 scripts/workflow_canary/
-├── run_workflow_canary.py     # entrypoint — mirrors run_live_canary.py CLI
-├── telegram_mock.py            # fake Telegram Bot API (single-port aiohttp)
+├── run_workflow_canary.py     # entrypoint
+├── telegram_mock.py            # fake Telegram Bot API
+├── sheets_mock.py              # mock Google Sheets v4
+├── calendar_mock.py            # mock Google Calendar v3
+├── hn_mock.py                  # mock Hacker News /newest
+├── gmail_mock.py               # mock Gmail v1
+├── web_search_mock.py          # mock Brave Search v3
+├── telegram_setup.py           # install + capability patch + pairing helpers
 ├── routines.py                 # libSQL helpers (insert + backdate + poll)
-├── scenarios/
-│   ├── _common.py              # shared run_routine_probe()
-│   ├── bug_logger.py           # Script 1
-│   ├── calendar_prep.py        # Script 2
-│   ├── hn_monitor.py           # Script 3
-│   ├── periodic_reminder.py    # Script 4
-│   └── crm_tracker.py          # Script 5
+└── scenarios/
+    ├── _common.py                              # shared run_routine_probe()
+    ├── bug_logger.py                           # Script 1 — Sheet write
+    ├── calendar_prep.py                        # Script 2 — Calendar → Telegram
+    ├── hn_monitor.py                           # Script 3 — HN → Telegram
+    ├── periodic_reminder.py                    # Script 4 — periodic reminder
+    ├── crm_tracker.py                          # Script 5 — Gmail → Sheets CRM
+    ├── manual_trigger.py                       # POST /api/routines/<id>/trigger
+    ├── lifecycle.py                            # disable/enable/delete via API
+    ├── dedup_cooldown.py                       # cooldown_secs back-to-back
+    ├── nl_routine_create.py                    # NL → routine_create tool
+    ├── nl_schedule_update.py                   # NL → routine_update tool
+    ├── telegram_channel_install.py             # install + setup → Active
+    ├── telegram_round_trip.py                  # webhook → agent → reply
+    ├── routine_visibility_from_telegram.py     # paired user → list routines
+    ├── manual_trigger_from_telegram.py         # paired user → trigger now
+    ├── first_immediate_run.py                  # fire_immediately ≤ 10s
+    ├── idempotent_disable_enable.py            # double-toggle is no-op
+    ├── cron_timing_accuracy.py                 # next_fire_at ±10s
+    └── log_assertions.py                       # gateway log scan (runs LAST)
 ```
 
 `scripts/live-canary/run.sh` dispatches `LANE=workflow-canary` here, and
 `.github/workflows/live-canary.yml` has a matching `workflow-canary`
 job in the live-canary matrix.
 
+## Mock surfaces
+
+Every external Google / external service is replaced by a single-port
+aiohttp mock in this directory. Mocks announce their port via
+`MOCK_<NAME>_PORT=<n>` on stdout (caught by `wait_for_port_line`),
+expose Bot-API-equivalent handlers under their canonical paths, and
+provide `/__mock/...` test hooks for seeding / draining / resetting.
+
+`run_workflow_canary.py` builds a comma-joined
+`IRONCLAW_TEST_HTTP_REMAP` for the gateway env so outbound HTTP for
+`api.telegram.org`, `sheets.googleapis.com`, `www.googleapis.com`,
+`news.ycombinator.com`, `gmail.googleapis.com`, and
+`api.search.brave.com` lands at the corresponding mock loopback
+address.
+
 ## What's covered today
 
-Every scenario runs the same shape:
+20 probes across 7 phases:
 
-1. Insert a `Lightweight` cron routine directly into libSQL with
-   `next_fire_at` backdated by 60 s. The routine's prompt embeds
-   a `[CANARY-WORKFLOW-<key>]` sentinel that the mock LLM matches
-   to emit a deterministic `http` tool call to
-   `api.telegram.org/bot.../sendMessage`.
-2. Wait for the cron ticker (configured to 2 s in
-   `run_workflow_canary.py`) to pick it up.
-3. The mock LLM (`tests/e2e/mock_llm.py`) responds with the http
-   tool call; the routine engine dispatches it.
-4. The http tool's request is rewritten by
-   `IRONCLAW_TEST_HTTP_REMAP=api.telegram.org=<mock>` (carried
-   through to the routine's `JobContext` via the engine's
-   `http_interceptor` field — see fix in `src/agent/routine_engine.rs`).
-5. Mock Telegram captures the sendMessage on
-   `/__mock/sent_messages`; the scenario asserts the per-scenario
-   ack text (`[canary-workflow:<key>] ack`) matches.
+**Phase 1 (Sheets):** bug_logger asserts the routine fires AND a row
+gets appended to mock_sheets with the correct timestamp / message /
+source shape. Catches the canonical "expected a sequence" regression.
 
-This catches regressions in:
-- `RoutineEngine::spawn_cron_ticker` and the `check_cron_triggers` loop
-- `RoutineAction::Lightweight` execution path
-- Routine state machine (`routines.next_fire_at` → `routine_runs.status`)
-- DB serialization of `action_config` / `trigger_config`
-- Mock LLM `TOOL_CALL_PATTERNS` matching the canary sentinel
-- http tool dispatch from a routine action
-- `IRONCLAW_TEST_HTTP_REMAP` interceptor propagation through
-  the routine engine's `JobContext` (regression-tested by the fact
-  that absent this propagation, the http call goes to real
-  api.telegram.org and 401s on the fake bot token, leaving
-  mock_telegram empty — exactly what we caught and fixed)
-- Mock Telegram bot recording the inbound sendMessage shape
+**Phase 2 (Calendar):** calendar_prep seeds a deterministic event,
+asserts mock_calendar saw events.list AND mock_telegram received a
+prep briefing referencing the seeded event title.
 
-What's not covered yet (per-scenario follow-ups):
-- Telegram channel install + bot-token seed via `/api/extensions/telegram/setup`
-  (the current canary uses the http tool directly, bypassing the
-  channel install path)
-- Mock Sheets write semantics (`values:append`, header-row creation)
-- Mock Google Calendar reads
-- Mock Hacker News HTTP scrape
-- LLM-driven email classification (for the CRM tracker, would need
-  per-email-shape canned responses in mock_llm.py)
-- Cross-scenario UI flows (routine "Run now" button, manual-trigger
-  from Telegram, schedule update via NL chat, disable/enable/delete)
+**Phase 3 (HN):** hn_monitor seeds two posts, asserts mock_hn
+received the /newest fetch AND mock_telegram captured a summary
+mentioning both posts.
+
+**Phase 4 (CRM):** crm_tracker seeds 1 lead + 1 newsletter + 1
+receipt, asserts exactly ONE row gets appended to mock_sheets (the
+lead only) with all 6 expected columns.
+
+**Phase 5 (Telegram):** telegram_channel_install runs the full
+install + capability patch + setup flow and asserts the channel
+reaches the installed/active state. telegram_round_trip posts an
+inbound webhook and asserts mock_telegram receives an outbound
+sendMessage with the actual chat_id (not 'default').
+routine_visibility_from_telegram + manual_trigger_from_telegram
+exercise the post-pairing chat path.
+
+**Phase 6 (Stability):** first_immediate_run asserts a backdated
+routine fires within 10s. log_assertions runs LAST and scans
+`gateway.log` for known fail-criterion regex patterns
+(`chat_id 'default'`, `parsed naive timestamp without timezone`,
+`retry after None`, `expected a sequence`).
+
+**Phase 7 (Timing):** cron_timing_accuracy sets `next_fire_at` to
+"now + 5s" and asserts the actual fire happens within ±10s.
+idempotent_disable_enable double-toggles enable/disable and asserts
+both halves are no-ops.
 
 ## How to run locally
-
-Foundation (build + venv + Playwright skipped):
 
 ```bash
 tests/e2e/.venv/bin/python scripts/workflow_canary/run_workflow_canary.py \
   --skip-build --skip-python-bootstrap
 ```
 
-Output:
+Run a single scenario:
 
-```
-[workflow-canary] mock telegram listening at http://127.0.0.1:51306
-[workflow-canary] === Script 1 — Telegram → Google Sheet Bug Logger ===
-[workflow-canary] === Script 2 — Calendar Prep Assistant ===
-[workflow-canary] === Script 3 — Hacker News Keyword Monitor ===
-[workflow-canary] === Script 4 — Periodic Reminder via Telegram ===
-[workflow-canary] === Script 5 — Email → CRM Inbound Tracker ===
-[workflow-canary] all 5 probe(s) passed.
+```bash
+tests/e2e/.venv/bin/python scripts/workflow_canary/run_workflow_canary.py \
+  --skip-build --skip-python-bootstrap \
+  --scenario telegram_round_trip
 ```
 
 CLI matches `run_live_canary.py` so the same `scripts/live-canary/run.sh`
@@ -102,27 +122,32 @@ dispatcher drives both.
 ## Adding a new scenario
 
 1. Drop a `scenarios/<name>.py` exporting an `async def run(*, stack,
-   mock_telegram_url, output_dir, log_dir) -> list[ProbeResult]`.
-2. For Phase 1A coverage, delegate to
+   mock_telegram_url, mock_sheets_url=None, mock_calendar_url=None,
+   mock_hn_url=None, mock_gmail_url=None, mock_web_search_url=None,
+   output_dir, log_dir) -> list[ProbeResult]`.
+2. For routine-only coverage, delegate to
    `scenarios._common.run_routine_probe()` — pass the script-specific
    `provider` / `mode` / `routine_name` / `prompt` and you're done.
-3. Register in `SCENARIOS` in `run_workflow_canary.py`.
-4. For Phase 1B side-effect verification, extend the scenario's `run`
-   to drive the relevant API (e.g. `/api/extensions/telegram/setup`,
-   reset the mock, fire the routine, then assert on
-   `/__mock/sent_messages`). The `ProbeResult.details` dict is the
-   right place to capture observed side effects for the artifact.
+3. For side-effect verification, drive the relevant API directly and
+   read back from the appropriate mock's `/__mock/` endpoint. The
+   `ProbeResult.details` dict is the right place to capture observed
+   side effects for the artifact.
+4. Register in `SCENARIOS` in `run_workflow_canary.py`. Order matters
+   — `log_assertions` should always run last so it sees the full log
+   surface.
+5. For new mocks, add a `<name>_mock.py` in this directory, a
+   `_spawn_mock_<name>` helper in the runner, and an entry in the
+   comma-joined `IRONCLAW_TEST_HTTP_REMAP`.
 
-## Phase 1B follow-up plan
+## Deferred coverage
 
-For each script, the next coverage layer is:
-
-| Script | Phase 1B work |
-|--------|---------------|
-| 1 — Bug Logger | Telegram channel install + Sheets `values:append` mock; assert row appended after `bug:` message injection |
-| 2 — Calendar Prep | Calendar `events:list` mock + web-search HTTP mock; assert Telegram briefing fires at lead-time |
-| 3 — HN Monitor | HN `/newest` HTTP mock; assert "first immediate run" fires within budget + dedup across runs |
-| 4 — Periodic Reminder | Telegram channel install + bot-token seed; assert mock `sendMessage` received the reminder text |
-| 5 — CRM Tracker | Gmail seeded inbox + Sheets write; mock LLM canned responses for email classification; assert structured columns + dedup |
-
-Each is an independent follow-up commit on top of this PR's foundation.
+- **Real-provider variant** (`workflow-canary-live`) — same probes
+  with real Gmail / Calendar / Sheets credentials. Separate lane.
+- **Auth recovery** (token revocation → auth_required SSE event with
+  valid auth_url) — requires real OAuth setup; covered by
+  `auth-live-canary`.
+- **UI flows** (Approval modal, Reconfigure flow, "Run now" button,
+  Routines tab interactions) — Playwright concerns; belong in
+  `auth-browser-consent` or a new `routine-ui-canary` lane.
+- **App-level dedup across cron fires** — would need a feature on
+  the agent side to track already-reported items; not implemented.

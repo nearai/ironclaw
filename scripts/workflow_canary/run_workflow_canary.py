@@ -131,6 +131,16 @@ SCENARIOS: dict[str, tuple[str, str, str]] = {
         "run",
         "First check fires within 10s (fire_immediately=True)",
     ),
+    "idempotent_disable_enable": (
+        "scripts.workflow_canary.scenarios.idempotent_disable_enable",
+        "run",
+        "Disable / enable double-toggle is idempotent",
+    ),
+    "cron_timing_accuracy": (
+        "scripts.workflow_canary.scenarios.cron_timing_accuracy",
+        "run",
+        "Cron */1 fires within ±15s of minute boundary",
+    ),
     # log_assertions intentionally registered LAST so it scans the
     # gateway log surface produced by every preceding probe.
     "log_assertions": (
