@@ -332,7 +332,7 @@ impl EffectBridgeAdapter {
     async fn enforce_tool_permission(
         &self,
         approval: &ToolApprovalContext<'_>,
-        tool: Option<&dyn Tool>,
+        tool: &dyn Tool,
         user_permission: ToolPermissionResolution,
     ) -> Result<(), EngineError> {
         match user_permission.effective {
@@ -347,8 +347,8 @@ impl EffectBridgeAdapter {
         }
 
         if matches!(
-            tool.map(|tool| tool.requires_approval(approval.parameters)),
-            Some(ApprovalRequirement::Always)
+            tool.requires_approval(approval.parameters),
+            ApprovalRequirement::Always
         ) {
             return Err(Self::gate_paused(
                 "approval",
@@ -453,7 +453,7 @@ impl EffectBridgeAdapter {
                     context: tool_info.context,
                     approval_already_granted: tool_info.approval_already_granted,
                 },
-                Some(tool.as_ref()),
+                tool.as_ref(),
                 user_permission,
             )
             .await?;
@@ -1452,7 +1452,7 @@ impl EffectBridgeAdapter {
                     context,
                     approval_already_granted,
                 },
-                Some(tool.as_ref()),
+                tool.as_ref(),
                 user_permission,
             )
             .await?;

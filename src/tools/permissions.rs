@@ -263,10 +263,15 @@ pub fn effective_permission(
     tool_name: &str,
     overrides: &HashMap<String, PermissionState>,
 ) -> PermissionState {
+    let canonical = tool_name.replace('-', "_");
+    let hyphenated = canonical.replace('_', "-");
+
     overrides
         .get(tool_name)
         .copied()
-        .or_else(|| seeded_default_permission(tool_name))
+        .or_else(|| overrides.get(&canonical).copied())
+        .or_else(|| overrides.get(&hyphenated).copied())
+        .or_else(|| seeded_default_permission(&canonical))
         .unwrap_or(PermissionState::AskEachTime)
 }
 
@@ -405,6 +410,27 @@ mod tests {
             effective_permission("http", &overrides),
             PermissionState::AskEachTime,
             "saved http permission should take precedence over the seeded default"
+        );
+    }
+
+    #[test]
+    fn test_effective_permission_checks_tool_name_aliases() {
+        let mut overrides = HashMap::new();
+        overrides.insert("tool-activate".to_string(), PermissionState::Disabled);
+
+        assert_eq!(
+            effective_permission("tool_activate", &overrides),
+            PermissionState::Disabled,
+            "hyphenated saved override should apply to underscore runtime lookup"
+        );
+
+        overrides.clear();
+        overrides.insert("tool_activate".to_string(), PermissionState::AskEachTime);
+
+        assert_eq!(
+            effective_permission("tool-activate", &overrides),
+            PermissionState::AskEachTime,
+            "underscore saved override should apply to hyphenated runtime lookup"
         );
     }
 

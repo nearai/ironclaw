@@ -494,7 +494,8 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         // the seeded baseline in effective_permission().
         // Disabled tools are excluded from the LLM's tool list entirely.
         // AlwaysAllow tools are pre-approved in session so the approval
-        // flow is skipped regardless of intrinsic approval metadata.
+        // flow is skipped unless the tool declares ApprovalRequirement::Always,
+        // which remains an unbypassable hard floor.
         //
         // The SettingsStore is wrapped in CachedSettingsStore so repeated
         // calls within the same session are cheap (in-memory lookup).
@@ -517,10 +518,10 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         };
 
         // Filter tool definitions and collect AlwaysAllow names for session
-        // pre-approval. Effective permissions are authoritative here: tools
-        // resolved to AlwaysAllow are pre-approved regardless of their
-        // intrinsic approval metadata, and AskEachTime/Disabled rows clear that
-        // pre-approval on the next turn.
+        // pre-approval. Effective permissions are authoritative here, but tools
+        // resolved to AlwaysAllow still respect ApprovalRequirement::Always at
+        // execution time. AskEachTime/Disabled rows clear pre-approval on the
+        // next turn.
         let mut to_auto_approve: Vec<String> = Vec::new();
         let tool_defs: Vec<_> = tool_defs
             .into_iter()
