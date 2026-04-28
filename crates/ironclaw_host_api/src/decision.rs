@@ -10,7 +10,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ApprovalRequest;
-use crate::{HostApiError, MountView, NetworkPolicy, ResourceReservationId, SecretHandle};
+use crate::{
+    HostApiError, MountView, NetworkPolicy, ResourceCeiling, ResourceReservationId, SecretHandle,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
@@ -54,6 +56,9 @@ pub enum Obligation {
     ApplyNetworkPolicy {
         policy: NetworkPolicy,
     },
+    EnforceResourceCeiling {
+        ceiling: ResourceCeiling,
+    },
     EnforceOutputLimit {
         bytes: u64,
     },
@@ -69,6 +74,7 @@ pub enum ObligationKind {
     InjectSecretOnce,
     AuditBefore,
     RedactOutput,
+    EnforceResourceCeiling,
     EnforceOutputLimit,
     AuditAfter,
 }
@@ -81,6 +87,7 @@ pub const OBLIGATION_EVALUATION_ORDER: &[ObligationKind] = &[
     ObligationKind::InjectSecretOnce,
     ObligationKind::AuditBefore,
     ObligationKind::RedactOutput,
+    ObligationKind::EnforceResourceCeiling,
     ObligationKind::EnforceOutputLimit,
     ObligationKind::AuditAfter,
 ];
@@ -163,6 +170,7 @@ impl Obligation {
             Self::UseScopedMounts { .. } => ObligationKind::UseScopedMounts,
             Self::InjectSecretOnce { .. } => ObligationKind::InjectSecretOnce,
             Self::ApplyNetworkPolicy { .. } => ObligationKind::ApplyNetworkPolicy,
+            Self::EnforceResourceCeiling { .. } => ObligationKind::EnforceResourceCeiling,
             Self::EnforceOutputLimit { .. } => ObligationKind::EnforceOutputLimit,
         }
     }

@@ -529,8 +529,17 @@ fn action_summaries_use_stable_snake_case_targets() {
 #[test]
 fn obligations_are_unique_and_canonicalized() {
     let reservation_id = ResourceReservationId::new();
+    let ceiling = ResourceCeiling {
+        max_usd: None,
+        max_input_tokens: Some(10),
+        max_output_tokens: None,
+        max_wall_clock_ms: None,
+        max_output_bytes: Some(2048),
+        sandbox: None,
+    };
     let obligations = Obligations::new(vec![
         Obligation::AuditAfter,
+        Obligation::EnforceResourceCeiling { ceiling },
         Obligation::ReserveResources { reservation_id },
         Obligation::AuditBefore,
     ])
@@ -545,6 +554,7 @@ fn obligations_are_unique_and_canonicalized() {
         vec![
             ObligationKind::ReserveResources,
             ObligationKind::AuditBefore,
+            ObligationKind::EnforceResourceCeiling,
             ObligationKind::AuditAfter,
         ]
     );
