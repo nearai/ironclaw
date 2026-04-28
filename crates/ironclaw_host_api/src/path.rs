@@ -43,6 +43,24 @@ pub struct ScopedPath(String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MountAlias(String);
 
+impl fmt::Display for VirtualPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl fmt::Display for ScopedPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl fmt::Display for MountAlias {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 const VIRTUAL_ROOTS: &[&str] = &[
     "/engine",
     "/system/extensions",

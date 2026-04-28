@@ -4041,6 +4041,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-postgres",
+ "tracing",
 ]
 
 [[package]]

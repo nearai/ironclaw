@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    HostApiError, HostPath, MountGrant, MountPermissions, MountView, ScopedPath, VirtualPath,
+    HostApiError, HostPath, MountPermissions, MountView, ScopedPath, VirtualPath,
 };
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
@@ -61,25 +61,25 @@ impl std::fmt::Display for FilesystemOperation {
 pub enum FilesystemError {
     #[error(transparent)]
     Contract(#[from] HostApiError),
-    #[error("permission denied for {operation} on scoped path {path:?}")]
+    #[error("permission denied for {operation} on scoped path {path}")]
     PermissionDenied {
         path: ScopedPath,
         operation: FilesystemOperation,
     },
-    #[error("no backend mount found for virtual path {path:?}")]
+    #[error("no backend mount found for virtual path {path}")]
     MountNotFound { path: VirtualPath },
-    #[error("virtual path not found for {operation} at {path:?}")]
+    #[error("virtual path not found for {operation} at {path}")]
     NotFound {
         path: VirtualPath,
         operation: FilesystemOperation,
     },
-    #[error("virtual path escaped backend mount {path:?}")]
+    #[error("virtual path escaped backend mount {path}")]
     PathOutsideMount { path: VirtualPath },
-    #[error("symlink escapes backend mount at virtual path {path:?}")]
+    #[error("symlink escapes backend mount at virtual path {path}")]
     SymlinkEscape { path: VirtualPath },
-    #[error("backend mount conflict at virtual path {path:?}")]
+    #[error("backend mount conflict at virtual path {path}")]
     MountConflict { path: VirtualPath },
-    #[error("filesystem backend error during {operation} at {path:?}: {reason}")]
+    #[error("filesystem backend error during {operation} at {path}: {reason}")]
     Backend {
         path: VirtualPath,
         operation: FilesystemOperation,
@@ -305,7 +305,7 @@ impl CompositeRootFilesystem {
         self.mounts
             .iter()
             .filter(|mount| {
-                virtual_prefix_matches(mount.descriptor.virtual_root.as_str(), path.as_str())
+                path_prefix_matches(mount.descriptor.virtual_root.as_str(), path.as_str())
             })
             .max_by_key(|mount| mount.descriptor.virtual_root.as_str().len())
             .ok_or_else(|| FilesystemError::MountNotFound { path: path.clone() })
@@ -403,7 +403,7 @@ pub trait RootFilesystem: Send + Sync {
     /// Returns metadata for a canonical virtual path without revealing raw host paths.
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError>;
 
-    /// Deletes a canonical virtual file or directory. Backends that do not support delete must fail closed before side effects.
+    /// Deletes an existing canonical virtual file or directory. Missing paths return [`FilesystemError::NotFound`]; backends that do not support delete must fail closed before side effects.
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         Err(FilesystemError::Backend {
             path: path.clone(),
@@ -485,14 +485,7 @@ where
         path: &ScopedPath,
         operation: FilesystemOperation,
     ) -> Result<VirtualPath, FilesystemError> {
-        let grant =
-            matching_mount(&self.mounts, path).ok_or_else(|| match self.mounts.resolve(path) {
-                Ok(_) => FilesystemError::from(HostApiError::InvalidMount {
-                    value: path.as_str().to_string(),
-                    reason: "scoped path matched no mount grant".to_string(),
-                }),
-                Err(error) => FilesystemError::from(error),
-            })?;
+        let (virtual_path, grant) = self.mounts.resolve_with_grant(path)?;
 
         if !operation_allowed(&grant.permissions, operation) {
             return Err(FilesystemError::PermissionDenied {
@@ -501,20 +494,8 @@ where
             });
         }
 
-        self.mounts.resolve(path).map_err(FilesystemError::from)
+        Ok(virtual_path)
     }
-}
-
-fn matching_mount<'a>(view: &'a MountView, path: &ScopedPath) -> Option<&'a MountGrant> {
-    let raw = path.as_str();
-    view.mounts
-        .iter()
-        .filter(|mount| alias_matches(mount.alias.as_str(), raw))
-        .max_by_key(|mount| mount.alias.as_str().len())
-}
-
-fn alias_matches(alias: &str, path: &str) -> bool {
-    path == alias || path.starts_with(&format!("{alias}/"))
 }
 
 fn operation_allowed(permissions: &MountPermissions, operation: FilesystemOperation) -> bool {
@@ -523,6 +504,8 @@ fn operation_allowed(permissions: &MountPermissions, operation: FilesystemOperat
         FilesystemOperation::WriteFile => permissions.write,
         FilesystemOperation::AppendFile => permissions.write,
         FilesystemOperation::ListDir => permissions.list,
+        // Stat is metadata-only: either read authority or list authority reveals
+        // equivalent existence/type information without file contents.
         FilesystemOperation::Stat => permissions.read || permissions.list,
         FilesystemOperation::Delete => permissions.delete,
         FilesystemOperation::CreateDirAll => permissions.write,
@@ -547,6 +530,11 @@ impl LocalFilesystem {
         Self::default()
     }
 
+    /// Mounts a host directory during trusted setup.
+    ///
+    /// This API is intentionally synchronous because it mutates in-memory mount
+    /// configuration and is not part of the async runtime operation path. Async
+    /// file operations after mount setup use `tokio::fs`.
     pub fn mount_local(
         &mut self,
         virtual_root: VirtualPath,
@@ -665,7 +653,7 @@ impl LocalFilesystem {
         let mount = self
             .mounts
             .iter()
-            .filter(|mount| virtual_prefix_matches(mount.virtual_root.as_str(), path.as_str()))
+            .filter(|mount| path_prefix_matches(mount.virtual_root.as_str(), path.as_str()))
             .max_by_key(|mount| mount.virtual_root.as_str().len())
             .ok_or_else(|| FilesystemError::MountNotFound { path: path.clone() })?;
 
@@ -788,7 +776,7 @@ impl RootFilesystem for LocalFilesystem {
     }
 }
 
-fn virtual_prefix_matches(prefix: &str, path: &str) -> bool {
+fn path_prefix_matches(prefix: &str, path: &str) -> bool {
     path == prefix || path.starts_with(&format!("{prefix}/"))
 }
 
@@ -853,6 +841,12 @@ fn io_error(
     operation: FilesystemOperation,
     error: std::io::Error,
 ) -> FilesystemError {
+    tracing::debug!(
+        virtual_path = path.as_str(),
+        %operation,
+        error = %error,
+        "local filesystem backend error"
+    );
     if error.kind() == std::io::ErrorKind::NotFound {
         FilesystemError::NotFound { path, operation }
     } else {
@@ -954,7 +948,7 @@ impl RootFilesystem for PostgresRootFilesystem {
     async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
         let client = self.client().await?;
         if matches!(
-            self.exact_entry(path).await?,
+            self.exact_entry_with_client(&client, path).await?,
             Some((_, FileType::Directory))
         ) {
             return Err(FilesystemError::Backend {
@@ -963,6 +957,9 @@ impl RootFilesystem for PostgresRootFilesystem {
                 reason: "cannot append to a directory".to_string(),
             });
         }
+        // TODO(reborn): append rewrites the whole DB row. Do not use this path
+        // for high-volume JSONL/event streams; route those through typed event
+        // stores or append-capable artifact backends instead.
         client
             .execute(
                 r#"
@@ -981,7 +978,8 @@ impl RootFilesystem for PostgresRootFilesystem {
     }
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        let exact_entry = self.exact_entry(path).await?;
+        let client = self.client().await?;
+        let exact_entry = self.exact_entry_with_client(&client, path).await?;
         if matches!(exact_entry, Some((_, FileType::File))) {
             return Err(FilesystemError::Backend {
                 path: path.clone(),
@@ -990,7 +988,7 @@ impl RootFilesystem for PostgresRootFilesystem {
             });
         }
         let rows = self
-            .child_entries(path, FilesystemOperation::ListDir)
+            .child_entries_with_client(&client, path, FilesystemOperation::ListDir)
             .await?;
         let children = direct_children(path, rows);
         if matches!(exact_entry, Some((_, FileType::Directory))) && is_not_found(&children) {
@@ -1000,14 +998,15 @@ impl RootFilesystem for PostgresRootFilesystem {
     }
 
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        if let Some((len, file_type)) = self.exact_entry(path).await? {
+        let client = self.client().await?;
+        if let Some((len, file_type)) = self.exact_entry_with_client(&client, path).await? {
             return Ok(FileStat {
                 path: path.clone(),
                 file_type,
                 len,
             });
         }
-        if self.has_child_entry(path).await? {
+        if self.has_child_entry_with_client(&client, path).await? {
             return Ok(FileStat {
                 path: path.clone(),
                 file_type: FileType::Directory,
@@ -1020,13 +1019,16 @@ impl RootFilesystem for PostgresRootFilesystem {
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let client = self.client().await?;
         let child_pattern = child_path_like_pattern(path);
-        client
+        let deleted = client
             .execute(
                 "DELETE FROM root_filesystem_entries WHERE path = $1 OR path LIKE $2 ESCAPE '!'",
                 &[&path.as_str(), &child_pattern],
             )
             .await
             .map_err(|error| db_error(path.clone(), FilesystemOperation::Delete, error))?;
+        if deleted == 0 {
+            return Err(not_found(path.clone(), FilesystemOperation::Delete));
+        }
         Ok(())
     }
 
@@ -1077,11 +1079,11 @@ impl RootFilesystem for PostgresRootFilesystem {
 
 #[cfg(feature = "postgres")]
 impl PostgresRootFilesystem {
-    async fn exact_entry(
+    async fn exact_entry_with_client(
         &self,
+        client: &tokio_postgres::Client,
         path: &VirtualPath,
     ) -> Result<Option<(u64, FileType)>, FilesystemError> {
-        let client = self.client().await?;
         let row = client
             .query_opt(
                 "SELECT OCTET_LENGTH(contents)::bigint AS len, is_dir FROM root_filesystem_entries WHERE path = $1",
@@ -1103,12 +1105,12 @@ impl PostgresRootFilesystem {
         }))
     }
 
-    async fn child_entries(
+    async fn child_entries_with_client(
         &self,
+        client: &tokio_postgres::Client,
         parent: &VirtualPath,
         operation: FilesystemOperation,
     ) -> Result<Vec<(VirtualPath, u64, FileType)>, FilesystemError> {
-        let client = self.client().await?;
         let pattern = child_path_like_pattern(parent);
         let rows = client
             .query(
@@ -1135,8 +1137,11 @@ impl PostgresRootFilesystem {
             .collect()
     }
 
-    async fn has_child_entry(&self, parent: &VirtualPath) -> Result<bool, FilesystemError> {
-        let client = self.client().await?;
+    async fn has_child_entry_with_client(
+        &self,
+        client: &tokio_postgres::Client,
+        parent: &VirtualPath,
+    ) -> Result<bool, FilesystemError> {
         let pattern = child_path_like_pattern(parent);
         let row = client
             .query_opt(
@@ -1264,6 +1269,9 @@ impl RootFilesystem for LibSqlRootFilesystem {
             });
         }
         let conn = self.connect().await?;
+        // TODO(reborn): append rewrites the whole DB row. Do not use this path
+        // for high-volume JSONL/event streams; route those through typed event
+        // stores or append-capable artifact backends instead.
         conn.execute(
             r#"
             INSERT INTO root_filesystem_entries (path, contents, is_dir, updated_at)
@@ -1319,12 +1327,16 @@ impl RootFilesystem for LibSqlRootFilesystem {
 
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let conn = self.connect().await?;
-        conn.execute(
-            "DELETE FROM root_filesystem_entries WHERE path = ?1 OR path LIKE ?2 ESCAPE '!'",
-            libsql::params![path.as_str(), child_path_like_pattern(path)],
-        )
-        .await
-        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
+        let deleted = conn
+            .execute(
+                "DELETE FROM root_filesystem_entries WHERE path = ?1 OR path LIKE ?2 ESCAPE '!'",
+                libsql::params![path.as_str(), child_path_like_pattern(path)],
+            )
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
+        if deleted == 0 {
+            return Err(not_found(path.clone(), FilesystemOperation::Delete));
+        }
         Ok(())
     }
 

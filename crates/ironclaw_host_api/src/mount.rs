@@ -102,6 +102,14 @@ impl MountView {
     }
 
     pub fn resolve(&self, path: &ScopedPath) -> Result<VirtualPath, HostApiError> {
+        self.resolve_with_grant(path)
+            .map(|(virtual_path, _grant)| virtual_path)
+    }
+
+    pub fn resolve_with_grant(
+        &self,
+        path: &ScopedPath,
+    ) -> Result<(VirtualPath, &MountGrant), HostApiError> {
         let raw = path.as_str();
         let mount = self
             .mounts
@@ -116,7 +124,7 @@ impl MountView {
             .strip_prefix(mount.alias.as_str())
             .unwrap_or_default()
             .trim_start_matches('/');
-        mount.target.join_tail(tail)
+        Ok((mount.target.join_tail(tail)?, mount))
     }
 
     /// Returns true when every child mount is present in the parent with the

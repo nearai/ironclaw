@@ -97,6 +97,15 @@ async fn libsql_root_filesystem_appends_deletes_and_creates_directories() {
             ..
         }
     ));
+
+    let err = filesystem.delete(&path).await.unwrap_err();
+    assert!(matches!(
+        err,
+        FilesystemError::NotFound {
+            operation: FilesystemOperation::Delete,
+            ..
+        }
+    ));
 }
 
 #[cfg(feature = "libsql")]

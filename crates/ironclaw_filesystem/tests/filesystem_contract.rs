@@ -149,6 +149,18 @@ async fn scoped_delete_requires_delete_permission_and_removes_file() {
         .unwrap();
 
     assert!(!storage.path().join("project1/generated.txt").exists());
+
+    let err = can_delete
+        .delete(&ScopedPath::new("/workspace/generated.txt").unwrap())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        FilesystemError::NotFound {
+            operation: FilesystemOperation::Delete,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
@@ -316,6 +328,7 @@ async fn display_errors_do_not_leak_raw_host_paths() {
 
     let display = err.to_string();
     assert!(display.contains("/projects/missing.txt"));
+    assert!(!display.contains("VirtualPath("));
     assert!(!display.contains(&storage.path().display().to_string()));
 }
 
