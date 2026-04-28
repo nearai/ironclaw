@@ -1,5 +1,11 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
+use async_trait::async_trait;
 use ironclaw_authorization::*;
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::{DirEntry, FileStat, FilesystemError, LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 
 #[tokio::test]
@@ -550,6 +556,45 @@ async fn filesystem_lease_store_persists_and_reloads_issued_leases() {
 }
 
 #[tokio::test]
+async fn filesystem_lease_store_lists_from_owner_index_without_scanning_invocation_roots() {
+    let fs = CountingFilesystem::new(engine_filesystem());
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let store = FilesystemCapabilityLeaseStore::new(&fs);
+    let mut expected = Vec::new();
+
+    for _ in 0..3 {
+        let scope = execution_context(CapabilitySet::default()).resource_scope;
+        let lease = CapabilityLease::new(
+            scope,
+            grant_for(
+                descriptor.id.clone(),
+                Principal::Extension(context.extension_id.clone()),
+                vec![EffectKind::DispatchCapability],
+            ),
+        );
+        expected.push(lease.grant.id);
+        store.issue(lease).await.unwrap();
+    }
+
+    fs.reset_list_dir_calls();
+    let leases = store.leases_for_scope(&context.resource_scope).await;
+
+    let mut actual = leases
+        .into_iter()
+        .map(|lease| lease.grant.id)
+        .collect::<Vec<_>>();
+    actual.sort_by_key(|lease_id| lease_id.as_uuid());
+    expected.sort_by_key(|lease_id| lease_id.as_uuid());
+    assert_eq!(actual, expected);
+    assert_eq!(
+        fs.list_dir_calls(),
+        0,
+        "indexed lease listing should not scan every invocation directory"
+    );
+}
+
+#[tokio::test]
 async fn filesystem_lease_store_persists_revoke_claim_and_consume() {
     let fs = engine_filesystem();
     let context = execution_context(CapabilitySet::default());
@@ -672,6 +717,60 @@ async fn revoked_lease_no_longer_authorizes_dispatch() {
             reason: DenyReason::MissingGrant
         }
     ));
+}
+
+struct CountingFilesystem {
+    inner: LocalFilesystem,
+    list_dir_calls: Arc<AtomicUsize>,
+}
+
+impl CountingFilesystem {
+    fn new(inner: LocalFilesystem) -> Self {
+        Self {
+            inner,
+            list_dir_calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn reset_list_dir_calls(&self) {
+        self.list_dir_calls.store(0, Ordering::SeqCst);
+    }
+
+    fn list_dir_calls(&self) -> usize {
+        self.list_dir_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for CountingFilesystem {
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        self.inner.read_file(path).await
+    }
+
+    async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        self.inner.write_file(path, bytes).await
+    }
+
+    async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        self.inner.append_file(path, bytes).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.list_dir_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.create_dir_all(path).await
+    }
 }
 
 fn descriptor(id: CapabilityId) -> CapabilityDescriptor {

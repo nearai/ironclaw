@@ -7,7 +7,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use async_trait::async_trait;
@@ -297,7 +297,7 @@ where
     F: RootFilesystem,
 {
     filesystem: &'a F,
-    lock: tokio::sync::Mutex<()>,
+    mutation_locks: Mutex<HashMap<CapabilityLeaseOwnerKey, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl<'a, F> FilesystemCapabilityLeaseStore<'a, F>
@@ -307,8 +307,18 @@ where
     pub fn new(filesystem: &'a F) -> Self {
         Self {
             filesystem,
-            lock: tokio::sync::Mutex::new(()),
+            mutation_locks: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn mutation_lock(&self, scope: &ResourceScope) -> Arc<tokio::sync::Mutex<()>> {
+        let key = CapabilityLeaseOwnerKey::new(scope);
+        self.mutation_locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(key)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     async fn read_lease(
@@ -332,6 +342,69 @@ where
             .write_file(&path, &bytes)
             .await
             .map_err(lease_persistence_error)
+    }
+
+    async fn read_lease_index(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Option<Vec<VirtualPath>>, CapabilityLeaseError> {
+        let path = lease_index_path(scope)?;
+        let bytes = match self.filesystem.read_file(&path).await {
+            Ok(bytes) => bytes,
+            Err(error) if is_not_found(&error) => return Ok(None),
+            Err(error) => return Err(lease_persistence_error(error)),
+        };
+        let index: CapabilityLeaseIndex = deserialize(&bytes)?;
+        Ok(Some(index.paths))
+    }
+
+    async fn write_lease_index(
+        &self,
+        scope: &ResourceScope,
+        mut paths: Vec<VirtualPath>,
+    ) -> Result<(), CapabilityLeaseError> {
+        paths.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        paths.dedup_by(|left, right| left.as_str() == right.as_str());
+        let path = lease_index_path(scope)?;
+        let bytes = serialize_pretty(&CapabilityLeaseIndex { paths })?;
+        self.filesystem
+            .write_file(&path, &bytes)
+            .await
+            .map_err(lease_persistence_error)
+    }
+
+    async fn index_lease_path(
+        &self,
+        scope: &ResourceScope,
+        path: VirtualPath,
+    ) -> Result<(), CapabilityLeaseError> {
+        let mut paths = self.read_lease_index(scope).await?.unwrap_or_default();
+        if !paths.iter().any(|existing| existing == &path) {
+            paths.push(path);
+        }
+        self.write_lease_index(scope, paths).await
+    }
+
+    async fn list_lease_paths_from_index_or_scan(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<VirtualPath>, CapabilityLeaseError> {
+        if let Some(paths) = self.read_lease_index(scope).await? {
+            return Ok(paths);
+        }
+        self.scan_lease_paths(scope).await
+    }
+
+    async fn scan_lease_paths(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<VirtualPath>, CapabilityLeaseError> {
+        let roots = self.list_invocation_roots(scope).await?;
+        let mut paths = Vec::new();
+        for root in roots {
+            paths.extend(self.list_lease_files(&root).await?);
+        }
+        Ok(paths)
     }
 
     async fn list_invocation_roots(
@@ -386,7 +459,10 @@ where
     F: RootFilesystem,
 {
     async fn issue(&self, lease: CapabilityLease) -> Result<CapabilityLease, CapabilityLeaseError> {
-        let _guard = self.lock.lock().await;
+        let lock = self.mutation_lock(&lease.scope);
+        let _guard = lock.lock().await;
+        self.index_lease_path(&lease.scope, lease_path(&lease.scope, lease.grant.id)?)
+            .await?;
         self.write_lease(&lease).await?;
         Ok(lease)
     }
@@ -396,7 +472,8 @@ where
         scope: &ResourceScope,
         lease_id: CapabilityGrantId,
     ) -> Result<CapabilityLease, CapabilityLeaseError> {
-        let _guard = self.lock.lock().await;
+        let lock = self.mutation_lock(scope);
+        let _guard = lock.lock().await;
         let mut lease = self
             .read_lease(scope, lease_id)
             .await?
@@ -420,7 +497,8 @@ where
         lease_id: CapabilityGrantId,
         invocation_fingerprint: &InvocationFingerprint,
     ) -> Result<CapabilityLease, CapabilityLeaseError> {
-        let _guard = self.lock.lock().await;
+        let lock = self.mutation_lock(scope);
+        let _guard = lock.lock().await;
         let mut lease = self
             .read_lease(scope, lease_id)
             .await?
@@ -436,7 +514,8 @@ where
         scope: &ResourceScope,
         lease_id: CapabilityGrantId,
     ) -> Result<CapabilityLease, CapabilityLeaseError> {
-        let _guard = self.lock.lock().await;
+        let lock = self.mutation_lock(scope);
+        let _guard = lock.lock().await;
         let mut lease = self
             .read_lease(scope, lease_id)
             .await?
@@ -458,18 +537,13 @@ where
     }
 
     async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease> {
-        let Ok(roots) = self.list_invocation_roots(scope).await else {
+        let Ok(paths) = self.list_lease_paths_from_index_or_scan(scope).await else {
             return Vec::new();
         };
         let mut leases = Vec::new();
-        for root in roots {
-            let Ok(files) = self.list_lease_files(&root).await else {
-                continue;
-            };
-            for path in files {
-                if let Ok(lease) = self.read_lease_file(&path).await {
-                    leases.push(lease);
-                }
+        for path in paths {
+            if let Ok(lease) = self.read_lease_file(&path).await {
+                leases.push(lease);
             }
         }
         let mut leases = leases
@@ -508,6 +582,28 @@ impl CapabilityLeaseKey {
             lease_id,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CapabilityLeaseOwnerKey {
+    tenant_id: TenantId,
+    user_id: UserId,
+    agent_id: Option<AgentId>,
+}
+
+impl CapabilityLeaseOwnerKey {
+    fn new(scope: &ResourceScope) -> Self {
+        Self {
+            tenant_id: scope.tenant_id.clone(),
+            user_id: scope.user_id.clone(),
+            agent_id: scope.agent_id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct CapabilityLeaseIndex {
+    paths: Vec<VirtualPath>,
 }
 
 /// Authorizer that combines request-scoped grants with active capability leases.
@@ -705,6 +801,14 @@ fn lease_path(
     VirtualPath::new(format!(
         "{}/{lease_id}.json",
         lease_invocation_root(scope)?.as_str()
+    ))
+    .map_err(lease_host_api_error)
+}
+
+fn lease_index_path(scope: &ResourceScope) -> Result<VirtualPath, CapabilityLeaseError> {
+    VirtualPath::new(format!(
+        "{}/_lease_index.json",
+        lease_tenant_user_root(scope)?.as_str()
     ))
     .map_err(lease_host_api_error)
 }
