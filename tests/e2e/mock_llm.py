@@ -173,7 +173,7 @@ TOOL_CALL_PATTERNS = [
         "routine_update",
         lambda _: {
             "name": "canary-nl-update-target",
-            "schedule": "0 */5 * * *",
+            "schedule": "0 */6 * * *",
         },
     ),
     # Workflow-canary Sheet-write side-effect probe. When a routine's

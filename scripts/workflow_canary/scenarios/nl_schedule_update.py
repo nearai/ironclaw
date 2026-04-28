@@ -2,9 +2,10 @@
 "change the schedule via chat" assertion (Script 4 PHASE 5.1).
 
 Original NL surface:
-- Script 4 PHASE 5.1: "change the dog walk reminder to every 5 minutes"
-  → "Routine updates successfully. next_fire_at shifts to ~5 minutes
-  from now. No error about 'cannot update schedule on non-cron routine.'"
+- Script 4 PHASE 5.1: "change the routine schedule via chat"
+  → "Routine updates successfully. trigger_config.schedule shifts to
+  the new cadence. No error about 'cannot update schedule on
+  non-cron routine.'"
 
 Back-end mechanism: the agent receives the NL message, decides to call
 ``routine_update`` with the target routine's name + new schedule,
@@ -16,7 +17,7 @@ Coverage:
    "old" schedule "*/1 * * * *".
 2. POST /api/chat/send with a message tagged [CANARY-WORKFLOW-NL-UPDATE].
 3. Mock LLM emits a deterministic routine_update tool call with the
-   "new" schedule "0 */5 * * *" (every 5 hours).
+   "new" schedule "0 */6 * * *" (every 6 hours).
 4. Poll the libSQL routines row; assert trigger_config.schedule
    updates to the new value.
 5. Assert the routine's other fields (name, action_type, enabled)
@@ -39,7 +40,7 @@ from scripts.workflow_canary.routines import insert_lightweight_cron_routine
 
 ROUTINE_NAME = "canary-nl-update-target"
 OLD_SCHEDULE = "*/1 * * * *"
-EXPECTED_NEW_SCHEDULE = "0 */5 * * *"
+EXPECTED_NEW_SCHEDULE = "0 */6 * * *"
 
 
 async def _open_thread(base_url: str, gateway_token: str) -> str:
@@ -148,7 +149,7 @@ async def run(
             thread_id,
             (
                 f"Please change the schedule of {ROUTINE_NAME!r} to fire "
-                "every 5 hours.\n\n[CANARY-WORKFLOW-NL-UPDATE]"
+                "every 6 hours.\n\n[CANARY-WORKFLOW-NL-UPDATE]"
             ),
         )
 
