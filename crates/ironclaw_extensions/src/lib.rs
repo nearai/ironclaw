@@ -258,6 +258,7 @@ pub struct ExtensionRegistry {
     packages: HashMap<ExtensionId, ExtensionPackage>,
     capabilities: HashMap<CapabilityId, CapabilityDescriptor>,
     extension_order: Vec<ExtensionId>,
+    capability_order: Vec<CapabilityId>,
 }
 
 impl ExtensionRegistry {
@@ -266,6 +267,8 @@ impl ExtensionRegistry {
     }
 
     pub fn insert(&mut self, package: ExtensionPackage) -> Result<(), ExtensionError> {
+        validate_package_consistency(&package)?;
+
         if self.packages.contains_key(&package.id) {
             return Err(ExtensionError::DuplicateExtension { id: package.id });
         }
@@ -290,6 +293,7 @@ impl ExtensionRegistry {
         }
 
         for descriptor in &package.capabilities {
+            self.capability_order.push(descriptor.id.clone());
             self.capabilities
                 .insert(descriptor.id.clone(), descriptor.clone());
         }
@@ -313,8 +317,28 @@ impl ExtensionRegistry {
     }
 
     pub fn capabilities(&self) -> impl Iterator<Item = &CapabilityDescriptor> {
-        self.capabilities.values()
+        self.capability_order
+            .iter()
+            .filter_map(|id| self.capabilities.get(id))
     }
+}
+
+fn validate_package_consistency(package: &ExtensionPackage) -> Result<(), ExtensionError> {
+    let expected = ExtensionPackage::from_manifest(package.manifest.clone(), package.root.clone())?;
+    if package.id != expected.id {
+        return Err(ExtensionError::InvalidManifest {
+            reason: format!(
+                "package id {} does not match manifest/root id {}",
+                package.id, expected.id
+            ),
+        });
+    }
+    if package.capabilities != expected.capabilities {
+        return Err(ExtensionError::InvalidManifest {
+            reason: "package capability descriptors do not match manifest declarations".to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Filesystem-backed extension discovery.

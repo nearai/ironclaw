@@ -118,16 +118,16 @@ fn invalid_manifest_asset_paths_are_rejected() {
 }
 
 #[test]
-fn registry_rejects_duplicate_extension_ids_and_capability_ids() {
+fn registry_rejects_duplicate_extension_ids_and_mutated_packages() {
     let package = ExtensionPackage::from_manifest(
         ExtensionManifest::parse(WASM_MANIFEST).unwrap(),
         VirtualPath::new("/system/extensions/echo").unwrap(),
     )
     .unwrap();
     let duplicate_extension = package.clone();
-    let mut duplicate_capability = package.clone();
-    duplicate_capability.id = ExtensionId::new("echo2").unwrap();
-    duplicate_capability.capabilities[0].provider = ExtensionId::new("echo2").unwrap();
+    let mut mutated_package = package.clone();
+    mutated_package.id = ExtensionId::new("echo2").unwrap();
+    mutated_package.capabilities[0].provider = ExtensionId::new("echo2").unwrap();
 
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
@@ -137,8 +137,24 @@ fn registry_rejects_duplicate_extension_ids_and_capability_ids() {
         Err(ExtensionError::DuplicateExtension { .. })
     ));
     assert!(matches!(
-        registry.insert(duplicate_capability),
-        Err(ExtensionError::DuplicateCapability { .. })
+        registry.insert(mutated_package),
+        Err(ExtensionError::InvalidManifest { reason }) if reason.contains("does not match")
+    ));
+}
+
+#[test]
+fn registry_revalidates_public_package_descriptors_against_manifest() {
+    let mut package = ExtensionPackage::from_manifest(
+        ExtensionManifest::parse(WASM_MANIFEST).unwrap(),
+        VirtualPath::new("/system/extensions/echo").unwrap(),
+    )
+    .unwrap();
+    package.capabilities[0].runtime = RuntimeKind::System;
+
+    let mut registry = ExtensionRegistry::new();
+    assert!(matches!(
+        registry.insert(package),
+        Err(ExtensionError::InvalidManifest { reason }) if reason.contains("manifest")
     ));
 }
 
@@ -154,8 +170,50 @@ fn registry_rejects_duplicate_capability_ids_within_inserted_package() {
     let mut registry = ExtensionRegistry::new();
     assert!(matches!(
         registry.insert(package),
-        Err(ExtensionError::DuplicateCapability { .. })
+        Err(ExtensionError::InvalidManifest { reason }) if reason.contains("manifest")
     ));
+}
+
+#[test]
+fn registry_capabilities_iterate_in_extension_and_manifest_order() {
+    let alpha = ExtensionPackage::from_manifest(
+        ExtensionManifest::parse(ORDERED_CAPABILITIES_MANIFEST).unwrap(),
+        VirtualPath::new("/system/extensions/ordered").unwrap(),
+    )
+    .unwrap();
+    let beta_manifest = ORDERED_CAPABILITIES_MANIFEST
+        .replace("id = \"ordered\"", "id = \"beta\"")
+        .replace("ordered.", "beta.");
+    let beta = ExtensionPackage::from_manifest(
+        ExtensionManifest::parse(&beta_manifest).unwrap(),
+        VirtualPath::new("/system/extensions/beta").unwrap(),
+    )
+    .unwrap();
+
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(alpha).unwrap();
+    registry.insert(beta).unwrap();
+
+    let ids: Vec<_> = registry
+        .capabilities()
+        .map(|descriptor| descriptor.id.as_str().to_string())
+        .collect();
+
+    assert_eq!(
+        ids,
+        vec![
+            "ordered.alpha",
+            "ordered.bravo",
+            "ordered.charlie",
+            "ordered.delta",
+            "ordered.echo",
+            "beta.alpha",
+            "beta.bravo",
+            "beta.charlie",
+            "beta.delta",
+            "beta.echo",
+        ]
+    );
 }
 
 #[tokio::test]
@@ -254,6 +312,53 @@ id = "echo.say"
 description = "Echo text"
 effects = ["dispatch_capability"]
 default_permission = "allow"
+parameters_schema = { type = "object" }
+"#;
+
+const ORDERED_CAPABILITIES_MANIFEST: &str = r#"
+id = "ordered"
+name = "Ordered"
+version = "0.1.0"
+description = "Ordered capability demo extension"
+trust = "sandbox"
+
+[runtime]
+kind = "wasm"
+module = "wasm/ordered.wasm"
+
+[[capabilities]]
+id = "ordered.alpha"
+description = "First capability"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+parameters_schema = { type = "object" }
+
+[[capabilities]]
+id = "ordered.bravo"
+description = "Second capability"
+effects = ["dispatch_capability"]
+default_permission = "ask"
+parameters_schema = { type = "object" }
+
+[[capabilities]]
+id = "ordered.charlie"
+description = "Third capability"
+effects = ["dispatch_capability"]
+default_permission = "deny"
+parameters_schema = { type = "object" }
+
+[[capabilities]]
+id = "ordered.delta"
+description = "Fourth capability"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+parameters_schema = { type = "object" }
+
+[[capabilities]]
+id = "ordered.echo"
+description = "Fifth capability"
+effects = ["dispatch_capability"]
+default_permission = "ask"
 parameters_schema = { type = "object" }
 "#;
 
