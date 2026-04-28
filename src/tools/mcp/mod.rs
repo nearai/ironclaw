@@ -63,17 +63,19 @@ pub(crate) fn normalize_server_name(name: &str) -> String {
     name.replace('-', "_")
 }
 
-pub(crate) fn is_auth_error_message(message: &str) -> bool {
-    let has_word = |word: &str| {
-        message
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .any(|candidate| candidate.eq_ignore_ascii_case(word))
-    };
+fn contains_ascii_word(message: &str, word: &str) -> bool {
+    message
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|candidate| candidate.eq_ignore_ascii_case(word))
+}
 
-    has_word("401")
-        || has_word("unauthorized")
-        || has_word("authentication")
-        || (has_word("400") && (has_word("authorization") || has_word("authenticate")))
+pub(crate) fn is_auth_error_message(message: &str) -> bool {
+    contains_ascii_word(message, "401")
+        || contains_ascii_word(message, "unauthorized")
+        || contains_ascii_word(message, "authentication")
+        || (contains_ascii_word(message, "400")
+            && (contains_ascii_word(message, "authorization")
+                || contains_ascii_word(message, "authenticate")))
 }
 
 #[cfg(test)]
