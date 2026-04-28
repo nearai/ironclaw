@@ -1,3 +1,4 @@
+use chrono::{Duration, Utc};
 use ironclaw_authorization::*;
 use ironclaw_host_api::*;
 use serde_json::json;
@@ -111,6 +112,113 @@ async fn capability_access_denies_when_grant_does_not_cover_declared_effects() {
 
     let decision = GrantAuthorizer::new()
         .authorize_dispatch(&context, &descriptor, &ResourceEstimate::default())
+        .await;
+
+    assert_eq!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::PolicyDenied
+        }
+    );
+}
+
+#[tokio::test]
+async fn capability_access_skips_expired_and_exhausted_grants() {
+    let descriptor = wasm_descriptor();
+    let mut expired = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![EffectKind::DispatchCapability],
+    );
+    expired.constraints.expires_at = Some(Utc::now() - Duration::minutes(1));
+    let mut exhausted = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![EffectKind::DispatchCapability],
+    );
+    exhausted.constraints.max_invocations = Some(0);
+
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch(
+            &execution_context(CapabilitySet {
+                grants: vec![expired, exhausted],
+            }),
+            &descriptor,
+            &ResourceEstimate::default(),
+        )
+        .await;
+
+    assert_eq!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::MissingGrant
+        }
+    );
+}
+
+#[tokio::test]
+async fn capability_access_allows_later_grant_that_covers_effects() {
+    let descriptor = CapabilityDescriptor {
+        effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+        ..wasm_descriptor()
+    };
+    let weak = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![EffectKind::DispatchCapability],
+    );
+    let strong = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![EffectKind::DispatchCapability, EffectKind::Network],
+    );
+
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch(
+            &execution_context(CapabilitySet {
+                grants: vec![weak, strong],
+            }),
+            &descriptor,
+            &ResourceEstimate::default(),
+        )
+        .await;
+
+    assert_eq!(
+        decision,
+        Decision::Allow {
+            obligations: Default::default()
+        }
+    );
+}
+
+#[tokio::test]
+async fn capability_access_denies_when_resource_estimate_exceeds_grant_ceiling() {
+    let descriptor = wasm_descriptor();
+    let mut grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![EffectKind::DispatchCapability],
+    );
+    grant.constraints.resource_ceiling = Some(ResourceCeiling {
+        max_usd: None,
+        max_input_tokens: Some(10),
+        max_output_tokens: None,
+        max_wall_clock_ms: None,
+        max_output_bytes: None,
+        sandbox: None,
+    });
+
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch(
+            &execution_context(CapabilitySet {
+                grants: vec![grant],
+            }),
+            &descriptor,
+            &ResourceEstimate {
+                input_tokens: Some(11),
+                ..ResourceEstimate::default()
+            },
+        )
         .await;
 
     assert_eq!(

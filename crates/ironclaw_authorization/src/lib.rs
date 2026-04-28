@@ -15,8 +15,9 @@ use chrono::Utc;
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, Decision, DenyReason,
-    EffectKind, ExecutionContext, HostApiError, InvocationFingerprint, InvocationId, Principal,
-    ResourceEstimate, ResourceScope, TenantId, UserId, VirtualPath,
+    EffectKind, ExecutionContext, HostApiError, InvocationFingerprint, InvocationId, MissionId,
+    Principal, ProjectId, ResourceCeiling, ResourceEstimate, ResourceScope, TenantId, ThreadId,
+    UserId, VirtualPath,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -61,20 +62,21 @@ impl CapabilityDispatchAuthorizer for GrantAuthorizer {
         &self,
         context: &ExecutionContext,
         descriptor: &CapabilityDescriptor,
-        _estimate: &ResourceEstimate,
+        estimate: &ResourceEstimate,
     ) -> Decision {
-        authorize_from_grants(context, descriptor, context.grants.grants.iter())
+        authorize_from_grants(context, descriptor, estimate, context.grants.grants.iter())
     }
 
     async fn authorize_spawn(
         &self,
         context: &ExecutionContext,
         descriptor: &CapabilityDescriptor,
-        _estimate: &ResourceEstimate,
+        estimate: &ResourceEstimate,
     ) -> Decision {
         authorize_from_grants(
             context,
             &spawn_descriptor(descriptor),
+            estimate,
             context.grants.grants.iter(),
         )
     }
@@ -133,7 +135,7 @@ pub trait CapabilityLeaseStore: Send + Sync {
     /// Persists a scoped lease before any approval record is marked approved.
     async fn issue(&self, lease: CapabilityLease) -> Result<CapabilityLease, CapabilityLeaseError>;
 
-    /// Revokes a lease only within the exact tenant/user/agent/invocation scope that owns it.
+    /// Revokes a lease only within the exact resource-owner/invocation scope that owns it.
     async fn revoke(
         &self,
         scope: &ResourceScope,
@@ -162,7 +164,7 @@ pub trait CapabilityLeaseStore: Send + Sync {
         lease_id: CapabilityGrantId,
     ) -> Result<CapabilityLease, CapabilityLeaseError>;
 
-    /// Lists leases visible to the tenant/user/agent scope without exposing cross-scope records.
+    /// Lists leases visible to the exact resource-owner scope without exposing cross-scope records.
     async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease>;
 
     /// Returns active, unexpired, unexhausted leases for the exact invocation context.
@@ -291,7 +293,7 @@ impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
     }
 }
 
-/// Filesystem-backed capability lease store under tenant/user/agent/invocation-scoped `/engine` paths.
+/// Filesystem-backed capability lease store under resource-owner/invocation-scoped `/engine` paths.
 pub struct FilesystemCapabilityLeaseStore<'a, F>
 where
     F: RootFilesystem,
@@ -568,6 +570,9 @@ struct CapabilityLeaseKey {
     tenant_id: TenantId,
     user_id: UserId,
     agent_id: Option<AgentId>,
+    project_id: Option<ProjectId>,
+    mission_id: Option<MissionId>,
+    thread_id: Option<ThreadId>,
     invocation_id: InvocationId,
     lease_id: CapabilityGrantId,
 }
@@ -578,6 +583,9 @@ impl CapabilityLeaseKey {
             tenant_id: scope.tenant_id.clone(),
             user_id: scope.user_id.clone(),
             agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+            mission_id: scope.mission_id.clone(),
+            thread_id: scope.thread_id.clone(),
             invocation_id: scope.invocation_id,
             lease_id,
         }
@@ -589,6 +597,9 @@ struct CapabilityLeaseOwnerKey {
     tenant_id: TenantId,
     user_id: UserId,
     agent_id: Option<AgentId>,
+    project_id: Option<ProjectId>,
+    mission_id: Option<MissionId>,
+    thread_id: Option<ThreadId>,
 }
 
 impl CapabilityLeaseOwnerKey {
@@ -597,6 +608,9 @@ impl CapabilityLeaseOwnerKey {
             tenant_id: scope.tenant_id.clone(),
             user_id: scope.user_id.clone(),
             agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+            mission_id: scope.mission_id.clone(),
+            thread_id: scope.thread_id.clone(),
         }
     }
 }
@@ -632,7 +646,7 @@ where
         &self,
         context: &ExecutionContext,
         descriptor: &CapabilityDescriptor,
-        _estimate: &ResourceEstimate,
+        estimate: &ResourceEstimate,
     ) -> Decision {
         if context.validate().is_err() {
             return Decision::Deny {
@@ -644,6 +658,7 @@ where
         authorize_from_grants(
             context,
             descriptor,
+            estimate,
             context.grants.grants.iter().chain(lease_grants.iter()),
         )
     }
@@ -652,7 +667,7 @@ where
         &self,
         context: &ExecutionContext,
         descriptor: &CapabilityDescriptor,
-        _estimate: &ResourceEstimate,
+        estimate: &ResourceEstimate,
     ) -> Decision {
         if context.validate().is_err() {
             return Decision::Deny {
@@ -664,6 +679,7 @@ where
         authorize_from_grants(
             context,
             &spawn_descriptor(descriptor),
+            estimate,
             context.grants.grants.iter().chain(lease_grants.iter()),
         )
     }
@@ -680,6 +696,7 @@ fn spawn_descriptor(descriptor: &CapabilityDescriptor) -> CapabilityDescriptor {
 fn authorize_from_grants<'a>(
     context: &ExecutionContext,
     descriptor: &CapabilityDescriptor,
+    estimate: &ResourceEstimate,
     grants: impl Iterator<Item = &'a CapabilityGrant>,
 ) -> Decision {
     if context.validate().is_err() {
@@ -688,23 +705,30 @@ fn authorize_from_grants<'a>(
         };
     }
 
-    let Some(grant) = grants
+    let mut saw_active_matching_grant = false;
+    for grant in grants
         .filter(|grant| grant.capability == descriptor.id)
-        .find(|grant| principal_matches_context(&grant.grantee, context))
-    else {
-        return Decision::Deny {
-            reason: DenyReason::MissingGrant,
-        };
-    };
-
-    if !effects_are_covered(&descriptor.effects, &grant.constraints.allowed_effects) {
-        return Decision::Deny {
-            reason: DenyReason::PolicyDenied,
-        };
+        .filter(|grant| principal_matches_context(&grant.grantee, context))
+        .filter(|grant| grant_is_active(grant))
+    {
+        saw_active_matching_grant = true;
+        if effects_are_covered(&descriptor.effects, &grant.constraints.allowed_effects)
+            && resource_estimate_is_covered(estimate, grant.constraints.resource_ceiling.as_ref())
+        {
+            return Decision::Allow {
+                obligations: Default::default(),
+            };
+        }
     }
 
-    Decision::Allow {
-        obligations: Default::default(),
+    if saw_active_matching_grant {
+        Decision::Deny {
+            reason: DenyReason::PolicyDenied,
+        }
+    } else {
+        Decision::Deny {
+            reason: DenyReason::MissingGrant,
+        }
     }
 }
 
@@ -723,6 +747,59 @@ fn principal_matches_context(principal: &Principal, context: &ExecutionContext) 
 
 fn effects_are_covered(required: &[EffectKind], allowed: &[EffectKind]) -> bool {
     required.iter().all(|effect| allowed.contains(effect))
+}
+
+fn grant_is_active(grant: &CapabilityGrant) -> bool {
+    grant
+        .constraints
+        .expires_at
+        .is_none_or(|expires_at| expires_at > Utc::now())
+        && grant.constraints.max_invocations != Some(0)
+}
+
+fn resource_estimate_is_covered(
+    estimate: &ResourceEstimate,
+    ceiling: Option<&ResourceCeiling>,
+) -> bool {
+    let Some(ceiling) = ceiling else {
+        return true;
+    };
+    options_within_ceiling(estimate.usd.as_ref(), ceiling.max_usd.as_ref())
+        && options_within_ceiling(
+            estimate.input_tokens.as_ref(),
+            ceiling.max_input_tokens.as_ref(),
+        )
+        && options_within_ceiling(
+            estimate.output_tokens.as_ref(),
+            ceiling.max_output_tokens.as_ref(),
+        )
+        && options_within_ceiling(
+            estimate.wall_clock_ms.as_ref(),
+            ceiling.max_wall_clock_ms.as_ref(),
+        )
+        && options_within_ceiling(
+            estimate.output_bytes.as_ref(),
+            ceiling.max_output_bytes.as_ref(),
+        )
+        && ceiling.sandbox.as_ref().is_none_or(|sandbox| {
+            options_within_ceiling(
+                estimate.network_egress_bytes.as_ref(),
+                sandbox.network_egress_bytes.as_ref(),
+            ) && options_within_ceiling(
+                estimate.process_count.as_ref(),
+                sandbox.process_count.as_ref(),
+            )
+        })
+}
+
+fn options_within_ceiling<T>(estimate: Option<&T>, maximum: Option<&T>) -> bool
+where
+    T: PartialOrd,
+{
+    match (estimate, maximum) {
+        (Some(estimate), Some(maximum)) => estimate <= maximum,
+        _ => true,
+    }
 }
 
 fn lease_is_authorizing(lease: &CapabilityLease, context: &ExecutionContext) -> bool {
@@ -792,6 +869,9 @@ fn same_scope_owner(left: &ResourceScope, right: &ResourceScope) -> bool {
     left.tenant_id == right.tenant_id
         && left.user_id == right.user_id
         && left.agent_id == right.agent_id
+        && left.project_id == right.project_id
+        && left.mission_id == right.mission_id
+        && left.thread_id == right.thread_id
 }
 
 fn lease_path(
@@ -828,14 +908,23 @@ fn lease_tenant_user_root(scope: &ResourceScope) -> Result<VirtualPath, Capabili
 }
 
 fn scoped_owner_root(scope: &ResourceScope) -> String {
-    let base = format!(
+    let mut base = format!(
         "/engine/tenants/{}/users/{}",
         scope.tenant_id, scope.user_id
     );
-    match &scope.agent_id {
-        Some(agent_id) => format!("{base}/agents/{agent_id}"),
-        None => base,
+    if let Some(agent_id) = &scope.agent_id {
+        base = format!("{base}/agents/{agent_id}");
     }
+    if let Some(project_id) = &scope.project_id {
+        base = format!("{base}/projects/{project_id}");
+    }
+    if let Some(mission_id) = &scope.mission_id {
+        base = format!("{base}/missions/{mission_id}");
+    }
+    if let Some(thread_id) = &scope.thread_id {
+        base = format!("{base}/threads/{thread_id}");
+    }
+    base
 }
 
 fn serialize_pretty<T>(value: &T) -> Result<Vec<u8>, CapabilityLeaseError>

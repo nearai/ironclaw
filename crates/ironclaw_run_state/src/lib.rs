@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     AgentId, ApprovalRequest, ApprovalRequestId, CapabilityId, HostApiError, InvocationId,
-    ResourceScope, TenantId, UserId, VirtualPath,
+    MissionId, ProjectId, ResourceScope, TenantId, ThreadId, UserId, VirtualPath,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -71,6 +71,9 @@ struct RunStateKey {
     tenant_id: TenantId,
     user_id: UserId,
     agent_id: Option<AgentId>,
+    project_id: Option<ProjectId>,
+    mission_id: Option<MissionId>,
+    thread_id: Option<ThreadId>,
     invocation_id: InvocationId,
 }
 
@@ -80,6 +83,9 @@ impl RunStateKey {
             tenant_id: scope.tenant_id.clone(),
             user_id: scope.user_id.clone(),
             agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+            mission_id: scope.mission_id.clone(),
+            thread_id: scope.thread_id.clone(),
             invocation_id,
         }
     }
@@ -90,6 +96,9 @@ struct ApprovalKey {
     tenant_id: TenantId,
     user_id: UserId,
     agent_id: Option<AgentId>,
+    project_id: Option<ProjectId>,
+    mission_id: Option<MissionId>,
+    thread_id: Option<ThreadId>,
     request_id: ApprovalRequestId,
 }
 
@@ -99,6 +108,9 @@ impl ApprovalKey {
             tenant_id: scope.tenant_id.clone(),
             user_id: scope.user_id.clone(),
             agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+            mission_id: scope.mission_id.clone(),
+            thread_id: scope.thread_id.clone(),
             request_id,
         }
     }
@@ -113,6 +125,11 @@ pub enum RunStateError {
     InvocationAlreadyExists { invocation_id: InvocationId },
     #[error("unknown approval request {request_id}")]
     UnknownApprovalRequest { request_id: ApprovalRequestId },
+    #[error("approval request {request_id} is not pending (status: {status:?})")]
+    ApprovalNotPending {
+        request_id: ApprovalRequestId,
+        status: ApprovalStatus,
+    },
     #[error("invalid storage path: {0}")]
     InvalidPath(String),
     #[error("filesystem error: {0}")]
@@ -132,7 +149,7 @@ impl From<FilesystemError> for RunStateError {
 /// Current-state store for invocation lifecycle.
 #[async_trait]
 pub trait RunStateStore: Send + Sync {
-    /// Creates a running invocation record in the exact tenant/user/agent scope.
+    /// Creates a running invocation record in the exact resource-owner scope.
     async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError>;
 
     /// Marks an invocation blocked on an approval request without granting authority by itself.
@@ -173,7 +190,7 @@ pub trait RunStateStore: Send + Sync {
         invocation_id: InvocationId,
     ) -> Result<Option<RunRecord>, RunStateError>;
 
-    /// Lists invocation records visible to the tenant/user/agent scope only.
+    /// Lists invocation records visible to the exact resource-owner scope only.
     async fn records_for_scope(
         &self,
         scope: &ResourceScope,
@@ -183,7 +200,7 @@ pub trait RunStateStore: Send + Sync {
 /// Store for approval requests emitted by authorization decisions.
 #[async_trait]
 pub trait ApprovalRequestStore: Send + Sync {
-    /// Persists a pending approval request in the tenant/user/agent scope without resolving it.
+    /// Persists a pending approval request in the exact resource-owner scope without resolving it.
     async fn save_pending(
         &self,
         scope: ResourceScope,
@@ -211,7 +228,7 @@ pub trait ApprovalRequestStore: Send + Sync {
         request_id: ApprovalRequestId,
     ) -> Result<ApprovalRecord, RunStateError>;
 
-    /// Lists approval records visible to the tenant/user/agent scope only.
+    /// Lists approval records visible to the exact resource-owner scope only.
     async fn records_for_scope(
         &self,
         scope: &ResourceScope,
@@ -294,6 +311,7 @@ impl RunStateStore for InMemoryRunStateStore {
     ) -> Result<RunRecord, RunStateError> {
         self.update(scope, invocation_id, |record| {
             record.status = RunStatus::BlockedAuth;
+            record.approval_request_id = None;
             record.error_kind = Some(error_kind);
         })
     }
@@ -305,6 +323,7 @@ impl RunStateStore for InMemoryRunStateStore {
     ) -> Result<RunRecord, RunStateError> {
         self.update(scope, invocation_id, |record| {
             record.status = RunStatus::Completed;
+            record.approval_request_id = None;
             record.error_kind = None;
         })
     }
@@ -317,6 +336,7 @@ impl RunStateStore for InMemoryRunStateStore {
     ) -> Result<RunRecord, RunStateError> {
         self.update(scope, invocation_id, |record| {
             record.status = RunStatus::Failed;
+            record.approval_request_id = None;
             record.error_kind = Some(error_kind);
         })
     }
@@ -368,6 +388,12 @@ impl InMemoryApprovalRequestStore {
         let record = records
             .get_mut(&ApprovalKey::new(scope, request_id))
             .ok_or(RunStateError::UnknownApprovalRequest { request_id })?;
+        if record.status != ApprovalStatus::Pending {
+            return Err(RunStateError::ApprovalNotPending {
+                request_id,
+                status: record.status,
+            });
+        }
         record.status = status;
         Ok(record.clone())
     }
@@ -440,7 +466,7 @@ impl ApprovalRequestStore for InMemoryApprovalRequestStore {
     }
 }
 
-/// Filesystem-backed run-state store under tenant/user/agent-scoped `/engine` paths.
+/// Filesystem-backed run-state store under resource-owner-scoped `/engine` paths.
 pub struct FilesystemRunStateStore<'a, F>
 where
     F: RootFilesystem,
@@ -522,6 +548,7 @@ where
             .await?
             .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
         record.status = RunStatus::BlockedAuth;
+        record.approval_request_id = None;
         record.error_kind = Some(error_kind);
         self.write_record(&record).await?;
         Ok(record)
@@ -538,6 +565,7 @@ where
             .await?
             .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
         record.status = RunStatus::Completed;
+        record.approval_request_id = None;
         record.error_kind = None;
         self.write_record(&record).await?;
         Ok(record)
@@ -555,6 +583,7 @@ where
             .await?
             .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
         record.status = RunStatus::Failed;
+        record.approval_request_id = None;
         record.error_kind = Some(error_kind);
         self.write_record(&record).await?;
         Ok(record)
@@ -604,7 +633,7 @@ where
     }
 }
 
-/// Filesystem-backed approval request store under tenant/user/agent-scoped `/engine` paths.
+/// Filesystem-backed approval request store under resource-owner-scoped `/engine` paths.
 pub struct FilesystemApprovalRequestStore<'a, F>
 where
     F: RootFilesystem,
@@ -635,6 +664,12 @@ where
             .get(scope, request_id)
             .await?
             .ok_or(RunStateError::UnknownApprovalRequest { request_id })?;
+        if record.status != ApprovalStatus::Pending {
+            return Err(RunStateError::ApprovalNotPending {
+                request_id,
+                status: record.status,
+            });
+        }
         record.status = status;
         self.write_record(&record).await?;
         Ok(record)
@@ -761,15 +796,24 @@ fn approval_records_root(scope: &ResourceScope) -> Result<VirtualPath, RunStateE
 }
 
 fn tenant_user_root(scope: &ResourceScope) -> String {
-    let base = format!(
+    let mut base = format!(
         "/engine/tenants/{}/users/{}",
         scope.tenant_id.as_str(),
         scope.user_id.as_str()
     );
-    match &scope.agent_id {
-        Some(agent_id) => format!("{base}/agents/{}", agent_id.as_str()),
-        None => base,
+    if let Some(agent_id) = &scope.agent_id {
+        base = format!("{base}/agents/{}", agent_id.as_str());
     }
+    if let Some(project_id) = &scope.project_id {
+        base = format!("{base}/projects/{}", project_id.as_str());
+    }
+    if let Some(mission_id) = &scope.mission_id {
+        base = format!("{base}/missions/{}", mission_id.as_str());
+    }
+    if let Some(thread_id) = &scope.thread_id {
+        base = format!("{base}/threads/{}", thread_id.as_str());
+    }
+    base
 }
 
 fn invalid_path(error: HostApiError) -> RunStateError {
@@ -780,6 +824,9 @@ fn same_scope_owner(left: &ResourceScope, right: &ResourceScope) -> bool {
     left.tenant_id == right.tenant_id
         && left.user_id == right.user_id
         && left.agent_id == right.agent_id
+        && left.project_id == right.project_id
+        && left.mission_id == right.mission_id
+        && left.thread_id == right.thread_id
 }
 
 fn serialize_pretty<T>(value: &T) -> Result<Vec<u8>, RunStateError>

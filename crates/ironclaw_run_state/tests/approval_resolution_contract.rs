@@ -48,6 +48,60 @@ async fn approval_resolution_is_scoped_to_tenant_and_user() {
     ));
 }
 
+#[tokio::test]
+async fn approval_store_rejects_second_resolution_attempt() {
+    let store = InMemoryApprovalRequestStore::new();
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id);
+    let request_id = approval.id;
+
+    store.save_pending(scope.clone(), approval).await.unwrap();
+    store.approve(&scope, request_id).await.unwrap();
+
+    let err = store.deny(&scope, request_id).await.unwrap_err();
+
+    assert!(matches!(
+        err,
+        RunStateError::ApprovalNotPending {
+            request_id: id,
+            status: ApprovalStatus::Approved,
+        } if id == request_id
+    ));
+}
+
+#[tokio::test]
+async fn filesystem_approval_store_rejects_second_resolution_attempt() {
+    let fs = {
+        let storage = tempfile::tempdir().unwrap().keep();
+        let mut fs = ironclaw_filesystem::LocalFilesystem::new();
+        fs.mount_local(
+            VirtualPath::new("/engine").unwrap(),
+            HostPath::from_path_buf(storage),
+        )
+        .unwrap();
+        fs
+    };
+    let store = FilesystemApprovalRequestStore::new(&fs);
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id);
+    let request_id = approval.id;
+
+    store.save_pending(scope.clone(), approval).await.unwrap();
+    store.approve(&scope, request_id).await.unwrap();
+
+    let err = store.deny(&scope, request_id).await.unwrap_err();
+
+    assert!(matches!(
+        err,
+        RunStateError::ApprovalNotPending {
+            request_id: id,
+            status: ApprovalStatus::Approved,
+        } if id == request_id
+    ));
+}
+
 fn sample_scope(invocation_id: InvocationId, tenant: &str, user: &str) -> ResourceScope {
     ResourceScope {
         tenant_id: TenantId::new(tenant).unwrap(),

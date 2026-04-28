@@ -88,7 +88,12 @@ where
         let lease = self.leases.issue(lease).await?;
         if let Err(error) = self.approvals.approve(scope, request_id).await {
             let _ = self.leases.revoke(&lease.scope, lease.grant.id).await;
-            return Err(error.into());
+            return match error {
+                RunStateError::ApprovalNotPending { status, .. } => {
+                    Err(ApprovalResolutionError::NotPending { status })
+                }
+                error => Err(error.into()),
+            };
         }
         self.emit_audit_best_effort(ironclaw_host_api::AuditEnvelope::approval_resolved(
             &record.scope,
@@ -117,7 +122,13 @@ where
             });
         }
 
-        let denied = self.approvals.deny(scope, request_id).await?;
+        let denied = match self.approvals.deny(scope, request_id).await {
+            Ok(denied) => denied,
+            Err(RunStateError::ApprovalNotPending { status, .. }) => {
+                return Err(ApprovalResolutionError::NotPending { status });
+            }
+            Err(error) => return Err(error.into()),
+        };
         self.emit_audit_best_effort(ironclaw_host_api::AuditEnvelope::approval_resolved(
             &denied.scope,
             &denied.request,

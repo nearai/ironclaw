@@ -236,6 +236,32 @@ async fn lease_store_hides_leases_across_agent_scope() {
 }
 
 #[tokio::test]
+async fn lease_store_hides_leases_across_project_scope() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let mut other_scope = context.resource_scope.clone();
+    other_scope.project_id = Some(ProjectId::new("project2").unwrap());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let lease = CapabilityLease::new(
+        context.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    let lease_id = lease.grant.id;
+    leases.issue(lease).await.unwrap();
+
+    assert!(leases.get(&other_scope, lease_id).await.is_none());
+    assert_eq!(leases.leases_for_scope(&other_scope).await, Vec::new());
+    assert!(matches!(
+        leases.revoke(&other_scope, lease_id).await.unwrap_err(),
+        CapabilityLeaseError::UnknownLease { .. }
+    ));
+}
+
+#[tokio::test]
 async fn lease_authorizer_denies_other_agent_context() {
     let leases = InMemoryCapabilityLeaseStore::new();
     let mut context = execution_context(CapabilitySet::default());

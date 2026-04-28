@@ -478,6 +478,171 @@ async fn approval_request_store_isolates_records_by_agent_scope() {
     assert_eq!(store.records_for_scope(&agent_a).await.unwrap().len(), 1);
 }
 
+#[tokio::test]
+async fn run_state_isolates_records_by_project_scope() {
+    let store = InMemoryRunStateStore::new();
+    let invocation_id = InvocationId::new();
+    let project_a = sample_scope(invocation_id, "tenant1", "user1");
+    let mut project_b = project_a.clone();
+    project_b.project_id = Some(ProjectId::new("project2").unwrap());
+
+    store
+        .start(RunStart {
+            invocation_id,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            scope: project_a.clone(),
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        store
+            .get(&project_b, invocation_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store.records_for_scope(&project_b).await.unwrap(),
+        Vec::new()
+    );
+    assert!(matches!(
+        store.complete(&project_b, invocation_id).await.unwrap_err(),
+        RunStateError::UnknownInvocation { .. }
+    ));
+}
+
+#[tokio::test]
+async fn filesystem_run_state_isolates_records_by_project_scope() {
+    let fs = engine_filesystem();
+    let store = FilesystemRunStateStore::new(&fs);
+    let invocation_id = InvocationId::new();
+    let project_a = sample_scope(invocation_id, "tenant1", "user1");
+    let mut project_b = project_a.clone();
+    project_b.project_id = Some(ProjectId::new("project2").unwrap());
+
+    store
+        .start(RunStart {
+            invocation_id,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            scope: project_a.clone(),
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        store
+            .get(&project_b, invocation_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store.records_for_scope(&project_b).await.unwrap(),
+        Vec::new()
+    );
+    assert_eq!(store.records_for_scope(&project_a).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn run_state_clears_stale_approval_request_on_non_approval_transitions() {
+    let store = InMemoryRunStateStore::new();
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    store
+        .start(RunStart {
+            invocation_id,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            scope: scope.clone(),
+        })
+        .await
+        .unwrap();
+    store
+        .block_approval(&scope, invocation_id, approval_request(invocation_id))
+        .await
+        .unwrap();
+
+    let auth_blocked = store
+        .block_auth(&scope, invocation_id, "ExternalAuth".to_string())
+        .await
+        .unwrap();
+    assert_eq!(auth_blocked.approval_request_id, None);
+
+    store
+        .block_approval(&scope, invocation_id, approval_request(invocation_id))
+        .await
+        .unwrap();
+    let failed = store
+        .fail(&scope, invocation_id, "AuthorizationDenied".to_string())
+        .await
+        .unwrap();
+    assert_eq!(failed.approval_request_id, None);
+
+    store
+        .block_approval(&scope, invocation_id, approval_request(invocation_id))
+        .await
+        .unwrap();
+    let completed = store.complete(&scope, invocation_id).await.unwrap();
+    assert_eq!(completed.approval_request_id, None);
+}
+
+#[tokio::test]
+async fn approval_request_store_isolates_records_by_project_scope() {
+    let store = InMemoryApprovalRequestStore::new();
+    let invocation_id = InvocationId::new();
+    let project_a = sample_scope(invocation_id, "tenant1", "user1");
+    let mut project_b = project_a.clone();
+    project_b.project_id = Some(ProjectId::new("project2").unwrap());
+    let approval = approval_request(invocation_id);
+
+    let record = store
+        .save_pending(project_a.clone(), approval)
+        .await
+        .unwrap();
+
+    assert!(
+        store
+            .get(&project_b, record.request.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store.records_for_scope(&project_b).await.unwrap(),
+        Vec::new()
+    );
+    assert_eq!(store.records_for_scope(&project_a).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn filesystem_approval_request_store_isolates_records_by_project_scope() {
+    let fs = engine_filesystem();
+    let store = FilesystemApprovalRequestStore::new(&fs);
+    let invocation_id = InvocationId::new();
+    let project_a = sample_scope(invocation_id, "tenant1", "user1");
+    let mut project_b = project_a.clone();
+    project_b.project_id = Some(ProjectId::new("project2").unwrap());
+    let approval = approval_request(invocation_id);
+
+    let record = store
+        .save_pending(project_a.clone(), approval)
+        .await
+        .unwrap();
+
+    assert!(
+        store
+            .get(&project_b, record.request.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store.records_for_scope(&project_b).await.unwrap(),
+        Vec::new()
+    );
+    assert_eq!(store.records_for_scope(&project_a).await.unwrap().len(), 1);
+}
+
 fn engine_filesystem() -> LocalFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
     let mut fs = LocalFilesystem::new();

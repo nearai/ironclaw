@@ -139,6 +139,48 @@ async fn approving_pending_request_revokes_issued_lease_when_approval_update_fai
 }
 
 #[tokio::test]
+async fn approving_pending_request_revokes_issued_lease_when_status_was_resolved_concurrently() {
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id, CapabilityId::new("echo.say").unwrap());
+    let request_id = approval.id;
+    let approvals = AlreadyResolvedOnApproveStore {
+        record: ApprovalRecord {
+            scope: scope.clone(),
+            request: approval,
+            status: ApprovalStatus::Pending,
+        },
+        resolved_status: ApprovalStatus::Denied,
+    };
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let resolver = ApprovalResolver::new(&approvals, &leases);
+
+    let err = resolver
+        .approve_dispatch(
+            &scope,
+            request_id,
+            LeaseApproval {
+                issued_by: Principal::User(scope.user_id.clone()),
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                expires_at: None,
+                max_invocations: Some(1),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ApprovalResolutionError::NotPending {
+            status: ApprovalStatus::Denied
+        }
+    ));
+    let issued = leases.leases_for_scope(&scope).await;
+    assert_eq!(issued.len(), 1);
+    assert_eq!(issued[0].status, CapabilityLeaseStatus::Revoked);
+}
+
+#[tokio::test]
 async fn lease_from_approved_request_is_resume_only_and_not_plain_authority() {
     let approvals = InMemoryApprovalRequestStore::new();
     let leases = InMemoryCapabilityLeaseStore::new();
@@ -521,6 +563,67 @@ impl ApprovalRequestStore for FailingApproveApprovalStore {
         _request_id: ApprovalRequestId,
     ) -> Result<ApprovalRecord, RunStateError> {
         Ok(self.record.clone())
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<ApprovalRecord>, RunStateError> {
+        if same_tenant_user_for_test(&self.record.scope, scope) {
+            Ok(vec![self.record.clone()])
+        } else {
+            Ok(Vec::new())
+        }
+    }
+}
+
+struct AlreadyResolvedOnApproveStore {
+    record: ApprovalRecord,
+    resolved_status: ApprovalStatus,
+}
+
+#[async_trait]
+impl ApprovalRequestStore for AlreadyResolvedOnApproveStore {
+    async fn save_pending(
+        &self,
+        _scope: ResourceScope,
+        _request: ApprovalRequest,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        Ok(self.record.clone())
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<Option<ApprovalRecord>, RunStateError> {
+        if self.record.scope == *scope && self.record.request.id == request_id {
+            Ok(Some(self.record.clone()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn approve(
+        &self,
+        _scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        Err(RunStateError::ApprovalNotPending {
+            request_id,
+            status: self.resolved_status,
+        })
+    }
+
+    async fn deny(
+        &self,
+        _scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        Err(RunStateError::ApprovalNotPending {
+            request_id,
+            status: self.resolved_status,
+        })
     }
 
     async fn records_for_scope(
