@@ -9,7 +9,7 @@ use axum::{
 };
 use futures::future::join_all;
 
-use crate::channels::web::auth::AuthenticatedUser;
+use crate::channels::web::auth::{AuthenticatedUser, UserIdentity};
 use crate::channels::web::platform::state::GatewayState;
 use crate::channels::web::types::*;
 
@@ -84,6 +84,19 @@ async fn skill_info(skill: ironclaw_skills::types::LoadedSkill) -> SkillInfo {
         has_requirements,
         has_scripts,
     }
+}
+
+fn require_skill_registry_admin_for_shared_mutation(
+    state: &GatewayState,
+    user: &UserIdentity,
+) -> Result<(), (StatusCode, String)> {
+    if state.multi_tenant_mode && !user.is_admin() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Admin privileges required to modify shared skills".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub async fn skills_list_handler(
@@ -200,6 +213,8 @@ pub async fn skills_install_handler(
     headers: axum::http::HeaderMap,
     Json(req): Json<SkillInstallRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    require_skill_registry_admin_for_shared_mutation(&state, &user)?;
+
     // Require explicit confirmation header to prevent accidental installs.
     // Chat tools have requires_approval(); this is the equivalent for the web API.
     if headers
@@ -342,6 +357,8 @@ pub async fn skills_remove_handler(
     headers: axum::http::HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    require_skill_registry_admin_for_shared_mutation(&state, &user)?;
+
     // Require explicit confirmation header to prevent accidental removals.
     if headers
         .get("x-confirm-action")
@@ -399,6 +416,18 @@ pub async fn skills_remove_handler(
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::sync::Arc;
+
+    use axum::{
+        Router,
+        body::Body,
+        http::{Request, StatusCode},
+        routing::{delete, post},
+    };
+    use tower::ServiceExt;
+
+    use crate::channels::web::auth::UserIdentity;
+    use crate::channels::web::test_helpers::test_gateway_state;
 
     #[test]
     fn catalog_entry_matches_installed_slug_suffix() {
@@ -454,6 +483,63 @@ mod tests {
             ),
             "finance/mortgage-calculator"
         );
+    }
+
+    fn multi_tenant_state() -> Arc<crate::channels::web::platform::state::GatewayState> {
+        let state = test_gateway_state(None);
+        let mut inner = match Arc::try_unwrap(state) {
+            Ok(inner) => inner,
+            Err(_) => panic!("expected sole GatewayState reference in test"),
+        };
+        inner.multi_tenant_mode = true;
+        Arc::new(inner)
+    }
+
+    #[tokio::test]
+    async fn skill_install_requires_admin_in_multi_tenant_mode() {
+        let state = multi_tenant_state();
+        let app = Router::new()
+            .route("/api/skills/install", post(super::skills_install_handler))
+            .with_state(state);
+
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/skills/install")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"name":"demo","content":"---\nname: demo\n---\n"}"#,
+            ))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = app.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn skill_remove_requires_admin_in_multi_tenant_mode() {
+        let state = multi_tenant_state();
+        let app = Router::new()
+            .route("/api/skills/{name}", delete(super::skills_remove_handler))
+            .with_state(state);
+
+        let mut req = Request::builder()
+            .method("DELETE")
+            .uri("/api/skills/demo")
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = app.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

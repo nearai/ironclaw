@@ -110,8 +110,8 @@ subset that can later be replaced by a typed `Deps` alias.
 |--------|------|-------------|
 | GET | `/api/skills` | List installed skills |
 | POST | `/api/skills/search` | Search ClawHub registry + local skills |
-| POST | `/api/skills/install` | Install a skill from ClawHub or by URL/content |
-| DELETE | `/api/skills/{name}` | Remove an installed skill |
+| POST | `/api/skills/install` | Install a skill from ClawHub or by URL/content. Admin-only in multi-tenant mode because installed skills are shared globally. |
+| DELETE | `/api/skills/{name}` | Remove an installed skill. Admin-only in multi-tenant mode because installed skills are shared globally. |
 
 ### Extensions
 | Method | Path | Description |
