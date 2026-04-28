@@ -7,6 +7,7 @@ mod support;
 
 #[cfg(feature = "libsql")]
 mod advanced {
+    use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
 
     use ironclaw::agent::routine::Trigger;
@@ -22,6 +23,43 @@ mod advanced {
         "/tests/fixtures/llm_traces/advanced"
     );
     const TIMEOUT: Duration = Duration::from_secs(30);
+
+    struct OauthCallbackEnvGuard {
+        original: Option<String>,
+        _mutex: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl OauthCallbackEnvGuard {
+        fn clear() -> Self {
+            static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+            let guard = ENV_MUTEX
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .expect("env mutex poisoned");
+            let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+            // SAFETY: Under ENV_MUTEX, no concurrent env access.
+            unsafe {
+                std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+            }
+            Self {
+                original,
+                _mutex: guard,
+            }
+        }
+    }
+
+    impl Drop for OauthCallbackEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: Under ENV_MUTEX (still held by _mutex), no concurrent env access.
+            unsafe {
+                if let Some(ref val) = self.original {
+                    std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+                } else {
+                    std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+                }
+            }
+        }
+    }
 
     async fn wait_for_routine_run(
         db: &std::sync::Arc<dyn Database>,
@@ -588,6 +626,7 @@ mod advanced {
         use crate::support::mock_mcp_server::{MockToolResponse, start_mock_mcp_server};
         use ironclaw::extensions::{AuthHint, ExtensionKind, ExtensionSource, RegistryEntry};
         const TEST_USER_ID: &str = "test-user";
+        let _oauth_env = OauthCallbackEnvGuard::clear();
 
         // 1. Start mock MCP server with pre-configured tool responses.
         let mock_server = start_mock_mcp_server(vec![
@@ -615,7 +654,8 @@ mod advanced {
         let trace =
             LlmTrace::from_file(format!("{FIXTURES}/mcp_extension_lifecycle.json")).unwrap();
 
-        // 3. Build rig with auto-approve (so tool_install doesn't block).
+        // 3. Build rig with auto-approve so install can proceed without a
+        // manual approval gate in the test harness.
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
             .with_auto_approve_tools(true)
@@ -623,10 +663,16 @@ mod advanced {
             .build()
             .await;
 
-        // 4. Inject mock-notion registry entry pointing to the mock server.
+        // 4. Force gateway-mode OAuth so post-install auth returns an auth URL
+        // instead of blocking in the CLI/browser OAuth flow.
         let ext_mgr = rig
             .extension_manager()
             .expect("test rig must expose extension manager");
+        ext_mgr
+            .enable_gateway_mode("https://gateway.example.com".to_string())
+            .await;
+
+        // 5. Inject mock-notion registry entry pointing to the mock server.
         ext_mgr
             .inject_registry_entry(RegistryEntry {
                 name: "mock-notion".to_string(),
@@ -643,12 +689,12 @@ mod advanced {
             })
             .await;
 
-        // 5. Turn 1: "setup mock-notion" → search → install → text.
+        // 6. Turn 1: "setup mock-notion" → search → install → auth-needed text.
         rig.send_message("setup mock-notion").await;
         let r1 = rig.wait_for_responses(1, TIMEOUT).await;
         assert!(!r1.is_empty(), "Turn 1: no response");
 
-        // 6. Simulate OAuth completion: inject token + activate.
+        // 7. Simulate OAuth completion: inject token + activate.
         // This mirrors what the gateway's oauth_callback_handler does after
         // the user completes the OAuth flow in their browser.
         let secret_name = "mcp_mock_notion_access_token";
@@ -669,7 +715,7 @@ mod advanced {
             activate_result.err()
         );
 
-        // 7. Turn 2: "check what's in my notion" → notion-search → notion-fetch → text.
+        // 8. Turn 2: "check what's in my notion" → notion-search → notion-fetch → text.
         // Wait for r1.len() + 1 to ensure we observe at least one new turn-2 response.
         let turn1_count = r1.len();
         rig.send_message("it's done, check what's in my notion")
@@ -681,7 +727,7 @@ mod advanced {
             r2.len()
         );
 
-        // 8. Verify tool calls across both turns.
+        // 9. Verify tool calls across both turns.
         let started = rig.tool_calls_started();
         assert!(
             started.iter().any(|s| s == "tool_search"),

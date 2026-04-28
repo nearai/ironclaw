@@ -23,7 +23,7 @@ mod support;
 mod live_tests {
     use std::time::Duration;
 
-    use crate::support::live_harness::{LiveTestHarness, LiveTestHarnessBuilder};
+    use crate::support::live_harness::{LiveTestHarness, LiveTestHarnessBuilder, TestMode};
 
     const ZIZMOR_JUDGE_CRITERIA: &str = "\
         The response contains a zizmor security scan report for GitHub Actions \
@@ -31,10 +31,36 @@ mod live_tests {
         It mentions specific finding types such as template-injection, artipacked, \
         excessive-permissions, dangerous-triggers, or similar GitHub Actions \
         security issues.";
+    const ZIZMOR_SCAN_PROMPT: &str = "\
+        Run zizmor against this checkout's GitHub Actions workflows now. \
+        Use the shell tool to install or invoke zizmor if needed, then execute \
+        it against `.github/workflows` and report the actual scan result. \
+        Do not stop after checking whether Rust, Cargo, Git, or zizmor are \
+        available. If the scan cannot run, include the exact command attempted \
+        and the exact failure output.";
+
+    fn tool_name_matches(tool: &str, expected: &str) -> bool {
+        tool == expected
+            || tool
+                .strip_prefix(expected)
+                .is_some_and(|rest| rest.starts_with('('))
+    }
+
+    fn tool_mentions(tool: &str, needle: &str) -> bool {
+        tool.to_lowercase().contains(&needle.to_lowercase())
+    }
+
+    fn used_shell(tools: &[String]) -> bool {
+        tools.iter().any(|t| tool_name_matches(t, "shell"))
+    }
+
+    fn attempted_zizmor(tools: &[String]) -> bool {
+        tools.iter().any(|t| tool_mentions(t, "zizmor"))
+    }
 
     /// Shared logic for zizmor scan tests (v1 and v2 engines).
     async fn run_zizmor_scan(harness: LiveTestHarness) {
-        let user_input = "can we run https://github.com/zizmorcore/zizmor";
+        let user_input = ZIZMOR_SCAN_PROMPT;
         let rig = harness.rig();
         rig.send_message(user_input).await;
 
@@ -53,8 +79,11 @@ mod live_tests {
         );
 
         // The agent should have used the shell tool to install/run zizmor.
+        // Tool events now carry args (e.g. `"shell(cmd)"`) via
+        // `format_action_display_name` in `src/bridge/router.rs`, so match both
+        // the bare name and the argument-prefixed form.
         assert!(
-            tools.iter().any(|t| t == "shell"),
+            used_shell(&tools),
             "Expected shell tool to be used for running zizmor, got: {tools:?}"
         );
 
@@ -66,6 +95,16 @@ mod live_tests {
             "Response should mention zizmor: {joined}"
         );
 
+        // In live mode, verify zizmor was actually invoked — either a tool
+        // name/arg mentions it (v2 captures args) or the response proves it
+        // ran (v1 only captures bare tool names like "shell").
+        if harness.mode() == TestMode::Live {
+            assert!(
+                attempted_zizmor(&tools) || joined.contains("zizmor"),
+                "Expected zizmor to appear in tool calls or response, got tools: {tools:?}"
+            );
+        }
+
         // LLM judge for semantic verification (live mode only).
         if let Some(verdict) = harness.judge(&text, ZIZMOR_JUDGE_CRITERIA).await {
             assert!(verdict.pass, "LLM judge failed: {}", verdict.reasoning);
@@ -75,8 +114,14 @@ mod live_tests {
     }
 
     /// Zizmor scan via engine v1 (default agentic loop).
+    ///
+    /// Marked `#[ignore]` by default because the `IRONCLAW_LIVE_TEST=1`
+    /// recording path needs real LLM credentials. The `replay` feature flag
+    /// promotes this test out of `--ignored` so CI can run the committed
+    /// fixture without extra `-- --ignored` gymnastics; see
+    /// `.github/workflows/replay-gate.yml`.
     #[tokio::test]
-    #[ignore] // Live tier: requires LLM API keys or a recorded trace fixture
+    #[cfg_attr(not(feature = "replay"), ignore)]
     async fn zizmor_scan() {
         let harness = LiveTestHarnessBuilder::new("zizmor_scan")
             .with_max_tool_iterations(40)
@@ -96,7 +141,7 @@ mod live_tests {
     /// mentions zizmor in its response (even if it can't execute shell).
     /// When v2 gains auto-approve support, update this to use `run_zizmor_scan`.
     #[tokio::test]
-    #[ignore] // Live tier: requires LLM API keys or a recorded trace fixture
+    #[cfg_attr(not(feature = "replay"), ignore)]
     async fn zizmor_scan_v2() {
         let harness = LiveTestHarnessBuilder::new("zizmor_scan_v2")
             .with_engine_v2(true)
@@ -104,7 +149,7 @@ mod live_tests {
             .build()
             .await;
 
-        let user_input = "can we run https://github.com/zizmorcore/zizmor";
+        let user_input = ZIZMOR_SCAN_PROMPT;
         let rig = harness.rig();
         rig.send_message(user_input).await;
 
@@ -125,10 +170,13 @@ mod live_tests {
 
         // V2 without auto-approve hits an approval gate for shell/tool_install.
         // The response may be the approval prompt itself rather than agent output.
-        // Verify the agent at least attempted a relevant action.
+        // Verify the agent at least attempted a relevant action. Tool events
+        // carry args (e.g. `"shell(cmd)"`) via `format_action_display_name`, so
+        // accept either the bare name or the argument-prefixed form.
         let attempted_relevant_tool = tools.iter().any(|t| {
-            t == "shell"
-                || t == "tool_install"
+            tool_name_matches(t, "shell")
+                || tool_name_matches(t, "tool_install")
+                || tool_name_matches(t, "tool-install")
                 || t.starts_with("tool_search")
                 || t.starts_with("skill_search")
         });
@@ -136,6 +184,12 @@ mod live_tests {
             attempted_relevant_tool,
             "Expected agent to attempt a relevant tool, got: {tools:?}"
         );
+        if harness.mode() == TestMode::Live {
+            assert!(
+                attempted_zizmor(&tools),
+                "Expected a tool attempt that mentions/runs zizmor, got: {tools:?}"
+            );
+        }
 
         // The response should mention zizmor or approval (approval gate).
         assert!(
@@ -185,14 +239,16 @@ mod live_tests {
     /// Uses NVIDIA GTC keynote as the search target so any captured
     /// trace fixtures contain only public conference content.
     #[tokio::test]
-    #[ignore] // Live tier: requires real Google OAuth credentials in the
-    // developer's `~/.ironclaw/ironclaw.db`. Live-only on purpose: the
-    // recorded trace would inevitably capture the bearer token, real
-    // Drive file metadata, and HTTP headers — all of which are PII
-    // that's hard to scrub safely. The test runs against the developer's
-    // real environment in live mode and is skipped otherwise. Hermetic
-    // regression coverage for the underlying alias-aware capabilities
-    // bug lives in `test_auth_wasm_tool_finds_legacy_hyphen_alias`.
+    #[ignore = "aspirational canary: currently blocked on the non-HTTP \
+                pre-flight auth gate. `src/auth/extension.rs::check_action_auth` \
+                stubs `NoAuthRequired` for any action that isn't `http`/`http_request`, \
+                so a missing-credential Drive call does NOT fire a gate — the agent \
+                gets the error back and enters a recovery loop, tripping Phase A's \
+                'exactly 1 LLM call' assertion. The `private-oauth` canary lane \
+                skips this test via scripts/live-canary/run.sh; re-enable there + \
+                remove this message once the gate fix lands. \
+                Hermetic regression coverage for the underlying alias-aware \
+                capabilities bug lives in `test_auth_wasm_tool_finds_legacy_hyphen_alias`."]
     async fn drive_auth_gate_roundtrip() {
         use crate::support::live_harness::TestMode;
         use ironclaw::channels::StatusUpdate;
@@ -236,7 +292,7 @@ mod live_tests {
 
         // Live-mode only. In replay mode the harness builds a stub rig
         // (no recorded fixture, no LLM provider) and we exit early.
-        if harness.mode() == TestMode::Replay {
+        if harness.mode() != TestMode::Live {
             eprintln!(
                 "[DriveAuthGate] Live-only test — skipping outside `IRONCLAW_LIVE_TEST=1`. \
                  Hermetic regression covered by \
@@ -376,7 +432,7 @@ mod live_tests {
             .collect();
         let drive_gate = auth_required_events
             .iter()
-            .find(|(ext, _, _)| ext.contains("google") || ext.contains("drive"));
+            .find(|(ext, _, _)| ext.as_str().contains("google") || ext.as_str().contains("drive"));
         assert!(
             drive_gate.is_some(),
             "Phase A: expected an AuthRequired event for the Google Drive extension, \
@@ -393,10 +449,15 @@ mod live_tests {
 
         // The agent must NOT have run a tool_install / tool_activate
         // recovery loop — that's the bad behaviour the post-flight
-        // detector eliminates.
-        let bad_recovery = phase_a_tools
-            .iter()
-            .any(|t| t == "tool_install" || t == "tool_activate" || t == "tool-install");
+        // detector eliminates. Match both bare names and the
+        // argument-prefixed `"<name>(args)"` form emitted by
+        // `format_action_display_name`; an exact-match check would silently
+        // miss `"tool_install(foo)"` and turn this into a false negative.
+        let bad_recovery = phase_a_tools.iter().any(|t| {
+            tool_name_matches(t, "tool_install")
+                || tool_name_matches(t, "tool_activate")
+                || tool_name_matches(t, "tool-install")
+        });
         assert!(
             !bad_recovery,
             "Phase A: agent ran a tool_install/tool_activate recovery loop instead \
@@ -501,12 +562,13 @@ mod live_tests {
             "[DriveAuthGate][Phase B] Tools attempted ({}): {phase_b_tools:?}",
             phase_b_tools.len()
         );
+        // Match bare and argument-prefixed names; see the Phase A comment.
         let phase_b_recovery = phase_b_tools.iter().any(|t| {
-            t == "tool_install"
-                || t == "tool-install"
-                || t == "tool_activate"
-                || t == "secret_list"
-                || t.starts_with("tool_search")
+            tool_name_matches(t, "tool_install")
+                || tool_name_matches(t, "tool-install")
+                || tool_name_matches(t, "tool_activate")
+                || tool_name_matches(t, "secret_list")
+                || tool_name_matches(t, "tool_search")
         });
         assert!(
             !phase_b_recovery,
@@ -573,7 +635,7 @@ mod live_tests {
             (user_input.to_string(), phase_a_text.clone()),
             (phase_b_user_label, phase_b_text.clone()),
         ];
-        harness.finish_turns(&turns).await;
+        harness.finish_turns_simple(&turns).await;
     }
 
     /// End-to-end verification of the *transparent* OAuth refresh path.
@@ -620,7 +682,7 @@ mod live_tests {
             .build()
             .await;
 
-        if harness.mode() == TestMode::Replay {
+        if harness.mode() != TestMode::Live {
             eprintln!(
                 "[DriveRefresh] Live-only test — skipping outside `IRONCLAW_LIVE_TEST=1`. \
                  Hermetic regression for the OAuth refresh layer lives in \
@@ -704,7 +766,8 @@ mod live_tests {
             matches!(
                 s,
                 StatusUpdate::AuthRequired { extension_name, .. }
-                    if extension_name.contains("google") || extension_name.contains("drive")
+                    if extension_name.as_str().contains("google")
+                        || extension_name.as_str().contains("drive")
             )
         });
         assert!(
@@ -762,6 +825,6 @@ mod live_tests {
         );
 
         let turns = vec![(user_input.to_string(), response_text.clone())];
-        harness.finish_turns(&turns).await;
+        harness.finish_turns_simple(&turns).await;
     }
 }

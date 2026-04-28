@@ -115,11 +115,11 @@ For ambiguous issues (architectural auth decisions, risk tradeoffs):
 
 ## Tracking
 
-Write findings to `commitments/signals/pending/security-<slug>.md` with `immediacy: prompt` for P1, `batch` for P2/P3. P1 findings also create a commitment in `commitments/open/` automatically with `urgency: critical`.
+Write findings to `projects/commitments/signals/pending/security-<slug>.md` with `immediacy: prompt` for P1, `batch` for P2/P3. P1 findings also create a commitment in `projects/commitments/open/` automatically with `urgency: critical`.
 
 ## False positive management
 
-If the user dismisses a finding, note the pattern in `commitments/calibration.md` so it's not re-flagged:
+If the user dismisses a finding, note the pattern in `projects/commitments/calibration.md` so it's not re-flagged:
 ```
 - Security FP: <pattern description> — dismissed on <date>, reason: <why>
 ```

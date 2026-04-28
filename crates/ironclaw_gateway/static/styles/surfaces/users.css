@@ -1,0 +1,19 @@
+/* --- Users Tab --- */
+.users-container { padding: 1rem; }
+.users-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
+.users-header h3 { margin: 0; font-size: 1.1rem; }
+.users-form { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
+.users-form input, .users-form select { padding: 0.4rem 0.6rem; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-secondary); color: var(--text-primary); font-size: 0.85rem; }
+.users-token-banner { background: var(--bg-tertiary); border: 1px solid var(--accent); border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.85rem; }
+.token-display { display: inline-block; padding: 0.3rem 0.6rem; background: var(--bg-primary); border-radius: 4px; font-family: var(--font-mono); word-break: break-all; margin: 0.4rem 0; user-select: all; }
+.user-id { font-family: var(--font-mono); font-size: 0.8rem; color: var(--text-muted); }
+.badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 10px; font-size: 0.75rem; background: var(--bg-tertiary); color: var(--text-secondary); }
+.badge-admin { background: var(--accent); color: #fff; }
+.btn-small { padding: 0.25rem 0.5rem; font-size: 0.75rem; border-radius: 4px; border: 1px solid var(--border); background: var(--bg-secondary); color: var(--text-primary); cursor: pointer; }
+.btn-small:hover { background: var(--bg-tertiary); }
+.btn-danger { border-color: #ef4444; color: #ef4444; }
+.btn-danger:hover { background: #ef4444; color: #fff; }
+.btn-primary { background: var(--accent); color: #fff; border: none; padding: 0.4rem 0.8rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem; }
+.btn-primary:hover { opacity: 0.9; }
+.btn-secondary { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border); padding: 0.4rem 0.8rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem; }
+

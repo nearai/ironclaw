@@ -52,6 +52,12 @@ pub enum WidgetSlot {
     /// Custom inline renderer for structured data in chat messages.
     /// Registered via `IronClaw.registerChatRenderer()` on the browser side.
     ChatRenderer,
+    /// Area inside a project drill-in view, above the missions/activity grid.
+    /// Good for: metrics dashboards, KPI cards, project health summaries.
+    ProjectHeader,
+    /// Additional section alongside missions and activity in the project
+    /// drill-in body. Good for: custom reports, data tables, embeds.
+    ProjectSection,
 }
 
 /// Prefix every CSS selector with `[data-widget="{widget_id}"]` for style isolation.
@@ -363,6 +369,8 @@ mod tests {
             WidgetSlot::StatusRight,
             WidgetSlot::SettingsSection,
             WidgetSlot::ChatRenderer,
+            WidgetSlot::ProjectHeader,
+            WidgetSlot::ProjectSection,
         ];
         for slot in slots {
             let json = serde_json::to_string(&slot).unwrap();

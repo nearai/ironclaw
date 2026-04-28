@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
 use tokio::sync::RwLock;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use ironclaw_engine::{
     CapabilityLease, ConversationId, ConversationSurface, DocId, DocType, EngineError, LeaseId,
@@ -51,7 +51,21 @@ use crate::workspace::{Workspace, WorkspaceEntry};
 
 const KNOWLEDGE_PREFIX: &str = ".system/engine/knowledge";
 const ORCHESTRATOR_PREFIX: &str = ".system/engine/orchestrator";
+/// Pre-#2049 orchestrator prefix; matched alongside the canonical prefix so
+/// fresh writes targeted at the legacy path still hit the protection check.
+const LEGACY_ORCHESTRATOR_PREFIX: &str = "engine/orchestrator";
+/// Engine-owned projects directory used for mission storage only. Project
+/// metadata lives under the user-facing `projects/<slug>/.project.json` —
+/// missions stay hidden here so the user's workspace view doesn't grow
+/// machine-managed mission JSON alongside their own docs.
 const PROJECTS_PREFIX: &str = ".system/engine/projects";
+/// User-facing project root. Writing a file under `projects/<slug>/...`
+/// is the gesture that declares a project exists — no separate schema,
+/// no `project_create` tool needed.
+const PROJECTS_ROOT: &str = "projects";
+/// Per-project metadata file (name, description, goals, metrics). Optional:
+/// absent means the project is named by its slug alone with empty metadata.
+const PROJECT_METADATA_FILENAME: &str = ".project.json";
 
 const THREADS_PREFIX: &str = ".system/engine/runtime/threads/active";
 const THREAD_ARCHIVE_PREFIX: &str = ".system/engine/runtime/threads/archive";
@@ -73,6 +87,13 @@ const ORCHESTRATOR_FAILURES_TITLE: &str = "orchestrator:failures";
 const PREAMBLE_OVERLAY_TITLE: &str = "prompt:codeact_preamble";
 const ORCHESTRATOR_CODE_TAG: &str = "orchestrator_code";
 const FIX_PATTERN_TITLE: &str = "fix_pattern_database";
+
+/// Re-export the engine's process-wide self-modify snapshot so the store
+/// gate reads the same value as the engine loop, the memory tool, and the
+/// self-improvement mission.
+fn self_modify_enabled() -> bool {
+    ironclaw_engine::runtime::self_modify_enabled()
+}
 
 /// Workspace-backed engine store.
 pub struct HybridStore {
@@ -118,10 +139,12 @@ impl HybridStore {
         self.migrate_legacy_engine_paths(ws).await;
 
         self.load_knowledge_docs(ws).await;
-        self.load_map(ws, PROJECTS_PREFIX, |project: Project| async {
-            self.projects.write().await.insert(project.id, project);
-        })
-        .await;
+        // Migrate any project JSONs still at the legacy engine path into
+        // the user-facing `projects/<slug>/.project.json` layout, then
+        // load from the new location. Running migration first means a
+        // single subsequent scan sees all projects once.
+        self.migrate_legacy_project_jsons(ws).await;
+        self.load_projects_from_workspace(ws).await;
         self.load_map(
             ws,
             CONVERSATIONS_PREFIX,
@@ -517,8 +540,8 @@ impl HybridStore {
     // ── Internal helpers ────────────────────────────────────
 
     async fn load_knowledge_docs(&self, ws: &Workspace) {
-        // Knowledge docs can be .md (frontmatter) or .json (legacy).
-        // Also load special docs from orchestrator/ and prompts/ paths.
+        // Knowledge docs can be .md (frontmatter), .json (legacy/runtime),
+        // or .py (orchestrator versions persisted as raw Python).
         let search_prefixes = [KNOWLEDGE_PREFIX, ORCHESTRATOR_PREFIX];
 
         for prefix in search_prefixes {
@@ -528,9 +551,12 @@ impl HybridStore {
             {
                 match ws.read(&entry.path).await {
                     Ok(doc) => {
-                        // Try frontmatter format first, then JSON
+                        // Try frontmatter format first, then JSON, then raw .py
                         let parsed = deserialize_knowledge_doc(&doc.content)
-                            .or_else(|| serde_json::from_str::<MemoryDoc>(&doc.content).ok());
+                            .or_else(|| serde_json::from_str::<MemoryDoc>(&doc.content).ok())
+                            .or_else(|| {
+                                synthesize_orchestrator_doc_from_py(&entry.path, &doc.content)
+                            });
                         if let Some(memory_doc) = parsed {
                             self.doc_paths
                                 .write()
@@ -616,6 +642,104 @@ impl HybridStore {
         };
         if let Err(e) = ws.write(&path, content).await {
             debug!(path = %path, "failed to persist engine text: {e}");
+        }
+    }
+
+    /// Load projects from `projects/<slug>/.project.json` in the
+    /// user-facing workspace. Any `projects/<slug>/` directory without a
+    /// metadata file is treated as a bare project: a stub Project struct
+    /// scoped to the workspace owner so `list_projects(user_id)` returns
+    /// it. Writing a file under `projects/foo/` is enough to declare the
+    /// project exists.
+    async fn load_projects_from_workspace(&self, ws: &Workspace) {
+        let entries = match ws.list(PROJECTS_ROOT).await {
+            Ok(entries) => entries,
+            Err(_) => return,
+        };
+        for entry in entries {
+            if !entry.is_directory {
+                continue;
+            }
+            let raw_slug = entry.name();
+            let meta_path = format!("{}/{PROJECT_METADATA_FILENAME}", entry.path);
+            let project = match ws.read(&meta_path).await {
+                Ok(doc) => match serde_json::from_str::<Project>(&doc.content) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!(path = %meta_path, "failed to parse project metadata: {e}");
+                        continue;
+                    }
+                },
+                Err(_) => match synth_bare_project(raw_slug, ws.user_id()) {
+                    Some(p) => p,
+                    None => continue,
+                },
+            };
+            self.projects.write().await.insert(project.id, project);
+        }
+    }
+
+    /// One-shot migration of project JSONs that still live at the old
+    /// engine-internal path (`.system/engine/projects/<slug>/project.json`)
+    /// into the user-facing layout (`projects/<slug>/.project.json`).
+    /// Idempotent: projects already migrated are left alone.
+    ///
+    /// Unparseable JSON gets renamed to `project.broken.json` so a
+    /// corrupted file doesn't re-fail silently on every boot. The user
+    /// can recover it manually instead of the engine masking the loss.
+    async fn migrate_legacy_project_jsons(&self, ws: &Workspace) {
+        let project_dirs = match ws.list(PROJECTS_PREFIX).await {
+            Ok(entries) => entries,
+            Err(_) => return,
+        };
+        for entry in project_dirs {
+            if !entry.is_directory {
+                continue;
+            }
+            let legacy_path = format!("{}/project.json", entry.path);
+            let doc = match ws.read(&legacy_path).await {
+                Ok(doc) => doc,
+                Err(_) => continue,
+            };
+            let project = match serde_json::from_str::<Project>(&doc.content) {
+                Ok(p) => p,
+                Err(e) => {
+                    let broken_path = format!("{}/project.broken.json", entry.path);
+                    warn!(
+                        path = %legacy_path,
+                        "legacy project metadata is unparseable: {e} — moving to {broken_path}"
+                    );
+                    if ws.read(&broken_path).await.is_err()
+                        && let Err(we) = ws.write(&broken_path, &doc.content).await
+                    {
+                        warn!("failed to write {broken_path}: {we}");
+                        continue;
+                    }
+                    if let Err(de) = ws.delete(&legacy_path).await {
+                        warn!("failed to remove legacy project path {legacy_path}: {de}");
+                    }
+                    continue;
+                }
+            };
+            let new_path = project_path(&project.name);
+            // Don't clobber a newer metadata file the user may have edited.
+            if ws.read(&new_path).await.is_ok() {
+                if let Err(e) = ws.delete(&legacy_path).await {
+                    warn!("failed to remove legacy project path {legacy_path}: {e}");
+                }
+                continue;
+            }
+            if let Err(e) = ws.write(&new_path, &doc.content).await {
+                warn!(
+                    legacy = %legacy_path,
+                    new = %new_path,
+                    "failed to migrate project metadata: {e}"
+                );
+                continue;
+            }
+            if let Err(e) = ws.delete(&legacy_path).await {
+                warn!("failed to remove legacy project path {legacy_path}: {e}");
+            }
         }
     }
 
@@ -719,7 +843,14 @@ impl HybridStore {
         }
     }
 
-    /// Get the project slug for a project_id, falling back to a short UUID.
+    /// Engine-internal mission-path slug — UUID-suffixed, used only for
+    /// `.system/engine/projects/<slug>/missions/...` storage. Keeps
+    /// mission paths unique even if two projects share a name.
+    ///
+    /// NOT the user-facing project directory: that uses
+    /// [`project_slug_for_name`] (no UUID suffix) so the path
+    /// `projects/<slug>/` stays predictable. The two slug schemes address
+    /// disjoint paths — don't confuse them.
     async fn project_slug(&self, project_id: ProjectId) -> String {
         self.projects
             .read()
@@ -825,8 +956,83 @@ fn doc_workspace_path(doc: &MemoryDoc) -> String {
     format!("{KNOWLEDGE_PREFIX}/{type_dir}/{slug}.md")
 }
 
+/// Check whether `path` resolves to an orchestrator `.py` version file.
+///
+/// Normalizes the path before matching so dot/double-slash/traversal
+/// components cannot bypass the check (e.g. `engine/./orchestrator/v3.py`,
+/// `.system/engine//orchestrator/v3.py`, `engine/knowledge/../orchestrator/v3.py`).
+/// Traversal attempts (`..` segments) are conservatively rejected (return
+/// `false`) — they cannot be a legitimate orchestrator code path.
 fn is_orchestrator_code_path(path: &str) -> bool {
-    path.starts_with(ORCHESTRATOR_PREFIX) && path.ends_with(".py")
+    let Some(canonical) = normalize_path(path) else {
+        return false;
+    };
+    if !canonical.ends_with(".py") {
+        return false;
+    }
+    canonical.starts_with(&format!("{ORCHESTRATOR_PREFIX}/"))
+        || canonical.starts_with(&format!("{LEGACY_ORCHESTRATOR_PREFIX}/"))
+}
+
+/// Strip `.` segments and collapse `//`, returning `None` on `..` traversal.
+///
+/// Mirrors `normalize_workspace_path` in `tools::builtin::memory` — kept
+/// local here so the store adapter has no dependency on the tool layer.
+fn normalize_path(path: &str) -> Option<String> {
+    let mut segments: Vec<&str> = Vec::new();
+    for seg in path.split('/') {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            return None;
+        }
+        segments.push(seg);
+    }
+    Some(segments.join("/"))
+}
+
+/// Synthesize a MemoryDoc from a raw `.py` orchestrator file found on disk.
+///
+/// Orchestrator versions are persisted as
+/// `.system/engine/orchestrator/v{N}.py` (raw Python). On restart, these
+/// need to be reconstituted as MemoryDocs so `load_orchestrator_from_docs()`
+/// can find them. The version number is extracted from the filename.
+///
+/// **Project scope**: orchestrator code is *physically global* — only one
+/// `v{N}.py` exists per workspace, regardless of how many projects share
+/// the workspace. Synthesized docs use `ProjectId::nil()` as the global
+/// marker, and `HybridStore::list_shared_memory_docs` (overridden below)
+/// surfaces them for any project query so the executor's per-project
+/// `load_orchestrator(project_id)` always finds them after a restart.
+fn synthesize_orchestrator_doc_from_py(path: &str, content: &str) -> Option<MemoryDoc> {
+    if !is_orchestrator_code_path(path) {
+        return None;
+    }
+    // Extract version from filename: .system/engine/orchestrator/v3.py → 3
+    let filename = path.rsplit('/').next()?;
+    let version: u64 = filename
+        .strip_prefix('v')?
+        .strip_suffix(".py")?
+        .parse()
+        .ok()?;
+
+    Some(MemoryDoc {
+        id: DocId(uuid::Uuid::new_v4()),
+        project_id: ProjectId(uuid::Uuid::nil()),
+        user_id: ironclaw_engine::types::shared_owner_id().to_string(),
+        doc_type: DocType::Note,
+        title: ORCHESTRATOR_MAIN_TITLE.to_string(),
+        content: content.to_string(),
+        source_thread_id: None,
+        tags: vec![ORCHESTRATOR_CODE_TAG.to_string()],
+        metadata: serde_json::json!({
+            "version": version,
+            "source": "persisted_py",
+        }),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    })
 }
 
 /// Check if a MemoryDoc is a protected orchestrator or prompt overlay document.
@@ -834,13 +1040,102 @@ fn is_protected_orchestrator_doc(doc: &MemoryDoc) -> bool {
     doc.title.starts_with("orchestrator:") || doc.title.starts_with("prompt:")
 }
 
-fn project_dir(name: &str, project_id: ProjectId) -> String {
-    let slug = slugify(name, &project_id.0.to_string());
-    format!("{PROJECTS_PREFIX}/{slug}")
+/// Build a stub Project for a `projects/<raw_slug>/` directory that has
+/// no `.project.json` yet. Normalizes the slug via `slugify_simple` so a
+/// bare directory and a later `Project::new` call for the same user+name
+/// collapse to the same `ProjectId`. Returns `None` if the slug is empty
+/// after normalization (e.g. a directory named `---`) — such dirs can't
+/// round-trip through workspace paths without colliding.
+///
+/// `user_id` is the owner of the workspace so the stub is scoped to that
+/// user; a bare project under `shared_owner_id` would be invisible to its
+/// real owner and globally visible to everyone else.
+fn synth_bare_project(raw_slug: &str, user_id: &str) -> Option<Project> {
+    let slug = ironclaw_engine::types::slugify_simple(raw_slug);
+    if slug.is_empty() {
+        return None;
+    }
+    let now = chrono::Utc::now();
+    Some(Project {
+        id: ProjectId::from_slug(user_id, &slug),
+        user_id: user_id.to_string(),
+        name: slug,
+        description: String::new(),
+        goals: Vec::new(),
+        metrics: Vec::new(),
+        metadata: serde_json::Value::Object(serde_json::Map::new()),
+        workspace_path: None,
+        created_at: now,
+        updated_at: now,
+    })
 }
 
-fn project_path(name: &str, project_id: ProjectId) -> String {
-    format!("{}/project.json", project_dir(name, project_id))
+/// True for docs that are physically global (one file regardless of project).
+///
+/// These docs live at well-known workspace paths (e.g.
+/// `.system/engine/orchestrator/v3.py`) and must surface for any project's
+/// `list_shared_memory_docs` query — see the override on `HybridStore`.
+fn is_globally_shared(doc: &MemoryDoc) -> bool {
+    doc.title == ORCHESTRATOR_MAIN_TITLE
+        || doc.title == ORCHESTRATOR_FAILURES_TITLE
+        || doc.title == PREAMBLE_OVERLAY_TITLE
+}
+
+/// Validate orchestrator content before persisting.
+///
+/// Only validates `orchestrator:*` documents — they contain Python code
+/// executed by the Monty sandbox. `prompt:*` documents (e.g.
+/// `prompt:codeact_preamble`) are markdown text injected into the system
+/// prompt and are NOT code — validating them as Python would reject every
+/// prompt overlay. If the engine ever supports Python-based prompt
+/// overlays, this function must be updated to cover those titles too.
+///
+/// Checks Python syntax so a broken patch doesn't consume failure-budget
+/// slots (3 failures trigger auto-rollback). Semantically dangerous
+/// patterns (`exec(compile(...))`, `__import__('os')`) pass validation
+/// because they are syntactically valid Python — all security enforcement
+/// happens at runtime in the Monty sandbox (resource limits, host-function
+/// gating, no filesystem/network access).
+fn validate_orchestrator_content(doc: &MemoryDoc) -> Result<(), EngineError> {
+    if doc.title.starts_with("orchestrator:")
+        && doc.title != ORCHESTRATOR_FAILURES_TITLE
+        && let Err(reason) = ironclaw_engine::executor::validate_python_syntax(&doc.content)
+    {
+        return Err(EngineError::InvalidInput {
+            reason: format!(
+                "orchestrator patch '{}' has invalid Python: {reason}",
+                doc.title
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Slug used to address a project on disk. Derived purely from the project
+/// name (no UUID suffix) so the user-facing path `projects/<slug>/` is
+/// predictable and doesn't churn when the project's ID changes.
+fn project_slug_for_name(name: &str) -> String {
+    let slug = ironclaw_engine::types::slugify_simple(name);
+    if slug.is_empty() {
+        "untitled".to_string()
+    } else {
+        slug
+    }
+}
+
+/// User-facing project directory. Writing any file under this path is the
+/// declaration that the project exists — the engine store auto-registers
+/// it on `memory_write`.
+fn project_dir(name: &str) -> String {
+    format!("{PROJECTS_ROOT}/{}", project_slug_for_name(name))
+}
+
+/// Canonical metadata file for a project. Hidden by the dot prefix so it
+/// doesn't clutter the project's `memory_tree` view, but still lives
+/// inside the user-facing project directory so the model can reason
+/// about it through normal workspace APIs.
+fn project_path(name: &str) -> String {
+    format!("{}/{PROJECT_METADATA_FILENAME}", project_dir(name))
 }
 
 fn thread_path(thread_id: ThreadId) -> String {
@@ -933,17 +1228,43 @@ fn slugify(title: &str, id: &str) -> String {
 // ── Frontmatter serialization ───────────────────────────────
 
 /// Serialize a MemoryDoc as YAML frontmatter + markdown content.
+/// Escape a string for embedding inside a YAML double-quoted scalar.
+///
+/// YAML double-quoted scalars require `\`, `"`, and control characters to be
+/// escaped. Newlines (`\n`, `\r`), tabs (`\t`), and backslashes are the most
+/// common offenders in user-supplied identifiers (e.g. OIDC `sub` claims).
+fn yaml_quoted_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn serialize_knowledge_doc(doc: &MemoryDoc) -> String {
     let mut frontmatter = String::from("---\n");
     frontmatter.push_str(&format!("id: \"{}\"\n", doc.id.0));
+    frontmatter.push_str(&format!("project_id: \"{}\"\n", doc.project_id.0));
+    frontmatter.push_str(&format!(
+        "user_id: \"{}\"\n",
+        yaml_quoted_escape(&doc.user_id)
+    ));
     frontmatter.push_str(&format!("doc_type: \"{:?}\"\n", doc.doc_type));
-    frontmatter.push_str(&format!("title: \"{}\"\n", doc.title.replace('"', "\\\"")));
+    frontmatter.push_str(&format!("title: \"{}\"\n", yaml_quoted_escape(&doc.title)));
     if !doc.tags.is_empty() {
         frontmatter.push_str(&format!(
             "tags: [{}]\n",
             doc.tags
                 .iter()
-                .map(|t| format!("\"{t}\""))
+                .map(|t| format!("\"{}\"", yaml_quoted_escape(t)))
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
@@ -1036,11 +1357,39 @@ fn deserialize_knowledge_doc(content: &str) -> Option<MemoryDoc> {
         .cloned()
         .unwrap_or(serde_json::json!({}));
 
-    // project_id is not in frontmatter — use nil UUID (assigned at load time)
+    let project_id = yaml
+        .get("project_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        .map(ProjectId)
+        .unwrap_or_else(|| {
+            debug!(
+                doc_id = %id,
+                "knowledge doc missing project_id frontmatter; loading as nil — \
+                 this indicates a doc serialized before project_id/user_id were \
+                 persisted and it will not be visible to project-scoped queries"
+            );
+            ProjectId(uuid::Uuid::nil())
+        });
+
+    let user_id = yaml
+        .get("user_id")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| {
+            debug!(
+                doc_id = %id,
+                "knowledge doc missing user_id frontmatter; loading as \"legacy\" — \
+                 this indicates a doc serialized before project_id/user_id were \
+                 persisted and it will not be visible to owner-scoped queries"
+            );
+            "legacy".to_string()
+        });
+
     Some(MemoryDoc {
         id: DocId(id),
-        project_id: ProjectId(uuid::Uuid::nil()),
-        user_id: "legacy".to_string(),
+        project_id,
+        user_id,
         doc_type,
         title,
         content: body.to_string(),
@@ -1066,6 +1415,14 @@ struct ThreadArchiveSummary {
     total_tokens: u64,
     #[serde(default)]
     outcome_preview: String,
+    // `#[serde(default)]` lets summaries written before this field existed
+    // continue to deserialize as zero rather than failing.
+    #[serde(default)]
+    total_cost_usd: f64,
+    // Short sidebar label. `#[serde(default)]` preserves backward
+    // compatibility with archive files written before this field existed.
+    #[serde(default)]
+    title: Option<String>,
 }
 
 fn compact_thread_summary(thread: &Thread) -> ThreadArchiveSummary {
@@ -1087,6 +1444,8 @@ fn compact_thread_summary(thread: &Thread) -> ThreadArchiveSummary {
         step_count: thread.step_count,
         total_tokens: thread.total_tokens_used,
         outcome_preview: outcome,
+        total_cost_usd: thread.total_cost_usd,
+        title: thread.title.clone(),
     }
 }
 
@@ -1110,6 +1469,7 @@ fn thread_from_archive(summary: &ThreadArchiveSummary) -> Option<Thread> {
     Some(Thread {
         id: ThreadId(id),
         goal: summary.goal.clone(),
+        title: summary.title.clone(),
         thread_type: ironclaw_engine::ThreadType::Mission,
         state,
         project_id: ironclaw_engine::ProjectId(uuid::Uuid::nil()),
@@ -1126,7 +1486,7 @@ fn thread_from_archive(summary: &ThreadArchiveSummary) -> Option<Thread> {
         completed_at,
         step_count: summary.step_count,
         total_tokens_used: summary.total_tokens,
-        total_cost_usd: 0.0,
+        total_cost_usd: summary.total_cost_usd,
     })
 }
 
@@ -1282,7 +1642,7 @@ impl Store for HybridStore {
             .write()
             .await
             .insert(project.id, project.clone());
-        self.persist_json(project_path(&project.name, project.id), project)
+        self.persist_json(project_path(&project.name), project)
             .await;
         Ok(())
     }
@@ -1341,22 +1701,30 @@ impl Store for HybridStore {
     }
 
     async fn save_memory_doc(&self, doc: &MemoryDoc) -> Result<(), EngineError> {
-        // Defense-in-depth: block orchestrator/prompt writes when self-modify is
-        // disabled, even if the caller bypassed tool-level checks.
+        // Defense-in-depth: gate orchestrator/prompt writes even if a caller
+        // bypassed tool-level checks. The "trusted internal" exemption is
+        // keyed off a tokio task-local flag set by `with_trusted_internal_writes`,
+        // not off caller-supplied metadata or title — an LLM tool call cannot
+        // enter that scope, so it cannot forge the system-internal marker.
+        // The failure-tracker writes (`record_orchestrator_failure`,
+        // `reset_orchestrator_failures`) enter the scope at the call site.
         if is_protected_orchestrator_doc(doc) {
-            let allow = std::env::var("ORCHESTRATOR_SELF_MODIFY")
-                .map(|v| v == "true" || v == "1")
-                .unwrap_or(false);
-            if !allow {
-                // Allow system-internal writes (v0 seeding, failure tracking) but
-                // block LLM-authored patches (version > 0, non-meta titles).
-                let is_system_internal = doc.title == "orchestrator:failures"
-                    || doc
-                        .metadata
-                        .get("source")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|s| s == "compiled_in");
-                if !is_system_internal {
+            let trusted = ironclaw_engine::runtime::is_trusted_internal_write_active();
+
+            // The failure tracker is a *system-internal* accounting doc — no
+            // LLM-reachable code path should ever write it. Reject untrusted
+            // writes to it regardless of self-modify state, so an attacker
+            // can't manipulate the auto-rollback budget even when patching
+            // is turned on.
+            if !trusted && doc.title == ORCHESTRATOR_FAILURES_TITLE {
+                return Err(EngineError::AccessDenied {
+                    user_id: doc.user_id.clone(),
+                    entity: format!("orchestrator doc '{}' (system-internal tracker)", doc.title),
+                });
+            }
+
+            if !self_modify_enabled() {
+                if !trusted {
                     return Err(EngineError::AccessDenied {
                         user_id: doc.user_id.clone(),
                         entity: format!(
@@ -1365,11 +1733,46 @@ impl Store for HybridStore {
                         ),
                     });
                 }
+            } else if !trusted {
+                // Self-modification is enabled — validate untrusted (LLM-written)
+                // patches before persisting so a broken patch doesn't consume
+                // failure-budget slots (3 failures trigger auto-rollback).
+                validate_orchestrator_content(doc)?;
             }
         }
 
-        self.docs.write().await.insert(doc.id, doc.clone());
-        self.persist_doc(doc).await;
+        let mut stamped = doc.clone();
+        // Normalize project_id for physically global docs so they surface
+        // from any project's `list_shared_memory_docs` query immediately,
+        // not just after restart where synthesize_orchestrator_doc_from_py
+        // creates them with nil. Without this, a fresh seed from
+        // MissionManager carries the writing project's id and is invisible
+        // to other projects until the workspace is reloaded.
+        if is_globally_shared(&stamped)
+            && ironclaw_engine::types::is_shared_owner(&stamped.user_id)
+            && !stamped.project_id.0.is_nil()
+        {
+            stamped.project_id = ProjectId(uuid::Uuid::nil());
+        }
+        // Stamp a content hash for audit trail on all protected docs. This
+        // is **write-time only** — `load_knowledge_docs` does not verify
+        // the hash on read because the workspace is the trust boundary
+        // (anyone with workspace access can edit files directly). The hash
+        // gives operators a "what did the LLM persist on this write" record
+        // for incident review, not a runtime integrity guarantee.
+        if is_protected_orchestrator_doc(doc) {
+            use sha2::{Digest, Sha256};
+            let hash = format!("{:x}", Sha256::digest(doc.content.as_bytes()));
+            if !stamped.metadata.is_object() {
+                stamped.metadata = serde_json::json!({});
+            }
+            if let Some(map) = stamped.metadata.as_object_mut() {
+                map.insert("content_hash".into(), serde_json::Value::String(hash));
+            }
+        }
+
+        self.docs.write().await.insert(stamped.id, stamped.clone());
+        self.persist_doc(&stamped).await;
         Ok(())
     }
 
@@ -1388,6 +1791,55 @@ impl Store for HybridStore {
             .await
             .values()
             .filter(|doc| doc.project_id == project_id && doc.user_id == user_id)
+            .cloned()
+            .collect())
+    }
+
+    /// List shared docs visible to *any* project query.
+    ///
+    /// The default trait impl filters by `(project_id, shared_owner)`. We
+    /// override here so that **physically global** docs — orchestrator
+    /// versions, the failure tracker, and prompt overlays, all of which
+    /// live at one well-known workspace path regardless of project — also
+    /// surface for any project that asks. Without this, orchestrator docs
+    /// rehydrated from disk on restart (which use `ProjectId::nil()` as a
+    /// global marker) would be invisible to project-scoped executor calls
+    /// such as `load_orchestrator(project_id)`, and self-modify state
+    /// would silently revert to compiled-in defaults.
+    async fn list_shared_memory_docs(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<Vec<MemoryDoc>, EngineError> {
+        let docs = self.docs.read().await;
+        let mut out: Vec<MemoryDoc> = docs
+            .values()
+            .filter(|doc| {
+                let owner_shared = ironclaw_engine::types::is_shared_owner(&doc.user_id);
+                if !owner_shared {
+                    return false;
+                }
+                // Match the project filter, OR surface global docs (those
+                // saved with `ProjectId::nil()`) for every project.
+                doc.project_id == project_id
+                    || (doc.project_id.0.is_nil() && is_globally_shared(doc))
+            })
+            .cloned()
+            .collect();
+        out.sort_by_key(|doc| doc.id.0);
+        out.dedup_by_key(|doc| doc.id);
+        Ok(out)
+    }
+
+    async fn list_memory_docs_by_owner(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<MemoryDoc>, EngineError> {
+        Ok(self
+            .docs
+            .read()
+            .await
+            .values()
+            .filter(|doc| doc.user_id == user_id)
             .cloned()
             .collect())
     }
@@ -1501,6 +1953,807 @@ impl Store for HybridStore {
                 .await;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_engine::types::shared_owner_id;
+
+    // ── normalize_path / is_orchestrator_code_path ─────────────
+
+    #[test]
+    fn normalize_strips_dot_and_double_slash() {
+        assert_eq!(
+            normalize_path(".system/engine/./orchestrator/v3.py").as_deref(),
+            Some(".system/engine/orchestrator/v3.py")
+        );
+        assert_eq!(
+            normalize_path(".system/engine//orchestrator//v3.py").as_deref(),
+            Some(".system/engine/orchestrator/v3.py")
+        );
+    }
+
+    #[test]
+    fn normalize_rejects_traversal() {
+        assert!(normalize_path(".system/engine/knowledge/../orchestrator/v3.py").is_none());
+        assert!(normalize_path("../escape").is_none());
+    }
+
+    #[test]
+    fn orchestrator_code_path_canonical() {
+        assert!(is_orchestrator_code_path(
+            ".system/engine/orchestrator/v3.py"
+        ));
+        assert!(is_orchestrator_code_path(
+            ".system/engine/orchestrator/v0.py"
+        ));
+    }
+
+    #[test]
+    fn orchestrator_code_path_legacy() {
+        assert!(is_orchestrator_code_path("engine/orchestrator/v3.py"));
+    }
+
+    #[test]
+    fn orchestrator_code_path_blocks_dot_segment_bypass() {
+        // The reviewer-flagged bypass: dot/double-slash segments resolved
+        // to the protected location but the raw `starts_with` missed them,
+        // letting the LLM persist a `.py` file that skipped syntax validation.
+        assert!(is_orchestrator_code_path(
+            ".system/engine/./orchestrator/v3.py"
+        ));
+        assert!(is_orchestrator_code_path(
+            ".system/engine//orchestrator/v3.py"
+        ));
+        assert!(is_orchestrator_code_path("engine/./orchestrator/v3.py"));
+    }
+
+    #[test]
+    fn orchestrator_code_path_rejects_traversal() {
+        // Traversal attempts can't be a legitimate code path; conservatively
+        // return false so the synthesis & write paths bail.
+        assert!(!is_orchestrator_code_path(
+            ".system/engine/knowledge/../orchestrator/v3.py"
+        ));
+        assert!(!is_orchestrator_code_path("../engine/orchestrator/v3.py"));
+    }
+
+    #[test]
+    fn orchestrator_code_path_rejects_unrelated_paths() {
+        assert!(!is_orchestrator_code_path(
+            ".system/engine/orchestrator/v3.md"
+        ));
+        assert!(!is_orchestrator_code_path(
+            ".system/engine/knowledge/notes/foo.py"
+        ));
+        assert!(!is_orchestrator_code_path(
+            "engine_other/orchestrator/v3.py"
+        ));
+        assert!(!is_orchestrator_code_path(""));
+    }
+
+    /// Parity test: the store adapter's `normalize_path` and the memory
+    /// tool's `normalize_workspace_path` both sit on the orchestrator
+    /// self-modify security boundary. They are independent copies of the
+    /// same normalization logic (one lives in the `ironclaw` bridge layer,
+    /// the other in a tool module) — if they ever diverge, a path-traversal
+    /// or dot-segment bypass reopens on one side.
+    ///
+    /// Reviewer concern (PR #1958 round 4): extract into a shared helper OR
+    /// add a cross-check test. Shared extraction would pull the store
+    /// adapter into the tools tree or vice versa; a parity test is the
+    /// lighter, more local guard.
+    #[test]
+    fn normalize_path_parity_with_memory_tool() {
+        use crate::tools::builtin::memory::normalize_workspace_path;
+
+        // Canonical input set covering every transformation we care about:
+        // pass-through, dot segments, double slashes, leading `./`, trailing
+        // slash, traversal (must reject), bare `..`, empty input, logical
+        // aliases (which are passed through unchanged).
+        let cases = [
+            "engine/orchestrator/v3.py",
+            ".system/engine/orchestrator/v0.py",
+            "engine/./orchestrator/v3.py",
+            "engine//orchestrator//v3.py",
+            "./engine/orchestrator/v3.py",
+            "engine/orchestrator/",
+            "engine/knowledge/../orchestrator/v3.py",
+            "../escape",
+            "..",
+            "",
+            "orchestrator:main",
+            "prompt:codeact_preamble",
+            "daily/2026-04-14.md",
+        ];
+
+        for input in cases {
+            assert_eq!(
+                normalize_path(input),
+                normalize_workspace_path(input),
+                "normalize_path and normalize_workspace_path must agree on {input:?}"
+            );
+        }
+    }
+
+    // ── synthesize_orchestrator_doc_from_py ────────────────────
+
+    #[test]
+    fn synthesize_extracts_version_from_filename() {
+        let doc = synthesize_orchestrator_doc_from_py(
+            ".system/engine/orchestrator/v7.py",
+            "def run_loop(): pass\n",
+        )
+        .expect("synthesizes a doc");
+        assert_eq!(doc.title, ORCHESTRATOR_MAIN_TITLE);
+        assert_eq!(doc.user_id, shared_owner_id());
+        assert!(doc.tags.contains(&ORCHESTRATOR_CODE_TAG.to_string()));
+        assert_eq!(
+            doc.metadata.get("version").and_then(|v| v.as_u64()),
+            Some(7)
+        );
+        assert!(doc.content.contains("run_loop"));
+    }
+
+    #[test]
+    fn synthesize_returns_none_for_non_orchestrator_paths() {
+        assert!(synthesize_orchestrator_doc_from_py("MEMORY.md", "x").is_none());
+        assert!(
+            synthesize_orchestrator_doc_from_py(".system/engine/knowledge/foo.py", "x").is_none()
+        );
+        assert!(
+            synthesize_orchestrator_doc_from_py(
+                ".system/engine/orchestrator/missing-prefix.py",
+                "x"
+            )
+            .is_none(),
+        );
+    }
+
+    #[test]
+    fn synthesize_returns_none_for_traversal() {
+        // Traversal in the path should never produce a synthesized doc.
+        assert!(
+            synthesize_orchestrator_doc_from_py(
+                ".system/engine/knowledge/../orchestrator/v3.py",
+                "x"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn synthesize_uses_global_project_id_marker() {
+        let doc = synthesize_orchestrator_doc_from_py(
+            ".system/engine/orchestrator/v0.py",
+            "def run_loop(): pass\n",
+        )
+        .expect("synthesizes a doc");
+        assert!(
+            doc.project_id.0.is_nil(),
+            "synthesized doc must use the nil ProjectId global marker so the \
+             list_shared_memory_docs override surfaces it for any project query"
+        );
+    }
+
+    // ── validate_orchestrator_content ──────────────────────────
+
+    #[test]
+    fn validate_accepts_well_formed_python() {
+        let doc = MemoryDoc {
+            id: DocId(uuid::Uuid::new_v4()),
+            project_id: ProjectId(uuid::Uuid::nil()),
+            user_id: shared_owner_id().to_string(),
+            doc_type: DocType::Note,
+            title: ORCHESTRATOR_MAIN_TITLE.to_string(),
+            content: "def run_loop():\n    return 1\n".to_string(),
+            source_thread_id: None,
+            tags: vec![ORCHESTRATOR_CODE_TAG.to_string()],
+            metadata: serde_json::json!({"version": 1}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        assert!(validate_orchestrator_content(&doc).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_broken_python() {
+        let doc = MemoryDoc {
+            id: DocId(uuid::Uuid::new_v4()),
+            project_id: ProjectId(uuid::Uuid::nil()),
+            user_id: shared_owner_id().to_string(),
+            doc_type: DocType::Note,
+            title: ORCHESTRATOR_MAIN_TITLE.to_string(),
+            content: "def f(\n".to_string(),
+            source_thread_id: None,
+            tags: vec![ORCHESTRATOR_CODE_TAG.to_string()],
+            metadata: serde_json::json!({"version": 1}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let err = validate_orchestrator_content(&doc).expect_err("broken Python should fail");
+        let msg = format!("{err:?}");
+        assert!(msg.contains("invalid Python") || msg.contains("syntax"));
+    }
+
+    #[test]
+    fn validate_skips_failure_tracker_doc() {
+        let doc = MemoryDoc {
+            id: DocId(uuid::Uuid::new_v4()),
+            project_id: ProjectId(uuid::Uuid::nil()),
+            user_id: shared_owner_id().to_string(),
+            doc_type: DocType::Note,
+            // The failure tracker is JSON, not Python — validator must skip it.
+            title: ORCHESTRATOR_FAILURES_TITLE.to_string(),
+            content: r#"{"version": 1, "count": 2}"#.to_string(),
+            source_thread_id: None,
+            tags: vec!["orchestrator_meta".to_string()],
+            metadata: serde_json::json!({}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        assert!(validate_orchestrator_content(&doc).is_ok());
+    }
+
+    #[test]
+    fn validate_skips_non_orchestrator_titles() {
+        // Prompt overlays are markdown — validator only runs on `orchestrator:*`.
+        let doc = MemoryDoc {
+            id: DocId(uuid::Uuid::new_v4()),
+            project_id: ProjectId(uuid::Uuid::nil()),
+            user_id: shared_owner_id().to_string(),
+            doc_type: DocType::Note,
+            title: PREAMBLE_OVERLAY_TITLE.to_string(),
+            content: "Some markdown overlay text.\n".to_string(),
+            source_thread_id: None,
+            tags: vec![],
+            metadata: serde_json::json!({}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        assert!(validate_orchestrator_content(&doc).is_ok());
+    }
+
+    // ── is_protected_orchestrator_doc / is_globally_shared ─────
+
+    #[test]
+    fn protected_doc_predicate_matches_titles() {
+        let make = |title: &str| MemoryDoc {
+            id: DocId(uuid::Uuid::new_v4()),
+            project_id: ProjectId(uuid::Uuid::nil()),
+            user_id: shared_owner_id().to_string(),
+            doc_type: DocType::Note,
+            title: title.to_string(),
+            content: String::new(),
+            source_thread_id: None,
+            tags: vec![],
+            metadata: serde_json::json!({}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        assert!(is_protected_orchestrator_doc(&make("orchestrator:main")));
+        assert!(is_protected_orchestrator_doc(&make(
+            "orchestrator:failures"
+        )));
+        assert!(is_protected_orchestrator_doc(&make(
+            "prompt:codeact_preamble"
+        )));
+        assert!(!is_protected_orchestrator_doc(&make("MEMORY.md")));
+        assert!(!is_protected_orchestrator_doc(&make("daily/2026-04-11.md")));
+    }
+
+    #[test]
+    fn global_doc_predicate_matches_titles() {
+        let make = |title: &str| MemoryDoc {
+            id: DocId(uuid::Uuid::new_v4()),
+            project_id: ProjectId(uuid::Uuid::nil()),
+            user_id: shared_owner_id().to_string(),
+            doc_type: DocType::Note,
+            title: title.to_string(),
+            content: String::new(),
+            source_thread_id: None,
+            tags: vec![],
+            metadata: serde_json::json!({}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        assert!(is_globally_shared(&make(ORCHESTRATOR_MAIN_TITLE)));
+        assert!(is_globally_shared(&make(ORCHESTRATOR_FAILURES_TITLE)));
+        assert!(is_globally_shared(&make(PREAMBLE_OVERLAY_TITLE)));
+        assert!(!is_globally_shared(&make("MEMORY.md")));
+    }
+
+    // ── HybridStore::list_shared_memory_docs override ──────────
+
+    #[tokio::test]
+    async fn list_shared_surfaces_global_orchestrator_for_any_project() {
+        use ironclaw_engine::Store;
+
+        let store = HybridStore::new(None);
+
+        // Insert a global synthesized orchestrator doc (project_id::nil()).
+        let synthesized = synthesize_orchestrator_doc_from_py(
+            ".system/engine/orchestrator/v2.py",
+            "def run_loop(): pass\n",
+        )
+        .expect("synthesize");
+        store
+            .docs
+            .write()
+            .await
+            .insert(synthesized.id, synthesized.clone());
+
+        // A query scoped to *any* concrete project must return it.
+        let project = ProjectId::new();
+        let docs = store
+            .list_shared_memory_docs(project)
+            .await
+            .expect("list shared");
+        assert!(
+            docs.iter().any(|d| d.id == synthesized.id),
+            "global orchestrator must be visible from any project query"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_shared_surfaces_project_scoped_orchestrator_for_matching_project() {
+        use ironclaw_engine::Store;
+
+        let store = HybridStore::new(None);
+        let project = ProjectId::new();
+
+        // A non-global orchestrator written under a specific project must
+        // appear for that project but NOT for unrelated ones.
+        let scoped = MemoryDoc {
+            id: DocId(uuid::Uuid::new_v4()),
+            project_id: project,
+            user_id: shared_owner_id().to_string(),
+            doc_type: DocType::Note,
+            title: ORCHESTRATOR_MAIN_TITLE.to_string(),
+            content: "def run_loop(): pass\n".to_string(),
+            source_thread_id: None,
+            tags: vec![ORCHESTRATOR_CODE_TAG.to_string()],
+            metadata: serde_json::json!({"version": 1}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        store.docs.write().await.insert(scoped.id, scoped.clone());
+
+        let matching = store.list_shared_memory_docs(project).await.unwrap();
+        assert!(matching.iter().any(|d| d.id == scoped.id));
+
+        let other_project = ProjectId::new();
+        let other = store.list_shared_memory_docs(other_project).await.unwrap();
+        assert!(
+            !other.iter().any(|d| d.id == scoped.id),
+            "project-scoped orchestrator must not leak to unrelated projects"
+        );
+    }
+
+    // ── save_memory_doc gate (forgeable metadata regression) ───
+
+    #[tokio::test]
+    async fn save_rejects_llm_orchestrator_when_self_modify_disabled() {
+        use ironclaw_engine::Store;
+
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::disable();
+        let store = HybridStore::new(None);
+
+        // The reviewer-flagged forgeable bypass: previously, an LLM-authored
+        // doc with `metadata.source = "compiled_in"` was treated as system
+        // internal. The new gate keys off the trusted-write task-local —
+        // since this call is NOT inside `with_trusted_internal_writes`,
+        // the metadata claim must NOT bypass the gate.
+        let doc = MemoryDoc {
+            id: DocId(uuid::Uuid::new_v4()),
+            project_id: ProjectId::new(),
+            user_id: shared_owner_id().to_string(),
+            doc_type: DocType::Note,
+            title: ORCHESTRATOR_MAIN_TITLE.to_string(),
+            content: "def run_loop(): pass\n".to_string(),
+            source_thread_id: None,
+            tags: vec![ORCHESTRATOR_CODE_TAG.to_string()],
+            metadata: serde_json::json!({"version": 5, "source": "compiled_in"}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let err = store
+            .save_memory_doc(&doc)
+            .await
+            .expect_err("forgeable metadata must not bypass the self-modify gate");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("self-modification disabled"),
+            "expected denial reason; got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn save_allows_trusted_seed_when_self_modify_disabled() {
+        use ironclaw_engine::Store;
+        use ironclaw_engine::runtime::with_trusted_internal_writes;
+
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::disable();
+        let store = HybridStore::new(None);
+
+        // System-internal seed inside the trusted-write scope must succeed
+        // even when self-modify is off (this is exactly what
+        // MissionManager::seed_orchestrator_v0 does at bootstrap).
+        let doc = MemoryDoc {
+            id: DocId(uuid::Uuid::new_v4()),
+            project_id: ProjectId::new(),
+            user_id: shared_owner_id().to_string(),
+            doc_type: DocType::Note,
+            title: ORCHESTRATOR_MAIN_TITLE.to_string(),
+            content: "def run_loop(): pass\n".to_string(),
+            source_thread_id: None,
+            tags: vec![ORCHESTRATOR_CODE_TAG.to_string()],
+            metadata: serde_json::json!({"version": 0}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        with_trusted_internal_writes(store.save_memory_doc(&doc))
+            .await
+            .expect("trusted seed write must succeed");
+    }
+
+    #[tokio::test]
+    async fn save_validates_python_when_self_modify_enabled() {
+        use ironclaw_engine::Store;
+
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
+        let store = HybridStore::new(None);
+
+        let doc = MemoryDoc {
+            id: DocId(uuid::Uuid::new_v4()),
+            project_id: ProjectId::new(),
+            user_id: shared_owner_id().to_string(),
+            doc_type: DocType::Note,
+            title: ORCHESTRATOR_MAIN_TITLE.to_string(),
+            // Broken Python — validator must reject before persisting.
+            content: "def f(\n".to_string(),
+            source_thread_id: None,
+            tags: vec![ORCHESTRATOR_CODE_TAG.to_string()],
+            metadata: serde_json::json!({"version": 1}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let err = store
+            .save_memory_doc(&doc)
+            .await
+            .expect_err("invalid Python must be rejected at write time");
+        let msg = format!("{err:?}");
+        assert!(msg.contains("invalid Python") || msg.contains("syntax"));
+    }
+
+    /// Regression test (PR #1958 round-4 review):
+    ///
+    /// Previously the self-modify gate contained a title-based exemption:
+    /// `trusted = is_trusted_internal_write_active() || doc.title ==
+    /// ORCHESTRATOR_FAILURES_TITLE`. Any code path that called
+    /// `save_memory_doc` with that title — including LLM-reachable ones
+    /// through the self-improvement mission — bypassed the gate and
+    /// could corrupt the failure counter (which governs auto-rollback).
+    /// The exemption now lives at the two real call sites inside
+    /// `with_trusted_internal_writes`; untrusted writes to the failure
+    /// tracker must be rejected.
+    #[tokio::test]
+    async fn save_rejects_untrusted_failure_tracker_writes() {
+        use ironclaw_engine::Store;
+
+        // Self-modify *enabled* is the interesting case — under the old
+        // title-based exemption the write would bypass even the
+        // `validate_orchestrator_content` step (the validator also skipped
+        // the failures title). With the fix, untrusted callers are blocked
+        // regardless of self-modify state.
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
+        let store = HybridStore::new(None);
+
+        let doc = MemoryDoc {
+            id: DocId(uuid::Uuid::new_v4()),
+            project_id: ProjectId::new(),
+            user_id: shared_owner_id().to_string(),
+            doc_type: DocType::Note,
+            title: "orchestrator:failures".to_string(),
+            content: r#"{"version":99,"count":0}"#.to_string(),
+            source_thread_id: None,
+            tags: vec![],
+            metadata: serde_json::json!({}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let err = store
+            .save_memory_doc(&doc)
+            .await
+            .expect_err("untrusted failure-tracker write must be rejected");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("system-internal tracker"),
+            "expected system-internal denial; got: {msg}"
+        );
+    }
+
+    /// The system-initiated failure-tracker writes from
+    /// `record_orchestrator_failure` and `reset_orchestrator_failures` must
+    /// still succeed — they enter the trusted-write scope at the call site.
+    #[tokio::test]
+    async fn save_allows_trusted_failure_tracker_writes() {
+        use ironclaw_engine::Store;
+        use ironclaw_engine::runtime::with_trusted_internal_writes;
+
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::disable();
+        let store = HybridStore::new(None);
+
+        let doc = MemoryDoc {
+            id: DocId(uuid::Uuid::new_v4()),
+            project_id: ProjectId::new(),
+            user_id: shared_owner_id().to_string(),
+            doc_type: DocType::Note,
+            title: "orchestrator:failures".to_string(),
+            content: r#"{"version":3,"count":1}"#.to_string(),
+            source_thread_id: None,
+            tags: vec![],
+            metadata: serde_json::json!({}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        with_trusted_internal_writes(store.save_memory_doc(&doc))
+            .await
+            .expect("trusted failure-tracker write must succeed");
+    }
+
+    #[tokio::test]
+    async fn save_stamps_content_hash_on_protected_docs() {
+        use ironclaw_engine::Store;
+
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
+        let store = HybridStore::new(None);
+
+        let doc = MemoryDoc {
+            id: DocId(uuid::Uuid::new_v4()),
+            project_id: ProjectId::new(),
+            user_id: shared_owner_id().to_string(),
+            doc_type: DocType::Note,
+            title: ORCHESTRATOR_MAIN_TITLE.to_string(),
+            content: "def run_loop(): return 1\n".to_string(),
+            source_thread_id: None,
+            tags: vec![ORCHESTRATOR_CODE_TAG.to_string()],
+            metadata: serde_json::json!({"version": 1}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let id = doc.id;
+        store.save_memory_doc(&doc).await.unwrap();
+
+        let stored = store.docs.read().await.get(&id).cloned().expect("stored");
+        let hash = stored
+            .metadata
+            .get("content_hash")
+            .and_then(|v| v.as_str())
+            .expect("content_hash stamped");
+        // Sha256 hex digest is 64 chars
+        assert_eq!(hash.len(), 64);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ── ThreadArchiveSummary serialization round-trip ──────────
+    //
+    // Regression: `thread_from_archive` previously hardcoded
+    // `total_cost_usd: 0.0`, silently losing accumulated cost when an
+    // archived thread got rehydrated for a mission detail page. Pin both
+    // a live cost round-trip (serialize → JSON → deserialize →
+    // reconstruct) and legacy compatibility (archive files written before
+    // this field existed still deserialize, falling back to 0.0).
+
+    fn archive_thread_fixture(cost: f64) -> ironclaw_engine::Thread {
+        let mut thread = ironclaw_engine::Thread::new(
+            "archive-round-trip",
+            ironclaw_engine::ThreadType::Mission,
+            ironclaw_engine::ProjectId::new(),
+            "u1",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.step_count = 3;
+        thread.total_tokens_used = 1500;
+        thread.total_cost_usd = cost;
+        thread.completed_at = Some(thread.created_at);
+        thread.state = ironclaw_engine::ThreadState::Completed;
+        thread
+    }
+
+    #[test]
+    fn archive_summary_preserves_total_cost_usd_through_round_trip() {
+        let thread = archive_thread_fixture(0.0105);
+        let summary = compact_thread_summary(&thread);
+        let json = serde_json::to_string(&summary).expect("serialize");
+        let restored: ThreadArchiveSummary = serde_json::from_str(&json).expect("deserialize");
+        let rehydrated =
+            thread_from_archive(&restored).expect("thread_from_archive should succeed");
+        let delta = (rehydrated.total_cost_usd - 0.0105_f64).abs();
+        assert!(
+            delta < 1e-12,
+            "total_cost_usd must round-trip: expected 0.0105, got {}",
+            rehydrated.total_cost_usd
+        );
+    }
+
+    // ── Project slug / synth_bare_project / project paths ─────
+    //
+    // The review on #2533 flagged a divergent-ID bug: synth_bare_project
+    // used the raw directory name to derive the `ProjectId` while
+    // `Project::new` slugified internally, so any non-canonical slug
+    // would split one workspace directory into two in-memory projects.
+    // These tests pin the invariant: for every name shape, the two code
+    // paths must produce identical IDs so the workspace round-trips.
+
+    #[test]
+    fn project_slug_for_name_uses_slugify_simple() {
+        assert_eq!(project_slug_for_name("commitments"), "commitments");
+        assert_eq!(project_slug_for_name("My Project"), "my-project");
+        assert_eq!(project_slug_for_name("  Q4 2026 Plan!"), "q4-2026-plan");
+    }
+
+    #[test]
+    fn project_slug_for_name_fallbacks_on_empty_slug() {
+        // A name with no alphanumerics can't produce a directory — must
+        // fall back to a reserved string rather than return "".
+        assert_eq!(project_slug_for_name(""), "untitled");
+        assert_eq!(project_slug_for_name("---"), "untitled");
+        assert_eq!(project_slug_for_name("!!!"), "untitled");
+    }
+
+    #[test]
+    fn project_dir_and_path_are_deterministic() {
+        assert_eq!(project_dir("commitments"), "projects/commitments");
+        assert_eq!(project_dir("My Project"), "projects/my-project");
+        assert_eq!(
+            project_path("commitments"),
+            "projects/commitments/.project.json"
+        );
+        assert_eq!(
+            project_path("My Project"),
+            "projects/my-project/.project.json"
+        );
+    }
+
+    #[test]
+    fn synth_bare_project_normalizes_slug_like_project_new() {
+        // For every directory name shape, the stub's ID must equal the
+        // ID `Project::new` would compute for the same user+name. This
+        // is the core fix for the review's ID-fork finding.
+        let user = "alice";
+        let directory_names = [
+            "commitments",
+            "My Project",
+            "MY PROJECT",
+            "  my-project  ",
+            "my__project",
+            "my.project",
+            "café",
+            "emoji 🚀",
+            "-leading",
+            "trailing-",
+            "---chaos---",
+            "q4-2026-plan",
+        ];
+        for raw_slug in directory_names {
+            let Some(stub) = synth_bare_project(raw_slug, user) else {
+                // Only names that slugify to empty produce None; assert
+                // the helper and Project::new agree on emptiness too.
+                assert!(
+                    ironclaw_engine::types::slugify_simple(raw_slug).is_empty(),
+                    "synth_bare_project returned None for non-empty slug {raw_slug:?}"
+                );
+                continue;
+            };
+            let explicit = Project::new(user, raw_slug, "");
+            assert_eq!(
+                stub.id, explicit.id,
+                "synth_bare_project({raw_slug:?}) and Project::new({raw_slug:?}) must produce the same ProjectId"
+            );
+            // Stub name is the normalized slug — saving this stub via
+            // `save_project` lands at the same directory as the raw dir
+            // only if that raw dir is already canonical, which is the
+            // guarantee we want for workspace round-tripping.
+            assert_eq!(stub.name, ironclaw_engine::types::slugify_simple(raw_slug));
+        }
+    }
+
+    #[test]
+    fn synth_bare_project_rejects_unsluggable_directories() {
+        // A directory whose name has no alphanumerics can't produce a
+        // stable slug, so there's nothing to synthesize.
+        assert!(synth_bare_project("", "alice").is_none());
+        assert!(synth_bare_project("---", "alice").is_none());
+        assert!(synth_bare_project("!!!", "alice").is_none());
+        assert!(synth_bare_project(".", "alice").is_none());
+        assert!(synth_bare_project("..", "alice").is_none());
+    }
+
+    #[test]
+    fn synth_bare_project_isolates_users() {
+        // Same slug across two users must not collide — `list_projects`
+        // filters by user, so a shared ID would leak between tenants.
+        let alice = synth_bare_project("notes", "alice").unwrap();
+        let bob = synth_bare_project("notes", "bob").unwrap();
+        assert_ne!(alice.id, bob.id);
+        assert_eq!(alice.user_id, "alice");
+        assert_eq!(bob.user_id, "bob");
+    }
+
+    #[test]
+    fn archive_summary_handles_legacy_json_without_total_cost_usd_field() {
+        // Craft JSON as it would have been written before this PR: no
+        // `total_cost_usd` key. `#[serde(default)]` must accept it.
+        let legacy = serde_json::json!({
+            "thread_id": uuid::Uuid::new_v4().to_string(),
+            "goal": "legacy",
+            "state": "Completed",
+            "created_at": chrono::Utc::now().to_rfc3339(),
+            "completed_at": chrono::Utc::now().to_rfc3339(),
+            "step_count": 2,
+            "total_tokens": 900,
+            // total_cost_usd deliberately omitted
+        })
+        .to_string();
+
+        let restored: ThreadArchiveSummary =
+            serde_json::from_str(&legacy).expect("legacy summary must still deserialize");
+        assert_eq!(
+            restored.total_cost_usd, 0.0,
+            "missing field should default to 0.0"
+        );
+
+        let rehydrated =
+            thread_from_archive(&restored).expect("thread_from_archive should succeed");
+        assert_eq!(rehydrated.total_cost_usd, 0.0);
+    }
+
+    #[test]
+    fn archive_summary_preserves_title_through_round_trip() {
+        // Regression: `title` was introduced as a sibling of `goal` to
+        // give UI consumers a short label. Missing persistence through
+        // the archive round-trip would mean mission backfill
+        // (`backfill_archived_threads`) rehydrates threads with
+        // `title = None`, and frontends fall back to rendering a UUID
+        // prefix.
+        let mut thread = archive_thread_fixture(0.0);
+        thread.title = Some("Daily summary".to_string());
+
+        let summary = compact_thread_summary(&thread);
+        let json = serde_json::to_string(&summary).expect("serialize");
+        let restored: ThreadArchiveSummary = serde_json::from_str(&json).expect("deserialize");
+        let rehydrated =
+            thread_from_archive(&restored).expect("thread_from_archive should succeed");
+        assert_eq!(rehydrated.title.as_deref(), Some("Daily summary"));
+    }
+
+    #[test]
+    fn archive_summary_handles_legacy_json_without_title_field() {
+        // Archive files written before `title` existed must still
+        // deserialize — `#[serde(default)]` maps the missing key to
+        // `None`. Matches the `total_cost_usd` precedent.
+        let legacy = serde_json::json!({
+            "thread_id": uuid::Uuid::new_v4().to_string(),
+            "goal": "legacy archived mission",
+            "state": "Completed",
+            "created_at": chrono::Utc::now().to_rfc3339(),
+            "completed_at": chrono::Utc::now().to_rfc3339(),
+            "step_count": 1,
+            "total_tokens": 100,
+            // title deliberately omitted
+        })
+        .to_string();
+
+        let restored: ThreadArchiveSummary =
+            serde_json::from_str(&legacy).expect("legacy summary must still deserialize");
+        assert_eq!(restored.title, None);
+
+        let rehydrated =
+            thread_from_archive(&restored).expect("thread_from_archive should succeed");
+        assert_eq!(rehydrated.title, None);
     }
 }
 
@@ -1719,5 +2972,431 @@ mod migration_tests {
             .await
             .expect("readable");
         assert_eq!(doc.content, "ok");
+    }
+
+    // ── Orchestrator persistence end-to-end ────────────────────
+    //
+    // These tests simulate the full save → restart → load → query path
+    // for orchestrator code persisted as raw `.py`. They were the focus
+    // of three high-severity reviewer findings on PR #1958:
+    //
+    // 1. The synthesized doc used `ProjectId::nil()` so project-scoped
+    //    queries returned nothing after restart (orchestrator silently
+    //    reverted to compiled-in defaults).
+    // 2. The path normalization bypass let an attacker persist a `.py`
+    //    file outside the load path, so the runtime + audit picture
+    //    diverged from disk.
+    // 3. Frontmatter `project_id` / `user_id` were dropped on
+    //    deserialization, so .md docs disappeared after restart.
+
+    #[tokio::test]
+    async fn orchestrator_py_round_trips_through_restart() {
+        use ironclaw_engine::Store;
+        use ironclaw_engine::runtime::with_trusted_internal_writes;
+        use ironclaw_engine::types::shared_owner_id;
+
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
+        let (ws, _dir) = fresh_workspace().await;
+
+        // ── Phase 1: write an orchestrator v3 through the trusted path
+        let project = ProjectId::new();
+        let store_a = HybridStore::new(Some(Arc::clone(&ws)));
+        let mut doc = MemoryDoc {
+            id: DocId(uuid::Uuid::new_v4()),
+            project_id: project,
+            user_id: shared_owner_id().to_string(),
+            doc_type: DocType::Note,
+            title: ORCHESTRATOR_MAIN_TITLE.to_string(),
+            content: "def run_loop():\n    return 42\n".to_string(),
+            source_thread_id: None,
+            tags: vec![ORCHESTRATOR_CODE_TAG.to_string()],
+            metadata: serde_json::json!({"version": 3}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        // Use a non-trusted save path: self_modify is enabled, so the
+        // store gate validates content but does not require the trusted
+        // scope. (`with_trusted_internal_writes` is also fine here; either
+        // codepath should round-trip.)
+        store_a.save_memory_doc(&doc).await.expect("write v3");
+
+        // The physical file should now exist as raw .py
+        let on_disk = ws
+            .read(".system/engine/orchestrator/v3.py")
+            .await
+            .expect("v3.py persisted");
+        assert!(
+            on_disk.content.contains("return 42"),
+            "raw Python content must round-trip to disk"
+        );
+
+        // ── Phase 2: simulate process restart with a fresh HybridStore
+        let store_b = HybridStore::new(Some(Arc::clone(&ws)));
+        store_b.load_state_from_workspace().await;
+
+        // The orchestrator must be visible to a project-scoped shared query
+        // — even when the synthesized doc was saved with ProjectId::nil().
+        let docs = store_b
+            .list_shared_memory_docs(project)
+            .await
+            .expect("list shared post-restart");
+        let restored = docs
+            .iter()
+            .find(|d| {
+                d.title == ORCHESTRATOR_MAIN_TITLE
+                    && d.tags.contains(&ORCHESTRATOR_CODE_TAG.to_string())
+                    && d.metadata.get("version").and_then(|v| v.as_u64()) == Some(3)
+            })
+            .expect("orchestrator v3 must be visible after restart");
+        assert!(restored.content.contains("return 42"));
+
+        // And it must be visible from an unrelated project too — the
+        // global override surfaces it everywhere, so the executor's
+        // load_orchestrator(any_project_id) call always finds the latest.
+        let other_project = ProjectId::new();
+        let other_docs = store_b
+            .list_shared_memory_docs(other_project)
+            .await
+            .expect("list shared for other project");
+        assert!(
+            other_docs.iter().any(|d| {
+                d.title == ORCHESTRATOR_MAIN_TITLE
+                    && d.metadata.get("version").and_then(|v| v.as_u64()) == Some(3)
+            }),
+            "global orchestrator must be visible to ALL project queries after restart"
+        );
+
+        // ── Phase 3: also verify v0 trusted-seed bypass survives restart
+        doc.id = DocId(uuid::Uuid::new_v4());
+        doc.metadata = serde_json::json!({"version": 0});
+        doc.content = "def run_loop():\n    return 0\n".to_string();
+        with_trusted_internal_writes(store_a.save_memory_doc(&doc))
+            .await
+            .expect("write v0 via trusted path");
+
+        let store_c = HybridStore::new(Some(Arc::clone(&ws)));
+        store_c.load_state_from_workspace().await;
+        let docs = store_c.list_shared_memory_docs(project).await.unwrap();
+        let v0 = docs
+            .iter()
+            .find(|d| d.metadata.get("version").and_then(|v| v.as_u64()) == Some(0));
+        assert!(v0.is_some(), "v0 must be visible after restart");
+        let v3 = docs
+            .iter()
+            .find(|d| d.metadata.get("version").and_then(|v| v.as_u64()) == Some(3));
+        assert!(v3.is_some(), "v3 must still be visible after restart");
+    }
+
+    #[tokio::test]
+    async fn knowledge_md_doc_round_trips_project_id_and_user_id() {
+        // Reviewer finding: `serialize_knowledge_doc` persisted neither
+        // `project_id` nor `user_id`, so `deserialize_knowledge_doc`
+        // restored them as `nil`/`"legacy"` and `list_memory_docs` (which
+        // filters by exact pair) returned nothing after restart.
+        use ironclaw_engine::Store;
+
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::disable();
+        let (ws, _dir) = fresh_workspace().await;
+
+        let project = ProjectId::new();
+        let user = "alice";
+
+        let store_a = HybridStore::new(Some(Arc::clone(&ws)));
+        let lesson = MemoryDoc {
+            id: DocId(uuid::Uuid::new_v4()),
+            project_id: project,
+            user_id: user.to_string(),
+            doc_type: DocType::Lesson,
+            title: "Always validate input".to_string(),
+            content: "Lesson body.".to_string(),
+            source_thread_id: None,
+            tags: vec!["safety".to_string()],
+            metadata: serde_json::json!({}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        store_a.save_memory_doc(&lesson).await.expect("save lesson");
+
+        // Restart and query: the doc must reappear under the same
+        // (project, user) pair via list_memory_docs.
+        let store_b = HybridStore::new(Some(Arc::clone(&ws)));
+        store_b.load_state_from_workspace().await;
+        let docs = store_b
+            .list_memory_docs(project, user)
+            .await
+            .expect("list project-scoped");
+        assert!(
+            docs.iter().any(|d| d.title == "Always validate input"),
+            "lesson must be visible to its original project + user pair after restart"
+        );
+
+        // Other (project, user) pair must NOT see it.
+        let other_project = ProjectId::new();
+        let docs_other = store_b
+            .list_memory_docs(other_project, user)
+            .await
+            .expect("list other project");
+        assert!(
+            !docs_other
+                .iter()
+                .any(|d| d.title == "Always validate input")
+        );
+        let docs_other_user = store_b
+            .list_memory_docs(project, "bob")
+            .await
+            .expect("list other user");
+        assert!(
+            !docs_other_user
+                .iter()
+                .any(|d| d.title == "Always validate input")
+        );
+    }
+
+    // ── Project auto-registration: load + migrate ─────────────
+
+    #[tokio::test]
+    async fn load_projects_picks_up_bare_directories() {
+        // Writing any file under `projects/<slug>/` declares the project.
+        // After load, the store must list that project for its owner.
+        let (ws, _dir) = fresh_workspace().await;
+        ws.write("projects/commitments/AGENTS.md", "# hi")
+            .await
+            .expect("seed bare project file");
+
+        let store = HybridStore::new(Some(Arc::clone(&ws)));
+        store.load_projects_from_workspace(&ws).await;
+
+        let projects = store
+            .list_projects(ws.user_id())
+            .await
+            .expect("list_projects");
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "commitments");
+        // ID must match what Project::new(user, "commitments", "") produces.
+        assert_eq!(
+            projects[0].id,
+            Project::new(ws.user_id(), "commitments", "").id,
+            "bare-synth ID must equal Project::new ID for canonical slug"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_projects_prefers_metadata_over_synth() {
+        // When `.project.json` exists, use its stored identity rather
+        // than synthesizing a stub. A user who renamed their project
+        // (displayed name ≠ slug) must see the real name.
+        let (ws, _dir) = fresh_workspace().await;
+
+        let project = Project::new(ws.user_id(), "commitments", "Main exec project");
+        let json = serde_json::to_string(&project).expect("serialize");
+        ws.write("projects/commitments/.project.json", &json)
+            .await
+            .expect("seed .project.json");
+        ws.write("projects/commitments/AGENTS.md", "# hi")
+            .await
+            .expect("seed content");
+
+        let store = HybridStore::new(Some(Arc::clone(&ws)));
+        store.load_projects_from_workspace(&ws).await;
+
+        let loaded = store
+            .load_project(project.id)
+            .await
+            .expect("load ok")
+            .expect("found");
+        assert_eq!(loaded.description, "Main exec project");
+    }
+
+    #[tokio::test]
+    async fn load_projects_skips_non_canonical_directories() {
+        // A workspace directory like `projects/My Project/` can't be
+        // auto-registered as-is — saving its metadata would land at
+        // `projects/my-project/.project.json`, forking the in-memory
+        // identity from the on-disk layout. Reject it cleanly.
+        //
+        // (We use a name that slugifies to empty; "My Project" does
+        // have a canonical slug and is still load-legal.)
+        let (ws, _dir) = fresh_workspace().await;
+        ws.write("projects/---/file.md", "content")
+            .await
+            .expect("seed");
+
+        let store = HybridStore::new(Some(Arc::clone(&ws)));
+        store.load_projects_from_workspace(&ws).await;
+        let projects = store
+            .list_projects(ws.user_id())
+            .await
+            .expect("list_projects");
+        assert!(
+            projects.is_empty(),
+            "unsluggable directories must not produce phantom projects: {projects:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_projects_weird_slugs_collapse_onto_one_id() {
+        // Two directories that normalize to the same slug must collapse
+        // to a single in-memory project, not duplicate. This is the
+        // anti-fork invariant the PR #2533 review flagged.
+        let (ws, _dir) = fresh_workspace().await;
+        ws.write("projects/commitments/a.md", "a")
+            .await
+            .expect("seed canonical");
+        // Craft a second dir that slugifies to `commitments` — the
+        // workspace API is strict about slashes but allows any other
+        // characters in a segment name. A dir literally named "Commitments"
+        // slugifies identically to the canonical one.
+        ws.write("projects/Commitments/b.md", "b")
+            .await
+            .expect("seed non-canonical");
+
+        let store = HybridStore::new(Some(Arc::clone(&ws)));
+        store.load_projects_from_workspace(&ws).await;
+
+        let projects = store
+            .list_projects(ws.user_id())
+            .await
+            .expect("list_projects");
+        assert_eq!(
+            projects.len(),
+            1,
+            "two dirs with the same canonical slug must collapse to one project; got {projects:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn migrate_legacy_project_json_moves_to_user_facing_path() {
+        // Legacy engine layout stored project metadata at
+        // `.system/engine/projects/<slug>/project.json`. Migration must
+        // copy it to `projects/<slug>/.project.json` and delete the old.
+        let (ws, _dir) = fresh_workspace().await;
+        let project = Project::new(ws.user_id(), "archived", "old project");
+        let legacy_json = serde_json::to_string(&project).expect("serialize");
+        ws.write(
+            ".system/engine/projects/archived/project.json",
+            &legacy_json,
+        )
+        .await
+        .expect("seed legacy");
+
+        let store = HybridStore::new(Some(Arc::clone(&ws)));
+        store.migrate_legacy_project_jsons(&ws).await;
+
+        // New path exists, legacy is gone.
+        let migrated = ws
+            .read("projects/archived/.project.json")
+            .await
+            .expect("migrated file readable");
+        let parsed: Project = serde_json::from_str(&migrated.content).expect("parse");
+        assert_eq!(parsed.description, "old project");
+        assert!(
+            !ws.exists(".system/engine/projects/archived/project.json")
+                .await
+                .unwrap_or(true),
+            "legacy path should be removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn migrate_legacy_project_json_preserves_user_edited_new_path() {
+        // If the user has already edited the new-path file, migration
+        // must not clobber it — but it should still clean up the legacy.
+        let (ws, _dir) = fresh_workspace().await;
+        let legacy_proj = Project::new(ws.user_id(), "ongoing", "stale legacy desc");
+        let legacy_json = serde_json::to_string(&legacy_proj).expect("serialize");
+        let fresh_proj = Project::new(ws.user_id(), "ongoing", "new user-edited desc");
+        let fresh_json = serde_json::to_string(&fresh_proj).expect("serialize");
+
+        ws.write(".system/engine/projects/ongoing/project.json", &legacy_json)
+            .await
+            .expect("seed legacy");
+        ws.write("projects/ongoing/.project.json", &fresh_json)
+            .await
+            .expect("seed new");
+
+        let store = HybridStore::new(Some(Arc::clone(&ws)));
+        store.migrate_legacy_project_jsons(&ws).await;
+
+        let preserved = ws
+            .read("projects/ongoing/.project.json")
+            .await
+            .expect("new path readable");
+        let parsed: Project = serde_json::from_str(&preserved.content).expect("parse");
+        assert_eq!(parsed.description, "new user-edited desc");
+        assert!(
+            !ws.exists(".system/engine/projects/ongoing/project.json")
+                .await
+                .unwrap_or(true),
+            "legacy duplicate must still be cleaned up"
+        );
+    }
+
+    #[tokio::test]
+    async fn migrate_legacy_project_json_moves_unparseable_aside() {
+        // A corrupted legacy project.json must not re-fail silently on
+        // every boot — move it aside so the user can recover and the
+        // next load run isn't dragging the bad file forward.
+        let (ws, _dir) = fresh_workspace().await;
+        ws.write(".system/engine/projects/broken/project.json", "{ not json")
+            .await
+            .expect("seed broken");
+
+        let store = HybridStore::new(Some(Arc::clone(&ws)));
+        store.migrate_legacy_project_jsons(&ws).await;
+
+        // Broken file parked at the .broken.json name.
+        let parked = ws
+            .read(".system/engine/projects/broken/project.broken.json")
+            .await
+            .expect("parked file readable");
+        assert_eq!(parked.content, "{ not json");
+        // Original legacy path cleared so migration doesn't keep tripping.
+        assert!(
+            !ws.exists(".system/engine/projects/broken/project.json")
+                .await
+                .unwrap_or(true),
+            "legacy path must be cleared after parking"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_python_orchestrator_is_rejected_at_write_time() {
+        // Reviewer finding: the validator must run *before* the doc is
+        // persisted, otherwise broken patches consume failure-budget slots
+        // (3 failures trigger auto-rollback) and corrupt the version chain.
+        use ironclaw_engine::Store;
+        use ironclaw_engine::types::shared_owner_id;
+
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
+        let (ws, _dir) = fresh_workspace().await;
+
+        let store = HybridStore::new(Some(Arc::clone(&ws)));
+        let project = ProjectId::new();
+        let bad = MemoryDoc {
+            id: DocId(uuid::Uuid::new_v4()),
+            project_id: project,
+            user_id: shared_owner_id().to_string(),
+            doc_type: DocType::Note,
+            title: ORCHESTRATOR_MAIN_TITLE.to_string(),
+            content: "def f(\n".to_string(), // unclosed paren
+            source_thread_id: None,
+            tags: vec![ORCHESTRATOR_CODE_TAG.to_string()],
+            metadata: serde_json::json!({"version": 1}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let err = store
+            .save_memory_doc(&bad)
+            .await
+            .expect_err("invalid Python must be rejected");
+        assert!(format!("{err:?}").contains("invalid Python"));
+
+        // No file was persisted to disk.
+        assert!(
+            !ws.exists(".system/engine/orchestrator/v1.py")
+                .await
+                .unwrap_or(true),
+            "rejected patch must not be persisted to disk"
+        );
     }
 }

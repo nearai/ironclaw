@@ -389,12 +389,9 @@ impl Channel for ReplChannel {
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let (tx, rx) = mpsc::channel(32);
-        // Store tx so send_status can inject approval responses directly.
-        // Skip for single-message mode — no interactive approval is needed
-        // and the extra sender would keep the stream open after /quit.
-        if self.single_message.is_none()
-            && let Ok(mut guard) = self.msg_tx.lock()
-        {
+        // Store tx so send_status can inject approval responses directly and
+        // single-message mode can send `/quit` after the first response.
+        if let Ok(mut guard) = self.msg_tx.lock() {
             *guard = Some(tx.clone());
         }
         let single_message = self.single_message.clone();
@@ -747,6 +744,9 @@ impl Channel for ReplChannel {
                     eprintln!("  {}{url}{}", fmt::link(), fmt::reset());
                 }
                 eprintln!();
+                // Resume readline so the user can paste a token or continue the
+                // auth flow via the normal submission parser path.
+                self.stdin_locked.store(false, Ordering::Relaxed);
             }
             StatusUpdate::AuthCompleted {
                 extension_name,
@@ -793,8 +793,10 @@ impl Channel for ReplChannel {
                     eprintln!("    \x1b[90m\u{2192} {}: {display}\x1b[0m", d.tool_name);
                 }
             }
-            StatusUpdate::TurnCost { .. } => {
-                // Cost display is handled by the TUI channel
+            StatusUpdate::TurnCost { .. }
+            | StatusUpdate::ToolResultFull { .. }
+            | StatusUpdate::TurnMetrics { .. } => {
+                // Verbose debug events — only relevant for web gateway
             }
             StatusUpdate::JobStatus { .. }
             | StatusUpdate::JobResult { .. }
@@ -808,7 +810,7 @@ impl Channel for ReplChannel {
             | StatusUpdate::ConversationHistory { .. } => {
                 // Infrastructure status events are only rendered by the TUI.
             }
-            StatusUpdate::SkillActivated { skill_names } => {
+            StatusUpdate::SkillActivated { skill_names, .. } => {
                 if !skill_names.is_empty() {
                     eprintln!(
                         "  \x1b[36m\u{25C8} skills: {}\x1b[0m",
@@ -851,8 +853,10 @@ mod tests {
 
     use super::*;
 
-    /// Regression: single-message mode must close the stream after the one
-    /// message so callers (and tests) don't hang forever.
+    /// Regression: single-message mode sends the user line, then after the agent
+    /// completes the turn `finish_single_message_turn()` injects `/quit` so the
+    /// main loop can exit; only then should the stream close (msg_tx clone kept
+    /// the channel open after the input thread exited).
     #[tokio::test]
     async fn single_message_mode_sends_message_and_closes_stream() {
         let repl = ReplChannel::with_message("hi".to_string());
@@ -865,15 +869,68 @@ mod tests {
         assert_eq!(first.channel, "repl");
         assert_eq!(first.content, "hi");
 
-        // The spawned thread sent the message and returned, dropping its
-        // sender. Because we skip storing a clone in msg_tx for single-
-        // message mode, the stream should close immediately.
+        repl.finish_single_message_turn().await;
+
+        let quit = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("timed out waiting for /quit injection")
+            .expect("/quit message missing");
+        assert_eq!(quit.channel, "repl");
+        assert_eq!(quit.content, "/quit");
+
         assert!(
             timeout(Duration::from_secs(1), stream.next())
                 .await
                 .expect("timed out waiting for stream to close")
                 .is_none(),
-            "stream should end after the single message"
+            "stream should end after /quit sender is dropped"
+        );
+    }
+
+    /// Regression: per `.claude/rules/testing.md` ("Test Through the Caller,
+    /// Not Just the Helper"), a unit test that only asserts the
+    /// `stdin_locked` flag flipped is insufficient — the side effect that
+    /// matters is the input thread's polling loop in `start()` actually
+    /// resuming. This test mirrors that polling pattern and asserts it
+    /// observes the unlock after `send_status(AuthRequired)`.
+    #[tokio::test]
+    async fn auth_required_status_unblocks_input_polling_loop() {
+        let repl = ReplChannel::with_user_id("test-user");
+        repl.stdin_locked.store(true, Ordering::Relaxed);
+
+        let stdin_locked = Arc::clone(&repl.stdin_locked);
+        let poller = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while stdin_locked.load(Ordering::Relaxed) {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            true
+        });
+
+        repl.send_status(
+            StatusUpdate::AuthRequired {
+                extension_name: ironclaw_common::ExtensionName::new("google_oauth_token").unwrap(),
+                instructions: Some("Paste your token".to_string()),
+                auth_url: None,
+                setup_url: Some("http://127.0.0.1:8080/auth".to_string()),
+                request_id: None,
+            },
+            &serde_json::json!({}),
+        )
+        .await
+        .expect("auth required status should render successfully");
+
+        let resumed = poller.join().expect("polling thread panicked");
+        assert!(
+            resumed,
+            "input polling loop must observe the unlock so the next readline can start"
+        );
+        assert!(
+            !repl.stdin_locked.load(Ordering::Relaxed),
+            "stdin_locked must remain false after AuthRequired so subsequent prompts aren't blocked"
         );
     }
 }

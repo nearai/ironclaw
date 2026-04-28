@@ -1,0 +1,47 @@
+{
+  "model_name": "v2-execution-obligation-nudge",
+  "expects": {
+    "response_contains": ["echo test"],
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "request_hint": {
+        "last_user_message_contains": "run"
+      },
+      "response": {
+        "type": "text",
+        "content": "I cannot execute tools from this reply path. Let me explain what would happen if I ran the echo tool.",
+        "input_tokens": 100,
+        "output_tokens": 30
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "asked to perform"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_obligation_echo_1",
+            "name": "echo",
+            "arguments": {
+              "message": "obligation echo test"
+            }
+          }
+        ],
+        "input_tokens": 200,
+        "output_tokens": 30
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "The echo tool returned: obligation echo test",
+        "input_tokens": 250,
+        "output_tokens": 15
+      }
+    }
+  ]
+}

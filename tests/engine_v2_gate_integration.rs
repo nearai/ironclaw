@@ -18,10 +18,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use tokio::sync::RwLock;
 
-use ironclaw_engine::types::capability::{EffectType, LeaseId};
+use ironclaw_engine::types::capability::{EffectType, LeaseId, ModelToolSurface};
 use ironclaw_engine::{
-    ActionDef, ActionResult, Capability, CapabilityLease, CapabilityRegistry, DocId,
-    EffectExecutor, EngineError, GrantedActions, LeaseManager, LlmBackend, LlmCallConfig,
+    ActionDef, ActionInventory, ActionResult, Capability, CapabilityLease, CapabilityRegistry,
+    DocId, EffectExecutor, EngineError, GrantedActions, LeaseManager, LlmBackend, LlmCallConfig,
     LlmOutput, LlmResponse, MemoryDoc, Mission, MissionId, MissionStatus, PolicyEngine, Project,
     ProjectId, ResumeKind, Step, Store, Thread, ThreadConfig, ThreadEvent, ThreadId, ThreadManager,
     ThreadMessage, ThreadOutcome, ThreadState, ThreadType, TokenUsage,
@@ -69,6 +69,54 @@ impl LlmBackend for ScriptedLlm {
     }
     fn model_name(&self) -> &str {
         "scripted-mock"
+    }
+}
+
+struct ActionCapturingScriptedLlm {
+    responses: std::sync::Mutex<Vec<LlmOutput>>,
+    seen_action_names: std::sync::Mutex<Vec<Vec<String>>>,
+}
+
+impl ActionCapturingScriptedLlm {
+    fn new(responses: Vec<LlmOutput>) -> Arc<Self> {
+        Arc::new(Self {
+            responses: std::sync::Mutex::new(responses),
+            seen_action_names: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn seen_action_names(&self) -> Vec<Vec<String>> {
+        self.seen_action_names.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmBackend for ActionCapturingScriptedLlm {
+    async fn complete(
+        &self,
+        _messages: &[ThreadMessage],
+        actions: &[ActionDef],
+        _config: &LlmCallConfig,
+    ) -> Result<LlmOutput, EngineError> {
+        self.seen_action_names.lock().unwrap().push(
+            actions
+                .iter()
+                .map(|action| action.name.clone())
+                .collect::<Vec<_>>(),
+        );
+        let mut queue = self.responses.lock().unwrap();
+        if queue.is_empty() {
+            Ok(LlmOutput {
+                response: LlmResponse::Text("done".into()),
+                usage: TokenUsage::default(),
+            })
+        } else {
+            Ok(queue.remove(0))
+        }
+    }
+
+    fn model_name(&self) -> &str {
+        "action-capturing-scripted-mock"
     }
 }
 
@@ -167,6 +215,108 @@ impl GateMockEffects {
     }
 }
 
+struct InstallThenAliasEffects {
+    calls: RwLock<Vec<(String, serde_json::Value)>>,
+    authenticated: RwLock<std::collections::HashSet<String>>,
+}
+
+impl InstallThenAliasEffects {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            calls: RwLock::new(Vec::new()),
+            authenticated: RwLock::new(std::collections::HashSet::new()),
+        })
+    }
+
+    async fn mark_authenticated(&self, action_name: &str) {
+        self.authenticated
+            .write()
+            .await
+            .insert(action_name.to_string());
+    }
+
+    async fn recorded_calls(&self) -> Vec<(String, serde_json::Value)> {
+        self.calls.read().await.clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl EffectExecutor for InstallThenAliasEffects {
+    async fn execute_action(
+        &self,
+        action_name: &str,
+        parameters: serde_json::Value,
+        _lease: &CapabilityLease,
+        _context: &ironclaw_engine::ThreadExecutionContext,
+    ) -> Result<ActionResult, EngineError> {
+        self.calls
+            .write()
+            .await
+            .push((action_name.to_string(), parameters.clone()));
+
+        if action_name == "tool_install"
+            && !self.authenticated.read().await.contains("tool_install")
+        {
+            return Err(EngineError::GatePaused {
+                gate_name: "authentication".into(),
+                action_name: action_name.to_string(),
+                call_id: "call_install_1".into(),
+                parameters: Box::new(parameters),
+                resume_kind: Box::new(ResumeKind::Authentication {
+                    credential_name: ironclaw_common::CredentialName::new("github").unwrap(),
+                    instructions: "Authenticate GitHub".into(),
+                    auth_url: None,
+                }),
+                paused_lease: None,
+                resume_output: None,
+            });
+        }
+
+        Ok(ActionResult {
+            call_id: String::new(),
+            action_name: action_name.to_string(),
+            output: serde_json::json!({"status": "ok", "action": action_name}),
+            is_error: false,
+            duration: Duration::from_millis(1),
+        })
+    }
+
+    async fn available_actions(
+        &self,
+        _leases: &[CapabilityLease],
+        _context: &ironclaw_engine::ThreadExecutionContext,
+    ) -> Result<Vec<ActionDef>, EngineError> {
+        Ok(vec![
+            ActionDef {
+                name: "tool_install".into(),
+                description: "Install a tool".into(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![EffectType::WriteExternal],
+                requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
+            },
+            ActionDef {
+                name: "create-issue".into(),
+                description: "Create an issue after install".into(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![EffectType::WriteExternal],
+                requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
+            },
+        ])
+    }
+
+    async fn available_capabilities(
+        &self,
+        _leases: &[CapabilityLease],
+        _context: &ironclaw_engine::ThreadExecutionContext,
+    ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, EngineError> {
+        Ok(vec![])
+    }
+}
+
 #[async_trait::async_trait]
 impl EffectExecutor for GateMockEffects {
     async fn execute_action(
@@ -195,6 +345,7 @@ impl EffectExecutor for GateMockEffects {
                     call_id: "call_gate_1".into(),
                     parameters: Box::new(parameters),
                     resume_kind: Box::new(ResumeKind::Approval { allow_always: true }),
+                    paused_lease: None,
                     resume_output: None,
                 });
             }
@@ -206,10 +357,11 @@ impl EffectExecutor for GateMockEffects {
                     call_id: "call_gate_2".into(),
                     parameters: Box::new(parameters),
                     resume_kind: Box::new(ResumeKind::Authentication {
-                        credential_name: "notion".into(),
+                        credential_name: ironclaw_common::CredentialName::new("notion").unwrap(),
                         instructions: "Authenticate your Notion workspace".into(),
                         auth_url: None,
                     }),
+                    paused_lease: None,
                     resume_output: None,
                 });
             }
@@ -223,6 +375,7 @@ impl EffectExecutor for GateMockEffects {
                 call_id: "call_gate_1".into(),
                 parameters: Box::new(parameters),
                 resume_kind: Box::new(ResumeKind::Approval { allow_always: true }),
+                paused_lease: None,
                 resume_output: None,
             });
         }
@@ -235,10 +388,11 @@ impl EffectExecutor for GateMockEffects {
                 call_id: "call_gate_2".into(),
                 parameters: Box::new(parameters),
                 resume_kind: Box::new(ResumeKind::Authentication {
-                    credential_name: "test_api_key".into(),
+                    credential_name: ironclaw_common::CredentialName::new("test_api_key").unwrap(),
                     instructions: "Provide your API key".into(),
                     auth_url: None,
                 }),
+                paused_lease: None,
                 resume_output: None,
             });
         }
@@ -255,6 +409,7 @@ impl EffectExecutor for GateMockEffects {
     async fn available_actions(
         &self,
         _leases: &[CapabilityLease],
+        _context: &ironclaw_engine::ThreadExecutionContext,
     ) -> Result<Vec<ActionDef>, EngineError> {
         // requires_approval: false — the gate check is done by the mock's
         // execute_action() returning GatePaused, not by the PolicyEngine.
@@ -265,6 +420,8 @@ impl EffectExecutor for GateMockEffects {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             },
             ActionDef {
                 name: "echo".into(),
@@ -272,6 +429,8 @@ impl EffectExecutor for GateMockEffects {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::ReadLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             },
             ActionDef {
                 name: "tool_install".into(),
@@ -279,8 +438,125 @@ impl EffectExecutor for GateMockEffects {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             },
         ])
+    }
+
+    async fn available_capabilities(
+        &self,
+        _leases: &[CapabilityLease],
+        _context: &ironclaw_engine::ThreadExecutionContext,
+    ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, EngineError> {
+        Ok(vec![])
+    }
+}
+
+struct ToolInfoCallableEffects;
+
+#[async_trait::async_trait]
+impl EffectExecutor for ToolInfoCallableEffects {
+    async fn execute_action(
+        &self,
+        action_name: &str,
+        parameters: serde_json::Value,
+        _lease: &CapabilityLease,
+        _context: &ironclaw_engine::ThreadExecutionContext,
+    ) -> Result<ActionResult, EngineError> {
+        let output = match action_name {
+            "tool_info" => serde_json::json!({
+                "name": "gmail",
+                "description": "Gmail tool",
+                "parameters": ["query"],
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"}
+                    },
+                    "required": ["query"]
+                }
+            }),
+            "gmail" => serde_json::json!({
+                "status": "ok",
+                "result": "gmail called",
+                "params": parameters
+            }),
+            other => serde_json::json!({
+                "status": "ok",
+                "result": format!("{other} called")
+            }),
+        };
+
+        Ok(ActionResult {
+            call_id: String::new(),
+            action_name: action_name.to_string(),
+            output,
+            is_error: false,
+            duration: Duration::from_millis(1),
+        })
+    }
+
+    async fn available_actions(
+        &self,
+        leases: &[CapabilityLease],
+        context: &ironclaw_engine::ThreadExecutionContext,
+    ) -> Result<Vec<ActionDef>, EngineError> {
+        Ok(self
+            .available_action_inventory(leases, context)
+            .await?
+            .inline)
+    }
+
+    async fn available_action_inventory(
+        &self,
+        _leases: &[CapabilityLease],
+        _context: &ironclaw_engine::ThreadExecutionContext,
+    ) -> Result<ActionInventory, EngineError> {
+        let tool_info = ActionDef {
+            name: "tool_info".into(),
+            description: "Inspect a tool".into(),
+            parameters_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "detail": {"type": "string"}
+                },
+                "required": ["name"]
+            }),
+            effects: vec![EffectType::ReadLocal],
+            requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
+            discovery: None,
+        };
+        let gmail = ActionDef {
+            name: "gmail".into(),
+            description: "Gmail tool".into(),
+            parameters_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"}
+                },
+                "required": ["query"]
+            }),
+            effects: vec![EffectType::ReadExternal],
+            requires_approval: false,
+            model_tool_surface: ModelToolSurface::CompactToolInfo,
+            discovery: None,
+        };
+
+        Ok(ActionInventory {
+            inline: vec![gmail, tool_info],
+            discoverable: Vec::new(),
+        })
+    }
+
+    async fn available_capabilities(
+        &self,
+        _leases: &[CapabilityLease],
+        _context: &ironclaw_engine::ThreadExecutionContext,
+    ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, EngineError> {
+        Ok(vec![])
     }
 }
 
@@ -393,6 +669,19 @@ impl Store for TestStore {
     ) -> Result<Vec<MemoryDoc>, EngineError> {
         Ok(self.docs.read().await.clone())
     }
+    async fn list_memory_docs_by_owner(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<MemoryDoc>, EngineError> {
+        Ok(self
+            .docs
+            .read()
+            .await
+            .iter()
+            .filter(|d| d.user_id == user_id)
+            .cloned()
+            .collect())
+    }
     async fn save_lease(&self, lease: &CapabilityLease) -> Result<(), EngineError> {
         let mut leases = self.leases.write().await;
         leases.retain(|l| l.id != lease.id);
@@ -469,6 +758,8 @@ fn make_caps(require_approval: bool) -> CapabilityRegistry {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: require_approval,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             },
             ActionDef {
                 name: "echo".into(),
@@ -476,6 +767,8 @@ fn make_caps(require_approval: bool) -> CapabilityRegistry {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::ReadLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             },
             ActionDef {
                 name: "tool_install".into(),
@@ -483,6 +776,8 @@ fn make_caps(require_approval: bool) -> CapabilityRegistry {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: require_approval,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             },
         ],
         knowledge: vec![],
@@ -502,7 +797,40 @@ fn make_caps_with_approval_tool() -> CapabilityRegistry {
             parameters_schema: serde_json::json!({"type": "object"}),
             effects: vec![EffectType::WriteExternal],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
+            discovery: None,
         }],
+        knowledge: vec![],
+        policies: vec![],
+    });
+    caps
+}
+
+fn make_caps_with_install_and_alias_followup() -> CapabilityRegistry {
+    let mut caps = CapabilityRegistry::new();
+    caps.register(Capability {
+        name: "tools".into(),
+        description: "test tools".into(),
+        actions: vec![
+            ActionDef {
+                name: "tool_install".into(),
+                description: "Install a tool".into(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![EffectType::WriteExternal],
+                requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
+            },
+            ActionDef {
+                name: "create_issue".into(),
+                description: "Create a follow-up issue".into(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![EffectType::WriteExternal],
+                requires_approval: false,
+                model_tool_surface: ModelToolSurface::CompactToolInfo,
+                discovery: None,
+            },
+        ],
         knowledge: vec![],
         policies: vec![],
     });
@@ -532,6 +860,7 @@ fn sample_pending_gate(
         created_at: Utc::now(),
         expires_at: Utc::now() + chrono::Duration::minutes(30),
         original_message: None,
+        paused_lease: None,
         resume_output: None,
         approval_already_granted: false,
     }
@@ -760,6 +1089,78 @@ async fn gate_paused_thread_resumes_to_completion() {
 }
 
 #[tokio::test]
+async fn tool_info_does_not_gate_callable_tool_into_next_llm_callable_set() {
+    let project_id = ProjectId::new();
+    let effects: Arc<dyn EffectExecutor> = Arc::new(ToolInfoCallableEffects);
+    let llm = ActionCapturingScriptedLlm::new(vec![
+        LlmOutput {
+            response: LlmResponse::ActionCalls {
+                calls: vec![ironclaw_engine::ActionCall {
+                    id: "call_tool_info_1".into(),
+                    action_name: "tool_info".into(),
+                    parameters: serde_json::json!({
+                        "name": "gmail",
+                        "detail": "schema"
+                    }),
+                }],
+                content: None,
+            },
+            usage: TokenUsage::default(),
+        },
+        LlmOutput {
+            response: LlmResponse::Text("done".into()),
+            usage: TokenUsage::default(),
+        },
+    ]);
+
+    let store = TestStore::new();
+    let mgr = ThreadManager::new(
+        llm.clone(),
+        effects,
+        store.clone() as Arc<dyn Store>,
+        Arc::new(make_caps(false)),
+        Arc::new(LeaseManager::new()),
+        Arc::new(PolicyEngine::new()),
+    );
+
+    let tid = mgr
+        .spawn_thread(
+            "inspect the gmail tool and continue",
+            ThreadType::Foreground,
+            project_id,
+            ThreadConfig::default(),
+            None,
+            "test-user",
+        )
+        .await
+        .expect("spawn_thread");
+
+    let outcome = mgr.join_thread(tid).await.expect("join");
+    assert!(matches!(outcome, ThreadOutcome::Completed { .. }));
+
+    let seen_action_names = llm.seen_action_names();
+    assert!(
+        seen_action_names.len() >= 2,
+        "expected at least two LLM calls, got {seen_action_names:?}"
+    );
+    assert!(
+        seen_action_names[0].contains(&"tool_info".to_string()),
+        "tool_info should be callable on the first step: {:?}",
+        seen_action_names[0]
+    );
+    assert!(
+        seen_action_names[0].contains(&"gmail".to_string()),
+        "gmail should already be callable on the first step: {:?}",
+        seen_action_names[0]
+    );
+    assert!(
+        seen_action_names[1].contains(&"gmail".to_string()),
+        "gmail should remain callable on the next step after tool_info: {:?}",
+        seen_action_names[1]
+    );
+}
+
+#[tokio::test]
 async fn approval_resolution_executes_pending_call_directly() {
     let project_id = ProjectId::new();
     let tools = Arc::new(ToolRegistry::new());
@@ -852,6 +1253,9 @@ async fn approval_resolution_executes_pending_call_directly() {
         current_call_id: Some("call_approval_1".into()),
         source_channel: None,
         user_timezone: None,
+        thread_goal: Some(thread.goal.clone()),
+        available_actions_snapshot: None,
+        available_action_inventory_snapshot: None,
     };
 
     let tool_result = effects
@@ -987,6 +1391,9 @@ async fn auth_resolution_retries_same_pending_action_without_second_pause() {
         current_call_id: Some("call_auth_1".into()),
         source_channel: None,
         user_timezone: None,
+        thread_goal: Some(thread.goal.clone()),
+        available_actions_snapshot: None,
+        available_action_inventory_snapshot: None,
     };
 
     effects.mark_authenticated("http").await;
@@ -1097,6 +1504,9 @@ async fn approval_chains_directly_into_auth_for_install_flow() {
         current_call_id: Some("call_install_1".into()),
         source_channel: None,
         user_timezone: None,
+        thread_goal: Some(thread.goal.clone()),
+        available_actions_snapshot: None,
+        available_action_inventory_snapshot: None,
     };
 
     effects.mark_approved("tool_install").await;
@@ -1156,6 +1566,143 @@ async fn approval_chains_directly_into_auth_for_install_flow() {
     assert_eq!(
         install_calls, 3,
         "install flow should retry once for approval and once for auth"
+    );
+}
+
+#[tokio::test]
+async fn install_auth_resume_followed_by_aliased_tool_call_completes_without_hanging() {
+    let project_id = ProjectId::new();
+    let effects = InstallThenAliasEffects::new();
+
+    let llm = ScriptedLlm::new(vec![
+        LlmOutput {
+            response: LlmResponse::ActionCalls {
+                calls: vec![ironclaw_engine::ActionCall {
+                    id: "call_install_1".into(),
+                    action_name: "tool_install".into(),
+                    parameters: serde_json::json!({"kind": "mcp_server", "name": "github"}),
+                }],
+                content: None,
+            },
+            usage: TokenUsage::default(),
+        },
+        LlmOutput {
+            response: LlmResponse::ActionCalls {
+                calls: vec![ironclaw_engine::ActionCall {
+                    id: "call_followup_1".into(),
+                    action_name: "create-issue".into(),
+                    parameters: serde_json::json!({"title": "Issue after install"}),
+                }],
+                content: None,
+            },
+            usage: TokenUsage::default(),
+        },
+        LlmOutput {
+            response: LlmResponse::Text("done".into()),
+            usage: TokenUsage::default(),
+        },
+    ]);
+
+    let store = TestStore::new();
+    let mgr = ThreadManager::new(
+        llm,
+        effects.clone(),
+        store.clone() as Arc<dyn Store>,
+        Arc::new(make_caps_with_install_and_alias_followup()),
+        Arc::new(LeaseManager::new()),
+        Arc::new(PolicyEngine::new()),
+    );
+
+    let tid = mgr
+        .spawn_thread(
+            "install github and then create an issue",
+            ThreadType::Foreground,
+            project_id,
+            ThreadConfig::default(),
+            None,
+            "test-user",
+        )
+        .await
+        .expect("spawn_thread");
+
+    let first = mgr.join_thread(tid).await.expect("first join");
+    assert!(matches!(first, ThreadOutcome::GatePaused { .. }));
+    assert_eq!(
+        store.load_thread(tid).await.unwrap().unwrap().state,
+        ThreadState::Waiting
+    );
+
+    let thread = store.load_thread(tid).await.unwrap().unwrap();
+    let lease = mgr
+        .leases
+        .find_lease_for_action(tid, "tool_install")
+        .await
+        .expect("lease for tool_install");
+    let exec_ctx = ironclaw_engine::ThreadExecutionContext {
+        thread_id: tid,
+        thread_type: thread.thread_type,
+        project_id: thread.project_id,
+        user_id: "test-user".into(),
+        step_id: ironclaw_engine::StepId::new(),
+        current_call_id: Some("call_install_1".into()),
+        source_channel: None,
+        user_timezone: None,
+        thread_goal: Some(thread.goal.clone()),
+        available_actions_snapshot: None,
+        available_action_inventory_snapshot: None,
+    };
+
+    effects.mark_authenticated("tool_install").await;
+    let install_result = effects
+        .execute_action(
+            "tool_install",
+            serde_json::json!({"kind": "mcp_server", "name": "github"}),
+            &lease,
+            &exec_ctx,
+        )
+        .await
+        .expect("authenticated install should complete directly");
+    mgr.resume_thread(
+        tid,
+        "test-user",
+        Some(resumed_action_result_message(
+            "call_install_1",
+            "tool_install",
+            &install_result.output,
+        )),
+        None,
+        Some("call_install_1".into()),
+    )
+    .await
+    .expect("resume after auth");
+
+    let outcome = mgr.join_thread(tid).await.expect("second join");
+    match outcome {
+        ThreadOutcome::Completed { response } => {
+            assert_eq!(response.as_deref(), Some("done"));
+        }
+        other => panic!("expected completion after auth + aliased follow-up call, got {other:?}"),
+    }
+
+    let saved = store.load_thread(tid).await.unwrap().unwrap();
+    assert_eq!(saved.state, ThreadState::Done);
+
+    let calls = effects.recorded_calls().await;
+    let install_calls = calls
+        .iter()
+        .filter(|(name, _)| name == "tool_install")
+        .count();
+    let followup_calls = calls
+        .iter()
+        .filter(|(name, _)| name == "create-issue")
+        .count();
+    assert_eq!(
+        install_calls, 2,
+        "install should be retried once after auth"
+    );
+    assert_eq!(
+        followup_calls, 1,
+        "aliased follow-up tool should execute once"
     );
 }
 
@@ -1459,6 +2006,8 @@ async fn lease_planner_mission_excludes_denylisted() {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::ReadLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             },
             ActionDef {
                 name: "routine_create".into(),
@@ -1466,6 +2015,8 @@ async fn lease_planner_mission_excludes_denylisted() {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::WriteLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::CompactToolInfo,
+                discovery: None,
             },
         ],
         knowledge: vec![],
@@ -1605,6 +2156,8 @@ async fn lease_gate_denies_without_lease() {
         parameters_schema: serde_json::json!({}),
         effects: vec![EffectType::WriteLocal],
         requires_approval: true,
+        model_tool_surface: ModelToolSurface::CompactToolInfo,
+        discovery: None,
     };
     let auto = std::collections::HashSet::new();
     let params = serde_json::json!({});
@@ -1651,6 +2204,8 @@ async fn lease_gate_allows_with_valid_lease() {
         parameters_schema: serde_json::json!({}),
         effects: vec![EffectType::WriteLocal],
         requires_approval: true,
+        model_tool_surface: ModelToolSurface::CompactToolInfo,
+        discovery: None,
     };
     let auto = std::collections::HashSet::new();
     let params = serde_json::json!({});
@@ -1721,6 +2276,8 @@ async fn pipeline_first_deny_wins() {
         parameters_schema: serde_json::json!({}),
         effects: vec![],
         requires_approval: false,
+        model_tool_surface: ModelToolSurface::CompactToolInfo,
+        discovery: None,
     };
     let auto = std::collections::HashSet::new();
     let params = serde_json::json!({});
@@ -1812,6 +2369,8 @@ async fn auto_approve_mode_still_pauses_always_tools() {
         parameters_schema: serde_json::json!({}),
         effects: vec![EffectType::WriteExternal],
         requires_approval: true, // This maps to Always in the real system
+        model_tool_surface: ModelToolSurface::CompactToolInfo,
+        discovery: None,
     };
     let auto = std::collections::HashSet::new();
     let params = serde_json::json!({});
@@ -1834,4 +2393,129 @@ async fn auto_approve_mode_still_pauses_always_tools() {
 
     // Verify the mode is correctly propagated
     assert_eq!(ctx.execution_mode, ExecutionMode::InteractiveAutoApprove);
+}
+
+/// Execution obligation fires on the resume path: a thread hits a gate,
+/// is resumed with a user message that signals execution intent ("run the
+/// echo tool"), and the orchestrator's per-message intent detection enables
+/// the obligation nudge even though the thread config did not have
+/// `require_action_attempt` set at spawn time.
+#[tokio::test]
+async fn gate_resume_with_execution_obligation() {
+    let project_id = ProjectId::new();
+    let effects = GateMockEffects::new(vec!["http".into()], vec![]);
+
+    // LLM responses for both phases:
+    // Phase 1 (initial): tool_call(http) → gate fires
+    // Phase 2 (resume):  text refusal → obligation nudge → tool_call(echo) → text done
+    let llm = ScriptedLlm::new(vec![
+        // Phase 1: triggers the http gate
+        LlmOutput {
+            response: LlmResponse::ActionCalls {
+                calls: vec![ironclaw_engine::ActionCall {
+                    id: "call_http_1".into(),
+                    action_name: "http".into(),
+                    parameters: serde_json::json!({"url": "https://example.com"}),
+                }],
+                content: None,
+            },
+            usage: TokenUsage::default(),
+        },
+        // Phase 2 after resume: http succeeds (approved), then LLM returns text
+        // refusal. The orchestrator should detect "run the echo tool" intent from
+        // the injected resume message and fire the obligation nudge.
+        LlmOutput {
+            response: LlmResponse::Text("I cannot execute tools from this reply path.".into()),
+            usage: TokenUsage::default(),
+        },
+        // After obligation nudge: echo tool call
+        LlmOutput {
+            response: LlmResponse::ActionCalls {
+                calls: vec![ironclaw_engine::ActionCall {
+                    id: "call_echo_1".into(),
+                    action_name: "echo".into(),
+                    parameters: serde_json::json!({"message": "obligation resume test"}),
+                }],
+                content: None,
+            },
+            usage: TokenUsage::default(),
+        },
+        // Final text
+        LlmOutput {
+            response: LlmResponse::Text("Echo returned: obligation resume test".into()),
+            usage: TokenUsage::default(),
+        },
+    ]);
+
+    let store = TestStore::new();
+    let mgr = ThreadManager::new(
+        llm,
+        effects.clone(),
+        store.clone() as Arc<dyn Store>,
+        Arc::new(make_caps(false)),
+        Arc::new(LeaseManager::new()),
+        Arc::new(PolicyEngine::new()),
+    );
+
+    // Phase 1: spawn with NO execution intent in the goal
+    let tid = mgr
+        .spawn_thread(
+            "check the api status",
+            ThreadType::Foreground,
+            project_id,
+            ThreadConfig::default(), // require_action_attempt = false
+            None,
+            "test-user",
+        )
+        .await
+        .expect("spawn_thread");
+
+    let first = mgr.join_thread(tid).await.expect("first join");
+    assert!(
+        matches!(first, ThreadOutcome::GatePaused { .. }),
+        "expected GatePaused, got: {first:?}"
+    );
+    assert_eq!(
+        store.load_thread(tid).await.unwrap().unwrap().state,
+        ThreadState::Waiting,
+    );
+
+    // Phase 2: approve the gate, resume with execution intent message.
+    // "run the echo tool" triggers signals_execution_intent() in the Python
+    // orchestrator's context check on run_loop startup.
+    effects.mark_approved("http").await;
+    mgr.resume_thread(
+        tid,
+        "test-user",
+        Some(ThreadMessage::user(
+            "run the echo tool with 'obligation resume test'",
+        )),
+        Some(("call_gate_1".into(), true)),
+        None,
+    )
+    .await
+    .expect("resume_thread");
+
+    let resumed = mgr.join_thread(tid).await.expect("second join");
+    assert!(
+        matches!(resumed, ThreadOutcome::Completed { .. }),
+        "expected Completed, got: {resumed:?}"
+    );
+
+    // Verify the echo tool was called — proves obligation worked.
+    // Without the per-message intent detection fix, the LLM's text refusal
+    // would have been accepted as the final response (no nudge), and the
+    // echo tool would never execute.
+    let thread = store.load_thread(tid).await.unwrap().unwrap();
+    let echo_executed = thread.events.iter().any(|e| {
+        matches!(
+            &e.kind,
+            ironclaw_engine::types::event::EventKind::ActionExecuted { action_name, .. }
+                if action_name == "echo"
+        )
+    });
+    assert!(
+        echo_executed,
+        "echo tool should have been called after obligation nudge on resume"
+    );
 }

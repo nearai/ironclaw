@@ -19,6 +19,7 @@
 //! - `__get_actions__` — available tool definitions
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use std::collections::HashMap;
@@ -29,6 +30,8 @@ use monty::{
 };
 use tracing::{debug, warn};
 
+use super::scripting::{execute_code, json_to_monty, monty_to_json, monty_to_string};
+use super::thread_context::thread_execution_context;
 use crate::capability::lease::LeaseManager;
 use crate::capability::policy::PolicyEngine;
 use crate::memory::RetrievalEngine;
@@ -37,16 +40,13 @@ use crate::runtime::messaging::{SignalReceiver, ThreadOutcome, ThreadSignal};
 use crate::traits::effect::{EffectExecutor, ThreadExecutionContext};
 use crate::traits::llm::{LlmBackend, LlmCallConfig};
 use crate::traits::store::Store;
-use crate::types::error::EngineError;
+use crate::types::error::{EngineError, OrchestratorFailure, OrchestratorFailureKind};
 use crate::types::event::{EventKind, ThreadEvent, summarize_params};
 use crate::types::message::ThreadMessage;
 use crate::types::project::ProjectId;
 use crate::types::shared_owner_id;
 use crate::types::step::{ActionCall, StepId, TokenUsage};
 use crate::types::thread::{ActiveSkillProvenance, Thread, ThreadState};
-use ironclaw_common::ValidTimezone;
-
-use super::scripting::{execute_code, json_to_monty, monty_to_json, monty_to_string};
 
 /// The compiled-in default orchestrator (v0).
 pub(crate) const DEFAULT_ORCHESTRATOR: &str = include_str!("../../orchestrator/default.py");
@@ -65,22 +65,19 @@ pub struct OrchestratorResult {
     pub tokens_used: TokenUsage,
 }
 
-/// Extract source_channel from thread metadata (set by ConversationManager).
-fn thread_source_channel(thread: &Thread) -> Option<String> {
-    thread
-        .metadata
-        .get("source_channel")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-}
-
-/// Extract and validate user_timezone from thread metadata (set by bridge router).
-fn thread_user_timezone(thread: &Thread) -> Option<ValidTimezone> {
-    thread
-        .metadata
-        .get("user_timezone")
-        .and_then(|v| v.as_str())
-        .and_then(ValidTimezone::parse)
+fn apply_snapshot_inventory(
+    exec_ctx: &mut ThreadExecutionContext,
+    inventory: Option<Arc<crate::types::capability::ActionInventory>>,
+) -> Arc<[crate::types::capability::ActionDef]> {
+    let available_actions: Arc<[crate::types::capability::ActionDef]> = inventory
+        .as_ref()
+        .map(|inventory| inventory.inline.clone().into())
+        .unwrap_or_else(|| Arc::from([]));
+    if let Some(inventory) = inventory {
+        exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
+        exec_ctx.available_action_inventory_snapshot = Some(inventory);
+    }
+    available_actions
 }
 
 fn normalize_pause_outcome(
@@ -96,12 +93,116 @@ fn normalize_pause_outcome(
     Ok(())
 }
 
+/// Default orchestrator VM wall-clock budget, in seconds.
+const ORCHESTRATOR_DEFAULT_MAX_DURATION_SECS: u64 = 300;
+/// Floor for the configurable orchestrator budget, to prevent nonsense values.
+const ORCHESTRATOR_MIN_MAX_DURATION_SECS: u64 = 30;
+/// Ceiling for the configurable orchestrator budget, bounding resource waste.
+const ORCHESTRATOR_MAX_MAX_DURATION_SECS: u64 = 3600;
+
+/// Resolve the orchestrator VM wall-clock budget from
+/// `IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS`. Cached for the process lifetime.
+fn orchestrator_max_duration() -> std::time::Duration {
+    static CACHED: OnceLock<std::time::Duration> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let secs = std::env::var("IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(ORCHESTRATOR_DEFAULT_MAX_DURATION_SECS)
+            .clamp(
+                ORCHESTRATOR_MIN_MAX_DURATION_SECS,
+                ORCHESTRATOR_MAX_MAX_DURATION_SECS,
+            );
+        std::time::Duration::from_secs(secs)
+    })
+}
+
 /// Resource limits for the orchestrator VM.
 fn orchestrator_limits() -> ResourceLimits {
     ResourceLimits::new()
-        .max_duration(std::time::Duration::from_secs(300)) // 5 min (longer than user code)
+        .max_duration(orchestrator_max_duration())
         .max_allocations(5_000_000)
         .max_memory(128 * 1024 * 1024) // 128 MB
+}
+
+/// Classify a Monty orchestrator failure into a typed
+/// [`OrchestratorFailure`] that carries a user-safe classification plus
+/// the preserved low-level detail for gateway debug mode.
+///
+/// The raw `err_msg` (often a Python traceback containing internal file
+/// paths and upstream HTTP bodies) is always stored on the returned
+/// struct's `debug_detail` field and emitted at `debug!`, never placed
+/// into the user-visible classification — see
+/// `.claude/rules/error-handling.md`, "Error Boundaries at the Channel
+/// Edge" (#2546).
+fn classify_orchestrator_failure(prefix: &str, err_msg: &str) -> OrchestratorFailure {
+    debug!(prefix, err_msg, "orchestrator VM failure");
+
+    let lower = err_msg.to_ascii_lowercase();
+    // Reserve `TimeLimit` for unmistakable Monty wall-clock markers — the
+    // user-facing message tells operators to raise
+    // `IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS`, which is wrong advice for
+    // upstream LLM / network timeouts. Bare `"timeout"` / `"timed out"`
+    // used to catch those (e.g. `reqwest`'s `"Request timed out"`,
+    // provider `"Connection timed out"`) and point users at the budget
+    // knob instead of the real failure class. Those now fall through to
+    // `Other` (generic internal failure). References: serrrfirat review
+    // on PR #2753, commit 82d06410.
+    //
+    // The predicates we keep are either the explicit env-var name in the
+    // VM's own error text, the phrase the Monty runtime uses for its
+    // duration limit, or the sentinel emitted by the engine when the
+    // orchestrator itself times out a step. Duplicating `ResourceLimits`
+    // wording is OK — those strings live alongside this classifier in the
+    // same crate.
+    let hit_time_limit = lower.contains("duration limit")
+        || lower.contains("max_duration")
+        || lower.contains("maximum duration")
+        || lower.contains("execution duration exceeded")
+        || lower.contains("orchestrator timed out");
+    let hit_memory_limit = lower.contains("memory limit") || lower.contains("allocation limit");
+    let hit_resource_limit = lower.contains("resource limit")
+        || lower.contains("out of fuel")
+        || lower.contains("fuel exhausted");
+    let has_python_traceback =
+        lower.contains("traceback (most recent call last)") || lower.contains("traceback:");
+
+    let kind = if hit_time_limit {
+        OrchestratorFailureKind::TimeLimit {
+            prefix: prefix.to_string(),
+            limit_secs: orchestrator_max_duration().as_secs(),
+        }
+    } else if hit_memory_limit || hit_resource_limit {
+        OrchestratorFailureKind::ResourceLimit {
+            prefix: prefix.to_string(),
+        }
+    } else if has_python_traceback {
+        OrchestratorFailureKind::Traceback {
+            prefix: prefix.to_string(),
+        }
+    } else {
+        OrchestratorFailureKind::Other {
+            prefix: prefix.to_string(),
+        }
+    };
+
+    OrchestratorFailure::new(kind, err_msg)
+}
+
+/// Wrap a Monty VM panic (parse / start / resume phase) as a typed
+/// orchestrator failure. The panic itself has no textual payload — the
+/// `panic_payload` we can stringify is always a `&str` or `String` from
+/// `catch_unwind` — so `debug_detail` carries the phase tag for
+/// correlation.
+fn orchestrator_vm_panic(prefix: &str, phase: &'static str) -> OrchestratorFailure {
+    debug!(prefix, phase, "orchestrator VM panic");
+    OrchestratorFailure::new(
+        OrchestratorFailureKind::VmPanic {
+            prefix: prefix.to_string(),
+            phase,
+        },
+        format!("Monty VM panicked during {phase}"),
+    )
 }
 
 /// Maximum consecutive failures before auto-rollback.
@@ -284,7 +385,13 @@ pub async fn record_orchestrator_failure(
     .to_string();
     tracker.updated_at = chrono::Utc::now();
 
-    if let Err(e) = store.save_memory_doc(&tracker).await {
+    // The failure tracker carries the `orchestrator:` title prefix and is
+    // therefore gated by `is_protected_orchestrator_doc` in the store.
+    // Enter the trusted-internal-writes scope so the system-initiated save
+    // is admitted without being mistaken for an LLM-authored patch.
+    if let Err(e) =
+        crate::runtime::with_trusted_internal_writes(store.save_memory_doc(&tracker)).await
+    {
         debug!("failed to save orchestrator failure tracker: {e}");
     }
 
@@ -303,7 +410,10 @@ pub async fn reset_orchestrator_failures(store: &Arc<dyn Store>, project_id: Pro
         let mut tracker = doc.clone();
         tracker.content = serde_json::json!({"version": 0, "count": 0}).to_string();
         tracker.updated_at = chrono::Utc::now();
-        let _ = store.save_memory_doc(&tracker).await;
+        // Same rationale as `record_orchestrator_failure`: the tracker doc
+        // has an `orchestrator:` title so the store gate triggers. Enter
+        // the trusted-writes scope for this system-initiated reset.
+        let _ = crate::runtime::with_trusted_internal_writes(store.save_memory_doc(&tracker)).await;
     }
 }
 
@@ -334,6 +444,7 @@ pub async fn execute_orchestrator(
     event_tx: Option<&tokio::sync::broadcast::Sender<ThreadEvent>>,
     retrieval: Option<&RetrievalEngine>,
     store: Option<&Arc<dyn Store>>,
+    platform_info: Option<&crate::executor::prompt::PlatformInfo>,
     persisted_state: &serde_json::Value,
 ) -> Result<OrchestratorResult, EngineError> {
     let mut total_tokens = TokenUsage::default();
@@ -347,14 +458,19 @@ pub async fn execute_orchestrator(
     })) {
         Ok(Ok(runner)) => runner,
         Ok(Err(e)) => {
-            return Err(EngineError::Effect {
-                reason: format!("Orchestrator parse error: {e}"),
-            });
+            // Route parse failures through the same typed sanitizer so
+            // a bad `default.py` deploy can't leak Monty internals to
+            // the channel edge.
+            return Err(EngineError::Orchestrator(classify_orchestrator_failure(
+                "Orchestrator parse error",
+                &e.to_string(),
+            )));
         }
         Err(_) => {
-            return Err(EngineError::Effect {
-                reason: "Monty VM panicked during orchestrator parsing".into(),
-            });
+            return Err(EngineError::Orchestrator(orchestrator_vm_panic(
+                "Orchestrator parse error",
+                "orchestrator parsing",
+            )));
         }
     };
 
@@ -363,20 +479,26 @@ pub async fn execute_orchestrator(
     let tracker = LimitedTracker::new(orchestrator_limits());
 
     let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        runner.start(input_values, tracker, PrintWriter::Collect(&mut stdout))
+        runner.start(
+            input_values,
+            tracker,
+            PrintWriter::CollectString(&mut stdout),
+        )
     }));
 
     let mut progress = match run_result {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
-            return Err(EngineError::Effect {
-                reason: format!("Orchestrator runtime error: {e}"),
-            });
+            return Err(EngineError::Orchestrator(classify_orchestrator_failure(
+                "Orchestrator runtime error",
+                &e.to_string(),
+            )));
         }
         Err(_) => {
-            return Err(EngineError::Effect {
-                reason: "Monty VM panicked during orchestrator start".into(),
-            });
+            return Err(EngineError::Orchestrator(orchestrator_vm_panic(
+                "Orchestrator runtime error",
+                "orchestrator start",
+            )));
         }
     };
 
@@ -428,6 +550,7 @@ pub async fn execute_orchestrator(
                                 effects,
                                 leases,
                                 store,
+                                platform_info,
                             },
                             &mut total_tokens,
                         )
@@ -503,18 +626,20 @@ pub async fn execute_orchestrator(
 
                 // Resume the orchestrator VM
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    call.resume(ext_result, PrintWriter::Collect(&mut stdout))
+                    call.resume(ext_result, PrintWriter::CollectString(&mut stdout))
                 })) {
                     Ok(Ok(p)) => progress = p,
                     Ok(Err(e)) => {
-                        return Err(EngineError::Effect {
-                            reason: format!("Orchestrator error after resume: {e}"),
-                        });
+                        return Err(EngineError::Orchestrator(classify_orchestrator_failure(
+                            "Orchestrator error after resume",
+                            &e.to_string(),
+                        )));
                     }
                     Err(_) => {
-                        return Err(EngineError::Effect {
-                            reason: "Monty VM panicked during orchestrator resume".into(),
-                        });
+                        return Err(EngineError::Orchestrator(orchestrator_vm_panic(
+                            "Orchestrator error after resume",
+                            "orchestrator resume",
+                        )));
                     }
                 }
 
@@ -531,19 +656,21 @@ pub async fn execute_orchestrator(
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     lookup.resume(
                         NameLookupResult::Undefined,
-                        PrintWriter::Collect(&mut stdout),
+                        PrintWriter::CollectString(&mut stdout),
                     )
                 })) {
                     Ok(Ok(p)) => progress = p,
                     Ok(Err(e)) => {
-                        return Err(EngineError::Effect {
-                            reason: format!("Orchestrator NameError '{name}': {e}"),
-                        });
+                        return Err(EngineError::Orchestrator(classify_orchestrator_failure(
+                            &format!("Orchestrator NameError '{name}'"),
+                            &e.to_string(),
+                        )));
                     }
                     Err(_) => {
-                        return Err(EngineError::Effect {
-                            reason: format!("Monty panic on NameLookup '{name}'"),
-                        });
+                        return Err(EngineError::Orchestrator(orchestrator_vm_panic(
+                            &format!("Orchestrator NameError '{name}'"),
+                            "name lookup",
+                        )));
                     }
                 }
             }
@@ -570,6 +697,7 @@ struct LlmCompleteDeps<'a> {
     effects: &'a Arc<dyn EffectExecutor>,
     leases: &'a Arc<LeaseManager>,
     store: Option<&'a Arc<dyn Store>>,
+    platform_info: Option<&'a crate::executor::prompt::PlatformInfo>,
 }
 
 /// Handle `__llm_complete__(messages, actions, config)`.
@@ -588,7 +716,7 @@ async fn handle_llm_complete(
 
     let explicit_messages = args.first().map(monty_to_json).filter(|v| !v.is_null());
     let explicit_config = args.get(2).map(monty_to_json).filter(|v| !v.is_null());
-    let messages = explicit_messages
+    let mut messages = explicit_messages
         .as_ref()
         .and_then(json_to_thread_messages)
         .unwrap_or_else(|| thread.messages.clone());
@@ -606,11 +734,23 @@ async fn handle_llm_complete(
     }
 
     let active_leases = deps.leases.active_for_thread(thread.id).await;
+    let actions_context = thread_execution_context(thread, StepId::new(), None);
     let actions = deps
         .effects
-        .available_actions(&active_leases)
+        .available_actions(&active_leases, &actions_context)
         .await
         .unwrap_or_default();
+    refresh_llm_messages_for_current_surface(
+        &mut messages,
+        thread,
+        deps.effects,
+        deps.store,
+        deps.platform_info,
+        &active_leases,
+        &actions_context,
+        &actions,
+    )
+    .await;
 
     let config = LlmCallConfig {
         max_tokens: explicit_config
@@ -678,6 +818,50 @@ async fn handle_llm_complete(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn refresh_llm_messages_for_current_surface(
+    messages: &mut Vec<ThreadMessage>,
+    thread: &Thread,
+    effects: &Arc<dyn EffectExecutor>,
+    store: Option<&Arc<dyn Store>>,
+    platform_info: Option<&crate::executor::prompt::PlatformInfo>,
+    active_leases: &[crate::types::capability::CapabilityLease],
+    actions_context: &ThreadExecutionContext,
+    actions: &[crate::types::capability::ActionDef],
+) {
+    if !messages.iter().any(|message| {
+        message.role == crate::types::message::MessageRole::System
+            && crate::executor::prompt::is_codeact_system_prompt(&message.content)
+    }) {
+        return;
+    }
+
+    let capabilities = match effects
+        .available_capabilities(active_leases, actions_context)
+        .await
+    {
+        Ok(capabilities) => capabilities,
+        Err(error) => {
+            debug!(
+                thread_id = %thread.id,
+                "failed to load capabilities for llm_complete prompt refresh: {error}"
+            );
+            Vec::new()
+        }
+    };
+
+    let system_prompt = crate::executor::prompt::build_codeact_system_prompt(
+        &capabilities,
+        actions,
+        store,
+        thread.project_id,
+        platform_info,
+    )
+    .await;
+
+    crate::executor::prompt::upsert_codeact_system_prompt(messages, system_prompt);
+}
+
 /// Handle `__execute_code_step__(code, state)`.
 ///
 /// Runs user CodeAct code in a nested Monty VM with full tool dispatch.
@@ -708,18 +892,10 @@ async fn handle_execute_code_step(
         .map(monty_to_json)
         .unwrap_or(serde_json::json!({}));
 
-    let exec_ctx = ThreadExecutionContext {
-        thread_id: thread.id,
-        thread_type: thread.thread_type,
-        project_id: thread.project_id,
-        user_id: thread.user_id.clone(),
-        step_id: StepId::new(),
-        current_call_id: None,
-        source_channel: thread_source_channel(thread),
-        user_timezone: thread_user_timezone(thread),
-    };
+    let exec_ctx = thread_execution_context(thread, StepId::new(), None);
 
     // Run user code in a nested Monty VM (same pattern as rlm_query)
+    let code_start = std::time::Instant::now();
     match Box::pin(execute_code(
         &code,
         thread,
@@ -748,10 +924,12 @@ async fn handle_execute_code_step(
             // error, etc.), surface it as an ActionFailed event so traces and
             // observers see the failure. Without this, parse errors silently
             // fall back to the LLM via the result dict and never warn callers.
-            if result.had_error {
+            if let Some(ref category) = result.failure {
                 let error_msg = if !result.stdout.is_empty() {
-                    let snippet: String = result.stdout.chars().take(500).collect();
-                    format!("CodeAct execution failed: {snippet}")
+                    format!(
+                        "CodeAct execution failed: {}",
+                        tail_chars(&result.stdout, 500)
+                    )
                 } else {
                     "CodeAct execution failed (no stdout)".to_string()
                 };
@@ -767,6 +945,7 @@ async fn handle_execute_code_step(
                         // trace correlation.
                         call_id: format!("codeact-step-{}", exec_ctx.step_id.0),
                         error: error_msg,
+                        duration_ms: code_start.elapsed().as_millis() as u64,
                         params_summary: None,
                     },
                 );
@@ -774,7 +953,60 @@ async fn handle_execute_code_step(
                     let _ = tx.send(failed_event.clone());
                 }
                 thread.events.push(failed_event);
+
+                // Emit structured CodeExecutionFailed event for instrumentation.
+                // This enables aggregate analysis of WHY code execution fails
+                // (Monty limitation vs LLM logic error vs tool dispatch failure).
+                let error_text = tail_chars(&result.stdout, 500);
+                let instrumentation_event = ThreadEvent::new(
+                    thread.id,
+                    EventKind::CodeExecutionFailed {
+                        step_id: exec_ctx.step_id,
+                        category: category.clone(),
+                        error: error_text,
+                        code_hash: Some(crate::executor::scripting::code_hash(&code)),
+                        duration_ms: code_start.elapsed().as_millis() as u64,
+                    },
+                );
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(instrumentation_event.clone());
+                }
+                thread.events.push(instrumentation_event);
             }
+
+            // Always emit CodeExecuted so debug observers see the exact code
+            // and stdout, regardless of success/failure. The in-context chat
+            // summary is too lossy for diagnostics. Kept separate from
+            // CodeExecutionFailed (which carries the failure classifier) and
+            // the per-action events already broadcast above.
+            //
+            // Cap code, stdout, and return_value at `CODE_EXECUTED_MAX_BYTES`
+            // each before emission so a step that prints or returns a large
+            // blob cannot bloat persisted thread events or flood the SSE
+            // broadcast buffer. Byte-based (not `chars().count()`) to keep
+            // this O(1) even for very large payloads. `tail_chars` elsewhere
+            // in this file is left alone because its callers already run
+            // inside pre-bounded inputs (`OUTPUT_TRUNCATE_LEN`, 500-char
+            // error slices) where chars-vs-bytes is not a perf concern.
+            const CODE_EXECUTED_MAX_BYTES: usize = 8_000;
+            let code_executed_event = ThreadEvent::new(
+                thread.id,
+                EventKind::CodeExecuted {
+                    step_id: exec_ctx.step_id,
+                    code: tail_utf8_bytes(&code, CODE_EXECUTED_MAX_BYTES),
+                    stdout: tail_utf8_bytes(&result.stdout, CODE_EXECUTED_MAX_BYTES),
+                    return_value: bounded_return_value(
+                        &result.return_value,
+                        CODE_EXECUTED_MAX_BYTES,
+                    ),
+                    duration_ms: code_start.elapsed().as_millis() as u64,
+                },
+            );
+            if let Some(tx) = event_tx {
+                let _ = tx.send(code_executed_event.clone());
+            }
+            thread.events.push(code_executed_event);
+
             thread.updated_at = chrono::Utc::now();
 
             let action_results: Vec<serde_json::Value> = result
@@ -795,10 +1027,10 @@ async fn handle_execute_code_step(
                 "stdout": result.stdout,
                 "action_results": action_results,
                 "final_answer": result.final_answer,
-                "had_error": result.had_error,
+                "had_error": result.failure.is_some(),
                 "pending_gate": result.need_approval.as_ref().map(|na| {
                     match na {
-                        ThreadOutcome::GatePaused { gate_name, action_name, call_id, parameters, resume_kind, resume_output } => serde_json::json!({
+                        ThreadOutcome::GatePaused { gate_name, action_name, call_id, parameters, resume_kind, resume_output, paused_lease } => serde_json::json!({
                             "gate_paused": true,
                             "gate_name": gate_name,
                             "action_name": action_name,
@@ -806,6 +1038,7 @@ async fn handle_execute_code_step(
                             "parameters": parameters,
                             "resume_kind": serde_json::to_value(resume_kind).unwrap_or_default(),
                             "resume_output": resume_output,
+                            "paused_lease": paused_lease,
                         }),
                         _ => serde_json::Value::Null,
                     }
@@ -858,16 +1091,23 @@ async fn handle_execute_action(
 
     let call_id = extract_string_kwarg(kwargs, "call_id").unwrap_or_default();
 
-    let exec_ctx = ThreadExecutionContext {
-        thread_id: thread.id,
-        thread_type: thread.thread_type,
-        project_id: thread.project_id,
-        user_id: thread.user_id.clone(),
-        step_id: StepId::new(),
-        current_call_id: Some(call_id.clone()),
-        source_channel: thread_source_channel(thread),
-        user_timezone: thread_user_timezone(thread),
+    let mut exec_ctx = thread_execution_context(thread, StepId::new(), Some(call_id.clone()));
+    let active_leases = leases.active_for_thread(thread.id).await;
+    let inventory = match effects
+        .available_action_inventory(&active_leases, &exec_ctx)
+        .await
+    {
+        Ok(inventory) => Some(Arc::new(inventory)),
+        Err(error) => {
+            debug!(
+                thread_id = %thread.id,
+                action = %name,
+                "failed to load action inventory for orchestrator action execution: {error}"
+            );
+            None
+        }
     };
+    let available_actions = apply_snapshot_inventory(&mut exec_ctx, inventory);
 
     // Helper: emit event only. The orchestrator owns transcript recording.
     let emit_and_record = |thread: &mut Thread,
@@ -884,7 +1124,34 @@ async fn handle_execute_action(
         thread.updated_at = chrono::Utc::now();
     };
 
-    // 1. Find lease for this action
+    // 1. Find the action definition from the callable inventory.
+    let action_def = available_actions.iter().find(|a| a.matches_name(&name));
+    if exec_ctx.available_actions_snapshot.is_some() && action_def.is_none() {
+        let error = format!("action '{name}' is not callable in this execution context");
+        let output = serde_json::json!({"error": &error});
+        emit_and_record(
+            thread,
+            event_tx,
+            EventKind::ActionFailed {
+                step_id: exec_ctx.step_id,
+                action_name: name.clone(),
+                call_id: call_id.clone(),
+                error,
+                duration_ms: 0,
+                params_summary: summarize_params(&name, &params),
+            },
+            &call_id,
+            &name,
+            &output,
+        );
+        let result = serde_json::json!({
+            "output": output,
+            "is_error": true,
+        });
+        return ExtFunctionResult::Return(json_to_monty(&result));
+    }
+
+    // 2. Find lease for this action
     let lease = match leases.find_lease_for_action(thread.id, &name).await {
         Some(l) => l,
         None => {
@@ -898,6 +1165,7 @@ async fn handle_execute_action(
                     action_name: name.clone(),
                     call_id: call_id.clone(),
                     error,
+                    duration_ms: 0,
                     params_summary: None,
                 },
                 &call_id,
@@ -912,14 +1180,12 @@ async fn handle_execute_action(
         }
     };
 
-    // 2. Check policy
-    let action_def = effects
-        .available_actions(std::slice::from_ref(&lease))
-        .await
-        .ok()
-        .and_then(|actions| actions.into_iter().find(|a| a.name == name));
+    let canonical_name = action_def
+        .as_ref()
+        .map(|action| action.name.clone())
+        .unwrap_or_else(|| name.clone());
 
-    if let Some(ref ad) = action_def {
+    if let Some(ad) = action_def {
         match policy.evaluate(ad, &lease, &[]) {
             crate::capability::policy::PolicyDecision::Deny { reason } => {
                 let output = serde_json::json!({"error": format!("Denied: {reason}")});
@@ -931,6 +1197,7 @@ async fn handle_execute_action(
                         action_name: name.clone(),
                         call_id: call_id.clone(),
                         error: reason,
+                        duration_ms: 0,
                         params_summary: None,
                     },
                     &call_id,
@@ -998,6 +1265,7 @@ async fn handle_execute_action(
                     action_name: name.clone(),
                     call_id: call_id.clone(),
                     error,
+                    duration_ms: 0,
                     params_summary: None,
                 },
                 &call_id,
@@ -1013,9 +1281,10 @@ async fn handle_execute_action(
     };
 
     // 4. Execute
-    let ps = summarize_params(&name, &params);
+    let ps = summarize_params(&canonical_name, &params);
+    let execution_start = std::time::Instant::now();
     match effects
-        .execute_action(&name, params, &lease, &exec_ctx)
+        .execute_action(&canonical_name, params, &lease, &exec_ctx)
         .await
     {
         Ok(r) => {
@@ -1030,6 +1299,7 @@ async fn handle_execute_action(
                     .and_then(|v| v.as_str())
                     .map(String::from)
                     .unwrap_or_else(|| r.output.to_string());
+                let duration_ms = r.duration.as_millis() as u64;
                 emit_and_record(
                     thread,
                     event_tx,
@@ -1038,6 +1308,11 @@ async fn handle_execute_action(
                         action_name: name.clone(),
                         call_id: call_id.clone(),
                         error: error_msg,
+                        duration_ms: if duration_ms > 0 {
+                            duration_ms
+                        } else {
+                            execution_start.elapsed().as_millis() as u64
+                        },
                         params_summary: ps.clone(),
                     },
                     &call_id,
@@ -1075,6 +1350,7 @@ async fn handle_execute_action(
             parameters,
             resume_kind,
             resume_output,
+            paused_lease,
         }) => {
             let _ = leases.refund_use(lease.id).await;
             let output = serde_json::json!({"status": "gate_paused", "gate_name": gate_name});
@@ -1105,6 +1381,7 @@ async fn handle_execute_action(
                 "parameters": parameters,
                 "resume_kind": serde_json::to_value(&*resume_kind).unwrap_or_default(),
                 "resume_output": resume_output,
+                "paused_lease": paused_lease.as_deref().cloned(),
             });
             ExtFunctionResult::Return(json_to_monty(&result))
         }
@@ -1118,6 +1395,7 @@ async fn handle_execute_action(
                     action_name: name.clone(),
                     call_id: call_id.clone(),
                     error: e.to_string(),
+                    duration_ms: execution_start.elapsed().as_millis() as u64,
                     params_summary: ps,
                 },
                 &call_id,
@@ -1197,6 +1475,26 @@ async fn handle_execute_actions_parallel(
     }
 
     let step_id = StepId::new();
+    let actions_context = thread_execution_context(thread, step_id, None);
+    let active_leases = leases.active_for_thread(thread.id).await;
+    let inventory = match effects
+        .available_action_inventory(&active_leases, &actions_context)
+        .await
+    {
+        Ok(inventory) => Some(Arc::new(inventory)),
+        Err(error) => {
+            debug!(
+                thread_id = %thread.id,
+                step_id = ?step_id,
+                "failed to load action inventory for orchestrator parallel execution: {error}"
+            );
+            None
+        }
+    };
+    let available_actions: Arc<[crate::types::capability::ActionDef]> = inventory
+        .as_ref()
+        .map(|inventory| inventory.inline.clone().into())
+        .unwrap_or_else(|| Arc::from([]));
 
     // ── Phase 1: Preflight (sequential) ─────────────────────────
     // Check leases and policies. Denied → error result. Approval → interrupt.
@@ -1215,6 +1513,42 @@ async fn handle_execute_actions_parallel(
     let mut preflight: Vec<Option<PfOutcome>> = Vec::with_capacity(parsed.len());
 
     for pc in &parsed {
+        // Find the action definition from the callable inventory.
+        let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
+        if let Some(ref inventory) = inventory {
+            exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
+            exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(inventory));
+        }
+        let action_def = available_actions
+            .iter()
+            .find(|a| a.matches_name(&pc.name))
+            .cloned();
+        if inventory.is_some() && action_def.is_none() {
+            let error = format!(
+                "action '{}' is not callable in this execution context",
+                pc.name
+            );
+            let output = serde_json::json!({"error": &error});
+            let result_json = serde_json::json!({
+                "output": &output,
+                "is_error": true,
+            });
+            let event = EventKind::ActionFailed {
+                step_id,
+                action_name: pc.name.clone(),
+                call_id: pc.call_id.clone(),
+                error,
+                duration_ms: 0,
+                params_summary: summarize_params(&pc.name, &pc.params),
+            };
+            preflight.push(Some(PfOutcome::Error {
+                result_json,
+                event,
+                output,
+            }));
+            continue;
+        }
+
         // Find lease
         let lease = match leases.find_lease_for_action(thread.id, &pc.name).await {
             Some(l) => l,
@@ -1230,6 +1564,7 @@ async fn handle_execute_actions_parallel(
                     action_name: pc.name.clone(),
                     call_id: pc.call_id.clone(),
                     error,
+                    duration_ms: 0,
                     params_summary: None,
                 };
                 preflight.push(Some(PfOutcome::Error {
@@ -1242,11 +1577,10 @@ async fn handle_execute_actions_parallel(
         };
 
         // Check policy
-        let action_def = effects
-            .available_actions(std::slice::from_ref(&lease))
-            .await
-            .ok()
-            .and_then(|actions| actions.into_iter().find(|a| a.name == pc.name));
+        let action_name = action_def
+            .as_ref()
+            .map(|action| action.name.clone())
+            .unwrap_or_else(|| pc.name.clone());
 
         if let Some(ref ad) = action_def {
             match policy.evaluate(ad, &lease, &[]) {
@@ -1258,9 +1592,10 @@ async fn handle_execute_actions_parallel(
                     });
                     let event = EventKind::ActionFailed {
                         step_id,
-                        action_name: pc.name.clone(),
+                        action_name: action_name.clone(),
                         call_id: pc.call_id.clone(),
                         error: reason,
+                        duration_ms: 0,
                         params_summary: None,
                     };
                     preflight.push(Some(PfOutcome::Error {
@@ -1355,6 +1690,7 @@ async fn handle_execute_actions_parallel(
                     action_name: pc.name.clone(),
                     call_id: pc.call_id.clone(),
                     error,
+                    duration_ms: 0,
                     params_summary: None,
                 };
                 preflight.push(Some(PfOutcome::Error {
@@ -1375,7 +1711,6 @@ async fn handle_execute_actions_parallel(
     let mut slot_results: Vec<Option<serde_json::Value>> = vec![None; parsed.len()];
     let mut slot_events: Vec<Option<EventKind>> = vec![None; parsed.len()];
     let mut slot_outputs: Vec<Option<serde_json::Value>> = vec![None; parsed.len()];
-
     // Separate runnable from errors
     let mut runnable: Vec<(usize, crate::types::capability::CapabilityLease)> = Vec::new();
     for (idx, pf) in preflight.into_iter().enumerate() {
@@ -1400,25 +1735,20 @@ async fn handle_execute_actions_parallel(
         // Single call: execute directly
         let (idx, lease) = runnable.into_iter().next().unwrap(); // safety: len()==1 checked above
         let pc = &parsed[idx];
-        let exec_ctx = ThreadExecutionContext {
-            thread_id: thread.id,
-            thread_type: thread.thread_type,
-            project_id: thread.project_id,
-            user_id: thread.user_id.clone(),
-            step_id,
-            current_call_id: Some(pc.call_id.clone()),
-            // Read source_channel from thread metadata so downstream tools
-            // (e.g. mission_create) can default notify_channels to the
-            // originating channel. Hardcoding `None` here was a bug — it
-            // silently dropped the gateway routing for any tool dispatched
-            // through the parallel batch path.
-            source_channel: thread_source_channel(thread),
-            user_timezone: thread_user_timezone(thread),
-        };
-        let ps = summarize_params(&pc.name, &pc.params);
+        let action_name = available_actions
+            .iter()
+            .find(|action| action.matches_name(&pc.name))
+            .map(|action| action.name.clone())
+            .unwrap_or_else(|| pc.name.clone());
+        let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
+        if let Some(ref inventory) = inventory {
+            exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
+            exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(inventory));
+        }
+        let ps = summarize_params(&action_name, &pc.params);
         let (result_json, event, output) = execute_single_action(
             effects,
-            &pc.name,
+            &action_name,
             pc.params.clone(),
             &pc.call_id,
             &lease,
@@ -1438,26 +1768,21 @@ async fn handle_execute_actions_parallel(
         let effects = effects.clone();
         // Capture once outside the loop — the thread's metadata is stable
         // for the duration of the parallel batch.
-        let parallel_source_channel = thread_source_channel(thread);
-        let parallel_user_timezone = thread_user_timezone(thread);
-
         for (idx, lease) in runnable {
-            let pc_name = parsed[idx].name.clone();
+            let pc_name = available_actions
+                .iter()
+                .find(|action| action.matches_name(&parsed[idx].name))
+                .map(|action| action.name.clone())
+                .unwrap_or_else(|| parsed[idx].name.clone());
             let pc_params = parsed[idx].params.clone();
             let pc_call_id = parsed[idx].call_id.clone();
             let effects = effects.clone();
             let lease = lease.clone();
-            let exec_ctx = ThreadExecutionContext {
-                thread_id: thread.id,
-                thread_type: thread.thread_type,
-                project_id: thread.project_id,
-                user_id: thread.user_id.clone(),
-                step_id,
-                current_call_id: Some(pc_call_id.clone()),
-                // See comment above — read from thread metadata, not None.
-                source_channel: parallel_source_channel.clone(),
-                user_timezone: parallel_user_timezone,
-            };
+            let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc_call_id.clone()));
+            if let Some(ref inventory) = inventory {
+                exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
+                exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(inventory));
+            }
             let ps = summarize_params(&pc_name, &pc_params);
 
             join_set.spawn(async move {
@@ -1529,6 +1854,7 @@ async fn execute_single_action(
     exec_ctx: &ThreadExecutionContext,
     params_summary: Option<String>,
 ) -> (serde_json::Value, EventKind, serde_json::Value) {
+    let execution_start = std::time::Instant::now();
     match effects.execute_action(name, params, lease, exec_ctx).await {
         Ok(r) => {
             // Surface wrapped errors as ActionFailed (see resolve_tool_future
@@ -1540,11 +1866,17 @@ async fn execute_single_action(
                     .and_then(|v| v.as_str())
                     .map(String::from)
                     .unwrap_or_else(|| r.output.to_string());
+                let duration_ms = r.duration.as_millis() as u64;
                 EventKind::ActionFailed {
                     step_id: exec_ctx.step_id,
                     action_name: name.to_string(),
                     call_id: call_id.to_string(),
                     error: error_msg,
+                    duration_ms: if duration_ms > 0 {
+                        duration_ms
+                    } else {
+                        execution_start.elapsed().as_millis() as u64
+                    },
                     params_summary: params_summary.clone(),
                 }
             } else {
@@ -1571,6 +1903,7 @@ async fn execute_single_action(
             parameters,
             resume_kind,
             resume_output,
+            paused_lease,
         }) => {
             let output = serde_json::json!({"status": "gate_paused", "gate_name": &gate_name});
             let event = EventKind::ApprovalRequested {
@@ -1593,6 +1926,7 @@ async fn execute_single_action(
                 "parameters": parameters,
                 "resume_kind": serde_json::to_value(&*resume_kind).unwrap_or_default(),
                 "resume_output": resume_output,
+                "paused_lease": paused_lease.as_deref().cloned(),
             });
             (result_json, event, output)
         }
@@ -1603,6 +1937,7 @@ async fn execute_single_action(
                 action_name: name.to_string(),
                 call_id: call_id.to_string(),
                 error: e.to_string(),
+                duration_ms: execution_start.elapsed().as_millis() as u64,
                 params_summary,
             };
             let result_json = serde_json::json!({
@@ -1683,11 +2018,13 @@ fn handle_emit_event(
             let action_name = extract_string_kwarg(kwargs, "action_name").unwrap_or_default();
             let call_id = extract_string_kwarg(kwargs, "call_id").unwrap_or_default();
             let error = extract_string_kwarg(kwargs, "error").unwrap_or_default();
+            let duration_ms = extract_u64_kwarg(kwargs, "duration_ms").unwrap_or(0);
             EventKind::ActionFailed {
                 step_id: StepId::new(),
                 action_name,
                 call_id,
                 error,
+                duration_ms,
                 params_summary: None,
             }
         }
@@ -1876,7 +2213,11 @@ async fn handle_get_actions(
     }
 
     let active_leases = leases.active_for_thread(thread.id).await;
-    match effects.available_actions(&active_leases).await {
+    let actions_context = thread_execution_context(thread, StepId::new(), None);
+    match effects
+        .available_actions(&active_leases, &actions_context)
+        .await
+    {
         Ok(actions) => {
             let actions_json: Vec<serde_json::Value> = actions
                 .iter()
@@ -1902,6 +2243,22 @@ async fn handle_get_actions(
 /// Loads all `DocType::Skill` MemoryDocs from the project and returns them
 /// as a list of Python dicts. The Python orchestrator handles scoring,
 /// selection, and injection — Rust just provides data access.
+///
+/// ## Setup-marker exclusion (v2 parity with v1 selector)
+///
+/// Before returning the skill list, this function filters out any
+/// skill whose `metadata.activation.setup_marker` is already present
+/// as a MemoryDoc title in the current project. In v2, workspace
+/// files are stored as MemoryDocs keyed by title, so "does the marker
+/// file exist" maps to "is there a MemoryDoc with that title" — and
+/// we already have the full doc list in scope for the skill filter,
+/// so this costs zero extra store calls.
+///
+/// This is the v2 equivalent of the `satisfied_setup_markers`
+/// argument threaded through `ironclaw_skills::prefilter_skills` on
+/// the v1 path. Both paths implement the same rule: a one-time setup
+/// skill whose marker file has been written has finished its job and
+/// should not keep burning activation budget on every subsequent turn.
 async fn handle_list_skills(
     _args: &[MontyObject],
     thread: &Thread,
@@ -1911,21 +2268,65 @@ async fn handle_list_skills(
         return ExtFunctionResult::Return(json_to_monty(&serde_json::json!([])));
     };
 
-    // Use shared listing: user's own skills + system/admin-installed skills.
-    let docs = match store
-        .list_memory_docs_with_shared(thread.project_id, &thread.user_id)
+    // User's docs in their project (all doc types — skill filtering happens
+    // below in the `filter(|d| d.doc_type == Skill)` pass).
+    let mut docs = match store
+        .list_memory_docs(thread.project_id, &thread.user_id)
         .await
     {
-        Ok(docs) => docs,
+        Ok(d) => d,
         Err(e) => {
-            debug!("__list_skills__: failed to load docs: {e}");
-            return ExtFunctionResult::Return(json_to_monty(&serde_json::json!([])));
+            debug!("__list_skills__: failed to load user docs: {e}");
+            vec![]
         }
     };
 
+    // Admin/shared skills across ALL projects (fixes multi-tenant visibility —
+    // shared skills live in the owner's project but must be visible to all users
+    // regardless of which per-user project their thread runs in).
+    match store.list_skills_global().await {
+        Ok(shared) => docs.extend(shared),
+        Err(e) => debug!("__list_skills__: failed to load global skills: {e}"),
+    }
+
+    docs.sort_by_key(|d| d.id.0);
+    docs.dedup_by_key(|d| d.id);
+
+    // Build the set of existing non-skill doc titles (== workspace paths
+    // in v2) once, so setup-marker filtering below is O(1) per skill.
+    // Exclude Skill docs so a marker like "github" doesn't collide with
+    // the skill doc of the same name.
+    let existing_titles: std::collections::HashSet<&str> = docs
+        .iter()
+        .filter(|d| d.doc_type != crate::types::memory::DocType::Skill)
+        .map(|d| d.title.as_str())
+        .collect();
+
     let skills: Vec<serde_json::Value> = docs
-        .into_iter()
+        .iter()
         .filter(|d| d.doc_type == crate::types::memory::DocType::Skill)
+        .filter(|d| {
+            // Setup-marker exclusion. If the skill's activation
+            // metadata declares a setup_marker and a MemoryDoc with
+            // that title already exists, the skill's setup has been
+            // completed and we skip it.
+            let marker = d
+                .metadata
+                .get("activation")
+                .and_then(|a| a.get("setup_marker"))
+                .and_then(|m| m.as_str());
+            match marker {
+                Some(m) if existing_titles.contains(m) => {
+                    debug!(
+                        skill = %d.title,
+                        marker = %m,
+                        "__list_skills__: excluding setup skill — marker already present"
+                    );
+                    false
+                }
+                _ => true,
+            }
+        })
         .map(|d| {
             serde_json::json!({
                 "doc_id": d.id.0.to_string(),
@@ -2097,6 +2498,8 @@ fn build_orchestrator_inputs(
         "max_iterations": thread.config.max_iterations,
         "max_tool_intent_nudges": thread.config.max_tool_intent_nudges,
         "enable_tool_intent_nudge": thread.config.enable_tool_intent_nudge,
+        "require_action_attempt": thread.config.require_action_attempt,
+        "max_action_requirement_nudges": thread.config.max_action_requirement_nudges,
         "max_consecutive_errors": thread.config.max_consecutive_errors,
         "max_tokens_total": thread.config.max_tokens_total,
         "max_budget_usd": thread.config.max_budget_usd,
@@ -2194,6 +2597,63 @@ fn action_calls_to_python_json(calls: &[ActionCall]) -> Vec<serde_json::Value> {
             }
         })
         .collect()
+}
+
+/// Extract the last `n` characters from `s`.
+///
+/// Error tracebacks appear at the end of stdout, after any `print()` output.
+/// Using the head would capture the print statements instead of the error.
+fn tail_chars(s: &str, n: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count > n {
+        s.chars().skip(char_count - n).collect()
+    } else {
+        s.to_owned()
+    }
+}
+
+/// Return the last `max_bytes` bytes of `s`, adjusted forward to the
+/// next UTF-8 character boundary so the slice is always valid UTF-8.
+///
+/// Byte-based (unlike [`tail_chars`]) to stay O(1)+boundary-walk on
+/// large payloads. Used by the `CodeExecuted` emission path where
+/// `code`/`stdout` can be arbitrarily large, so `chars().count()` on
+/// every step would be measurable overhead.
+fn tail_utf8_bytes(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_owned();
+    }
+    let mut start = s.len() - max_bytes;
+    // Advance past mid-codepoint bytes. At most 3 iterations because
+    // UTF-8 codepoints are ≤ 4 bytes.
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    s[start..].to_owned() // safety: `start` is validated by `is_char_boundary`
+}
+
+/// Bound the serialized size of a CodeAct return value before emission.
+///
+/// - `Null` → `None` (no change — a null return is nothing to surface).
+/// - `String` → tail-truncated via [`tail_utf8_bytes`].
+/// - Other (`Array`, `Object`, `Number`, `Bool`) → serialized length
+///   checked; returned intact if ≤ `max_bytes`, dropped otherwise.
+///
+/// Dropping (rather than truncating arbitrary JSON) is deliberate: a
+/// truncated `Array` / `Object` is unparseable on the frontend and
+/// provides no diagnostic value. Observers see a `None` return value
+/// and know the payload was omitted for size, not that it was `null`.
+fn bounded_return_value(value: &serde_json::Value, max_bytes: usize) -> Option<serde_json::Value> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) => {
+            Some(serde_json::Value::String(tail_utf8_bytes(s, max_bytes)))
+        }
+        other => match serde_json::to_vec(other) {
+            Ok(buf) if buf.len() <= max_bytes => Some(other.clone()),
+            _ => None,
+        },
+    }
 }
 
 /// Build a PII-safe summary of an `action_calls` JSON value for log output.
@@ -2377,6 +2837,7 @@ fn parse_outcome(result: &serde_json::Value) -> ThreadOutcome {
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown error")
                 .to_string(),
+            debug_detail: None,
         },
         "gate_paused" => {
             let resume_kind_value = result
@@ -2410,6 +2871,10 @@ fn parse_outcome(result: &serde_json::Value) -> ThreadOutcome {
                     .unwrap_or(serde_json::json!({})),
                 resume_kind,
                 resume_output: result.get("resume_output").cloned(),
+                paused_lease: result
+                    .get("paused_lease")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok()),
             }
         }
         _ => ThreadOutcome::Completed { response: None },
@@ -2461,6 +2926,248 @@ mod tests {
     use crate::types::memory::{DocType, MemoryDoc};
     use crate::types::project::ProjectId;
 
+    // ── CodeExecuted payload bounding ────────────────────────────
+
+    #[test]
+    fn tail_utf8_bytes_returns_input_when_already_small() {
+        assert_eq!(tail_utf8_bytes("hello", 100), "hello");
+    }
+
+    #[test]
+    fn tail_utf8_bytes_tails_ascii_at_byte_boundary() {
+        let s: String = "abcdefghij".repeat(100); // 1_000 bytes
+        let out = tail_utf8_bytes(&s, 50);
+        assert_eq!(out.len(), 50);
+        assert!(s.ends_with(&out));
+    }
+
+    #[test]
+    fn tail_utf8_bytes_advances_past_multibyte_split() {
+        // 4-byte emoji followed by ASCII; cut position lands mid-codepoint.
+        let s = format!("{}abcde", "🐍".repeat(10)); // 40 bytes of emoji + 5 ASCII = 45 bytes
+        let out = tail_utf8_bytes(&s, 9);
+        // The walk-forward must have landed on a char boundary; the
+        // resulting &str must be valid UTF-8 (implicit — String construction
+        // would panic otherwise) and end with the original tail.
+        assert!(s.ends_with(&out));
+        assert!(out.len() <= 9);
+    }
+
+    #[test]
+    fn bounded_return_value_drops_null() {
+        assert_eq!(bounded_return_value(&serde_json::Value::Null, 100), None);
+    }
+
+    #[test]
+    fn bounded_return_value_truncates_large_string() {
+        let big = "x".repeat(50_000);
+        let v = serde_json::Value::String(big);
+        let out = bounded_return_value(&v, 100).expect("string retained");
+        let s = out.as_str().expect("string variant");
+        assert_eq!(s.len(), 100);
+    }
+
+    #[test]
+    fn bounded_return_value_retains_small_structured() {
+        let v = serde_json::json!({"ok": true, "count": 42});
+        assert_eq!(bounded_return_value(&v, 1_000), Some(v));
+    }
+
+    #[test]
+    fn bounded_return_value_drops_oversized_structured() {
+        // A 10k-element array serializes well past 8 KiB.
+        let items: Vec<_> = (0..10_000).collect();
+        let v = serde_json::json!(items);
+        assert_eq!(
+            bounded_return_value(&v, 8_000),
+            None,
+            "oversized structured return_value should be dropped, not truncated"
+        );
+    }
+
+    // ── Orchestrator budget / error mapping ─────────────────────
+
+    #[test]
+    fn failure_reason_maps_timeout_to_user_safe_message() {
+        let failure = classify_orchestrator_failure(
+            "Orchestrator error after resume",
+            "ResourceLimits: duration limit exceeded",
+        );
+        assert!(
+            matches!(failure.kind, OrchestratorFailureKind::TimeLimit { .. }),
+            "expected TimeLimit variant, got: {:?}",
+            failure.kind
+        );
+        let rendered = failure.user_message();
+        assert!(
+            rendered.contains("time budget exhausted"),
+            "expected user-safe timeout reason, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS"),
+            "reason must point operators at the override env var, got: {rendered}"
+        );
+    }
+
+    /// Regression for serrrfirat review on PR #2753 (commit 82d06410) —
+    /// the classifier used to treat any `"timeout"` / `"timed out"`
+    /// substring as a wall-clock exhaustion, so upstream LLM / network
+    /// timeouts (`"Request timed out"`, `"Connection timed out"`) were
+    /// mapped to `TimeLimit` and the user-facing message advised raising
+    /// `IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS` — completely wrong for a
+    /// provider-side timeout. Those now fall through to `Other` so the
+    /// budget knob is only suggested when the failure is actually a
+    /// Monty wall-clock limit.
+    #[test]
+    fn failure_reason_does_not_treat_upstream_timeout_as_time_limit() {
+        for upstream in [
+            "Request timed out",
+            "Connection timed out",
+            "LLM call failed: timeout waiting for response",
+            "upstream provider timeout after 30s",
+        ] {
+            let failure = classify_orchestrator_failure("Orchestrator runtime error", upstream);
+            assert!(
+                !matches!(failure.kind, OrchestratorFailureKind::TimeLimit { .. }),
+                "upstream timeout {upstream:?} must NOT classify as TimeLimit, got: {:?}",
+                failure.kind,
+            );
+            assert!(
+                matches!(failure.kind, OrchestratorFailureKind::Other { .. }),
+                "upstream timeout {upstream:?} should fall through to Other, got: {:?}",
+                failure.kind,
+            );
+            let rendered = failure.user_message();
+            assert!(
+                !rendered.contains("IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS"),
+                "user message for upstream timeout must not advise raising the budget knob, got: {rendered}",
+            );
+        }
+    }
+
+    #[test]
+    fn failure_reason_maps_memory_limit() {
+        let failure =
+            classify_orchestrator_failure("Orchestrator runtime error", "memory limit hit");
+        assert!(matches!(
+            failure.kind,
+            OrchestratorFailureKind::ResourceLimit { .. }
+        ));
+        assert!(
+            failure.user_message().contains("resource budget exhausted"),
+            "memory-limit reason should not leak raw Monty text, got: {}",
+            failure.user_message()
+        );
+    }
+
+    /// Regression for Copilot review on PR #2753 (commit 042c2ee7) —
+    /// `Other`'s user-facing Display used to embed the raw `err_msg`.
+    /// Surfaces like `runtime/mission.rs::process_mission_outcome_and_notify`
+    /// render `format!("Mission failed: {error}")` directly, bypassing the
+    /// channel-edge sanitizer in `bridge::user_facing_errors`, so any
+    /// unclassified Monty output would leak tracebacks / internal paths
+    /// there. The generic user-facing text now reads "internal orchestrator
+    /// failure"; the raw message is preserved in `debug_detail`.
+    #[test]
+    fn failure_reason_hides_unknown_raw_message_from_user_text() {
+        let failure =
+            classify_orchestrator_failure("Orchestrator runtime error", "NameError: foo undefined");
+        assert!(matches!(
+            failure.kind,
+            OrchestratorFailureKind::Other { .. }
+        ));
+        let rendered = failure.user_message();
+        assert!(
+            !rendered.contains("NameError"),
+            "Other variant must not surface raw err_msg in Display, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("internal orchestrator failure"),
+            "Other variant should render the generic fallback, got: {rendered}"
+        );
+        // Raw detail is still available for operator triage via debug_detail.
+        assert!(
+            failure.debug_detail().contains("NameError"),
+            "debug_detail must preserve the raw err_msg, got: {}",
+            failure.debug_detail()
+        );
+    }
+
+    /// Regression for Copilot review on PR #2753 — substring `"duration"`
+    /// alone mis-classified any error whose message happened to contain
+    /// that word as a timeout. The narrow predicate set now requires
+    /// the full phrase `"duration limit"` / `"max_duration"` /
+    /// `"maximum duration"` or an explicit timeout word.
+    #[test]
+    fn failure_reason_does_not_treat_bare_duration_as_timeout() {
+        let failure = classify_orchestrator_failure(
+            "Orchestrator runtime error",
+            "TypeError: duration must be a positive integer",
+        );
+        assert!(
+            !matches!(failure.kind, OrchestratorFailureKind::TimeLimit { .. }),
+            "bare 'duration' in an unrelated error must not classify as TimeLimit, got: {:?}",
+            failure.kind
+        );
+        assert!(
+            matches!(failure.kind, OrchestratorFailureKind::Other { .. }),
+            "expected Other variant for unrelated duration-word error, got: {:?}",
+            failure.kind
+        );
+    }
+
+    #[test]
+    fn failure_reason_strips_python_traceback() {
+        // Regression for #2546 — bug bash 4/16 reported raw Python tracebacks
+        // from the Monty VM being shown verbatim to end users, including
+        // internal file paths ("orchestrator.py", line 907) and upstream
+        // HTTP response bodies.
+        let raw = "Traceback (most recent call last):\n  File \"orchestrator.py\", line 907, in run_loop\n  File \"orchestrator.py\", line 548, in __llm_complete__\nRuntimeError: LLM call failed: Provider nearai_chat request failed: HTTP 502 Bad Gateway";
+        let failure = classify_orchestrator_failure("Orchestrator error after resume", raw);
+        assert!(matches!(
+            failure.kind,
+            OrchestratorFailureKind::Traceback { .. }
+        ));
+        let rendered = failure.user_message();
+        assert!(
+            rendered.contains("internal orchestrator failure"),
+            "should surface a generic internal-failure message, got: {rendered}"
+        );
+        for forbidden in [
+            "Traceback",
+            "orchestrator.py",
+            "File \"",
+            "line 907",
+            "line 548",
+            "HTTP 502",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "user-visible reason must not leak `{forbidden}`, got: {rendered}"
+            );
+        }
+        // The debug detail MUST retain the raw traceback so gateway
+        // debug mode can surface it without re-reading logs.
+        assert!(
+            failure.debug_detail().contains("Traceback"),
+            "debug detail must preserve the raw Monty trace, got: {}",
+            failure.debug_detail()
+        );
+    }
+
+    #[test]
+    fn max_duration_default_and_bounds() {
+        // Default (no env var set): 300s — but OnceLock may already be
+        // primed by another test in the suite, so we only check it's within
+        // the documented bounds.
+        let secs = orchestrator_max_duration().as_secs();
+        assert!(
+            (ORCHESTRATOR_MIN_MAX_DURATION_SECS..=ORCHESTRATOR_MAX_MAX_DURATION_SECS)
+                .contains(&secs),
+            "orchestrator_max_duration must be within [{ORCHESTRATOR_MIN_MAX_DURATION_SECS}, {ORCHESTRATOR_MAX_MAX_DURATION_SECS}], got {secs}"
+        );
+    }
+
     // ── Python helper unit tests via Monty ──────────────────────
     //
     // Extracts the helper functions from the default orchestrator and
@@ -2479,7 +3186,7 @@ mod tests {
         let tracker = LimitedTracker::new(ResourceLimits::new().max_allocations(500_000));
 
         let mut progress = runner
-            .start(vec![], tracker, PrintWriter::Collect(&mut stdout))
+            .start(vec![], tracker, PrintWriter::CollectString(&mut stdout))
             .expect("Failed to start orchestrator test");
 
         loop {
@@ -2490,7 +3197,7 @@ mod tests {
                         let val = call.args.first().cloned().unwrap_or(MontyObject::None);
                         let _ = call.resume(
                             ExtFunctionResult::Return(MontyObject::None),
-                            PrintWriter::Collect(&mut stdout),
+                            PrintWriter::CollectString(&mut stdout),
                         );
                         return val;
                     }
@@ -2499,14 +3206,14 @@ mod tests {
                         _ => ExtFunctionResult::Return(MontyObject::None),
                     };
                     progress = call
-                        .resume(ext_result, PrintWriter::Collect(&mut stdout))
+                        .resume(ext_result, PrintWriter::CollectString(&mut stdout))
                         .expect("resume failed");
                 }
                 RunProgress::NameLookup(lookup) => {
                     progress = lookup
                         .resume(
                             NameLookupResult::Undefined,
-                            PrintWriter::Collect(&mut stdout),
+                            PrintWriter::CollectString(&mut stdout),
                         )
                         .expect("name lookup resume failed");
                 }
@@ -2712,6 +3419,173 @@ mod tests {
         assert!(!eval_python_bool(
             r#"signals_tool_intent("If you want, I can next fetch a cleaner update.")"#
         ));
+    }
+
+    // ── Stop / pause / cancel intent (mission lifecycle) ─────────
+
+    #[test]
+    fn signals_tool_intent_stop_pause_cancel() {
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("I'll stop the mission now.")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("Let me pause the ticker.")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("I'll cancel the monitoring.")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("I'm going to halt the recurring task.")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("I will disable the mission.")"#
+        ));
+    }
+
+    #[test]
+    fn signals_tool_intent_no_false_positive_stop_discussion() {
+        // "let me explain" is in EXCLUSIONS — blocks the entire text
+        assert!(!eval_python_bool(
+            r#"signals_tool_intent("Let me explain how to stop the mission.")"#
+        ));
+        // Past tense should not trigger
+        assert!(!eval_python_bool(
+            r#"signals_tool_intent("I already stopped the mission.")"#
+        ));
+    }
+
+    // ── Execution intent: stop / pause / cancel ────────────────
+
+    #[test]
+    fn signals_execution_intent_stop_pause_cancel() {
+        assert!(eval_python_bool(r#"signals_execution_intent("stop it")"#));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("pause the mission")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("cancel that")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("please stop the ticker")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("please pause everything")"#
+        ));
+    }
+
+    #[test]
+    fn signals_execution_intent_bare_stop() {
+        // Bare imperative commands — the exact user messages from #2808
+        assert!(eval_python_bool(r#"signals_execution_intent("stop")"#));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("stop pinging")"#
+        ));
+        assert!(eval_python_bool(r#"signals_execution_intent("pause")"#));
+        assert!(eval_python_bool(r#"signals_execution_intent("cancel")"#));
+        assert!(eval_python_bool(r#"signals_execution_intent("halt")"#));
+    }
+
+    #[test]
+    fn signals_execution_intent_no_false_positive_stop_in_sentence() {
+        // "stop" mid-sentence should NOT trigger — only at the start
+        assert!(!eval_python_bool(
+            r#"signals_execution_intent("I can't stop thinking about it")"#
+        ));
+        assert!(!eval_python_bool(
+            r#"signals_execution_intent("how do I stop a mission?")"#
+        ));
+    }
+
+    #[test]
+    fn signals_execution_intent_halt_disable_phrases() {
+        // "halt/disable" pronoun+article phrases and "please halt/disable"
+        assert!(eval_python_bool(r#"signals_execution_intent("halt that")"#));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("halt the mission")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("disable it")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("disable the ticker")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("please halt the mission")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("please disable the routine")"#
+        ));
+        // Bare "disable" command
+        assert!(eval_python_bool(r#"signals_execution_intent("disable")"#));
+    }
+
+    #[test]
+    fn signals_execution_intent_bare_stop_with_punctuation() {
+        // Bare commands with trailing punctuation must still match
+        assert!(eval_python_bool(r#"signals_execution_intent("stop.")"#));
+        assert!(eval_python_bool(r#"signals_execution_intent("cancel!")"#));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("stop pinging.")"#
+        ));
+    }
+
+    // ── Skill activation: smart-quote / autocorrect resilience ───
+    //
+    // Regression for the ceo-setup non-activation report. iOS / macOS / most
+    // rich text inputs autocorrect `I'm` (ASCII U+0027) to `I'm` (curly
+    // U+2019). Authored regex patterns use ASCII punctuation, so without
+    // boundary normalization the curly form silently fails to match and
+    // the skill scores 0. `normalize_punctuation` in `default.py` folds
+    // curly quotes/dashes to ASCII before scoring.
+
+    #[test]
+    fn normalize_punctuation_folds_curly_quotes_and_dashes() {
+        // The input contains every typographic variant we fold. The
+        // expected output uses only ASCII punctuation, so a Rust-side
+        // regex that authors typed naturally still hits.
+        let raw =
+            "\u{2018}\u{2019}\u{201A}\u{201B}\u{201C}\u{201D}\u{201E}\u{201F}\u{2013}\u{2014}";
+        let expected = "''''\"\"\"\"--";
+        let program = format!("FINAL(normalize_punctuation({raw:?}) == {expected:?})");
+        // Run the helper-only slice of default.py with the assertion appended.
+        let helpers_end = DEFAULT_ORCHESTRATOR
+            .find("\ndef run_loop(")
+            .unwrap_or(DEFAULT_ORCHESTRATOR.len());
+        let helpers = &DEFAULT_ORCHESTRATOR[..helpers_end];
+        let code = format!("{helpers}\n{program}");
+        match run_python_final(code) {
+            MontyObject::Bool(true) => {}
+            other => panic!("normalize_punctuation did not produce ASCII fold: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_skills_matches_curly_apostrophe_input() {
+        // The ceo-setup skill's first pattern uses ASCII `'`. A user
+        // typing on iOS sends U+2019. With normalization, select_skills
+        // must still pick the skill; without it, the regex misses and
+        // the skill scores 0.
+        let pattern = r"(?i)I'm a (CEO|manager|executive|director|VP|founder)";
+        // Build a single-skill list as a Python literal — metadata shape
+        // matches what handle_list_skills emits at runtime.
+        let skill_literal = format!(
+            r#"[{{"doc_id": "test", "title": "ceo-setup", "content": "body", "metadata": {{"name": "ceo-setup", "activation": {{"patterns": [{pattern:?}], "max_context_tokens": 2500, "keywords": [], "tags": []}}}}}}]"#
+        );
+        let curly_goal = "I\u{2019}m Illia Polosukhin. I\u{2019}m a CEO of NEAR Foundation";
+        let program = format!(
+            "selected = select_skills({skill_literal}, {curly_goal:?}); FINAL(len(selected))"
+        );
+        let helpers_end = DEFAULT_ORCHESTRATOR
+            .find("\ndef run_loop(")
+            .unwrap_or(DEFAULT_ORCHESTRATOR.len());
+        let helpers = &DEFAULT_ORCHESTRATOR[..helpers_end];
+        let code = format!("{helpers}\n{program}");
+        match run_python_final(code) {
+            MontyObject::Int(1) => {}
+            other => {
+                panic!("select_skills should pick ceo-setup for curly-quoted input, got: {other:?}")
+            }
+        }
     }
 
     #[tokio::test]
@@ -2922,6 +3796,7 @@ mod tests {
             parameters: serde_json::json!({"cmd":"ls"}),
             resume_kind: crate::gate::ResumeKind::Approval { allow_always: true },
             resume_output: None,
+            paused_lease: None,
         };
         normalize_pause_outcome(&mut thread, &outcome).unwrap();
         assert_eq!(thread.state, ThreadState::Waiting);
@@ -2938,23 +3813,43 @@ mod tests {
     fn parse_outcome_failed() {
         let result = serde_json::json!({"outcome": "failed", "error": "boom"});
         let outcome = parse_outcome(&result);
-        assert!(matches!(outcome, ThreadOutcome::Failed { error } if error == "boom"));
+        assert!(matches!(outcome, ThreadOutcome::Failed { error, .. } if error == "boom"));
     }
 
     #[test]
     fn parse_outcome_gate_paused() {
+        let lease = crate::types::capability::CapabilityLease {
+            id: crate::types::capability::LeaseId::new(),
+            thread_id: crate::types::thread::ThreadId::new(),
+            capability_name: "test-capability".into(),
+            granted_actions: crate::types::capability::GrantedActions::Specific(vec![
+                "shell".into(),
+            ]),
+            granted_at: chrono::Utc::now(),
+            expires_at: None,
+            max_uses: Some(1),
+            uses_remaining: Some(1),
+            revoked: false,
+            revoked_reason: None,
+        };
         let result = serde_json::json!({
             "outcome": "gate_paused",
             "gate_name": "approval",
             "action_name": "shell",
             "call_id": "abc",
             "parameters": {"cmd": "rm -rf /"},
-            "resume_kind": {"Approval": {"allow_always": true}}
+            "resume_kind": {"Approval": {"allow_always": true}},
+            "paused_lease": lease,
         });
         let outcome = parse_outcome(&result);
-        assert!(
-            matches!(outcome, ThreadOutcome::GatePaused { action_name, .. } if action_name == "shell")
-        );
+        assert!(matches!(
+            outcome,
+            ThreadOutcome::GatePaused {
+                action_name,
+                paused_lease: Some(_),
+                ..
+            } if action_name == "shell"
+        ));
     }
 
     #[test]
@@ -2969,6 +3864,95 @@ mod tests {
         let result = serde_json::json!({"outcome": "stopped"});
         let outcome = parse_outcome(&result);
         assert!(matches!(outcome, ThreadOutcome::Stopped));
+    }
+
+    /// Regression test for nearai/ironclaw#2084 — drives the private
+    /// `handle_list_skills` call site end-to-end (not just the
+    /// `list_skills_global` helper). This is the caller-level test required by
+    /// `.claude/rules/testing.md` ("Test Through the Caller, Not Just the
+    /// Helper"): a future regression that reverts `handle_list_skills` back to
+    /// `list_memory_docs_with_shared(thread.project_id, &thread.user_id)` would
+    /// slip past a helper-only unit test but must fail this one, because the
+    /// shared skill lives in a different project than the caller's thread.
+    #[tokio::test]
+    async fn handle_list_skills_returns_shared_skills_from_other_projects() {
+        use crate::types::shared_owner_id;
+        use crate::types::thread::{ThreadConfig, ThreadType};
+
+        // project_a: where alice's thread runs.
+        // project_b: where the admin installed a shared skill.
+        let project_a = ProjectId::new();
+        let project_b = ProjectId::new();
+
+        let shared_skill = MemoryDoc::new(
+            project_b,
+            shared_owner_id(),
+            DocType::Skill,
+            "skill:admin-installed",
+            "shared content",
+        );
+        let alice_skill = MemoryDoc::new(
+            project_a,
+            "alice",
+            DocType::Skill,
+            "skill:alice-owned",
+            "alice content",
+        );
+        // A non-skill doc in alice's project must not leak into the result.
+        let alice_note = MemoryDoc::new(
+            project_a,
+            "alice",
+            DocType::Note,
+            "note:scratch",
+            "note body",
+        );
+
+        let store: Arc<dyn Store> = Arc::new(crate::tests::InMemoryStore::with_docs(vec![
+            shared_skill.clone(),
+            alice_skill.clone(),
+            alice_note,
+        ]));
+
+        let thread = Thread::new(
+            "test goal",
+            ThreadType::Foreground,
+            project_a,
+            "alice",
+            ThreadConfig::default(),
+        );
+
+        let result = handle_list_skills(&[], &thread, Some(&store)).await;
+        let ExtFunctionResult::Return(obj) = result else {
+            panic!("handle_list_skills did not return a value");
+        };
+        let json = monty_to_json(&obj);
+        let arr = json
+            .as_array()
+            .expect("handle_list_skills must return a JSON array");
+
+        let titles: Vec<&str> = arr
+            .iter()
+            .filter_map(|v| v.get("title").and_then(|t| t.as_str()))
+            .collect();
+
+        assert!(
+            titles.contains(&"skill:admin-installed"),
+            "shared skill from project_b must be visible to alice's thread in project_a — got {titles:?}"
+        );
+        assert!(
+            titles.contains(&"skill:alice-owned"),
+            "alice's own skill must be visible — got {titles:?}"
+        );
+        assert!(
+            !titles.contains(&"note:scratch"),
+            "non-skill docs must be filtered out — got {titles:?}"
+        );
+        assert_eq!(
+            arr.len(),
+            2,
+            "expected exactly 2 skills (shared + alice), got {}: {titles:?}",
+            arr.len()
+        );
     }
 
     // ── handle_llm_complete model forwarding ────────────────────
@@ -3025,7 +4009,141 @@ mod tests {
         async fn available_actions(
             &self,
             _: &[crate::types::capability::CapabilityLease],
+            _: &ThreadExecutionContext,
         ) -> Result<Vec<crate::types::capability::ActionDef>, EngineError> {
+            Ok(vec![])
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[crate::types::capability::CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
+            Ok(vec![])
+        }
+    }
+
+    struct PromptCapturingLlm {
+        captured_messages: tokio::sync::Mutex<Vec<Vec<ThreadMessage>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmBackend for PromptCapturingLlm {
+        fn model_name(&self) -> &str {
+            "prompt-capturing"
+        }
+
+        async fn complete(
+            &self,
+            messages: &[ThreadMessage],
+            _actions: &[crate::types::capability::ActionDef],
+            _config: &LlmCallConfig,
+        ) -> Result<crate::traits::llm::LlmOutput, EngineError> {
+            self.captured_messages.lock().await.push(messages.to_vec());
+            Ok(crate::traits::llm::LlmOutput {
+                response: crate::types::step::LlmResponse::Text("ok".into()),
+                usage: crate::types::step::TokenUsage::default(),
+            })
+        }
+    }
+
+    struct CompactActionEffects;
+
+    #[async_trait::async_trait]
+    impl EffectExecutor for CompactActionEffects {
+        async fn execute_action(
+            &self,
+            _: &str,
+            _: serde_json::Value,
+            _: &crate::types::capability::CapabilityLease,
+            _: &ThreadExecutionContext,
+        ) -> Result<crate::types::step::ActionResult, EngineError> {
+            Ok(crate::types::step::ActionResult {
+                call_id: String::new(),
+                action_name: String::new(),
+                output: serde_json::json!({}),
+                is_error: false,
+                duration: std::time::Duration::from_millis(1),
+            })
+        }
+
+        async fn available_actions(
+            &self,
+            _: &[crate::types::capability::CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::ActionDef>, EngineError> {
+            Ok(vec![crate::types::capability::ActionDef {
+                name: "gmail_send".into(),
+                description: "Send Gmail".into(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "to": {"type": "string"},
+                        "body": {"type": "string"}
+                    }
+                }),
+                effects: vec![crate::types::capability::EffectType::WriteExternal],
+                requires_approval: false,
+                model_tool_surface: crate::types::capability::ModelToolSurface::CompactToolInfo,
+                discovery: None,
+            }])
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[crate::types::capability::CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
+            Ok(vec![])
+        }
+    }
+
+    struct InventoryErrorEffects;
+
+    #[async_trait::async_trait]
+    impl EffectExecutor for InventoryErrorEffects {
+        async fn execute_action(
+            &self,
+            action_name: &str,
+            _: serde_json::Value,
+            _: &crate::types::capability::CapabilityLease,
+            ctx: &ThreadExecutionContext,
+        ) -> Result<crate::types::step::ActionResult, EngineError> {
+            Ok(crate::types::step::ActionResult {
+                call_id: String::new(),
+                action_name: action_name.to_string(),
+                output: serde_json::json!({
+                    "has_action_snapshot": ctx.available_actions_snapshot.is_some(),
+                    "has_inventory_snapshot": ctx.available_action_inventory_snapshot.is_some(),
+                }),
+                is_error: false,
+                duration: std::time::Duration::from_millis(1),
+            })
+        }
+
+        async fn available_actions(
+            &self,
+            _: &[crate::types::capability::CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::ActionDef>, EngineError> {
+            Ok(vec![])
+        }
+
+        async fn available_action_inventory(
+            &self,
+            _: &[crate::types::capability::CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<crate::types::capability::ActionInventory, EngineError> {
+            Err(EngineError::Effect {
+                reason: "inventory failed".into(),
+            })
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[crate::types::capability::CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
             Ok(vec![])
         }
     }
@@ -3065,6 +4183,7 @@ mod tests {
                 effects: &effects,
                 leases: &leases,
                 store: Some(&store),
+                platform_info: None,
             },
             &mut total_tokens,
         )
@@ -3109,6 +4228,7 @@ mod tests {
                 effects: &effects,
                 leases: &leases,
                 store: Some(&store),
+                platform_info: None,
             },
             &mut total_tokens,
         )
@@ -3117,6 +4237,121 @@ mod tests {
         let captured = concrete.captured.lock().await;
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0], None);
+    }
+
+    #[tokio::test]
+    async fn llm_complete_refreshes_codeact_prompt_with_current_compact_actions() {
+        let concrete = Arc::new(PromptCapturingLlm {
+            captured_messages: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let llm: Arc<dyn LlmBackend> = Arc::clone(&concrete) as Arc<dyn LlmBackend>;
+        let effects: Arc<dyn EffectExecutor> = Arc::new(CompactActionEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let store: Arc<dyn Store> = Arc::new(crate::tests::InMemoryStore::with_docs(vec![]));
+
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+        thread.messages = vec![
+            ThreadMessage::system(
+                crate::executor::prompt::build_codeact_system_prompt_with_docs(&[], &[], &[], None),
+            ),
+            ThreadMessage::user("use gmail"),
+        ];
+        leases
+            .grant(
+                thread.id,
+                "tools",
+                crate::types::capability::GrantedActions::All,
+                None,
+                None,
+            )
+            .await
+            .expect("grant tool lease");
+
+        let mut total_tokens = TokenUsage::default();
+        let result = handle_llm_complete(
+            &[],
+            &[],
+            &mut thread,
+            LlmCompleteDeps {
+                llm: &llm,
+                effects: &effects,
+                leases: &leases,
+                store: Some(&store),
+                platform_info: None,
+            },
+            &mut total_tokens,
+        )
+        .await;
+
+        assert!(matches!(result, ExtFunctionResult::Return(_)));
+        let captured = concrete.captured_messages.lock().await;
+        let system_prompt = &captured[0][0].content;
+        assert!(system_prompt.contains("## Enabled Tools"));
+        assert!(system_prompt.contains("`gmail_send`"));
+    }
+
+    #[tokio::test]
+    async fn execute_action_does_not_set_empty_snapshots_when_inventory_fetch_fails() {
+        let effects: Arc<dyn EffectExecutor> = Arc::new(InventoryErrorEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+
+        let mut thread = Thread::new(
+            "test action inventory fallback",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        leases
+            .grant(
+                thread.id,
+                "tools",
+                crate::types::capability::GrantedActions::All,
+                None,
+                None,
+            )
+            .await
+            .expect("grant lease");
+
+        let result = handle_execute_action(
+            &[
+                MontyObject::String("echo".into()),
+                json_to_monty(&serde_json::json!({})),
+            ],
+            &[(
+                MontyObject::String("call_id".into()),
+                MontyObject::String("call-1".into()),
+            )],
+            &mut thread,
+            &effects,
+            &leases,
+            &policy,
+            None,
+        )
+        .await;
+
+        let ExtFunctionResult::Return(obj) = result else {
+            panic!("handle_execute_action did not return a value");
+        };
+        let json = monty_to_json(&obj);
+        assert_eq!(json["is_error"], serde_json::json!(false));
+        assert_eq!(
+            json["output"],
+            serde_json::json!({
+                "has_action_snapshot": false,
+                "has_inventory_snapshot": false,
+            })
+        );
     }
 
     // ── Python ↔ Rust ActionCall round-trip ───────────────────────────────
@@ -3562,6 +4797,41 @@ FINAL(consecutive_action_errors)
         assert_eq!(count, 0);
     }
 
+    /// Regression: `max_consecutive_errors` arrives as `null` when the Rust
+    /// caller passes `Option::None`. Python's `dict.get(key, default)` returns
+    /// the explicit `None`, not the default, so `None + 2` used to blow up in
+    /// the error-gating branch on the very first failed action call. The
+    /// orchestrator now coalesces `None` to a sentinel; this test pins that
+    /// behavior.
+    #[test]
+    fn action_errors_tolerate_null_max_consecutive_errors() {
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = None
+if max_consecutive_errors is None:
+    max_consecutive_errors = 10**9
+consecutive_action_errors = 1
+nudge = False
+failed = False
+if consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+    failed = True
+elif consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors:
+    nudge = True
+# 0 = no nudge / no failure (expected with None = no-limit sentinel)
+if failed:
+    FINAL(2)
+elif nudge:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(
+            result, 0,
+            "None max_consecutive_errors must behave as no-limit, not crash"
+        );
+    }
+
     #[test]
     fn action_errors_nudge_injected_at_threshold() {
         // When consecutive_action_errors reaches max_consecutive_errors,
@@ -3859,5 +5129,84 @@ FINAL(batch_error_count)
                  this would cause 'No tool output found' from the LLM API"
             );
         }
+    }
+
+    // ── CodeExecutionFailed event emission (caller test) ────────
+
+    #[tokio::test]
+    async fn execute_code_step_emits_code_execution_failed_event() {
+        let llm: Arc<dyn LlmBackend> = Arc::new(ModelCapturingLlm {
+            captured: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let effects: Arc<dyn EffectExecutor> = Arc::new(NoopEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+
+        let mut thread = Thread::new(
+            "test code execution failure instrumentation",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        // Pass intentionally broken Python code (syntax error)
+        let args = &[
+            json_to_monty(&serde_json::json!("def ==")),
+            json_to_monty(&serde_json::json!({})),
+        ];
+
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let _result = handle_execute_code_step(
+            args,
+            &[],
+            &mut thread,
+            &llm,
+            &effects,
+            &leases,
+            &policy,
+            Some(&tx),
+        )
+        .await;
+
+        // Verify CodeExecutionFailed event was emitted on thread.events
+        let code_failed_events: Vec<_> = thread
+            .events
+            .iter()
+            .filter(|e| matches!(&e.kind, EventKind::CodeExecutionFailed { .. }))
+            .collect();
+
+        assert_eq!(
+            code_failed_events.len(),
+            1,
+            "expected exactly one CodeExecutionFailed event, got {}",
+            code_failed_events.len()
+        );
+
+        if let EventKind::CodeExecutionFailed {
+            category,
+            code_hash,
+            ..
+        } = &code_failed_events[0].kind
+        {
+            assert_eq!(
+                *category,
+                crate::types::step::CodeExecutionFailure::SyntaxError
+            );
+            assert!(code_hash.is_some());
+        } else {
+            panic!("expected CodeExecutionFailed event kind");
+        }
+
+        // Also verify ActionFailed was emitted (existing behavior)
+        let action_failed = thread
+            .events
+            .iter()
+            .any(|e| matches!(&e.kind, EventKind::ActionFailed { .. }));
+        assert!(
+            action_failed,
+            "expected ActionFailed event alongside CodeExecutionFailed"
+        );
     }
 }

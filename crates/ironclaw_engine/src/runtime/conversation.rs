@@ -305,9 +305,13 @@ impl ConversationManager {
                 }
 
                 // Spawn new foreground thread with conversation history.
+                // `goal` holds the full message (the orchestrator feeds it as
+                // the initial user turn); `title` is the short sidebar label.
+                let title = crate::types::thread::Thread::derive_title_from_message(content);
                 self.thread_manager
                     .spawn_thread_with_history(
                         content, // use message as goal
+                        title,
                         ThreadType::Foreground,
                         project_id,
                         thread_config,
@@ -385,7 +389,7 @@ impl ConversationManager {
                 ));
                 conv.untrack_thread(thread_id);
             }
-            ThreadOutcome::Failed { error } => {
+            ThreadOutcome::Failed { error, .. } => {
                 conv.add_entry(ConversationEntry::system_for_thread(
                     thread_id,
                     format!("Thread failed: {error}"),
@@ -632,7 +636,16 @@ mod tests {
         async fn available_actions(
             &self,
             _: &[CapabilityLease],
+            _: &crate::traits::effect::ThreadExecutionContext,
         ) -> Result<Vec<ActionDef>, EngineError> {
+            Ok(vec![])
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[CapabilityLease],
+            _: &crate::traits::effect::ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
             Ok(vec![])
         }
     }
@@ -745,6 +758,9 @@ mod tests {
             _: ProjectId,
             _: &str,
         ) -> Result<Vec<MemoryDoc>, EngineError> {
+            Ok(vec![])
+        }
+        async fn list_memory_docs_by_owner(&self, _: &str) -> Result<Vec<MemoryDoc>, EngineError> {
             Ok(vec![])
         }
         async fn save_lease(&self, _: &CapabilityLease) -> Result<(), EngineError> {

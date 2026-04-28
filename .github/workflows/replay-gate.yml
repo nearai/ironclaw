@@ -1,0 +1,102 @@
+name: Replay Snapshot Gate
+
+# Runs `cargo insta test --check` over the committed replay fixtures so any
+# change to engine dispatch, agent loop, or tool execution has to come with
+# an accepted snapshot diff. Scoped to paths that can actually move the
+# replay output, so unrelated PRs don't pay the build cost.
+#
+# Cache strategy: GitHub Actions enforces a 10 GB per-repo cache quota, and
+# the repo routinely sits close to that ceiling, so PR-scoped caches get
+# LRU-evicted between runs. The `push: [staging, main]` trigger primes a
+# warm cache on the base branches every time work lands there — PRs
+# targeting those branches then restore from that cache (GitHub allows
+# cross-ref restore from the PR's base) instead of paying the full
+# cold-cache compile on every push.
+
+on:
+  pull_request:
+    paths:
+      - 'crates/ironclaw_engine/**'
+      - 'src/agent/**'
+      - 'src/llm/**'
+      - 'src/tools/builtin/**'
+      - 'src/bridge/**'
+      - 'tests/fixtures/llm_traces/**'
+      - 'tests/snapshots/**'
+      - 'tests/support/replay_outcome.rs'
+      - 'tests/e2e_engine_v2.rs'
+      - 'tests/e2e_live.rs'
+      - 'tests/e2e_recorded_trace.rs'
+      - 'Cargo.toml'
+      - '.github/workflows/replay-gate.yml'
+  push:
+    branches:
+      # PRs default to staging in this repo, so priming staging is what
+      # actually benefits most PRs. main is kept so the cache also warms
+      # whenever staging is promoted forward.
+      - staging
+      - main
+
+jobs:
+  replay-snapshots:
+    name: Replay snapshot gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Keep `save-if` restricted to base-branch pushes so PR runs only read
+      # the cache and never write — this prevents a single big PR cache
+      # from filling the 10 GB quota and evicting the primed base-branch
+      # cache that every other PR depends on.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: replay-gate
+          save-if: ${{ github.event_name == 'push' }}
+
+      # Precompiled binaries — avoids the ~40s cargo-insta source build and
+      # wires nextest in the same step since insta's `--test-runner nextest`
+      # needs it on the PATH.
+      - name: Install cargo-insta and cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-insta,cargo-nextest
+
+      # `cargo insta test` runs the tests and, in `--check` mode, fails if any
+      # new or pending `.snap.new` would be produced. Combined with the
+      # `replay` feature flag, this promotes the `#[ignore]`d live tests into
+      # a required status check while keeping them off the default `cargo test`.
+      #
+      # `--test-runner nextest` runs each test binary in parallel processes
+      # and enforces the per-test timeouts defined in `.config/nextest.toml`.
+      # `NEXTEST_PROFILE=ci` selects the stricter profile there (no
+      # fail-fast, inline failure output, suppressed success noise).
+      - name: Run replay snapshot tests
+        env:
+          NEXTEST_PROFILE: ci
+        run: |
+          cargo insta test \
+            --check \
+            --test-runner nextest \
+            --no-default-features \
+            --features "libsql,replay" \
+            --test e2e_engine_v2 \
+            --test e2e_recorded_trace \
+            --test e2e_live
+
+      # Reports EventKind variants that have no snapshot exercising them.
+      # Runs in non-strict mode so it stays advisory while coverage ramps up —
+      # flip to `--strict` once every variant is covered at least once.
+      - name: Report trace coverage
+        run: ./scripts/trace-coverage.sh
+
+      - name: Reject committed .snap.new files
+        run: |
+          if git ls-files 'tests/snapshots/*.snap.new' | grep .; then
+            echo "Committed .snap.new files found — run 'cargo insta review' and commit the accepted .snap."
+            exit 1
+          fi

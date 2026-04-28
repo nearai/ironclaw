@@ -1,52 +1,57 @@
+use ironclaw_common::ExtensionName;
+
 use crate::extensions::ExtensionError;
 
+/// Validate and canonicalize an extension name.
+///
+/// Thin wrapper around [`ExtensionName::new`] that adapts the identity-layer
+/// error to [`ExtensionError::InstallFailed`] so existing callers don't
+/// change. New code should prefer [`ExtensionName`] directly.
 pub fn canonicalize_extension_name(name: &str) -> Result<String, ExtensionError> {
-    if name.contains('/') || name.contains('\\') || name.contains("..") || name.contains('\0') {
-        return Err(ExtensionError::InstallFailed(format!(
-            "Invalid extension name '{name}': contains path separator or traversal characters"
-        )));
-    }
+    ExtensionName::new(name)
+        .map(String::from)
+        .map_err(|e| ExtensionError::InstallFailed(format!("Invalid extension name: {e}")))
+}
 
-    let canonical = name.trim().replace('-', "_");
-    if canonical.is_empty() {
-        return Err(ExtensionError::InstallFailed(
-            "Invalid extension name: must not be empty".to_string(),
-        ));
-    }
+pub fn normalize_extension_names<I>(names: I) -> Vec<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut normalized = Vec::new();
+    let mut seen = std::collections::HashSet::new();
 
-    let bytes = canonical.as_bytes();
-    if bytes.first() == Some(&b'_') || bytes.last() == Some(&b'_') {
-        return Err(ExtensionError::InstallFailed(format!(
-            "Invalid extension name '{name}': must start and end with a lowercase letter or digit"
-        )));
-    }
-
-    let mut prev_underscore = false;
-    for ch in canonical.chars() {
-        let is_valid = ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_';
-        if !is_valid {
-            return Err(ExtensionError::InstallFailed(format!(
-                "Invalid extension name '{name}': only lowercase letters, digits, and underscores are allowed"
-            )));
-        }
-        if ch == '_' {
-            if prev_underscore {
-                return Err(ExtensionError::InstallFailed(format!(
-                    "Invalid extension name '{name}': consecutive underscores are not allowed"
-                )));
+    for name in names {
+        match canonicalize_extension_name(&name) {
+            Ok(name) => {
+                if seen.insert(name.clone()) {
+                    normalized.push(name);
+                }
             }
-            prev_underscore = true;
-        } else {
-            prev_underscore = false;
+            Err(error) => {
+                tracing::warn!(
+                    channel = %name,
+                    error = %error,
+                    "Skipping invalid startup channel name"
+                );
+            }
         }
     }
 
-    Ok(canonical)
+    normalized
 }
 
 pub fn legacy_extension_alias(name: &str) -> Option<String> {
     let alias = name.replace('_', "-");
     (alias != name).then_some(alias)
+}
+
+pub fn extension_name_candidates(name: &str) -> Vec<String> {
+    let canonical = canonicalize_extension_name(name).unwrap_or_else(|_| name.to_string());
+    let mut candidates = vec![canonical.clone()];
+    if let Some(legacy) = legacy_extension_alias(&canonical) {
+        candidates.push(legacy);
+    }
+    candidates
 }
 
 /// Filenames to look for when extracting a WASM archive for an extension.
@@ -124,12 +129,42 @@ mod tests {
     }
 
     #[test]
+    fn normalize_extension_names_canonicalizes_deduplicates_and_skips_invalid() {
+        assert_eq!(
+            normalize_extension_names(vec![
+                "telegram".to_string(),
+                "my-channel".to_string(),
+                "my_channel".to_string(),
+                "BadName".to_string(),
+                "../bad".to_string(),
+            ]),
+            vec!["telegram", "my_channel"]
+        );
+    }
+
+    #[test]
     fn archive_filenames_matches_canonical() {
         let af = ArchiveFilenames::new("gmail");
         assert!(af.is_wasm("gmail.wasm"));
         assert!(af.is_caps("gmail.capabilities.json"));
         assert!(!af.is_wasm("other.wasm"));
         assert!(af.alias_wasm.is_none());
+    }
+
+    #[test]
+    fn extension_name_candidates_include_legacy_alias() {
+        assert_eq!(
+            extension_name_candidates("google_calendar"),
+            vec!["google_calendar", "google-calendar"]
+        );
+    }
+
+    #[test]
+    fn extension_name_candidates_canonicalize_hyphenated_name() {
+        assert_eq!(
+            extension_name_candidates("slack-relay"),
+            vec!["slack_relay", "slack-relay"]
+        );
     }
 
     #[test]

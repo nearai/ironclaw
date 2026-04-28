@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -22,6 +23,7 @@ use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse,
 };
+use crate::llm::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 use crate::llm::{costs, session::SessionManager};
 
 /// Information about an available model from NEAR AI API.
@@ -258,9 +260,16 @@ impl NearAiChatProvider {
 
         let status = response.status();
         // Extract Retry-After header before consuming the response body.
-        let retry_after_header = Some(crate::llm::retry::parse_retry_after(
-            response.headers().get("retry-after"),
-        ));
+        // `retry_after_header` is `Some(parsed_or_60s_fallback)` only when the
+        // header was actually present on the response — `None` otherwise, so
+        // that 5xx retries fall back to `retry_backoff_delay`'s exponential
+        // schedule instead of the 60s default `parse_retry_after` applies to
+        // missing headers. The 60s floor for 429 (rate limit) is re-added
+        // explicitly at the 429 call site below via `.or(Some(...))`.
+        let retry_after_header: Option<Duration> = response
+            .headers()
+            .get("retry-after")
+            .map(crate::llm::retry::parse_retry_after_value);
         let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
             provider: "nearai_chat".to_string(),
             reason: format!("Failed to read response body: {}", e),
@@ -293,8 +302,59 @@ impl NearAiChatProvider {
             }
 
             if status_code == 429 {
+                // Preserve existing rate-limit behavior: fall back to a 60s
+                // default when the server omits Retry-After. Long sleeps are
+                // appropriate for rate-limit backpressure.
                 return Err(LlmError::RateLimited {
                     provider: "nearai_chat".to_string(),
+                    retry_after: retry_after_header.or(Some(Duration::from_secs(60))),
+                });
+            }
+
+            // Payload too large — the accumulated context exceeds the provider's
+            // request size limit. Map to ContextLengthExceeded so the dispatcher
+            // can trigger automatic compaction instead of crashing.
+            if status_code == 413 {
+                let lower = response_text.to_ascii_lowercase();
+                let (used, limit) = crate::llm::rig_adapter::parse_token_counts(&lower);
+                return Err(LlmError::ContextLengthExceeded { used, limit });
+            }
+
+            // Some providers return 400 with "context_length_exceeded" in the body
+            // (e.g., OpenAI-compatible endpoints behind NEAR AI).
+            if status_code == 400 {
+                let lower = response_text.to_ascii_lowercase();
+                const CONTEXT_PATTERNS: &[&str] = &[
+                    "context_length_exceeded",
+                    "maximum context length",
+                    "too many tokens",
+                    "payload too large",
+                ];
+                if CONTEXT_PATTERNS.iter().any(|p| lower.contains(p)) {
+                    let (used, limit) = crate::llm::rig_adapter::parse_token_counts(&lower);
+                    return Err(LlmError::ContextLengthExceeded { used, limit });
+                }
+            }
+
+            // Any HTTP 5xx from the upstream LLM gateway — map to BadGateway
+            // so the retry layer backs off, the circuit breaker counts a
+            // transient failure, and the channel boundary produces a user-safe
+            // message. HTTP 500 is the most important case for the #2546
+            // traceback-leak report: upstream application errors frequently
+            // return 500 with a Python traceback in the body. 502/503/504 are
+            // the proxy-layer variants. The `status` field preserves the
+            // specific code for operators; the body is logged at debug and
+            // never carried on the error.
+            if matches!(status_code, 500..=599) {
+                tracing::debug!(
+                    provider = "nearai_chat",
+                    status = status_code,
+                    body_preview = crate::agent::truncate_for_preview(&response_text, 512).as_str(),
+                    "NEAR AI Chat upstream 5xx response"
+                );
+                return Err(LlmError::BadGateway {
+                    provider: "nearai_chat".to_string(),
+                    status: status_code,
                     retry_after: retry_after_header,
                 });
             }
@@ -498,10 +558,14 @@ impl LlmProvider for NearAiChatProvider {
 
         // Fall back to reasoning_content when content is null (same as
         // complete_with_tools — reasoning models may put the answer there).
-        let content = choice
-            .message
-            .content
-            .or(choice.message.reasoning_content)
+        let ChatCompletionResponseMessage {
+            content,
+            reasoning_content,
+            reasoning,
+            ..
+        } = choice.message;
+        let content = content
+            .or(reasoning_content.or(reasoning))
             .unwrap_or_default();
         let finish_reason = match choice.finish_reason.as_deref() {
             Some("stop") => FinishReason::Stop,
@@ -543,28 +607,15 @@ impl LlmProvider for NearAiChatProvider {
             messages
         };
 
-        let tools: Vec<ChatCompletionTool> = req
-            .tools
-            .into_iter()
-            .map(|t| ChatCompletionTool {
-                tool_type: "function".to_string(),
-                function: ChatCompletionFunction {
-                    name: t.name,
-                    description: Some(t.description),
-                    parameters: Some(t.parameters),
-                },
-            })
-            .collect();
-
-        let request = ChatCompletionRequest {
+        let request = build_chat_completion_request(
             model,
             messages,
-            temperature: req.temperature,
-            max_tokens: req.max_tokens,
-            stop: req.stop_sequences,
-            tools: if tools.is_empty() { None } else { Some(tools) },
-            tool_choice: req.tool_choice,
-        };
+            req.tools,
+            req.temperature,
+            req.max_tokens,
+            req.stop_sequences,
+            req.tool_choice,
+        );
 
         let response: ChatCompletionResponse = self.send_request(&request).await?;
 
@@ -577,9 +628,16 @@ impl LlmProvider for NearAiChatProvider {
                     provider: "nearai_chat".to_string(),
                 })?;
 
-        let tool_calls: Vec<ToolCall> = choice
-            .message
-            .tool_calls
+        let ChatCompletionResponseMessage {
+            content: message_content,
+            reasoning_content,
+            reasoning,
+            tool_calls: message_tool_calls,
+            ..
+        } = choice.message;
+        let reasoning_fallback = reasoning_content.or(reasoning);
+
+        let tool_calls: Vec<ToolCall> = message_tool_calls
             .unwrap_or_default()
             .into_iter()
             .map(|tc| {
@@ -601,9 +659,9 @@ impl LlmProvider for NearAiChatProvider {
         // leaking that into conversation history inflates context and
         // confuses the model.
         let content = if tool_calls.is_empty() {
-            choice.message.content.or(choice.message.reasoning_content)
+            message_content.or(reasoning_fallback)
         } else {
-            choice.message.content
+            message_content
         };
 
         let finish_reason = match choice.finish_reason.as_deref() {
@@ -991,7 +1049,13 @@ impl From<ChatMessage> for ChatCompletionMessage {
         } else if !msg.content_parts.is_empty() {
             // Build multimodal content array: text + image parts
             let mut parts = vec![crate::llm::ContentPart::Text { text: msg.content }];
-            parts.extend(msg.content_parts);
+            parts.extend(msg.content_parts.into_iter().map(|part| match part {
+                crate::llm::ContentPart::ImageUrl { mut image_url } => {
+                    image_url.detail = Some(image_url.normalized_openai_detail());
+                    crate::llm::ContentPart::ImageUrl { image_url }
+                }
+                other => other,
+            }));
             Some(MessageContent::Parts(parts))
         } else {
             Some(MessageContent::Text(msg.content))
@@ -1023,6 +1087,50 @@ struct ChatCompletionFunction {
     parameters: Option<serde_json::Value>,
 }
 
+/// Convert a `ToolDefinition` to NEAR AI Chat Completions tool format.
+///
+/// Chat Completions is non-strict by default, but this boundary still flattens
+/// top-level combinators that OpenAI-compatible tool APIs reject.
+fn convert_tool_definition(tool: crate::llm::provider::ToolDefinition) -> ChatCompletionTool {
+    let mut description = tool.description.clone();
+    let parameters = shape_tool_schema(
+        ToolSchemaPolicy::FlattenOnly,
+        &tool.parameters,
+        &mut description,
+    );
+
+    ChatCompletionTool {
+        tool_type: "function".to_string(),
+        function: ChatCompletionFunction {
+            name: tool.name,
+            description: Some(description),
+            parameters: Some(parameters),
+        },
+    }
+}
+
+fn build_chat_completion_request(
+    model: String,
+    messages: Vec<ChatCompletionMessage>,
+    tools: Vec<crate::llm::provider::ToolDefinition>,
+    temperature: Option<f32>,
+    max_tokens: Option<u32>,
+    stop: Option<Vec<String>>,
+    tool_choice: Option<String>,
+) -> ChatCompletionRequest {
+    let tools: Vec<ChatCompletionTool> = tools.into_iter().map(convert_tool_definition).collect();
+
+    ChatCompletionRequest {
+        model,
+        messages,
+        temperature,
+        max_tokens,
+        stop,
+        tools: if tools.is_empty() { None } else { Some(tools) },
+        tool_choice,
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ChatCompletionResponse {
     #[allow(dead_code)]
@@ -1047,8 +1155,10 @@ struct ChatCompletionResponseMessage {
     /// Some models return chain-of-thought reasoning here instead of in
     /// `content`. vLLM/SGLang backends (used by NEAR AI) return the field
     /// as `reasoning`; other APIs (GLM-5, DeepSeek) use `reasoning_content`.
-    #[serde(default, alias = "reasoning")]
+    #[serde(default)]
     reasoning_content: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
     tool_calls: Option<Vec<ChatCompletionToolCall>>,
 }
 
@@ -1167,6 +1277,47 @@ mod tests {
     }
 
     #[test]
+    fn test_message_conversion_defaults_missing_image_detail_to_auto() {
+        let msg = ChatMessage::user_with_parts(
+            "describe this",
+            vec![crate::llm::ContentPart::ImageUrl {
+                image_url: crate::llm::ImageUrl {
+                    url: "data:image/jpeg;base64,Zm9v".to_string(),
+                    detail: None,
+                },
+            }],
+        );
+        let chat_msg: ChatCompletionMessage = msg.into();
+
+        let content = serde_json::to_value(chat_msg.content).expect("serialize content");
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            "data:image/jpeg;base64,Zm9v"
+        );
+        assert_eq!(content[1]["image_url"]["detail"], "auto");
+    }
+
+    #[test]
+    fn test_message_conversion_preserves_explicit_image_detail() {
+        for expected in ["low", "high"] {
+            let msg = ChatMessage::user_with_parts(
+                "describe this",
+                vec![crate::llm::ContentPart::ImageUrl {
+                    image_url: crate::llm::ImageUrl {
+                        url: format!("https://example.com/{expected}.png"),
+                        detail: Some(expected.to_string()),
+                    },
+                }],
+            );
+            let chat_msg: ChatCompletionMessage = msg.into();
+            let content = serde_json::to_value(chat_msg.content).expect("serialize content");
+            assert_eq!(content[1]["image_url"]["detail"], expected);
+        }
+    }
+
+    #[test]
     fn test_tool_message_conversion() {
         let msg = ChatMessage::tool_result("call_123", "my_tool", "result");
         let chat_msg: ChatCompletionMessage = msg.into();
@@ -1213,6 +1364,86 @@ mod tests {
         let msg = ChatMessage::assistant("Hello");
         let chat_msg: ChatCompletionMessage = msg.into();
         assert!(chat_msg.tool_calls.is_none());
+    }
+
+    #[test]
+    fn test_convert_tool_definition_preserves_optional_fields() {
+        use crate::llm::provider::ToolDefinition;
+
+        let tool = ToolDefinition {
+            name: "message".to_string(),
+            description: "Send a message".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "content": { "type": "string" },
+                    "channel": { "type": "string" },
+                    "target": { "type": "string" },
+                    "attachments": { "type": "array" }
+                },
+                "required": ["content"]
+            }),
+        };
+
+        let converted = convert_tool_definition(tool);
+        let params = converted.function.parameters.expect("parameters");
+
+        assert_eq!(params["required"], serde_json::json!(["content"]));
+        assert_eq!(params["properties"]["channel"]["type"], "string");
+        assert_eq!(params["properties"]["target"]["type"], "string");
+        assert_eq!(params["properties"]["attachments"]["type"], "array");
+        assert_eq!(
+            converted.function.description.as_deref(),
+            Some("Send a message")
+        );
+    }
+
+    #[test]
+    fn test_convert_tool_definition_flattens_top_level_oneof_without_strictifying() {
+        use crate::llm::provider::ToolDefinition;
+
+        let tool = ToolDefinition {
+            name: "lookup".to_string(),
+            description: "Resolve a user".to_string(),
+            parameters: serde_json::json!({
+            "type": "object",
+            "oneOf": [
+                {
+                    "properties": {
+                        "mode": { "const": "by_name" },
+                        "name": { "type": "string" }
+                    },
+                    "required": ["mode", "name"]
+                },
+                {
+                    "properties": {
+                        "mode": { "const": "by_id" },
+                        "id": { "type": "string" }
+                    },
+                    "required": ["mode", "id"]
+                }
+            ]
+            }),
+        };
+
+        let converted = convert_tool_definition(tool);
+        let params = converted.function.parameters.expect("parameters");
+
+        assert_eq!(params["type"], "object");
+        assert!(
+            params.get("oneOf").is_none(),
+            "top-level oneOf should still be flattened for OpenAI-compatible requests"
+        );
+        assert_eq!(params["additionalProperties"], true);
+        assert_eq!(params["required"], serde_json::json!([]));
+        assert_eq!(params["properties"]["mode"]["const"], "by_name");
+        assert_eq!(params["properties"]["name"]["type"], "string");
+        assert_eq!(params["properties"]["id"]["type"], "string");
+        let description = converted.function.description.expect("description");
+        assert!(
+            description.contains("Upstream JSON schema"),
+            "flattened schemas should preserve the advisory hint"
+        );
     }
 
     #[test]
@@ -1429,7 +1660,7 @@ mod tests {
         assert_eq!(output, default_out);
     }
 
-    /// Regression: reasoning_content must NOT leak into tool-call responses.
+    /// Regression: reasoning fallbacks must NOT leak into tool-call responses.
     #[test]
     fn test_reasoning_content_not_leaked_into_tool_call_response() {
         let response: ChatCompletionResponse = serde_json::from_value(serde_json::json!({
@@ -1439,6 +1670,7 @@ mod tests {
                     "role": "assistant",
                     "content": null,
                     "reasoning_content": "Let me think about which tool to call...",
+                    "reasoning": "Secondary reasoning fallback text",
                     "tool_calls": [{
                         "id": "call_abc123",
                         "type": "function",
@@ -1455,9 +1687,15 @@ mod tests {
         .unwrap();
 
         let choice = response.choices.into_iter().next().unwrap();
-        let tool_calls: Vec<ToolCall> = choice
-            .message
-            .tool_calls
+        let ChatCompletionResponseMessage {
+            content: message_content,
+            reasoning_content,
+            reasoning,
+            tool_calls: message_tool_calls,
+            ..
+        } = choice.message;
+        let reasoning_fallback = reasoning_content.or(reasoning);
+        let tool_calls: Vec<ToolCall> = message_tool_calls
             .unwrap_or_default()
             .into_iter()
             .map(|tc| {
@@ -1473,14 +1711,14 @@ mod tests {
             .collect();
 
         let content = if tool_calls.is_empty() {
-            choice.message.content.or(choice.message.reasoning_content)
+            message_content.or(reasoning_fallback)
         } else {
-            choice.message.content
+            message_content
         };
 
         assert!(
             content.is_none(),
-            "reasoning_content should NOT leak into tool-call responses, got: {:?}",
+            "reasoning fallbacks should NOT leak into tool-call responses, got: {:?}",
             content
         );
         assert_eq!(tool_calls.len(), 1);
@@ -1496,7 +1734,8 @@ mod tests {
                 "message": {
                     "role": "assistant",
                     "content": null,
-                    "reasoning_content": "The answer is 42."
+                    "reasoning_content": "The answer is 42.",
+                    "reasoning": "Backup reasoning text"
                 },
                 "finish_reason": "stop"
             }],
@@ -1505,9 +1744,15 @@ mod tests {
         .unwrap();
 
         let choice = response.choices.into_iter().next().unwrap();
-        let tool_calls: Vec<ToolCall> = choice
-            .message
-            .tool_calls
+        let ChatCompletionResponseMessage {
+            content: message_content,
+            reasoning_content,
+            reasoning,
+            tool_calls: message_tool_calls,
+            ..
+        } = choice.message;
+        let reasoning_fallback = reasoning_content.or(reasoning);
+        let tool_calls: Vec<ToolCall> = message_tool_calls
             .unwrap_or_default()
             .into_iter()
             .map(|tc| {
@@ -1523,9 +1768,9 @@ mod tests {
             .collect();
 
         let content = if tool_calls.is_empty() {
-            choice.message.content.or(choice.message.reasoning_content)
+            message_content.or(reasoning_fallback)
         } else {
-            choice.message.content
+            message_content
         };
 
         assert_eq!(
@@ -1537,7 +1782,7 @@ mod tests {
     }
 
     /// The vLLM/SGLang API returns `reasoning` (not `reasoning_content`).
-    /// Verify that the serde alias deserializes it correctly.
+    /// Verify that this dedicated field is consumed as fallback content.
     #[test]
     fn test_reasoning_field_alias_accepted() {
         let response: ChatCompletionResponse = serde_json::from_value(serde_json::json!({
@@ -1556,12 +1801,18 @@ mod tests {
         .unwrap();
 
         let choice = response.choices.into_iter().next().unwrap();
-        let content = choice.message.content.or(choice.message.reasoning_content);
+        let ChatCompletionResponseMessage {
+            content,
+            reasoning_content,
+            reasoning,
+            ..
+        } = choice.message;
+        let content = content.or(reasoning_content.or(reasoning));
 
         assert_eq!(
             content,
             Some("The answer is 42.".to_string()),
-            "reasoning field (vLLM alias) should deserialize into reasoning_content"
+            "reasoning should be used as fallback content"
         );
     }
 
@@ -1593,9 +1844,15 @@ mod tests {
         .unwrap();
 
         let choice = response.choices.into_iter().next().unwrap();
-        let tool_calls: Vec<ToolCall> = choice
-            .message
-            .tool_calls
+        let ChatCompletionResponseMessage {
+            content: message_content,
+            reasoning_content,
+            reasoning,
+            tool_calls: message_tool_calls,
+            ..
+        } = choice.message;
+        let reasoning_fallback = reasoning_content.or(reasoning);
+        let tool_calls: Vec<ToolCall> = message_tool_calls
             .unwrap_or_default()
             .into_iter()
             .map(|tc| {
@@ -1611,9 +1868,9 @@ mod tests {
             .collect();
 
         let content = if tool_calls.is_empty() {
-            choice.message.content.or(choice.message.reasoning_content)
+            message_content.or(reasoning_fallback)
         } else {
-            choice.message.content
+            message_content
         };
 
         assert!(
@@ -1621,6 +1878,66 @@ mod tests {
             "reasoning (alias) should NOT leak into tool-call responses"
         );
         assert_eq!(tool_calls.len(), 1);
+    }
+
+    /// Regression: payloads that include BOTH reasoning fields must parse
+    /// successfully and honor fallback precedence:
+    /// content -> reasoning_content -> reasoning.
+    #[test]
+    fn test_both_reasoning_fields_parse_with_defined_precedence() {
+        // Case 1: content is present, so it wins over both reasoning fields.
+        let response_with_content: ChatCompletionResponse =
+            serde_json::from_value(serde_json::json!({
+                "id": "chatcmpl-test-content",
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "Final answer in content.",
+                        "reasoning_content": "Reasoning content fallback",
+                        "reasoning": "Reasoning alias fallback"
+                    },
+                    "finish_reason": "stop"
+                }]
+            }))
+            .expect("payload with both reasoning fields should deserialize");
+        let choice = response_with_content.choices.into_iter().next().unwrap();
+        let ChatCompletionResponseMessage {
+            content,
+            reasoning_content,
+            reasoning,
+            ..
+        } = choice.message;
+        let selected = content
+            .or(reasoning_content.or(reasoning))
+            .expect("content should be selected");
+        assert_eq!(selected, "Final answer in content.");
+
+        // Case 2: content is null; reasoning_content should win over reasoning.
+        let response_without_content: ChatCompletionResponse =
+            serde_json::from_value(serde_json::json!({
+                "id": "chatcmpl-test-reasoning",
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "reasoning_content": "Preferred reasoning_content",
+                        "reasoning": "Secondary reasoning"
+                    },
+                    "finish_reason": "stop"
+                }]
+            }))
+            .expect("payload with both reasoning fields should deserialize");
+        let choice = response_without_content.choices.into_iter().next().unwrap();
+        let ChatCompletionResponseMessage {
+            content,
+            reasoning_content,
+            reasoning,
+            ..
+        } = choice.message;
+        let selected = content
+            .or(reasoning_content.or(reasoning))
+            .expect("reasoning fallback should be selected");
+        assert_eq!(selected, "Preferred reasoning_content");
     }
 
     #[tokio::test]
@@ -1654,6 +1971,34 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_bearer_token_session_beats_env_var() {
+        struct EnvLockGuard {
+            _guard: std::sync::MutexGuard<'static, ()>,
+        }
+        impl EnvLockGuard {
+            fn new() -> Self {
+                Self {
+                    _guard: crate::config::helpers::lock_env(),
+                }
+            }
+        }
+        struct EnvVarGuard {
+            key: &'static str,
+            original: Option<std::ffi::OsString>,
+        }
+        impl Drop for EnvVarGuard {
+            fn drop(&mut self) {
+                #[allow(unused_unsafe)]
+                // SAFETY: serialized via ENV_MUTEX.
+                unsafe {
+                    match &self.original {
+                        Some(value) => std::env::set_var(self.key, value),
+                        None => std::env::remove_var(self.key),
+                    }
+                }
+            }
+        }
+
+        let _guard = EnvLockGuard::new();
         // Session token takes priority over NEARAI_API_KEY env var.
         // This prevents unexpected auth mode switches mid-run.
         let mut cfg = test_nearai_config("http://localhost:8318");
@@ -1664,10 +2009,16 @@ mod tests {
             .await;
 
         // Set env var that should NOT be used when session token exists
+        let original = std::env::var_os("NEARAI_API_KEY");
         #[allow(unused_unsafe)]
+        // SAFETY: serialized via ENV_MUTEX.
         unsafe {
             std::env::set_var("NEARAI_API_KEY", "env-api-key-should-not-win");
         }
+        let _env_guard = EnvVarGuard {
+            key: "NEARAI_API_KEY",
+            original,
+        };
 
         let provider = NearAiChatProvider::new(cfg, session).expect("provider");
         let token = provider
@@ -1678,15 +2029,38 @@ mod tests {
             token, "oauth-token",
             "session token must take priority over env var"
         );
-
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::remove_var("NEARAI_API_KEY");
-        }
     }
 
     #[tokio::test]
     async fn test_resolve_bearer_token_config_beats_session_and_env() {
+        struct EnvLockGuard {
+            _guard: std::sync::MutexGuard<'static, ()>,
+        }
+        impl EnvLockGuard {
+            fn new() -> Self {
+                Self {
+                    _guard: crate::config::helpers::lock_env(),
+                }
+            }
+        }
+        struct EnvVarGuard {
+            key: &'static str,
+            original: Option<std::ffi::OsString>,
+        }
+        impl Drop for EnvVarGuard {
+            fn drop(&mut self) {
+                #[allow(unused_unsafe)]
+                // SAFETY: serialized via ENV_MUTEX.
+                unsafe {
+                    match &self.original {
+                        Some(value) => std::env::set_var(self.key, value),
+                        None => std::env::remove_var(self.key),
+                    }
+                }
+            }
+        }
+
+        let _guard = EnvLockGuard::new();
         // Config API key should win even when session token AND env var are set.
         let cfg = test_nearai_config("http://localhost:8318");
         let session = test_session();
@@ -1694,10 +2068,16 @@ mod tests {
             .set_token(secrecy::SecretString::from("session-tok".to_string()))
             .await;
 
+        let original = std::env::var_os("NEARAI_API_KEY");
         #[allow(unused_unsafe)]
+        // SAFETY: serialized via ENV_MUTEX.
         unsafe {
             std::env::set_var("NEARAI_API_KEY", "env-key");
         }
+        let _env_guard = EnvVarGuard {
+            key: "NEARAI_API_KEY",
+            original,
+        };
 
         let provider = NearAiChatProvider::new(cfg, session).expect("provider");
         let token = provider
@@ -1708,11 +2088,47 @@ mod tests {
             token, "test-key",
             "config api_key must win over session token and env var"
         );
+    }
 
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::remove_var("NEARAI_API_KEY");
-        }
+    #[test]
+    fn test_build_chat_completion_request_normalizes_top_level_oneof() {
+        use crate::llm::provider::ToolDefinition;
+
+        let request = build_chat_completion_request(
+            "test-model".to_string(),
+            vec![ChatMessage::user("Use the github tool").into()],
+            vec![ToolDefinition {
+                name: "github".to_string(),
+                description: "Search GitHub".to_string(),
+                parameters: serde_json::json!({
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "repo": { "type": "string" }
+                            }
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "owner": { "type": "string" }
+                            }
+                        }
+                    ]
+                }),
+            }],
+            Some(0.2),
+            Some(16),
+            None,
+            Some("auto".to_string()),
+        );
+
+        let tools = request.tools.expect("tools present");
+        assert_eq!(tools.len(), 1);
+        let parameters = tools[0].function.parameters.as_ref().expect("parameters");
+        assert_eq!(parameters["type"], "object");
+        assert!(parameters.get("oneOf").is_none());
+        assert!(parameters.get("properties").is_some());
     }
 
     // -- ModelInfo serde alias tests ------------------------------------------

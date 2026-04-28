@@ -1,8 +1,8 @@
 # IronClaw Profile: local
 #
-# Stripped-down configuration for solo developers working locally.
-# Disables server-oriented features (gateway, heartbeat, routines, sandbox)
-# and enables the rich TUI for an interactive terminal experience.
+# Configuration for solo developers working locally.
+# Disables server-oriented gateway and Docker sandbox features while keeping
+# personal-assistant background tasks enabled.
 #
 # Usage: set IRONCLAW_PROFILE=local in your environment or .env file.
 #
@@ -19,10 +19,10 @@ cli_mode = "tui"
 enabled = false
 
 [heartbeat]
-enabled = false
+enabled = true
 
 [routines]
-enabled = false
+enabled = true
 
 [hygiene]
-enabled = false
+enabled = true
