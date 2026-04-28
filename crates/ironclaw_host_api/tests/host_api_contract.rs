@@ -576,6 +576,73 @@ fn privileged_runtime_and_trust_classes_cannot_be_self_asserted_from_json() {
 }
 
 #[test]
+fn requested_trust_class_round_trips_all_variants() {
+    // Requested trust is intentionally fully deserializable — it is *declared*
+    // intent, not effective authority. Privileged-sounding variants only
+    // become real after policy evaluation in ironclaw_trust.
+    for (raw, expected) in [
+        ("untrusted", RequestedTrustClass::Untrusted),
+        ("third_party", RequestedTrustClass::ThirdParty),
+        (
+            "first_party_requested",
+            RequestedTrustClass::FirstPartyRequested,
+        ),
+        ("system_requested", RequestedTrustClass::SystemRequested),
+    ] {
+        let parsed: RequestedTrustClass = serde_json::from_value(json!(raw)).unwrap();
+        assert_eq!(parsed, expected);
+        assert_eq!(serde_json::to_value(parsed).unwrap(), json!(raw));
+    }
+}
+
+#[test]
+fn manifest_json_with_system_field_parses_only_into_requested_type() {
+    // A manifest fragment cannot be coerced into an effective TrustClass:
+    // the wire form `"system"` is rejected by TrustClass deserialization but
+    // accepted as RequestedTrustClass::SystemRequested when the manifest
+    // schema explicitly uses the requested form. Manifests that try to use
+    // `"system"` for the *effective* slot get a compile/parse error before
+    // any policy code runs.
+    assert!(serde_json::from_value::<TrustClass>(json!("system")).is_err());
+    assert_eq!(
+        serde_json::from_value::<RequestedTrustClass>(json!("system_requested")).unwrap(),
+        RequestedTrustClass::SystemRequested
+    );
+}
+
+#[test]
+fn package_identity_serializes_with_source_tag() {
+    let identity = PackageIdentity::new(
+        PackageId::new("github").unwrap(),
+        PackageSource::LocalManifest {
+            path: "/extensions/github/manifest.toml".to_string(),
+        },
+        Some("abcd1234".to_string()),
+        None,
+    );
+    let value = serde_json::to_value(&identity).unwrap();
+    assert_eq!(value["package_id"], json!("github"));
+    assert_eq!(value["source"]["kind"], json!("local_manifest"));
+    assert_eq!(
+        value["source"]["path"],
+        json!("/extensions/github/manifest.toml")
+    );
+    assert_eq!(value["digest"], json!("abcd1234"));
+    assert!(value["signer"].is_null());
+
+    let round_trip: PackageIdentity = serde_json::from_value(value).unwrap();
+    assert_eq!(round_trip, identity);
+}
+
+#[test]
+fn package_source_admin_and_bundled_have_no_extra_fields() {
+    let bundled: PackageSource = serde_json::from_value(json!({"kind": "bundled"})).unwrap();
+    assert_eq!(bundled, PackageSource::Bundled);
+    let admin: PackageSource = serde_json::from_value(json!({"kind": "admin"})).unwrap();
+    assert_eq!(admin, PackageSource::Admin);
+}
+
+#[test]
 fn system_principals_distinguish_host_runtime_from_named_services() {
     assert_eq!(
         serde_json::to_value(Principal::HostRuntime).unwrap(),

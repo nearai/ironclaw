@@ -190,6 +190,7 @@ string_id!(ProjectId, "project", validate_scope_id);
 string_id!(MissionId, "mission", validate_scope_id);
 string_id!(ThreadId, "thread", validate_scope_id);
 string_id!(ExtensionId, "extension", validate_name_segment);
+string_id!(PackageId, "package", validate_name_segment);
 string_id!(SecretHandle, "secret", validate_name_segment);
 string_id!(SystemServiceId, "system_service", validate_name_segment);
 

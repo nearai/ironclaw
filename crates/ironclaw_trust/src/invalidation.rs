@@ -1,0 +1,132 @@
+//! Trust-change invalidation contract.
+//!
+//! When the host policy revokes or downgrades a package's effective trust,
+//! affected grants and leases must be invalidated *before* any subsequent
+//! dispatch can produce a side effect under the stale ceiling. PR3's
+//! authorization layer registers a [`TrustChangeListener`] on the
+//! [`InvalidationBus`] and revokes matching grants synchronously when
+//! [`InvalidationBus::publish`] runs.
+//!
+//! The bus is fail-closed by design: listeners are run synchronously on the
+//! publishing thread. If any listener panics, the panic propagates — the
+//! caller of `publish` must observe a failure rather than continue believing
+//! invalidation succeeded.
+
+use std::sync::{Arc, RwLock};
+
+use ironclaw_host_api::{CapabilityId, PackageIdentity, Timestamp};
+
+use crate::decision::EffectiveTrustClass;
+
+/// Listener notified when effective trust for a package changes.
+pub trait TrustChangeListener: Send + Sync {
+    fn on_trust_changed(&self, change: &TrustChange);
+}
+
+/// One trust-change event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustChange {
+    pub identity: PackageIdentity,
+    pub previous: EffectiveTrustClass,
+    pub current: EffectiveTrustClass,
+    /// Authority that was active before the change, if known. Listeners use
+    /// this to scope the grant set they invalidate.
+    pub previous_authority: Vec<CapabilityId>,
+    pub effective_at: Timestamp,
+}
+
+/// Synchronous fan-out of [`TrustChange`] events.
+///
+/// Listeners are run in registration order on the publishing thread. The
+/// bus does not buffer or deduplicate events — semantics are intentionally
+/// simple so PR3's grant store can rely on strict happens-before ordering.
+pub struct InvalidationBus {
+    listeners: RwLock<Vec<Arc<dyn TrustChangeListener>>>,
+}
+
+impl InvalidationBus {
+    pub fn new() -> Self {
+        Self {
+            listeners: RwLock::new(Vec::new()),
+        }
+    }
+
+    pub fn register(&self, listener: Arc<dyn TrustChangeListener>) {
+        // Recover from poisoning rather than panic: the listeners Vec itself
+        // never enters an inconsistent state (we only push), so the previous
+        // panic that poisoned the lock has already failed closed for its own
+        // publish — subsequent registrations are safe.
+        let mut guard = self
+            .listeners
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.push(listener);
+    }
+
+    /// Fan out the change synchronously. All listeners run before this
+    /// returns; downstream code observing the post-publish state can rely on
+    /// every listener having processed the change. A panicking listener
+    /// propagates on the publishing thread — fail-closed.
+    pub fn publish(&self, change: TrustChange) {
+        let listeners = self
+            .listeners
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for listener in listeners.iter() {
+            listener.on_trust_changed(&change);
+        }
+    }
+
+    pub fn listener_count(&self) -> usize {
+        self.listeners
+            .read()
+            .map(|g| g.len())
+            .unwrap_or_else(|p| p.into_inner().len())
+    }
+}
+
+impl Default for InvalidationBus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Returns true when two package identities differ in any field that should
+/// invalidate retained grants. Used by PR3's grant store to decide whether
+/// an existing grant survives a re-evaluation.
+pub fn identity_changed(prev: &PackageIdentity, curr: &PackageIdentity) -> bool {
+    prev.package_id != curr.package_id
+        || prev.source != curr.source
+        || prev.digest != curr.digest
+        || prev.signer != curr.signer
+}
+
+/// Returns true when the requested-authority list grew or changed. Pure
+/// equality check — any difference (added, removed, reordered into a new
+/// set) is a change and forces grant reissue.
+pub fn authority_changed(prev: &[CapabilityId], curr: &[CapabilityId]) -> bool {
+    if prev.len() != curr.len() {
+        return true;
+    }
+    let mut prev_sorted: Vec<&CapabilityId> = prev.iter().collect();
+    let mut curr_sorted: Vec<&CapabilityId> = curr.iter().collect();
+    prev_sorted.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    curr_sorted.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    prev_sorted != curr_sorted
+}
+
+/// Returns true when an existing grant may be retained across a
+/// re-evaluation: identity stable, effective trust unchanged, and requested
+/// authority unchanged. Any drift forces grant reissue per AC #7.
+pub fn grant_retention_eligible(
+    prev_identity: &PackageIdentity,
+    curr_identity: &PackageIdentity,
+    prev_trust: EffectiveTrustClass,
+    curr_trust: EffectiveTrustClass,
+    prev_authority: &[CapabilityId],
+    curr_authority: &[CapabilityId],
+) -> bool {
+    !identity_changed(prev_identity, curr_identity)
+        && prev_trust == curr_trust
+        && !authority_changed(prev_authority, curr_authority)
+}
