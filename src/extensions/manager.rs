@@ -5562,12 +5562,9 @@ impl ExtensionManager {
             let msg = e.to_string();
             if crate::tools::mcp::is_auth_error_message(&msg) {
                 if server.has_custom_auth_header() {
-                    let status = crate::tools::mcp::http_auth_status_code(&msg)
-                        .map(|code| format!(" HTTP status {code}."))
-                        .unwrap_or_default();
                     ExtensionError::ActivationFailed(format!(
-                        "MCP server '{}' rejected its configured Authorization header.{} Update the configured credential and try again.",
-                        name, status
+                        "MCP server '{}' rejected its configured Authorization header. Update the configured credential and try again.",
+                        name
                     ))
                 } else {
                     ExtensionError::AuthRequired

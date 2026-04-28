@@ -220,7 +220,7 @@ async fn retry_startup_mcp_auth_activation(
     for attempt in 1..=MCP_STARTUP_AUTH_RETRY_ATTEMPTS {
         tokio::time::sleep(MCP_STARTUP_AUTH_RETRY_DELAY).await;
 
-        let server = match manager.get_mcp_server(&activation_name, &user_id).await {
+        match manager.get_mcp_server(&activation_name, &user_id).await {
             Ok(server) if !server.enabled => {
                 tracing::debug!(
                     server = %raw_server_name,
@@ -254,6 +254,9 @@ async fn retry_startup_mcp_auth_activation(
             }
         };
 
+        // The initial startup failure already proved this was a custom-header
+        // HTTP 401/403. Keep the retry loop bounded instead of re-parsing the
+        // user-facing activation error after each failed attempt.
         match manager.activate_mcp(&activation_name, &user_id).await {
             Ok(result) => {
                 tracing::info!(
@@ -265,21 +268,10 @@ async fn retry_startup_mcp_auth_activation(
                 return;
             }
             Err(e) => {
-                let err_str = e.to_string();
-                if !should_retry_startup_mcp_auth_error(&server, &err_str) {
-                    tracing::debug!(
-                        server = %raw_server_name,
-                        attempt,
-                        error = %err_str,
-                        "MCP startup auth retry stopped because activation error is no longer retriable"
-                    );
-                    return;
-                }
-
                 tracing::debug!(
                     server = %raw_server_name,
                     attempt,
-                    error = %err_str,
+                    error = %e,
                     "MCP startup auth retry attempt did not activate server"
                 );
             }

@@ -624,12 +624,9 @@ impl McpClient {
                         .as_ref()
                         .is_some_and(|config| config.has_custom_auth_header())
                     {
-                        let status = super::http_auth_status_code(msg)
-                            .map(|code| format!(" HTTP status {code}."))
-                            .unwrap_or_default();
                         format!(
-                            "MCP server '{}' rejected its configured Authorization header.{} Update the configured credential and try again.",
-                            self.server_name, status
+                            "MCP server '{}' rejected its configured Authorization header. Update the configured credential and try again.",
+                            self.server_name
                         )
                     } else {
                         format!(
