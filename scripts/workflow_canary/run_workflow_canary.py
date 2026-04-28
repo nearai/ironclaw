@@ -126,6 +126,18 @@ SCENARIOS: dict[str, tuple[str, str, str]] = {
         "run",
         "Manual routine trigger → ack returns to Telegram",
     ),
+    "first_immediate_run": (
+        "scripts.workflow_canary.scenarios.first_immediate_run",
+        "run",
+        "First check fires within 10s (fire_immediately=True)",
+    ),
+    # log_assertions intentionally registered LAST so it scans the
+    # gateway log surface produced by every preceding probe.
+    "log_assertions": (
+        "scripts.workflow_canary.scenarios.log_assertions",
+        "run",
+        "Gateway log scan — no chat_id 'default' / naive timestamp / etc.",
+    ),
 }
 
 
