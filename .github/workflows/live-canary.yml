@@ -370,7 +370,27 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
+      # wasm32-wasip2 + cargo-component + the channels build are all
+      # required: the lane's telegram_channel_install /
+      # telegram_round_trip / routine_visibility_from_telegram /
+      # manual_trigger_from_telegram scenarios call
+      # `/api/extensions/install` for the bundled telegram WASM
+      # channel, which only succeeds when channels-src/telegram has a
+      # built telegram.wasm artifact. Other live-canary lanes that
+      # exercise WASM extensions follow the same pattern.
+      # `--channels` skips the WASM tools build (~5 tools that
+      # workflow-canary doesn't exercise) to keep the lane under
+      # ~6 min on a fresh runner.
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: live-canary-workflow-canary
+      - name: Install cargo-component
+        run: cargo install cargo-component --locked || true
+      - name: Build WASM channels
+        run: ./scripts/build-wasm-extensions.sh --channels
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
