@@ -95,6 +95,64 @@ def parse_junit(path: Path, report: LaneReport) -> None:
             report.junit_failures.append((name, msg[:240]))
 
 
+def parse_results_json(path: Path, report: LaneReport) -> None:
+    """Parse a workflow-canary-shaped ``results.json``.
+
+    Schema (one entry per probe):
+
+        {"results": [
+            {"provider", "mode", "success": bool, "latency_ms": int, "details": {...}},
+            ...
+        ]}
+
+    ``passed`` = count(success); ``failed`` = count(!success); each failure
+    becomes a (name, message) entry on ``junit_failures`` so the Slack
+    output renders the same way an auth-canary failure would. Skipped
+    counts stay at 0 — workflow-canary scenarios always run when the
+    lane is enabled.
+    """
+    if not path.exists() or path.stat().st_size == 0:
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    results = data.get("results") or []
+    if not isinstance(results, list):
+        return
+    for entry in results:
+        if not isinstance(entry, dict):
+            continue
+        report.tests += 1
+        if entry.get("success"):
+            report.passed += 1
+        else:
+            report.failed += 1
+            name = (
+                f"{entry.get('provider', '?')}/{entry.get('mode', '?')}"
+            )
+            msg = ""
+            details = entry.get("details") or {}
+            if isinstance(details, dict):
+                msg = str(details.get("error") or "")
+                if not msg:
+                    # No structured error — surface a short status pair so
+                    # the Slack reason isn't blank for soft failures
+                    # (e.g. run_terminal but assertion didn't match).
+                    fragments: list[str] = []
+                    for k, v in details.items():
+                        if k in ("routine_id", "run_status", "run_count"):
+                            continue
+                        fragments.append(f"{k}={v}")
+                        if len(fragments) >= 3:
+                            break
+                    msg = ", ".join(fragments)
+            report.junit_failures.append((name, msg[:240]))
+        latency = entry.get("latency_ms")
+        if isinstance(latency, (int, float)):
+            report.duration_s += latency / 1000.0
+
+
 def collect_lane(lane_dir: Path) -> LaneReport | None:
     parts = lane_dir.parts
     if len(parts) < 3:
@@ -102,7 +160,12 @@ def collect_lane(lane_dir: Path) -> LaneReport | None:
     lane = parts[-3]
     provider = parts[-2]
     r = LaneReport(lane=lane, provider=provider)
+    # Auth-canary lanes write JUnit XML; workflow-canary writes its own
+    # results.json. Read whichever exists — both populate the same
+    # LaneReport fields so downstream rendering / Haiku enrichment is
+    # source-agnostic.
     parse_junit(lane_dir / "auth-canary-junit.xml", r)
+    parse_results_json(lane_dir / "results.json", r)
     r.summary_md = read_tail(lane_dir / "summary.md", 4_000)
     r.log_tail = read_tail(lane_dir / "test-output.log", MAX_LOG_BYTES)
     if r.tests == 0 and not r.log_tail:
