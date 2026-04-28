@@ -176,6 +176,39 @@ TOOL_CALL_PATTERNS = [
             "schedule": "0 */5 * * *",
         },
     ),
+    # Workflow-canary Sheet-write side-effect probe. When a routine's
+    # Lightweight prompt carries [CANARY-WORKFLOW-SHEET-APPEND], emit
+    # an http POST to the mock Google Sheets API's values:append
+    # endpoint. The IRONCLAW_TEST_HTTP_REMAP set in
+    # run_workflow_canary.py routes sheets.googleapis.com to the local
+    # sheets_mock subprocess, which records the captured row for the
+    # scenario's assertion.
+    #
+    # Spreadsheet ID is hardcoded; the scenario pre-seeds the sheet
+    # with that ID + headers via /__mock/seed_spreadsheet.
+    (
+        re.compile(r"\[CANARY-WORKFLOW-SHEET-APPEND\]", re.IGNORECASE),
+        "http",
+        lambda _: {
+            "method": "POST",
+            "url": (
+                "https://sheets.googleapis.com/v4/spreadsheets/"
+                "canary-bug-logger/values/Sheet1:append"
+                "?valueInputOption=USER_ENTERED"
+            ),
+            "body": {
+                "range": "Sheet1",
+                "majorDimension": "ROWS",
+                "values": [
+                    [
+                        "2026-04-28T00:00:00Z",
+                        "login button is unresponsive on mobile",
+                        "telegram",
+                    ]
+                ],
+            },
+        },
+    ),
     # Default workflow-canary scenarios tag their routine prompt with
     # [CANARY-WORKFLOW-<key>] so this matcher emits a deterministic
     # `http` tool call that reaches mock_telegram via

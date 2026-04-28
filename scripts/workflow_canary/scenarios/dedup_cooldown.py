@@ -45,6 +45,7 @@ async def run(
     *,
     stack: Any,
     mock_telegram_url: str,
+    mock_sheets_url: str | None = None,
     output_dir: Path,
     log_dir: Path,
 ) -> list[ProbeResult]:

@@ -153,14 +153,27 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _spawn_mock_telegram(
-    python: Path, log_dir: Path
+def _spawn_mock(
+    python: Path,
+    *,
+    script_name: str,
+    port_line_pattern: str,
+    log_filename: str,
+    log_dir: Path,
 ) -> tuple[subprocess.Popen[str], str]:
-    """Start the mock Telegram Bot API server and return (process, url)."""
+    """Start a workflow-canary mock subprocess (telegram_mock.py /
+    sheets_mock.py / calendar_mock.py / etc.) and return (process, url).
+
+    The mock prints ``<MARKER>=<port>`` on stdout (e.g.
+    ``MOCK_TELEGRAM_PORT=54321``); ``port_line_pattern`` is the regex
+    used to extract that port. After discovery, a daemon thread drains
+    the rest of stdout to a log file so the pipe never fills (same fix
+    as ``scripts/live_canary/common.py f59981d3``).
+    """
     proc = subprocess.Popen(
         [
             str(python),
-            str(Path(__file__).parent / "telegram_mock.py"),
+            str(Path(__file__).parent / script_name),
             "--port",
             "0",
         ],
@@ -170,14 +183,12 @@ def _spawn_mock_telegram(
         bufsize=1,
     )
     match = wait_for_port_line(
-        proc, re.compile(r"MOCK_TELEGRAM_PORT=(\d+)"), timeout=15.0
+        proc, re.compile(port_line_pattern), timeout=15.0
     )
     url = f"http://127.0.0.1:{match.group(1)}"
 
-    # Drain remaining stdout to a log file so the pipe doesn't fill —
-    # same lesson as scripts/live_canary/common.py f59981d3.
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "telegram_mock.log"
+    log_path = log_dir / log_filename
     import threading
 
     def _drain() -> None:
@@ -195,6 +206,30 @@ def _spawn_mock_telegram(
     return proc, url
 
 
+def _spawn_mock_telegram(
+    python: Path, log_dir: Path
+) -> tuple[subprocess.Popen[str], str]:
+    return _spawn_mock(
+        python,
+        script_name="telegram_mock.py",
+        port_line_pattern=r"MOCK_TELEGRAM_PORT=(\d+)",
+        log_filename="telegram_mock.log",
+        log_dir=log_dir,
+    )
+
+
+def _spawn_mock_sheets(
+    python: Path, log_dir: Path
+) -> tuple[subprocess.Popen[str], str]:
+    return _spawn_mock(
+        python,
+        script_name="sheets_mock.py",
+        port_line_pattern=r"MOCK_SHEETS_PORT=(\d+)",
+        log_filename="sheets_mock.log",
+        log_dir=log_dir,
+    )
+
+
 async def _run_scenarios(
     args: argparse.Namespace, log_dir: Path, results: list[ProbeResult]
 ) -> None:
@@ -202,30 +237,36 @@ async def _run_scenarios(
 
     python = venv_python(args.venv)
     mock_telegram_proc, mock_telegram_url = _spawn_mock_telegram(python, log_dir)
+    mock_sheets_proc, mock_sheets_url = _spawn_mock_sheets(python, log_dir)
     print(
         f"[workflow-canary] mock telegram listening at {mock_telegram_url}",
         flush=True,
     )
+    print(
+        f"[workflow-canary] mock sheets   listening at {mock_sheets_url}",
+        flush=True,
+    )
+
+    mock_procs = [mock_telegram_proc, mock_sheets_proc]
 
     try:
+        # Comma-separate IRONCLAW_TEST_HTTP_REMAP entries so IronClaw's
+        # HostRemapHttpInterceptor builds a multi-host map. Order
+        # doesn't matter for the parser — `host=base_url` pairs split on
+        # commas. See src/http_intercept.rs:88-118.
+        remap = ",".join(
+            [
+                f"api.telegram.org={mock_telegram_url}",
+                f"sheets.googleapis.com={mock_sheets_url}",
+            ]
+        )
         stack = await start_gateway_stack(
             venv_dir=args.venv,
             owner_user_id="workflow-canary-owner",
             temp_prefix="ironclaw-workflow-canary",
             gateway_token_prefix="workflow-canary",
             extra_gateway_env={
-                # Route the WASM telegram tool's outbound calls to our
-                # mock. The remap is honored by IronClaw's WASM HTTP
-                # client when the binary is built with debug_assertions.
-                "IRONCLAW_TEST_HTTP_REMAP": (
-                    f"api.telegram.org={mock_telegram_url}"
-                ),
-                # The auth-live-canary stack disables routines by default
-                # (ROUTINES_ENABLED=false in build_gateway_env). The
-                # workflow-canary scenarios fire routines as their core
-                # under-test surface, so re-enable + tighten the cron
-                # tick interval so backdated routines fire within ~2 s
-                # instead of the default 15 s.
+                "IRONCLAW_TEST_HTTP_REMAP": remap,
                 "ROUTINES_ENABLED": "true",
                 "ROUTINES_CRON_INTERVAL": "2",
                 "ROUTINES_DEFAULT_COOLDOWN": "0",
@@ -233,7 +274,8 @@ async def _run_scenarios(
             log_dir=log_dir,
         )
     except Exception:
-        stop_process(mock_telegram_proc)
+        for p in mock_procs:
+            stop_process(p)
         raise
 
     try:
@@ -245,13 +287,15 @@ async def _run_scenarios(
             scenario_results = await scenario_fn(
                 stack=stack,
                 mock_telegram_url=mock_telegram_url,
+                mock_sheets_url=mock_sheets_url,
                 output_dir=args.output_dir,
                 log_dir=log_dir,
             )
             results.extend(scenario_results)
     finally:
         stop_gateway_stack(stack)
-        stop_process(mock_telegram_proc)
+        for p in mock_procs:
+            stop_process(p)
 
 
 def _write_results(results: list[ProbeResult], output_dir: Path) -> Path:
