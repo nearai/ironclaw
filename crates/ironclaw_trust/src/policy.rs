@@ -7,11 +7,11 @@
 //! recognizes the package identity assigns the effective trust. If no source
 //! matches, the policy falls through to a non-privileged default.
 
-use chrono::Utc;
 use ironclaw_host_api::{
     CapabilityId, EffectKind, PackageIdentity, PackageSource, RequestedTrustClass, ResourceCeiling,
 };
 
+use crate::clock::{Clock, SystemClock};
 use crate::decision::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use crate::error::TrustError;
 use crate::sources::PolicySource;
@@ -46,19 +46,32 @@ pub struct SourceMatch {
 
 /// Default host-controlled policy. Composes layered sources in priority order;
 /// the first source returning `Some` wins. No source ⇒ non-privileged default.
+///
+/// The clock is injectable so policy evaluation is deterministic in tests
+/// and audit-replay harnesses; production wiring uses [`SystemClock`].
 pub struct HostTrustPolicy {
     sources: Vec<Box<dyn PolicySource>>,
+    clock: Box<dyn Clock>,
 }
 
 impl HostTrustPolicy {
+    /// Construct with a default `SystemClock`. Most production callers use
+    /// this.
     pub fn new(sources: Vec<Box<dyn PolicySource>>) -> Self {
-        Self { sources }
+        Self {
+            sources,
+            clock: Box::new(SystemClock),
+        }
     }
 
     pub fn empty() -> Self {
-        Self {
-            sources: Vec::new(),
-        }
+        Self::new(Vec::new())
+    }
+
+    /// Construct with an explicit clock. Tests inject `FixedClock` here so
+    /// `evaluated_at` is reproducible across runs.
+    pub fn with_clock(sources: Vec<Box<dyn PolicySource>>, clock: Box<dyn Clock>) -> Self {
+        Self { sources, clock }
     }
 
     pub fn add_source(&mut self, source: Box<dyn PolicySource>) {
@@ -68,6 +81,7 @@ impl HostTrustPolicy {
 
 impl TrustPolicy for HostTrustPolicy {
     fn evaluate(&self, input: &TrustPolicyInput) -> Result<TrustDecision, TrustError> {
+        let evaluated_at = self.clock.now();
         for source in &self.sources {
             if let Some(matched) = source.evaluate(input)? {
                 return Ok(TrustDecision {
@@ -77,12 +91,12 @@ impl TrustPolicy for HostTrustPolicy {
                         max_resource_ceiling: matched.max_resource_ceiling,
                     },
                     provenance: matched.provenance,
-                    evaluated_at: Utc::now(),
+                    evaluated_at,
                 });
             }
         }
 
-        Ok(default_decision(input))
+        Ok(default_decision(input, evaluated_at))
     }
 }
 
@@ -97,7 +111,10 @@ impl TrustPolicy for HostTrustPolicy {
 /// registered them yet. Honoring third-party authority (but no privileged
 /// authority) is a defensible default for these origins; PR3 may upgrade
 /// unrecognized `Bundled` to a hard error.
-fn default_decision(input: &TrustPolicyInput) -> TrustDecision {
+fn default_decision(
+    input: &TrustPolicyInput,
+    evaluated_at: ironclaw_host_api::Timestamp,
+) -> TrustDecision {
     let effective_trust = match input.identity.source {
         PackageSource::LocalManifest { .. } => EffectiveTrustClass::sandbox(),
         PackageSource::Bundled | PackageSource::Registry { .. } | PackageSource::Admin => {
@@ -109,6 +126,6 @@ fn default_decision(input: &TrustPolicyInput) -> TrustDecision {
         effective_trust,
         authority_ceiling: AuthorityCeiling::empty(),
         provenance: TrustProvenance::Default,
-        evaluated_at: Utc::now(),
+        evaluated_at,
     }
 }

@@ -20,6 +20,7 @@
 //! See `crates/ironclaw_trust/CLAUDE.md` for the guardrails and
 //! `docs/reborn/contracts/host-api.md` for the broader trust contract.
 
+pub mod clock;
 pub mod decision;
 pub mod error;
 pub mod invalidation;
@@ -30,6 +31,7 @@ pub mod sources;
 #[doc(hidden)]
 pub mod fixtures;
 
+pub use clock::{Clock, FixedClock, SystemClock};
 pub use decision::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 pub use error::TrustError;
 pub use invalidation::{

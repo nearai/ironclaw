@@ -104,22 +104,26 @@ pub fn identity_changed(prev: &PackageIdentity, curr: &PackageIdentity) -> bool 
 /// Returns true when the requested-authority set differs between two
 /// re-evaluations of the same package.
 ///
-/// The check is a set-equality (sorted-vec) compare, so it fires on **any**
-/// difference: additions, removals, or reorderings into a new set. This is
-/// deliberately stricter than a literal reading of AC #5 ("Expanded
-/// authority requires renewed approval") — over-firing on removal is safe
-/// (a smaller authority set going through reissue is at worst a redundant
-/// approval), while *under*-firing on additions would silently retain a
-/// grant whose authority surface changed. We choose the safer side.
+/// The check is set-equality with a length guard, so it fires on **any**
+/// content difference: additions, removals, or reorderings into a different
+/// set. This is deliberately stricter than a literal reading of AC #5
+/// ("Expanded authority requires renewed approval") — over-firing on
+/// removal is safe (a smaller authority set going through reissue is at
+/// worst a redundant approval), while *under*-firing on additions would
+/// silently retain a grant whose authority surface changed. We choose the
+/// safer side.
+///
+/// Implementation: a bidirectional `iter().all(contains)` runs in O(n²) on
+/// the slice contents but allocates nothing — a measurable win on WASM and
+/// no slower than `sort + compare` for the small authority lists (a
+/// handful of capability ids per package) we see in practice. The length
+/// guard is required: without it, `[a, a, b]` would falsely match `[a, b]`
+/// because every entry of the longer slice is contained in the shorter.
 pub fn authority_changed(prev: &[CapabilityId], curr: &[CapabilityId]) -> bool {
     if prev.len() != curr.len() {
         return true;
     }
-    let mut prev_sorted: Vec<&CapabilityId> = prev.iter().collect();
-    let mut curr_sorted: Vec<&CapabilityId> = curr.iter().collect();
-    prev_sorted.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    curr_sorted.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    prev_sorted != curr_sorted
+    !prev.iter().all(|p| curr.contains(p)) || !curr.iter().all(|c| prev.contains(c))
 }
 
 /// Returns true when an existing grant may be retained across a

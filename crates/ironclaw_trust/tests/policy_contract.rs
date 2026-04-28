@@ -610,3 +610,32 @@ fn trust_decision_serializes_for_audit() {
     assert_eq!(value["effective_trust"], serde_json::json!("sandbox"));
     assert_eq!(value["provenance"]["kind"], serde_json::json!("default"));
 }
+
+// ---------------------------------------------------------------------------
+// Clock determinism — `HostTrustPolicy::with_clock` makes evaluation
+// reproducible, removing nondeterminism from a security-critical path.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn evaluate_uses_injected_clock_for_evaluated_at() {
+    use chrono::TimeZone;
+    use ironclaw_trust::FixedClock;
+
+    let frozen = chrono::Utc.with_ymd_and_hms(2026, 4, 28, 12, 0, 0).unwrap();
+    let policy = HostTrustPolicy::with_clock(
+        vec![Box::new(BundledRegistry::new())],
+        Box::new(FixedClock::new(frozen)),
+    );
+
+    let identity = bundled_identity("ironclaw_core", None);
+    let first = policy
+        .evaluate(&input(identity.clone(), RequestedTrustClass::ThirdParty))
+        .unwrap();
+    let second = policy
+        .evaluate(&input(identity, RequestedTrustClass::ThirdParty))
+        .unwrap();
+
+    assert_eq!(first.evaluated_at, frozen);
+    assert_eq!(second.evaluated_at, frozen);
+    assert_eq!(first.evaluated_at, second.evaluated_at);
+}
