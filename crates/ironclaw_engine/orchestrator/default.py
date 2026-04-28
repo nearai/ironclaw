@@ -243,6 +243,43 @@ def format_docs(docs):
     return "\n".join(parts)
 
 
+def ensure_working_messages(state, context):
+    """Initialize the mutable orchestrator transcript."""
+    existing = state.get("working_messages")
+    if isinstance(existing, list):
+        return existing
+    if isinstance(context, list):
+        state["working_messages"] = list(context)
+    else:
+        state["working_messages"] = []
+    return state["working_messages"]
+
+
+def append_message(messages, role, content, action_name=None, action_call_id=None, action_calls=None):
+    """Append a normalized message to the working transcript."""
+    msg = {"role": role, "content": content}
+    if action_name is not None:
+        msg["action_name"] = action_name
+    if action_call_id is not None:
+        msg["action_call_id"] = action_call_id
+    if action_calls is not None:
+        msg["action_calls"] = action_calls
+    messages.append(msg)
+
+
+def append_system_append(messages, content):
+    """Append additional context to the first system message."""
+    for msg in messages:
+        if msg.get("role") == "System":
+            existing = msg.get("content", "")
+            if existing:
+                msg["content"] = existing + "\n\n" + content
+            else:
+                msg["content"] = content
+            return
+    messages.insert(0, {"role": "System", "content": content})
+
+
 # Conservative fallback heuristic matching the old Rust-side estimator.
 # These MUST be defined before `estimate_context_tokens` (and therefore
 # before the `FINAL(result)` entry-point call below). Moving them after the
@@ -672,43 +709,6 @@ def format_skills(skills):
                      "automatically inject the required credentials.\n")
 
     return "\n".join(parts)
-
-
-def ensure_working_messages(state, context):
-    """Initialize the mutable orchestrator transcript."""
-    existing = state.get("working_messages")
-    if isinstance(existing, list):
-        return existing
-    if isinstance(context, list):
-        state["working_messages"] = list(context)
-    else:
-        state["working_messages"] = []
-    return state["working_messages"]
-
-
-def append_message(messages, role, content, action_name=None, action_call_id=None, action_calls=None):
-    """Append a normalized message to the working transcript."""
-    msg = {"role": role, "content": content}
-    if action_name is not None:
-        msg["action_name"] = action_name
-    if action_call_id is not None:
-        msg["action_call_id"] = action_call_id
-    if action_calls is not None:
-        msg["action_calls"] = action_calls
-    messages.append(msg)
-
-
-def append_system_append(messages, content):
-    """Append additional context to the first system message."""
-    for msg in messages:
-        if msg.get("role") == "System":
-            existing = msg.get("content", "")
-            if existing:
-                msg["content"] = existing + "\n\n" + content
-            else:
-                msg["content"] = content
-            return
-    messages.insert(0, {"role": "System", "content": content})
 
 
 def complete_result(state, outcome, response=None, error=None, extra=None):
