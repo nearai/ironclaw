@@ -230,6 +230,54 @@ def _spawn_mock_sheets(
     )
 
 
+def _spawn_mock_calendar(
+    python: Path, log_dir: Path
+) -> tuple[subprocess.Popen[str], str]:
+    return _spawn_mock(
+        python,
+        script_name="calendar_mock.py",
+        port_line_pattern=r"MOCK_CALENDAR_PORT=(\d+)",
+        log_filename="calendar_mock.log",
+        log_dir=log_dir,
+    )
+
+
+def _spawn_mock_hn(
+    python: Path, log_dir: Path
+) -> tuple[subprocess.Popen[str], str]:
+    return _spawn_mock(
+        python,
+        script_name="hn_mock.py",
+        port_line_pattern=r"MOCK_HN_PORT=(\d+)",
+        log_filename="hn_mock.log",
+        log_dir=log_dir,
+    )
+
+
+def _spawn_mock_gmail(
+    python: Path, log_dir: Path
+) -> tuple[subprocess.Popen[str], str]:
+    return _spawn_mock(
+        python,
+        script_name="gmail_mock.py",
+        port_line_pattern=r"MOCK_GMAIL_PORT=(\d+)",
+        log_filename="gmail_mock.log",
+        log_dir=log_dir,
+    )
+
+
+def _spawn_mock_web_search(
+    python: Path, log_dir: Path
+) -> tuple[subprocess.Popen[str], str]:
+    return _spawn_mock(
+        python,
+        script_name="web_search_mock.py",
+        port_line_pattern=r"MOCK_WEB_SEARCH_PORT=(\d+)",
+        log_filename="web_search_mock.log",
+        log_dir=log_dir,
+    )
+
+
 async def _run_scenarios(
     args: argparse.Namespace, log_dir: Path, results: list[ProbeResult]
 ) -> None:
@@ -238,16 +286,45 @@ async def _run_scenarios(
     python = venv_python(args.venv)
     mock_telegram_proc, mock_telegram_url = _spawn_mock_telegram(python, log_dir)
     mock_sheets_proc, mock_sheets_url = _spawn_mock_sheets(python, log_dir)
+    mock_calendar_proc, mock_calendar_url = _spawn_mock_calendar(python, log_dir)
+    mock_hn_proc, mock_hn_url = _spawn_mock_hn(python, log_dir)
+    mock_gmail_proc, mock_gmail_url = _spawn_mock_gmail(python, log_dir)
+    mock_web_search_proc, mock_web_search_url = _spawn_mock_web_search(
+        python, log_dir
+    )
     print(
-        f"[workflow-canary] mock telegram listening at {mock_telegram_url}",
+        f"[workflow-canary] mock telegram     listening at {mock_telegram_url}",
         flush=True,
     )
     print(
-        f"[workflow-canary] mock sheets   listening at {mock_sheets_url}",
+        f"[workflow-canary] mock sheets       listening at {mock_sheets_url}",
+        flush=True,
+    )
+    print(
+        f"[workflow-canary] mock calendar     listening at {mock_calendar_url}",
+        flush=True,
+    )
+    print(
+        f"[workflow-canary] mock hn           listening at {mock_hn_url}",
+        flush=True,
+    )
+    print(
+        f"[workflow-canary] mock gmail        listening at {mock_gmail_url}",
+        flush=True,
+    )
+    print(
+        f"[workflow-canary] mock web_search   listening at {mock_web_search_url}",
         flush=True,
     )
 
-    mock_procs = [mock_telegram_proc, mock_sheets_proc]
+    mock_procs = [
+        mock_telegram_proc,
+        mock_sheets_proc,
+        mock_calendar_proc,
+        mock_hn_proc,
+        mock_gmail_proc,
+        mock_web_search_proc,
+    ]
 
     try:
         # Comma-separate IRONCLAW_TEST_HTTP_REMAP entries so IronClaw's
@@ -258,6 +335,10 @@ async def _run_scenarios(
             [
                 f"api.telegram.org={mock_telegram_url}",
                 f"sheets.googleapis.com={mock_sheets_url}",
+                f"www.googleapis.com={mock_calendar_url}",
+                f"news.ycombinator.com={mock_hn_url}",
+                f"gmail.googleapis.com={mock_gmail_url}",
+                f"api.search.brave.com={mock_web_search_url}",
             ]
         )
         stack = await start_gateway_stack(
@@ -288,6 +369,10 @@ async def _run_scenarios(
                 stack=stack,
                 mock_telegram_url=mock_telegram_url,
                 mock_sheets_url=mock_sheets_url,
+                mock_calendar_url=mock_calendar_url,
+                mock_hn_url=mock_hn_url,
+                mock_gmail_url=mock_gmail_url,
+                mock_web_search_url=mock_web_search_url,
                 output_dir=args.output_dir,
                 log_dir=log_dir,
             )

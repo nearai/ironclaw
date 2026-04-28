@@ -94,6 +94,10 @@ async def run(
     stack: Any,
     mock_telegram_url: str,
     mock_sheets_url: str | None = None,
+    mock_calendar_url: str | None = None,
+    mock_hn_url: str | None = None,
+    mock_gmail_url: str | None = None,
+    mock_web_search_url: str | None = None,
     output_dir: Path,
     log_dir: Path,
 ) -> list[ProbeResult]:
