@@ -595,6 +595,18 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             reason_ctx.model_override = Some(model);
         }
 
+        if iteration == 0 {
+            if let Some(t) = self
+                .message
+                .metadata
+                .get("temperature")
+                .and_then(|v| v.as_f64())
+                .map(|f| f as f32)
+            {
+                reason_ctx.temperature_override = Some(t);
+            }
+        }
+
         let output = match reasoning.respond_with_tools(reason_ctx).await {
             Ok(output) => output,
             Err(crate::error::LlmError::ContextLengthExceeded { used, limit }) => {

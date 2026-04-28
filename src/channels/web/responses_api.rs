@@ -647,13 +647,6 @@ pub async fn create_response_handler(
             "invalid_request_error",
         ));
     }
-    if req.temperature.is_some() {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "The 'temperature' field is not yet supported",
-            "invalid_request_error",
-        ));
-    }
     if req.max_output_tokens.is_some() {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
@@ -695,6 +688,9 @@ pub async fn create_response_handler(
         "user_id": &user.user_id,
         "source": "responses_api",
     });
+    if let Some(t) = req.temperature {
+        metadata["temperature"] = serde_json::json!(t);
+    }
     if let Some(ref ctx) = req.x_context {
         metadata["context"] = ctx.clone();
     }
