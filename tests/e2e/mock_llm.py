@@ -147,7 +147,36 @@ TOOL_CALL_PATTERNS = [
             "body": {"label": m.group("label")},
         },
     ),
-    # Workflow-canary scenarios each tag their routine prompt with
+    # Workflow-canary NL-driven routine creation: when a chat message
+    # carries the [CANARY-WORKFLOW-NL-CREATE] sentinel, emit a
+    # routine_create tool call so the canary can verify the agent's
+    # NL → tool dispatch → routine row pipeline.
+    (
+        re.compile(r"\[CANARY-WORKFLOW-NL-CREATE\]", re.IGNORECASE),
+        "routine_create",
+        lambda _: {
+            "name": "canary-nl-created",
+            "prompt": (
+                "send a Telegram acknowledgement\n\n"
+                "[CANARY-WORKFLOW-nl_create] inner-prompt"
+            ),
+            "trigger_type": "cron",
+            "schedule": "0 */1 * * *",
+            "description": "canary: NL-driven routine creation",
+        },
+    ),
+    # Workflow-canary NL-driven schedule update: when a chat message
+    # carries [CANARY-WORKFLOW-NL-UPDATE], emit a routine_update tool
+    # call retargeting the canary's pre-seeded routine.
+    (
+        re.compile(r"\[CANARY-WORKFLOW-NL-UPDATE\]", re.IGNORECASE),
+        "routine_update",
+        lambda _: {
+            "name": "canary-nl-update-target",
+            "schedule": "0 */5 * * *",
+        },
+    ),
+    # Default workflow-canary scenarios tag their routine prompt with
     # [CANARY-WORKFLOW-<key>] so this matcher emits a deterministic
     # `http` tool call that reaches mock_telegram via
     # IRONCLAW_TEST_HTTP_REMAP=api.telegram.org=<mock>. The chat_id is
@@ -155,6 +184,12 @@ TOOL_CALL_PATTERNS = [
     # The text echoes the scenario key so the scenario can disambiguate
     # which message belongs to it when the mock_telegram is shared
     # across the workflow-canary lane's probes.
+    #
+    # Important: this generic matcher must come AFTER the specific
+    # NL-CREATE / NL-UPDATE matchers above. mock_llm.py iterates
+    # TOOL_CALL_PATTERNS in order and stops at the first match —
+    # without ordering, [CANARY-WORKFLOW-nl_create] inside a routine
+    # PROMPT would emit an http tool call instead of routine_create.
     (
         re.compile(r"\[CANARY-WORKFLOW-(?P<key>[a-z_0-9]+)\]", re.IGNORECASE),
         "http",

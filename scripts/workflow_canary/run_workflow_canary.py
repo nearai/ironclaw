@@ -96,6 +96,16 @@ SCENARIOS: dict[str, tuple[str, str, str]] = {
         "run",
         "Dedup — cooldown_secs suppresses back-to-back fires",
     ),
+    "nl_routine_create": (
+        "scripts.workflow_canary.scenarios.nl_routine_create",
+        "run",
+        "NL routine create — POST /api/chat/send → routine_create tool",
+    ),
+    "nl_schedule_update": (
+        "scripts.workflow_canary.scenarios.nl_schedule_update",
+        "run",
+        "NL schedule update — POST /api/chat/send → routine_update tool",
+    ),
 }
 
 
