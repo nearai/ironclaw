@@ -79,6 +79,30 @@ async def _stop_process(proc, sig=signal.SIGINT, timeout=5):
     await _drain_pipes()
 
 
+async def _drain_stream_to_file(stream, path):
+    """Drain an asyncio subprocess stream to a file in a background task.
+
+    Without an active drainer, ``asyncio.create_subprocess_exec(stdout=PIPE,
+    stderr=PIPE)`` deadlocks under sustained log output: the kernel pipe
+    buffer fills (64 KiB on Linux, 16-64 KiB on macOS depending on tuning)
+    and the child blocks on its next stdout/stderr write. For ironclaw
+    with ``RUST_LOG=ironclaw=info`` and an SSE-driven test that pumps
+    requests, that translates into the gateway freezing mid-request and
+    SSE events never arriving — exactly the failure mode of
+    test_wasm_tool_first_chat_auth_attempt_emits_auth_url. Mirrors the
+    sync threading.Thread version in scripts/live_canary/common.py.
+    """
+    try:
+        with open(path, "ab", buffering=0) as fh:
+            while True:
+                chunk = await stream.readline()
+                if not chunk:
+                    return
+                fh.write(chunk)
+    except Exception:
+        pass
+
+
 async def _start_mock_google_api():
     from aiohttp import web
 
@@ -369,6 +393,11 @@ async def _start_auth_matrix_server(
                 f"gmail.googleapis.com={mock_api_url},"
                 f"www.googleapis.com={mock_api_url}"
             ),
+            # Allow RUST_LOG passthrough from the test runner — the auth
+            # matrix fixture historically built its env from scratch
+            # which made it impossible to crank up logging from the
+            # outside. Forwarded here so debug runs work.
+            "RUST_LOG": os.environ.get("RUST_LOG", "ironclaw=info"),
         }
         _forward_coverage_env(env)
 
@@ -380,6 +409,20 @@ async def _start_auth_matrix_server(
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
+
+        # Drain stdout/stderr to a temp log file so the kernel pipe buffer
+        # never fills. Without this, ironclaw's RUST_LOG=info output
+        # eventually blocks on stdout writes and the SSE event loop
+        # freezes mid-request. See _drain_stream_to_file's docstring.
+        # Log path lives outside home_dir so it survives tmpdir cleanup
+        # and can be inspected post-test for debugging.
+        log_path = os.environ.get(
+            "IRONCLAW_AUTH_MATRIX_LOG", "/tmp/ironclaw-auth-matrix-gateway.log"
+        )
+        drain_tasks = [
+            asyncio.create_task(_drain_stream_to_file(proc.stdout, log_path)),
+            asyncio.create_task(_drain_stream_to_file(proc.stderr, log_path)),
+        ]
 
         base_url = f"http://127.0.0.1:{gateway_port}"
         try:
@@ -398,6 +441,8 @@ async def _start_auth_matrix_server(
                 "tools_dir": tools_dir,
                 "channels_dir": channels_dir,
                 "proc": proc,
+                "drain_tasks": drain_tasks,
+                "log_path": log_path,
                 "tmpdirs": tmpdirs,
             }
         except Exception:
@@ -422,6 +467,15 @@ async def _shutdown_auth_matrix_server(server: dict, *, cleanup: bool = True) ->
         await _stop_process(proc, sig=signal.SIGINT, timeout=10)
         if proc.returncode is None:
             await _stop_process(proc, timeout=2)
+    # Cancel the stdout/stderr drainer tasks once the process is dead;
+    # they'll naturally exit on their next readline() returning empty,
+    # but cancelling guarantees no leaked tasks across test boundaries.
+    for task in server.get("drain_tasks", []):
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
     if cleanup:
         for tmpdir in server["tmpdirs"]:
             tmpdir.cleanup()
