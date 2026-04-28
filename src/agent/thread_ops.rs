@@ -328,34 +328,9 @@ fn capture_turns_from_conversation_messages_with_outcomes(
     (turns, aggregate)
 }
 
+#[cfg(test)]
 fn trace_credit_notice_message(summary: &crate::trace_contribution::CreditSummary) -> String {
-    let mut message = format!(
-        "Trace contribution credit update: {} submitted, {} expired ({} total), pending +{:.2}, final confirmed +{:.2}, delayed ledger {:+.2}. Delayed credit can change after privacy review, replay/eval, duplicate checks, and downstream utility scoring.",
-        summary.submissions_submitted,
-        summary.submissions_expired,
-        summary.submissions_total,
-        summary.pending_credit,
-        summary.final_credit,
-        summary.delayed_credit_delta
-    );
-    if summary.credit_events_total > 0 {
-        message.push_str(&format!(
-            " {} credit event(s) recorded.",
-            summary.credit_events_total
-        ));
-    }
-    if !summary.recent_explanations.is_empty() {
-        let explanations = summary
-            .recent_explanations
-            .iter()
-            .take(2)
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(" ");
-        message.push_str(" Recent factors: ");
-        message.push_str(&explanations);
-    }
-    message
+    crate::trace_contribution::trace_credit_notice_message(summary)
 }
 
 impl Agent {
@@ -1286,24 +1261,78 @@ impl Agent {
                 }
             }
 
-            let report = match crate::trace_contribution::flush_trace_contribution_queue_for_scope(
+            match crate::trace_contribution::flush_trace_contribution_queue_for_scope(
                 Some(&user_id),
                 10,
             )
             .await
             {
-                Ok(report) => report,
+                Ok(_report) => {}
                 Err(error) => {
                     tracing::debug!(%error, %thread_id, "Failed to flush autonomous trace queue");
-                    return;
                 }
-            };
+            }
 
-            if let Some(summary) = report.credit_notice {
-                let message = trace_credit_notice_message(&summary);
-                let _ = channels
-                    .send_status(&channel, StatusUpdate::Status(message), &metadata)
-                    .await;
+            let pending =
+                match crate::trace_contribution::pending_trace_credit_notice_outbox_items_for_scope(
+                    Some(&user_id),
+                ) {
+                    Ok(pending) => pending,
+                    Err(error) => {
+                        tracing::debug!(
+                            %error,
+                            %thread_id,
+                            "Failed to read autonomous trace credit notice outbox"
+                        );
+                        return;
+                    }
+                };
+            for item in pending {
+                match channels
+                    .send_status(
+                        &channel,
+                        StatusUpdate::Status(item.message.clone()),
+                        &metadata,
+                    )
+                    .await
+                {
+                    Ok(()) => {
+                        if let Err(error) =
+                            crate::trace_contribution::record_trace_credit_notice_delivery_success_for_scope(
+                                Some(&user_id),
+                                &item.fingerprint,
+                                &channel,
+                            )
+                        {
+                            tracing::debug!(
+                                %error,
+                                %thread_id,
+                                "Failed to record autonomous trace credit notice delivery"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            %error,
+                            %thread_id,
+                            "Failed to send autonomous trace credit notice"
+                        );
+                        if let Err(record_error) =
+                            crate::trace_contribution::record_trace_credit_notice_delivery_failure_for_scope(
+                                Some(&user_id),
+                                &item.fingerprint,
+                                &channel,
+                                &error.to_string(),
+                            )
+                        {
+                            tracing::debug!(
+                                %record_error,
+                                %thread_id,
+                                "Failed to record autonomous trace credit notice delivery failure"
+                            );
+                        }
+                    }
+                }
             }
         });
     }
@@ -2822,6 +2851,7 @@ mod tests {
     #[derive(Clone)]
     struct RecordingStatusChannel {
         statuses: Arc<TokioMutex<Vec<StatusUpdate>>>,
+        fail_status: bool,
     }
 
     #[async_trait::async_trait]
@@ -2847,6 +2877,12 @@ mod tests {
             status: StatusUpdate,
             _metadata: &serde_json::Value,
         ) -> Result<(), ChannelError> {
+            if self.fail_status {
+                return Err(ChannelError::SendFailed {
+                    name: "test".to_string(),
+                    reason: "forced status failure for test".to_string(),
+                });
+            }
             self.statuses.lock().await.push(status);
             Ok(())
         }
@@ -2904,6 +2940,7 @@ mod tests {
         channels
             .add(Box::new(RecordingStatusChannel {
                 statuses: Arc::clone(&statuses),
+                fail_status: false,
             }))
             .await;
 
@@ -3285,8 +3322,9 @@ mod tests {
     }
 
     #[cfg(feature = "libsql")]
-    async fn make_trace_capture_agent_with_statuses(
+    async fn make_trace_capture_agent_with_status_channel(
         llm: Arc<dyn crate::llm::LlmProvider>,
+        fail_status: bool,
     ) -> (
         Agent,
         Arc<dyn crate::db::Database>,
@@ -3299,6 +3337,7 @@ mod tests {
         channels
             .add(Box::new(RecordingStatusChannel {
                 statuses: Arc::clone(&statuses),
+                fail_status,
             }))
             .await;
         let deps = AgentDeps {
@@ -3362,6 +3401,18 @@ mod tests {
         );
 
         (agent, db, temp_dir, statuses)
+    }
+
+    #[cfg(feature = "libsql")]
+    async fn make_trace_capture_agent_with_statuses(
+        llm: Arc<dyn crate::llm::LlmProvider>,
+    ) -> (
+        Agent,
+        Arc<dyn crate::db::Database>,
+        tempfile::TempDir,
+        Arc<TokioMutex<Vec<StatusUpdate>>>,
+    ) {
+        make_trace_capture_agent_with_status_channel(llm, false).await
     }
 
     #[cfg(feature = "libsql")]
@@ -3550,6 +3601,82 @@ mod tests {
             notice_seen,
             "autonomous trace credit status was not emitted"
         );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_autonomous_trace_credit_notice_failure_stays_pending_in_outbox() {
+        let (agent, _db, _temp_dir, _statuses) =
+            make_trace_capture_agent_with_status_channel(Arc::new(StubLlm::new("done")), true)
+                .await;
+        let user_id = format!("trace-runtime-credit-failure-user-{}", Uuid::new_v4());
+        let policy = crate::trace_contribution::StandingTraceContributionPolicy {
+            enabled: true,
+            ingestion_endpoint: Some("http://127.0.0.1:9/v1/traces".to_string()),
+            auto_submit_high_value_traces: true,
+            min_submission_score: 0.0,
+            credit_notice_interval_hours: 168,
+            ..Default::default()
+        };
+        crate::trace_contribution::write_trace_policy_for_scope(Some(&user_id), &policy)
+            .expect("trace policy writes");
+        write_trace_notice_record_for_user(&user_id, 4.0, 6.0);
+
+        let session = agent.session_manager.get_or_create_session(&user_id).await;
+        let thread_id = {
+            let mut sess = session.lock().await;
+            sess.create_thread(Some("test")).id
+        };
+        let message = IncomingMessage::new("test", &user_id, "finish it");
+
+        let result = agent
+            .process_user_input(
+                &message,
+                agent.tenant_ctx(&user_id).await,
+                Arc::clone(&session),
+                thread_id,
+                "finish it",
+            )
+            .await
+            .expect("process user input");
+        assert!(matches!(result, SubmissionResult::Response { .. }));
+
+        let failure_recorded = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let outbox = crate::trace_contribution::read_trace_credit_notice_outbox_for_scope(
+                    Some(&user_id),
+                )
+                .expect("credit notice outbox reads");
+                if outbox.iter().any(|item| {
+                    item.status == crate::trace_contribution::TraceCreditNoticeOutboxStatus::Pending
+                        && item.attempt_count == 1
+                        && item.delivery_attempts.iter().any(|attempt| {
+                            !attempt.succeeded
+                                && attempt
+                                    .error_hash
+                                    .as_deref()
+                                    .is_some_and(|hash| hash.starts_with("sha256:"))
+                                && attempt.error_kind.is_some()
+                        })
+                }) {
+                    break true;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap_or(false);
+
+        assert!(
+            failure_recorded,
+            "failed autonomous credit notice delivery should remain pending in the durable outbox"
+        );
+        let serialized = serde_json::to_string(
+            &crate::trace_contribution::read_trace_credit_notice_outbox_for_scope(Some(&user_id))
+                .expect("credit notice outbox reads"),
+        )
+        .expect("outbox serializes");
+        assert!(!serialized.contains("forced status failure for test"));
     }
 
     #[cfg(feature = "libsql")]

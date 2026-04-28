@@ -42,6 +42,7 @@ pub const TRACE_CREDIT_NOTICE_MAX_SNOOZE_HOURS: u32 = 24 * 365;
 pub const TRACE_UPLOAD_CLAIM_DEFAULT_TIMEOUT_MS: u64 = 5_000;
 pub const TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const TRACE_UPLOAD_CLAIM_REFRESH_SKEW_SECONDS: i64 = 60;
+const TRACE_CREDIT_NOTICE_OUTBOX_MAX_ATTEMPTS_STORED: usize = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceContributionEnvelope {
@@ -750,6 +751,36 @@ pub struct CreditSummary {
     pub credit_events_total: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_explanations: Vec<String>,
+}
+
+pub fn trace_credit_notice_message(summary: &CreditSummary) -> String {
+    let mut message = format!(
+        "Trace contribution credit update: {} submitted, {} expired ({} total), pending +{:.2}, final confirmed +{:.2}, delayed ledger {:+.2}. Delayed credit can change after privacy review, replay/eval, duplicate checks, and downstream utility scoring.",
+        summary.submissions_submitted,
+        summary.submissions_expired,
+        summary.submissions_total,
+        summary.pending_credit,
+        summary.final_credit,
+        summary.delayed_credit_delta
+    );
+    if summary.credit_events_total > 0 {
+        message.push_str(&format!(
+            " {} credit event(s) recorded.",
+            summary.credit_events_total
+        ));
+    }
+    if !summary.recent_explanations.is_empty() {
+        let explanations = summary
+            .recent_explanations
+            .iter()
+            .take(2)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(" ");
+        message.push_str(" Recent factors: ");
+        message.push_str(&explanations);
+    }
+    message
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -3574,6 +3605,49 @@ impl TraceCreditNoticeState {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceCreditNoticeOutboxItem {
+    pub notice_id: String,
+    pub fingerprint: String,
+    pub summary: CreditSummary,
+    pub message: String,
+    pub status: TraceCreditNoticeOutboxStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_attempt_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_attempt_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snoozed_until: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub attempt_count: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivery_attempts: Vec<TraceCreditNoticeDeliveryAttempt>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceCreditNoticeOutboxStatus {
+    Pending,
+    Delivered,
+    Acknowledged,
+    Snoozed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceCreditNoticeDeliveryAttempt {
+    pub channel: String,
+    pub attempted_at: DateTime<Utc>,
+    pub succeeded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<TraceQueueTelemetryFailureKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_hash: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalTraceSubmissionStatus {
@@ -3993,6 +4067,50 @@ pub fn snooze_trace_credit_notice_for_scope_until(
     snoozed_until: DateTime<Utc>,
 ) -> anyhow::Result<Option<CreditSummary>> {
     snooze_trace_credit_notice_for_scope_until_at(scope, snoozed_until, Utc::now())
+}
+
+pub fn read_trace_credit_notice_outbox_for_scope(
+    scope: Option<&str>,
+) -> anyhow::Result<Vec<TraceCreditNoticeOutboxItem>> {
+    let _guard = lock_trace_scope_for_mutation_blocking(scope);
+    read_trace_credit_notice_outbox_for_scope_unlocked(scope)
+}
+
+pub fn pending_trace_credit_notice_outbox_items_for_scope(
+    scope: Option<&str>,
+) -> anyhow::Result<Vec<TraceCreditNoticeOutboxItem>> {
+    let _guard = lock_trace_scope_for_mutation_blocking(scope);
+    pending_trace_credit_notice_outbox_items_for_scope_at_unlocked(scope, Utc::now())
+}
+
+pub fn record_trace_credit_notice_delivery_success_for_scope(
+    scope: Option<&str>,
+    fingerprint: &str,
+    channel: &str,
+) -> anyhow::Result<Option<TraceCreditNoticeOutboxItem>> {
+    let _guard = lock_trace_scope_for_mutation_blocking(scope);
+    record_trace_credit_notice_delivery_success_for_scope_at_unlocked(
+        scope,
+        fingerprint,
+        channel,
+        Utc::now(),
+    )
+}
+
+pub fn record_trace_credit_notice_delivery_failure_for_scope(
+    scope: Option<&str>,
+    fingerprint: &str,
+    channel: &str,
+    error: &str,
+) -> anyhow::Result<Option<TraceCreditNoticeOutboxItem>> {
+    let _guard = lock_trace_scope_for_mutation_blocking(scope);
+    record_trace_credit_notice_delivery_failure_for_scope_at_unlocked(
+        scope,
+        fingerprint,
+        channel,
+        error,
+        Utc::now(),
+    )
 }
 
 fn snooze_trace_credit_notice_for_scope_until_at(
@@ -5970,6 +6088,7 @@ fn mark_trace_credit_noticed_if_due_at_unlocked(
     else {
         return Ok(None);
     };
+    upsert_trace_credit_notice_outbox_item_unlocked(scope, &summary, &fingerprint, now)?;
 
     for record in &mut records {
         if trace_record_noticeable(record) {
@@ -6009,6 +6128,7 @@ fn acknowledge_trace_credit_notice_for_scope_at_unlocked(
             };
         }
     }
+    mark_trace_credit_notice_outbox_acknowledged_unlocked(scope, &fingerprint, now)?;
     write_local_trace_records_for_scope(scope, &records)?;
     Ok(Some(summary))
 }
@@ -6037,6 +6157,7 @@ fn snooze_trace_credit_notice_for_scope_until_at_unlocked(
             };
         }
     }
+    mark_trace_credit_notice_outbox_snoozed_unlocked(scope, &fingerprint, snoozed_until, now)?;
     write_local_trace_records_for_scope(scope, &records)?;
     Ok(Some(summary))
 }
@@ -6147,6 +6268,271 @@ fn trace_credit_notice_fingerprint(records: &[LocalTraceSubmissionRecord]) -> Op
         hasher.update(b"\n");
     }
     Some(format!("sha256:{}", hex::encode(&hasher.finalize()[..16])))
+}
+
+fn upsert_trace_credit_notice_outbox_item_unlocked(
+    scope: Option<&str>,
+    summary: &CreditSummary,
+    fingerprint: &str,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    let mut outbox = read_trace_credit_notice_outbox_for_scope_unlocked(scope)?;
+    let message = trace_credit_notice_message(summary);
+    if let Some(item) = outbox
+        .iter_mut()
+        .find(|item| item.fingerprint == fingerprint)
+    {
+        item.summary = summary.clone();
+        item.message = message;
+        item.updated_at = now;
+        if item.status != TraceCreditNoticeOutboxStatus::Acknowledged {
+            item.status = TraceCreditNoticeOutboxStatus::Pending;
+            item.next_attempt_at = None;
+            item.snoozed_until = None;
+        }
+    } else {
+        outbox.push(TraceCreditNoticeOutboxItem {
+            notice_id: trace_credit_notice_outbox_id(fingerprint),
+            fingerprint: fingerprint.to_string(),
+            summary: summary.clone(),
+            message,
+            status: TraceCreditNoticeOutboxStatus::Pending,
+            created_at: now,
+            updated_at: now,
+            last_attempt_at: None,
+            delivered_at: None,
+            next_attempt_at: None,
+            snoozed_until: None,
+            attempt_count: 0,
+            delivery_attempts: Vec::new(),
+        });
+    }
+    write_trace_credit_notice_outbox_for_scope_unlocked(scope, &outbox)
+}
+
+fn mark_trace_credit_notice_outbox_acknowledged_unlocked(
+    scope: Option<&str>,
+    fingerprint: &str,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    update_trace_credit_notice_outbox_item_unlocked(scope, fingerprint, |item| {
+        item.status = TraceCreditNoticeOutboxStatus::Acknowledged;
+        item.updated_at = now;
+        item.next_attempt_at = None;
+        item.snoozed_until = None;
+    })
+    .map(|_| ())
+}
+
+fn mark_trace_credit_notice_outbox_snoozed_unlocked(
+    scope: Option<&str>,
+    fingerprint: &str,
+    snoozed_until: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    update_trace_credit_notice_outbox_item_unlocked(scope, fingerprint, |item| {
+        item.status = TraceCreditNoticeOutboxStatus::Snoozed;
+        item.updated_at = now;
+        item.next_attempt_at = Some(snoozed_until);
+        item.snoozed_until = Some(snoozed_until);
+    })
+    .map(|_| ())
+}
+
+fn read_trace_credit_notice_outbox_for_scope_unlocked(
+    scope: Option<&str>,
+) -> anyhow::Result<Vec<TraceCreditNoticeOutboxItem>> {
+    let path = trace_credit_notice_outbox_path(scope);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let body = std::fs::read_to_string(&path).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to read trace credit notice outbox {}: {}",
+            path.display(),
+            e
+        )
+    })?;
+    serde_json::from_str(&body).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to parse trace credit notice outbox {}: {}",
+            path.display(),
+            e
+        )
+    })
+}
+
+fn write_trace_credit_notice_outbox_for_scope_unlocked(
+    scope: Option<&str>,
+    outbox: &[TraceCreditNoticeOutboxItem],
+) -> anyhow::Result<()> {
+    write_json_file(
+        &trace_credit_notice_outbox_path(scope),
+        outbox,
+        "trace credit notice outbox",
+    )
+}
+
+#[cfg(test)]
+fn pending_trace_credit_notice_outbox_items_for_scope_at(
+    scope: Option<&str>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Vec<TraceCreditNoticeOutboxItem>> {
+    let _guard = lock_trace_scope_for_mutation_blocking(scope);
+    pending_trace_credit_notice_outbox_items_for_scope_at_unlocked(scope, now)
+}
+
+fn pending_trace_credit_notice_outbox_items_for_scope_at_unlocked(
+    scope: Option<&str>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Vec<TraceCreditNoticeOutboxItem>> {
+    Ok(read_trace_credit_notice_outbox_for_scope_unlocked(scope)?
+        .into_iter()
+        .filter(|item| trace_credit_notice_outbox_item_due(item, now))
+        .collect())
+}
+
+fn trace_credit_notice_outbox_item_due(
+    item: &TraceCreditNoticeOutboxItem,
+    now: DateTime<Utc>,
+) -> bool {
+    match item.status {
+        TraceCreditNoticeOutboxStatus::Pending => item
+            .next_attempt_at
+            .map(|next_attempt_at| next_attempt_at <= now)
+            .unwrap_or(true),
+        TraceCreditNoticeOutboxStatus::Snoozed => item
+            .snoozed_until
+            .map(|snoozed_until| snoozed_until <= now)
+            .unwrap_or_else(|| {
+                item.next_attempt_at
+                    .map(|next_attempt_at| next_attempt_at <= now)
+                    .unwrap_or(true)
+            }),
+        TraceCreditNoticeOutboxStatus::Delivered | TraceCreditNoticeOutboxStatus::Acknowledged => {
+            false
+        }
+    }
+}
+
+fn record_trace_credit_notice_delivery_success_for_scope_at_unlocked(
+    scope: Option<&str>,
+    fingerprint: &str,
+    channel: &str,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Option<TraceCreditNoticeOutboxItem>> {
+    update_trace_credit_notice_outbox_item_unlocked(scope, fingerprint, |item| {
+        push_trace_credit_notice_delivery_attempt(
+            item,
+            TraceCreditNoticeDeliveryAttempt {
+                channel: safe_trace_credit_notice_channel(channel),
+                attempted_at: now,
+                succeeded: true,
+                error_kind: None,
+                error_hash: None,
+            },
+        );
+        item.status = TraceCreditNoticeOutboxStatus::Delivered;
+        item.updated_at = now;
+        item.last_attempt_at = Some(now);
+        item.delivered_at = Some(now);
+        item.next_attempt_at = None;
+        item.snoozed_until = None;
+        item.attempt_count = item.attempt_count.saturating_add(1);
+    })
+}
+
+fn record_trace_credit_notice_delivery_failure_for_scope_at_unlocked(
+    scope: Option<&str>,
+    fingerprint: &str,
+    channel: &str,
+    error: &str,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Option<TraceCreditNoticeOutboxItem>> {
+    let error_hash = trace_credit_notice_delivery_error_hash(error);
+    let error_kind = trace_credit_notice_delivery_error_kind(error);
+    update_trace_credit_notice_outbox_item_unlocked(scope, fingerprint, |item| {
+        let next_attempt_count = item.attempt_count.saturating_add(1);
+        push_trace_credit_notice_delivery_attempt(
+            item,
+            TraceCreditNoticeDeliveryAttempt {
+                channel: safe_trace_credit_notice_channel(channel),
+                attempted_at: now,
+                succeeded: false,
+                error_kind: Some(error_kind),
+                error_hash: Some(error_hash.clone()),
+            },
+        );
+        item.status = TraceCreditNoticeOutboxStatus::Pending;
+        item.updated_at = now;
+        item.last_attempt_at = Some(now);
+        item.delivered_at = None;
+        item.next_attempt_at = Some(trace_queue_next_retry_at(now, next_attempt_count));
+        item.snoozed_until = None;
+        item.attempt_count = next_attempt_count;
+    })
+}
+
+fn update_trace_credit_notice_outbox_item_unlocked(
+    scope: Option<&str>,
+    fingerprint: &str,
+    mut update: impl FnMut(&mut TraceCreditNoticeOutboxItem),
+) -> anyhow::Result<Option<TraceCreditNoticeOutboxItem>> {
+    let mut outbox = read_trace_credit_notice_outbox_for_scope_unlocked(scope)?;
+    let mut updated = None;
+    if let Some(item) = outbox
+        .iter_mut()
+        .find(|item| item.fingerprint == fingerprint)
+    {
+        update(item);
+        updated = Some(item.clone());
+    }
+    if updated.is_some() {
+        write_trace_credit_notice_outbox_for_scope_unlocked(scope, &outbox)?;
+    }
+    Ok(updated)
+}
+
+fn push_trace_credit_notice_delivery_attempt(
+    item: &mut TraceCreditNoticeOutboxItem,
+    attempt: TraceCreditNoticeDeliveryAttempt,
+) {
+    item.delivery_attempts.push(attempt);
+    let excess = item
+        .delivery_attempts
+        .len()
+        .saturating_sub(TRACE_CREDIT_NOTICE_OUTBOX_MAX_ATTEMPTS_STORED);
+    if excess > 0 {
+        item.delivery_attempts.drain(0..excess);
+    }
+}
+
+fn trace_credit_notice_outbox_id(fingerprint: &str) -> String {
+    canonical_hash(&format!("trace_credit_notice:{fingerprint}"))
+}
+
+fn safe_trace_credit_notice_channel(channel: &str) -> String {
+    let sanitized = channel
+        .trim()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(*ch, '-' | '_' | '.'))
+        .take(64)
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "unknown".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn trace_credit_notice_delivery_error_hash(error: &str) -> String {
+    let digest = Sha256::digest(error.as_bytes());
+    format!("sha256:{}", hex::encode(&digest[..8]))
+}
+
+fn trace_credit_notice_delivery_error_kind(error: &str) -> TraceQueueTelemetryFailureKind {
+    let error = anyhow::anyhow!(error.to_string());
+    trace_queue_telemetry_failure_kind(&error)
 }
 
 struct TraceQueueCompactionCandidate {
@@ -6910,6 +7296,10 @@ fn trace_records_path(scope: Option<&str>) -> PathBuf {
 
 fn trace_queue_telemetry_path(scope: Option<&str>) -> PathBuf {
     trace_contribution_dir_for_scope(scope).join("queue_telemetry.json")
+}
+
+fn trace_credit_notice_outbox_path(scope: Option<&str>) -> PathBuf {
+    trace_contribution_dir_for_scope(scope).join("credit_notice_outbox.json")
 }
 
 fn write_json_file<T: Serialize + ?Sized>(
@@ -8510,6 +8900,273 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[test]
+    fn trace_credit_notice_outbox_enqueue_is_idempotent_per_fingerprint() {
+        let scope = format!("trace-credit-outbox-idempotent-test-{}", Uuid::new_v4());
+        write_trace_policy_for_scope(
+            Some(&scope),
+            &StandingTraceContributionPolicy {
+                enabled: true,
+                ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                credit_notice_interval_hours: 168,
+                ..Default::default()
+            },
+        )
+        .expect("policy writes");
+        write_local_trace_records_for_scope(
+            Some(&scope),
+            &[submitted_credit_record(
+                1.0,
+                Some(1.5),
+                None,
+                vec!["Delayed utility credit posted.".to_string()],
+            )],
+        )
+        .expect("record writes");
+
+        let now = Utc::now();
+        let first = mark_trace_credit_noticed_if_due_at_unlocked(Some(&scope), 168, now)
+            .expect("first notice check succeeds")
+            .expect("first notice is due");
+        assert_eq!(first.final_credit, 1.5);
+        let second = mark_trace_credit_noticed_if_due_at_unlocked(
+            Some(&scope),
+            168,
+            now + chrono::Duration::hours(169),
+        )
+        .expect("second notice check succeeds")
+        .expect("same fingerprint is due again after interval");
+        assert_eq!(second.final_credit, 1.5);
+
+        let outbox = read_trace_credit_notice_outbox_for_scope(Some(&scope))
+            .expect("credit notice outbox reads");
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(outbox[0].status, TraceCreditNoticeOutboxStatus::Pending);
+        assert_eq!(outbox[0].attempt_count, 0);
+        assert!(outbox[0].message.contains("pending +1.00"));
+
+        let pending = pending_trace_credit_notice_outbox_items_for_scope_at(Some(&scope), now)
+            .expect("pending outbox reads");
+        assert_eq!(pending.len(), 1);
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[test]
+    fn credit_notice_delivery_success_marks_outbox_delivered() {
+        let scope = format!("trace-credit-outbox-delivered-test-{}", Uuid::new_v4());
+        write_trace_policy_for_scope(
+            Some(&scope),
+            &StandingTraceContributionPolicy {
+                enabled: true,
+                ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                credit_notice_interval_hours: 168,
+                ..Default::default()
+            },
+        )
+        .expect("policy writes");
+        write_local_trace_records_for_scope(
+            Some(&scope),
+            &[submitted_credit_record(
+                2.0,
+                Some(3.0),
+                None,
+                vec!["Benchmark conversion bonus posted.".to_string()],
+            )],
+        )
+        .expect("record writes");
+        mark_trace_credit_noticed_if_due_at_unlocked(Some(&scope), 168, Utc::now())
+            .expect("notice check succeeds")
+            .expect("notice is due");
+        let fingerprint = read_trace_credit_notice_outbox_for_scope(Some(&scope))
+            .expect("outbox reads")[0]
+            .fingerprint
+            .clone();
+
+        let delivered = record_trace_credit_notice_delivery_success_for_scope(
+            Some(&scope),
+            &fingerprint,
+            "test",
+        )
+        .expect("delivery success records")
+        .expect("outbox item exists");
+
+        assert_eq!(delivered.status, TraceCreditNoticeOutboxStatus::Delivered);
+        assert_eq!(delivered.attempt_count, 1);
+        assert!(delivered.delivered_at.is_some());
+        assert_eq!(delivered.delivery_attempts.len(), 1);
+        assert!(delivered.delivery_attempts[0].succeeded);
+        assert!(
+            pending_trace_credit_notice_outbox_items_for_scope_at(Some(&scope), Utc::now())
+                .expect("pending outbox reads")
+                .is_empty()
+        );
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[test]
+    fn credit_notice_delivery_failure_keeps_pending_with_safe_error_hash() {
+        let scope = format!("trace-credit-outbox-failure-test-{}", Uuid::new_v4());
+        write_trace_policy_for_scope(
+            Some(&scope),
+            &StandingTraceContributionPolicy {
+                enabled: true,
+                ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                credit_notice_interval_hours: 168,
+                ..Default::default()
+            },
+        )
+        .expect("policy writes");
+        write_local_trace_records_for_scope(
+            Some(&scope),
+            &[submitted_credit_record(
+                4.0,
+                Some(5.0),
+                None,
+                vec!["Regression catch bonus posted.".to_string()],
+            )],
+        )
+        .expect("record writes");
+        let now = Utc::now();
+        mark_trace_credit_noticed_if_due_at_unlocked(Some(&scope), 168, now)
+            .expect("notice check succeeds")
+            .expect("notice is due");
+        let fingerprint = read_trace_credit_notice_outbox_for_scope(Some(&scope))
+            .expect("outbox reads")[0]
+            .fingerprint
+            .clone();
+
+        let failed = record_trace_credit_notice_delivery_failure_for_scope(
+            Some(&scope),
+            &fingerprint,
+            "test",
+            "failed for alice@example.com using sk-test-secret in /Users/alice/private",
+        )
+        .expect("delivery failure records")
+        .expect("outbox item exists");
+
+        assert_eq!(failed.status, TraceCreditNoticeOutboxStatus::Pending);
+        assert_eq!(failed.attempt_count, 1);
+        assert!(failed.next_attempt_at.is_some());
+        assert_eq!(failed.delivery_attempts.len(), 1);
+        let attempt = &failed.delivery_attempts[0];
+        assert!(!attempt.succeeded);
+        assert_eq!(attempt.channel, "test");
+        assert!(
+            attempt
+                .error_hash
+                .as_deref()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+        assert!(attempt.error_kind.is_some());
+        let serialized = serde_json::to_string(&failed).expect("outbox serializes");
+        assert!(!serialized.contains("alice@example.com"));
+        assert!(!serialized.contains("sk-test-secret"));
+        assert!(!serialized.contains("/Users/alice/private"));
+
+        assert!(
+            pending_trace_credit_notice_outbox_items_for_scope_at(Some(&scope), now)
+                .expect("pending before retry reads")
+                .is_empty(),
+            "failed delivery should wait until next_attempt_at before retry"
+        );
+        assert_eq!(
+            pending_trace_credit_notice_outbox_items_for_scope_at(
+                Some(&scope),
+                failed.next_attempt_at.expect("next attempt exists")
+            )
+            .expect("pending after retry reads")
+            .len(),
+            1
+        );
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[test]
+    fn credit_notice_acknowledge_and_snooze_suppress_pending_outbox_items() {
+        let ack_scope = format!("trace-credit-outbox-ack-test-{}", Uuid::new_v4());
+        let snooze_scope = format!("trace-credit-outbox-snooze-test-{}", Uuid::new_v4());
+        for scope in [&ack_scope, &snooze_scope] {
+            write_trace_policy_for_scope(
+                Some(scope),
+                &StandingTraceContributionPolicy {
+                    enabled: true,
+                    ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                    credit_notice_interval_hours: 168,
+                    ..Default::default()
+                },
+            )
+            .expect("policy writes");
+            write_local_trace_records_for_scope(
+                Some(scope),
+                &[submitted_credit_record(
+                    1.0,
+                    Some(2.0),
+                    None,
+                    vec!["Delayed utility credit posted.".to_string()],
+                )],
+            )
+            .expect("record writes");
+            mark_trace_credit_noticed_if_due_at_unlocked(Some(scope), 168, Utc::now())
+                .expect("notice check succeeds")
+                .expect("notice is due");
+        }
+
+        acknowledge_trace_credit_notice_for_scope_at_unlocked(Some(&ack_scope), Utc::now())
+            .expect("ack succeeds")
+            .expect("ack returns summary");
+        let ack_outbox =
+            read_trace_credit_notice_outbox_for_scope(Some(&ack_scope)).expect("outbox reads");
+        assert_eq!(
+            ack_outbox[0].status,
+            TraceCreditNoticeOutboxStatus::Acknowledged
+        );
+        assert!(
+            pending_trace_credit_notice_outbox_items_for_scope_at(Some(&ack_scope), Utc::now())
+                .expect("pending ack outbox reads")
+                .is_empty()
+        );
+
+        let now = Utc::now();
+        let snoozed_until = now + chrono::Duration::hours(4);
+        snooze_trace_credit_notice_for_scope_until_at_unlocked(
+            Some(&snooze_scope),
+            snoozed_until,
+            now,
+        )
+        .expect("snooze succeeds")
+        .expect("snooze returns summary");
+        let snooze_outbox =
+            read_trace_credit_notice_outbox_for_scope(Some(&snooze_scope)).expect("outbox reads");
+        assert_eq!(
+            snooze_outbox[0].status,
+            TraceCreditNoticeOutboxStatus::Snoozed
+        );
+        assert_eq!(snooze_outbox[0].snoozed_until, Some(snoozed_until));
+        assert!(
+            pending_trace_credit_notice_outbox_items_for_scope_at(
+                Some(&snooze_scope),
+                now + chrono::Duration::hours(1)
+            )
+            .expect("pending snoozed outbox reads")
+            .is_empty()
+        );
+        assert_eq!(
+            pending_trace_credit_notice_outbox_items_for_scope_at(
+                Some(&snooze_scope),
+                snoozed_until
+            )
+            .expect("pending after snooze reads")
+            .len(),
+            1
+        );
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&ack_scope)));
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&snooze_scope)));
     }
 
     #[test]

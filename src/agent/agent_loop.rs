@@ -124,38 +124,6 @@ fn trimmed_option(value: Option<&str>) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn trace_queue_worker_credit_notice_message(
-    summary: &crate::trace_contribution::CreditSummary,
-) -> String {
-    let mut message = format!(
-        "Trace contribution credit update: {} submitted, {} expired ({} total), pending +{:.2}, final confirmed +{:.2}, delayed ledger {:+.2}. Delayed credit can change after privacy review, replay/eval, duplicate checks, and downstream utility scoring.",
-        summary.submissions_submitted,
-        summary.submissions_expired,
-        summary.submissions_total,
-        summary.pending_credit,
-        summary.final_credit,
-        summary.delayed_credit_delta
-    );
-    if summary.credit_events_total > 0 {
-        message.push_str(&format!(
-            " {} credit event(s) recorded.",
-            summary.credit_events_total
-        ));
-    }
-    if !summary.recent_explanations.is_empty() {
-        let explanations = summary
-            .recent_explanations
-            .iter()
-            .take(2)
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(" ");
-        message.push_str(" Recent factors: ");
-        message.push_str(&explanations);
-    }
-    message
-}
-
 async fn trace_queue_worker_scopes(
     owner_id: &str,
     store: Option<Arc<dyn Database>>,
@@ -187,7 +155,8 @@ fn spawn_trace_queue_flush_worker(
         loop {
             interval.tick().await;
             let scopes = trace_queue_worker_scopes(&owner_id, store.clone()).await;
-            let report =
+            let delivery_scopes = scopes.clone();
+            let _report =
                 match crate::trace_contribution::flush_trace_contribution_queue_worker_tick(
                     scopes,
                     TRACE_QUEUE_WORKER_FLUSH_LIMIT,
@@ -197,29 +166,99 @@ fn spawn_trace_queue_flush_worker(
                     Ok(report) => report,
                     Err(error) => {
                         tracing::debug!(%error, "Trace Commons queue worker tick failed");
+                        for scope in delivery_scopes {
+                            deliver_trace_credit_notice_outbox_for_scope(&scope, &channels).await;
+                        }
                         continue;
                     }
                 };
 
-            for scope_report in report.scope_reports {
-                let Some(summary) = scope_report.credit_notice else {
-                    continue;
-                };
-                let message = trace_queue_worker_credit_notice_message(&summary);
-                let response = OutgoingResponse::text(message);
-                let results = channels.broadcast_all(&scope_report.scope, response).await;
-                for (channel, result) in results {
-                    if let Err(error) = result {
-                        tracing::debug!(
-                            %channel,
-                            %error,
-                            "Trace Commons queue worker failed to deliver credit notice"
-                        );
-                    }
-                }
+            for scope in delivery_scopes {
+                deliver_trace_credit_notice_outbox_for_scope(&scope, &channels).await;
             }
         }
     })
+}
+
+async fn deliver_trace_credit_notice_outbox_for_scope(scope: &str, channels: &Arc<ChannelManager>) {
+    let pending =
+        match crate::trace_contribution::pending_trace_credit_notice_outbox_items_for_scope(Some(
+            scope,
+        )) {
+            Ok(pending) => pending,
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    scope_ref = %crate::trace_contribution::local_pseudonymous_contributor_id(scope),
+                    "Trace Commons queue worker failed to read credit notice outbox"
+                );
+                return;
+            }
+        };
+    for item in pending {
+        let response = OutgoingResponse::text(item.message.clone());
+        let results = channels.broadcast_all(scope, response).await;
+        let success_channel = results
+            .iter()
+            .find_map(|(channel, result)| result.is_ok().then(|| channel.clone()));
+        if let Some(channel) = success_channel {
+            if let Err(error) =
+                crate::trace_contribution::record_trace_credit_notice_delivery_success_for_scope(
+                    Some(scope),
+                    &item.fingerprint,
+                    &channel,
+                )
+            {
+                tracing::debug!(
+                    %channel,
+                    %error,
+                    "Trace Commons queue worker failed to record credit notice delivery"
+                );
+            }
+            continue;
+        }
+
+        if results.is_empty() {
+            if let Err(error) =
+                crate::trace_contribution::record_trace_credit_notice_delivery_failure_for_scope(
+                    Some(scope),
+                    &item.fingerprint,
+                    "none",
+                    "no channels registered for credit notice delivery",
+                )
+            {
+                tracing::debug!(
+                    %error,
+                    "Trace Commons queue worker failed to record empty credit notice delivery"
+                );
+            }
+            continue;
+        }
+
+        for (channel, result) in results {
+            if let Err(error) = result {
+                tracing::debug!(
+                    %channel,
+                    %error,
+                    "Trace Commons queue worker failed to deliver credit notice"
+                );
+                if let Err(record_error) =
+                    crate::trace_contribution::record_trace_credit_notice_delivery_failure_for_scope(
+                        Some(scope),
+                        &item.fingerprint,
+                        &channel,
+                        &error.to_string(),
+                    )
+                {
+                    tracing::debug!(
+                        %channel,
+                        %record_error,
+                        "Trace Commons queue worker failed to record credit notice delivery failure"
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn resolve_owner_scope_notification_user(
