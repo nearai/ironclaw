@@ -13301,7 +13301,24 @@ fn trace_summary_similarity_score(
     };
     let target_embedding = trace_redacted_summary_embedding(target_summary);
     let candidate_embedding = trace_redacted_summary_embedding(candidate_summary);
-    trace_summary_embedding_similarity(&target_embedding, &candidate_embedding)
+    trace_summary_embedding_similarity(&target_embedding, &candidate_embedding).max(
+        trace_summary_token_similarity(target_summary, candidate_summary),
+    )
+}
+
+fn trace_summary_token_similarity(left: &str, right: &str) -> f32 {
+    let left_tokens = trace_similarity_tokens(left);
+    let right_tokens = trace_similarity_tokens(right);
+    if left_tokens.is_empty() || right_tokens.is_empty() {
+        return 0.0;
+    }
+    let intersection = left_tokens.intersection(&right_tokens).count() as f32;
+    let union = left_tokens.union(&right_tokens).count() as f32;
+    if union == 0.0 {
+        0.0
+    } else {
+        (intersection / union).clamp(0.0, 1.0)
+    }
 }
 
 fn trace_vector_embedding_input(record: &StorageTraceDerivedRecord) -> String {
@@ -24248,6 +24265,354 @@ mod tests {
             != StorageTraceRevocationPropagationAction::RecordPhysicalDeleteReceipt));
     }
 
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn revocation_worker_invalidates_exact_vector_entry_target() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-revocation-exact-vector.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("tenant-a submission succeeds");
+
+        let derived_records = db
+            .list_trace_derived_records("tenant-a")
+            .await
+            .expect("derived records read");
+        let primary_derived = derived_records
+            .iter()
+            .find(|record| record.submission_id == submission_id)
+            .expect("primary derived record exists");
+        let trace_id = primary_derived.trace_id;
+        let target_vector_entry_id = Uuid::new_v4();
+        let sibling_derived_id = Uuid::new_v4();
+        let sibling_vector_entry_id = Uuid::new_v4();
+
+        db.append_trace_derived_record(StorageTraceDerivedRecordWrite {
+            tenant_id: "tenant-a".to_string(),
+            derived_id: sibling_derived_id,
+            submission_id,
+            trace_id,
+            status: StorageTraceDerivedStatus::Current,
+            worker_kind: StorageTraceWorkerKind::DuplicatePrecheck,
+            worker_version: "duplicate-precheck-v1".to_string(),
+            input_object_ref: None,
+            input_hash: "sha256:sibling-vector-input".to_string(),
+            output_object_ref: None,
+            canonical_summary: Some("Sibling vector summary".to_string()),
+            canonical_summary_hash: Some("sha256:sibling-vector-summary".to_string()),
+            summary_model: "summary-model-v1".to_string(),
+            task_success: Some("success".to_string()),
+            privacy_risk: Some("low".to_string()),
+            event_count: Some(2),
+            tool_sequence: vec!["memory_search".to_string()],
+            tool_categories: vec!["memory".to_string()],
+            coverage_tags: vec!["tool:memory_search".to_string()],
+            duplicate_score: Some(0.1),
+            novelty_score: Some(0.4),
+            cluster_id: Some("cluster:tenant-a".to_string()),
+        })
+        .await
+        .expect("sibling derived record writes");
+
+        for (derived_id, vector_entry_id, source_hash) in [
+            (
+                primary_derived.derived_id,
+                target_vector_entry_id,
+                "sha256:target-vector-summary",
+            ),
+            (
+                sibling_derived_id,
+                sibling_vector_entry_id,
+                "sha256:sibling-vector-summary",
+            ),
+        ] {
+            db.upsert_trace_vector_entry(StorageTraceVectorEntryWrite {
+                tenant_id: "tenant-a".to_string(),
+                submission_id,
+                derived_id,
+                vector_entry_id,
+                vector_store: "trace_commons_metadata_precheck".to_string(),
+                embedding_model: TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_MODEL.to_string(),
+                embedding_dimension: 64,
+                embedding_version: TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_VERSION.to_string(),
+                source_projection: StorageTraceVectorEntrySourceProjection::CanonicalSummary,
+                source_hash: source_hash.to_string(),
+                status: StorageTraceVectorEntryStatus::Active,
+                nearest_trace_ids: Vec::new(),
+                cluster_id: Some("cluster:tenant-a".to_string()),
+                duplicate_score: Some(0.1),
+                novelty_score: Some(0.4),
+                indexed_at: Some(Utc::now()),
+                invalidated_at: None,
+                deleted_at: None,
+            })
+            .await
+            .expect("vector entry writes");
+        }
+
+        let item_id = Uuid::new_v4();
+        db.upsert_trace_revocation_propagation_item(TraceRevocationPropagationItemWrite {
+            tenant_id: "tenant-a".to_string(),
+            propagation_item_id: item_id,
+            source_submission_id: submission_id,
+            target: StorageTraceRevocationPropagationTarget::VectorEntry {
+                vector_entry_id: target_vector_entry_id,
+            },
+            action: StorageTraceRevocationPropagationAction::InvalidateVector,
+            status: StorageTraceRevocationPropagationItemStatus::Pending,
+            idempotency_key: format!("{submission_id}:invalidate-vector-target"),
+            reason: "user_revoked_trace".to_string(),
+            attempt_count: 0,
+            last_error: None,
+            next_attempt_at: None,
+            completed_at: None,
+            evidence_hash: None,
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("vector invalidation item writes");
+
+        let Json(response) = revocation_propagation_worker_handler(
+            State(state),
+            auth_headers("revocation-worker-token-a"),
+            Json(TraceRevocationPropagationWorkerRequest {
+                purpose: Some("test_exact_vector_invalidation".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("revocation worker invalidates targeted vector entry");
+        assert_eq!(response.checked, 1);
+        assert_eq!(response.completed, 1);
+        assert_eq!(response.skipped, 0);
+        assert_eq!(response.failed, 0);
+
+        let items = db
+            .list_trace_revocation_propagation_items("tenant-a", submission_id)
+            .await
+            .expect("revocation propagation items read");
+        let item = items
+            .iter()
+            .find(|item| item.propagation_item_id == item_id)
+            .expect("vector invalidation item exists");
+        assert_eq!(
+            item.status,
+            StorageTraceRevocationPropagationItemStatus::Done
+        );
+
+        let vector_entries = db
+            .list_trace_vector_entries("tenant-a")
+            .await
+            .expect("vector entries read");
+        assert!(vector_entries.iter().any(|entry| {
+            entry.vector_entry_id == target_vector_entry_id
+                && entry.status == StorageTraceVectorEntryStatus::Invalidated
+                && entry.invalidated_at.is_some()
+        }));
+        assert!(vector_entries.iter().any(|entry| {
+            entry.vector_entry_id == sibling_vector_entry_id
+                && entry.status == StorageTraceVectorEntryStatus::Active
+                && entry.invalidated_at.is_none()
+        }));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn vector_payload_object_delete_records_physical_delete_receipt() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_root = temp.path().join("service-local-vector-objects");
+        let artifact_store = test_artifact_store(&artifact_root);
+        let configured_store = ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            artifact_store.clone(),
+        );
+        let artifact_reader = configured_store.clone();
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp
+            .path()
+            .join("trace-revocation-delete-vector-payload.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+            Some(configured_store),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("tenant-a submission succeeds");
+        let Json(index_response) = vector_index_handler(
+            State(state.clone()),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceVectorIndexRequest {
+                purpose: Some("vector_payload_delete_receipt".to_string()),
+                dry_run: false,
+            }),
+        )
+        .await
+        .expect("vector indexing succeeds");
+        assert_eq!(index_response.vector_entries_indexed, 1);
+
+        let object_ref = db
+            .get_latest_active_trace_object_ref(
+                "tenant-a",
+                submission_id,
+                StorageTraceObjectArtifactKind::WorkerIntermediate,
+            )
+            .await
+            .expect("vector payload object ref reads")
+            .expect("vector payload object ref exists");
+        let payload: TraceVectorPayloadArtifact = artifact_reader
+            .get_json_by_object_key(
+                &tenant_storage_ref("tenant-a"),
+                TraceArtifactKind::VectorPayload,
+                &object_ref.object_key,
+                &object_ref.content_sha256,
+            )
+            .expect("vector payload object exists");
+        assert_eq!(object_ref.created_by_job_id, Some(payload.vector_entry_id));
+
+        let delete_item_id = Uuid::new_v4();
+        db.upsert_trace_revocation_propagation_item(TraceRevocationPropagationItemWrite {
+            tenant_id: "tenant-a".to_string(),
+            propagation_item_id: delete_item_id,
+            source_submission_id: submission_id,
+            target: StorageTraceRevocationPropagationTarget::ObjectRef {
+                object_ref_id: object_ref.object_ref_id,
+            },
+            action: StorageTraceRevocationPropagationAction::DeleteObjectPayload,
+            status: StorageTraceRevocationPropagationItemStatus::Pending,
+            idempotency_key: format!("{submission_id}:delete-vector-payload"),
+            reason: "user_revoked_trace".to_string(),
+            attempt_count: 0,
+            last_error: None,
+            next_attempt_at: None,
+            completed_at: None,
+            evidence_hash: None,
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("delete vector payload item writes");
+
+        let Json(response) = revocation_propagation_worker_handler(
+            State(state),
+            auth_headers("revocation-worker-token-a"),
+            Json(TraceRevocationPropagationWorkerRequest {
+                purpose: Some("test_delete_vector_payload".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("revocation worker deletes vector payload object");
+        assert_eq!(response.checked, 1);
+        assert_eq!(response.completed, 1);
+        assert_eq!(response.skipped, 0);
+        assert_eq!(response.failed, 0);
+
+        artifact_reader
+            .get_json_by_object_key::<TraceVectorPayloadArtifact>(
+                &tenant_storage_ref("tenant-a"),
+                TraceArtifactKind::VectorPayload,
+                &object_ref.object_key,
+                &object_ref.content_sha256,
+            )
+            .expect_err("vector payload object was deleted");
+
+        let object_refs = db
+            .list_trace_object_refs("tenant-a", submission_id)
+            .await
+            .expect("object refs read");
+        let deleted_ref = object_refs
+            .iter()
+            .find(|record| record.object_ref_id == object_ref.object_ref_id)
+            .expect("vector payload object ref still listed");
+        assert!(deleted_ref.deleted_at.is_some());
+
+        let items = db
+            .list_trace_revocation_propagation_items("tenant-a", submission_id)
+            .await
+            .expect("propagation items read");
+        let delete_item = items
+            .iter()
+            .find(|item| item.propagation_item_id == delete_item_id)
+            .expect("delete item exists");
+        assert_eq!(
+            delete_item.status,
+            StorageTraceRevocationPropagationItemStatus::Done
+        );
+        let receipt_item = items
+            .iter()
+            .find(|item| {
+                item.action == StorageTraceRevocationPropagationAction::RecordPhysicalDeleteReceipt
+            })
+            .expect("physical delete receipt item exists");
+        let StorageTraceRevocationPropagationTarget::PhysicalDeleteReceipt {
+            object_ref_id,
+            object_store,
+            object_key,
+            receipt_sha256,
+        } = &receipt_item.target
+        else {
+            panic!("receipt item target must be a physical delete receipt");
+        };
+        assert_eq!(*object_ref_id, Some(object_ref.object_ref_id));
+        assert_eq!(
+            object_store,
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+        );
+        assert_eq!(object_key, &object_ref.object_key);
+        assert_eq!(
+            receipt_item.evidence_hash.as_deref(),
+            Some(receipt_sha256.as_str())
+        );
+    }
+
     #[tokio::test]
     async fn submit_writes_encrypted_artifact_receipt_when_configured() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -32101,15 +32466,18 @@ mod tests {
             .await
             .expect("vector entries read");
         assert_eq!(vector_entries.len(), 2);
-        assert!(vector_entries.iter().all(|entry| {
-            entry.nearest_trace_ids.len() == 1
-                && entry
-                    .duplicate_score
-                    .is_some_and(|score| score > TRACE_SIMILARITY_NEIGHBOR_THRESHOLD && score < 1.0)
-                && entry
-                    .novelty_score
-                    .is_some_and(|score| score > 0.05 && score < 0.95)
-        }));
+        assert!(
+            vector_entries.iter().all(|entry| {
+                entry.nearest_trace_ids.len() == 1
+                    && entry.duplicate_score.is_some_and(|score| {
+                        score > TRACE_SIMILARITY_NEIGHBOR_THRESHOLD && score < 1.0
+                    })
+                    && entry
+                        .novelty_score
+                        .is_some_and(|score| (0.05..0.95).contains(&score))
+            }),
+            "unexpected vector entries: {vector_entries:#?}"
+        );
     }
 
     #[cfg(feature = "libsql")]
