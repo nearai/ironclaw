@@ -176,8 +176,7 @@ impl StartupMcpLoadResult {
 }
 
 fn should_retry_startup_mcp_auth_error(server: &McpServerConfig, error_message: &str) -> bool {
-    server.has_custom_auth_header()
-        && crate::tools::mcp::has_http_unauthorized_status(error_message)
+    server.has_custom_auth_header() && crate::tools::mcp::is_auth_error_message(error_message)
 }
 
 fn spawn_startup_mcp_auth_retries(
@@ -1917,11 +1916,7 @@ mod tests {
             &api_key_server,
             "connection refused"
         ));
-        assert!(!super::should_retry_startup_mcp_auth_error(
-            &api_key_server,
-            "403 Forbidden"
-        ));
-        assert!(!super::should_retry_startup_mcp_auth_error(
+        assert!(super::should_retry_startup_mcp_auth_error(
             &api_key_server,
             "MCP error: Unauthorized (code -32001)"
         ));

@@ -63,28 +63,22 @@ pub(crate) fn normalize_server_name(name: &str) -> String {
     name.replace('-', "_")
 }
 
-fn contains_ascii_word(message: &str, word: &str) -> bool {
-    message
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|candidate| candidate.eq_ignore_ascii_case(word))
-}
-
 pub(crate) fn is_auth_error_message(message: &str) -> bool {
-    contains_ascii_word(message, "401")
-        || contains_ascii_word(message, "unauthorized")
-        || contains_ascii_word(message, "authentication")
-        || (contains_ascii_word(message, "400")
-            && (contains_ascii_word(message, "authorization")
-                || contains_ascii_word(message, "authenticate")))
-}
+    let has_word = |word: &str| {
+        message
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|candidate| candidate.eq_ignore_ascii_case(word))
+    };
 
-pub(crate) fn has_http_unauthorized_status(message: &str) -> bool {
-    contains_ascii_word(message, "401")
+    has_word("401")
+        || has_word("unauthorized")
+        || has_word("authentication")
+        || (has_word("400") && (has_word("authorization") || has_word("authenticate")))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{has_http_unauthorized_status, is_auth_error_message, normalize_server_name};
+    use super::{is_auth_error_message, normalize_server_name};
 
     #[test]
     fn test_is_auth_error_message_matches_whole_words() {
@@ -109,19 +103,5 @@ mod tests {
     fn normalize_server_name_folds_hyphens_to_underscores() {
         assert_eq!(normalize_server_name("my-mcp-server"), "my_mcp_server");
         assert_eq!(normalize_server_name("nearai"), "nearai");
-    }
-
-    #[test]
-    fn has_http_unauthorized_status_matches_401_only() {
-        assert!(has_http_unauthorized_status(
-            "[nearai] MCP server returned status: 401 Unauthorized"
-        ));
-        assert!(!has_http_unauthorized_status(
-            "HTTP status 403. Update credential."
-        ));
-        assert!(!has_http_unauthorized_status("MCP error: Unauthorized"));
-        assert!(!has_http_unauthorized_status(
-            "localhost:4010 did not respond"
-        ));
     }
 }
