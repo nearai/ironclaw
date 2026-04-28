@@ -81,21 +81,15 @@ impl ExecutionGate for ApprovalGate {
                         }
                     }
                 }
-                ApprovalRequirement::Always => {
-                    if is_auto_approved {
-                        GateDecision::Allow
-                    } else {
-                        GateDecision::Pause {
-                            reason: format!(
-                                "Tool '{}' requires explicit approval for this operation.",
-                                ctx.action_name
-                            ),
-                            resume_kind: ResumeKind::Approval {
-                                allow_always: false,
-                            },
-                        }
-                    }
-                }
+                ApprovalRequirement::Always => GateDecision::Pause {
+                    reason: format!(
+                        "Tool '{}' requires explicit approval for this operation.",
+                        ctx.action_name
+                    ),
+                    resume_kind: ResumeKind::Approval {
+                        allow_always: false,
+                    },
+                },
             },
             ExecutionMode::InteractiveAutoApprove => match requirement {
                 ApprovalRequirement::Never | ApprovalRequirement::UnlessAutoApproved => {
@@ -104,21 +98,15 @@ impl ExecutionGate for ApprovalGate {
                     // hooks, auth gates) still apply.
                     GateDecision::Allow
                 }
-                ApprovalRequirement::Always => {
-                    if is_auto_approved {
-                        GateDecision::Allow
-                    } else {
-                        GateDecision::Pause {
-                            reason: format!(
-                                "Tool '{}' requires explicit approval (auto-approve does not cover this operation).",
-                                ctx.action_name
-                            ),
-                            resume_kind: ResumeKind::Approval {
-                                allow_always: false,
-                            },
-                        }
-                    }
-                }
+                ApprovalRequirement::Always => GateDecision::Pause {
+                    reason: format!(
+                        "Tool '{}' requires explicit approval (auto-approve does not cover this operation).",
+                        ctx.action_name
+                    ),
+                    resume_kind: ResumeKind::Approval {
+                        allow_always: false,
+                    },
+                },
             },
             ExecutionMode::Autonomous => match requirement {
                 ApprovalRequirement::Never | ApprovalRequirement::UnlessAutoApproved => {
@@ -126,18 +114,12 @@ impl ExecutionGate for ApprovalGate {
                     // (regression fix: 0e5f1b12 — is_blocked was rejecting Never tools)
                     GateDecision::Allow
                 }
-                ApprovalRequirement::Always => {
-                    if is_auto_approved {
-                        GateDecision::Allow
-                    } else {
-                        GateDecision::Deny {
-                            reason: format!(
-                                "Tool '{}' requires explicit approval and cannot run autonomously.",
-                                ctx.action_name
-                            ),
-                        }
-                    }
-                }
+                ApprovalRequirement::Always => GateDecision::Deny {
+                    reason: format!(
+                        "Tool '{}' requires explicit approval and cannot run autonomously.",
+                        ctx.action_name
+                    ),
+                },
             },
             ExecutionMode::Container => GateDecision::Allow,
         }
@@ -327,10 +309,48 @@ impl ExecutionGate for RelayChannelGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::JobContext;
+    use crate::tools::{Tool, ToolError, ToolOutput};
     use ironclaw_engine::gate::ExecutionMode;
     use ironclaw_engine::types::capability::{ActionDef, EffectType, ModelToolSurface};
     use ironclaw_engine::types::thread::ThreadId;
     use std::collections::HashSet;
+    use std::time::Duration;
+
+    struct ApprovalTestTool {
+        name: &'static str,
+        requirement: ApprovalRequirement,
+    }
+
+    #[async_trait]
+    impl Tool for ApprovalTestTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "approval test tool"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({ "ok": true }),
+                Duration::from_millis(1),
+            ))
+        }
+
+        fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+            self.requirement
+        }
+    }
 
     fn action_def(name: &str, requires_approval: bool) -> ActionDef {
         ActionDef {
@@ -364,6 +384,17 @@ mod tests {
         }
     }
 
+    async fn approval_gate_with_tool(
+        name: &'static str,
+        requirement: ApprovalRequirement,
+    ) -> ApprovalGate {
+        let registry = Arc::new(ToolRegistry::new());
+        registry
+            .register(Arc::new(ApprovalTestTool { name, requirement }))
+            .await;
+        ApprovalGate::new(registry)
+    }
+
     // ── InteractiveAutoApprove mode ─────────────────────────
 
     #[tokio::test]
@@ -384,6 +415,73 @@ mod tests {
         );
         // RelayChannelGate doesn't care about mode — it only checks channel suffix
         assert!(matches!(gate.evaluate(&c).await, GateDecision::Allow)); // safety: test-only
+    }
+
+    #[tokio::test]
+    async fn approval_gate_auto_approved_unless_allows() {
+        let gate =
+            approval_gate_with_tool("test_tool", ApprovalRequirement::UnlessAutoApproved).await;
+        let ad = action_def("test_tool", true);
+        let auto = HashSet::from(["test_tool".to_string()]);
+        let params = serde_json::json!({});
+        let c = ctx(&ad, ExecutionMode::Interactive, "web", &auto, &params);
+
+        assert!(matches!(gate.evaluate(&c).await, GateDecision::Allow));
+    }
+
+    #[tokio::test]
+    async fn approval_gate_auto_approved_always_pauses_interactive() {
+        let gate = approval_gate_with_tool("test_tool", ApprovalRequirement::Always).await;
+        let ad = action_def("test_tool", true);
+        let auto = HashSet::from(["test_tool".to_string()]);
+        let params = serde_json::json!({});
+        let c = ctx(&ad, ExecutionMode::Interactive, "web", &auto, &params);
+
+        assert!(matches!(
+            gate.evaluate(&c).await,
+            GateDecision::Pause {
+                resume_kind: ResumeKind::Approval {
+                    allow_always: false
+                },
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn approval_gate_auto_approved_always_pauses_interactive_auto_approve() {
+        let gate = approval_gate_with_tool("test_tool", ApprovalRequirement::Always).await;
+        let ad = action_def("test_tool", true);
+        let auto = HashSet::from(["test_tool".to_string()]);
+        let params = serde_json::json!({});
+        let c = ctx(
+            &ad,
+            ExecutionMode::InteractiveAutoApprove,
+            "web",
+            &auto,
+            &params,
+        );
+
+        assert!(matches!(
+            gate.evaluate(&c).await,
+            GateDecision::Pause {
+                resume_kind: ResumeKind::Approval {
+                    allow_always: false
+                },
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn approval_gate_auto_approved_always_denies_autonomous() {
+        let gate = approval_gate_with_tool("test_tool", ApprovalRequirement::Always).await;
+        let ad = action_def("test_tool", true);
+        let auto = HashSet::from(["test_tool".to_string()]);
+        let params = serde_json::json!({});
+        let c = ctx(&ad, ExecutionMode::Autonomous, "web", &auto, &params);
+
+        assert!(matches!(gate.evaluate(&c).await, GateDecision::Deny { .. }));
     }
 
     // ── RelayChannelGate ─────────────────────────────────────

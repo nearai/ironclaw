@@ -38,14 +38,13 @@ pub fn seeded_default_permission(tool_name: &str) -> Option<PermissionState> {
     match tool_name.replace('-', "_").as_str() {
         "echo" | "time" | "json" | "memory_search" | "memory_read" | "memory_write"
         | "memory_tree" | "tool_list" | "tool_info" | "tool_search" | "tool_activate"
-        | "skill_list" | "skill_search" | "list_jobs" | "job_status" | "job_events"
+        | "skill_list" | "skill_search" | "http" | "list_jobs" | "job_status" | "job_events"
         | "image_analyze" | "message" => Some(PermissionState::AlwaysAllow),
         "shell"
         | "read_file"
         | "write_file"
         | "list_dir"
         | "apply_patch"
-        | "http"
         | "create_job"
         | "event_emit"
         | "routine_create"
@@ -388,6 +387,24 @@ mod tests {
             effective_permission("shell", &overrides),
             PermissionState::AskEachTime,
             "missing persisted permission should use the seeded default for shell"
+        );
+
+        assert_eq!(
+            effective_permission("http", &overrides),
+            PermissionState::AlwaysAllow,
+            "missing persisted permission should use the seeded default for http"
+        );
+    }
+
+    #[test]
+    fn test_effective_permission_saved_http_override_wins() {
+        let mut overrides = HashMap::new();
+        overrides.insert("http".to_string(), PermissionState::AskEachTime);
+
+        assert_eq!(
+            effective_permission("http", &overrides),
+            PermissionState::AskEachTime,
+            "saved http permission should take precedence over the seeded default"
         );
     }
 

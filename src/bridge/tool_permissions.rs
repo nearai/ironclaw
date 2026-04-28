@@ -66,3 +66,49 @@ impl ToolPermissionSnapshot {
 pub(crate) fn canonical_tool_name(tool_name: &str) -> String {
     tool_name.replace('-', "_")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_http_permission_uses_seeded_default() {
+        let snapshot = ToolPermissionSnapshot::default();
+
+        assert_eq!(
+            snapshot.resolve_permission("http"),
+            ToolPermissionResolution {
+                effective: PermissionState::AlwaysAllow,
+                explicit: None,
+            }
+        );
+    }
+
+    #[test]
+    fn saved_http_permission_wins_over_seeded_default() {
+        let snapshot = ToolPermissionSnapshot {
+            overrides: HashMap::from([("http".to_string(), PermissionState::AskEachTime)]),
+        };
+
+        assert_eq!(
+            snapshot.resolve_permission("http"),
+            ToolPermissionResolution {
+                effective: PermissionState::AskEachTime,
+                explicit: Some(PermissionState::AskEachTime),
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_tool_defaults_to_ask_each_time() {
+        let snapshot = ToolPermissionSnapshot::default();
+
+        assert_eq!(
+            snapshot.resolve_permission("unknown_tool"),
+            ToolPermissionResolution {
+                effective: PermissionState::AskEachTime,
+                explicit: None,
+            }
+        );
+    }
+}

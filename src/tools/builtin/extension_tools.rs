@@ -114,7 +114,7 @@ impl Tool for ToolSearchTool {
         "Search for available extensions to add new capabilities. Extensions include \
          channels (Telegram, Slack, Discord — connect messaging platforms so IronClaw can \
          receive and reply there), tools, and MCP servers. Use `tool_install` for explicit \
-         installation, then use `tool_activate` with name=\"...\" to make a discovered \
+         installation, then call `tool_activate(name=\"...\")` to make a discovered \
          integration usable. Use the `message` tool for \
          proactive outbound sends. Use discover:true to search online if the built-in registry \
          has no results."
