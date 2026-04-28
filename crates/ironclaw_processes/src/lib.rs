@@ -14,6 +14,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use futures::FutureExt;
 use ironclaw_events::{EventSink, RuntimeEvent};
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
@@ -153,6 +154,8 @@ pub enum ProcessError {
     ProcessResultStoreUnavailable,
     #[error("process result is unavailable for {process_id}")]
     ProcessResultUnavailable { process_id: ProcessId },
+    #[error("invalid stored process record: {reason}")]
+    InvalidStoredRecord { reason: String },
     #[error("invalid storage path: {0}")]
     InvalidPath(String),
     #[error("filesystem error: {0}")]
@@ -473,6 +476,7 @@ impl<'a> ProcessHost<'a> {
         scope: &ResourceScope,
         process_id: ProcessId,
     ) -> Result<ProcessResultRecord, ProcessError> {
+        let mut terminal_without_result_seen = false;
         loop {
             if let Some(result) = self.result(scope, process_id).await? {
                 return Ok(result);
@@ -482,8 +486,13 @@ impl<'a> ProcessHost<'a> {
                 .get(scope, process_id)
                 .await?
                 .ok_or(ProcessError::UnknownProcess { process_id })?;
-            if record.status.is_terminal() && self.result_store.is_none() {
-                return Err(ProcessError::ProcessResultUnavailable { process_id });
+            if record.status.is_terminal() {
+                if self.result_store.is_none() || terminal_without_result_seen {
+                    return Err(ProcessError::ProcessResultUnavailable { process_id });
+                }
+                terminal_without_result_seen = true;
+            } else {
+                terminal_without_result_seen = false;
             }
             sleep(self.poll_interval).await;
         }
@@ -818,15 +827,21 @@ where
         self
     }
 
+    fn owned_reservations_guard(
+        &self,
+    ) -> MutexGuard<'_, HashMap<ProcessKey, ResourceReservationId>> {
+        self.owned_reservations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn record_owned_reservation(
         &self,
         scope: &ResourceScope,
         process_id: ProcessId,
         reservation_id: ResourceReservationId,
     ) {
-        self.owned_reservations
-            .lock()
-            .unwrap()
+        self.owned_reservations_guard()
             .insert(ProcessKey::new(scope, process_id), reservation_id);
     }
 
@@ -837,18 +852,14 @@ where
         record_reservation_id: Option<ResourceReservationId>,
     ) -> Result<ResourceReservationId, ProcessError> {
         let reservation_id = self
-            .owned_reservations
-            .lock()
-            .unwrap()
+            .owned_reservations_guard()
             .remove(&ProcessKey::new(scope, process_id))
             .ok_or(ProcessError::ResourceReservationNotOwned {
                 process_id,
                 reservation_id: record_reservation_id,
             })?;
         if Some(reservation_id) != record_reservation_id {
-            self.owned_reservations
-                .lock()
-                .unwrap()
+            self.owned_reservations_guard()
                 .insert(ProcessKey::new(scope, process_id), reservation_id);
             return Err(ProcessError::ResourceReservationMismatch {
                 process_id,
@@ -1194,8 +1205,11 @@ impl ProcessManager for BackgroundProcessManager {
             cancellation,
         };
         tokio::spawn(async move {
-            match executor.execute(request).await {
-                Ok(result) => {
+            match std::panic::AssertUnwindSafe(executor.execute(request))
+                .catch_unwind()
+                .await
+            {
+                Ok(Ok(result)) => {
                     if let Ok(record) = store.complete(&scope, process_id).await
                         && let Some(result_store) = &result_store
                     {
@@ -1204,13 +1218,28 @@ impl ProcessManager for BackgroundProcessManager {
                             .await;
                     }
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     if let Ok(record) = store.fail(&scope, process_id, error.kind).await
                         && let Some(result_store) = &result_store
                         && let Some(error_kind) = record.error_kind.clone()
                     {
                         let _ = result_store
                             .fail(&record.scope, record.process_id, error_kind)
+                            .await;
+                    }
+                }
+                Err(_) => {
+                    if let Ok(record) = store
+                        .fail(&scope, process_id, "runtime_panic".to_string())
+                        .await
+                        && let Some(result_store) = &result_store
+                    {
+                        let _ = result_store
+                            .fail(
+                                &record.scope,
+                                record.process_id,
+                                "runtime_panic".to_string(),
+                            )
                             .await;
                     }
                 }
@@ -1558,6 +1587,7 @@ where
             Err(error) => return Err(error.into()),
         };
         let record = deserialize::<ProcessRecord>(&bytes)?;
+        ensure_process_record_matches(&record, process_id)?;
         if same_scope_owner(&record.scope, scope) {
             Ok(Some(record))
         } else {
@@ -1715,6 +1745,7 @@ where
             Err(error) => return Err(error.into()),
         };
         let record = deserialize::<ProcessResultRecord>(&bytes)?;
+        ensure_result_record_matches(&record, process_id)?;
         if same_scope_owner(&record.scope, scope) {
             Ok(Some(record))
         } else {
@@ -1736,6 +1767,14 @@ where
         let Some(output_ref) = record.output_ref else {
             return Ok(None);
         };
+        let expected_output_ref = process_output_path(scope, process_id)?;
+        if output_ref != expected_output_ref {
+            return Err(invalid_stored_record(format!(
+                "process result output ref {} does not match expected {}",
+                output_ref.as_str(),
+                expected_output_ref.as_str()
+            )));
+        }
         let bytes = match self.filesystem.as_ref().read_file(&output_ref).await {
             Ok(bytes) => bytes,
             Err(error) if is_not_found(&error) => return Ok(None),
@@ -1828,6 +1867,38 @@ fn same_scope_owner(left: &ResourceScope, right: &ResourceScope) -> bool {
     left.tenant_id == right.tenant_id
         && left.user_id == right.user_id
         && left.agent_id == right.agent_id
+}
+
+fn ensure_process_record_matches(
+    record: &ProcessRecord,
+    process_id: ProcessId,
+) -> Result<(), ProcessError> {
+    if record.process_id != process_id {
+        return Err(invalid_stored_record(format!(
+            "stored process id {} does not match requested {}",
+            record.process_id, process_id
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_result_record_matches(
+    record: &ProcessResultRecord,
+    process_id: ProcessId,
+) -> Result<(), ProcessError> {
+    if record.process_id != process_id {
+        return Err(invalid_stored_record(format!(
+            "stored process result id {} does not match requested {}",
+            record.process_id, process_id
+        )));
+    }
+    Ok(())
+}
+
+fn invalid_stored_record(reason: impl Into<String>) -> ProcessError {
+    ProcessError::InvalidStoredRecord {
+        reason: reason.into(),
+    }
 }
 
 fn serialize_pretty<T>(value: &T) -> Result<Vec<u8>, ProcessError>

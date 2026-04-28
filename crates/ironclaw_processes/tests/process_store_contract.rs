@@ -9,7 +9,7 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_processes::*;
 use ironclaw_resources::{
@@ -797,6 +797,44 @@ async fn resource_managed_store_reconciles_on_complete_and_releases_on_failure_o
 }
 
 #[tokio::test]
+async fn background_process_manager_releases_process_reservation_after_executor_panic() {
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let store = Arc::new(ResourceManagedProcessStore::new(
+        InMemoryProcessStore::new(),
+        governor.clone(),
+    ));
+    let manager = BackgroundProcessManager::new(store.clone(), Arc::new(PanicExecutor));
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let tenant = ResourceAccount::tenant(scope.tenant_id.clone());
+
+    manager
+        .spawn(process_start_with_estimate(
+            process_id,
+            invocation_id,
+            scope.clone(),
+            process_estimate(),
+        ))
+        .await
+        .unwrap();
+
+    wait_for_status(store.as_ref(), &scope, process_id, ProcessStatus::Failed).await;
+    assert_eq!(
+        store
+            .get(&scope, process_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .error_kind
+            .as_deref(),
+        Some("runtime_panic")
+    );
+    assert_eq!(governor.reserved_for(&tenant), ResourceTally::default());
+    assert_eq!(governor.usage_for(&tenant), ResourceTally::default());
+}
+
+#[tokio::test]
 async fn background_process_manager_cleans_up_process_resource_reservations() {
     let success_governor = Arc::new(InMemoryResourceGovernor::new());
     let success_store = Arc::new(
@@ -983,6 +1021,36 @@ async fn process_host_kill_records_killed_result_without_output() {
 }
 
 #[tokio::test]
+async fn process_host_await_result_returns_unavailable_when_terminal_result_is_missing() {
+    let store = InMemoryProcessStore::new();
+    let result_store = Arc::new(DroppingProcessResultStore);
+    let host = ProcessHost::new(&store)
+        .with_result_store(result_store)
+        .with_poll_interval(Duration::from_millis(5));
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+
+    store
+        .start(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+    store.complete(&scope, process_id).await.unwrap();
+
+    let err = timeout(
+        Duration::from_millis(100),
+        host.await_result(&scope, process_id),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+
+    assert!(
+        matches!(err, ProcessError::ProcessResultUnavailable { process_id: id } if id == process_id)
+    );
+}
+
+#[tokio::test]
 async fn process_host_await_result_waits_for_background_success() {
     let store = Arc::new(InMemoryProcessStore::new());
     let result_store = Arc::new(InMemoryProcessResultStore::new());
@@ -1147,6 +1215,71 @@ async fn background_process_manager_stores_filesystem_output_ref() {
         host.output(&scope, process_id).await.unwrap(),
         Some(serde_json::json!({"ok": true}))
     );
+}
+
+#[tokio::test]
+async fn filesystem_process_store_rejects_record_id_mismatches() {
+    let fs = engine_filesystem();
+    let store = FilesystemProcessStore::new(&fs);
+    let invocation_id = InvocationId::new();
+    let requested_process_id = ProcessId::new();
+    let stored_process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let mut forged = process_record(stored_process_id, invocation_id, scope.clone());
+    forged.status = ProcessStatus::Completed;
+
+    fs.write_file(
+        &stored_process_record_path(&scope, requested_process_id),
+        &serde_json::to_vec_pretty(&forged).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let err = store.get(&scope, requested_process_id).await.unwrap_err();
+
+    assert!(matches!(err, ProcessError::InvalidStoredRecord { .. }));
+}
+
+#[tokio::test]
+async fn filesystem_process_result_store_rejects_unexpected_output_refs() {
+    let fs = engine_filesystem();
+    let store = FilesystemProcessResultStore::new(&fs);
+    let owner_invocation_id = InvocationId::new();
+    let owner_process_id = ProcessId::new();
+    let owner_scope = sample_scope(owner_invocation_id, "tenant1", "user1");
+    let other_invocation_id = InvocationId::new();
+    let other_process_id = ProcessId::new();
+    let other_scope = sample_scope(other_invocation_id, "tenant2", "user1");
+
+    store
+        .complete(
+            &other_scope,
+            other_process_id,
+            serde_json::json!({"secret": true}),
+        )
+        .await
+        .unwrap();
+    let forged = ProcessResultRecord {
+        process_id: owner_process_id,
+        scope: owner_scope.clone(),
+        status: ProcessStatus::Completed,
+        output: None,
+        output_ref: Some(stored_process_output_path(&other_scope, other_process_id)),
+        error_kind: None,
+    };
+    fs.write_file(
+        &stored_process_result_path(&owner_scope, owner_process_id),
+        &serde_json::to_vec_pretty(&forged).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let err = store
+        .output(&owner_scope, owner_process_id)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, ProcessError::InvalidStoredRecord { .. }));
 }
 
 #[tokio::test]
@@ -1454,6 +1587,18 @@ impl ProcessExecutor for CancellationAwareExecutor {
     }
 }
 
+struct PanicExecutor;
+
+#[async_trait]
+impl ProcessExecutor for PanicExecutor {
+    async fn execute(
+        &self,
+        _request: ProcessExecutionRequest,
+    ) -> Result<ProcessExecutionResult, ProcessExecutionError> {
+        panic!("simulated runtime panic");
+    }
+}
+
 struct CountingExecutor {
     result: Result<(), &'static str>,
     delay: Duration,
@@ -1513,6 +1658,66 @@ impl ProcessExecutor for CountingExecutor {
     }
 }
 
+struct DroppingProcessResultStore;
+
+#[async_trait]
+impl ProcessResultStore for DroppingProcessResultStore {
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        _output: serde_json::Value,
+    ) -> Result<ProcessResultRecord, ProcessError> {
+        Ok(ProcessResultRecord {
+            process_id,
+            scope: scope.clone(),
+            status: ProcessStatus::Completed,
+            output: None,
+            output_ref: None,
+            error_kind: None,
+        })
+    }
+
+    async fn fail(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        error_kind: String,
+    ) -> Result<ProcessResultRecord, ProcessError> {
+        Ok(ProcessResultRecord {
+            process_id,
+            scope: scope.clone(),
+            status: ProcessStatus::Failed,
+            output: None,
+            output_ref: None,
+            error_kind: Some(error_kind),
+        })
+    }
+
+    async fn kill(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ProcessResultRecord, ProcessError> {
+        Ok(ProcessResultRecord {
+            process_id,
+            scope: scope.clone(),
+            status: ProcessStatus::Killed,
+            output: None,
+            output_ref: None,
+            error_kind: None,
+        })
+    }
+
+    async fn get(
+        &self,
+        _scope: &ResourceScope,
+        _process_id: ProcessId,
+    ) -> Result<Option<ProcessResultRecord>, ProcessError> {
+        Ok(None)
+    }
+}
+
 async fn wait_for_event_count(events: &InMemoryEventSink, expected: usize) {
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
@@ -1548,6 +1753,29 @@ async fn wait_for_status<S>(
             record.status
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+fn process_record(
+    process_id: ProcessId,
+    invocation_id: InvocationId,
+    scope: ResourceScope,
+) -> ProcessRecord {
+    let start = process_start(process_id, invocation_id, scope);
+    ProcessRecord {
+        process_id: start.process_id,
+        parent_process_id: start.parent_process_id,
+        invocation_id: start.invocation_id,
+        scope: start.scope,
+        extension_id: start.extension_id,
+        capability_id: start.capability_id,
+        runtime: start.runtime,
+        status: ProcessStatus::Running,
+        grants: start.grants,
+        mounts: start.mounts,
+        estimated_resources: start.estimated_resources,
+        resource_reservation_id: start.resource_reservation_id,
+        error_kind: None,
     }
 }
 
@@ -1608,6 +1836,33 @@ fn process_estimate() -> ResourceEstimate {
         concurrency_slots: Some(1),
         ..ResourceEstimate::default()
     }
+}
+
+fn stored_process_record_path(scope: &ResourceScope, process_id: ProcessId) -> VirtualPath {
+    VirtualPath::new(format!(
+        "/engine/tenants/{}/users/{}/processes/{process_id}.json",
+        scope.tenant_id.as_str(),
+        scope.user_id.as_str()
+    ))
+    .unwrap()
+}
+
+fn stored_process_result_path(scope: &ResourceScope, process_id: ProcessId) -> VirtualPath {
+    VirtualPath::new(format!(
+        "/engine/tenants/{}/users/{}/process-results/{process_id}.json",
+        scope.tenant_id.as_str(),
+        scope.user_id.as_str()
+    ))
+    .unwrap()
+}
+
+fn stored_process_output_path(scope: &ResourceScope, process_id: ProcessId) -> VirtualPath {
+    VirtualPath::new(format!(
+        "/engine/tenants/{}/users/{}/process-outputs/{process_id}/output.json",
+        scope.tenant_id.as_str(),
+        scope.user_id.as_str()
+    ))
+    .unwrap()
 }
 
 fn engine_filesystem() -> LocalFilesystem {
