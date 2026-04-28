@@ -44,6 +44,13 @@ class GatewayStack:
     gateway_proc: subprocess.Popen[str]
     mock_llm_proc: subprocess.Popen[str]
     tempdirs: list[tempfile.TemporaryDirectory[str]]
+    # http_url and channels_dir are populated when start_gateway_stack
+    # is invoked. http_url is the HTTP-channel webhook endpoint
+    # (separate from the gateway's REST API port). channels_dir is the
+    # WASM channels base directory — needed by Telegram-channel-install
+    # scenarios that patch the per-channel capabilities.json.
+    http_url: str = ""
+    channels_dir: str = ""
 
 
 def run(cmd: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
@@ -488,6 +495,8 @@ async def start_gateway_stack(
             gateway_proc=gateway_proc,
             mock_llm_proc=mock_llm_proc,
             tempdirs=tempdirs,
+            http_url=f"http://127.0.0.1:{http_port}",
+            channels_dir=str(channels_tmp.name),
         )
     except Exception:
         stop_process(mock_llm_proc)

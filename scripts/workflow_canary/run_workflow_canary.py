@@ -106,6 +106,26 @@ SCENARIOS: dict[str, tuple[str, str, str]] = {
         "run",
         "NL schedule update — POST /api/chat/send → routine_update tool",
     ),
+    "telegram_channel_install": (
+        "scripts.workflow_canary.scenarios.telegram_channel_install",
+        "run",
+        "Telegram channel install + setup → /api/extensions",
+    ),
+    "telegram_round_trip": (
+        "scripts.workflow_canary.scenarios.telegram_round_trip",
+        "run",
+        "Telegram inbound webhook → agent → outbound reply",
+    ),
+    "routine_visibility_from_telegram": (
+        "scripts.workflow_canary.scenarios.routine_visibility_from_telegram",
+        "run",
+        "Telegram → agent → list-routines reply",
+    ),
+    "manual_trigger_from_telegram": (
+        "scripts.workflow_canary.scenarios.manual_trigger_from_telegram",
+        "run",
+        "Manual routine trigger → ack returns to Telegram",
+    ),
 }
 
 
@@ -351,6 +371,12 @@ async def _run_scenarios(
                 "ROUTINES_ENABLED": "true",
                 "ROUTINES_CRON_INTERVAL": "2",
                 "ROUTINES_DEFAULT_COOLDOWN": "0",
+                # Routes the hardcoded validate_telegram_bot_token getMe
+                # call (in src/extensions/manager.rs) to mock_telegram.
+                # That getMe path bypasses the standard
+                # IRONCLAW_TEST_HTTP_REMAP because it doesn't go through
+                # the http_interceptor pipeline.
+                "IRONCLAW_TEST_TELEGRAM_API_BASE_URL": mock_telegram_url,
             },
             log_dir=log_dir,
         )
