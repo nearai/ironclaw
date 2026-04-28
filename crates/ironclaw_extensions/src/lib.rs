@@ -492,21 +492,34 @@ fn ensure_extension_root_matches(
     id: &ExtensionId,
     root: &VirtualPath,
 ) -> Result<(), ExtensionError> {
-    let expected = format!("/system/extensions/{}", id.as_str());
-    if root.as_str() != expected {
+    let expected = extension_id_from_package_root(root)?;
+    if &expected != id {
         return Err(ExtensionError::ManifestIdMismatch {
             root: root.clone(),
-            expected: ExtensionId::new(
-                root.as_str()
-                    .trim_start_matches("/system/extensions/")
-                    .split('/')
-                    .next()
-                    .unwrap_or_default(),
-            )?,
+            expected,
             actual: id.clone(),
         });
     }
     Ok(())
+}
+
+fn extension_id_from_package_root(root: &VirtualPath) -> Result<ExtensionId, ExtensionError> {
+    let Some(extension_id) = root.as_str().strip_prefix("/system/extensions/") else {
+        return Err(invalid_package_root(root));
+    };
+    if extension_id.is_empty() || extension_id.contains('/') {
+        return Err(invalid_package_root(root));
+    }
+    Ok(ExtensionId::new(extension_id.to_string())?)
+}
+
+fn invalid_package_root(root: &VirtualPath) -> ExtensionError {
+    ExtensionError::InvalidManifest {
+        reason: format!(
+            "extension package root {} must be /system/extensions/<extension>",
+            root.as_str()
+        ),
+    }
 }
 
 fn validate_asset_path(value: &str) -> Result<(), ExtensionError> {
@@ -583,11 +596,12 @@ fn validate_mcp_runtime_shape(
                     reason: format!("mcp {transport} transport must not specify command"),
                 });
             }
-            if url.is_none() {
+            let Some(url) = url else {
                 return Err(ExtensionError::InvalidManifest {
                     reason: format!("mcp {transport} transport requires url"),
                 });
-            }
+            };
+            validate_mcp_http_url(transport, url)?;
         }
         _ => {
             return Err(ExtensionError::InvalidManifest {
@@ -596,6 +610,18 @@ fn validate_mcp_runtime_shape(
         }
     }
 
+    Ok(())
+}
+
+fn validate_mcp_http_url(transport: &str, value: &str) -> Result<(), ExtensionError> {
+    let parsed = url::Url::parse(value).map_err(|_| ExtensionError::InvalidManifest {
+        reason: format!("mcp {transport} transport URL must be absolute http(s) URL"),
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(ExtensionError::InvalidManifest {
+            reason: format!("mcp {transport} transport URL must use http or https"),
+        });
+    }
     Ok(())
 }
 

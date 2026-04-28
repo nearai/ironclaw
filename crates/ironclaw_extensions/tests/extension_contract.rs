@@ -375,6 +375,28 @@ fn package_root_must_match_manifest_id() {
 }
 
 #[test]
+fn package_root_must_be_direct_extension_directory() {
+    for root in [
+        "/system/extensions",
+        "/system/extensions/echo/nested",
+        "/projects/echo",
+    ] {
+        let manifest = ExtensionManifest::parse(WASM_MANIFEST).unwrap();
+        let err =
+            ExtensionPackage::from_manifest(manifest, VirtualPath::new(root).unwrap()).unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                ExtensionError::InvalidManifest { reason }
+                    if reason.contains("/system/extensions/<extension>")
+            ),
+            "{root:?} should be rejected as an invalid package root"
+        );
+    }
+}
+
+#[test]
 fn package_rejects_duplicate_capabilities_within_manifest() {
     let duplicate_manifest = WASM_MANIFEST.to_string()
         + r#"
@@ -464,6 +486,14 @@ fn mcp_runtime_requires_endpoint_shape_for_transport() {
     assert!(matches!(
         ExtensionManifest::parse(MCP_HTTP_WITH_COMMAND_MANIFEST),
         Err(ExtensionError::InvalidManifest { reason }) if reason.contains("http") && reason.contains("command")
+    ));
+    assert!(matches!(
+        ExtensionManifest::parse(MCP_HTTP_INVALID_URL_MANIFEST),
+        Err(ExtensionError::InvalidManifest { reason }) if reason.contains("http") && reason.contains("URL")
+    ));
+    assert!(matches!(
+        ExtensionManifest::parse(MCP_SSE_UNSUPPORTED_URL_SCHEME_MANIFEST),
+        Err(ExtensionError::InvalidManifest { reason }) if reason.contains("sse") && reason.contains("http")
     ));
 }
 
@@ -735,6 +765,46 @@ trust = "user_trusted"
 kind = "mcp"
 transport = "http"
 command = "github-mcp-server"
+
+[[capabilities]]
+id = "github-mcp.search_issues"
+description = "Search GitHub issues"
+effects = ["network", "dispatch_capability"]
+default_permission = "ask"
+parameters_schema = { type = "object" }
+"#;
+
+const MCP_HTTP_INVALID_URL_MANIFEST: &str = r#"
+id = "github-mcp"
+name = "GitHub MCP"
+version = "0.1.0"
+description = "GitHub MCP adapter"
+trust = "user_trusted"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "not a url"
+
+[[capabilities]]
+id = "github-mcp.search_issues"
+description = "Search GitHub issues"
+effects = ["network", "dispatch_capability"]
+default_permission = "ask"
+parameters_schema = { type = "object" }
+"#;
+
+const MCP_SSE_UNSUPPORTED_URL_SCHEME_MANIFEST: &str = r#"
+id = "github-mcp"
+name = "GitHub MCP"
+version = "0.1.0"
+description = "GitHub MCP adapter"
+trust = "user_trusted"
+
+[runtime]
+kind = "mcp"
+transport = "sse"
+url = "file:///tmp/mcp.sock"
 
 [[capabilities]]
 id = "github-mcp.search_issues"
