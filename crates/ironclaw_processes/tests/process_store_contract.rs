@@ -9,7 +9,9 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+use ironclaw_filesystem::{
+    DirEntry, FileStat, FilesystemError, FilesystemOperation, LocalFilesystem, RootFilesystem,
+};
 use ironclaw_host_api::*;
 use ironclaw_processes::*;
 use ironclaw_resources::{
@@ -683,6 +685,36 @@ async fn resource_managed_store_releases_when_inner_store_drops_reservation_id()
 }
 
 #[tokio::test]
+async fn resource_managed_store_preserves_original_error_when_cleanup_fails() {
+    let governor = Arc::new(ReleaseFailingGovernor::default());
+    let inner = InMemoryProcessStore::new();
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    inner
+        .start(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+    let store = ResourceManagedProcessStore::new(inner, governor);
+
+    let err = store
+        .start(process_start_with_estimate(
+            process_id,
+            InvocationId::new(),
+            scope,
+            process_estimate(),
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ProcessError::ResourceCleanupFailed { original, cleanup: ResourceError::UnknownReservation { .. } }
+            if matches!(*original, ProcessError::ProcessAlreadyExists { process_id: id } if id == process_id)
+    ));
+}
+
+#[tokio::test]
 async fn resource_managed_store_releases_reservation_when_inner_start_fails() {
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let inner = InMemoryProcessStore::new();
@@ -1218,6 +1250,22 @@ async fn background_process_manager_stores_filesystem_output_ref() {
 }
 
 #[tokio::test]
+async fn filesystem_process_store_propagates_backend_errors_that_mention_not_found() {
+    let fs = BackendErrorFilesystem;
+    let store = FilesystemProcessStore::new(&fs);
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+
+    let err = store.get(&scope, process_id).await.unwrap_err();
+
+    assert!(matches!(
+        err,
+        ProcessError::Filesystem(reason) if reason.contains("database index not found")
+    ));
+}
+
+#[tokio::test]
 async fn filesystem_process_store_rejects_record_id_mismatches() {
     let fs = engine_filesystem();
     let store = FilesystemProcessStore::new(&fs);
@@ -1488,6 +1536,78 @@ impl ProcessStore for ForgedProcessStore {
             })
             .cloned()
             .collect())
+    }
+}
+
+#[derive(Default)]
+struct ReleaseFailingGovernor {
+    inner: InMemoryResourceGovernor,
+}
+
+impl ResourceGovernor for ReleaseFailingGovernor {
+    fn set_limit(&self, account: ResourceAccount, limits: ResourceLimits) {
+        self.inner.set_limit(account, limits);
+    }
+
+    fn reserve(
+        &self,
+        scope: ResourceScope,
+        estimate: ResourceEstimate,
+    ) -> Result<ironclaw_resources::ResourceReservation, ResourceError> {
+        self.inner.reserve(scope, estimate)
+    }
+
+    fn reserve_with_id(
+        &self,
+        scope: ResourceScope,
+        estimate: ResourceEstimate,
+        reservation_id: ResourceReservationId,
+    ) -> Result<ironclaw_resources::ResourceReservation, ResourceError> {
+        self.inner.reserve_with_id(scope, estimate, reservation_id)
+    }
+
+    fn reconcile(
+        &self,
+        reservation_id: ResourceReservationId,
+        actual: ResourceUsage,
+    ) -> Result<ironclaw_resources::ResourceReceipt, ResourceError> {
+        self.inner.reconcile(reservation_id, actual)
+    }
+
+    fn release(
+        &self,
+        reservation_id: ResourceReservationId,
+    ) -> Result<ironclaw_resources::ResourceReceipt, ResourceError> {
+        Err(ResourceError::UnknownReservation { id: reservation_id })
+    }
+}
+
+struct BackendErrorFilesystem;
+
+#[async_trait]
+impl RootFilesystem for BackendErrorFilesystem {
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        Err(backend_error(path, FilesystemOperation::ReadFile))
+    }
+
+    async fn write_file(&self, path: &VirtualPath, _bytes: &[u8]) -> Result<(), FilesystemError> {
+        Err(backend_error(path, FilesystemOperation::WriteFile))
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        Err(backend_error(path, FilesystemOperation::ListDir))
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        Err(backend_error(path, FilesystemOperation::Stat))
+    }
+}
+
+fn backend_error(path: &VirtualPath, operation: FilesystemOperation) -> FilesystemError {
+    FilesystemError::Backend {
+        path: path.clone(),
+        operation,
+        reason: "database index not found while backend is unavailable".to_string(),
     }
 }
 

@@ -150,6 +150,11 @@ pub enum ProcessError {
     },
     #[error("resource lifecycle error: {0}")]
     Resource(ResourceError),
+    #[error("resource cleanup failed after process error: original={original}; cleanup={cleanup}")]
+    ResourceCleanupFailed {
+        original: Box<ProcessError>,
+        cleanup: ResourceError,
+    },
     #[error("process result store is not configured")]
     ProcessResultStoreUnavailable,
     #[error("process result is unavailable for {process_id}")]
@@ -873,18 +878,46 @@ where
     fn release_reservation(
         &self,
         reservation_id: ResourceReservationId,
-    ) -> Result<(), ProcessError> {
+    ) -> Result<(), ResourceError> {
         self.governor.release(reservation_id)?;
         Ok(())
+    }
+
+    fn release_reservation_after_error(
+        &self,
+        reservation_id: ResourceReservationId,
+        original: ProcessError,
+    ) -> ProcessError {
+        match self.release_reservation(reservation_id) {
+            Ok(()) => original,
+            Err(cleanup) => ProcessError::ResourceCleanupFailed {
+                original: Box::new(original),
+                cleanup,
+            },
+        }
     }
 
     fn reconcile_reservation(
         &self,
         reservation_id: ResourceReservationId,
-    ) -> Result<(), ProcessError> {
+    ) -> Result<(), ResourceError> {
         self.governor
             .reconcile(reservation_id, self.completion_usage.clone())?;
         Ok(())
+    }
+
+    fn reconcile_reservation_after_error(
+        &self,
+        reservation_id: ResourceReservationId,
+        original: ProcessError,
+    ) -> ProcessError {
+        match self.reconcile_reservation(reservation_id) {
+            Ok(()) => original,
+            Err(cleanup) => ProcessError::ResourceCleanupFailed {
+                original: Box::new(original),
+                cleanup,
+            },
+        }
     }
 }
 
@@ -912,17 +945,14 @@ where
                 Ok(record)
             }
             Ok(record) => {
-                self.release_reservation(reservation.id)?;
-                Err(ProcessError::ResourceReservationMismatch {
+                let original = ProcessError::ResourceReservationMismatch {
                     process_id: record.process_id,
                     expected: reservation.id,
                     actual: record.resource_reservation_id,
-                })
+                };
+                Err(self.release_reservation_after_error(reservation.id, original))
             }
-            Err(error) => {
-                self.release_reservation(reservation.id)?;
-                Err(error)
-            }
+            Err(error) => Err(self.release_reservation_after_error(reservation.id, error)),
         }
     }
 
@@ -946,14 +976,15 @@ where
             }
         };
         if record.resource_reservation_id != Some(reservation_id) {
-            self.reconcile_reservation(reservation_id)?;
-            return Err(ProcessError::ResourceReservationMismatch {
+            let original = ProcessError::ResourceReservationMismatch {
                 process_id: record.process_id,
                 expected: reservation_id,
                 actual: record.resource_reservation_id,
-            });
+            };
+            return Err(self.reconcile_reservation_after_error(reservation_id, original));
         }
-        self.reconcile_reservation(reservation_id)?;
+        self.reconcile_reservation(reservation_id)
+            .map_err(ProcessError::Resource)?;
         Ok(record)
     }
 
@@ -978,14 +1009,15 @@ where
             }
         };
         if record.resource_reservation_id != Some(reservation_id) {
-            self.release_reservation(reservation_id)?;
-            return Err(ProcessError::ResourceReservationMismatch {
+            let original = ProcessError::ResourceReservationMismatch {
                 process_id: record.process_id,
                 expected: reservation_id,
                 actual: record.resource_reservation_id,
-            });
+            };
+            return Err(self.release_reservation_after_error(reservation_id, original));
         }
-        self.release_reservation(reservation_id)?;
+        self.release_reservation(reservation_id)
+            .map_err(ProcessError::Resource)?;
         Ok(record)
     }
 
@@ -1009,14 +1041,15 @@ where
             }
         };
         if record.resource_reservation_id != Some(reservation_id) {
-            self.release_reservation(reservation_id)?;
-            return Err(ProcessError::ResourceReservationMismatch {
+            let original = ProcessError::ResourceReservationMismatch {
                 process_id: record.process_id,
                 expected: reservation_id,
                 actual: record.resource_reservation_id,
-            });
+            };
+            return Err(self.release_reservation_after_error(reservation_id, original));
         }
-        self.release_reservation(reservation_id)?;
+        self.release_reservation(reservation_id)
+            .map_err(ProcessError::Resource)?;
         Ok(record)
     }
 
@@ -1916,13 +1949,5 @@ where
 }
 
 fn is_not_found(error: &FilesystemError) -> bool {
-    match error {
-        FilesystemError::NotFound { .. } => true,
-        FilesystemError::Backend { reason, .. } => {
-            reason.contains("No such file")
-                || reason.contains("not found")
-                || reason.contains("os error 2")
-        }
-        _ => false,
-    }
+    matches!(error, FilesystemError::NotFound { .. })
 }
