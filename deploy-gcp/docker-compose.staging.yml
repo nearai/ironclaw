@@ -1,0 +1,59 @@
+# Compose file used on the GCP staging VM.
+#
+# Differs from the repo-root docker-compose.yml in three deliberate ways:
+#   1. Pulls images from Artifact Registry instead of building from source
+#      (the VM has no source tree).
+#   2. Binds t3claw on 0.0.0.0:3000 so the load balancer can reach it via
+#      the internal network. The repo-root file binds 127.0.0.1 for safety
+#      on developer laptops; on the VM there is no public IP, so 0.0.0.0
+#      is fine.
+#   3. Excludes the t3n-mcp-sidecar — it is opt-in for staging and not
+#      built by gcp-provision.sh. Add it back here if you push that image.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    profiles: ["app"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: t3claw
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: t3claw
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U t3claw"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  t3claw:
+    profiles: ["app"]
+    image: us-central1-docker.pkg.dev/gen-lang-client-0263867259/t3claw/agent:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "0.0.0.0:3000:3000"
+    group_add:
+      - "${DOCKER_GID:-0}"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://t3claw:${POSTGRES_PASSWORD}@postgres:5432/t3claw
+      GATEWAY_ENABLED: "true"
+      GATEWAY_HOST: "0.0.0.0"
+      GATEWAY_PORT: "3000"
+      CLI_ENABLED: "false"
+      ONBOARD_COMPLETED: "true"
+      T3CLAW_IN_DOCKER: "true"
+      SANDBOX_ENABLED: ${SANDBOX_ENABLED:-false}
+      SANDBOX_POLICY: ${SANDBOX_POLICY:-readonly}
+    volumes:
+      - t3claw-data:/home/t3claw/.t3claw
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  postgres-data:
+  t3claw-data:

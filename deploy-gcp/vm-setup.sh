@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # VM bootstrap for T3Claw on GCP Compute Engine (Debian 12).
 #
-# Copy this directory and docker-compose.yml to the VM first, then run:
-#   sudo bash /tmp/deploy/vm-setup.sh
+# Copy deploy-gcp/ to the VM first, then run:
+#   sudo bash /var/tmp/deploy/vm-setup.sh
 #
 # The script expects:
-#   /tmp/deploy/              — contents of deploy-gcp/
-#   /tmp/docker-compose.yml   — repo-root docker-compose.yml
+#   /var/tmp/deploy/                          — contents of deploy-gcp/
+#   /var/tmp/deploy/docker-compose.staging.yml — installed as /opt/t3claw/docker-compose.yml
 
 set -euo pipefail
 
@@ -53,28 +53,21 @@ fi
 
 gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
 
-# Pre-pull images so the first start is fast (the service does this too, but
-# doing it here surfaces auth problems before systemd gets involved).
-echo "==> Pre-pulling images"
+# Pre-pull the agent image so the first start is fast and any AR auth problems
+# surface here rather than inside systemd.
+echo "==> Pre-pulling agent image"
 docker pull "${IMAGE_PREFIX}/agent:latest"
-docker pull "${IMAGE_PREFIX}/t3n-mcp-sidecar:latest"
 
 # ── App directory ─────────────────────────────────────────────────────────────
 echo "==> Setting up /opt/t3claw"
 mkdir -p /opt/t3claw
 chmod 700 /opt/t3claw
 
-cp /tmp/docker-compose.yml /opt/t3claw/docker-compose.yml
-
-# Rewrite image references so compose uses the Artifact Registry images instead
-# of building from source (the VM has no source tree).
-sed -i \
-  "s|build:.*||g;
-   /context:/d;
-   /dockerfile:/d;
-   /target:/d;
-   s|image: t3claw.*|image: ${IMAGE_PREFIX}/agent:latest|g" \
-  /opt/t3claw/docker-compose.yml
+# Install the staging-specific compose file directly. The repo-root
+# docker-compose.yml is for local development (build from source, 127.0.0.1
+# binds, sidecar contexts) and cannot be safely rewritten in place; the
+# staging file is the dedicated VM variant.
+install -m 644 /var/tmp/deploy/docker-compose.staging.yml /opt/t3claw/docker-compose.yml
 
 # ── Environment file ──────────────────────────────────────────────────────────
 if [ ! -f /opt/t3claw/.env ]; then
@@ -91,7 +84,7 @@ fi
 
 # ── Systemd service ───────────────────────────────────────────────────────────
 echo "==> Installing t3claw.service"
-cp /tmp/deploy/t3claw.service /etc/systemd/system/t3claw.service
+cp /var/tmp/deploy/t3claw.service /etc/systemd/system/t3claw.service
 systemctl daemon-reload
 
 if [ -f /opt/t3claw/.env ]; then
@@ -105,4 +98,4 @@ echo "==> Bootstrap complete"
 echo ""
 echo "    Verify with:"
 echo "      systemctl status t3claw"
-echo "      docker logs t3-claw-t3claw-1"
+echo "      docker logs t3claw-t3claw-1"
