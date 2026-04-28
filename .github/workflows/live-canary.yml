@@ -817,6 +817,17 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           CANARY_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           GITHUB_SHA: ${{ github.sha }}
+          # Repo-scoped GITHUB_TOKEN with `issues: write` permission
+          # (declared in the top-level `permissions:` block). The
+          # notifier opens / updates one canary-failure issue per
+          # failed lane, deduplicated by title. Off-by-default
+          # opt-out: drop CANARY_CREATE_ISSUES below or unset.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          # Only auto-open issues for scheduled runs — manual
+          # workflow_dispatch tests would otherwise flood the tracker
+          # while iterating on canary changes locally.
+          CANARY_CREATE_ISSUES: ${{ github.event_name == 'schedule' && '1' || '0' }}
         run: |
           # The notifier is intentionally side-effect-light: it exits 0 even on
           # failure so the canary run's overall status isn't masked by a flaky
