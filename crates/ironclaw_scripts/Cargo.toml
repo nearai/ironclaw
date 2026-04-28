@@ -1,0 +1,15 @@
+[package]
+name = "ironclaw_scripts"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_resources = { path = "../ironclaw_resources" }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+rust_decimal_macros = "1"
