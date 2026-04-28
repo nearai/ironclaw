@@ -370,8 +370,8 @@ curl -s -X POST \
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/skills` | List all discovered skills with trust level and activation status |
-| `POST` | `/api/skills/install` | Install a skill from ClawHub or a local path |
-| `DELETE` | `/api/skills/:name` | Remove an installed skill |
+| `POST` | `/api/skills/install` | Install a skill from ClawHub or a local path. Admin-only in multi-tenant mode because installed skills are shared globally. |
+| `DELETE` | `/api/skills/:name` | Remove an installed skill. Admin-only in multi-tenant mode because installed skills are shared globally. |
 | `GET` | `/api/skills/search` | Search the ClawHub registry |
 
 ### GET /api/skills/search
