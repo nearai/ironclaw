@@ -389,6 +389,14 @@
 .debug-activity-icon.think { color: var(--warning); }
 .debug-activity-icon.stream { color: #60a5fa; }
 .debug-activity-icon.error { color: var(--danger); }
+.debug-activity-icon.code { color: #10b981; }
+.debug-activity-icon.warn { color: var(--warning); }
+.debug-activity-icon.gate { color: #f59e0b; }
+.debug-activity-icon.skill { color: #a78bfa; }
+.debug-activity-icon.plan { color: #22c55e; }
+.debug-activity-icon.state { color: #94a3b8; }
+.debug-activity-icon.image { color: #f472b6; }
+.debug-activity-icon.job { color: #0ea5e9; }
 
 .debug-activity-label {
   flex: 1;

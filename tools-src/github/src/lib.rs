@@ -430,6 +430,14 @@ enum GitHubAction {
         page: Option<u32>,
         limit: Option<u32>,
     },
+    #[serde(rename = "fork_repo")]
+    ForkRepo {
+        owner: String,
+        repo: String,
+        organization: Option<String>,
+        name: Option<String>,
+        default_branch_only: Option<bool>,
+    },
     #[serde(rename = "handle_webhook")]
     HandleWebhook { webhook: GitHubWebhookRequest },
 }
@@ -752,6 +760,19 @@ fn execute_inner(params: &str) -> Result<String, String> {
             page,
             limit,
         } => get_workflow_runs(&owner, &repo, workflow_id.as_deref(), page, limit),
+        GitHubAction::ForkRepo {
+            owner,
+            repo,
+            organization,
+            name,
+            default_branch_only,
+        } => fork_repo(
+            &owner,
+            &repo,
+            organization.as_deref(),
+            name.as_deref(),
+            default_branch_only,
+        ),
         GitHubAction::HandleWebhook { webhook } => handle_webhook(webhook),
     }
 }
@@ -921,6 +942,49 @@ fn create_repo(
     }
     if let Some(template) = license_template {
         req_body["license_template"] = serde_json::json!(template);
+    }
+
+    github_request("POST", &path, Some(req_body.to_string()))
+}
+
+fn fork_repo(
+    owner: &str,
+    repo: &str,
+    organization: Option<&str>,
+    name: Option<&str>,
+    default_branch_only: Option<bool>,
+) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    validate_input_length(owner, "owner")?;
+    validate_input_length(repo, "repo")?;
+    if let Some(org) = organization {
+        validate_input_length(org, "organization")?;
+        if !validate_path_segment(org) {
+            return Err("Invalid org name".into());
+        }
+    }
+    if let Some(n) = name {
+        validate_input_length(n, "name")?;
+        if !validate_path_segment(n) {
+            return Err("Invalid fork name".into());
+        }
+    }
+
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    let path = format!("/repos/{}/{}/forks", encoded_owner, encoded_repo);
+
+    let mut req_body = serde_json::json!({});
+    if let Some(org) = organization {
+        req_body["organization"] = serde_json::json!(org);
+    }
+    if let Some(n) = name {
+        req_body["name"] = serde_json::json!(n);
+    }
+    if let Some(only) = default_branch_only {
+        req_body["default_branch_only"] = serde_json::json!(only);
     }
 
     github_request("POST", &path, Some(req_body.to_string()))
@@ -2302,6 +2366,17 @@ const SCHEMA: &str = r#"{
         },
         {
             "properties": {
+                "action": { "const": "fork_repo" },
+                "owner": { "type": "string", "description": "Repository owner (user or org) to fork from" },
+                "repo": { "type": "string", "description": "Repository name to fork" },
+                "organization": { "type": "string", "description": "Optional organization to fork into; omit to fork into the authenticated user's account" },
+                "name": { "type": "string", "description": "Optional name for the fork; defaults to the original repo name" },
+                "default_branch_only": { "type": "boolean", "default": false, "description": "When true, only the default branch is copied into the fork" }
+            },
+            "required": ["action", "owner", "repo"]
+        },
+        {
+            "properties": {
                 "action": { "const": "handle_webhook" },
                 "webhook": {
                     "type": "object",
@@ -2377,6 +2452,7 @@ mod tests {
             "create_release",
             "trigger_workflow",
             "get_workflow_runs",
+            "fork_repo",
             "handle_webhook",
         ]
         .into_iter()
