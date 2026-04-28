@@ -56,10 +56,30 @@ DEFAULT_OUTPUT_DIR = ROOT / "artifacts" / "workflow-canary"
 # Each scenario function takes (stack, mock_telegram_url, output_dir,
 # log_dir) and returns a list[ProbeResult].
 SCENARIOS: dict[str, tuple[str, str, str]] = {
+    "bug_logger": (
+        "scripts.workflow_canary.scenarios.bug_logger",
+        "run",
+        "Script 1 — Telegram → Google Sheet Bug Logger",
+    ),
+    "calendar_prep": (
+        "scripts.workflow_canary.scenarios.calendar_prep",
+        "run",
+        "Script 2 — Calendar Prep Assistant",
+    ),
+    "hn_monitor": (
+        "scripts.workflow_canary.scenarios.hn_monitor",
+        "run",
+        "Script 3 — Hacker News Keyword Monitor",
+    ),
     "periodic_reminder": (
         "scripts.workflow_canary.scenarios.periodic_reminder",
         "run",
         "Script 4 — Periodic Reminder via Telegram",
+    ),
+    "crm_tracker": (
+        "scripts.workflow_canary.scenarios.crm_tracker",
+        "run",
+        "Script 5 — Email → CRM Inbound Tracker",
     ),
 }
 
