@@ -11,6 +11,14 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
 
+[features]
+# Exposes `crate::fixtures` constructors that produce privileged
+# `EffectiveTrustClass` values without going through the policy engine.
+# Off by default — production builds must NEVER enable this. Tests opt in
+# via `cargo test --features test-fixtures` (or `--features
+# ironclaw_trust/test-fixtures` from the workspace root).
+test-fixtures = []
+
 [dependencies]
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 chrono = { version = "0.4", features = ["serde"] }
@@ -19,3 +27,8 @@ thiserror = "2"
 
 [dev-dependencies]
 serde_json = "1"
+static_assertions = "1"
+
+[[test]]
+name = "policy_contract"
+required-features = ["test-fixtures"]

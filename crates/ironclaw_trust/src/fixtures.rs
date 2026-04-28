@@ -1,15 +1,14 @@
 //! Test-only fixture constructors. **Not for production use.**
 //!
-//! This module is `#[doc(hidden)]` because it is the deliberate escape
-//! hatch that integration tests use to stage privileged
-//! [`EffectiveTrustClass`] entries. Production code MUST construct
-//! `EffectiveTrustClass` only via [`crate::TrustPolicy::evaluate`]; using
-//! these helpers anywhere outside `tests/` is a code-review failure.
+//! This module is gated behind the `test-fixtures` Cargo feature so it is
+//! invisible to normal production builds. The crate's own unit tests
+//! (`#[cfg(test)]`) and integration tests opt in via the feature; nothing
+//! else can.
 //!
-//! Naming intentionally signals the boundary (`*_for_test`). PR review
-//! should reject any non-test caller.
+//! Even with the feature on, naming intentionally signals the boundary
+//! (`*_for_test`). PR review should reject any non-test caller.
 
-use ironclaw_host_api::{EffectKind, PackageId};
+use ironclaw_host_api::{EffectKind, PackageId, ResourceCeiling};
 
 use crate::decision::EffectiveTrustClass;
 use crate::sources::{AdminEntry, BundledEntry, admin_entry_with_trust, bundled_entry_with_trust};
@@ -31,7 +30,24 @@ pub fn bundled_entry_for_test(
     effective_trust: EffectiveTrustClass,
     allowed_effects: Vec<EffectKind>,
 ) -> BundledEntry {
-    bundled_entry_with_trust(package_id, digest, effective_trust, allowed_effects)
+    bundled_entry_with_trust(package_id, digest, effective_trust, allowed_effects, None)
+}
+
+/// Test fixture: a [`BundledEntry`] with an explicit resource ceiling.
+pub fn bundled_entry_with_resource_ceiling_for_test(
+    package_id: PackageId,
+    digest: Option<String>,
+    effective_trust: EffectiveTrustClass,
+    allowed_effects: Vec<EffectKind>,
+    max_resource_ceiling: ResourceCeiling,
+) -> BundledEntry {
+    bundled_entry_with_trust(
+        package_id,
+        digest,
+        effective_trust,
+        allowed_effects,
+        Some(max_resource_ceiling),
+    )
 }
 
 /// Test fixture: an [`AdminEntry`] at the given effective trust ceiling.
@@ -40,5 +56,5 @@ pub fn admin_entry_for_test(
     effective_trust: EffectiveTrustClass,
     allowed_effects: Vec<EffectKind>,
 ) -> AdminEntry {
-    admin_entry_with_trust(package_id, effective_trust, allowed_effects)
+    admin_entry_with_trust(package_id, effective_trust, allowed_effects, None)
 }

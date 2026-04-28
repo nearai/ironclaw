@@ -23,6 +23,20 @@ use ironclaw_trust::{
     TrustChange, TrustDecision, TrustPolicy, TrustPolicyInput, TrustProvenance, authority_changed,
     grant_retention_eligible, identity_changed,
 };
+use static_assertions::assert_not_impl_any;
+
+// ---------------------------------------------------------------------------
+// Compile-time invariant for AC #1: `EffectiveTrustClass` must NOT implement
+// `DeserializeOwned`. If a future change accidentally adds a Deserialize
+// impl, this check fires at compile time rather than letting wire payloads
+// forge privileged effective trust. Mirrors the existing `host_api` pattern
+// (`assert_not_impl_any!(HostPath: serde::Serialize)`).
+//
+// `DeserializeOwned` is the practical attack surface — JSON / TOML / binary
+// codecs that produce owned strings need `DeserializeOwned`. A bare
+// `Deserialize<'de>` impl would also fail this check on `Copy` types.
+// ---------------------------------------------------------------------------
+assert_not_impl_any!(EffectiveTrustClass: serde::de::DeserializeOwned);
 
 use crate::support::{FakeAuthorizer, FakeGrantStore};
 
@@ -295,15 +309,31 @@ fn t5_effective_system_without_grant_denies_invocation() {
 fn t6_expanded_authority_requires_renewed_approval() {
     let prev = vec![cap("github.read")];
     let curr_added = vec![cap("github.read"), cap("github.delete")];
-    let curr_removed = vec![cap("github.read")];
+    let curr_unchanged = vec![cap("github.read")];
+    let curr_removed_all = vec![];
 
     assert!(
         authority_changed(&prev, &curr_added),
         "growth in requested authority must force re-approval"
     );
     assert!(
-        !authority_changed(&prev, &curr_removed),
+        !authority_changed(&prev, &curr_unchanged),
         "identical authority sets must remain retainable"
+    );
+    // Removal also fires per the documented over-firing semantic in
+    // `authority_changed`: any set difference invalidates retention.
+    assert!(
+        authority_changed(&prev, &curr_removed_all),
+        "removal of authority entries must also force re-evaluation \
+         (deliberate over-firing — see authority_changed docs)"
+    );
+
+    // Reorder of the SAME set must NOT fire — set semantics, not list.
+    let prev_two = vec![cap("github.read"), cap("github.write")];
+    let prev_two_reordered = vec![cap("github.write"), cap("github.read")];
+    assert!(
+        !authority_changed(&prev_two, &prev_two_reordered),
+        "reordering the same set must remain retainable"
     );
 
     // grant_retention_eligible composes identity + trust + authority:
@@ -400,19 +430,22 @@ fn t8_revocation_publishes_invalidation_before_next_dispatch() {
 // Issue suggested test #5 (compile-time). AC #1.
 // ---------------------------------------------------------------------------
 
-/// This is a runtime form of the type-level guarantee. The actual
-/// compile-time check is implicit in the public API: every function that
-/// accepts a trust ceiling takes `EffectiveTrustClass`, never
-/// `RequestedTrustClass`. There is no `From<RequestedTrustClass>` or
-/// `TryFrom<RequestedTrustClass>` for `EffectiveTrustClass` defined
-/// anywhere in this crate. Demonstrate by enumerating the surface:
+/// The compile-time half of this guarantee lives at the top of the file
+/// (`assert_not_impl_any!(EffectiveTrustClass: serde::de::DeserializeOwned)`):
+/// no `Deserialize`-shaped path can produce an `EffectiveTrustClass` from a
+/// wire payload. The runtime half — that the *publicly constructible*
+/// `EffectiveTrustClass` values are never privileged — is asserted here.
+///
+/// Together these prove that `RequestedTrustClass` (which freely
+/// deserializes from manifest JSON) cannot be coerced or wire-decoded into
+/// a privileged effective ceiling. The only path to privileged effective
+/// trust is `TrustPolicy::evaluate`, exercised by T3.
 #[test]
 fn t9_requested_trust_class_cannot_satisfy_effective_trust_argument() {
-    // Construct a RequestedTrustClass ...
+    // RequestedTrustClass exists and freely deserializes ...
     let requested = RequestedTrustClass::SystemRequested;
-    // ... and observe that no public API on EffectiveTrustClass accepts it.
-    // The only path to a privileged EffectiveTrustClass is policy.evaluate.
     let _ = requested;
+    // ... but every publicly constructible EffectiveTrustClass is non-privileged.
     let public_constructors = [
         EffectiveTrustClass::sandbox(),
         EffectiveTrustClass::user_trusted(),
@@ -423,6 +456,8 @@ fn t9_requested_trust_class_cannot_satisfy_effective_trust_argument() {
             "publicly constructible EffectiveTrustClass must never be privileged"
         );
     }
+    // And `TrustClass`'s underlying serde gate for privileged variants is
+    // independently asserted in `host_api_contract.rs`.
 }
 
 // ---------------------------------------------------------------------------

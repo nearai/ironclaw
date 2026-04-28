@@ -9,7 +9,7 @@
 
 use chrono::Utc;
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, PackageIdentity, PackageSource, RequestedTrustClass,
+    CapabilityId, EffectKind, PackageIdentity, PackageSource, RequestedTrustClass, ResourceCeiling,
 };
 
 use crate::decision::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
@@ -38,6 +38,10 @@ pub struct SourceMatch {
     pub effective_trust: EffectiveTrustClass,
     pub provenance: TrustProvenance,
     pub allowed_effects: Vec<EffectKind>,
+    /// Optional resource ceiling forwarded from the matching source's entry
+    /// onto the resulting `AuthorityCeiling`. `None` means the source
+    /// imposes no extra resource cap.
+    pub max_resource_ceiling: Option<ResourceCeiling>,
 }
 
 /// Default host-controlled policy. Composes layered sources in priority order;
@@ -70,7 +74,7 @@ impl TrustPolicy for HostTrustPolicy {
                     effective_trust: matched.effective_trust,
                     authority_ceiling: AuthorityCeiling {
                         allowed_effects: matched.allowed_effects,
-                        max_resource_ceiling: None,
+                        max_resource_ceiling: matched.max_resource_ceiling,
                     },
                     provenance: matched.provenance,
                     evaluated_at: Utc::now(),
@@ -82,20 +86,23 @@ impl TrustPolicy for HostTrustPolicy {
     }
 }
 
-/// Fallback decision when no policy source recognizes the package. Caps at
-/// `UserTrusted` for sources that are *capable* of being trusted (admin-style
-/// origin) and at `Sandbox` for everything else, so `LocalManifest` requests
-/// for `FirstPartyRequested` / `SystemRequested` are silently downgraded
-/// rather than honored.
+/// Fallback decision when no policy source recognizes the package.
+///
+/// `LocalManifest` origins drop all the way to `Sandbox`: nothing about a
+/// user-controlled file should imply latent trust, so we treat an unmatched
+/// local manifest the same as untrusted code.
+///
+/// Other origins (`Bundled`, `Registry`, `Admin`) cap at `UserTrusted` —
+/// they are *capable* of being host-policy-blessed, but the operator hasn't
+/// registered them yet. Honoring third-party authority (but no privileged
+/// authority) is a defensible default for these origins; PR3 may upgrade
+/// unrecognized `Bundled` to a hard error.
 fn default_decision(input: &TrustPolicyInput) -> TrustDecision {
     let effective_trust = match input.identity.source {
-        // A LocalManifest origin without explicit policy match never reaches
-        // privileged trust, regardless of what the manifest declared.
-        PackageSource::LocalManifest { .. } => EffectiveTrustClass::user_trusted(),
-        // Bundled / Registry / Admin sources without a registered entry also
-        // fall back; PR3 may want to treat unrecognized Bundled as a hard
-        // error, but for PR1b we downgrade quietly and record provenance.
-        _ => EffectiveTrustClass::user_trusted(),
+        PackageSource::LocalManifest { .. } => EffectiveTrustClass::sandbox(),
+        PackageSource::Bundled | PackageSource::Registry { .. } | PackageSource::Admin => {
+            EffectiveTrustClass::user_trusted()
+        }
     };
 
     TrustDecision {

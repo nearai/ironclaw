@@ -101,9 +101,16 @@ pub fn identity_changed(prev: &PackageIdentity, curr: &PackageIdentity) -> bool 
         || prev.signer != curr.signer
 }
 
-/// Returns true when the requested-authority list grew or changed. Pure
-/// equality check — any difference (added, removed, reordered into a new
-/// set) is a change and forces grant reissue.
+/// Returns true when the requested-authority set differs between two
+/// re-evaluations of the same package.
+///
+/// The check is a set-equality (sorted-vec) compare, so it fires on **any**
+/// difference: additions, removals, or reorderings into a new set. This is
+/// deliberately stricter than a literal reading of AC #5 ("Expanded
+/// authority requires renewed approval") — over-firing on removal is safe
+/// (a smaller authority set going through reissue is at worst a redundant
+/// approval), while *under*-firing on additions would silently retain a
+/// grant whose authority surface changed. We choose the safer side.
 pub fn authority_changed(prev: &[CapabilityId], curr: &[CapabilityId]) -> bool {
     if prev.len() != curr.len() {
         return true;
