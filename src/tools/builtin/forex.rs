@@ -261,7 +261,9 @@ fn compute_cone(
 
     let mut projection = Vec::new();
     for t in 0..=HORIZON_DAYS {
-        let date_str = (today + chrono::Duration::days(t)).format("%Y-%m-%d").to_string();
+        let date_str = (today + chrono::Duration::days(t))
+            .format("%Y-%m-%d")
+            .to_string();
         let center = current_rate + (target_rate - current_rate) * t as f64 / HORIZON_DAYS as f64;
         let (upper, lower) = if t == 0 {
             (current_rate, current_rate)
@@ -555,12 +557,13 @@ pub async fn run_transfer_analysis(
 ) -> Result<serde_json::Value, ToolError> {
     let now = chrono::Utc::now();
     let today = now.date_naive();
-    let start_str = (today - chrono::Duration::days(220)).format("%Y-%m-%d").to_string();
+    let start_str = (today - chrono::Duration::days(220))
+        .format("%Y-%m-%d")
+        .to_string();
     let end_str = today.format("%Y-%m-%d").to_string();
 
-    let massive_url = format!(
-        "{MASSIVE_BASE}/C:USDINR/range/1/day/{start_str}/{end_str}?sort=asc&limit=5000"
-    );
+    let massive_url =
+        format!("{MASSIVE_BASE}/C:USDINR/range/1/day/{start_str}/{end_str}?sort=asc&limit=5000");
     let now_unix = now.timestamp();
     let dxy_url = format!(
         "https://query1.finance.yahoo.com/v8/finance/chart/DX-Y.NYB?interval=1d&period1={}&period2={now_unix}",
@@ -569,23 +572,22 @@ pub async fn run_transfer_analysis(
 
     let bearer = massive_bearer(secrets, user_id).await?;
 
-    let abound_rate_url = format!(
-        "{REMITTANCE_BASE}/exchange-rate?from_currency=USD&to_currency=INR"
-    );
+    let abound_rate_url =
+        format!("{REMITTANCE_BASE}/exchange-rate?from_currency=USD&to_currency=INR");
     let abound_rate_fut = async {
-        let result = abound_get(client, secrets, user_id, &abound_rate_url).await.ok()?;
+        let result = abound_get(client, secrets, user_id, &abound_rate_url)
+            .await
+            .ok()?;
         result
             .get("body")
             .and_then(|b| b.get("data"))
             .and_then(|d| d.get("effective_exchange_rate"))
             .and_then(|r| {
-                r.get("value")
-                    .and_then(|v| v.as_f64())
-                    .or_else(|| {
-                        r.get("formatted_value")
-                            .and_then(|v| v.as_str())
-                            .and_then(|s| s.parse::<f64>().ok())
-                    })
+                r.get("value").and_then(|v| v.as_f64()).or_else(|| {
+                    r.get("formatted_value")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse::<f64>().ok())
+                })
             })
             .filter(|&r| r > 0.0)
     };
@@ -673,15 +675,14 @@ pub async fn run_transfer_analysis(
             .unwrap_or_else(|| "N/A".into()),
         (hr * 10.0).round() / 10.0,
     );
-    if recommend == "wait" {
-        if let Some(save) = could_save
-            && save > 0.0
-        {
-            message.push_str(&format!(
-                " If you wait, you could get ₹{} more on your transfer.",
-                format_rate(save)
-            ));
-        }
+    if recommend == "wait"
+        && let Some(save) = could_save
+        && save > 0.0
+    {
+        message.push_str(&format!(
+            " If you wait, you could get ₹{} more on your transfer.",
+            format_rate(save)
+        ));
     }
     if for_wire {
         message.push_str(
@@ -822,7 +823,9 @@ impl Tool for ValidateTransferTargetTool {
 
         let now = chrono::Utc::now();
         let today = now.date_naive();
-        let start_str = (today - chrono::Duration::days(5)).format("%Y-%m-%d").to_string();
+        let start_str = (today - chrono::Duration::days(5))
+            .format("%Y-%m-%d")
+            .to_string();
         let today_str = today.format("%Y-%m-%d").to_string();
 
         let url = format!(

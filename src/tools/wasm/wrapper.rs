@@ -2618,8 +2618,7 @@ mod tests {
         };
 
         // Expired credential — should report missing required
-        let result =
-            resolve_host_credentials(&caps, Some(&store), "user1", None, None).await;
+        let result = resolve_host_credentials(&caps, Some(&store), "user1", None, None).await;
         assert!(
             !result.missing_required.is_empty(),
             "expired credential should be reported as missing"

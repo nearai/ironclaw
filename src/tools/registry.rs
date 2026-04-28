@@ -20,10 +20,10 @@ use crate::tools::builtin::{
     AboundRateAlertTool, AboundSendWireTool, AnalyzeTransferTool, ApplyPatchTool, CancelJobTool,
     CreateJobTool, EchoTool, ExtensionInfoTool, FileUndoTool, ForexHistoricalDataTool, GlobTool,
     GrepTool, HttpTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool,
-    ListJobsTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PlanUpdateTool,
-    PromptQueue, ReadFileTool, ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool,
-    SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool,
-    ToolPermissionSetTool, ToolRemoveTool, ToolSearchTool, ToolUpgradeTool,
+    ListJobsTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
+    PlanUpdateTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool, SkillListTool,
+    SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
+    ToolListTool, ToolPermissionSetTool, ToolRemoveTool, ToolSearchTool, ToolUpgradeTool,
     ValidateTransferTargetTool, WriteFileTool, shared_file_history, shared_read_file_state,
 };
 use crate::tools::rate_limiter::RateLimiter;
@@ -169,8 +169,14 @@ pub struct ToolRegistry {
 }
 
 /// Shared slot for deferred mission manager injection into tools.
-pub type MissionSlot =
-    Arc<tokio::sync::RwLock<Option<(Arc<ironclaw_engine::MissionManager>, ironclaw_engine::ProjectId)>>>;
+pub type MissionSlot = Arc<
+    tokio::sync::RwLock<
+        Option<(
+            Arc<ironclaw_engine::MissionManager>,
+            ironclaw_engine::ProjectId,
+        )>,
+    >,
+>;
 
 impl ToolRegistry {
     fn tool_definition(tool: &Arc<dyn Tool>) -> ToolDefinition {
