@@ -38,3 +38,5 @@ V22__sandbox_restart_params = 12611649486554869350
 V23__list_workspace_files_escape_like = 12519024535161914473
 V24__llm_calls_created_at_index = 2650126284755685421
 V25__wasm_fuel_limit_bump = 8924323300096627270
+V26__root_filesystem_entries = 11094038407147728260
+V27__root_filesystem_entries_directories = 4126641792698406758

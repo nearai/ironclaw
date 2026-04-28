@@ -7,8 +7,8 @@ use tempfile::tempdir;
 #[tokio::test]
 async fn catalog_describes_paths_by_longest_matching_mount() {
     let mut root = CompositeRootFilesystem::new();
-    let broad_backend = empty_local_backend("/memory");
-    let private_backend = empty_local_backend("/memory/private");
+    let (broad_backend, _broad_dir) = empty_local_backend("/memory");
+    let (private_backend, _private_dir) = empty_local_backend("/memory/private");
 
     root.mount(
         descriptor(
@@ -142,6 +142,8 @@ async fn composite_routes_filesystem_operations_to_matching_backend() {
 #[tokio::test]
 async fn catalog_mounts_are_sorted_for_stable_diagnostics() {
     let mut root = CompositeRootFilesystem::new();
+    let (project_backend, _project_dir) = empty_local_backend("/projects");
+    let (memory_backend, _memory_dir) = empty_local_backend("/memory");
     root.mount(
         descriptor(
             "/projects",
@@ -151,7 +153,7 @@ async fn catalog_mounts_are_sorted_for_stable_diagnostics() {
             ContentKind::ProjectFile,
             IndexPolicy::NotIndexed,
         ),
-        Arc::new(empty_local_backend("/projects")),
+        Arc::new(project_backend),
     )
     .unwrap();
     root.mount(
@@ -163,7 +165,7 @@ async fn catalog_mounts_are_sorted_for_stable_diagnostics() {
             ContentKind::MemoryDocument,
             IndexPolicy::FullTextAndVector,
         ),
-        Arc::new(empty_local_backend("/memory")),
+        Arc::new(memory_backend),
     )
     .unwrap();
 
@@ -181,6 +183,8 @@ async fn catalog_mounts_are_sorted_for_stable_diagnostics() {
 #[tokio::test]
 async fn duplicate_composite_mount_roots_fail_closed() {
     let mut root = CompositeRootFilesystem::new();
+    let (memory_backend, _memory_dir) = empty_local_backend("/memory");
+    let (other_backend, _other_dir) = empty_local_backend("/memory");
     root.mount(
         descriptor(
             "/memory",
@@ -190,7 +194,7 @@ async fn duplicate_composite_mount_roots_fail_closed() {
             ContentKind::MemoryDocument,
             IndexPolicy::FullTextAndVector,
         ),
-        Arc::new(empty_local_backend("/memory")),
+        Arc::new(memory_backend),
     )
     .unwrap();
 
@@ -204,7 +208,7 @@ async fn duplicate_composite_mount_roots_fail_closed() {
                 ContentKind::MemoryDocument,
                 IndexPolicy::FullTextAndVector,
             ),
-            Arc::new(empty_local_backend("/memory")),
+            Arc::new(other_backend),
         )
         .unwrap_err();
 
@@ -222,19 +226,16 @@ async fn missing_composite_mount_fails_without_backend_side_effects() {
     assert!(matches!(err, FilesystemError::MountNotFound { .. }));
 }
 
-fn empty_local_backend(virtual_root: &str) -> LocalFilesystem {
+fn empty_local_backend(virtual_root: &str) -> (LocalFilesystem, tempfile::TempDir) {
     let dir = tempdir().unwrap();
-    let path = dir.path().to_path_buf();
-    std::mem::forget(dir);
-
     let mut backend = LocalFilesystem::new();
     backend
         .mount_local(
             VirtualPath::new(virtual_root).unwrap(),
-            HostPath::from_path_buf(path),
+            HostPath::from_path_buf(dir.path().to_path_buf()),
         )
         .unwrap();
-    backend
+    (backend, dir)
 }
 
 fn descriptor(

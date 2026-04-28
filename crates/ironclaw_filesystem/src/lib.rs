@@ -5,6 +5,14 @@
 //! through a caller's [`MountView`], checks mount permissions, then performs the
 //! operation against a trusted root filesystem namespace addressed by
 //! [`VirtualPath`]. Backend implementations alone touch raw host paths.
+//!
+//! The local backend canonicalizes existing paths and their nearest existing
+//! ancestors before opening files, and it re-roots new leaf paths on the checked
+//! canonical parent. That narrows symlink escape opportunities but does not
+//! provide a kernel-enforced race-free guarantee against a writable mount root
+//! being modified between containment checks and opens. Production hardening for
+//! hostile local directories should use fd-relative traversal such as `openat2`
+//! with `RESOLVE_BENEATH`, `O_NOFOLLOW`, or a capability filesystem crate.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -620,7 +628,17 @@ impl LocalFilesystem {
         // backend root. If its canonical parent leaves the backend root, an
         // existing symlink in the parent chain caused the escape.
         ensure_contained(path, mount, &canonical_parent, true)?;
-        Ok(joined)
+        // Re-root the final path on the canonicalized, containment-checked
+        // parent rather than returning `joined` (which still contains the
+        // un-canonicalized ancestor components). This narrows the TOCTOU
+        // window between the containment check and the eventual write — a
+        // later swap of an ancestor symlink does not change the path we hand
+        // back. Robust defense (openat / O_NOFOLLOW / cap-std) is tracked as a
+        // follow-up; see PR #2996 review.
+        let file_name = joined
+            .file_name()
+            .ok_or_else(|| FilesystemError::PathOutsideMount { path: path.clone() })?;
+        Ok(canonical_parent.join(file_name))
     }
 
     async fn resolve_for_create_dir_all(
@@ -1013,20 +1031,33 @@ impl RootFilesystem for PostgresRootFilesystem {
     }
 
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        let client = self.client().await?;
+        let mut client = self.client().await?;
+        let transaction = client
+            .transaction()
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
         for prefix in virtual_path_prefixes(path)? {
-            if matches!(self.exact_entry(&prefix).await?, Some((_, FileType::File))) {
+            let row = transaction
+                .query_opt(
+                    "SELECT is_dir FROM root_filesystem_entries WHERE path = $1",
+                    &[&prefix.as_str()],
+                )
+                .await
+                .map_err(|error| {
+                    db_error(prefix.clone(), FilesystemOperation::CreateDirAll, error)
+                })?;
+            if row.is_some_and(|row| !row.get::<_, bool>("is_dir")) {
                 return Err(FilesystemError::Backend {
                     path: prefix,
                     operation: FilesystemOperation::CreateDirAll,
                     reason: "file exists where directory is required".to_string(),
                 });
             }
-            client
+            transaction
                 .execute(
                     r#"
                     INSERT INTO root_filesystem_entries (path, contents, is_dir)
-                    VALUES ($1, '\\x'::bytea, TRUE)
+                    VALUES ($1, ''::bytea, TRUE)
                     ON CONFLICT (path) DO NOTHING
                     "#,
                     &[&prefix.as_str()],
@@ -1036,6 +1067,10 @@ impl RootFilesystem for PostgresRootFilesystem {
                     db_error(path.clone(), FilesystemOperation::CreateDirAll, error)
                 })?;
         }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
         Ok(())
     }
 }
@@ -1049,13 +1084,13 @@ impl PostgresRootFilesystem {
         let client = self.client().await?;
         let row = client
             .query_opt(
-                "SELECT OCTET_LENGTH(contents) AS len, is_dir FROM root_filesystem_entries WHERE path = $1",
+                "SELECT OCTET_LENGTH(contents)::bigint AS len, is_dir FROM root_filesystem_entries WHERE path = $1",
                 &[&path.as_str()],
             )
             .await
             .map_err(|error| db_error(path.clone(), FilesystemOperation::Stat, error))?;
         Ok(row.map(|row| {
-            let len: i32 = row.get("len");
+            let len: i64 = row.get("len");
             let is_dir: bool = row.get("is_dir");
             (
                 if is_dir { 0 } else { len.max(0) as u64 },
@@ -1077,7 +1112,7 @@ impl PostgresRootFilesystem {
         let pattern = child_path_like_pattern(parent);
         let rows = client
             .query(
-                "SELECT path, OCTET_LENGTH(contents) AS len, is_dir FROM root_filesystem_entries WHERE path LIKE $1 ESCAPE '!' ORDER BY path",
+                "SELECT path, OCTET_LENGTH(contents)::bigint AS len, is_dir FROM root_filesystem_entries WHERE path LIKE $1 ESCAPE '!' ORDER BY path",
                 &[&pattern],
             )
             .await
@@ -1085,7 +1120,7 @@ impl PostgresRootFilesystem {
         rows.into_iter()
             .map(|row| {
                 let path: String = row.get("path");
-                let len: i32 = row.get("len");
+                let len: i64 = row.get("len");
                 let is_dir: bool = row.get("is_dir");
                 Ok((
                     VirtualPath::new(path)?,
@@ -1115,21 +1150,11 @@ impl PostgresRootFilesystem {
 }
 
 #[cfg(feature = "postgres")]
-const POSTGRES_ROOT_FILESYSTEM_SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS root_filesystem_entries (
-    path TEXT PRIMARY KEY CHECK (path LIKE '/%'),
-    contents BYTEA NOT NULL DEFAULT '\\x',
-    is_dir BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+const POSTGRES_ROOT_FILESYSTEM_SCHEMA: &str = concat!(
+    include_str!("../../../migrations/V26__root_filesystem_entries.sql"),
+    "\n",
+    include_str!("../../../migrations/V27__root_filesystem_entries_directories.sql"),
 );
-ALTER TABLE root_filesystem_entries
-    ADD COLUMN IF NOT EXISTS is_dir BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE root_filesystem_entries
-    ALTER COLUMN contents SET DEFAULT '\\x';
-CREATE INDEX IF NOT EXISTS idx_root_filesystem_entries_path
-    ON root_filesystem_entries(path);
-"#;
 
 #[cfg(feature = "libsql")]
 /// libSQL-backed [`RootFilesystem`] storing file contents by virtual path.
@@ -1305,27 +1330,50 @@ impl RootFilesystem for LibSqlRootFilesystem {
 
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let conn = self.connect().await?;
+        let transaction = conn.transaction().await.map_err(|error| {
+            libsql_db_error(path.clone(), FilesystemOperation::CreateDirAll, error)
+        })?;
         for prefix in virtual_path_prefixes(path)? {
-            if matches!(self.exact_entry(&prefix).await?, Some((_, FileType::File))) {
-                return Err(FilesystemError::Backend {
-                    path: prefix,
-                    operation: FilesystemOperation::CreateDirAll,
-                    reason: "file exists where directory is required".to_string(),
-                });
+            let mut rows = transaction
+                .query(
+                    "SELECT is_dir FROM root_filesystem_entries WHERE path = ?1",
+                    libsql::params![prefix.as_str()],
+                )
+                .await
+                .map_err(|error| {
+                    libsql_db_error(prefix.clone(), FilesystemOperation::CreateDirAll, error)
+                })?;
+            if let Some(row) = rows.next().await.map_err(|error| {
+                libsql_db_error(prefix.clone(), FilesystemOperation::CreateDirAll, error)
+            })? {
+                let is_dir: i64 = row.get(0).map_err(|error| {
+                    libsql_db_error(prefix.clone(), FilesystemOperation::CreateDirAll, error)
+                })?;
+                if is_dir == 0 {
+                    return Err(FilesystemError::Backend {
+                        path: prefix,
+                        operation: FilesystemOperation::CreateDirAll,
+                        reason: "file exists where directory is required".to_string(),
+                    });
+                }
             }
-            conn.execute(
-                r#"
-                INSERT INTO root_filesystem_entries (path, contents, is_dir, updated_at)
-                VALUES (?1, X'', 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-                ON CONFLICT (path) DO NOTHING
-                "#,
-                libsql::params![prefix.as_str()],
-            )
-            .await
-            .map_err(|error| {
-                libsql_db_error(path.clone(), FilesystemOperation::CreateDirAll, error)
-            })?;
+            transaction
+                .execute(
+                    r#"
+                    INSERT INTO root_filesystem_entries (path, contents, is_dir, updated_at)
+                    VALUES (?1, X'', 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                    ON CONFLICT (path) DO NOTHING
+                    "#,
+                    libsql::params![prefix.as_str()],
+                )
+                .await
+                .map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::CreateDirAll, error)
+                })?;
         }
+        transaction.commit().await.map_err(|error| {
+            libsql_db_error(path.clone(), FilesystemOperation::CreateDirAll, error)
+        })?;
         Ok(())
     }
 }
@@ -1394,18 +1442,23 @@ impl LibSqlRootFilesystem {
             .next()
             .await
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Stat, error))?;
-        Ok(row.map(|row| {
-            let len = row.get::<i64>(0).unwrap_or(0).max(0) as u64;
-            let is_dir = row.get::<i64>(1).unwrap_or(0) != 0;
-            (
-                if is_dir { 0 } else { len },
-                if is_dir {
-                    FileType::Directory
-                } else {
-                    FileType::File
-                },
-            )
-        }))
+        let Some(row) = row else { return Ok(None) };
+        let len_raw: i64 = row
+            .get(0)
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Stat, error))?;
+        let is_dir_raw: i64 = row
+            .get(1)
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Stat, error))?;
+        let len = len_raw.max(0) as u64;
+        let is_dir = is_dir_raw != 0;
+        Ok(Some((
+            if is_dir { 0 } else { len },
+            if is_dir {
+                FileType::Directory
+            } else {
+                FileType::File
+            },
+        )))
     }
 
     async fn child_entries(
@@ -1431,8 +1484,14 @@ impl LibSqlRootFilesystem {
             let path: String = row
                 .get(0)
                 .map_err(|error| libsql_db_error(parent.clone(), operation, error))?;
-            let len = row.get::<i64>(1).unwrap_or(0).max(0) as u64;
-            let is_dir = row.get::<i64>(2).unwrap_or(0) != 0;
+            let len_raw: i64 = row
+                .get(1)
+                .map_err(|error| libsql_db_error(parent.clone(), operation, error))?;
+            let is_dir_raw: i64 = row
+                .get(2)
+                .map_err(|error| libsql_db_error(parent.clone(), operation, error))?;
+            let len = len_raw.max(0) as u64;
+            let is_dir = is_dir_raw != 0;
             paths.push((
                 VirtualPath::new(path)?,
                 if is_dir { 0 } else { len },
@@ -1473,8 +1532,8 @@ CREATE TABLE IF NOT EXISTS root_filesystem_entries (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
-CREATE INDEX IF NOT EXISTS idx_root_filesystem_entries_path
-    ON root_filesystem_entries(path);
+-- The PRIMARY KEY on `path` already provides a unique index for equality
+-- lookups, so no separate index is created.
 "#;
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
