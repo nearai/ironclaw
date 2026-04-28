@@ -222,6 +222,13 @@ function deleteRoutine(id, name) {
   apiFetch('/api/routines/' + id, { method: 'DELETE' })
     .then(() => {
       showToast(I18n.t('routines.deleted'), 'success');
+      // Re-check legacy routine count so the v2 user who just deleted
+      // their last v1 routine sees the tab fall back to hidden without
+      // a page reload (#2982).
+      refreshLegacyRoutinesPresence().then(function() {
+        applyEngineModeToTabs();
+        applyEngineModeUi();
+      });
       if (currentRoutineId === id) closeRoutineDetail();
       else loadRoutines();
     })
