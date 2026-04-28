@@ -1,11 +1,27 @@
-"""Script 4 — Periodic Reminder via Telegram (issue #1044), Phase 1A.
+"""Script 4 — Periodic Reminder via Telegram (issue #1044).
 
-Verifies the routine engine picks up a backdated cron routine, fires
-its Lightweight action against the (mock) LLM, and records a
-``routine_runs`` row with terminal status. The original NL script
-calls for a Telegram delivery side-effect; that layer (Telegram channel
-install + bot-token seed + sendMessage assertion against the mock
-Telegram server) is Phase 1B follow-up work.
+End-to-end coverage:
+
+1. Backdated cron routine inserted via libSQL.
+2. Routine engine cron-tick picks it up.
+3. Lightweight action runs against the mock LLM, which emits an
+   ``http`` POST to ``api.telegram.org/.../sendMessage`` (matched on
+   the per-scenario ``[CANARY-WORKFLOW-periodic_reminder]`` sentinel
+   in ``tests/e2e/mock_llm.py``).
+4. ``IRONCLAW_TEST_HTTP_REMAP`` rewrites the Telegram host to the
+   loopback ``telegram_mock`` server, which records the message.
+5. Probe asserts both (a) ``routine_runs`` reaches a terminal status,
+   and (b) ``telegram_mock`` captured a ``sendMessage`` whose text
+   contains ``[canary-workflow:periodic_reminder] ack``.
+
+Steps 1–5 are all wired through ``run_routine_probe`` with
+``verify_telegram=True`` — see ``scenarios/_common.py``. Channel
+*install* (``/api/extensions/install`` + capability patch +
+``/api/extensions/telegram/setup`` + pairing) is exercised by the
+sibling ``telegram_*`` scenarios; this scenario covers the
+routine-driven sendMessage path specifically and intentionally hits
+api.telegram.org via the raw http tool rather than through the
+installed channel.
 
 Reporter: Henry.
 """
