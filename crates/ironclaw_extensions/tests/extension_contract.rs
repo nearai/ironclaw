@@ -142,6 +142,22 @@ fn registry_rejects_duplicate_extension_ids_and_capability_ids() {
     ));
 }
 
+#[test]
+fn registry_rejects_duplicate_capability_ids_within_inserted_package() {
+    let mut package = ExtensionPackage::from_manifest(
+        ExtensionManifest::parse(WASM_MANIFEST).unwrap(),
+        VirtualPath::new("/system/extensions/echo").unwrap(),
+    )
+    .unwrap();
+    package.capabilities.push(package.capabilities[0].clone());
+
+    let mut registry = ExtensionRegistry::new();
+    assert!(matches!(
+        registry.insert(package),
+        Err(ExtensionError::DuplicateCapability { .. })
+    ));
+}
+
 #[tokio::test]
 async fn discovery_reads_manifests_from_filesystem_virtual_root() {
     let storage = tempdir().unwrap();
@@ -489,6 +505,32 @@ async fn discovery_ignores_non_directory_entries_in_extension_root() {
     std::fs::create_dir_all(storage.path().join("echo")).unwrap();
     std::fs::write(storage.path().join("echo/manifest.toml"), WASM_MANIFEST).unwrap();
     std::fs::write(storage.path().join(".DS_Store"), b"not an extension").unwrap();
+
+    let mut fs = LocalFilesystem::new();
+    fs.mount_local(
+        VirtualPath::new("/system/extensions").unwrap(),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
+    )
+    .unwrap();
+
+    let registry =
+        ExtensionDiscovery::discover(&fs, &VirtualPath::new("/system/extensions").unwrap())
+            .await
+            .unwrap();
+
+    assert!(
+        registry
+            .get_extension(&ExtensionId::new("echo").unwrap())
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn discovery_ignores_non_extension_directories_with_invalid_ids() {
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("echo")).unwrap();
+    std::fs::write(storage.path().join("echo/manifest.toml"), WASM_MANIFEST).unwrap();
+    std::fs::create_dir_all(storage.path().join(".cache")).unwrap();
 
     let mut fs = LocalFilesystem::new();
     fs.mount_local(

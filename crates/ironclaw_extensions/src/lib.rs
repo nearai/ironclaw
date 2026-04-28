@@ -270,8 +270,11 @@ impl ExtensionRegistry {
             return Err(ExtensionError::DuplicateExtension { id: package.id });
         }
 
+        let mut seen_capabilities = HashSet::new();
         for descriptor in &package.capabilities {
-            if self.capabilities.contains_key(&descriptor.id) {
+            if !seen_capabilities.insert(descriptor.id.clone())
+                || self.capabilities.contains_key(&descriptor.id)
+            {
                 return Err(ExtensionError::DuplicateCapability {
                     id: descriptor.id.clone(),
                 });
@@ -333,7 +336,9 @@ impl ExtensionDiscovery {
             if entry.file_type != FileType::Directory {
                 continue;
             }
-            let expected = ExtensionId::new(entry.name.clone())?;
+            let Ok(expected) = ExtensionId::new(entry.name.clone()) else {
+                continue;
+            };
             let manifest_path = VirtualPath::new(format!(
                 "{}/{}/manifest.toml",
                 root.as_str().trim_end_matches('/'),
