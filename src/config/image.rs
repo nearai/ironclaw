@@ -70,6 +70,14 @@ impl ImageConfig {
         }
 
         let explicit_api_key = optional_env("IMAGE_API_KEY")?.map(SecretString::from);
+        if explicit_base_url.is_some() && explicit_api_key.is_none() {
+            return Err(ConfigError::MissingRequired {
+                key: "IMAGE_API_KEY".to_string(),
+                hint: "IMAGE_API_KEY is required when IMAGE_BASE_URL is set so image tools do not reuse chat-provider credentials for a distinct endpoint."
+                    .to_string(),
+            });
+        }
+
         let inherited = inherited_endpoint(llm);
 
         let api_base_url = explicit_base_url
@@ -264,7 +272,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_base_url_does_not_inherit_chat_key() {
+    fn explicit_base_url_requires_image_api_key() {
         let _guard = lock_env();
         clear_image_env();
         unsafe {
@@ -272,15 +280,13 @@ mod tests {
             std::env::set_var("IMAGE_MODEL", "dall-e-3");
         }
 
-        let cfg = ImageConfig::resolve(&Settings::default(), &nearai_llm(Some("near-key"), "qwen"))
-            .expect("image config should resolve");
+        let err = ImageConfig::resolve(&Settings::default(), &nearai_llm(Some("near-key"), "qwen"))
+            .expect_err("explicit image endpoint without image key should fail");
 
-        assert_eq!(
-            cfg.api_base_url.as_deref(),
-            Some("http://localhost:8080/v1")
-        );
-        assert!(cfg.api_key.is_none());
-        assert!(cfg.endpoint_credentials().is_none());
+        assert!(matches!(
+            err,
+            ConfigError::MissingRequired { ref key, .. } if key == "IMAGE_API_KEY"
+        ));
 
         clear_image_env();
     }
