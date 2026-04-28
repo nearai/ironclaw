@@ -78,6 +78,44 @@ pub struct AppComponents {
     /// Populated by the pairing flow (Task 8). Pre-allocated here so all
     /// subsystems can hold an `Arc` to the same cache instance.
     pub ownership_cache: Arc<crate::ownership::OwnershipCache>,
+    /// App-level background tasks whose lifetime should not outlive the
+    /// assembled component graph.
+    pub background_tasks: AppBackgroundTasks,
+}
+
+#[derive(Default)]
+pub struct AppBackgroundTasks {
+    startup_mcp_auth_retries: tokio::task::JoinSet<()>,
+}
+
+impl AppBackgroundTasks {
+    fn spawn_startup_mcp_auth_retry(
+        &mut self,
+        manager: Arc<ExtensionManager>,
+        retry: StartupMcpAuthRetry,
+        user_id: String,
+    ) {
+        self.startup_mcp_auth_retries.spawn(async move {
+            retry_startup_mcp_auth_activation(manager, retry, user_id).await;
+        });
+    }
+
+    pub async fn shutdown(&mut self) {
+        self.startup_mcp_auth_retries.abort_all();
+        while let Some(result) = self.startup_mcp_auth_retries.join_next().await {
+            if let Err(e) = result
+                && e.is_panic()
+            {
+                tracing::error!("Startup MCP auth retry task panicked: {}", e);
+            }
+        }
+    }
+}
+
+impl Drop for AppBackgroundTasks {
+    fn drop(&mut self) {
+        self.startup_mcp_auth_retries.abort_all();
+    }
 }
 
 /// Options that control optional init phases.
@@ -108,7 +146,7 @@ const MCP_STARTUP_AUTH_RETRY_ATTEMPTS: usize = 24;
 const MCP_STARTUP_AUTH_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 struct StartupMcpAuthRetry {
-    server: McpServerConfig,
+    server_name: String,
     initial_error: String,
 }
 
@@ -126,11 +164,11 @@ impl StartupMcpLoadOutcome {
         }
     }
 
-    fn retry_auth(server: McpServerConfig, initial_error: String) -> Self {
+    fn retry_auth(server_name: String, initial_error: String) -> Self {
         Self {
             client: None,
             auth_retry: Some(StartupMcpAuthRetry {
-                server,
+                server_name,
                 initial_error,
             }),
         }
@@ -143,26 +181,14 @@ fn should_retry_startup_mcp_auth_error(server: &McpServerConfig, error_message: 
     // still being provisioned. Retry only that preconfigured-key case;
     // OAuth/missing-auth MCP servers should still surface the normal
     // "run mcp auth" path instead of spinning in the background.
-    server.has_custom_auth_header() && crate::tools::mcp::is_auth_error_message(error_message)
-}
-
-async fn is_startup_mcp_retry_already_active(
-    manager: &ExtensionManager,
-    user_id: &str,
-    server_name: &str,
-) -> bool {
-    let normalized_name = crate::tools::mcp::normalize_server_name(server_name);
-    let store = manager.mcp_client_store();
-    store.contains(user_id, &normalized_name).await
-        || (normalized_name != server_name && store.contains(user_id, server_name).await)
+    server.has_custom_auth_header()
+        && crate::tools::mcp::specific_auth_rejection_marker(error_message).is_some()
 }
 
 fn spawn_startup_mcp_auth_retries(
+    background_tasks: &mut AppBackgroundTasks,
     manager: Arc<ExtensionManager>,
     retries: Vec<StartupMcpAuthRetry>,
-    mcp_session_manager: Arc<McpSessionManager>,
-    mcp_process_manager: Arc<McpProcessManager>,
-    secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     user_id: String,
 ) {
     if retries.is_empty() {
@@ -178,36 +204,20 @@ fn spawn_startup_mcp_auth_retries(
 
     for retry in retries {
         let manager = Arc::clone(&manager);
-        let mcp_session_manager = Arc::clone(&mcp_session_manager);
-        let mcp_process_manager = Arc::clone(&mcp_process_manager);
-        let secrets_store = secrets_store.clone();
         let user_id = user_id.clone();
-
-        tokio::spawn(async move {
-            retry_startup_mcp_auth_activation(
-                manager,
-                retry,
-                mcp_session_manager,
-                mcp_process_manager,
-                secrets_store,
-                user_id,
-            )
-            .await;
-        });
+        background_tasks.spawn_startup_mcp_auth_retry(manager, retry, user_id);
     }
 }
 
 async fn retry_startup_mcp_auth_activation(
     manager: Arc<ExtensionManager>,
     retry: StartupMcpAuthRetry,
-    mcp_session_manager: Arc<McpSessionManager>,
-    mcp_process_manager: Arc<McpProcessManager>,
-    secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     user_id: String,
 ) {
-    let server_name = retry.server.name.clone();
+    let raw_server_name = retry.server_name;
+    let activation_name = crate::tools::mcp::normalize_server_name(&raw_server_name);
     tracing::debug!(
-        server = %server_name,
+        server = %raw_server_name,
         error = %retry.initial_error,
         "MCP server rejected startup Authorization header; background retry will wait for credential binding"
     );
@@ -215,33 +225,32 @@ async fn retry_startup_mcp_auth_activation(
     for attempt in 1..=MCP_STARTUP_AUTH_RETRY_ATTEMPTS {
         tokio::time::sleep(MCP_STARTUP_AUTH_RETRY_DELAY).await;
 
-        if is_startup_mcp_retry_already_active(&manager, &user_id, &server_name).await {
-            tracing::debug!(
-                server = %server_name,
-                "MCP startup auth retry stopped because server is already active"
-            );
-            return;
-        }
-
-        let server = match manager.get_mcp_server(&server_name, &user_id).await {
-            Ok(server) if server.enabled => server,
-            Ok(_) => {
+        let server = match manager.get_mcp_server(&activation_name, &user_id).await {
+            Ok(server) if !server.enabled => {
                 tracing::debug!(
-                    server = %server_name,
+                    server = %raw_server_name,
                     "MCP startup auth retry stopped because server is disabled"
                 );
                 return;
             }
+            Ok(server) if !server.has_custom_auth_header() => {
+                tracing::debug!(
+                    server = %raw_server_name,
+                    "MCP startup auth retry stopped because server no longer uses a custom Authorization header"
+                );
+                return;
+            }
+            Ok(server) => server,
             Err(crate::tools::mcp::config::ConfigError::ServerNotFound { .. }) => {
                 tracing::debug!(
-                    server = %server_name,
+                    server = %raw_server_name,
                     "MCP startup auth retry stopped because server was removed"
                 );
                 return;
             }
             Err(e) => {
                 tracing::debug!(
-                    server = %server_name,
+                    server = %raw_server_name,
                     attempt,
                     error = %e,
                     "MCP startup auth retry could not reload server config"
@@ -250,53 +259,11 @@ async fn retry_startup_mcp_auth_activation(
             }
         };
 
-        let client = match crate::tools::mcp::create_client_from_config(
-            server.clone(),
-            &mcp_session_manager,
-            &mcp_process_manager,
-            secrets_store.clone(),
-            &user_id,
-        )
-        .await
-        {
-            Ok(client) => client,
-            Err(e) => {
-                tracing::debug!(
-                    server = %server_name,
-                    attempt,
-                    error = %e,
-                    "MCP startup auth retry could not create client"
-                );
-                continue;
-            }
-        };
-
-        let normalized_name = client.server_name().to_string();
-        if is_startup_mcp_retry_already_active(&manager, &user_id, &normalized_name).await {
-            tracing::debug!(
-                server = %normalized_name,
-                "MCP startup auth retry stopped because server is already active"
-            );
-            return;
-        }
-
-        match client.list_tools().await {
-            Ok(mcp_tools) => {
-                let tool_count = mcp_tools.len();
-                let registered = manager
-                    .inject_mcp_client(normalized_name.clone(), &user_id, Arc::new(client))
-                    .await;
-                if server_name != normalized_name {
-                    tracing::debug!(
-                        raw_name = %server_name,
-                        normalized = %normalized_name,
-                        "Startup MCP server name normalized during auth retry"
-                    );
-                }
+        match manager.activate_mcp(&activation_name, &user_id).await {
+            Ok(result) => {
                 tracing::info!(
-                    server = %normalized_name,
-                    tool_count,
-                    registered_count = registered.len(),
+                    server = %result.name,
+                    registered_count = result.tools_loaded.len(),
                     attempt,
                     "Activated MCP server after startup auth retry"
                 );
@@ -304,11 +271,20 @@ async fn retry_startup_mcp_auth_activation(
             }
             Err(e) => {
                 let err_str = e.to_string();
+                if !should_retry_startup_mcp_auth_error(&server, &err_str) {
+                    tracing::debug!(
+                        server = %raw_server_name,
+                        attempt,
+                        error = %err_str,
+                        "MCP startup auth retry stopped because activation error is no longer retriable"
+                    );
+                    return;
+                }
+
                 tracing::debug!(
-                    server = %server_name,
+                    server = %raw_server_name,
                     attempt,
                     error = %err_str,
-                    auth_rejected = should_retry_startup_mcp_auth_error(&server, &err_str),
                     "MCP startup auth retry attempt did not activate server"
                 );
             }
@@ -316,7 +292,7 @@ async fn retry_startup_mcp_auth_activation(
     }
 
     tracing::warn!(
-        server = %server_name,
+        server = %raw_server_name,
         attempts = MCP_STARTUP_AUTH_RETRY_ATTEMPTS,
         "MCP server remained inactive after startup auth retry; activate it manually once the configured credential is valid"
     );
@@ -921,6 +897,7 @@ impl AppBuilder {
             Option<Arc<ExtensionManager>>,
             Vec<crate::extensions::RegistryEntry>,
             Vec<String>,
+            AppBackgroundTasks,
         ),
         anyhow::Error,
     > {
@@ -1085,19 +1062,23 @@ impl AppBuilder {
                                         if crate::tools::mcp::is_auth_error_message(&err_str)
                                         {
                                             if has_custom_auth_header {
-                                                tracing::warn!(
-                                                    "MCP server '{}' rejected its configured Authorization header; startup will retry in the background in case the credential is still being bound.",
-                                                    server_name
-                                                );
                                                 if should_retry_startup_mcp_auth_error(
                                                     &retry_server,
                                                     &err_str,
                                                 ) {
+                                                    tracing::warn!(
+                                                        "MCP server '{}' rejected its configured Authorization header; startup will retry in the background in case the credential is still being bound.",
+                                                        server_name
+                                                    );
                                                     return StartupMcpLoadOutcome::retry_auth(
-                                                        retry_server,
+                                                        server_name,
                                                         err_str,
                                                     );
                                                 }
+                                                tracing::warn!(
+                                                    "MCP server '{}' rejected its configured Authorization header. Update the configured credential and try again.",
+                                                    server_name
+                                                );
                                             } else {
                                                 tracing::warn!(
                                                     "MCP server '{}' requires authentication. \
@@ -1207,6 +1188,8 @@ impl AppBuilder {
                 ));
             }
         };
+        let mut background_tasks = AppBackgroundTasks::default();
+
         let extension_manager = {
             let mut em = ExtensionManager::new(
                 Arc::clone(&mcp_session_manager),
@@ -1283,11 +1266,9 @@ impl AppBuilder {
             }
 
             spawn_startup_mcp_auth_retries(
+                &mut background_tasks,
                 Arc::clone(&manager),
                 startup_mcp_auth_retries,
-                Arc::clone(&mcp_session_manager),
-                Arc::clone(&mcp_process_manager),
-                self.secrets_store.clone(),
                 self.config.owner_id.clone(),
             );
 
@@ -1334,6 +1315,7 @@ impl AppBuilder {
             extension_manager,
             catalog_entries,
             dev_loaded_tool_names,
+            background_tasks,
         ))
     }
 
@@ -1433,6 +1415,7 @@ impl AppBuilder {
             extension_manager,
             catalog_entries,
             dev_loaded_tool_names,
+            background_tasks,
         ) = self
             .init_extensions(&tools, &hooks, settings_store.clone())
             .await?;
@@ -1579,6 +1562,7 @@ impl AppBuilder {
             dev_loaded_tool_names,
             builder,
             ownership_cache: Arc::new(crate::ownership::OwnershipCache::new()),
+            background_tasks,
         })
     }
 }
@@ -1922,6 +1906,10 @@ mod tests {
             &api_key_server,
             "401 Unauthorized"
         ));
+        assert!(super::should_retry_startup_mcp_auth_error(
+            &api_key_server,
+            "MCP server 'nearai' rejected its configured Authorization header. Upstream error: invalid API key. Update the configured credential and try again."
+        ));
 
         let oauth_server =
             crate::tools::mcp::McpServerConfig::new("notion", "https://mcp.notion.com/mcp");
@@ -1933,6 +1921,14 @@ mod tests {
         assert!(!super::should_retry_startup_mcp_auth_error(
             &api_key_server,
             "connection refused"
+        ));
+        assert!(!super::should_retry_startup_mcp_auth_error(
+            &api_key_server,
+            "MCP error: Unauthorized (code -32001)"
+        ));
+        assert!(!super::should_retry_startup_mcp_auth_error(
+            &api_key_server,
+            "tool permissions rejected unauthorized operation"
         ));
     }
 

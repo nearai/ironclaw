@@ -78,9 +78,25 @@ pub(crate) fn is_auth_error_message(message: &str) -> bool {
                 || contains_ascii_word(message, "authenticate")))
 }
 
+pub(crate) fn specific_auth_rejection_marker(message: &str) -> Option<&'static str> {
+    if contains_ascii_word(message, "401") && contains_ascii_word(message, "unauthorized") {
+        return Some("401 Unauthorized");
+    }
+
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("invalid api key")
+        || lower.contains("invalid api-key")
+        || lower.contains("invalid_api_key")
+    {
+        return Some("invalid API key");
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{is_auth_error_message, normalize_server_name};
+    use super::{is_auth_error_message, normalize_server_name, specific_auth_rejection_marker};
 
     #[test]
     fn test_is_auth_error_message_matches_whole_words() {
@@ -105,5 +121,26 @@ mod tests {
     fn normalize_server_name_folds_hyphens_to_underscores() {
         assert_eq!(normalize_server_name("my-mcp-server"), "my_mcp_server");
         assert_eq!(normalize_server_name("nearai"), "nearai");
+    }
+
+    #[test]
+    fn specific_auth_rejection_marker_requires_precise_markers() {
+        assert_eq!(
+            specific_auth_rejection_marker("HTTP 401: Unauthorized"),
+            Some("401 Unauthorized")
+        );
+        assert_eq!(
+            specific_auth_rejection_marker("Invalid API key"),
+            Some("invalid API key")
+        );
+        assert_eq!(specific_auth_rejection_marker("tool unauthorized"), None);
+        assert_eq!(
+            specific_auth_rejection_marker("MCP error: Unauthorized (code -32001)"),
+            None
+        );
+        assert_eq!(
+            specific_auth_rejection_marker("localhost:4010 unauthorized"),
+            None
+        );
     }
 }

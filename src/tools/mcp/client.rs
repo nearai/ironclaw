@@ -624,9 +624,12 @@ impl McpClient {
                         .as_ref()
                         .is_some_and(|config| config.has_custom_auth_header())
                     {
+                        let upstream_marker = super::specific_auth_rejection_marker(msg)
+                            .map(|marker| format!(" Upstream error: {marker}."))
+                            .unwrap_or_default();
                         format!(
-                            "MCP server '{}' rejected its configured Authorization header. Update the configured credential and try again.",
-                            self.server_name
+                            "MCP server '{}' rejected its configured Authorization header.{} Update the configured credential and try again.",
+                            self.server_name, upstream_marker
                         )
                     } else {
                         format!(
@@ -1515,6 +1518,53 @@ mod tests {
 
         let headers = transport.recorded_headers();
         assert_eq!(headers.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn custom_auth_error_message_preserves_specific_marker() {
+        let init_response = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(1),
+            result: Some(serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "test", "version": "1.0"}
+            })),
+            error: None,
+        };
+        let notification_ack = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            result: None,
+            error: None,
+        };
+        let auth_error = Err(ToolError::ExternalService(
+            "[test] MCP server returned status: 401 Unauthorized - Invalid API key".to_string(),
+        ));
+        let transport = Arc::new(RetryMockTransport::new(
+            true,
+            vec![Ok(init_response), Ok(notification_ack), auth_error],
+        ));
+        let config = McpServerConfig::new("test_http", "https://example.com/mcp").with_headers(
+            HashMap::from([("Authorization".to_string(), "Bearer test-key".to_string())]),
+        );
+        let client = McpClient::new_with_transport(
+            "test_http",
+            transport,
+            None,
+            None,
+            "default",
+            Some(config),
+        );
+
+        let err = client
+            .list_tools()
+            .await
+            .expect_err("custom auth rejection should fail")
+            .to_string();
+
+        assert!(err.contains("configured Authorization header"));
+        assert!(err.contains("401 Unauthorized"));
     }
 
     #[test]

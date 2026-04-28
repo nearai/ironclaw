@@ -5495,7 +5495,7 @@ impl ExtensionManager {
         ))
     }
 
-    async fn activate_mcp(
+    pub(crate) async fn activate_mcp(
         &self,
         name: &str,
         user_id: &str,
@@ -5562,9 +5562,12 @@ impl ExtensionManager {
             let msg = e.to_string();
             if crate::tools::mcp::is_auth_error_message(&msg) {
                 if server.has_custom_auth_header() {
+                    let upstream_marker = crate::tools::mcp::specific_auth_rejection_marker(&msg)
+                        .map(|marker| format!(" Upstream error: {marker}."))
+                        .unwrap_or_default();
                     ExtensionError::ActivationFailed(format!(
-                        "MCP server '{}' rejected its configured Authorization header. Update the configured credential and try again.",
-                        name
+                        "MCP server '{}' rejected its configured Authorization header.{} Update the configured credential and try again.",
+                        name, upstream_marker
                     ))
                 } else {
                     ExtensionError::AuthRequired
