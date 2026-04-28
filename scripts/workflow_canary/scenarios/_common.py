@@ -2,29 +2,27 @@
 
 Each scenario inserts a Lightweight cron routine with a prompt that
 includes a ``[CANARY-WORKFLOW-<key>]`` sentinel, backdates
-``next_fire_at``, and polls ``routine_runs`` for terminal status.
+``next_fire_at``, polls ``routine_runs`` for terminal status, and
+verifies the mock Telegram bot received the expected ack message
+via the http tool's remapped sendMessage call.
 
-Phase 1A coverage (default ``verify_telegram=False``):
+Coverage delivered:
 - Routine engine cron-tick path (`spawn_cron_ticker` → `check_cron_triggers`)
 - Lightweight routine action execution (`RoutineAction::Lightweight`)
 - DB-backed routine state machine (`routines.next_fire_at` →
   `routine_runs.status`)
+- Mock LLM tool dispatch (`TOOL_CALL_PATTERNS` in tests/e2e/mock_llm.py)
+- http tool execution from a routine action (with the
+  ``http_interceptor`` propagation fix in routine_engine.rs that
+  carries the ``IRONCLAW_TEST_HTTP_REMAP`` interceptor through
+  the routine's ``JobContext``)
+- Mock Telegram capture of the per-scenario ack text via
+  ``/__mock/sent_messages``
 
-Phase 1B (opt-in ``verify_telegram=True``) attempts to additionally
-verify the mock Telegram bot received an ack message via the http
-tool's remapped sendMessage call. The ``[CANARY-WORKFLOW-<key>]``
-sentinel triggers a deterministic http tool call from the mock LLM
-(see ``TOOL_CALL_PATTERNS`` in tests/e2e/mock_llm.py).
-
-Phase 1B is currently **gated off by default** because
-``IRONCLAW_TEST_HTTP_REMAP`` does not propagate from the gateway
-env into the ``ToolContext.http_interceptor`` slot used by
-routine-driven http tool dispatches — the routine engine appears to
-build a fresh ``ToolContext`` without the global interceptor wired
-in. Surface this as a follow-up bug in the routine engine's lightweight
-action context construction; once fixed, flip the default and the
-existing scenarios pick up real send-side verification with no
-further changes here.
+Each scenario sets ``verify_telegram=True`` so the assertion
+covers the full pipeline; pass ``verify_telegram=False`` to opt
+out (e.g., for a future probe whose action emits a different
+side effect than a Telegram sendMessage).
 """
 
 from __future__ import annotations
@@ -71,7 +69,7 @@ async def run_routine_probe(
     description: str = "",
     schedule: str = "*/1 * * * *",
     timeout_secs: float = 60.0,
-    verify_telegram: bool = False,
+    verify_telegram: bool = True,
     extra_details: dict[str, Any] | None = None,
 ) -> ProbeResult:
     """Insert a lightweight cron routine, fire it, verify the engine

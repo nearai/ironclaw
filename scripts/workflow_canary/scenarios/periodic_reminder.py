@@ -34,5 +34,11 @@ async def run(
         routine_name="canary-periodic-reminder",
         prompt_intro="Send the user a Telegram reminder to walk the dog.",
         description="canary script 4: dog walk reminder",
+        # Phase 1B: with the routine engine's http_interceptor
+        # propagation fix in place, the http tool dispatch from
+        # the Lightweight action now reaches the mock Telegram
+        # bot via IRONCLAW_TEST_HTTP_REMAP. Verify the bot
+        # captured a sendMessage with the expected ack text.
+        verify_telegram=True,
     )
     return [result]

@@ -43,5 +43,6 @@ async def run(
             "send the user a Telegram acknowledgement."
         ),
         description="canary script 1: telegram bugs -> sheet",
+        verify_telegram=True,
     )
     return [result]

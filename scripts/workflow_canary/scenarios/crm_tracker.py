@@ -52,5 +52,6 @@ async def run(
             "'Inbound CRM' sheet, and send a Telegram summary."
         ),
         description="canary script 5: gmail -> sheets CRM",
+        verify_telegram=True,
     )
     return [result]

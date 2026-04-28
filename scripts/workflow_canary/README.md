@@ -28,37 +28,52 @@ scripts/workflow_canary/
 `.github/workflows/live-canary.yml` has a matching `workflow-canary`
 job in the live-canary matrix.
 
-## What's covered today (Phase 1A)
+## What's covered today
 
 Every scenario runs the same shape:
 
 1. Insert a `Lightweight` cron routine directly into libSQL with
-   `next_fire_at` backdated by 60 s.
+   `next_fire_at` backdated by 60 s. The routine's prompt embeds
+   a `[CANARY-WORKFLOW-<key>]` sentinel that the mock LLM matches
+   to emit a deterministic `http` tool call to
+   `api.telegram.org/bot.../sendMessage`.
 2. Wait for the cron ticker (configured to 2 s in
    `run_workflow_canary.py`) to pick it up.
-3. The mock LLM (`tests/e2e/mock_llm.py`) responds to the routine's
-   prompt; the engine completes the lightweight action.
-4. Assert `routine_runs` has at least one row in a terminal status
-   (`ok` / `attention` / `failed`); success requires `ok` or
-   `attention`.
+3. The mock LLM (`tests/e2e/mock_llm.py`) responds with the http
+   tool call; the routine engine dispatches it.
+4. The http tool's request is rewritten by
+   `IRONCLAW_TEST_HTTP_REMAP=api.telegram.org=<mock>` (carried
+   through to the routine's `JobContext` via the engine's
+   `http_interceptor` field — see fix in `src/agent/routine_engine.rs`).
+5. Mock Telegram captures the sendMessage on
+   `/__mock/sent_messages`; the scenario asserts the per-scenario
+   ack text (`[canary-workflow:<key>] ack`) matches.
 
 This catches regressions in:
-- `RoutineEngine::spawn_cron_ticker` and the `check_cron_triggers`
-  loop
+- `RoutineEngine::spawn_cron_ticker` and the `check_cron_triggers` loop
 - `RoutineAction::Lightweight` execution path
-- Routine state machine (`routines.next_fire_at` → `routine_runs`
-  status transitions)
-- DB serialization of action_config / trigger_config
-- Mock-LLM round-trip latency under cron-tick scheduling
+- Routine state machine (`routines.next_fire_at` → `routine_runs.status`)
+- DB serialization of `action_config` / `trigger_config`
+- Mock LLM `TOOL_CALL_PATTERNS` matching the canary sentinel
+- http tool dispatch from a routine action
+- `IRONCLAW_TEST_HTTP_REMAP` interceptor propagation through
+  the routine engine's `JobContext` (regression-tested by the fact
+  that absent this propagation, the http call goes to real
+  api.telegram.org and 401s on the fake bot token, leaving
+  mock_telegram empty — exactly what we caught and fixed)
+- Mock Telegram bot recording the inbound sendMessage shape
 
-What it deliberately does **not** cover yet:
-- Telegram channel install + bot-token seed (per-scenario Phase 1B)
+What's not covered yet (per-scenario follow-ups):
+- Telegram channel install + bot-token seed via `/api/extensions/telegram/setup`
+  (the current canary uses the http tool directly, bypassing the
+  channel install path)
 - Mock Sheets write semantics (`values:append`, header-row creation)
 - Mock Google Calendar reads
 - Mock Hacker News HTTP scrape
-- LLM-driven email classification for the CRM tracker
-- Cross-scenario verification (e.g., routine "Run now" button in the
-  UI, manual-trigger from Telegram, schedule update via NL chat)
+- LLM-driven email classification (for the CRM tracker, would need
+  per-email-shape canned responses in mock_llm.py)
+- Cross-scenario UI flows (routine "Run now" button, manual-trigger
+  from Telegram, schedule update via NL chat, disable/enable/delete)
 
 ## How to run locally
 

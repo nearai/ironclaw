@@ -47,5 +47,6 @@ async def run(
             "10 minutes before each meeting."
         ),
         description="canary script 2: calendar prep -> telegram",
+        verify_telegram=True,
     )
     return [result]

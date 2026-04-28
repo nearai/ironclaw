@@ -49,5 +49,6 @@ async def run(
             "description."
         ),
         description="canary script 3: hacker news -> telegram",
+        verify_telegram=True,
     )
     return [result]
