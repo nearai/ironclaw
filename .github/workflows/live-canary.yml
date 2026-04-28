@@ -5,11 +5,11 @@ on:
   # scheduled slot means also updating those guards, so keep this
   # block and the job conditions in lockstep.
   schedule:
-    # Single daily slot: every lane runs once per day at 02:00 UTC as
-    # parallel jobs in the same workflow run. One run = one red dot on
-    # failure, one notification, one place to drill into per-lane
-    # status. Job-level `if:` guards below all match this cron.
-    - cron: "0 2 * * *"
+    # Every 6 hours (00, 06, 12, 18 UTC). Every lane runs as parallel
+    # jobs in the same workflow run; one run = one red dot on failure,
+    # one notification, one place to drill into per-lane status.
+    # Job-level `if:` guards below all match this cron.
+    - cron: "0 */6 * * *"
   workflow_dispatch:
     inputs:
       lane:
@@ -67,7 +67,7 @@ jobs:
   auth-smoke:
     name: Auth Smoke
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-smoke'))
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -99,7 +99,7 @@ jobs:
   auth-full:
     name: Auth Full
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-full'))
     runs-on: ubuntu-latest
     timeout-minutes: 75
@@ -131,7 +131,7 @@ jobs:
   auth-channels:
     name: Auth Channels
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-channels'))
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -163,7 +163,7 @@ jobs:
   auth-live-seeded:
     name: Auth Live Seeded
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-live-seeded'))
     runs-on: ubuntu-latest
     timeout-minutes: 75
@@ -253,7 +253,7 @@ jobs:
   auth-browser-consent:
     name: Auth Browser Consent
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-browser-consent'))
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -363,7 +363,7 @@ jobs:
   workflow-canary:
     name: Workflow Canary
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'workflow-canary'))
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -395,7 +395,7 @@ jobs:
   deterministic-replay:
     name: Deterministic Replay
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
       (github.event_name == 'workflow_dispatch' &&
       (inputs.lane == 'all' || inputs.lane == 'deterministic-replay'))
     runs-on: ubuntu-latest
@@ -436,7 +436,7 @@ jobs:
   public-smoke:
     name: Public Live Smoke
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'public-smoke'))
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -497,7 +497,7 @@ jobs:
   persona-rotating:
     name: Rotating Persona Live
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'persona-rotating'))
     runs-on: ubuntu-latest
     timeout-minutes: 180
@@ -557,7 +557,7 @@ jobs:
     name: Private OAuth Live
     if: >
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'private-oauth')) ||
-      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *' && vars.LIVE_CANARY_PRIVATE_OAUTH_ENABLED == 'true')
+      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *' && vars.LIVE_CANARY_PRIVATE_OAUTH_ENABLED == 'true')
     runs-on: [self-hosted, ironclaw-live]
     timeout-minutes: 120
     env:
@@ -610,7 +610,7 @@ jobs:
   provider-matrix:
     name: Provider Matrix (${{ matrix.provider }})
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'provider-matrix'))
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -811,9 +811,12 @@ jobs:
           path: artifacts/live-canary
           merge-multiple: true
       - name: Generate and post Slack report
-        # Temporarily disabled while iterating on canary stabilization; re-enable
-        # once the auth-* lanes are green on the default branch.
-        if: false
+        # Notifier exits 0 even on Slack/Haiku failure (see
+        # notify_slack.py docstring) so a flaky webhook can't fail the
+        # whole canary run. Gated on schedule + workflow_dispatch only —
+        # PR-triggered runs (if any) skip the post to keep noise out of
+        # the channel.
+        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
