@@ -33,12 +33,14 @@ async def run(
 ) -> list[ProbeResult]:
     result = await run_routine_probe(
         stack=stack,
+        mock_telegram_url=mock_telegram_url,
         provider="routines",
         mode="bug_logger",
         routine_name="canary-bug-logger",
-        prompt=(
-            "hi — bug logger: scan recent telegram messages for entries "
-            "starting with 'bug:' and append each to the bug-tracking sheet"
+        prompt_intro=(
+            "Scan recent Telegram messages for entries starting with "
+            "'bug:' and append each to the bug-tracking sheet, then "
+            "send the user a Telegram acknowledgement."
         ),
         description="canary script 1: telegram bugs -> sheet",
     )

@@ -28,10 +28,11 @@ async def run(
 ) -> list[ProbeResult]:
     result = await run_routine_probe(
         stack=stack,
+        mock_telegram_url=mock_telegram_url,
         provider="routines",
         mode="periodic_reminder",
         routine_name="canary-periodic-reminder",
-        prompt="hi - dog walk reminder",
+        prompt_intro="Send the user a Telegram reminder to walk the dog.",
         description="canary script 4: dog walk reminder",
     )
     return [result]

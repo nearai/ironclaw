@@ -41,14 +41,15 @@ async def run(
 ) -> list[ProbeResult]:
     result = await run_routine_probe(
         stack=stack,
+        mock_telegram_url=mock_telegram_url,
         provider="routines",
         mode="crm_tracker",
         routine_name="canary-crm-tracker",
-        prompt=(
-            "hi — crm tracker: scan recent gmail messages for inbound "
-            "sales leads, classify each into Company / Contact Name / "
-            "Email / Status / Notes / Next Action, and append rows to "
-            "the 'Inbound CRM' sheet"
+        prompt_intro=(
+            "Scan recent Gmail messages for inbound sales leads, "
+            "classify each into Company / Contact Name / Email / "
+            "Status / Notes / Next Action, append rows to the "
+            "'Inbound CRM' sheet, and send a Telegram summary."
         ),
         description="canary script 5: gmail -> sheets CRM",
     )

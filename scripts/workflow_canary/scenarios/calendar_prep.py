@@ -37,13 +37,14 @@ async def run(
 ) -> list[ProbeResult]:
     result = await run_routine_probe(
         stack=stack,
+        mock_telegram_url=mock_telegram_url,
         provider="routines",
         mode="calendar_prep",
         routine_name="canary-calendar-prep",
-        prompt=(
-            "hi — calendar prep: list upcoming meetings, look up each "
-            "external attendee's company background, and send a "
-            "Telegram briefing 10 minutes before each meeting"
+        prompt_intro=(
+            "List upcoming meetings, look up each external attendee's "
+            "company background, and send a Telegram briefing "
+            "10 minutes before each meeting."
         ),
         description="canary script 2: calendar prep -> telegram",
     )

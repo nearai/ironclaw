@@ -39,13 +39,14 @@ async def run(
 ) -> list[ProbeResult]:
     result = await run_routine_probe(
         stack=stack,
+        mock_telegram_url=mock_telegram_url,
         provider="routines",
         mode="hn_monitor",
         routine_name="canary-hn-monitor",
-        prompt=(
-            "hi — hacker news monitor: scrape the latest 'Show HN' "
-            "posts and send a Telegram summary including title, link, "
-            "author, and brief description"
+        prompt_intro=(
+            "Scrape the latest 'Show HN' posts and send a Telegram "
+            "summary including title, link, author, and brief "
+            "description."
         ),
         description="canary script 3: hacker news -> telegram",
     )

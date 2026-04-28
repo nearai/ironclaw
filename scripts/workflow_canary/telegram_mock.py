@@ -296,8 +296,22 @@ def _bot_route(method: str):
     return _route
 
 
+@web.middleware
+async def _request_logger(request: web.Request, handler):
+    """Log every inbound request so the gateway log captures whether
+    the gateway's HTTP remap is delivering traffic to us during a
+    canary run. Cheap, single-process, no perf impact at the volumes
+    the canary generates."""
+    print(
+        f"[telegram_mock] {request.method} {request.path}"
+        f"{('?' + request.query_string) if request.query_string else ''}",
+        flush=True,
+    )
+    return await handler(request)
+
+
 def make_app() -> web.Application:
-    app = web.Application()
+    app = web.Application(middlewares=[_request_logger])
     app["state"] = _new_state()
 
     # Bot API methods (IronClaw uses both POST and GET for getUpdates)

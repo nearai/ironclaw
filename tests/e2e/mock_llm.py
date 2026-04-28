@@ -147,6 +147,28 @@ TOOL_CALL_PATTERNS = [
             "body": {"label": m.group("label")},
         },
     ),
+    # Workflow-canary scenarios each tag their routine prompt with
+    # [CANARY-WORKFLOW-<key>] so this matcher emits a deterministic
+    # `http` tool call that reaches mock_telegram via
+    # IRONCLAW_TEST_HTTP_REMAP=api.telegram.org=<mock>. The chat_id is
+    # the canary's simulated test user (mock_telegram DEFAULT_USER_ID).
+    # The text echoes the scenario key so the scenario can disambiguate
+    # which message belongs to it when the mock_telegram is shared
+    # across the workflow-canary lane's probes.
+    (
+        re.compile(r"\[CANARY-WORKFLOW-(?P<key>[a-z_0-9]+)\]", re.IGNORECASE),
+        "http",
+        lambda m: {
+            "method": "POST",
+            "url": (
+                "https://api.telegram.org/bot111222333:CANARY/sendMessage"
+            ),
+            "body": {
+                "chat_id": 8800800800,
+                "text": f"[canary-workflow:{m.group('key').lower()}] ack",
+            },
+        },
+    ),
     (
         re.compile(r"check gmail unread|gmail unread", re.IGNORECASE),
         "gmail",
