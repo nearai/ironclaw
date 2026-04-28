@@ -685,6 +685,34 @@ async fn resource_managed_store_releases_when_inner_store_drops_reservation_id()
 }
 
 #[tokio::test]
+async fn resource_managed_store_preserves_mismatch_when_reconcile_cleanup_fails() {
+    let governor = Arc::new(ReconcileFailingGovernor::default());
+    let store =
+        ResourceManagedProcessStore::new(CompletionReservationDroppingStore::default(), governor);
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+
+    store
+        .start(process_start_with_estimate(
+            process_id,
+            invocation_id,
+            scope.clone(),
+            process_estimate(),
+        ))
+        .await
+        .unwrap();
+
+    let err = store.complete(&scope, process_id).await.unwrap_err();
+
+    assert!(matches!(
+        err,
+        ProcessError::ResourceCleanupFailed { original, cleanup: ResourceError::UnknownReservation { .. } }
+            if matches!(*original, ProcessError::ResourceReservationMismatch { process_id: id, .. } if id == process_id)
+    ));
+}
+
+#[tokio::test]
 async fn resource_managed_store_preserves_original_error_when_cleanup_fails() {
     let governor = Arc::new(ReleaseFailingGovernor::default());
     let inner = InMemoryProcessStore::new();
@@ -1540,6 +1568,60 @@ impl ProcessStore for ForgedProcessStore {
 }
 
 #[derive(Default)]
+struct CompletionReservationDroppingStore {
+    inner: InMemoryProcessStore,
+}
+
+#[async_trait]
+impl ProcessStore for CompletionReservationDroppingStore {
+    async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
+        self.inner.start(start).await
+    }
+
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ProcessRecord, ProcessError> {
+        let mut record = self.inner.complete(scope, process_id).await?;
+        record.resource_reservation_id = None;
+        Ok(record)
+    }
+
+    async fn fail(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        error_kind: String,
+    ) -> Result<ProcessRecord, ProcessError> {
+        self.inner.fail(scope, process_id, error_kind).await
+    }
+
+    async fn kill(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ProcessRecord, ProcessError> {
+        self.inner.kill(scope, process_id).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<Option<ProcessRecord>, ProcessError> {
+        self.inner.get(scope, process_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<ProcessRecord>, ProcessError> {
+        self.inner.records_for_scope(scope).await
+    }
+}
+
+#[derive(Default)]
 struct ReleaseFailingGovernor {
     inner: InMemoryResourceGovernor,
 }
@@ -1579,6 +1661,49 @@ impl ResourceGovernor for ReleaseFailingGovernor {
         reservation_id: ResourceReservationId,
     ) -> Result<ironclaw_resources::ResourceReceipt, ResourceError> {
         Err(ResourceError::UnknownReservation { id: reservation_id })
+    }
+}
+
+#[derive(Default)]
+struct ReconcileFailingGovernor {
+    inner: InMemoryResourceGovernor,
+}
+
+impl ResourceGovernor for ReconcileFailingGovernor {
+    fn set_limit(&self, account: ResourceAccount, limits: ResourceLimits) {
+        self.inner.set_limit(account, limits);
+    }
+
+    fn reserve(
+        &self,
+        scope: ResourceScope,
+        estimate: ResourceEstimate,
+    ) -> Result<ironclaw_resources::ResourceReservation, ResourceError> {
+        self.inner.reserve(scope, estimate)
+    }
+
+    fn reserve_with_id(
+        &self,
+        scope: ResourceScope,
+        estimate: ResourceEstimate,
+        reservation_id: ResourceReservationId,
+    ) -> Result<ironclaw_resources::ResourceReservation, ResourceError> {
+        self.inner.reserve_with_id(scope, estimate, reservation_id)
+    }
+
+    fn reconcile(
+        &self,
+        reservation_id: ResourceReservationId,
+        _actual: ResourceUsage,
+    ) -> Result<ironclaw_resources::ResourceReceipt, ResourceError> {
+        Err(ResourceError::UnknownReservation { id: reservation_id })
+    }
+
+    fn release(
+        &self,
+        reservation_id: ResourceReservationId,
+    ) -> Result<ironclaw_resources::ResourceReceipt, ResourceError> {
+        self.inner.release(reservation_id)
     }
 }
 
