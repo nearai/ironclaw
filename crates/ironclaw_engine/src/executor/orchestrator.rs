@@ -606,11 +606,7 @@ async fn handle_llm_complete(
 
     // If a terminal action result was stashed by handle_execute_actions_parallel,
     // return it directly as a text response — skip the LLM call entirely.
-    if let Some(stashed) = thread
-        .metadata
-        .get("_terminal_result")
-        .cloned()
-    {
+    if let Some(stashed) = thread.metadata.get("_terminal_result").cloned() {
         if let Some(obj) = thread.metadata.as_object_mut() {
             obj.remove("_terminal_result");
         }
@@ -1601,12 +1597,13 @@ async fn handle_execute_actions_parallel(
             let name = &parsed[idx].name;
             if terminal_set.iter().any(|t| t == name) {
                 let output = rj.get("output").cloned().unwrap_or_default();
-                if !rj.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false) {
+                if !rj
+                    .get("is_error")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
                     if let Some(obj) = thread.metadata.as_object_mut() {
-                        obj.insert(
-                            "_terminal_result".to_string(),
-                            output,
-                        );
+                        obj.insert("_terminal_result".to_string(), output);
                     }
                     debug!(action = %name, "stashed terminal action result");
                     break;
@@ -2048,7 +2045,11 @@ async fn handle_list_skills(
     // at tool execution time, independent of keyword-based skill activation.
     let mut terminal_actions: Vec<String> = Vec::new();
     for d in &skill_docs {
-        if let Some(arr) = d.metadata.get("terminal_actions").and_then(|v| v.as_array()) {
+        if let Some(arr) = d
+            .metadata
+            .get("terminal_actions")
+            .and_then(|v| v.as_array())
+        {
             for item in arr {
                 if let Some(s) = item.as_str() {
                     terminal_actions.push(s.to_string());
@@ -2056,13 +2057,13 @@ async fn handle_list_skills(
             }
         }
     }
-    if !terminal_actions.is_empty() {
-        if let Some(obj) = thread.metadata.as_object_mut() {
-            obj.insert(
-                "_terminal_actions".to_string(),
-                serde_json::json!(terminal_actions),
-            );
-        }
+    if !terminal_actions.is_empty()
+        && let Some(obj) = thread.metadata.as_object_mut()
+    {
+        obj.insert(
+            "_terminal_actions".to_string(),
+            serde_json::json!(terminal_actions),
+        );
     }
 
     let skills: Vec<serde_json::Value> = skill_docs
