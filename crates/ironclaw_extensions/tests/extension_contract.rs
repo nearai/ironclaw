@@ -104,6 +104,7 @@ fn invalid_manifest_asset_paths_are_rejected() {
         "wasm\\\\echo.wasm",
         "https://example.com/echo.wasm",
         "wasm/has\\u0000nul.wasm",
+        "C:evil.wasm",
     ] {
         let manifest = WASM_MANIFEST.replace("wasm/echo.wasm", invalid);
         assert!(
@@ -420,6 +421,34 @@ fn first_party_and_system_runtimes_cannot_be_self_asserted_by_manifests() {
         ExtensionManifest::parse(SYSTEM_MANIFEST),
         Err(ExtensionError::ManifestParse { .. })
     ));
+    assert!(matches!(
+        ExtensionManifest::parse(SANDBOX_FIRST_PARTY_RUNTIME_MANIFEST),
+        Err(ExtensionError::InvalidManifest { reason }) if reason.contains("host-assigned")
+    ));
+    assert!(matches!(
+        ExtensionManifest::parse(SANDBOX_SYSTEM_RUNTIME_MANIFEST),
+        Err(ExtensionError::InvalidManifest { reason }) if reason.contains("host-assigned")
+    ));
+}
+
+#[test]
+fn mcp_runtime_requires_endpoint_shape_for_transport() {
+    assert!(matches!(
+        ExtensionManifest::parse(MCP_STDIO_WITHOUT_COMMAND_MANIFEST),
+        Err(ExtensionError::InvalidManifest { reason }) if reason.contains("stdio") && reason.contains("command")
+    ));
+    assert!(matches!(
+        ExtensionManifest::parse(MCP_STDIO_WITH_URL_MANIFEST),
+        Err(ExtensionError::InvalidManifest { reason }) if reason.contains("stdio") && reason.contains("url")
+    ));
+    assert!(matches!(
+        ExtensionManifest::parse(MCP_HTTP_WITHOUT_URL_MANIFEST),
+        Err(ExtensionError::InvalidManifest { reason }) if reason.contains("http") && reason.contains("url")
+    ));
+    assert!(matches!(
+        ExtensionManifest::parse(MCP_HTTP_WITH_COMMAND_MANIFEST),
+        Err(ExtensionError::InvalidManifest { reason }) if reason.contains("http") && reason.contains("command")
+    ));
 }
 
 #[test]
@@ -452,6 +481,32 @@ fn registry_lookup_returns_declared_package_and_descriptor() {
         .unwrap();
     assert_eq!(capability.description, "Echo text");
     assert_eq!(capability.provider.as_str(), "echo");
+}
+
+#[tokio::test]
+async fn discovery_ignores_non_directory_entries_in_extension_root() {
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("echo")).unwrap();
+    std::fs::write(storage.path().join("echo/manifest.toml"), WASM_MANIFEST).unwrap();
+    std::fs::write(storage.path().join(".DS_Store"), b"not an extension").unwrap();
+
+    let mut fs = LocalFilesystem::new();
+    fs.mount_local(
+        VirtualPath::new("/system/extensions").unwrap(),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
+    )
+    .unwrap();
+
+    let registry =
+        ExtensionDiscovery::discover(&fs, &VirtualPath::new("/system/extensions").unwrap())
+            .await
+            .unwrap();
+
+    assert!(
+        registry
+            .get_extension(&ExtensionId::new("echo").unwrap())
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -528,5 +583,121 @@ id = "audit.write"
 description = "Write audit event"
 effects = ["dispatch_capability"]
 default_permission = "allow"
+parameters_schema = { type = "object" }
+"#;
+
+const SANDBOX_FIRST_PARTY_RUNTIME_MANIFEST: &str = r#"
+id = "conversation"
+name = "Conversation"
+version = "0.1.0"
+description = "Conversation service"
+trust = "sandbox"
+
+[runtime]
+kind = "first_party"
+service = "conversation"
+
+[[capabilities]]
+id = "conversation.ingest"
+description = "Ingest normalized messages"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+parameters_schema = { type = "object" }
+"#;
+
+const SANDBOX_SYSTEM_RUNTIME_MANIFEST: &str = r#"
+id = "audit"
+name = "Audit"
+version = "0.1.0"
+description = "Audit service"
+trust = "sandbox"
+
+[runtime]
+kind = "system"
+service = "audit"
+
+[[capabilities]]
+id = "audit.write"
+description = "Write audit event"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+parameters_schema = { type = "object" }
+"#;
+
+const MCP_STDIO_WITHOUT_COMMAND_MANIFEST: &str = r#"
+id = "github-mcp"
+name = "GitHub MCP"
+version = "0.1.0"
+description = "GitHub MCP adapter"
+trust = "user_trusted"
+
+[runtime]
+kind = "mcp"
+transport = "stdio"
+
+[[capabilities]]
+id = "github-mcp.search_issues"
+description = "Search GitHub issues"
+effects = ["network", "dispatch_capability"]
+default_permission = "ask"
+parameters_schema = { type = "object" }
+"#;
+
+const MCP_STDIO_WITH_URL_MANIFEST: &str = r#"
+id = "github-mcp"
+name = "GitHub MCP"
+version = "0.1.0"
+description = "GitHub MCP adapter"
+trust = "user_trusted"
+
+[runtime]
+kind = "mcp"
+transport = "stdio"
+url = "http://localhost:3000"
+
+[[capabilities]]
+id = "github-mcp.search_issues"
+description = "Search GitHub issues"
+effects = ["network", "dispatch_capability"]
+default_permission = "ask"
+parameters_schema = { type = "object" }
+"#;
+
+const MCP_HTTP_WITHOUT_URL_MANIFEST: &str = r#"
+id = "github-mcp"
+name = "GitHub MCP"
+version = "0.1.0"
+description = "GitHub MCP adapter"
+trust = "user_trusted"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+
+[[capabilities]]
+id = "github-mcp.search_issues"
+description = "Search GitHub issues"
+effects = ["network", "dispatch_capability"]
+default_permission = "ask"
+parameters_schema = { type = "object" }
+"#;
+
+const MCP_HTTP_WITH_COMMAND_MANIFEST: &str = r#"
+id = "github-mcp"
+name = "GitHub MCP"
+version = "0.1.0"
+description = "GitHub MCP adapter"
+trust = "user_trusted"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+command = "github-mcp-server"
+
+[[capabilities]]
+id = "github-mcp.search_issues"
+description = "Search GitHub issues"
+effects = ["network", "dispatch_capability"]
+default_permission = "ask"
 parameters_schema = { type = "object" }
 "#;

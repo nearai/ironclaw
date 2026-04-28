@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use ironclaw_filesystem::{FilesystemError, RootFilesystem};
+use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, HostApiError, PermissionMode,
     ResourceProfile, RuntimeKind, TrustClass, VirtualPath,
@@ -330,6 +330,9 @@ impl ExtensionDiscovery {
 
         let mut registry = ExtensionRegistry::new();
         for entry in entries {
+            if entry.file_type != FileType::Directory {
+                continue;
+            }
             let expected = ExtensionId::new(entry.name.clone())?;
             let manifest_path = VirtualPath::new(format!(
                 "{}/{}/manifest.toml",
@@ -444,13 +447,7 @@ impl RawRuntime {
                 args,
                 url,
             } => {
-                validate_non_empty("mcp transport", &transport)?;
-                if let Some(command) = &command {
-                    validate_non_empty("mcp command", command)?;
-                }
-                if let Some(url) = &url {
-                    validate_non_empty("mcp url", url)?;
-                }
+                validate_mcp_runtime_shape(&transport, command.as_deref(), url.as_deref())?;
                 Ok(ExtensionRuntime::Mcp {
                     transport,
                     command,
@@ -460,11 +457,15 @@ impl RawRuntime {
             }
             Self::FirstParty { service } => {
                 validate_non_empty("first-party service", &service)?;
-                Ok(ExtensionRuntime::FirstParty { service })
+                Err(ExtensionError::InvalidManifest {
+                    reason: "first-party and system runtimes are host-assigned and cannot be self-asserted by manifests".to_string(),
+                })
             }
             Self::System { service } => {
                 validate_non_empty("system service", &service)?;
-                Ok(ExtensionRuntime::System { service })
+                Err(ExtensionError::InvalidManifest {
+                    reason: "first-party and system runtimes are host-assigned and cannot be self-asserted by manifests".to_string(),
+                })
             }
         }
     }
@@ -545,6 +546,54 @@ fn validate_asset_path(value: &str) -> Result<(), ExtensionError> {
     Ok(())
 }
 
+fn validate_mcp_runtime_shape(
+    transport: &str,
+    command: Option<&str>,
+    url: Option<&str>,
+) -> Result<(), ExtensionError> {
+    validate_non_empty("mcp transport", transport)?;
+    if let Some(command) = command {
+        validate_non_empty("mcp command", command)?;
+    }
+    if let Some(url) = url {
+        validate_non_empty("mcp url", url)?;
+    }
+
+    match transport {
+        "stdio" => {
+            if url.is_some() {
+                return Err(ExtensionError::InvalidManifest {
+                    reason: "mcp stdio transport must not specify url".to_string(),
+                });
+            }
+            if command.is_none() {
+                return Err(ExtensionError::InvalidManifest {
+                    reason: "mcp stdio transport requires command".to_string(),
+                });
+            }
+        }
+        "http" | "sse" => {
+            if command.is_some() {
+                return Err(ExtensionError::InvalidManifest {
+                    reason: format!("mcp {transport} transport must not specify command"),
+                });
+            }
+            if url.is_none() {
+                return Err(ExtensionError::InvalidManifest {
+                    reason: format!("mcp {transport} transport requires url"),
+                });
+            }
+        }
+        _ => {
+            return Err(ExtensionError::InvalidManifest {
+                reason: "mcp transport must be one of stdio, http, or sse".to_string(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_non_empty(kind: &str, value: &str) -> Result<(), ExtensionError> {
     if value.trim().is_empty() {
         Err(ExtensionError::InvalidManifest {
@@ -557,5 +606,6 @@ fn validate_non_empty(kind: &str, value: &str) -> Result<(), ExtensionError> {
 
 fn looks_like_windows_path(value: &str) -> bool {
     let bytes = value.as_bytes();
-    bytes.len() >= 3 && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/')
+    (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+        || (bytes.len() >= 3 && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/'))
 }
