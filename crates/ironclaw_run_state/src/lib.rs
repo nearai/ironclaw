@@ -125,6 +125,8 @@ pub enum RunStateError {
     InvocationAlreadyExists { invocation_id: InvocationId },
     #[error("unknown approval request {request_id}")]
     UnknownApprovalRequest { request_id: ApprovalRequestId },
+    #[error("approval request {request_id} already exists")]
+    ApprovalRequestAlreadyExists { request_id: ApprovalRequestId },
     #[error("approval request {request_id} is not pending (status: {status:?})")]
     ApprovalNotPending {
         request_id: ApprovalRequestId,
@@ -417,10 +419,14 @@ impl ApprovalRequestStore for InMemoryApprovalRequestStore {
             request,
             status: ApprovalStatus::Pending,
         };
-        self.records_guard().insert(
-            ApprovalKey::new(&record.scope, record.request.id),
-            record.clone(),
-        );
+        let key = ApprovalKey::new(&record.scope, record.request.id);
+        let mut records = self.records_guard();
+        if records.contains_key(&key) {
+            return Err(RunStateError::ApprovalRequestAlreadyExists {
+                request_id: record.request.id,
+            });
+        }
+        records.insert(key, record.clone());
         Ok(record)
     }
 
@@ -694,6 +700,11 @@ where
         request: ApprovalRequest,
     ) -> Result<ApprovalRecord, RunStateError> {
         let _guard = self.lock.lock().await;
+        if self.get(&scope, request.id).await?.is_some() {
+            return Err(RunStateError::ApprovalRequestAlreadyExists {
+                request_id: request.id,
+            });
+        }
         let record = ApprovalRecord {
             scope,
             request,

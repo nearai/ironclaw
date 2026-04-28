@@ -71,17 +71,37 @@ async fn approval_store_rejects_second_resolution_attempt() {
 }
 
 #[tokio::test]
-async fn filesystem_approval_store_rejects_second_resolution_attempt() {
-    let fs = {
-        let storage = tempfile::tempdir().unwrap().keep();
-        let mut fs = ironclaw_filesystem::LocalFilesystem::new();
-        fs.mount_local(
-            VirtualPath::new("/engine").unwrap(),
-            HostPath::from_path_buf(storage),
-        )
+async fn approval_store_rejects_duplicate_pending_save() {
+    let store = InMemoryApprovalRequestStore::new();
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id);
+    let request_id = approval.id;
+
+    store
+        .save_pending(scope.clone(), approval.clone())
+        .await
         .unwrap();
-        fs
-    };
+    store.approve(&scope, request_id).await.unwrap();
+
+    let err = store
+        .save_pending(scope.clone(), approval)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        RunStateError::ApprovalRequestAlreadyExists { request_id: id } if id == request_id
+    ));
+    assert_eq!(
+        store.get(&scope, request_id).await.unwrap().unwrap().status,
+        ApprovalStatus::Approved
+    );
+}
+
+#[tokio::test]
+async fn filesystem_approval_store_rejects_second_resolution_attempt() {
+    let fs = engine_filesystem();
     let store = FilesystemApprovalRequestStore::new(&fs);
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
@@ -100,6 +120,47 @@ async fn filesystem_approval_store_rejects_second_resolution_attempt() {
             status: ApprovalStatus::Approved,
         } if id == request_id
     ));
+}
+
+#[tokio::test]
+async fn filesystem_approval_store_rejects_duplicate_pending_save() {
+    let fs = engine_filesystem();
+    let store = FilesystemApprovalRequestStore::new(&fs);
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id);
+    let request_id = approval.id;
+
+    store
+        .save_pending(scope.clone(), approval.clone())
+        .await
+        .unwrap();
+    store.approve(&scope, request_id).await.unwrap();
+
+    let err = store
+        .save_pending(scope.clone(), approval)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        RunStateError::ApprovalRequestAlreadyExists { request_id: id } if id == request_id
+    ));
+    assert_eq!(
+        store.get(&scope, request_id).await.unwrap().unwrap().status,
+        ApprovalStatus::Approved
+    );
+}
+
+fn engine_filesystem() -> ironclaw_filesystem::LocalFilesystem {
+    let storage = tempfile::tempdir().unwrap().keep();
+    let mut fs = ironclaw_filesystem::LocalFilesystem::new();
+    fs.mount_local(
+        VirtualPath::new("/engine").unwrap(),
+        HostPath::from_path_buf(storage),
+    )
+    .unwrap();
+    fs
 }
 
 fn sample_scope(invocation_id: InvocationId, tenant: &str, user: &str) -> ResourceScope {

@@ -16,8 +16,8 @@ use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, Decision, DenyReason,
     EffectKind, ExecutionContext, HostApiError, InvocationFingerprint, InvocationId, MissionId,
-    Principal, ProjectId, ResourceCeiling, ResourceEstimate, ResourceScope, TenantId, ThreadId,
-    UserId, VirtualPath,
+    NetworkPolicy, Obligation, Obligations, Principal, ProjectId, ResourceCeiling,
+    ResourceEstimate, ResourceScope, TenantId, ThreadId, UserId, VirtualPath,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -260,7 +260,12 @@ impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
 
         let was_claimed = lease.status == CapabilityLeaseStatus::Claimed;
         ensure_consumable(lease)?;
-        if let Some(remaining) = lease.grant.constraints.max_invocations.as_mut() {
+        if lease.invocation_fingerprint.is_some() {
+            if let Some(remaining) = lease.grant.constraints.max_invocations.as_mut() {
+                *remaining = 0;
+            }
+            lease.status = CapabilityLeaseStatus::Consumed;
+        } else if let Some(remaining) = lease.grant.constraints.max_invocations.as_mut() {
             *remaining -= 1;
             if *remaining == 0 {
                 lease.status = CapabilityLeaseStatus::Consumed;
@@ -524,7 +529,12 @@ where
             .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
         let was_claimed = lease.status == CapabilityLeaseStatus::Claimed;
         ensure_consumable(&lease)?;
-        if let Some(remaining) = lease.grant.constraints.max_invocations.as_mut() {
+        if lease.invocation_fingerprint.is_some() {
+            if let Some(remaining) = lease.grant.constraints.max_invocations.as_mut() {
+                *remaining = 0;
+            }
+            lease.status = CapabilityLeaseStatus::Consumed;
+        } else if let Some(remaining) = lease.grant.constraints.max_invocations.as_mut() {
             *remaining -= 1;
             if *remaining == 0 {
                 lease.status = CapabilityLeaseStatus::Consumed;
@@ -714,10 +724,9 @@ fn authorize_from_grants<'a>(
         saw_active_matching_grant = true;
         if effects_are_covered(&descriptor.effects, &grant.constraints.allowed_effects)
             && resource_estimate_is_covered(estimate, grant.constraints.resource_ceiling.as_ref())
+            && let Some(obligations) = obligations_for_grant(descriptor, grant)
         {
-            return Decision::Allow {
-                obligations: Default::default(),
-            };
+            return Decision::Allow { obligations };
         }
     }
 
@@ -730,6 +739,65 @@ fn authorize_from_grants<'a>(
             reason: DenyReason::MissingGrant,
         }
     }
+}
+
+fn obligations_for_grant(
+    descriptor: &CapabilityDescriptor,
+    grant: &CapabilityGrant,
+) -> Option<Obligations> {
+    let mut obligations = Vec::new();
+
+    if descriptor_requires_mount_policy(descriptor) {
+        obligations.push(Obligation::UseScopedMounts {
+            mounts: grant.constraints.mounts.clone(),
+        });
+    }
+
+    if descriptor.effects.contains(&EffectKind::Network)
+        || network_policy_is_constrained(&grant.constraints.network)
+    {
+        obligations.push(Obligation::ApplyNetworkPolicy {
+            policy: grant.constraints.network.clone(),
+        });
+    }
+
+    if descriptor.effects.contains(&EffectKind::UseSecret) {
+        match grant.constraints.secrets.as_slice() {
+            [handle] => obligations.push(Obligation::InjectSecretOnce {
+                handle: handle.clone(),
+            }),
+            _ => return None,
+        }
+    }
+
+    if let Some(bytes) = grant
+        .constraints
+        .resource_ceiling
+        .as_ref()
+        .and_then(|ceiling| ceiling.max_output_bytes)
+    {
+        obligations.push(Obligation::EnforceOutputLimit { bytes });
+    }
+
+    Obligations::new(obligations).ok()
+}
+
+fn descriptor_requires_mount_policy(descriptor: &CapabilityDescriptor) -> bool {
+    descriptor.effects.iter().any(|effect| {
+        matches!(
+            effect,
+            EffectKind::ReadFilesystem
+                | EffectKind::WriteFilesystem
+                | EffectKind::DeleteFilesystem
+                | EffectKind::ExecuteCode
+        )
+    })
+}
+
+fn network_policy_is_constrained(policy: &NetworkPolicy) -> bool {
+    !policy.allowed_targets.is_empty()
+        || policy.deny_private_ip_ranges
+        || policy.max_egress_bytes.is_some()
 }
 
 fn principal_matches_context(principal: &Principal, context: &ExecutionContext) -> bool {
@@ -782,13 +850,17 @@ fn resource_estimate_is_covered(
             ceiling.max_output_bytes.as_ref(),
         )
         && ceiling.sandbox.as_ref().is_none_or(|sandbox| {
-            options_within_ceiling(
-                estimate.network_egress_bytes.as_ref(),
-                sandbox.network_egress_bytes.as_ref(),
-            ) && options_within_ceiling(
-                estimate.process_count.as_ref(),
-                sandbox.process_count.as_ref(),
-            )
+            sandbox.cpu_time_ms.is_none()
+                && sandbox.memory_bytes.is_none()
+                && sandbox.disk_bytes.is_none()
+                && options_within_ceiling(
+                    estimate.network_egress_bytes.as_ref(),
+                    sandbox.network_egress_bytes.as_ref(),
+                )
+                && options_within_ceiling(
+                    estimate.process_count.as_ref(),
+                    sandbox.process_count.as_ref(),
+                )
         })
 }
 
@@ -798,6 +870,7 @@ where
 {
     match (estimate, maximum) {
         (Some(estimate), Some(maximum)) => estimate <= maximum,
+        (None, Some(_)) => false,
         _ => true,
     }
 }

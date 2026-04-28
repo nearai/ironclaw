@@ -51,6 +51,88 @@ async fn capability_access_allows_matching_extension_grant() {
 }
 
 #[tokio::test]
+async fn capability_access_returns_grant_constraints_as_runtime_obligations() {
+    let descriptor = CapabilityDescriptor {
+        effects: vec![
+            EffectKind::DispatchCapability,
+            EffectKind::Network,
+            EffectKind::UseSecret,
+            EffectKind::ReadFilesystem,
+        ],
+        ..wasm_descriptor()
+    };
+    let secret = SecretHandle::new("api-key").unwrap();
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/project1").unwrap(),
+        MountPermissions::read_only(),
+    )])
+    .unwrap();
+    let network = NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "api.example.com".to_string(),
+            port: Some(443),
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(1024),
+    };
+    let mut grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![
+            EffectKind::DispatchCapability,
+            EffectKind::Network,
+            EffectKind::UseSecret,
+            EffectKind::ReadFilesystem,
+        ],
+    );
+    grant.constraints.mounts = mounts.clone();
+    grant.constraints.network = network.clone();
+    grant.constraints.secrets = vec![secret.clone()];
+    grant.constraints.resource_ceiling = Some(ResourceCeiling {
+        max_usd: None,
+        max_input_tokens: None,
+        max_output_tokens: None,
+        max_wall_clock_ms: None,
+        max_output_bytes: Some(2048),
+        sandbox: None,
+    });
+
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch(
+            &execution_context(CapabilitySet {
+                grants: vec![grant],
+            }),
+            &descriptor,
+            &ResourceEstimate {
+                output_bytes: Some(512),
+                ..ResourceEstimate::default()
+            },
+        )
+        .await;
+
+    let Decision::Allow { obligations } = decision else {
+        panic!("expected allow decision with obligations, got {decision:?}");
+    };
+    assert!(obligations.as_slice().iter().any(
+        |obligation| matches!(obligation, Obligation::UseScopedMounts { mounts: value } if value == &mounts)
+    ));
+    assert!(obligations.as_slice().iter().any(
+        |obligation| matches!(obligation, Obligation::ApplyNetworkPolicy { policy } if policy == &network)
+    ));
+    assert!(obligations.as_slice().iter().any(
+        |obligation| matches!(obligation, Obligation::InjectSecretOnce { handle } if handle == &secret)
+    ));
+    assert!(
+        obligations
+            .as_slice()
+            .iter()
+            .any(|obligation| matches!(obligation, Obligation::EnforceOutputLimit { bytes: 2048 }))
+    );
+}
+
+#[tokio::test]
 async fn capability_access_denies_when_grant_is_for_different_principal_or_capability() {
     let descriptor = wasm_descriptor();
     let wrong_principal = grant_for(
@@ -183,12 +265,7 @@ async fn capability_access_allows_later_grant_that_covers_effects() {
         )
         .await;
 
-    assert_eq!(
-        decision,
-        Decision::Allow {
-            obligations: Default::default()
-        }
-    );
+    assert!(matches!(decision, Decision::Allow { .. }));
 }
 
 #[tokio::test]
@@ -218,6 +295,41 @@ async fn capability_access_denies_when_resource_estimate_exceeds_grant_ceiling()
                 input_tokens: Some(11),
                 ..ResourceEstimate::default()
             },
+        )
+        .await;
+
+    assert_eq!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::PolicyDenied
+        }
+    );
+}
+
+#[tokio::test]
+async fn capability_access_denies_when_grant_ceiling_dimension_has_no_estimate() {
+    let descriptor = wasm_descriptor();
+    let mut grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![EffectKind::DispatchCapability],
+    );
+    grant.constraints.resource_ceiling = Some(ResourceCeiling {
+        max_usd: None,
+        max_input_tokens: Some(10),
+        max_output_tokens: None,
+        max_wall_clock_ms: None,
+        max_output_bytes: None,
+        sandbox: None,
+    });
+
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch(
+            &execution_context(CapabilitySet {
+                grants: vec![grant],
+            }),
+            &descriptor,
+            &ResourceEstimate::default(),
         )
         .await;
 
