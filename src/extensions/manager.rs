@@ -2882,7 +2882,7 @@ impl ExtensionManager {
             return Ok(config.clone());
         }
         // Try normalized alias (hyphens → underscores)
-        let underscore_alias = name.replace('-', "_");
+        let underscore_alias = crate::tools::mcp::normalize_server_name(name);
         if underscore_alias != name
             && let Some(config) = servers.get(&underscore_alias)
         {

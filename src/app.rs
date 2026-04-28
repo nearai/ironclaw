@@ -138,9 +138,10 @@ impl StartupMcpLoadOutcome {
 }
 
 fn should_retry_startup_mcp_auth_error(server: &McpServerConfig, error_message: &str) -> bool {
-    // Hosted private-chat can inject an API-key Authorization header before
-    // its key binding is visible to /mcp. Retry only that preconfigured-key
-    // case; OAuth/missing-auth MCP servers should still surface the normal
+    // Some hosted MCP providers may reject a preconfigured API-key
+    // Authorization header during startup while the upstream credential is
+    // still being provisioned. Retry only that preconfigured-key case;
+    // OAuth/missing-auth MCP servers should still surface the normal
     // "run mcp auth" path instead of spinning in the background.
     server.has_custom_auth_header() && crate::tools::mcp::is_auth_error_message(error_message)
 }
@@ -150,7 +151,7 @@ async fn is_startup_mcp_retry_already_active(
     user_id: &str,
     server_name: &str,
 ) -> bool {
-    let normalized_name = server_name.replace('-', "_");
+    let normalized_name = crate::tools::mcp::normalize_server_name(server_name);
     let store = manager.mcp_client_store();
     store.contains(user_id, &normalized_name).await
         || (normalized_name != server_name && store.contains(user_id, server_name).await)
