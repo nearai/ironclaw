@@ -292,6 +292,135 @@ async fn capability_host_returns_dispatch_result_when_lease_consume_fails_after_
 }
 
 #[tokio::test]
+async fn capability_host_rejects_resume_with_mismatched_capability_id() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = RecordingDispatcher::default();
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "approved"});
+
+    block_host
+        .invoke_json(CapabilityInvocationRequest {
+            context: context.clone(),
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+        })
+        .await
+        .unwrap_err();
+    let approval_id = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .approval_request_id
+        .unwrap();
+
+    let resume_authorizer = GrantAuthorizer::new();
+    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+    let wrong_capability = CapabilityId::new("echo.other").unwrap();
+    let err = resume_host
+        .resume_json(CapabilityResumeRequest {
+            context,
+            approval_request_id: approval_id,
+            capability_id: wrong_capability.clone(),
+            estimate,
+            input,
+        })
+        .await
+        .unwrap_err();
+
+    let message = err.to_string();
+    assert!(!message.contains(capability_id().as_str()));
+    match err {
+        CapabilityInvocationError::ResumeContextMismatch { capability, kind } => {
+            assert_eq!(capability, wrong_capability);
+            assert_eq!(kind, ResumeContextMismatchKind::CapabilityId);
+        }
+        other => panic!("expected ResumeContextMismatch, got {other:?}"),
+    }
+    assert!(!dispatcher.has_request());
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.error_kind.as_deref(), Some("ResumeContextMismatch"));
+}
+
+#[tokio::test]
+async fn capability_host_rejects_resume_with_mismatched_approval_request_id() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = RecordingDispatcher::default();
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "approved"});
+
+    block_host
+        .invoke_json(CapabilityInvocationRequest {
+            context: context.clone(),
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+        })
+        .await
+        .unwrap_err();
+    let real_approval_id = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .approval_request_id
+        .unwrap();
+    let bogus_approval_id = ApprovalRequestId::new();
+    assert_ne!(bogus_approval_id, real_approval_id);
+
+    let resume_authorizer = GrantAuthorizer::new();
+    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+    let err = resume_host
+        .resume_json(CapabilityResumeRequest {
+            context,
+            approval_request_id: bogus_approval_id,
+            capability_id: capability_id(),
+            estimate,
+            input,
+        })
+        .await
+        .unwrap_err();
+
+    let message = err.to_string();
+    assert!(!message.contains(&real_approval_id.to_string()));
+    assert!(!message.contains(&bogus_approval_id.to_string()));
+    match err {
+        CapabilityInvocationError::ResumeContextMismatch { capability, kind } => {
+            assert_eq!(capability, capability_id());
+            assert_eq!(kind, ResumeContextMismatchKind::ApprovalRequestId);
+        }
+        other => panic!("expected ResumeContextMismatch, got {other:?}"),
+    }
+    assert!(!dispatcher.has_request());
+}
+
+#[tokio::test]
 async fn capability_host_rejects_resume_with_mutated_input_before_lease_claim_or_dispatch() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();

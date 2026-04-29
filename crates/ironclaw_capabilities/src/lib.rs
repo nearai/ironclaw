@@ -19,6 +19,7 @@ use ironclaw_run_state::{
 };
 use serde_json::Value;
 use thiserror::Error;
+use tracing::warn;
 
 /// Caller-facing capability invocation request.
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +59,14 @@ pub struct CapabilityInvocationResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilitySpawnResult {
     pub process: ProcessRecord,
+}
+
+/// Redacted reason a resume request did not match the blocked invocation context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeContextMismatchKind {
+    CapabilityId,
+    ApprovalRequestId,
+    CapabilityAndApprovalRequestId,
 }
 
 /// Capability invocation failures before or during dispatch.
@@ -108,12 +117,23 @@ pub enum CapabilityInvocationError {
         capability: CapabilityId,
         status: RunStatus,
     },
+    #[error("capability {capability} resume context mismatch: {kind:?}")]
+    ResumeContextMismatch {
+        capability: CapabilityId,
+        kind: ResumeContextMismatchKind,
+    },
     #[error("lease update failed: {0}")]
     Lease(Box<CapabilityLeaseError>),
     #[error("run-state update failed: {0}")]
     RunState(Box<RunStateError>),
     #[error("process update failed: {0}")]
     Process(Box<ProcessError>),
+    /// Runtime dispatch failure surfaced through the neutral host API port.
+    ///
+    /// `kind` is a stable, redacted identifier produced by
+    /// [`dispatch_error_kind`]. The mapping is part of the public contract:
+    /// upstream callers may depend on these strings for routing, metrics, or
+    /// audit grouping. The mapping is pinned by unit tests in this crate.
     #[error("dispatch failed: {kind}")]
     Dispatch { kind: String },
 }
@@ -172,11 +192,24 @@ where
         }
     }
 
+    /// Attaches the run-state store used to record invocation lifecycle.
+    ///
+    /// Required for `resume_json`. Strongly recommended for `invoke_json` and
+    /// `spawn_json` so denials, obligation rejections, and dispatch failures
+    /// transition the run record to `Failed` instead of being silently
+    /// dropped. Without it, error paths still return the right user-facing
+    /// error but no run record is persisted.
     pub fn with_run_state(mut self, run_state: &'a dyn RunStateStore) -> Self {
         self.run_state = Some(run_state);
         self
     }
 
+    /// Attaches the approval-request store used to persist approval prompts.
+    ///
+    /// Required for `invoke_json` paths whose authorizer returns
+    /// `Decision::RequireApproval` and for `resume_json`. Without it, an
+    /// approval-required dispatch fails with `ApprovalStoreMissing` rather
+    /// than blocking for human review.
     pub fn with_approval_requests(
         mut self,
         approval_requests: &'a dyn ApprovalRequestStore,
@@ -185,6 +218,10 @@ where
         self
     }
 
+    /// Attaches the capability-lease store used to consume approved leases.
+    ///
+    /// Required for `resume_json`; not consulted by `invoke_json` or
+    /// `spawn_json`.
     pub fn with_capability_leases(
         mut self,
         capability_leases: &'a dyn CapabilityLeaseStore,
@@ -193,6 +230,11 @@ where
         self
     }
 
+    /// Attaches the process manager used to spawn long-running invocations.
+    ///
+    /// Required for `spawn_json`; not consulted by `invoke_json` or
+    /// `resume_json`. Without it, `spawn_json` fails with
+    /// `ProcessManagerMissing`.
     pub fn with_process_manager(mut self, process_manager: &'a dyn ProcessManager) -> Self {
         self.process_manager = Some(process_manager);
         self
@@ -410,19 +452,14 @@ where
                 status: run_record.status,
             });
         }
-        if run_record.capability_id != request.capability_id
-            || run_record.approval_request_id != Some(request.approval_request_id)
-        {
-            fail_run(
-                run_state,
-                &scope,
-                invocation_id,
-                "ApprovalInvariantViolation",
-            )
-            .await?;
-            return Err(CapabilityInvocationError::AuthorizationDenied {
+        let capability_mismatch = run_record.capability_id != request.capability_id;
+        let approval_request_mismatch =
+            run_record.approval_request_id != Some(request.approval_request_id);
+        if capability_mismatch || approval_request_mismatch {
+            fail_run(run_state, &scope, invocation_id, "ResumeContextMismatch").await?;
+            return Err(CapabilityInvocationError::ResumeContextMismatch {
                 capability: request.capability_id,
-                reason: DenyReason::InternalInvariantViolation,
+                kind: resume_context_mismatch_kind(capability_mismatch, approval_request_mismatch),
             });
         }
 
@@ -543,13 +580,17 @@ where
             }
         };
 
-        if capability_leases
+        if let Err(error) = capability_leases
             .consume(&scope, claimed_lease.grant.id)
             .await
-            .is_err()
         {
-            run_state.complete(&scope, invocation_id).await?;
-            return Ok(CapabilityInvocationResult { dispatch });
+            warn!(
+                lease_id = %claimed_lease.grant.id,
+                invocation_id = %invocation_id,
+                capability_id = %capability_id,
+                error_kind = capability_lease_error_kind(&error),
+                "capability lease consume failed after successful dispatch; lease left in claimed state",
+            );
         }
 
         run_state.complete(&scope, invocation_id).await?;
@@ -708,8 +749,15 @@ async fn fail_run_if_configured(
     invocation_id: InvocationId,
     error_kind: &'static str,
 ) {
-    if let Some(run_state) = run_state {
-        let _ = fail_run(run_state, scope, invocation_id, error_kind).await;
+    if let Some(run_state) = run_state
+        && let Err(error) = fail_run(run_state, scope, invocation_id, error_kind).await
+    {
+        warn!(
+            invocation_id = %invocation_id,
+            error_kind,
+            transition_error_kind = run_state_error_kind(&error),
+            "run-state fail transition failed; original business error is being returned to caller",
+        );
     }
 }
 
@@ -734,6 +782,45 @@ fn approval_not_approved_error_kind(status: ApprovalStatus) -> &'static str {
     }
 }
 
+fn resume_context_mismatch_kind(
+    capability_mismatch: bool,
+    approval_request_mismatch: bool,
+) -> ResumeContextMismatchKind {
+    debug_assert!(capability_mismatch || approval_request_mismatch);
+    match (capability_mismatch, approval_request_mismatch) {
+        (true, true) => ResumeContextMismatchKind::CapabilityAndApprovalRequestId,
+        (true, false) => ResumeContextMismatchKind::CapabilityId,
+        (false, true) => ResumeContextMismatchKind::ApprovalRequestId,
+        (false, false) => ResumeContextMismatchKind::ApprovalRequestId,
+    }
+}
+
+fn capability_lease_error_kind(error: &CapabilityLeaseError) -> &'static str {
+    match error {
+        CapabilityLeaseError::UnknownLease { .. } => "UnknownLease",
+        CapabilityLeaseError::ExpiredLease { .. } => "ExpiredLease",
+        CapabilityLeaseError::ExhaustedLease { .. } => "ExhaustedLease",
+        CapabilityLeaseError::UnclaimedFingerprintLease { .. } => "UnclaimedFingerprintLease",
+        CapabilityLeaseError::FingerprintMismatch { .. } => "FingerprintMismatch",
+        CapabilityLeaseError::InactiveLease { .. } => "InactiveLease",
+        CapabilityLeaseError::Persistence { .. } => "Persistence",
+    }
+}
+
+fn run_state_error_kind(error: &RunStateError) -> &'static str {
+    match error {
+        RunStateError::UnknownInvocation { .. } => "UnknownInvocation",
+        RunStateError::InvocationAlreadyExists { .. } => "InvocationAlreadyExists",
+        RunStateError::UnknownApprovalRequest { .. } => "UnknownApprovalRequest",
+        RunStateError::ApprovalRequestAlreadyExists { .. } => "ApprovalRequestAlreadyExists",
+        RunStateError::ApprovalNotPending { .. } => "ApprovalNotPending",
+        RunStateError::InvalidPath(_) => "InvalidPath",
+        RunStateError::Filesystem(_) => "Filesystem",
+        RunStateError::Serialization(_) => "Serialization",
+        RunStateError::Deserialization(_) => "Deserialization",
+    }
+}
+
 fn dispatch_error_kind(error: &DispatchError) -> String {
     match error {
         DispatchError::UnknownCapability { .. } => "UnknownCapability".to_string(),
@@ -744,5 +831,106 @@ fn dispatch_error_kind(error: &DispatchError) -> String {
         DispatchError::Mcp { kind }
         | DispatchError::Script { kind }
         | DispatchError::Wasm { kind } => kind.as_str().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_host_api::{ExtensionId, RuntimeDispatchErrorKind, RuntimeKind};
+
+    fn cap() -> CapabilityId {
+        CapabilityId::new("test.cap").unwrap()
+    }
+
+    fn ext() -> ExtensionId {
+        ExtensionId::new("test").unwrap()
+    }
+
+    #[test]
+    fn dispatch_error_kind_maps_unknown_capability_to_stable_literal() {
+        let kind = dispatch_error_kind(&DispatchError::UnknownCapability { capability: cap() });
+        assert_eq!(kind, "UnknownCapability");
+    }
+
+    #[test]
+    fn dispatch_error_kind_maps_unknown_provider_to_stable_literal() {
+        let kind = dispatch_error_kind(&DispatchError::UnknownProvider {
+            capability: cap(),
+            provider: ext(),
+        });
+        assert_eq!(kind, "UnknownProvider");
+    }
+
+    #[test]
+    fn dispatch_error_kind_maps_runtime_mismatch_to_stable_literal() {
+        let kind = dispatch_error_kind(&DispatchError::RuntimeMismatch {
+            capability: cap(),
+            descriptor_runtime: RuntimeKind::Wasm,
+            package_runtime: RuntimeKind::Mcp,
+        });
+        assert_eq!(kind, "RuntimeMismatch");
+    }
+
+    #[test]
+    fn dispatch_error_kind_maps_missing_runtime_backend_to_stable_literal() {
+        let kind = dispatch_error_kind(&DispatchError::MissingRuntimeBackend {
+            runtime: RuntimeKind::Wasm,
+        });
+        assert_eq!(kind, "MissingRuntimeBackend");
+    }
+
+    #[test]
+    fn dispatch_error_kind_maps_unsupported_runtime_to_stable_literal() {
+        let kind = dispatch_error_kind(&DispatchError::UnsupportedRuntime {
+            capability: cap(),
+            runtime: RuntimeKind::Wasm,
+        });
+        assert_eq!(kind, "UnsupportedRuntime");
+    }
+
+    #[test]
+    fn dispatch_error_kind_forwards_mcp_runtime_kind_as_str() {
+        let kind = dispatch_error_kind(&DispatchError::Mcp {
+            kind: RuntimeDispatchErrorKind::Backend,
+        });
+        assert_eq!(kind, "Backend");
+    }
+
+    #[test]
+    fn dispatch_error_kind_forwards_script_runtime_kind_as_str() {
+        let kind = dispatch_error_kind(&DispatchError::Script {
+            kind: RuntimeDispatchErrorKind::OutputTooLarge,
+        });
+        assert_eq!(kind, "OutputTooLarge");
+    }
+
+    #[test]
+    fn dispatch_error_kind_forwards_wasm_runtime_kind_as_str() {
+        let kind = dispatch_error_kind(&DispatchError::Wasm {
+            kind: RuntimeDispatchErrorKind::Memory,
+        });
+        assert_eq!(kind, "Memory");
+    }
+
+    #[test]
+    fn from_dispatch_error_flattens_via_dispatch_error_kind() {
+        let err =
+            CapabilityInvocationError::from(DispatchError::UnknownCapability { capability: cap() });
+        match err {
+            CapabilityInvocationError::Dispatch { kind } => assert_eq!(kind, "UnknownCapability"),
+            other => panic!("expected Dispatch variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_dispatch_error_flattens_redacted_runtime_kind() {
+        let err = CapabilityInvocationError::from(DispatchError::Wasm {
+            kind: RuntimeDispatchErrorKind::Guest,
+        });
+        match err {
+            CapabilityInvocationError::Dispatch { kind } => assert_eq!(kind, "Guest"),
+            other => panic!("expected Dispatch variant, got {other:?}"),
+        }
     }
 }
