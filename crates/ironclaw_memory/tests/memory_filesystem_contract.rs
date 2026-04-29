@@ -1,0 +1,255 @@
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
+use ironclaw_host_api::VirtualPath;
+use ironclaw_memory::*;
+
+#[tokio::test]
+async fn memory_filesystem_maps_virtual_paths_to_repository_keys() {
+    let repo = Arc::new(InMemoryMemoryDocumentRepository::new());
+    let fs = MemoryDocumentFilesystem::new(repo.clone());
+    let key =
+        MemoryDocumentPath::new("tenant-a", "alice", Some("project-1"), "notes/a.md").unwrap();
+
+    fs.write_file(
+        &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/project-1/notes/a.md")
+            .unwrap(),
+        b"memory note",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        repo.read_document(&key).await.unwrap().unwrap(),
+        b"memory note"
+    );
+    assert_eq!(
+        fs.read_file(
+            &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/project-1/notes/a.md")
+                .unwrap()
+        )
+        .await
+        .unwrap(),
+        b"memory note"
+    );
+}
+
+#[tokio::test]
+async fn memory_filesystem_preserves_tenant_user_project_isolation() {
+    let repo = Arc::new(InMemoryMemoryDocumentRepository::new());
+    let fs = MemoryDocumentFilesystem::new(repo);
+
+    fs.write_file(
+        &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/project-1/MEMORY.md")
+            .unwrap(),
+        b"alice tenant-a project-1",
+    )
+    .await
+    .unwrap();
+    fs.write_file(
+        &VirtualPath::new("/memory/tenants/tenant-a/users/bob/projects/project-1/MEMORY.md")
+            .unwrap(),
+        b"bob tenant-a project-1",
+    )
+    .await
+    .unwrap();
+    fs.write_file(
+        &VirtualPath::new("/memory/tenants/tenant-b/users/alice/projects/project-1/MEMORY.md")
+            .unwrap(),
+        b"alice tenant-b project-1",
+    )
+    .await
+    .unwrap();
+    fs.write_file(
+        &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/project-2/MEMORY.md")
+            .unwrap(),
+        b"alice tenant-a project-2",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        fs.read_file(
+            &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/project-1/MEMORY.md")
+                .unwrap(),
+        )
+        .await
+        .unwrap(),
+        b"alice tenant-a project-1"
+    );
+    assert_eq!(
+        fs.read_file(
+            &VirtualPath::new("/memory/tenants/tenant-a/users/bob/projects/project-1/MEMORY.md")
+                .unwrap(),
+        )
+        .await
+        .unwrap(),
+        b"bob tenant-a project-1"
+    );
+    assert_eq!(
+        fs.read_file(
+            &VirtualPath::new("/memory/tenants/tenant-b/users/alice/projects/project-1/MEMORY.md")
+                .unwrap(),
+        )
+        .await
+        .unwrap(),
+        b"alice tenant-b project-1"
+    );
+    assert_eq!(
+        fs.read_file(
+            &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/project-2/MEMORY.md")
+                .unwrap(),
+        )
+        .await
+        .unwrap(),
+        b"alice tenant-a project-2"
+    );
+}
+
+#[tokio::test]
+async fn memory_filesystem_lists_direct_children_from_document_paths() {
+    let repo = Arc::new(InMemoryMemoryDocumentRepository::new());
+    let fs = MemoryDocumentFilesystem::new(repo);
+
+    for (path, bytes) in [
+        (
+            "/memory/tenants/tenant-a/users/alice/projects/_none/SOUL.md",
+            b"soul".as_slice(),
+        ),
+        (
+            "/memory/tenants/tenant-a/users/alice/projects/_none/notes/a.md",
+            b"a",
+        ),
+        (
+            "/memory/tenants/tenant-a/users/alice/projects/_none/notes/deep/b.md",
+            b"b",
+        ),
+    ] {
+        fs.write_file(&VirtualPath::new(path).unwrap(), bytes)
+            .await
+            .unwrap();
+    }
+
+    let entries = fs
+        .list_dir(&VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none").unwrap())
+        .await
+        .unwrap();
+
+    let summary: Vec<_> = entries
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry.file_type, entry.path.as_str()))
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            (
+                "SOUL.md",
+                FileType::File,
+                "/memory/tenants/tenant-a/users/alice/projects/_none/SOUL.md",
+            ),
+            (
+                "notes",
+                FileType::Directory,
+                "/memory/tenants/tenant-a/users/alice/projects/_none/notes",
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn memory_filesystem_stats_exact_files_and_inferred_directories() {
+    let repo = Arc::new(InMemoryMemoryDocumentRepository::new());
+    let fs = MemoryDocumentFilesystem::new(repo);
+
+    fs.write_file(
+        &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/notes/a.md")
+            .unwrap(),
+        b"abc",
+    )
+    .await
+    .unwrap();
+
+    let file = fs
+        .stat(
+            &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/notes/a.md")
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(file.file_type, FileType::File);
+    assert_eq!(file.len, 3);
+
+    let directory = fs
+        .stat(
+            &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/notes").unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(directory.file_type, FileType::Directory);
+    assert_eq!(directory.len, 0);
+
+    let err = fs
+        .stat(
+            &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/missing.md")
+                .unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, FilesystemError::Backend { .. }));
+    assert!(
+        err.to_string()
+            .contains("/memory/tenants/tenant-a/users/alice")
+    );
+}
+
+#[tokio::test]
+async fn memory_filesystem_invokes_indexer_after_writes() {
+    let repo = Arc::new(InMemoryMemoryDocumentRepository::new());
+    let indexer = Arc::new(RecordingIndexer::default());
+    let fs = MemoryDocumentFilesystem::new(repo).with_indexer(indexer.clone());
+
+    fs.write_file(
+        &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/project-1/AGENTS.md")
+            .unwrap(),
+        b"agent instructions",
+    )
+    .await
+    .unwrap();
+
+    let indexed = indexer.paths.lock().unwrap().clone();
+    assert_eq!(indexed.len(), 1);
+    assert_eq!(indexed[0].tenant_id(), "tenant-a");
+    assert_eq!(indexed[0].user_id(), "alice");
+    assert_eq!(indexed[0].project_id(), Some("project-1"));
+    assert_eq!(indexed[0].relative_path(), "AGENTS.md");
+}
+
+#[tokio::test]
+async fn memory_filesystem_rejects_non_document_memory_paths() {
+    let repo = Arc::new(InMemoryMemoryDocumentRepository::new());
+    let fs = MemoryDocumentFilesystem::new(repo);
+
+    let err = fs
+        .write_file(
+            &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none").unwrap(),
+            b"not a document",
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, FilesystemError::Backend { .. }));
+}
+
+#[derive(Default)]
+struct RecordingIndexer {
+    paths: Mutex<Vec<MemoryDocumentPath>>,
+}
+
+#[async_trait]
+impl MemoryDocumentIndexer for RecordingIndexer {
+    async fn reindex_document(&self, path: &MemoryDocumentPath) -> Result<(), FilesystemError> {
+        self.paths.lock().unwrap().push(path.clone());
+        Ok(())
+    }
+}
