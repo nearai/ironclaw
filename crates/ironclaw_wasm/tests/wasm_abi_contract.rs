@@ -51,6 +51,39 @@ fn json_abi_validates_input_schema_before_guest_execution() {
 }
 
 #[test]
+fn json_abi_enforces_full_json_schema_constraints_before_guest_execution() {
+    let runtime = WasmRuntime::for_testing().unwrap();
+    let module = runtime.prepare(json_echo_spec()).unwrap();
+    let descriptor = make_descriptor(
+        "json",
+        "json.echo",
+        RuntimeKind::Wasm,
+        json!({
+            "type": "object",
+            "required": ["message"],
+            "additionalProperties": false,
+            "properties": {
+                "message": {"type": "string", "enum": ["allowed"]}
+            }
+        }),
+    );
+    let reservation = sample_reservation();
+
+    let err = runtime
+        .invoke_json(
+            &module,
+            &descriptor,
+            Some(&reservation),
+            CapabilityInvocation {
+                input: json!({"message": "blocked", "extra": true}),
+            },
+        )
+        .unwrap_err();
+
+    assert!(matches!(err, WasmError::InvalidInvocation { reason } if reason.contains("schema")));
+}
+
+#[test]
 fn json_abi_reports_guest_error_status_with_sanitized_message() {
     let runtime = WasmRuntime::for_testing().unwrap();
     let module = runtime.prepare(guest_error_spec()).unwrap();

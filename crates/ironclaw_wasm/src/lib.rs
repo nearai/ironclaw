@@ -4,15 +4,6 @@
 //! receive no ambient host authority: every privileged effect must eventually
 //! cross an explicit host import checked by IronClaw host API contracts.
 
-use std::{
-    collections::HashMap,
-    net::IpAddr,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
-
-use futures::executor::block_on;
 use ironclaw_extensions::{ExtensionError, ExtensionPackage, ExtensionRuntime};
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
@@ -23,6 +14,14 @@ use ironclaw_host_api::{
 use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use rust_decimal::Decimal;
 use serde_json::Value;
+use std::{
+    collections::HashMap,
+    future::Future,
+    net::{IpAddr, ToSocketAddrs},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 use thiserror::Error;
 use wasmtime::{Cache, Caller, Config, Engine, Instance, Linker, Module, ResourceLimiter, Store};
 
@@ -42,6 +41,10 @@ const FS_STAT_LEN_IMPORT: &str = "fs_stat_len";
 const HTTP_REQUEST_IMPORT: &str = "http_request_utf8";
 const MAX_LOG_ENTRIES: usize = 1_000;
 const MAX_LOG_MESSAGE_BYTES: usize = 4 * 1024;
+const MAX_GUEST_PATH_BYTES: usize = 4 * 1024;
+const MAX_HTTP_URL_BYTES: usize = 8 * 1024;
+const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
+const MAX_FS_WRITE_BYTES: usize = 1024 * 1024;
 
 /// WASM runtime configuration for the V1 runtime lane.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,8 +95,10 @@ pub trait WasmHostFilesystem: Send + Sync {
 }
 
 /// Scoped filesystem adapter for WASM filesystem imports.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct WasmScopedFilesystem<F> {
+    root: Arc<F>,
+    mounts: MountView,
     scoped: ScopedFilesystem<F>,
 }
 
@@ -103,34 +108,43 @@ where
 {
     pub fn new(root: Arc<F>, mounts: MountView) -> Self {
         Self {
-            scoped: ScopedFilesystem::new(root, mounts),
+            scoped: ScopedFilesystem::new(Arc::clone(&root), mounts.clone()),
+            root,
+            mounts,
         }
     }
 
     pub fn scoped(&self) -> &ScopedFilesystem<F> {
         &self.scoped
     }
+
+    fn scoped_for_bridge(&self) -> ScopedFilesystem<F> {
+        ScopedFilesystem::new(Arc::clone(&self.root), self.mounts.clone())
+    }
 }
 
 impl<F> WasmHostFilesystem for WasmScopedFilesystem<F>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + 'static,
 {
     fn read_utf8(&self, path: &str) -> Result<String, String> {
         let path = ScopedPath::new(path.to_string()).map_err(|error| error.to_string())?;
-        let bytes = block_on(self.scoped.read_file(&path)).map_err(|error| error.to_string())?;
+        let scoped = self.scoped_for_bridge();
+        let bytes = run_filesystem_bridge(async move { scoped.read_file(&path).await })?;
         String::from_utf8(bytes).map_err(|error| error.to_string())
     }
 
     fn write_utf8(&self, path: &str, contents: &str) -> Result<(), String> {
         let path = ScopedPath::new(path.to_string()).map_err(|error| error.to_string())?;
-        block_on(self.scoped.write_file(&path, contents.as_bytes()))
-            .map_err(|error| error.to_string())
+        let contents = contents.as_bytes().to_vec();
+        let scoped = self.scoped_for_bridge();
+        run_filesystem_bridge(async move { scoped.write_file(&path, &contents).await })
     }
 
     fn list_utf8(&self, path: &str) -> Result<String, String> {
         let path = ScopedPath::new(path.to_string()).map_err(|error| error.to_string())?;
-        let entries = block_on(self.scoped.list_dir(&path)).map_err(|error| error.to_string())?;
+        let scoped = self.scoped_for_bridge();
+        let entries = run_filesystem_bridge(async move { scoped.list_dir(&path).await })?;
         let names = entries
             .into_iter()
             .map(|entry| entry.name)
@@ -140,10 +154,24 @@ where
 
     fn stat_len(&self, path: &str) -> Result<u64, String> {
         let path = ScopedPath::new(path.to_string()).map_err(|error| error.to_string())?;
-        block_on(self.scoped.stat(&path))
-            .map(|stat| stat.len)
-            .map_err(|error| error.to_string())
+        let scoped = self.scoped_for_bridge();
+        run_filesystem_bridge(async move { scoped.stat(&path).await }).map(|stat| stat.len)
     }
+}
+
+fn run_filesystem_bridge<T, Fut>(future: Fut) -> Result<T, String>
+where
+    T: Send + 'static,
+    Fut: Future<Output = Result<T, FilesystemError>> + Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name("ironclaw-wasm-fs-bridge".to_string())
+        .spawn(move || futures::executor::block_on(future))
+        .map_err(|error| format!("failed to spawn filesystem bridge thread: {error}"))?;
+    handle
+        .join()
+        .map_err(|_| "filesystem bridge thread panicked".to_string())?
+        .map_err(|error| error.to_string())
 }
 
 /// Host-mediated HTTP request issued by a WASM network import.
@@ -162,20 +190,102 @@ pub struct WasmHttpResponse {
 }
 
 /// Synchronous host HTTP surface exposed to WASM network imports.
+///
+/// Implementations used behind [`WasmPolicyHttpClient`] must not follow
+/// redirects transparently or bypass the validated host/port. The policy wrapper
+/// validates the URL before dispatch and hands the request to this trait only
+/// after the target is allowlisted and private-IP checks pass.
 pub trait WasmHostHttp: Send + Sync {
     fn request_utf8(&self, request: WasmHttpRequest) -> Result<WasmHttpResponse, String>;
 }
 
-/// Network-policy enforcing wrapper around a host-provided HTTP client.
-#[derive(Debug, Clone)]
-pub struct WasmPolicyHttpClient<C> {
-    client: C,
-    policy: NetworkPolicy,
+/// Invocation-scoped host import context for WASM JSON execution.
+#[derive(Clone, Default)]
+pub struct WasmHostImportContext {
+    filesystem: Option<Arc<dyn WasmHostFilesystem>>,
+    http: Option<Arc<dyn WasmHostHttp>>,
 }
 
-impl<C> WasmPolicyHttpClient<C> {
+impl std::fmt::Debug for WasmHostImportContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WasmHostImportContext")
+            .field("filesystem", &self.filesystem.is_some())
+            .field("http", &self.http.is_some())
+            .finish()
+    }
+}
+
+impl WasmHostImportContext {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_filesystem(mut self, filesystem: Arc<dyn WasmHostFilesystem>) -> Self {
+        self.filesystem = Some(filesystem);
+        self
+    }
+
+    pub fn with_http(mut self, http: Arc<dyn WasmHostHttp>) -> Self {
+        self.http = Some(http);
+        self
+    }
+
+    pub fn filesystem(&self) -> Option<&Arc<dyn WasmHostFilesystem>> {
+        self.filesystem.as_ref()
+    }
+
+    pub fn http(&self) -> Option<&Arc<dyn WasmHostHttp>> {
+        self.http.as_ref()
+    }
+}
+
+/// DNS resolver used by the policy wrapper before host HTTP dispatch.
+pub trait WasmNetworkResolver: Send + Sync {
+    fn resolve_ips(&self, host: &str, port: Option<u16>) -> Result<Vec<IpAddr>, String>;
+}
+
+/// System DNS resolver for production host HTTP policy checks.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemNetworkResolver;
+
+impl WasmNetworkResolver for SystemNetworkResolver {
+    fn resolve_ips(&self, host: &str, port: Option<u16>) -> Result<Vec<IpAddr>, String> {
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            return Ok(vec![ip]);
+        }
+        let port = port.unwrap_or(443);
+        (host, port)
+            .to_socket_addrs()
+            .map_err(|error| error.to_string())
+            .map(|addrs| addrs.map(|addr| addr.ip()).collect())
+    }
+}
+
+/// Network-policy enforcing wrapper around a host-provided HTTP client.
+#[derive(Debug, Clone)]
+pub struct WasmPolicyHttpClient<C, R = SystemNetworkResolver> {
+    client: C,
+    policy: NetworkPolicy,
+    resolver: R,
+}
+
+impl<C> WasmPolicyHttpClient<C, SystemNetworkResolver> {
     pub fn new(client: C, policy: NetworkPolicy) -> Self {
-        Self { client, policy }
+        Self {
+            client,
+            policy,
+            resolver: SystemNetworkResolver,
+        }
+    }
+}
+
+impl<C, R> WasmPolicyHttpClient<C, R> {
+    pub fn new_with_resolver(client: C, policy: NetworkPolicy, resolver: R) -> Self {
+        Self {
+            client,
+            policy,
+            resolver,
+        }
     }
 
     pub fn policy(&self) -> &NetworkPolicy {
@@ -183,15 +293,14 @@ impl<C> WasmPolicyHttpClient<C> {
     }
 }
 
-impl<C> WasmHostHttp for WasmPolicyHttpClient<C>
+impl<C, R> WasmHostHttp for WasmPolicyHttpClient<C, R>
 where
     C: WasmHostHttp,
+    R: WasmNetworkResolver,
 {
     fn request_utf8(&self, request: WasmHttpRequest) -> Result<WasmHttpResponse, String> {
         let target = network_target_for_url(&request.url)?;
-        if !network_policy_allows(&self.policy, &target) {
-            return Err("network target denied by policy".to_string());
-        }
+        validate_network_target(&self.policy, &target, &self.resolver)?;
         if let Some(max) = self.policy.max_egress_bytes
             && request.body.len() as u64 > max
         {
@@ -587,35 +696,13 @@ impl WasmRuntime {
         F: RootFilesystem,
         G: ResourceGovernor,
     {
-        let reservation = reserve_or_use_existing(
+        self.execute_extension_json_with_host_context(
+            fs,
             governor,
-            request.scope.clone(),
-            request.estimate.clone(),
-            request.resource_reservation,
-        )?;
-
-        let prepared = match self
-            .prepare_extension_capability(fs, request.package, request.capability_id)
-            .await
-        {
-            Ok(prepared) => prepared,
-            Err(error) => return Err(release_after_failure(governor, reservation.id, error)),
-        };
-
-        let result = match self.invoke_json(
-            prepared.module.as_ref(),
-            &prepared.descriptor,
-            Some(&reservation),
-            request.invocation,
-        ) {
-            Ok(result) => result,
-            Err(error) => return Err(release_after_failure(governor, reservation.id, error)),
-        };
-
-        let receipt = governor
-            .reconcile(reservation.id, result.usage.clone())
-            .map_err(|error| WasmError::Resource(Box::new(error)))?;
-        Ok(WasmExecutionResult { result, receipt })
+            request,
+            WasmHostImportContext::new(),
+        )
+        .await
     }
 
     /// Execute a WASM extension capability with host-mediated network imports.
@@ -625,6 +712,27 @@ impl WasmRuntime {
         governor: &G,
         request: WasmExecutionRequest<'_>,
         http: Arc<dyn WasmHostHttp>,
+    ) -> Result<WasmExecutionResult, WasmError>
+    where
+        F: RootFilesystem,
+        G: ResourceGovernor,
+    {
+        self.execute_extension_json_with_host_context(
+            fs,
+            governor,
+            request,
+            WasmHostImportContext::new().with_http(http),
+        )
+        .await
+    }
+
+    /// Execute a WASM extension capability with an explicit host-import context.
+    pub async fn execute_extension_json_with_host_context<F, G>(
+        &self,
+        fs: &F,
+        governor: &G,
+        request: WasmExecutionRequest<'_>,
+        host_context: WasmHostImportContext,
     ) -> Result<WasmExecutionResult, WasmError>
     where
         F: RootFilesystem,
@@ -645,12 +753,12 @@ impl WasmRuntime {
             Err(error) => return Err(release_after_failure(governor, reservation.id, error)),
         };
 
-        let result = match self.invoke_json_with_network(
+        let result = match self.invoke_json_with_host_context(
             prepared.module.as_ref(),
             &prepared.descriptor,
             Some(&reservation),
             request.invocation,
-            http,
+            host_context,
         ) {
             Ok(result) => result,
             Err(error) => return Err(release_after_failure(governor, reservation.id, error)),
@@ -718,6 +826,24 @@ impl WasmRuntime {
             invocation,
             None,
             Some(http),
+        )
+    }
+
+    pub fn invoke_json_with_host_context(
+        &self,
+        module: &PreparedWasmModule,
+        descriptor: &CapabilityDescriptor,
+        reservation: Option<&ResourceReservation>,
+        invocation: CapabilityInvocation,
+        host_context: WasmHostImportContext,
+    ) -> Result<CapabilityResult, WasmError> {
+        self.invoke_json_inner(
+            module,
+            descriptor,
+            reservation,
+            invocation,
+            host_context.filesystem.clone(),
+            host_context.http.clone(),
         )
     }
 
@@ -819,7 +945,7 @@ impl WasmRuntime {
         })?;
         let output_byte_count = output_bytes.len() as u64;
         let fuel_consumed = self.fuel_consumed(&store);
-        let usage = resource_usage(start, output_byte_count);
+        let usage = resource_usage(start, output_byte_count, store.data().network_egress_bytes);
 
         let logs = store.data().logs.clone();
 
@@ -869,7 +995,7 @@ impl WasmRuntime {
         Ok(WasmInvocationResult {
             value,
             reservation_id: reservation.id,
-            usage: resource_usage(start, output_bytes),
+            usage: resource_usage(start, output_bytes, 0),
             fuel_consumed: self.fuel_consumed(&store),
             output_bytes,
         })
@@ -996,6 +1122,7 @@ impl WasmRuntime {
 struct RuntimeStoreData {
     limiter: WasmRuntimeLimiter,
     logs: Vec<WasmLogEntry>,
+    network_egress_bytes: u64,
     filesystem: Option<Arc<dyn WasmHostFilesystem>>,
     http: Option<Arc<dyn WasmHostHttp>>,
 }
@@ -1009,9 +1136,14 @@ impl RuntimeStoreData {
         Self {
             limiter: WasmRuntimeLimiter::new(memory_limit),
             logs: Vec::new(),
+            network_egress_bytes: 0,
             filesystem,
             http,
         }
+    }
+
+    fn record_network_bytes(&mut self, bytes: u64) {
+        self.network_egress_bytes = self.network_egress_bytes.saturating_add(bytes);
     }
 
     fn push_log(&mut self, level: WasmLogLevel, message: String) {
@@ -1254,7 +1386,7 @@ fn host_fs_read_utf8(
     out_ptr: i32,
     out_cap: i32,
 ) -> i32 {
-    let Ok(path) = read_guest_utf8(caller, path_ptr, path_len) else {
+    let Ok(path) = read_guest_utf8(caller, path_ptr, path_len, MAX_GUEST_PATH_BYTES) else {
         return -1;
     };
     let Some(filesystem) = caller.data().filesystem.clone() else {
@@ -1273,10 +1405,10 @@ fn host_fs_write_utf8(
     data_ptr: i32,
     data_len: i32,
 ) -> i32 {
-    let Ok(path) = read_guest_utf8(caller, path_ptr, path_len) else {
+    let Ok(path) = read_guest_utf8(caller, path_ptr, path_len, MAX_GUEST_PATH_BYTES) else {
         return -1;
     };
-    let Ok(contents) = read_guest_utf8(caller, data_ptr, data_len) else {
+    let Ok(contents) = read_guest_utf8(caller, data_ptr, data_len, MAX_FS_WRITE_BYTES) else {
         return -2;
     };
     let Some(filesystem) = caller.data().filesystem.clone() else {
@@ -1295,7 +1427,7 @@ fn host_fs_list_utf8(
     out_ptr: i32,
     out_cap: i32,
 ) -> i32 {
-    let Ok(path) = read_guest_utf8(caller, path_ptr, path_len) else {
+    let Ok(path) = read_guest_utf8(caller, path_ptr, path_len, MAX_GUEST_PATH_BYTES) else {
         return -1;
     };
     let Some(filesystem) = caller.data().filesystem.clone() else {
@@ -1312,7 +1444,7 @@ fn host_fs_stat_len(
     path_ptr: i32,
     path_len: i32,
 ) -> i64 {
-    let Ok(path) = read_guest_utf8(caller, path_ptr, path_len) else {
+    let Ok(path) = read_guest_utf8(caller, path_ptr, path_len, MAX_GUEST_PATH_BYTES) else {
         return -1;
     };
     let Some(filesystem) = caller.data().filesystem.clone() else {
@@ -1328,9 +1460,13 @@ fn read_guest_utf8(
     caller: &mut Caller<'_, RuntimeStoreData>,
     ptr: i32,
     len: i32,
+    max_len: usize,
 ) -> Result<String, i32> {
     let offset = usize::try_from(ptr).map_err(|_| -1)?;
     let len = usize::try_from(len).map_err(|_| -1)?;
+    if len > max_len {
+        return Err(-6);
+    }
     let Some(memory) = caller
         .get_export("memory")
         .and_then(|item| item.into_memory())
@@ -1383,13 +1519,13 @@ fn host_http_request_utf8(caller: &mut Caller<'_, RuntimeStoreData>, args: HttpI
     let Some(method) = network_method_from_i32(args.method) else {
         return -1;
     };
-    let Ok(url) = read_guest_utf8(caller, args.url_ptr, args.url_len) else {
+    let Ok(url) = read_guest_utf8(caller, args.url_ptr, args.url_len, MAX_HTTP_URL_BYTES) else {
         return -2;
     };
     let body = if args.body_len == 0 {
         String::new()
     } else {
-        match read_guest_utf8(caller, args.body_ptr, args.body_len) {
+        match read_guest_utf8(caller, args.body_ptr, args.body_len, MAX_HTTP_BODY_BYTES) {
             Ok(body) => body,
             Err(_) => return -3,
         }
@@ -1397,8 +1533,13 @@ fn host_http_request_utf8(caller: &mut Caller<'_, RuntimeStoreData>, args: HttpI
     let Some(http) = caller.data().http.clone() else {
         return -10;
     };
+    let request_body_bytes = body.len() as u64;
     match http.request_utf8(WasmHttpRequest { method, url, body }) {
         Ok(response) => {
+            let response_body_bytes = response.body.len() as u64;
+            caller
+                .data_mut()
+                .record_network_bytes(request_body_bytes.saturating_add(response_body_bytes));
             write_guest_bytes(caller, args.out_ptr, args.out_cap, response.body.as_bytes())
         }
         Err(_) => -11,
@@ -1436,6 +1577,20 @@ fn network_target_for_url(raw: &str) -> Result<NetworkTarget, String> {
     })
 }
 
+fn validate_network_target<R>(
+    policy: &NetworkPolicy,
+    target: &NetworkTarget,
+    resolver: &R,
+) -> Result<(), String>
+where
+    R: WasmNetworkResolver,
+{
+    if !network_policy_allows(policy, target) {
+        return Err("network target denied by policy".to_string());
+    }
+    validate_private_ip_policy(policy, target, resolver)
+}
+
 fn network_policy_allows(policy: &NetworkPolicy, target: &NetworkTarget) -> bool {
     if policy.allowed_targets.is_empty() {
         return false;
@@ -1450,6 +1605,39 @@ fn network_policy_allows(policy: &NetworkPolicy, target: &NetworkTarget) -> bool
         .allowed_targets
         .iter()
         .any(|pattern| target_matches_pattern(target, pattern))
+}
+
+fn validate_private_ip_policy<R>(
+    policy: &NetworkPolicy,
+    target: &NetworkTarget,
+    resolver: &R,
+) -> Result<(), String>
+where
+    R: WasmNetworkResolver,
+{
+    if !policy.deny_private_ip_ranges {
+        return Ok(());
+    }
+    let resolved_ips = if let Ok(ip) = target.host.parse::<IpAddr>() {
+        vec![ip]
+    } else {
+        let port = Some(target.port.unwrap_or_else(|| default_port(target.scheme)));
+        resolver.resolve_ips(&target.host, port)?
+    };
+    if resolved_ips.is_empty() {
+        return Err("network target did not resolve to any IP addresses".to_string());
+    }
+    if resolved_ips.into_iter().any(is_private_or_loopback_ip) {
+        return Err("network target resolves to a private or loopback IP".to_string());
+    }
+    Ok(())
+}
+
+fn default_port(scheme: NetworkScheme) -> u16 {
+    match scheme {
+        NetworkScheme::Http => 80,
+        NetworkScheme::Https => 443,
+    }
 }
 
 fn target_matches_pattern(target: &NetworkTarget, pattern: &NetworkTargetPattern) -> bool {
@@ -1647,70 +1835,36 @@ fn validate_invocation_schema(schema: &Value, input: &Value) -> Result<(), WasmE
         return Ok(());
     }
 
-    if let Some(expected_type) = schema.get("type").and_then(Value::as_str) {
-        validate_json_type(input, expected_type, "input")?;
-    }
+    let validator =
+        jsonschema::validator_for(schema).map_err(|error| WasmError::InvalidInvocation {
+            reason: format!("invalid parameter schema: {error}"),
+        })?;
+    let errors = validator
+        .iter_errors(input)
+        .take(5)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
 
-    let Some(input_object) = input.as_object() else {
-        return Ok(());
-    };
-
-    if let Some(required) = schema.get("required").and_then(Value::as_array) {
-        for field in required {
-            let Some(field) = field.as_str() else {
-                continue;
-            };
-            if !input_object.contains_key(field) {
-                return Err(WasmError::InvalidInvocation {
-                    reason: format!("missing required input field '{field}'"),
-                });
-            }
-        }
-    }
-
-    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
-        for (field, property_schema) in properties {
-            let Some(value) = input_object.get(field) else {
-                continue;
-            };
-            if let Some(expected_type) = property_schema.get("type").and_then(Value::as_str) {
-                validate_json_type(value, expected_type, field)?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_json_type(value: &Value, expected_type: &str, field: &str) -> Result<(), WasmError> {
-    let valid = match expected_type {
-        "object" => value.is_object(),
-        "array" => value.is_array(),
-        "string" => value.is_string(),
-        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
-        "number" => value.is_number(),
-        "boolean" => value.is_boolean(),
-        "null" => value.is_null(),
-        _ => true,
-    };
-
-    if valid {
+    if errors.is_empty() {
         Ok(())
     } else {
         Err(WasmError::InvalidInvocation {
-            reason: format!("input field '{field}' must be {expected_type}"),
+            reason: format!(
+                "input failed parameter schema validation: {}",
+                errors.join("; ")
+            ),
         })
     }
 }
 
-fn resource_usage(start: Instant, output_bytes: u64) -> ResourceUsage {
+fn resource_usage(start: Instant, output_bytes: u64, network_egress_bytes: u64) -> ResourceUsage {
     ResourceUsage {
         usd: Decimal::ZERO,
         input_tokens: 0,
         output_tokens: 0,
         wall_clock_ms: start.elapsed().as_millis().max(1) as u64,
         output_bytes,
-        network_egress_bytes: 0,
+        network_egress_bytes,
         process_count: 1,
     }
 }

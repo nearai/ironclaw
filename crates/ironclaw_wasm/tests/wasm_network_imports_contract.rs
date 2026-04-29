@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 
 use ironclaw_host_api::*;
@@ -10,7 +11,7 @@ fn network_import_uses_host_http_with_allowlist_policy() {
         status: 200,
         body: r#"{"ok":true}"#.to_string(),
     });
-    let http = WasmPolicyHttpClient::new(
+    let http = WasmPolicyHttpClient::new_with_resolver(
         client.clone(),
         NetworkPolicy {
             allowed_targets: vec![NetworkTargetPattern {
@@ -21,6 +22,7 @@ fn network_import_uses_host_http_with_allowlist_policy() {
             deny_private_ip_ranges: true,
             max_egress_bytes: Some(1024),
         },
+        public_resolver(),
     );
     let runtime = WasmRuntime::for_testing().unwrap();
     let module = runtime
@@ -73,7 +75,7 @@ fn network_policy_denies_unlisted_host_before_client_call() {
         status: 200,
         body: r#"{"ok":true}"#.to_string(),
     });
-    let http = WasmPolicyHttpClient::new(
+    let http = WasmPolicyHttpClient::new_with_resolver(
         client.clone(),
         NetworkPolicy {
             allowed_targets: vec![NetworkTargetPattern {
@@ -84,6 +86,7 @@ fn network_policy_denies_unlisted_host_before_client_call() {
             deny_private_ip_ranges: true,
             max_egress_bytes: Some(1024),
         },
+        public_resolver(),
     );
     let runtime = WasmRuntime::for_testing().unwrap();
     let module = runtime
@@ -112,7 +115,7 @@ fn network_policy_blocks_literal_private_ip_targets_before_client_call() {
         status: 200,
         body: r#"{"ok":true}"#.to_string(),
     });
-    let http = WasmPolicyHttpClient::new(
+    let http = WasmPolicyHttpClient::new_with_resolver(
         client.clone(),
         NetworkPolicy {
             allowed_targets: vec![NetworkTargetPattern {
@@ -123,6 +126,7 @@ fn network_policy_blocks_literal_private_ip_targets_before_client_call() {
             deny_private_ip_ranges: true,
             max_egress_bytes: Some(1024),
         },
+        public_resolver(),
     );
     let runtime = WasmRuntime::for_testing().unwrap();
     let module = runtime
@@ -151,7 +155,7 @@ fn network_policy_enforces_request_body_egress_limit_before_client_call() {
         status: 200,
         body: r#"{"ok":true}"#.to_string(),
     });
-    let http = WasmPolicyHttpClient::new(
+    let http = WasmPolicyHttpClient::new_with_resolver(
         client.clone(),
         NetworkPolicy {
             allowed_targets: vec![NetworkTargetPattern {
@@ -162,6 +166,7 @@ fn network_policy_enforces_request_body_egress_limit_before_client_call() {
             deny_private_ip_ranges: true,
             max_egress_bytes: Some(4),
         },
+        public_resolver(),
     );
     let runtime = WasmRuntime::for_testing().unwrap();
     let module = runtime
@@ -193,7 +198,7 @@ fn network_policy_enforces_response_body_limit() {
         status: 200,
         body: r#"{"ok":true,"large":"payload"}"#.to_string(),
     });
-    let http = WasmPolicyHttpClient::new(
+    let http = WasmPolicyHttpClient::new_with_resolver(
         client,
         NetworkPolicy {
             allowed_targets: vec![NetworkTargetPattern {
@@ -204,6 +209,7 @@ fn network_policy_enforces_response_body_limit() {
             deny_private_ip_ranges: true,
             max_egress_bytes: Some(4),
         },
+        public_resolver(),
     );
     let runtime = WasmRuntime::for_testing().unwrap();
     let module = runtime
@@ -223,6 +229,125 @@ fn network_policy_enforces_response_body_limit() {
         .unwrap();
 
     assert_eq!(result.output, json!({"ok": false}));
+}
+
+#[test]
+fn network_import_records_http_bytes_in_resource_usage() {
+    let client = RecordingHttpClient::new(WasmHttpResponse {
+        status: 200,
+        body: r#"{"ok":true}"#.to_string(),
+    });
+    let http = WasmPolicyHttpClient::new_with_resolver(
+        client,
+        NetworkPolicy {
+            allowed_targets: vec![NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "api.example.test".to_string(),
+                port: None,
+            }],
+            deny_private_ip_ranges: true,
+            max_egress_bytes: Some(1024),
+        },
+        public_resolver(),
+    );
+    let runtime = WasmRuntime::for_testing().unwrap();
+    let module = runtime
+        .prepare(http_post_spec("https://api.example.test/v1/echo", "hello"))
+        .unwrap();
+    let descriptor = make_descriptor("net-demo", "net-demo.http", RuntimeKind::Wasm);
+    let reservation = sample_reservation();
+
+    let result = runtime
+        .invoke_json_with_network(
+            &module,
+            &descriptor,
+            Some(&reservation),
+            CapabilityInvocation { input: json!({}) },
+            Arc::new(http),
+        )
+        .unwrap();
+
+    assert_eq!(result.output, json!({"ok": true}));
+    assert_eq!(result.usage.network_egress_bytes, 16);
+}
+
+#[test]
+fn network_policy_denies_hostname_resolving_to_private_ip_before_client_call() {
+    let client = RecordingHttpClient::new(WasmHttpResponse {
+        status: 200,
+        body: r#"{"ok":true}"#.to_string(),
+    });
+    let http = WasmPolicyHttpClient::new_with_resolver(
+        client.clone(),
+        NetworkPolicy {
+            allowed_targets: vec![NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "api.example.test".to_string(),
+                port: None,
+            }],
+            deny_private_ip_ranges: true,
+            max_egress_bytes: Some(1024),
+        },
+        StaticResolver::new("127.0.0.1"),
+    );
+    let runtime = WasmRuntime::for_testing().unwrap();
+    let module = runtime
+        .prepare(http_spec("https://api.example.test/v1/echo"))
+        .unwrap();
+    let descriptor = make_descriptor("net-demo", "net-demo.http", RuntimeKind::Wasm);
+    let reservation = sample_reservation();
+
+    let result = runtime
+        .invoke_json_with_network(
+            &module,
+            &descriptor,
+            Some(&reservation),
+            CapabilityInvocation { input: json!({}) },
+            Arc::new(http),
+        )
+        .unwrap();
+
+    assert_eq!(result.output, json!({"ok": false}));
+    assert!(client.requests.lock().unwrap().is_empty());
+}
+
+#[test]
+fn network_import_rejects_oversized_url_before_client_call() {
+    let client = RecordingHttpClient::new(WasmHttpResponse {
+        status: 200,
+        body: r#"{"ok":true}"#.to_string(),
+    });
+    let http = WasmPolicyHttpClient::new_with_resolver(
+        client.clone(),
+        NetworkPolicy {
+            allowed_targets: vec![NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "api.example.test".to_string(),
+                port: None,
+            }],
+            deny_private_ip_ranges: true,
+            max_egress_bytes: Some(16 * 1024),
+        },
+        public_resolver(),
+    );
+    let runtime = WasmRuntime::for_testing().unwrap();
+    let oversized_url = format!("https://api.example.test/{}", "a".repeat(8 * 1024));
+    let module = runtime.prepare(http_spec(&oversized_url)).unwrap();
+    let descriptor = make_descriptor("net-demo", "net-demo.http", RuntimeKind::Wasm);
+    let reservation = sample_reservation();
+
+    let result = runtime
+        .invoke_json_with_network(
+            &module,
+            &descriptor,
+            Some(&reservation),
+            CapabilityInvocation { input: json!({}) },
+            Arc::new(http),
+        )
+        .unwrap();
+
+    assert_eq!(result.output, json!({"ok": false}));
+    assert!(client.requests.lock().unwrap().is_empty());
 }
 
 #[derive(Clone)]
@@ -245,6 +370,29 @@ impl WasmHostHttp for RecordingHttpClient {
         self.requests.lock().unwrap().push(request);
         Ok(self.response.clone())
     }
+}
+
+#[derive(Debug, Clone)]
+struct StaticResolver {
+    ip: IpAddr,
+}
+
+impl StaticResolver {
+    fn new(ip: &str) -> Self {
+        Self {
+            ip: ip.parse().unwrap(),
+        }
+    }
+}
+
+impl WasmNetworkResolver for StaticResolver {
+    fn resolve_ips(&self, _host: &str, _port: Option<u16>) -> Result<Vec<IpAddr>, String> {
+        Ok(vec![self.ip])
+    }
+}
+
+fn public_resolver() -> StaticResolver {
+    StaticResolver::new("93.184.216.34")
 }
 
 fn http_spec(url: &str) -> WasmModuleSpec {
@@ -272,8 +420,8 @@ fn http_module_bytes(url: &str, method: i32, body: &str) -> Vec<u8> {
             (import "host" "http_request_utf8" (func $http (param i32 i32 i32 i32 i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             (data (i32.const 64) "{url}")
-            (data (i32.const 256) "{{\"ok\":false}}")
-            (data (i32.const 512) "{body}")
+            (data (i32.const 20000) "{{\"ok\":false}}")
+            (data (i32.const 21000) "{body}")
             (global $heap (mut i32) (i32.const 1024))
             (global $out_ptr (mut i32) (i32.const 0))
             (global $out_len (mut i32) (i32.const 0))
@@ -291,9 +439,9 @@ fn http_module_bytes(url: &str, method: i32, body: &str) -> Vec<u8> {
               i32.const {method}
               i32.const 64
               i32.const {url_len}
-              i32.const 512
+              i32.const 21000
               i32.const {body_len}
-              i32.const 4096
+              i32.const 32768
               i32.const 512
               call $http
               local.set $n
@@ -302,12 +450,12 @@ fn http_module_bytes(url: &str, method: i32, body: &str) -> Vec<u8> {
               i32.const 0
               i32.ge_s
               if
-                i32.const 4096
+                i32.const 32768
                 global.set $out_ptr
                 local.get $n
                 global.set $out_len
               else
-                i32.const 256
+                i32.const 20000
                 global.set $out_ptr
                 i32.const 12
                 global.set $out_len

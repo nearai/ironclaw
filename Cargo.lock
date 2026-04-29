@@ -4268,12 +4268,14 @@ dependencies = [
 name = "ironclaw_wasm"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "blake3",
  "futures",
  "ironclaw_extensions",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_resources",
+ "jsonschema",
  "rust_decimal",
  "rust_decimal_macros",
  "serde_json",

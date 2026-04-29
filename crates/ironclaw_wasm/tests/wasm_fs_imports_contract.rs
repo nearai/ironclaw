@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::thread::ThreadId;
+
+use async_trait::async_trait;
 
 use ironclaw_filesystem::*;
 use ironclaw_host_api::*;
@@ -111,6 +114,48 @@ fn fs_list_and_stat_imports_use_scoped_filesystem() {
     assert_eq!(result.output, json!(["a.json", "b.json"]));
 }
 
+#[test]
+fn fs_import_rejects_oversized_path_before_filesystem_call() {
+    let recording_fs = RecordingFilesystem::default();
+    let runtime = WasmRuntime::for_testing().unwrap();
+    let oversized_path = format!("/workspace/{}", "a".repeat(5 * 1024));
+    let module = runtime.prepare(fs_read_path_spec(&oversized_path)).unwrap();
+    let descriptor = make_descriptor("fs-demo", "fs-demo.read", RuntimeKind::Wasm);
+    let reservation = sample_reservation();
+
+    let result = runtime
+        .invoke_json_with_filesystem(
+            &module,
+            &descriptor,
+            Some(&reservation),
+            CapabilityInvocation { input: json!({}) },
+            Arc::new(recording_fs.clone()),
+        )
+        .unwrap();
+
+    assert_eq!(result.output, json!({"ok": false}));
+    assert!(recording_fs.read_paths.lock().unwrap().is_empty());
+}
+
+#[test]
+fn scoped_filesystem_bridge_polls_root_filesystem_off_calling_thread() {
+    let caller_thread = std::thread::current().id();
+    let root = Arc::new(ThreadRecordingRootFilesystem::default());
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/project").unwrap(),
+        MountPermissions::read_only(),
+    )])
+    .unwrap();
+    let wasm_fs = WasmScopedFilesystem::new(root.clone(), mounts);
+
+    let contents = wasm_fs.read_utf8("/workspace/input.json").unwrap();
+
+    assert_eq!(contents, r#"{"ok":true}"#);
+    let observed_thread = root.observed_read_thread.lock().unwrap().unwrap();
+    assert_ne!(observed_thread, caller_thread);
+}
+
 fn scoped_filesystem(
     permissions: MountPermissions,
     populate: impl FnOnce(&std::path::Path),
@@ -134,6 +179,117 @@ fn scoped_filesystem(
     .unwrap();
 
     (WasmScopedFilesystem::new(Arc::new(root), mounts), storage)
+}
+
+#[derive(Clone, Default)]
+struct RecordingFilesystem {
+    read_paths: Arc<Mutex<Vec<String>>>,
+}
+
+impl WasmHostFilesystem for RecordingFilesystem {
+    fn read_utf8(&self, path: &str) -> Result<String, String> {
+        self.read_paths.lock().unwrap().push(path.to_string());
+        Ok(r#"{"ok":true}"#.to_string())
+    }
+
+    fn write_utf8(&self, _path: &str, _contents: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn list_utf8(&self, _path: &str) -> Result<String, String> {
+        Ok("[]".to_string())
+    }
+
+    fn stat_len(&self, _path: &str) -> Result<u64, String> {
+        Ok(0)
+    }
+}
+
+#[derive(Debug, Default)]
+struct ThreadRecordingRootFilesystem {
+    observed_read_thread: Mutex<Option<ThreadId>>,
+}
+
+#[async_trait]
+impl RootFilesystem for ThreadRecordingRootFilesystem {
+    async fn read_file(&self, _path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        *self.observed_read_thread.lock().unwrap() = Some(std::thread::current().id());
+        Ok(br#"{"ok":true}"#.to_vec())
+    }
+
+    async fn write_file(&self, path: &VirtualPath, _bytes: &[u8]) -> Result<(), FilesystemError> {
+        Err(backend_error(path, FilesystemOperation::WriteFile))
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        Err(backend_error(path, FilesystemOperation::ListDir))
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        Err(backend_error(path, FilesystemOperation::Stat))
+    }
+}
+
+fn backend_error(path: &VirtualPath, operation: FilesystemOperation) -> FilesystemError {
+    FilesystemError::Backend {
+        path: path.clone(),
+        operation,
+        reason: "not implemented by test filesystem".to_string(),
+    }
+}
+
+fn fs_read_path_spec(path: &str) -> WasmModuleSpec {
+    let path_len = path.len();
+    WasmModuleSpec {
+        provider: ExtensionId::new("fs-demo").unwrap(),
+        capability: CapabilityId::new("fs-demo.read").unwrap(),
+        export: "read".to_string(),
+        bytes: wat::parse_str(format!(
+            r#"(module
+                (import "host" "fs_read_utf8" (func $read (param i32 i32 i32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (data (i32.const 64) "{path}")
+                (data (i32.const 20000) "{{\"ok\":false}}")
+                (global $heap (mut i32) (i32.const 1024))
+                (global $out_ptr (mut i32) (i32.const 0))
+                (global $out_len (mut i32) (i32.const 0))
+                (func (export "alloc") (param $len i32) (result i32)
+                  (local $ptr i32)
+                  global.get $heap
+                  local.set $ptr
+                  global.get $heap
+                  local.get $len
+                  i32.add
+                  global.set $heap
+                  local.get $ptr)
+                (func (export "read") (param i32 i32) (result i32)
+                  (local $n i32)
+                  i32.const 64
+                  i32.const {path_len}
+                  i32.const 32768
+                  i32.const 512
+                  call $read
+                  local.set $n
+                  local.get $n
+                  i32.const 0
+                  i32.ge_s
+                  if
+                    i32.const 32768
+                    global.set $out_ptr
+                    local.get $n
+                    global.set $out_len
+                  else
+                    i32.const 20000
+                    global.set $out_ptr
+                    i32.const 12
+                    global.set $out_len
+                  end
+                  i32.const 0)
+                (func (export "output_ptr") (result i32) global.get $out_ptr)
+                (func (export "output_len") (result i32) global.get $out_len))"#,
+        ))
+        .unwrap(),
+    }
 }
 
 fn fs_read_spec() -> WasmModuleSpec {
