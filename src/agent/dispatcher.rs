@@ -1846,12 +1846,11 @@ pub(super) async fn enrich_image_tool_result(
             _ => serde_json::json!({}),
         };
         if let Some(object) = status_metadata.as_object_mut() {
-            object
-                .entry("user_id".to_string())
-                .or_insert_with(|| serde_json::json!(ctx.user_id));
-            object
-                .entry("thread_id".to_string())
-                .or_insert_with(|| serde_json::json!(ctx.thread_id.to_string()));
+            object.insert("user_id".to_string(), serde_json::json!(ctx.user_id));
+            object.insert(
+                "thread_id".to_string(),
+                serde_json::json!(ctx.thread_id.to_string()),
+            );
         }
 
         let _ = ctx
@@ -4172,14 +4171,19 @@ mod tests {
         })
         .to_string());
 
-        let metadata = serde_json::json!({});
+        let thread_id = uuid::Uuid::new_v4();
+        let metadata = serde_json::json!({
+            "chat_type": "direct",
+            "user_id": "untrusted-user",
+            "thread_id": "untrusted-thread",
+        });
         let sentinel = super::enrich_image_tool_result(
             super::ImageToolResultContext::new(
                 &manager,
                 "test",
                 &metadata,
                 "test-user",
-                uuid::Uuid::new_v4(),
+                thread_id,
                 42,
             )
             .with_artifact_root(dir.path()),
@@ -4193,6 +4197,7 @@ mod tests {
         let path = sentinel.path().expect("path");
         assert_eq!(tokio::fs::read(path).await.expect("read"), b"png-bytes");
         assert!(tool_result.expect("tool result").contains("\"path\""));
+        let expected_thread_id = thread_id.to_string();
         let statuses = statuses.lock().expect("statuses mutex");
         assert!(matches!(
             statuses.as_slice(),
@@ -4200,8 +4205,9 @@ mod tests {
                 if event_id == "turn-42-call_img_0"
                     && data_url.starts_with("data:image/png;base64,")
                     && status_path == path
-                    && status_metadata.get("thread_id").and_then(|v| v.as_str()).is_some()
+                    && status_metadata.get("thread_id").and_then(|v| v.as_str()) == Some(expected_thread_id.as_str())
                     && status_metadata.get("user_id").and_then(|v| v.as_str()) == Some("test-user")
+                    && status_metadata.get("chat_type").and_then(|v| v.as_str()) == Some("direct")
         ));
     }
 

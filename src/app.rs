@@ -654,13 +654,19 @@ impl AppBuilder {
                 let gen_model = crate::llm::image_models::suggest_image_model(&models)
                     .unwrap_or("black-forest-labs/FLUX.2-klein-4B")
                     .to_string();
-                tools.register_image_tools(api_base.clone(), api_key.clone(), gen_model, None);
+                let image_artifact_root = crate::image_artifacts::default_image_artifact_root();
+                tools.register_image_tools(
+                    api_base.clone(),
+                    api_key.clone(),
+                    gen_model,
+                    image_artifact_root.clone(),
+                );
 
                 // Check for vision models
                 let vision_model = crate::llm::vision_models::suggest_vision_model(&models)
                     .unwrap_or(&model_name)
                     .to_string();
-                tools.register_vision_tools(api_base, api_key, vision_model, None);
+                tools.register_vision_tools(api_base, api_key, vision_model, image_artifact_root);
             }
         }
 

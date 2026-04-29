@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 pub(crate) const MAX_IMAGE_ARTIFACT_BYTES: usize = 10 * 1024 * 1024;
 
-fn default_image_artifact_root() -> PathBuf {
+pub(crate) fn default_image_artifact_root() -> PathBuf {
     crate::bootstrap::ironclaw_base_dir().join("image-artifacts")
 }
 
@@ -71,6 +71,51 @@ fn image_artifact_filename(artifact_id: &str, attempt: usize, ext: &str) -> Stri
     } else {
         format!("{stem}-{attempt}.{ext}")
     }
+}
+
+fn max_base64_encoded_len(decoded_limit: usize) -> usize {
+    decoded_limit.div_ceil(3) * 4
+}
+
+fn ensure_base64_decoded_len_within_limit(
+    encoded: &str,
+    decoded_limit: usize,
+) -> Result<(), String> {
+    let max_encoded_len = max_base64_encoded_len(decoded_limit);
+    if encoded.len() > max_encoded_len {
+        return Err(format!(
+            "image data URL exceeds {} byte limit",
+            decoded_limit
+        ));
+    }
+
+    let trailing_padding = encoded
+        .as_bytes()
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'=')
+        .count();
+    if trailing_padding > 2 {
+        return Err("invalid image data URL base64 padding".to_string());
+    }
+    if trailing_padding > 0 && !encoded.len().is_multiple_of(4) {
+        return Err("invalid image data URL base64 padding".to_string());
+    }
+
+    let decoded_upper_bound = match encoded.len() % 4 {
+        0 => encoded.len() / 4 * 3 - trailing_padding,
+        2 => encoded.len() / 4 * 3 + 1,
+        3 => encoded.len() / 4 * 3 + 2,
+        _ => encoded.len() / 4 * 3 + 3,
+    };
+    if decoded_upper_bound > decoded_limit {
+        return Err(format!(
+            "image data URL exceeds {} byte limit",
+            decoded_limit
+        ));
+    }
+
+    Ok(())
 }
 
 pub(crate) async fn persist_image_artifact(
@@ -150,9 +195,16 @@ pub(crate) fn decode_image_data_url(data_url: &str) -> Result<(String, Vec<u8>),
         return Err("image data URL must be base64 encoded".to_string());
     }
     let normalized_media_type = normalize_image_media_type(media_type)?;
+    ensure_base64_decoded_len_within_limit(data, MAX_IMAGE_ARTIFACT_BYTES)?;
     let bytes = BASE64_STANDARD
         .decode(data)
         .map_err(|e| format!("invalid image data URL base64: {e}"))?;
+    if bytes.len() > MAX_IMAGE_ARTIFACT_BYTES {
+        return Err(format!(
+            "image data URL exceeds {} byte limit",
+            MAX_IMAGE_ARTIFACT_BYTES
+        ));
+    }
     Ok((normalized_media_type.to_string(), bytes))
 }
 
@@ -226,6 +278,20 @@ mod tests {
 
         assert_eq!(media_type, "image/png");
         assert_eq!(bytes, b"png");
+    }
+
+    #[test]
+    fn rejects_base64_that_can_decode_past_limit_before_decode() {
+        let encoded = "A".repeat(max_base64_encoded_len(1));
+
+        let err = ensure_base64_decoded_len_within_limit(&encoded, 1).expect_err("rejected");
+
+        assert!(err.contains("1 byte limit"));
+    }
+
+    #[test]
+    fn accepts_base64_at_limit_when_padding_keeps_decoded_size_in_bounds() {
+        ensure_base64_decoded_len_within_limit("AA==", 1).expect("within limit");
     }
 
     #[test]

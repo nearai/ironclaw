@@ -24,8 +24,7 @@ use crate::agent::session::{
 };
 use crate::agent::submission::SubmissionResult;
 use crate::channels::{
-    AttachmentKind, ChatApprovalPrompt, HistoryMessage, IncomingAttachment, IncomingMessage,
-    StatusUpdate,
+    AttachmentKind, ChatApprovalPrompt, HistoryMessage, IncomingMessage, StatusUpdate,
 };
 use crate::context::JobContext;
 use crate::error::Error;
@@ -77,7 +76,7 @@ fn tool_result_content_for_rebuild(result: &str) -> String {
 }
 
 struct PersistedInlineImageAttachments {
-    attachments: Vec<IncomingAttachment>,
+    local_paths: Vec<Option<String>>,
     created_paths: Vec<String>,
 }
 
@@ -95,17 +94,21 @@ async fn persist_inline_image_attachments_at(
 ) -> PersistedInlineImageAttachments {
     if message.attachments.is_empty() {
         return PersistedInlineImageAttachments {
-            attachments: Vec::new(),
+            local_paths: Vec::new(),
             created_paths: Vec::new(),
         };
     }
 
-    let mut attachments = message.attachments.clone();
+    let mut local_paths = message
+        .attachments
+        .iter()
+        .map(|attachment| attachment.local_path.clone())
+        .collect::<Vec<_>>();
     let mut created_paths = Vec::new();
-    for (idx, attachment) in attachments.iter_mut().enumerate() {
+    for (idx, attachment) in message.attachments.iter().enumerate() {
         if attachment.kind != AttachmentKind::Image
             || attachment.data.is_empty()
-            || attachment.local_path.is_some()
+            || local_paths[idx].is_some()
         {
             continue;
         }
@@ -127,7 +130,7 @@ async fn persist_inline_image_attachments_at(
         {
             Ok(path) => {
                 created_paths.push(path.clone());
-                attachment.local_path = Some(path);
+                local_paths[idx] = Some(path);
             }
             Err(err) => {
                 tracing::warn!(
@@ -140,7 +143,7 @@ async fn persist_inline_image_attachments_at(
         }
     }
     PersistedInlineImageAttachments {
-        attachments,
+        local_paths,
         created_paths,
     }
 }
@@ -694,9 +697,10 @@ impl Agent {
         }
 
         let persisted_attachments = persist_inline_image_attachments(message, thread_id).await;
-        let augmented = crate::agent::attachments::augment_with_attachments(
+        let augmented = crate::agent::attachments::augment_with_attachment_local_paths(
             content,
-            &persisted_attachments.attachments,
+            &message.attachments,
+            &persisted_attachments.local_paths,
         );
         let (effective_content, image_parts) = match &augmented {
             Some(result) => (result.text.as_str(), result.image_parts.clone()),
@@ -3881,17 +3885,14 @@ mod tests {
         let persisted =
             super::persist_inline_image_attachments_at(Some(dir.path()), &message, thread_id).await;
 
-        let path = persisted.attachments[0]
-            .local_path
-            .as_deref()
-            .expect("local path");
+        let path = persisted.local_paths[0].as_deref().expect("local path");
         assert!(path.ends_with(".png"));
         assert_eq!(persisted.created_paths, vec![path.to_string()]);
         assert_eq!(
             tokio::fs::read(path).await.expect("read"),
             vec![0x89, 0x50, 0x4E, 0x47]
         );
-        assert_eq!(persisted.attachments[0].data, vec![0x89, 0x50, 0x4E, 0x47]);
+        assert_eq!(message.attachments[0].data, vec![0x89, 0x50, 0x4E, 0x47]);
     }
 
     #[tokio::test]
