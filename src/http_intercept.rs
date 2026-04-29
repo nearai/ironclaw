@@ -72,6 +72,9 @@ fn is_loopback_target(base_url: &str) -> bool {
     let Ok(parsed) = reqwest::Url::parse(base_url) else {
         return false;
     };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return false;
+    }
     let Some(host) = parsed.host_str() else {
         return false;
     };
@@ -198,6 +201,9 @@ mod tests {
         assert!(is_loopback_target("http://localhost:8080"));
         assert!(is_loopback_target("http://127.0.0.1"));
         assert!(is_loopback_target("http://127.0.0.1:8080"));
+        assert!(is_loopback_target("http://[::1]:8080"));
+        assert!(!is_loopback_target("ftp://localhost:8080"));
+        assert!(!is_loopback_target("file://localhost/tmp/mock"));
         assert!(!is_loopback_target("https://api.anthropic.com"));
         assert!(!is_loopback_target("http://192.168.1.1"));
         assert!(!is_loopback_target("http://10.0.0.1"));
