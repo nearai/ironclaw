@@ -1,7 +1,15 @@
 //! PR1b acceptance-criteria contract tests.
 //!
 //! Each test maps to a row in the plan's coverage matrix:
-//!   - T1..T13: trust policy + invalidation contract
+//!   - T1..T12: trust policy + invalidation contract
+//!   - T13, T13b–e: AdminConfig source/digest binding (PR3043 review fix)
+//!   - T14, T14b–e: HostTrustPolicy::mutate_with orchestration (AC #6
+//!     enforcement via type-private mutators)
+//!   - T15: default_decision fail-closed across every PackageSource
+//!   - T16, T16b–c: TrustChange no-op / downgrade / upgrade / kind-change
+//!     semantics + InvalidationBus publish-time guard
+//!   - T17: LocalDevOverride inert-contract pinning (forward-compat seam)
+//!   - T18: EffectiveTrustClass audit wire-shape for all four variants
 //!
 //! Test fixtures live in `mod support` below: `FakeAuthorizer` (gates
 //! capability invocation on `EffectiveTrustClass::is_privileged()` AND an
@@ -9,19 +17,22 @@
 //! a shared `InvalidationBus`). These prove ordering and grant-denial
 //! behavior at the integration boundary that PR3 will eventually own.
 
+use std::collections::BTreeSet;
+
 use chrono::Utc;
 use ironclaw_host_api::{
     CapabilityId, EffectKind, PackageId, PackageIdentity, PackageSource, RequestedTrustClass,
     TrustClass,
 };
 use ironclaw_trust::fixtures::{
-    admin_entry_for_test, bundled_entry_for_test, effective_first_party_for_test,
-    effective_system_for_test,
+    admin_entry_for_test, admin_entry_with_digest_for_test, bundled_entry_for_test,
+    effective_first_party_for_test, effective_system_for_test,
 };
 use ironclaw_trust::{
-    AdminConfig, BundledRegistry, EffectiveTrustClass, HostTrustPolicy, InvalidationBus,
-    TrustChange, TrustDecision, TrustPolicy, TrustPolicyInput, TrustProvenance, authority_changed,
-    grant_retention_eligible, identity_changed,
+    AdminConfig, AdminEntry, BundledRegistry, EffectiveTrustClass, HostTrustPolicy,
+    InvalidationBus, LocalDevOverride, PolicySource, TrustChange, TrustDecision, TrustError,
+    TrustPolicy, TrustPolicyInput, TrustProvenance, authority_changed, grant_retention_eligible,
+    identity_changed,
 };
 use static_assertions::assert_not_impl_any;
 
@@ -164,8 +175,16 @@ fn input(identity: PackageIdentity, requested: RequestedTrustClass) -> TrustPoli
     TrustPolicyInput {
         identity,
         requested_trust: requested,
-        requested_authority: Vec::new(),
+        requested_authority: BTreeSet::new(),
     }
+}
+
+/// Build a capability set from a list of names. Convenience helper for
+/// tests that exercise authority sets — duplicates and reorderings
+/// collapse into the same canonical `BTreeSet`, which is exactly the
+/// invariant the type signature is enforcing in production.
+fn caps(names: &[&str]) -> BTreeSet<CapabilityId> {
+    names.iter().map(|n| cap(n)).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -230,14 +249,12 @@ fn t2_self_promotion_blocks_privileged_grant_via_fake_authorizer() {
 
 #[test]
 fn t3_host_assignment_via_bundled_registry_grants_effective_trust() {
-    let registry = BundledRegistry::new();
-    registry.upsert(bundled_entry_for_test(
+    let registry = BundledRegistry::with_entries([bundled_entry_for_test(
         pkg("ironclaw_core"),
         Some("digest_v1".to_string()),
         effective_system_for_test(),
         vec![EffectKind::DispatchCapability],
-    ));
-
+    )]);
     let policy = HostTrustPolicy::new(vec![Box::new(registry)]);
 
     let identity = bundled_identity("ironclaw_core", Some("digest_v1"));
@@ -258,13 +275,12 @@ fn t3_host_assignment_via_bundled_registry_grants_effective_trust() {
 
 #[test]
 fn t4_host_assignment_alone_grants_no_capability() {
-    let registry = BundledRegistry::new();
-    registry.upsert(bundled_entry_for_test(
+    let registry = BundledRegistry::with_entries([bundled_entry_for_test(
         pkg("ironclaw_core"),
         None,
         effective_system_for_test(),
         vec![EffectKind::DispatchCapability],
-    ));
+    )]);
     let policy = HostTrustPolicy::new(vec![Box::new(registry)]);
 
     let identity = bundled_identity("ironclaw_core", None);
@@ -307,10 +323,10 @@ fn t5_effective_system_without_grant_denies_invocation() {
 
 #[test]
 fn t6_expanded_authority_requires_renewed_approval() {
-    let prev = vec![cap("github.read")];
-    let curr_added = vec![cap("github.read"), cap("github.delete")];
-    let curr_unchanged = vec![cap("github.read")];
-    let curr_removed_all = vec![];
+    let prev = caps(&["github.read"]);
+    let curr_added = caps(&["github.read", "github.delete"]);
+    let curr_unchanged = caps(&["github.read"]);
+    let curr_removed_all = caps(&[]);
 
     assert!(
         authority_changed(&prev, &curr_added),
@@ -328,12 +344,30 @@ fn t6_expanded_authority_requires_renewed_approval() {
          (deliberate over-firing — see authority_changed docs)"
     );
 
-    // Reorder of the SAME set must NOT fire — set semantics, not list.
-    let prev_two = vec![cap("github.read"), cap("github.write")];
-    let prev_two_reordered = vec![cap("github.write"), cap("github.read")];
+    // BTreeSet typing means insertion-order/duplicates are erased at the
+    // type boundary — `[a, b]` and `[b, a]` produce the same set.
+    let prev_two = caps(&["github.read", "github.write"]);
+    let prev_two_reordered = caps(&["github.write", "github.read"]);
     assert!(
         !authority_changed(&prev_two, &prev_two_reordered),
         "reordering the same set must remain retainable"
+    );
+
+    // Regression for the "authority_changed over-fires on duplicate
+    // entries" review finding: a hypothetical caller passing
+    // `[a, a, b]` (multiset) and `[a, b]` (set) used to fire because
+    // the slice-based check length-guarded against multiset drift.
+    // Set typing makes the multiset literally inexpressible — both
+    // collapse into `{a, b}` at construction.
+    let multiset_collapsed: BTreeSet<CapabilityId> =
+        [cap("github.read"), cap("github.read"), cap("github.write")]
+            .into_iter()
+            .collect();
+    let plain = caps(&["github.read", "github.write"]);
+    assert!(
+        !authority_changed(&multiset_collapsed, &plain),
+        "duplicates in the source list must canonicalize away — \
+         set typing prevents the [a, a, b] vs [a, b] over-fire"
     );
 
     // grant_retention_eligible composes identity + trust + authority:
@@ -362,15 +396,16 @@ fn t7_downgrade_publishes_invalidation_before_next_dispatch() {
     bus.register(store.clone());
 
     let identity = bundled_identity("ironclaw_core", Some("digest_v1"));
-    let prev_authority = vec![cap("ironclaw_core.dispatch")];
+    let prev_authority = caps(&["ironclaw_core.dispatch"]);
 
-    let change = TrustChange {
-        identity: identity.clone(),
-        previous: effective_system_for_test(),
-        current: EffectiveTrustClass::user_trusted(),
-        previous_authority: prev_authority.clone(),
-        effective_at: Utc::now(),
-    };
+    let change = TrustChange::new(
+        identity.clone(),
+        effective_system_for_test(),
+        EffectiveTrustClass::user_trusted(),
+        prev_authority.clone(),
+        Utc::now(),
+    )
+    .expect("System → UserTrusted is a real change, not a no-op");
     bus.publish(change.clone());
 
     // Synchronous fan-out: invalidation must be observable immediately.
@@ -411,13 +446,14 @@ fn t8_revocation_publishes_invalidation_before_next_dispatch() {
     // Revocation models a complete drop to non-privileged trust due to a
     // policy-source removal (admin removed the entry).
     let identity = bundled_identity("ironclaw_core", None);
-    let change = TrustChange {
-        identity: identity.clone(),
-        previous: effective_system_for_test(),
-        current: EffectiveTrustClass::sandbox(),
-        previous_authority: vec![cap("ironclaw_core.dispatch")],
-        effective_at: Utc::now(),
-    };
+    let change = TrustChange::new(
+        identity.clone(),
+        effective_system_for_test(),
+        EffectiveTrustClass::sandbox(),
+        caps(&["ironclaw_core.dispatch"]),
+        Utc::now(),
+    )
+    .expect("System → Sandbox is a real revocation, not a no-op");
     bus.publish(change.clone());
 
     let recorded = store.invalidations();
@@ -500,13 +536,12 @@ fn t11_digest_drift_forces_grant_reissue() {
     // Bundled registry pins on digest: a digest mismatch forces a fall-through
     // to the default downgrade, which is exactly the AC #7 grant-reissue
     // trigger.
-    let registry = BundledRegistry::new();
-    registry.upsert(bundled_entry_for_test(
+    let registry = BundledRegistry::with_entries([bundled_entry_for_test(
         pkg("ironclaw_core"),
         Some("digest_v1".to_string()),
         effective_first_party_for_test(),
         vec![],
-    ));
+    )]);
     let policy = HostTrustPolicy::new(vec![Box::new(registry)]);
 
     let prev_decision = policy
@@ -524,13 +559,14 @@ fn t11_digest_drift_forces_grant_reissue() {
 
     assert!(prev_decision.effective_trust.is_privileged());
     assert!(!curr_decision.effective_trust.is_privileged());
+    let empty_authority = BTreeSet::<CapabilityId>::new();
     assert!(!grant_retention_eligible(
         &prev,
         &curr,
         prev_decision.effective_trust,
         curr_decision.effective_trust,
-        &[],
-        &[],
+        &empty_authority,
+        &empty_authority,
     ));
 }
 
@@ -556,42 +592,664 @@ fn t12_signer_drift_forces_grant_reissue() {
 
     assert!(identity_changed(&prev, &curr));
     let trust = effective_first_party_for_test();
+    let empty_authority = BTreeSet::<CapabilityId>::new();
     assert!(!grant_retention_eligible(
         &prev,
         &curr,
         trust,
         trust,
-        &[],
-        &[]
+        &empty_authority,
+        &empty_authority,
     ));
 }
 
 // ---------------------------------------------------------------------------
-// T13 — admin config source overrides the absence of a bundled match
+// T13 — admin config grants trust when source binding matches.
 // Decision rule #3 from the plan.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn t13_admin_config_source_grants_trust_when_bundled_does_not_match() {
+fn t13_admin_config_grants_trust_when_source_binding_matches() {
     let bundled = BundledRegistry::new(); // empty
-    let admin = AdminConfig::new();
-    admin.upsert(admin_entry_for_test(
+    let admin = AdminConfig::with_entries([admin_entry_for_test(
         pkg("operator_blessed"),
+        PackageSource::Bundled,
         effective_first_party_for_test(),
         vec![EffectKind::ReadFilesystem],
-    ));
+    )]);
 
-    // Layered: bundled first, admin second. Bundled returns None, admin
-    // returns the privileged match.
+    // Layered: bundled first, admin second. Bundled is empty, admin's
+    // entry binds to PackageSource::Bundled, and the input identity is
+    // also PackageSource::Bundled, so the admin entry matches and grants
+    // FirstParty.
     let policy = HostTrustPolicy::new(vec![Box::new(bundled), Box::new(admin)]);
 
-    let identity = local_manifest_identity("operator_blessed");
+    let identity = bundled_identity("operator_blessed", None);
     let decision = policy
         .evaluate(&input(identity, RequestedTrustClass::FirstPartyRequested))
         .unwrap();
 
     assert_eq!(decision.effective_trust.class(), TrustClass::FirstParty);
     assert_eq!(decision.provenance, TrustProvenance::AdminConfig);
+}
+
+// ---------------------------------------------------------------------------
+// T13b — admin config does NOT shadow across sources.
+//
+// Regression for the PR3043 review finding: an `AdminEntry` for a
+// `Bundled` package_id must not let a `LocalManifest` package with the
+// same id pick up the elevation. Pre-fix, this exact path returned
+// `TrustClass::FirstParty`; post-fix it must fall through to the default
+// downgrade, which puts a LocalManifest at `Sandbox`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t13b_admin_config_does_not_shadow_local_manifest_with_bundled_entry() {
+    let admin = AdminConfig::with_entries([admin_entry_for_test(
+        pkg("operator_blessed"),
+        PackageSource::Bundled,
+        effective_first_party_for_test(),
+        vec![EffectKind::ReadFilesystem],
+    )]);
+    let policy = HostTrustPolicy::new(vec![Box::new(BundledRegistry::new()), Box::new(admin)]);
+
+    // Same package_id as the admin entry, but coming from a user-writable
+    // LocalManifest. Must NOT inherit the elevation.
+    let identity = local_manifest_identity("operator_blessed");
+    let decision = policy
+        .evaluate(&input(identity, RequestedTrustClass::FirstPartyRequested))
+        .unwrap();
+
+    assert!(
+        !decision.effective_trust.is_privileged(),
+        "LocalManifest must not pick up an admin elevation aimed at Bundled"
+    );
+    assert_eq!(decision.effective_trust.class(), TrustClass::Sandbox);
+    assert_eq!(decision.provenance, TrustProvenance::Default);
+}
+
+// ---------------------------------------------------------------------------
+// T13c — admin config rejects cross-registry source shadowing.
+//
+// An `AdminEntry::for_registry("https://trusted.example/...")` must not
+// match a `Bundled` package with the same id — different origin, no
+// elevation. Mirror of T13b for the Registry/Bundled cross-source case.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t13c_admin_config_does_not_shadow_bundled_with_registry_entry() {
+    let admin = AdminConfig::with_entries([AdminEntry::for_registry(
+        pkg("operator_blessed"),
+        "https://trusted.example/registry".to_string(),
+        None,
+        effective_first_party_for_test(),
+        vec![EffectKind::ReadFilesystem],
+        None,
+    )]);
+    let policy = HostTrustPolicy::new(vec![Box::new(admin)]);
+
+    // Same package_id as the admin entry, but Bundled origin instead of
+    // the entry's pinned Registry. Must fall through.
+    let identity = bundled_identity("operator_blessed", None);
+    let decision = policy
+        .evaluate(&input(identity, RequestedTrustClass::FirstPartyRequested))
+        .unwrap();
+
+    assert!(!decision.effective_trust.is_privileged());
+    assert_eq!(decision.provenance, TrustProvenance::Default);
+}
+
+// ---------------------------------------------------------------------------
+// T13d — admin digest pin drift falls through to default.
+//
+// AdminEntry parallels BundledEntry digest semantics: when the entry pins
+// a digest, the package's digest must match exactly. Drift falls through
+// to the default downgrade, which is the AC #7 grant-reissue trigger.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t13d_admin_digest_pin_drift_falls_through() {
+    let admin = AdminConfig::with_entries([admin_entry_with_digest_for_test(
+        pkg("operator_blessed"),
+        PackageSource::Bundled,
+        "digest_v1".to_string(),
+        effective_first_party_for_test(),
+        vec![EffectKind::ReadFilesystem],
+    )]);
+    let policy = HostTrustPolicy::new(vec![Box::new(admin)]);
+
+    // Digest drift: package presents v2, entry pins v1. No match.
+    let drifted = bundled_identity("operator_blessed", Some("digest_v2"));
+    let decision = policy
+        .evaluate(&input(drifted, RequestedTrustClass::FirstPartyRequested))
+        .unwrap();
+
+    assert!(!decision.effective_trust.is_privileged());
+    assert_eq!(decision.provenance, TrustProvenance::Default);
+
+    // Sanity: when the digest matches, the entry does match.
+    let aligned = bundled_identity("operator_blessed", Some("digest_v1"));
+    let decision = policy
+        .evaluate(&input(aligned, RequestedTrustClass::FirstPartyRequested))
+        .unwrap();
+    assert_eq!(decision.effective_trust.class(), TrustClass::FirstParty);
+    assert_eq!(decision.provenance, TrustProvenance::AdminConfig);
+}
+
+// ---------------------------------------------------------------------------
+// T13e — explicit `for_local_manifest` constructor elevates when chosen.
+//
+// The fix doesn't ban LocalManifest elevation outright; it requires the
+// operator to *spell it out* via the dedicated constructor. This test
+// pins the contract that the explicit path still works — and the
+// constructor name (`for_local_manifest`) is what `rg` will surface for
+// review.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t13e_admin_for_local_manifest_elevates_when_explicit() {
+    let path = "/extensions/operator_blessed/manifest.toml".to_string();
+    let admin = AdminConfig::with_entries([AdminEntry::for_local_manifest(
+        pkg("operator_blessed"),
+        path.clone(),
+        None,
+        effective_first_party_for_test(),
+        vec![EffectKind::ReadFilesystem],
+        None,
+    )]);
+    let policy = HostTrustPolicy::new(vec![Box::new(admin)]);
+
+    // Identity path matches the entry's pinned manifest path — the
+    // PackageSource::LocalManifest equality covers both kind and path.
+    let identity = local_manifest_identity("operator_blessed");
+    assert_eq!(
+        identity.source,
+        PackageSource::LocalManifest { path: path.clone() },
+        "test-helper path must match the entry's pinned path"
+    );
+    let decision = policy
+        .evaluate(&input(identity, RequestedTrustClass::FirstPartyRequested))
+        .unwrap();
+
+    assert_eq!(decision.effective_trust.class(), TrustClass::FirstParty);
+    assert_eq!(decision.provenance, TrustProvenance::AdminConfig);
+
+    // A different manifest path with the same package_id must not match —
+    // the `path` is part of the source equality.
+    let other_path_identity = PackageIdentity::new(
+        pkg("operator_blessed"),
+        PackageSource::LocalManifest {
+            path: "/elsewhere/manifest.toml".to_string(),
+        },
+        None,
+        None,
+    );
+    let decision = policy
+        .evaluate(&input(
+            other_path_identity,
+            RequestedTrustClass::FirstPartyRequested,
+        ))
+        .unwrap();
+    assert!(
+        !decision.effective_trust.is_privileged(),
+        "for_local_manifest must bind to a specific manifest path, not any LocalManifest"
+    );
+    assert_eq!(decision.provenance, TrustProvenance::Default);
+}
+
+// ---------------------------------------------------------------------------
+// T14 — `mutate_with` orchestrates pre-eval / mutate / post-eval / publish.
+//
+// Regression for the "InvalidationBus orchestration is enforced only by
+// caller discipline" review finding: AC #6 is now a compile-time guarantee
+// because the per-source `upsert` / `remove` methods are `pub(crate)` and
+// the only public path to them is `HostTrustPolicy::mutate_with`, which
+// hard-wires the publish step into the orchestration.
+//
+// T14 — publish fires when the affected identity's trust class drops.
+// T14b — no publish when the closure leaves the affected identity's class
+//        unchanged (e.g., mutating an unrelated package).
+// T14c — closure return value is surfaced to the caller.
+// T14d — missing source kind yields `InvariantViolation` with the type
+//        spelled out in the message.
+// T14e — closure errors short-circuit the orchestration: no publish, no
+//        post-evaluate.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t14_mutate_with_publishes_when_affected_trust_class_drops() {
+    let admin = AdminConfig::with_entries([admin_entry_for_test(
+        pkg("operator_blessed"),
+        PackageSource::Bundled,
+        effective_first_party_for_test(),
+        vec![EffectKind::ReadFilesystem],
+    )]);
+    let policy = HostTrustPolicy::new(vec![Box::new(admin)]);
+    let bus = InvalidationBus::new();
+    let store = FakeGrantStore::new();
+    bus.register(store.clone());
+
+    let identity = bundled_identity("operator_blessed", None);
+    let prev_authority = caps(&["operator_blessed.read"]);
+
+    policy
+        .mutate_with(
+            &bus,
+            identity.clone(),
+            prev_authority.clone(),
+            RequestedTrustClass::FirstPartyRequested,
+            |m| {
+                m.admin_remove(&pkg("operator_blessed"))?;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+    let recorded = store.invalidations();
+    assert_eq!(
+        recorded.len(),
+        1,
+        "removal that drops trust class must publish exactly one TrustChange"
+    );
+    assert_eq!(recorded[0].identity, identity);
+    assert_eq!(recorded[0].previous.class(), TrustClass::FirstParty);
+    assert!(
+        !recorded[0].current.is_privileged(),
+        "post-removal trust must not be privileged \
+         (unmatched Bundled falls to Sandbox per default_decision fail-closed contract)"
+    );
+    assert_eq!(recorded[0].previous_authority, prev_authority);
+}
+
+#[test]
+fn t14b_mutate_with_does_not_publish_when_affected_trust_class_unchanged() {
+    let admin = AdminConfig::with_entries([admin_entry_for_test(
+        pkg("operator_blessed"),
+        PackageSource::Bundled,
+        effective_first_party_for_test(),
+        vec![EffectKind::ReadFilesystem],
+    )]);
+    let policy = HostTrustPolicy::new(vec![Box::new(admin)]);
+    let bus = InvalidationBus::new();
+    let store = FakeGrantStore::new();
+    bus.register(store.clone());
+
+    // Affected identity is "unrelated" — the mutation touches a different
+    // package, so the affected identity's trust class stays at the default.
+    policy
+        .mutate_with(
+            &bus,
+            bundled_identity("unrelated", None),
+            BTreeSet::new(),
+            RequestedTrustClass::FirstPartyRequested,
+            |m| {
+                m.admin_upsert(admin_entry_for_test(
+                    pkg("other_pkg"),
+                    PackageSource::Bundled,
+                    effective_system_for_test(),
+                    vec![],
+                ))?;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+    assert!(
+        store.invalidations().is_empty(),
+        "no publish when the affected identity's effective trust class \
+         did not change"
+    );
+}
+
+#[test]
+fn t14c_mutate_with_returns_closure_result() {
+    let admin = AdminConfig::with_entries([admin_entry_for_test(
+        pkg("operator_blessed"),
+        PackageSource::Bundled,
+        effective_first_party_for_test(),
+        vec![EffectKind::ReadFilesystem],
+    )]);
+    let policy = HostTrustPolicy::new(vec![Box::new(admin)]);
+    let bus = InvalidationBus::new();
+
+    let removed = policy
+        .mutate_with(
+            &bus,
+            bundled_identity("operator_blessed", None),
+            BTreeSet::new(),
+            RequestedTrustClass::FirstPartyRequested,
+            |m| m.admin_remove(&pkg("operator_blessed")),
+        )
+        .unwrap();
+
+    assert!(
+        removed.is_some(),
+        "closure must surface the removed entry through mutate_with's return"
+    );
+}
+
+#[test]
+fn t14d_mutate_with_surfaces_missing_source_kind() {
+    // Policy chain has no AdminConfig — calling admin_remove must yield
+    // InvariantViolation, not silently no-op.
+    let policy = HostTrustPolicy::new(vec![Box::new(BundledRegistry::new())]);
+    let bus = InvalidationBus::new();
+
+    let result = policy.mutate_with(
+        &bus,
+        bundled_identity("anything", None),
+        BTreeSet::new(),
+        RequestedTrustClass::ThirdParty,
+        |m| {
+            m.admin_remove(&pkg("anything"))?;
+            Ok(())
+        },
+    );
+
+    let TrustError::InvariantViolation { reason } = result.unwrap_err();
+    assert!(
+        reason.contains("AdminConfig"),
+        "missing-source error must name the type — got: {reason}"
+    );
+}
+
+#[test]
+fn t14e_mutate_with_short_circuits_on_closure_error() {
+    let admin = AdminConfig::with_entries([admin_entry_for_test(
+        pkg("operator_blessed"),
+        PackageSource::Bundled,
+        effective_first_party_for_test(),
+        vec![EffectKind::ReadFilesystem],
+    )]);
+    let policy = HostTrustPolicy::new(vec![Box::new(admin)]);
+    let bus = InvalidationBus::new();
+    let store = FakeGrantStore::new();
+    bus.register(store.clone());
+
+    // Closure performs a real mutation, then errors. The trust class for
+    // the affected identity *would* have changed, but because the closure
+    // errored we must NOT publish — the caller has to handle the partial
+    // state explicitly.
+    let result: Result<(), TrustError> = policy.mutate_with(
+        &bus,
+        bundled_identity("operator_blessed", None),
+        BTreeSet::new(),
+        RequestedTrustClass::FirstPartyRequested,
+        |m| {
+            m.admin_remove(&pkg("operator_blessed"))?;
+            Err(TrustError::InvariantViolation {
+                reason: "simulated downstream failure".to_string(),
+            })
+        },
+    );
+
+    assert!(matches!(result, Err(TrustError::InvariantViolation { .. })));
+    assert!(
+        store.invalidations().is_empty(),
+        "closure errors must short-circuit before publish — \
+         partial mutations are the caller's problem"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T15 — `default_decision` is fail-closed for every PackageSource.
+//
+// Regression for the "default_decision for unmatched Bundled / Registry is
+// UserTrusted" review finding. Pre-fix, an unmatched Bundled / Registry /
+// Admin package picked up `UserTrusted` purely on the basis of its origin
+// string — fail-open, since `SignedRegistry` is inert and "Bundled but
+// not in the registry" is a host-config bug rather than a third-party
+// credential. Post-fix, all unmatched origins drop to `Sandbox`.
+//
+// This test pins the contract at the public-API level so a future change
+// re-introducing the soft fallback fails loudly.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t15_default_decision_is_sandbox_for_every_unmatched_package_source() {
+    // Empty policy chain — every input falls through to `default_decision`.
+    let policy = HostTrustPolicy::new(vec![
+        Box::new(BundledRegistry::new()),
+        Box::new(AdminConfig::new()),
+    ]);
+
+    let unmatched_origins = [
+        // Already correct pre-fix; included so the test asserts the full
+        // matrix uniformly.
+        local_manifest_identity("any_local"),
+        bundled_identity("missing_from_bundled_registry", None),
+        // Most security-critical case — an unverified remote package
+        // must NOT pick up UserTrusted just because it carries a
+        // `Registry { url }` origin tag.
+        PackageIdentity::new(
+            pkg("untrusted_remote_pkg"),
+            PackageSource::Registry {
+                url: "https://anywhere.evil/registry".to_string(),
+            },
+            None,
+            None,
+        ),
+        PackageIdentity::new(pkg("orphaned_admin_pkg"), PackageSource::Admin, None, None),
+    ];
+
+    for identity in unmatched_origins {
+        let decision = policy
+            .evaluate(&input(
+                identity.clone(),
+                RequestedTrustClass::SystemRequested,
+            ))
+            .unwrap();
+        assert_eq!(
+            decision.effective_trust.class(),
+            TrustClass::Sandbox,
+            "unmatched {:?} must fall to Sandbox, not UserTrusted",
+            identity.source
+        );
+        assert_eq!(decision.provenance, TrustProvenance::Default);
+        assert!(
+            decision.authority_ceiling.allowed_effects.is_empty(),
+            "default decision must carry an empty authority ceiling"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T16 — `TrustChange` no-op / downgrade / upgrade / kind-change semantics.
+//
+// Regression for the "TrustChange with previous == current is publishable"
+// review finding. Listeners coding the naive pattern "any TrustChange
+// fired ⇒ revoke grants" would over-revoke on benign upgrades and
+// no-ops. The fix layers three guards:
+//
+//   1. `TrustChange::new` returns `None` for no-ops at construction.
+//   2. `InvalidationBus::publish` drops no-ops as defense-in-depth (and
+//      `debug_assert!`s in dev so the offending caller is loud).
+//   3. `is_downgrade` / `is_upgrade` / `is_kind_change` helpers let
+//      sophisticated listeners gate behavior precisely.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t16_trust_change_new_filters_no_ops() {
+    let identity = bundled_identity("any", None);
+    let trust = EffectiveTrustClass::user_trusted();
+    assert!(
+        TrustChange::new(identity, trust, trust, BTreeSet::new(), Utc::now()).is_none(),
+        "TrustChange::new must return None when previous == current"
+    );
+}
+
+#[test]
+fn t16b_trust_change_classifies_downgrade_upgrade_and_kind_change() {
+    let identity = bundled_identity("any", None);
+    let now = Utc::now();
+    let sandbox = EffectiveTrustClass::sandbox();
+    let user_trusted = EffectiveTrustClass::user_trusted();
+    let first_party = effective_first_party_for_test();
+    let system = effective_system_for_test();
+
+    // Downgrade: FirstParty → UserTrusted.
+    let down = TrustChange::new(
+        identity.clone(),
+        first_party,
+        user_trusted,
+        BTreeSet::new(),
+        now,
+    )
+    .unwrap();
+    assert!(down.is_downgrade());
+    assert!(!down.is_upgrade());
+    assert!(!down.is_kind_change());
+
+    // Upgrade: Sandbox → UserTrusted.
+    let up = TrustChange::new(
+        identity.clone(),
+        sandbox,
+        user_trusted,
+        BTreeSet::new(),
+        now,
+    )
+    .unwrap();
+    assert!(!up.is_downgrade());
+    assert!(up.is_upgrade());
+    assert!(!up.is_kind_change());
+
+    // Kind change: FirstParty ↔ System (both privileged, level 2, but
+    // semantically different privilege kinds).
+    let kind = TrustChange::new(identity, first_party, system, BTreeSet::new(), now).unwrap();
+    assert!(!kind.is_downgrade());
+    assert!(!kind.is_upgrade());
+    assert!(
+        kind.is_kind_change(),
+        "FirstParty ↔ System is a kind change — different privilege classes \
+         at the same authority level"
+    );
+}
+
+#[test]
+fn t16c_invalidation_bus_publish_drops_no_op_struct_literal_in_release() {
+    // `TrustChange::new` is the recommended path, but a hand-built
+    // struct literal can still produce a no-op. Release builds must
+    // silently drop it from the bus rather than fanning out to
+    // listeners. (Debug builds trip a `debug_assert!` — that path is
+    // tested in `cfg(debug_assertions)` builds via cargo test default.)
+    //
+    // We can only assert the release-mode behavior portably here, so
+    // the test gates the assertion on `cfg(not(debug_assertions))` to
+    // avoid the debug-mode panic. The debug-mode panic itself is the
+    // intent — assert that *no listener fired* in release-mode.
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let bus = InvalidationBus::new();
+    let store = FakeGrantStore::new();
+    bus.register(store.clone());
+
+    let identity = bundled_identity("any", None);
+    let same = EffectiveTrustClass::user_trusted();
+    let no_op = TrustChange {
+        identity,
+        previous: same,
+        current: same,
+        previous_authority: BTreeSet::new(),
+        effective_at: Utc::now(),
+    };
+    bus.publish(no_op);
+
+    assert!(
+        store.invalidations().is_empty(),
+        "no-op TrustChange must not fan out to listeners in release builds"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T17 — `LocalDevOverride` stays inert even when enabled and pre-staged.
+//
+// PR1b ships `LocalDevOverride` as a forward-compat seam: the type and
+// `PolicySource` impl exist, but the implementation is intentionally
+// non-functional until a future PR wires up explicit operator opt-in +
+// audit logging. The `enabled_for_test` fixture lets the test suite
+// exercise that contract — enabling the source and staging overrides
+// must NOT produce trust matches.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t17_local_dev_override_remains_inert_even_when_enabled_and_staged() {
+    let staged = LocalDevOverride::enabled_for_test(vec![(
+        pkg("dev_pkg"),
+        admin_entry_for_test(
+            pkg("dev_pkg"),
+            PackageSource::LocalManifest {
+                path: "/extensions/dev_pkg/manifest.toml".to_string(),
+            },
+            effective_first_party_for_test(),
+            vec![EffectKind::ReadFilesystem],
+        ),
+    )]);
+    assert!(
+        staged.is_enabled(),
+        "fixture must produce an enabled instance"
+    );
+    assert_eq!(
+        staged.override_count(),
+        1,
+        "fixture must surface the staged entry through override_count"
+    );
+
+    // Even though `staged` is enabled and has an override that *would*
+    // elevate `dev_pkg` to FirstParty if the seam were live, evaluate
+    // must return Ok(None). The dev-override implementation is not in
+    // PR1b — the inert contract pins that promise.
+    let probe = TrustPolicyInput {
+        identity: PackageIdentity::new(
+            pkg("dev_pkg"),
+            PackageSource::LocalManifest {
+                path: "/extensions/dev_pkg/manifest.toml".to_string(),
+            },
+            None,
+            None,
+        ),
+        requested_trust: RequestedTrustClass::FirstPartyRequested,
+        requested_authority: BTreeSet::new(),
+    };
+    assert!(
+        staged.evaluate(&probe).unwrap().is_none(),
+        "LocalDevOverride must remain inert until the dev-override \
+         implementation lands — a future PR is what flips this assertion"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T18 — `EffectiveTrustClass` audit wire shape across all four variants.
+//
+// The crate's serialization output is part of the audit contract — a
+// rename of any underlying `TrustClass` variant would silently change
+// what audit envelopes record. The existing
+// `trust_decision_serializes_for_audit` smoke test only exercises
+// `Sandbox`; this test pins all four wire strings, including the
+// privileged variants reachable via `test-fixtures`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t18_effective_trust_class_serializes_to_canonical_wire_strings() {
+    use serde_json::json;
+    assert_eq!(
+        serde_json::to_value(EffectiveTrustClass::sandbox()).unwrap(),
+        json!("sandbox")
+    );
+    assert_eq!(
+        serde_json::to_value(EffectiveTrustClass::user_trusted()).unwrap(),
+        json!("user_trusted")
+    );
+    assert_eq!(
+        serde_json::to_value(effective_first_party_for_test()).unwrap(),
+        json!("first_party"),
+        "first_party wire string must remain stable for audit log compatibility"
+    );
+    assert_eq!(
+        serde_json::to_value(effective_system_for_test()).unwrap(),
+        json!("system"),
+        "system wire string must remain stable for audit log compatibility"
+    );
 }
 
 // ---------------------------------------------------------------------------

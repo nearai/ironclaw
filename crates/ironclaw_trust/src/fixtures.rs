@@ -8,7 +8,7 @@
 //! Even with the feature on, naming intentionally signals the boundary
 //! (`*_for_test`). PR review should reject any non-test caller.
 
-use ironclaw_host_api::{EffectKind, PackageId, ResourceCeiling};
+use ironclaw_host_api::{EffectKind, PackageId, PackageSource, ResourceCeiling};
 
 use crate::decision::EffectiveTrustClass;
 use crate::sources::{AdminEntry, BundledEntry, admin_entry_with_trust, bundled_entry_with_trust};
@@ -50,11 +50,41 @@ pub fn bundled_entry_with_resource_ceiling_for_test(
     )
 }
 
-/// Test fixture: an [`AdminEntry`] at the given effective trust ceiling.
+/// Test fixture: an [`AdminEntry`] bound to a specific [`PackageSource`].
+///
+/// Tests must spell the source explicitly so that the source-pin invariant
+/// in `AdminConfig::evaluate` is exercised end-to-end. The fixture exists
+/// to keep test bodies short, not to hide the source binding.
 pub fn admin_entry_for_test(
     package_id: PackageId,
+    source: PackageSource,
     effective_trust: EffectiveTrustClass,
     allowed_effects: Vec<EffectKind>,
 ) -> AdminEntry {
-    admin_entry_with_trust(package_id, effective_trust, allowed_effects, None)
+    admin_entry_with_trust(
+        package_id,
+        source,
+        None,
+        effective_trust,
+        allowed_effects,
+        None,
+    )
+}
+
+/// Test fixture: an [`AdminEntry`] with an explicit digest pin.
+pub fn admin_entry_with_digest_for_test(
+    package_id: PackageId,
+    source: PackageSource,
+    digest: String,
+    effective_trust: EffectiveTrustClass,
+    allowed_effects: Vec<EffectKind>,
+) -> AdminEntry {
+    admin_entry_with_trust(
+        package_id,
+        source,
+        Some(digest),
+        effective_trust,
+        allowed_effects,
+        None,
+    )
 }

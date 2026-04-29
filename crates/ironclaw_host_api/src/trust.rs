@@ -12,8 +12,33 @@
 //! deserialized from any source, including untrusted user manifests, because
 //! it cannot be confused with effective trust at the type level.
 //!
-//! See `ironclaw_trust` for the policy engine that bridges the two and
-//! `docs/reborn/contracts/host-api.md` for the broader trust contract.
+//! ## Cross-crate vocabulary
+//!
+//! - The manifest field `trust = "..."` parses into [`RequestedTrustClass`]
+//!   (snake_case mapping: `untrusted`, `third_party`, `first_party_requested`,
+//!   `system_requested`). It is metadata — never authority.
+//! - [`PackageIdentity`] is the trust-policy-side identity for any
+//!   manifest-bearing package: installed extensions (WASM / Script / MCP),
+//!   bundled extensions / loops / skills, operator-declared packages, and
+//!   eventual built-in tools (see `crates/ironclaw_trust/CONTRACT.md` §9 for
+//!   the migration path).
+//! - The `package_id: PackageId` field on [`PackageIdentity`] is the same
+//!   value as `ExtensionId` at other layers — `ExtensionId` when the
+//!   identity reaches the extension registry / `CapabilityDescriptor.provider`,
+//!   `PackageId` when it reaches the trust policy. The two names describe
+//!   the same value at different layers.
+//! - [`crate::CapabilityDescriptor::trust_ceiling`] mirrors the manifest's
+//!   declared trust as `TrustClass` — it is *declarative metadata*, not the
+//!   policy-validated effective ceiling. The privileged variants of
+//!   `TrustClass` reject deserialization, so this field can only carry
+//!   `Sandbox` / `UserTrusted` from manifest input. Effective trust comes
+//!   from `ironclaw_trust::TrustPolicy::evaluate` and is attached to
+//!   [`crate::ExecutionContext::trust`] at dispatch time.
+//!
+//! See `ironclaw_trust::TrustPolicy` for the engine that bridges request to
+//! effective trust, `crates/ironclaw_trust/CONTRACT.md` for the full
+//! evaluation matrix, and `docs/reborn/contracts/host-api.md` (in the
+//! staging-track docs) for the broader Reborn vocabulary.
 
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +50,22 @@ use serde::{Deserialize, Serialize};
 /// `SystemRequested` variants only express *intent*; they grant nothing on
 /// their own and must be matched against host policy in `ironclaw_trust`
 /// before any privileged effect can take place.
+///
+/// ## Manifest mapping
+///
+/// The manifest field `trust = "..."` (see `docs/reborn/contracts/extensions.md`
+/// §4 in the staging-track docs) parses into this type via snake_case serde:
+///
+/// | Manifest value | Variant |
+/// |---|---|
+/// | `"untrusted"` (or absent) | [`Self::Untrusted`] |
+/// | `"third_party"` | [`Self::ThirdParty`] |
+/// | `"first_party_requested"` | [`Self::FirstPartyRequested`] |
+/// | `"system_requested"` | [`Self::SystemRequested`] |
+///
+/// A manifest may freely declare any variant; whether the host honors a
+/// privileged request is decided by `ironclaw_trust::TrustPolicy::evaluate`,
+/// not by parsing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RequestedTrustClass {
@@ -69,6 +110,27 @@ pub enum PackageSource {
 /// came from; `digest` and `signer` are optional verification anchors. The
 /// trust policy engine matches on the combination — drift in any of these
 /// fields invalidates retained grants per the issue acceptance criteria.
+///
+/// ## Scope
+///
+/// `PackageIdentity` is the trust-policy identity for **any
+/// manifest-bearing package** that flows through the host trust pipeline:
+///
+/// | Scope | Typical [`PackageSource`] | Notes |
+/// |---|---|---|
+/// | Installed extensions (WASM / Script / MCP) | `LocalManifest` or `Registry` | Manifest declares `trust = "..."` |
+/// | Bundled extensions / loops / skills | `Bundled` | Compiled with the host; matched by `BundledRegistry` |
+/// | Operator declarations | `Admin` | `AdminConfig` out-of-band trust assertion |
+/// | Built-in tools (eventual) | `Bundled` | See `crates/ironclaw_trust/CONTRACT.md` §9 for migration |
+///
+/// `package_id: PackageId` is the same value as `ExtensionId` at the extension
+/// registry / `CapabilityDescriptor.provider` layer. The two names describe
+/// the same identifier observed by different consumers.
+///
+/// `package_id` collisions across [`PackageSource`] variants are **never**
+/// treated as the same package — the `ironclaw_trust` policy binds trust to
+/// the `(package_id, source)` pair, so a `LocalManifest` and a `Bundled`
+/// package with the same id are distinct trust subjects.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PackageIdentity {
     pub package_id: crate::PackageId,

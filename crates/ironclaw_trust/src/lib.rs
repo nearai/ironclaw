@@ -15,10 +15,18 @@
 //! 3. **Trust changes invalidate active grants.** A trust downgrade or
 //!    revocation publishes a [`TrustChange`] on the [`InvalidationBus`]
 //!    synchronously, before any subsequent dispatch can produce a side
-//!    effect under the stale ceiling.
+//!    effect under the stale ceiling. Runtime mutation goes through
+//!    [`HostTrustPolicy::mutate_with`], which hard-wires the
+//!    pre-evaluate / mutate / post-evaluate / publish dance so AC #6 is
+//!    a compile-time guarantee — the per-source `upsert` / `remove`
+//!    methods are `pub(crate)` and only reachable through
+//!    [`SourceMutators`] inside a `mutate_with` closure.
 //!
-//! See `crates/ironclaw_trust/CLAUDE.md` for the guardrails and
-//! `docs/reborn/contracts/host-api.md` for the broader trust contract.
+//! See `crates/ironclaw_trust/CONTRACT.md` for the full cross-crate
+//! contract (evaluation matrix, `PackageIdentity` scope, mutation
+//! orchestration, built-in tool migration intent), `CLAUDE.md` for the
+//! per-file guardrails, and `docs/reborn/contracts/host-api.md` (in the
+//! staging-track docs) for the broader Reborn vocabulary.
 
 pub mod clock;
 pub mod decision;
@@ -38,7 +46,7 @@ pub use invalidation::{
     InvalidationBus, TrustChange, TrustChangeListener, authority_changed, grant_retention_eligible,
     identity_changed,
 };
-pub use policy::{HostTrustPolicy, SourceMatch, TrustPolicy, TrustPolicyInput};
+pub use policy::{HostTrustPolicy, SourceMatch, SourceMutators, TrustPolicy, TrustPolicyInput};
 pub use sources::{
     AdminConfig, AdminEntry, BundledEntry, BundledRegistry, LocalDevOverride, PolicySource,
     SignedRegistry, SignerEntry,
@@ -76,7 +84,7 @@ mod tests {
             .evaluate(&TrustPolicyInput {
                 identity,
                 requested_trust: RequestedTrustClass::SystemRequested,
-                requested_authority: vec![],
+                requested_authority: std::collections::BTreeSet::new(),
             })
             .unwrap();
         assert!(!decision.effective_trust.is_privileged());

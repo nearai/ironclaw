@@ -9,26 +9,30 @@
 //!
 //! ## Mutation and invalidation
 //!
-//! `BundledRegistry` and `AdminConfig` expose synchronous `upsert` /
-//! `remove` methods that mutate in place. Per AC #6 of issue #3012, any
-//! mutation that *lowers* a previously-effective trust class must publish a
+//! `BundledRegistry`, `AdminConfig`, and `SignedRegistry` mutate in place
+//! via `upsert` / `remove`. Per AC #6 of issue #3012, any mutation that
+//! *lowers* a previously-effective trust class must publish a
 //! [`crate::TrustChange`] on an [`crate::InvalidationBus`] **before** any
-//! subsequent dispatch can run under the stale ceiling. The mutators here
-//! intentionally do not own a bus reference — the caller is the only place
-//! that knows the previous decision and the current authority list, so the
-//! caller is the only place that can build a faithful `TrustChange`.
+//! subsequent dispatch can run under the stale ceiling.
 //!
-//! Standard pattern:
+//! Computing "previous" effective trust requires evaluating the *whole*
+//! policy chain — not just the source being mutated — so the orchestration
+//! cannot live on a single source. Instead it lives on
+//! [`crate::HostTrustPolicy::mutate_with`], which is the **only public
+//! runtime-mutation path**: the per-source `upsert` / `remove` methods are
+//! `pub(crate)` and reachable only through
+//! [`crate::SourceMutators`] inside a `mutate_with` closure. That call
+//! pre-evaluates, runs the mutation, post-evaluates, and publishes a
+//! `TrustChange` synchronously if the effective trust class changed —
+//! making AC #6 a compile-time guarantee rather than a doc-comment
+//! convention.
 //!
-//! 1. Call `evaluate` (or otherwise capture the previous `TrustDecision`)
-//!    before mutating.
-//! 2. Mutate (`upsert` / `remove`).
-//! 3. Build a `TrustChange` and call `bus.publish(change)`.
-//!
-//! Skipping step 3 silently violates AC #6. PR3's grant-store wiring will
-//! own this orchestration; for PR1b the contract is documented and exercised
-//! by tests T7 / T8.
+//! Construction-time population (the `with_entries` / `with_signers`
+//! constructors below) remains `pub` because no policy state exists for an
+//! invalidation to be meaningful against — those constructors are for
+//! seeding the chain *before* it is wired up to a bus.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -45,9 +49,16 @@ use crate::policy::{SourceMatch, TrustPolicyInput};
 /// `Err` is reserved for real evaluation failures (corrupt config, signature
 /// verification error); a "this source did not match" outcome must always be
 /// `Ok(None)`.
-pub trait PolicySource: Send + Sync {
+///
+/// The `as_any` hook lets [`crate::SourceMutators`] downcast a
+/// `&dyn PolicySource` back to its concrete type (`BundledRegistry`,
+/// `AdminConfig`, etc.) so a `mutate_with` closure can call the
+/// crate-private mutators on the right source. Implementations should
+/// return `self`.
+pub trait PolicySource: Send + Sync + Any {
     fn name(&self) -> &'static str;
     fn evaluate(&self, input: &TrustPolicyInput) -> Result<Option<SourceMatch>, TrustError>;
+    fn as_any(&self) -> &dyn Any;
 }
 
 /// One entry in the bundled trust registry.
@@ -99,11 +110,13 @@ impl BundledRegistry {
         }
     }
 
-    /// Insert or replace an entry. **Caller must publish a `TrustChange` on
-    /// the relevant `InvalidationBus` if this mutation lowers an already-
-    /// active decision** — see the module docs for the orchestration
-    /// pattern.
-    pub fn upsert(&self, entry: BundledEntry) {
+    /// Insert or replace an entry.
+    ///
+    /// `pub(crate)` because runtime mutation is only correct when wrapped
+    /// in a [`crate::HostTrustPolicy::mutate_with`] call that publishes
+    /// the consequent `TrustChange` on an `InvalidationBus`. Use
+    /// [`Self::with_entries`] for construction-time population.
+    pub(crate) fn upsert(&self, entry: BundledEntry) {
         let mut entries = self
             .entries
             .write()
@@ -111,12 +124,12 @@ impl BundledRegistry {
         entries.insert(entry.package_id.clone(), entry);
     }
 
-    /// Remove an entry by id, returning the previous value if any. **Caller
-    /// must publish a `TrustChange` on the relevant `InvalidationBus`
-    /// before any further dispatch** — removing an entry typically lowers
-    /// effective trust, which is exactly the case AC #6 requires
-    /// fail-closed handling for.
-    pub fn remove(&self, package_id: &PackageId) -> Option<BundledEntry> {
+    /// Remove an entry by id, returning the previous value if any.
+    ///
+    /// `pub(crate)` for the same reason as [`Self::upsert`]: runtime
+    /// removal must go through `HostTrustPolicy::mutate_with` so the
+    /// invalidation contract (AC #6) is honored automatically.
+    pub(crate) fn remove(&self, package_id: &PackageId) -> Option<BundledEntry> {
         let mut entries = self
             .entries
             .write()
@@ -134,6 +147,10 @@ impl Default for BundledRegistry {
 impl PolicySource for BundledRegistry {
     fn name(&self) -> &'static str {
         "bundled"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 
     fn evaluate(&self, input: &TrustPolicyInput) -> Result<Option<SourceMatch>, TrustError> {
@@ -166,14 +183,122 @@ impl PolicySource for BundledRegistry {
     }
 }
 
-/// Operator/admin trust configuration. Same shape as bundled but distinct
-/// provenance and intended for sources outside any user-controllable file.
+/// Operator/admin trust configuration.
+///
+/// Each entry binds an elevation to a *specific* `(package_id, source)` pair
+/// — and optionally a digest — so a same-`package_id` package from a
+/// less-trusted origin cannot inherit the elevation. The structural fix
+/// closes the shadowing footgun documented in the PR3043 review: without
+/// the source pin, an `AdminEntry` for a `Bundled` package would have also
+/// matched a `LocalManifest` package with the same id, letting an
+/// unprivileged user shadow an admin-blessed identifier into `FirstParty`.
+///
+/// Construct entries through the `AdminEntry::for_*` constructors. The
+/// `for_local_manifest` constructor is named separately so that *every*
+/// site that elevates a user-writable package is greppable for review.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdminEntry {
     pub package_id: PackageId,
+    /// Origin this entry binds to. The entry only matches packages whose
+    /// `PackageIdentity::source` equals this value. Use the matching
+    /// `for_bundled` / `for_registry` / `for_admin` / `for_local_manifest`
+    /// constructor rather than building the variant by hand.
+    pub source: PackageSource,
+    /// Optional digest pin. When set, the entry only matches packages whose
+    /// `PackageIdentity::digest` is `Some` and equals this value — drift
+    /// falls through to the default downgrade per AC #7.
+    pub digest: Option<String>,
     pub effective_trust: EffectiveTrustClass,
     pub allowed_effects: Vec<EffectKind>,
     pub max_resource_ceiling: Option<ResourceCeiling>,
+}
+
+impl AdminEntry {
+    /// Bind an elevation to a `Bundled` package.
+    pub fn for_bundled(
+        package_id: PackageId,
+        digest: Option<String>,
+        effective_trust: EffectiveTrustClass,
+        allowed_effects: Vec<EffectKind>,
+        max_resource_ceiling: Option<ResourceCeiling>,
+    ) -> Self {
+        Self {
+            package_id,
+            source: PackageSource::Bundled,
+            digest,
+            effective_trust,
+            allowed_effects,
+            max_resource_ceiling,
+        }
+    }
+
+    /// Bind an elevation to a package fetched from a specific registry URL.
+    /// The URL is part of the source-equality match — operators must spell
+    /// out which registry they're trusting.
+    pub fn for_registry(
+        package_id: PackageId,
+        registry_url: String,
+        digest: Option<String>,
+        effective_trust: EffectiveTrustClass,
+        allowed_effects: Vec<EffectKind>,
+        max_resource_ceiling: Option<ResourceCeiling>,
+    ) -> Self {
+        Self {
+            package_id,
+            source: PackageSource::Registry { url: registry_url },
+            digest,
+            effective_trust,
+            allowed_effects,
+            max_resource_ceiling,
+        }
+    }
+
+    /// Bind an elevation to a `PackageSource::Admin` declaration. No digest
+    /// — the operator is the source.
+    pub fn for_admin(
+        package_id: PackageId,
+        effective_trust: EffectiveTrustClass,
+        allowed_effects: Vec<EffectKind>,
+        max_resource_ceiling: Option<ResourceCeiling>,
+    ) -> Self {
+        Self {
+            package_id,
+            source: PackageSource::Admin,
+            digest: None,
+            effective_trust,
+            allowed_effects,
+            max_resource_ceiling,
+        }
+    }
+
+    /// Bind an elevation to a `LocalManifest` package at a specific path.
+    ///
+    /// **This is the highest-risk AdminEntry constructor.** A
+    /// `LocalManifest` is a user-writable file; elevating one to `FirstParty`
+    /// or `System` trusts whatever bytes that file contains at evaluation
+    /// time. The constructor exists separately so every elevation of a
+    /// user-writable package is `rg for_local_manifest` away. Pair with a
+    /// digest pin when the elevation is meant to bind a specific known
+    /// artifact rather than "whatever this manifest currently says".
+    pub fn for_local_manifest(
+        package_id: PackageId,
+        manifest_path: String,
+        digest: Option<String>,
+        effective_trust: EffectiveTrustClass,
+        allowed_effects: Vec<EffectKind>,
+        max_resource_ceiling: Option<ResourceCeiling>,
+    ) -> Self {
+        Self {
+            package_id,
+            source: PackageSource::LocalManifest {
+                path: manifest_path,
+            },
+            digest,
+            effective_trust,
+            allowed_effects,
+            max_resource_ceiling,
+        }
+    }
 }
 
 pub struct AdminConfig {
@@ -197,10 +322,9 @@ impl AdminConfig {
         }
     }
 
-    /// Insert or replace an entry. **Caller must publish a `TrustChange` on
-    /// the relevant `InvalidationBus` if this mutation lowers an already-
-    /// active decision** — see the module docs.
-    pub fn upsert(&self, entry: AdminEntry) {
+    /// Insert or replace an entry. `pub(crate)` — runtime mutation must go
+    /// through [`crate::HostTrustPolicy::mutate_with`].
+    pub(crate) fn upsert(&self, entry: AdminEntry) {
         let mut entries = self
             .entries
             .write()
@@ -208,11 +332,9 @@ impl AdminConfig {
         entries.insert(entry.package_id.clone(), entry);
     }
 
-    /// Remove an entry by id, returning the previous value if any. **Caller
-    /// must publish a `TrustChange` on the relevant `InvalidationBus`
-    /// before any further dispatch** — removing an admin grant typically
-    /// downgrades trust, AC #6.
-    pub fn remove(&self, package_id: &PackageId) -> Option<AdminEntry> {
+    /// Remove an entry by id, returning the previous value if any.
+    /// `pub(crate)` — runtime mutation must go through `mutate_with`.
+    pub(crate) fn remove(&self, package_id: &PackageId) -> Option<AdminEntry> {
         let mut entries = self
             .entries
             .write()
@@ -232,9 +354,11 @@ impl PolicySource for AdminConfig {
         "admin_config"
     }
 
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn evaluate(&self, input: &TrustPolicyInput) -> Result<Option<SourceMatch>, TrustError> {
-        // AdminConfig matches any source — operators may elevate a package
-        // installed from any origin.
         let entries = self
             .entries
             .read()
@@ -242,6 +366,23 @@ impl PolicySource for AdminConfig {
         let Some(entry) = entries.get(&input.identity.package_id) else {
             return Ok(None);
         };
+        // Source pin: an admin entry binds elevation to a specific
+        // `PackageSource`. Mismatch falls through (returns `None`) so a
+        // less-trusted-origin package with the same `package_id` cannot
+        // inherit the elevation. This is the structural fix for the
+        // shadowing footgun documented in the PR3043 review.
+        if entry.source != input.identity.source {
+            return Ok(None);
+        }
+        // Digest pin: same drift semantics as `BundledRegistry` — when set,
+        // the package's digest must match exactly. Drift falls through to
+        // the default downgrade, which is the AC #7 grant-reissue trigger.
+        if let Some(pinned) = entry.digest.as_deref() {
+            match input.identity.digest.as_deref() {
+                Some(actual) if actual == pinned => {}
+                _ => return Ok(None),
+            }
+        }
         Ok(Some(SourceMatch {
             effective_trust: entry.effective_trust,
             provenance: TrustProvenance::AdminConfig,
@@ -277,6 +418,24 @@ pub struct SignerEntry {
 /// exists yet. PR1b ships the data shape so callers can stage signers
 /// against a stable interface; a follow-up will fill in the actual
 /// signature check.
+///
+/// **Threat note for the future implementation.** The current `SignerEntry`
+/// shape keys an `effective_trust` ceiling on `signer` alone — i.e., a
+/// verified signature from signer X would, naively, vouch for *any*
+/// package signed by X with whatever ceiling the entry declares. A
+/// compromised signer key, or a signer that signs packages outside its
+/// intended scope, would then escalate every such package. When this
+/// source is wired up:
+///
+/// 1. The verification path must bind `(signer, package_id, digest)` —
+///    a verified signature is evidence about *that artifact*, not about
+///    the signer's general authority.
+/// 2. `effective_trust` should be capped by what the host policy decides
+///    is acceptable for the *package*, not what the entry asserts about
+///    the *signer*.
+/// 3. Reuse the `AdminEntry::for_*` constructor pattern: separate
+///    constructors per `PackageSource` so the call sites that elevate
+///    user-writable origins are greppable.
 pub struct SignedRegistry {
     trusted_signers: RwLock<HashMap<String, SignerEntry>>,
 }
@@ -298,9 +457,9 @@ impl SignedRegistry {
         }
     }
 
-    /// Insert or replace a trusted-signer entry. **Same publish-on-mutation
-    /// contract as `BundledRegistry::upsert`.**
-    pub fn upsert(&self, entry: SignerEntry) {
+    /// Insert or replace a trusted-signer entry. `pub(crate)` — runtime
+    /// mutation must go through [`crate::HostTrustPolicy::mutate_with`].
+    pub(crate) fn upsert(&self, entry: SignerEntry) {
         let mut entries = self
             .trusted_signers
             .write()
@@ -308,10 +467,9 @@ impl SignedRegistry {
         entries.insert(entry.signer.clone(), entry);
     }
 
-    /// Remove a trusted signer. **Caller must publish a `TrustChange`** —
-    /// removing a signer revokes all packages that were trusted via that
-    /// signer.
-    pub fn remove(&self, signer: &str) -> Option<SignerEntry> {
+    /// Remove a trusted signer. `pub(crate)` — runtime mutation must go
+    /// through `mutate_with`.
+    pub(crate) fn remove(&self, signer: &str) -> Option<SignerEntry> {
         let mut entries = self
             .trusted_signers
             .write()
@@ -329,6 +487,10 @@ impl Default for SignedRegistry {
 impl PolicySource for SignedRegistry {
     fn name(&self) -> &'static str {
         "signed_registry"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 
     fn evaluate(&self, _input: &TrustPolicyInput) -> Result<Option<SourceMatch>, TrustError> {
@@ -349,15 +511,9 @@ impl PolicySource for SignedRegistry {
 /// user-writable location) and audit logging on every match. Without that
 /// configuration the source is inert.
 pub struct LocalDevOverride {
-    // Future shape — the structural seam future PRs will fill in.
-    // `#[allow(dead_code)]` is intentional in PR1b: callers can already
-    // observe `LocalDevOverride` as a `PolicySource` and stage it in their
-    // policy chain, while the interior intentionally has no read path. The
-    // alternative (omitting the fields entirely) would force a breaking
-    // shape change later.
     /// Packages the operator has explicitly opted in for elevated trust in
-    /// development. Empty means the source is fully inert.
-    #[allow(dead_code)]
+    /// development. Empty means the source has nothing to evaluate even
+    /// once the implementation lands.
     overrides: RwLock<HashMap<PackageId, AdminEntry>>,
     /// When `false`, even configured overrides are ignored. PR1b
     /// initialises this to `false`; future config wiring must set it to
@@ -376,6 +532,41 @@ impl LocalDevOverride {
             enabled: false,
         }
     }
+
+    /// True when the source has been opted in. Always `false` in PR1b
+    /// because no production opt-in path exists yet — the accessor is
+    /// here so tests can pin the inert contract and so future
+    /// implementations have a stable read surface.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Number of staged override entries.
+    pub fn override_count(&self) -> usize {
+        self.overrides
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    /// Test-only: construct a `LocalDevOverride` that has been "enabled"
+    /// and pre-staged with override entries.
+    ///
+    /// Even with this, [`PolicySource::evaluate`] returns `Ok(None)` —
+    /// PR1b's contract is that the source is inert until the future
+    /// dev-override implementation lands. The fixture exists so tests
+    /// can pin that inert contract: enabling + staging overrides must
+    /// not produce trust under any input. Gated on the `test-fixtures`
+    /// feature so production builds cannot reach this path even if a
+    /// future caller forgets the discipline.
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn enabled_for_test(entries: Vec<(PackageId, AdminEntry)>) -> Self {
+        let map: HashMap<_, _> = entries.into_iter().collect();
+        Self {
+            overrides: RwLock::new(map),
+            enabled: true,
+        }
+    }
 }
 
 impl Default for LocalDevOverride {
@@ -387,6 +578,10 @@ impl Default for LocalDevOverride {
 impl PolicySource for LocalDevOverride {
     fn name(&self) -> &'static str {
         "local_dev_override"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 
     fn evaluate(&self, _input: &TrustPolicyInput) -> Result<Option<SourceMatch>, TrustError> {
@@ -423,12 +618,16 @@ pub(crate) fn bundled_entry_with_trust(
 
 pub(crate) fn admin_entry_with_trust(
     package_id: PackageId,
+    source: PackageSource,
+    digest: Option<String>,
     effective_trust: EffectiveTrustClass,
     allowed_effects: Vec<EffectKind>,
     max_resource_ceiling: Option<ResourceCeiling>,
 ) -> AdminEntry {
     AdminEntry {
         package_id,
+        source,
+        digest,
         effective_trust,
         allowed_effects,
         max_resource_ceiling,

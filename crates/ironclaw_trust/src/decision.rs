@@ -68,6 +68,32 @@ impl EffectiveTrustClass {
     pub fn is_privileged(&self) -> bool {
         matches!(self.inner, TrustClass::FirstParty | TrustClass::System)
     }
+
+    /// Authority level for ordering trust classes.
+    ///
+    /// Higher value ⇒ more authority. Used by [`crate::TrustChange`] to
+    /// distinguish downgrades, upgrades, and sideways "kind changes":
+    ///
+    /// | Class         | Level |
+    /// |---------------|-------|
+    /// | `Sandbox`     |   0   |
+    /// | `UserTrusted` |   1   |
+    /// | `FirstParty`  |   2   |
+    /// | `System`      |   2   |
+    ///
+    /// `FirstParty` and `System` share level `2` because both are
+    /// privileged but represent *different kinds* of privilege
+    /// (host-blessed extension vs host-owned service). A change between
+    /// them is neither a downgrade nor an upgrade — it's a kind change,
+    /// and listeners that scope grants to a specific privilege kind must
+    /// still revoke. See [`crate::TrustChange::is_kind_change`].
+    pub fn authority_level(&self) -> u8 {
+        match self.inner {
+            TrustClass::Sandbox => 0,
+            TrustClass::UserTrusted => 1,
+            TrustClass::FirstParty | TrustClass::System => 2,
+        }
+    }
 }
 
 /// Where the effective trust came from. Recorded on every decision for audit.
