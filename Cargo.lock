@@ -3911,6 +3911,7 @@ dependencies = [
  "ironclaw_common",
  "ironclaw_engine",
  "ironclaw_gateway",
+ "ironclaw_reborn_composition",
  "ironclaw_safety",
  "ironclaw_skills",
  "ironclaw_tui",
@@ -4114,6 +4115,28 @@ dependencies = [
  "static_assertions",
  "thiserror 2.0.18",
  "uuid",
+]
+
+[[package]]
+name = "ironclaw_reborn_composition"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_approvals",
+ "ironclaw_authorization",
+ "ironclaw_events",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_resources",
+ "ironclaw_run_state",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

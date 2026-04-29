@@ -31,6 +31,7 @@ pub(crate) mod llm;
 mod missions;
 pub mod oauth;
 pub mod profile;
+mod reborn;
 pub mod relay;
 mod routines;
 mod safety;
@@ -63,6 +64,7 @@ pub use self::hygiene::HygieneConfig;
 pub use self::llm::default_session_path;
 pub use self::missions::MissionsConfig;
 pub use self::oauth::OAuthConfig;
+pub use self::reborn::{RebornConfig, RebornProfile};
 pub use self::relay::RelayConfig;
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;
@@ -129,6 +131,10 @@ pub struct Config {
     /// Channel-relay integration (Slack via external relay service).
     /// Present only when both `CHANNEL_RELAY_URL` and `CHANNEL_RELAY_API_KEY` are set.
     pub relay: Option<RelayConfig>,
+    /// Reborn composition root toggle. Default-off legacy startup path until
+    /// `REBORN_ENABLED=true` is set explicitly. See `src/config/reborn.rs`
+    /// and issue #3026.
+    pub reborn: RebornConfig,
 }
 
 /// Generate a fresh random AES-256-GCM master key for `Config::for_testing`.
@@ -258,6 +264,7 @@ impl Config {
             observability: crate::observability::ObservabilityConfig::default(),
             oauth: OAuthConfig::default(),
             relay: None,
+            reborn: RebornConfig::default(),
         }
     }
 
@@ -391,6 +398,42 @@ impl Config {
     ) -> Result<(), ConfigError> {
         self.llm =
             Self::resolve_llm_with_secrets(store, user_id, toml_path, secrets, is_operator).await?;
+        Ok(())
+    }
+
+    /// Re-resolve the Reborn composition config from the typed settings
+    /// store after secrets have been initialised.
+    ///
+    /// Issue #3026 acceptance criterion #8 requires that
+    /// "post-secret provider/model/network/credential re-resolution happens
+    /// before Reborn services that depend on them are built." The Reborn
+    /// composition root currently doesn't depend on secret-bearing fields
+    /// (`enabled` and `profile` are bools/enums), so this hook is mostly a
+    /// no-op today. It is wired through anyway because:
+    ///
+    /// 1. The contract demands a post-secret re-resolve point exist before
+    ///    [`Config::reborn`] is consumed by `AppBuilder`. Adding it now
+    ///    means future Reborn settings (e.g. `reborn.events.backend`
+    ///    referencing a `SecretHandle`) inherit the call site for free.
+    /// 2. A DB row written between `Config::build` and `init_secrets` —
+    ///    such as a CLI subcommand flipping the profile — should be
+    ///    visible at composition time.
+    pub async fn re_resolve_reborn(
+        &mut self,
+        store: Option<&(dyn crate::db::SettingsStore + Sync)>,
+        user_id: &str,
+        toml_path: Option<&std::path::Path>,
+    ) -> Result<(), ConfigError> {
+        let is_operator = user_id == self.owner_id;
+        let settings = if let Some(store) = store {
+            Self::load_db_backed_settings(store, user_id, toml_path, is_operator, false).await?
+        } else {
+            let mut s = Settings::default();
+            profile::apply_profile(&mut s)?;
+            Self::apply_toml_overlay(&mut s, toml_path)?;
+            s
+        };
+        self.reborn = RebornConfig::resolve_with_settings(&settings)?;
         Ok(())
     }
 
@@ -611,6 +654,7 @@ impl Config {
             },
             oauth: OAuthConfig::resolve()?,
             relay: RelayConfig::from_env(),
+            reborn: RebornConfig::resolve_with_settings(settings)?,
         })
     }
 }

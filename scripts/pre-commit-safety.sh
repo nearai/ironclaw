@@ -427,12 +427,65 @@ if [ -n "$PROJECTION_HITS" ]; then
     echo "$PROJECTION_HITS" | sed 's/^/    /'
 fi
 
+# 10. Reborn dual-source-of-truth guard.
+#     Issue #3026 acceptance criterion #13: once Reborn production mode is
+#     active, channel/loop/tool paths must route through Reborn services
+#     rather than legacy direct managers. A file that imports both the
+#     Reborn composition output (`reborn_services` / `RebornProductionServices`)
+#     and reaches into legacy state-bag fields (`state.{store,workspace,
+#     extension_manager,skill_registry,session_manager}.*`) on the same
+#     edit is the canonical shape of the dual-source-of-truth bug.
+#
+#     The check looks at any added line in the staged diff that mentions
+#     either `reborn_services` or `RebornProductionServices`, then checks
+#     whether the same file also has an added legacy direct-manager
+#     access. Suppress with `// reborn-bridge-exempt: <reason>` when the
+#     site is a documented bridge (e.g. legacy compatibility mode that
+#     #3029 owns).
+#
+#     The match is filename-scoped: a Reborn-mention in one file plus a
+#     legacy access in a different file is *not* a violation, since they
+#     could be different layers. The bug only shows up when the same
+#     code path reaches into both sources of truth.
+REBORN_DIFF=$(git diff --cached -U0 -- '*.rs' 2>/dev/null || true)
+if [ -z "$REBORN_DIFF" ]; then
+    REBORN_DIFF=$(git diff "$(resolve_base_ref)" -U0 -- '*.rs' 2>/dev/null || true)
+fi
+if [ -n "$REBORN_DIFF" ]; then
+    # Extract per-file added-line sets. The diff is in unified format with
+    # `+++ b/<path>` separating files. We walk the diff once, group added
+    # lines by file, and check each file independently for the dual-touch
+    # pattern. `awk` keeps the script POSIX-portable.
+    REBORN_HITS=$(printf '%s\n' "$REBORN_DIFF" | awk '
+        /^\+\+\+ b\// { file = substr($0, 7); next }
+        /^\+/ {
+            line = substr($0, 2)
+            if (line ~ /reborn_services|RebornProductionServices/) reborn[file] = reborn[file] "\n" line
+            if (line ~ /state\.(store|workspace|workspace_pool|extension_manager|skill_registry|session_manager)\./ \
+                && line !~ /\/\/ dispatch-exempt:|\/\/ reborn-bridge-exempt:|\/\/ safety:/) \
+                legacy[file] = legacy[file] "\n" line
+        }
+        END {
+            for (f in reborn) {
+                if (legacy[f] != "") {
+                    print f ": Reborn composition surface and legacy state-bag accessed in same edit"
+                }
+            }
+        }
+    ' | head -5 || true)
+    if [ -n "$REBORN_HITS" ]; then
+        warn "REBORN_BRIDGE" "Same file edits both \`reborn_services\`/\`RebornProductionServices\` and legacy \`state.{store,workspace,...}\`. Once Reborn is the path, routes flow through one source of truth. Annotate documented bridge sites with '// reborn-bridge-exempt: <reason>'. See issue #3026 AC #13 and .claude/rules/tools.md."
+        printf '%s\n' "$REBORN_HITS" | sed 's/^/    /'
+    fi
+fi
+
 if [ "$WARNINGS" -gt 0 ]; then
     echo ""
     echo "Found $WARNINGS potential issue(s). Fix them or add '// safety: <reason>' to suppress."
     echo "(For DISPATCH warnings, use '// dispatch-exempt: <reason>' instead.)"
     echo "(For CREDNAME warnings, use '// web-identity-exempt: <reason>' instead.)"
     echo "(For PROJECTION warnings, use '// projection-exempt: <category>, <detail>' instead.)"
+    echo "(For REBORN_BRIDGE warnings, use '// reborn-bridge-exempt: <reason>' instead.)"
     echo ""
     exit 1
 fi

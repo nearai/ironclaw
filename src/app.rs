@@ -24,6 +24,9 @@ use crate::tools::mcp::{McpProcessManager, McpSessionManager};
 use crate::tools::wasm::SharedCredentialRegistry;
 use crate::tools::wasm::WasmToolRuntime;
 use crate::workspace::{EmbeddingCacheConfig, EmbeddingProvider, Workspace};
+use ironclaw_reborn_composition::{
+    RebornBuildInput, RebornProductionServices, RebornReadiness, build_reborn_production_services,
+};
 use ironclaw_safety::SafetyLayer;
 use ironclaw_skills::SkillRegistry;
 use ironclaw_skills::catalog::SkillCatalog;
@@ -78,6 +81,29 @@ pub struct AppComponents {
     /// Populated by the pairing flow (Task 8). Pre-allocated here so all
     /// subsystems can hold an `Arc` to the same cache instance.
     pub ownership_cache: Arc<crate::ownership::OwnershipCache>,
+    /// Reborn composition root output. Always present — the `Disabled`
+    /// profile produces an empty graph rather than `None`, so the readiness
+    /// surface always has a typed handle to inspect. See
+    /// `crates/ironclaw_reborn_composition/` and issue #3026.
+    pub reborn_services: Arc<RebornProductionServices>,
+}
+
+impl AppComponents {
+    /// Operator-visible Reborn readiness summary.
+    ///
+    /// Issue #3026 acceptance criterion #14: health/readiness diagnostics
+    /// must expose mode/profile/backend readiness without leaking
+    /// credentials or raw host paths. The returned [`RebornReadiness`]
+    /// is redaction-safe by construction — every field is a typed value
+    /// that cannot carry secret material.
+    ///
+    /// HTTP `/health` and CLI status surfaces should render this value
+    /// directly. Operators who need concrete backend identity should
+    /// consult logs or a future operator-only endpoint that gates on
+    /// authentication.
+    pub fn reborn_readiness(&self) -> RebornReadiness {
+        self.reborn_services.readiness()
+    }
 }
 
 /// Options that control optional init phases.
@@ -1097,6 +1123,32 @@ impl AppBuilder {
         self.init_database().await?;
         self.init_secrets().await?;
 
+        // Post-secret Reborn re-resolution. Issue #3026 acceptance #8:
+        // settings that reference secret-backed fields must be re-resolved
+        // after secrets are available. Today the Reborn config carries no
+        // secret-bearing fields, so this is functionally a no-op — but it
+        // keeps the call site present for the moment a secret-backed
+        // Reborn setting (e.g. an event-backend connection-string handle)
+        // is added. Failing this resolve aborts startup for the same
+        // reason `init_secrets` failures abort: it indicates a corrupt or
+        // inconsistent settings layer that the legacy path would also
+        // refuse to run on. We swallow the warning when no DB store is
+        // available (CLI subcommands, --no-db mode) — the env-only
+        // baseline already populated `self.config.reborn` in `Config::build`.
+        if let Some(db) = self.db.as_ref() {
+            let toml_path = self.toml_path.clone();
+            let user_id = self.config.owner_id.clone();
+            // Use the workspace-backed settings store would be more
+            // accurate, but it doesn't exist yet at this point — it is
+            // built later in `build_all`. The raw DB is sufficient for
+            // the bootstrap reborn knobs; future secret-backed Reborn
+            // settings will move this hook below the workspace adapter.
+            let store = Arc::clone(db) as Arc<dyn crate::db::SettingsStore + Send + Sync>;
+            self.config
+                .re_resolve_reborn(Some(store.as_ref()), &user_id, toml_path.as_deref())
+                .await?;
+        }
+
         // Post-init validation: backends with dedicated config (nearai, gemini_oauth,
         // bedrock, openai_codex) handle their own credential resolution. For registry-based
         // backends, fail early if no provider config was resolved.
@@ -1303,6 +1355,17 @@ impl AppBuilder {
         // that every tool name is known.  Existing entries are never overwritten.
         seed_tool_permissions(&tools, self.db.as_ref(), &self.config.owner_id).await;
 
+        // Reborn composition root.
+        //
+        // Runs after all legacy initialization phases (database, secrets,
+        // LLM, tools, extensions) so module-owned Reborn factories can
+        // share already-initialised handles. Under the default
+        // `RebornProfile::Disabled` this is a no-op that returns an empty
+        // services struct — the legacy startup path remains authoritative
+        // until the explicit cutover decision flips it. See issue #3026
+        // and `crates/ironclaw_reborn_composition/`.
+        let reborn_services = build_reborn_services(&self.config).await?;
+
         Ok(AppComponents {
             config: self.config,
             db: self.db,
@@ -1334,8 +1397,52 @@ impl AppBuilder {
             dev_loaded_tool_names,
             builder,
             ownership_cache: Arc::new(crate::ownership::OwnershipCache::new()),
+            reborn_services,
         })
     }
+}
+
+/// Build the Reborn composition graph for the current config.
+///
+/// Lives in this file rather than directly inside `build_all` so the
+/// branching is independently testable and so a future caller (a CLI
+/// `doctor` subcommand, a readiness probe) can rebuild the graph without
+/// re-running every other init phase.
+///
+/// Behavior:
+///
+/// - `RebornProfile::Disabled` → returns an empty services struct
+///   immediately. Module-owned factories never run.
+/// - any other profile → calls `build_reborn_production_services`. A failure
+///   under `Production` or `MigrationDryRun` propagates as a startup error
+///   so the process exits before exposing channels/routes/tools — the
+///   fail-closed contract from issue #3026.
+async fn build_reborn_services(
+    config: &Config,
+) -> Result<Arc<RebornProductionServices>, anyhow::Error> {
+    if !config.reborn.is_active() {
+        return Ok(Arc::new(RebornProductionServices::disabled()));
+    }
+
+    tracing::info!(
+        profile = %config.reborn.profile,
+        owner_id = %config.owner_id,
+        "Reborn composition active; building service graph"
+    );
+
+    let services = build_reborn_production_services(RebornBuildInput {
+        profile: config.reborn.profile,
+        owner_id: config.owner_id.clone(),
+    })
+    .await
+    .map_err(|err| {
+        // Map at the boundary so the operator sees the sanitized
+        // composition diagnostic, not a raw lower-layer error. The
+        // `RebornBuildError::Display` impl is already redaction-safe.
+        anyhow::anyhow!("reborn composition failed: {err}")
+    })?;
+
+    Ok(Arc::new(services))
 }
 
 /// FK constraints applied after bootstrap_ownership rewrites 'default' rows.
@@ -1578,6 +1685,81 @@ mod tests {
     use crate::hooks::{
         Hook, HookContext, HookError, HookEvent, HookOutcome, HookPoint, HookRegistry,
     };
+
+    // Reborn composition branch tests (issue #3026, Phase 1 acceptance #1).
+    //
+    // These drive `build_reborn_services` directly so the AppBuilder branch
+    // is exercised at the call site, not just inside the composition crate.
+    // Per `.claude/rules/testing.md` "Test Through the Caller", the
+    // composition crate's own unit tests are not enough — `Config.reborn`
+    // is a multi-input wrapper between operator config and the factory, and
+    // a regression where AppBuilder silently dropped one of the inputs
+    // would not be caught by the crate-internal tests.
+    #[cfg(feature = "libsql")]
+    mod reborn_branch {
+        use super::super::build_reborn_services;
+        use crate::config::{Config, RebornConfig, RebornProfile};
+
+        fn config_with_profile(profile: RebornProfile) -> Config {
+            // `Config::for_testing` is the only test-only constructor that
+            // produces a Config with all required fields populated; cloning
+            // a real Config from env would race with other tests under
+            // ENV_MUTEX. Override `reborn` after construction.
+            let tmp = std::env::temp_dir().join(format!("ironclaw-reborn-{profile}"));
+            let mut cfg = Config::for_testing(tmp.clone(), tmp.clone(), tmp);
+            cfg.reborn = RebornConfig {
+                enabled: profile != RebornProfile::Disabled,
+                profile,
+            };
+            cfg
+        }
+
+        #[tokio::test]
+        async fn disabled_profile_returns_empty_graph() {
+            let cfg = config_with_profile(RebornProfile::Disabled);
+            let services = build_reborn_services(&cfg)
+                .await
+                .expect("disabled must succeed");
+            assert_eq!(services.profile, RebornProfile::Disabled);
+            assert!(services.resource_governor.is_none());
+            assert!(services.event_log.is_none());
+        }
+
+        #[tokio::test]
+        async fn local_dev_profile_wires_merged_substrate() {
+            let cfg = config_with_profile(RebornProfile::LocalDev);
+            let services = build_reborn_services(&cfg)
+                .await
+                .expect("local-dev must succeed");
+            assert_eq!(services.profile, RebornProfile::LocalDev);
+            assert!(
+                services.resource_governor.is_some(),
+                "local-dev must populate merged substrate"
+            );
+            assert!(services.is_dev_only());
+        }
+
+        #[tokio::test]
+        async fn production_profile_fails_closed() {
+            // No durable backends are wired yet, so production must return
+            // an error rather than booting on in-memory fallback. The
+            // anyhow::Error message must include the redaction-safe
+            // sanitized prefix from `RebornBuildError::Display`.
+            let cfg = config_with_profile(RebornProfile::Production);
+            let err = build_reborn_services(&cfg)
+                .await
+                .expect_err("production must fail closed without durable substrate");
+            let rendered = err.to_string();
+            assert!(
+                rendered.contains("reborn composition failed"),
+                "error must carry the boundary-mapped prefix; got {rendered}"
+            );
+            assert!(
+                !rendered.contains("/Users/"),
+                "production diagnostic leaked a host path: {rendered}"
+            );
+        }
+    }
 
     /// Regression for #1537 — WASM credential injection silently failed on
     /// hosted TEE deployments because the ephemeral-store fallback was only

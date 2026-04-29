@@ -165,6 +165,99 @@ assert_flagged "CREDNAME: bare CredentialName reference is flagged" \
     "$CREDNAME_POS" \
     "$CREDNAME_NEG"
 
+# ── REBORN_BRIDGE ─────────────────────────────────────────────
+# Issue #3026 acceptance criterion #13: no file may simultaneously
+# touch the Reborn composition surface (`reborn_services` /
+# `RebornProductionServices`) and reach into legacy state-bag fields
+# (`state.{store,workspace,...}.*`) on the same edit. The check runs
+# an awk pipeline over the unified diff to group added lines by file,
+# then flags files that have both.
+
+assert_reborn_bridge() {
+    local label="$1" diff="$2" expect_flag="$3"
+    local result
+    if result=$(printf '%s\n' "$diff" | awk '
+        /^\+\+\+ b\// { file = substr($0, 7); next }
+        /^\+/ {
+            line = substr($0, 2)
+            if (line ~ /reborn_services|RebornProductionServices/) reborn[file] = reborn[file] "\n" line
+            if (line ~ /state\.(store|workspace|workspace_pool|extension_manager|skill_registry|session_manager)\./ \
+                && line !~ /\/\/ dispatch-exempt:|\/\/ reborn-bridge-exempt:|\/\/ safety:/) \
+                legacy[file] = legacy[file] "\n" line
+        }
+        END {
+            for (f in reborn) {
+                if (legacy[f] != "") {
+                    print f
+                }
+            }
+        }
+    '); then :; fi
+
+    if [ "$expect_flag" = "yes" ]; then
+        if [ -n "${result:-}" ]; then
+            echo "OK: $label (correctly flagged)"
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: $label — bridge violation not flagged"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        if [ -z "${result:-}" ]; then
+            echo "OK: $label (correctly filtered)"
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: $label — false positive: $result"
+            FAIL=$((FAIL + 1))
+        fi
+    fi
+}
+
+# 1. Reborn-only file: not flagged.
+assert_reborn_bridge "REBORN_BRIDGE: reborn-only file is not flagged" \
+    "+++ b/src/app.rs
++    let services = build_reborn_production_services(input).await?;
++    components.reborn_services = Some(services);" \
+    "no"
+
+# 2. Legacy-only file: not flagged.
+assert_reborn_bridge "REBORN_BRIDGE: legacy-only file is not flagged" \
+    "+++ b/src/channels/web/handlers/projects.rs
++    let projects = state.store.list_projects(&owner_id).await?;" \
+    "no"
+
+# 3. Same file touches both: flagged.
+assert_reborn_bridge "REBORN_BRIDGE: same-file dual touch is flagged" \
+    "+++ b/src/channels/web/handlers/dual.rs
++    let r = components.reborn_services.readiness();
++    let projects = state.store.list_projects(&owner_id).await?;" \
+    "yes"
+
+# 4. Same file but legacy line is annotated as a documented bridge:
+#    not flagged.
+assert_reborn_bridge "REBORN_BRIDGE: documented bridge exemption suppresses" \
+    "+++ b/src/bridge/legacy_compat.rs
++    let r = components.reborn_services.readiness();
++    let projects = state.store.list_projects(&owner_id).await?; // reborn-bridge-exempt: legacy v1 settings read during cutover #3029" \
+    "no"
+
+# 5. Cross-file: Reborn touch in one file, legacy touch in another —
+#    not flagged. Bug only shows when same code path mixes both.
+assert_reborn_bridge "REBORN_BRIDGE: cross-file touches are not flagged" \
+    "+++ b/src/app.rs
++    components.reborn_services = Some(services);
++++ b/src/channels/web/handlers/projects.rs
++    let projects = state.store.list_projects(&owner_id).await?;" \
+    "no"
+
+# 6. Same file but legacy line uses the existing dispatch-exempt
+#    annotation: not flagged (we share the exemption set).
+assert_reborn_bridge "REBORN_BRIDGE: existing dispatch-exempt also suppresses" \
+    "+++ b/src/cli/admin.rs
++    let r = components.reborn_services.readiness();
++    let users = state.store.list_users(scope).await?; // dispatch-exempt: cross-user aggregation read" \
+    "no"
+
 echo ""
 echo "Passed: $PASS, Failed: $FAIL"
 [ "$FAIL" -eq 0 ]
