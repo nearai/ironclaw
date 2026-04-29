@@ -1,6 +1,7 @@
 use chrono::{Duration, Utc};
 use ironclaw_authorization::*;
 use ironclaw_host_api::*;
+use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use serde_json::json;
 
 #[tokio::test]
@@ -202,6 +203,271 @@ async fn capability_access_denies_when_grant_does_not_cover_declared_effects() {
             reason: DenyReason::PolicyDenied
         }
     );
+}
+
+#[tokio::test]
+async fn capability_access_with_trust_denies_when_authority_ceiling_excludes_effect() {
+    let descriptor = CapabilityDescriptor {
+        effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+        ..wasm_descriptor()
+    };
+    let grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![EffectKind::DispatchCapability, EffectKind::Network],
+    );
+    let context = execution_context(CapabilitySet {
+        grants: vec![grant],
+    });
+    let trust = trust_decision(vec![EffectKind::DispatchCapability], None);
+
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch_with_trust(&context, &descriptor, &ResourceEstimate::default(), &trust)
+        .await;
+
+    assert_eq!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::PolicyDenied
+        }
+    );
+}
+
+#[tokio::test]
+async fn capability_access_with_trust_denies_when_estimate_exceeds_authority_ceiling() {
+    let descriptor = wasm_descriptor();
+    let mut grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![EffectKind::DispatchCapability],
+    );
+    grant.constraints.resource_ceiling = Some(ResourceCeiling {
+        max_usd: None,
+        max_input_tokens: None,
+        max_output_tokens: None,
+        max_wall_clock_ms: None,
+        max_output_bytes: Some(2048),
+        sandbox: None,
+    });
+    let context = execution_context(CapabilitySet {
+        grants: vec![grant],
+    });
+    let trust = trust_decision(
+        vec![EffectKind::DispatchCapability],
+        Some(ResourceCeiling {
+            max_usd: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
+            max_wall_clock_ms: None,
+            max_output_bytes: Some(1024),
+            sandbox: None,
+        }),
+    );
+
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch_with_trust(
+            &context,
+            &descriptor,
+            &ResourceEstimate {
+                output_bytes: Some(1500),
+                ..ResourceEstimate::default()
+            },
+            &trust,
+        )
+        .await;
+
+    assert_eq!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::PolicyDenied
+        }
+    );
+}
+
+#[tokio::test]
+async fn capability_access_with_trust_clamps_runtime_resource_obligation_to_authority_ceiling() {
+    let descriptor = wasm_descriptor();
+    let mut grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![EffectKind::DispatchCapability],
+    );
+    grant.constraints.resource_ceiling = Some(ResourceCeiling {
+        max_usd: None,
+        max_input_tokens: None,
+        max_output_tokens: None,
+        max_wall_clock_ms: None,
+        max_output_bytes: Some(2048),
+        sandbox: None,
+    });
+    let context = execution_context(CapabilitySet {
+        grants: vec![grant],
+    });
+    let trust = trust_decision(
+        vec![EffectKind::DispatchCapability],
+        Some(ResourceCeiling {
+            max_usd: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
+            max_wall_clock_ms: None,
+            max_output_bytes: Some(1024),
+            sandbox: None,
+        }),
+    );
+
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch_with_trust(
+            &context,
+            &descriptor,
+            &ResourceEstimate {
+                output_bytes: Some(512),
+                ..ResourceEstimate::default()
+            },
+            &trust,
+        )
+        .await;
+
+    let Decision::Allow { obligations } = decision else {
+        panic!("expected allow with clamped obligation, got {decision:?}");
+    };
+    assert!(
+        obligations
+            .as_slice()
+            .iter()
+            .any(|obligation| matches!(obligation, Obligation::EnforceOutputLimit { bytes: 1024 }))
+    );
+    assert!(
+        !obligations
+            .as_slice()
+            .iter()
+            .any(|obligation| matches!(obligation, Obligation::EnforceOutputLimit { bytes: 2048 }))
+    );
+}
+
+#[tokio::test]
+async fn capability_access_with_trust_denies_when_context_trust_differs_from_decision() {
+    let descriptor = wasm_descriptor();
+    let grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![EffectKind::DispatchCapability],
+    );
+    let mut context = execution_context(CapabilitySet {
+        grants: vec![grant],
+    });
+    context.trust = TrustClass::UserTrusted;
+    let trust = trust_decision(vec![EffectKind::DispatchCapability], None);
+
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch_with_trust(&context, &descriptor, &ResourceEstimate::default(), &trust)
+        .await;
+
+    assert_eq!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::PolicyDenied
+        }
+    );
+}
+
+#[tokio::test]
+async fn capability_spawn_with_trust_requires_spawn_process_in_authority_ceiling() {
+    let descriptor = wasm_descriptor();
+    let grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![EffectKind::DispatchCapability, EffectKind::SpawnProcess],
+    );
+    let context = execution_context(CapabilitySet {
+        grants: vec![grant],
+    });
+    let trust = trust_decision(vec![EffectKind::DispatchCapability], None);
+
+    let decision = GrantAuthorizer::new()
+        .authorize_spawn_with_trust(&context, &descriptor, &ResourceEstimate::default(), &trust)
+        .await;
+
+    assert_eq!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::PolicyDenied
+        }
+    );
+}
+
+#[test]
+fn grant_exceeds_authority_ceiling_detects_effect_reductions() {
+    let grant = grant_for(
+        CapabilityId::new("echo.say").unwrap(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![EffectKind::DispatchCapability, EffectKind::Network],
+    );
+    let ceiling = AuthorityCeiling {
+        allowed_effects: vec![EffectKind::DispatchCapability],
+        max_resource_ceiling: None,
+    };
+
+    assert!(grant_exceeds_authority_ceiling(&grant, &ceiling));
+}
+
+#[test]
+fn grant_exceeds_authority_ceiling_detects_resource_reductions() {
+    let mut grant = grant_for(
+        CapabilityId::new("echo.say").unwrap(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![EffectKind::DispatchCapability],
+    );
+    grant.constraints.resource_ceiling = Some(ResourceCeiling {
+        max_usd: None,
+        max_input_tokens: None,
+        max_output_tokens: None,
+        max_wall_clock_ms: None,
+        max_output_bytes: Some(2048),
+        sandbox: None,
+    });
+    let ceiling = AuthorityCeiling {
+        allowed_effects: vec![EffectKind::DispatchCapability],
+        max_resource_ceiling: Some(ResourceCeiling {
+            max_usd: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
+            max_wall_clock_ms: None,
+            max_output_bytes: Some(1024),
+            sandbox: None,
+        }),
+    };
+
+    assert!(grant_exceeds_authority_ceiling(&grant, &ceiling));
+}
+
+#[test]
+fn grant_exceeds_authority_ceiling_keeps_grants_within_ceiling() {
+    let mut grant = grant_for(
+        CapabilityId::new("echo.say").unwrap(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![EffectKind::DispatchCapability],
+    );
+    grant.constraints.resource_ceiling = Some(ResourceCeiling {
+        max_usd: None,
+        max_input_tokens: None,
+        max_output_tokens: None,
+        max_wall_clock_ms: None,
+        max_output_bytes: Some(512),
+        sandbox: None,
+    });
+    let ceiling = AuthorityCeiling {
+        allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+        max_resource_ceiling: Some(ResourceCeiling {
+            max_usd: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
+            max_wall_clock_ms: None,
+            max_output_bytes: Some(1024),
+            sandbox: None,
+        }),
+    };
+
+    assert!(!grant_exceeds_authority_ceiling(&grant, &ceiling));
 }
 
 #[tokio::test]
@@ -463,6 +729,21 @@ fn wasm_descriptor() -> CapabilityDescriptor {
         effects: vec![EffectKind::DispatchCapability],
         default_permission: PermissionMode::Allow,
         resource_profile: None,
+    }
+}
+
+fn trust_decision(
+    allowed_effects: Vec<EffectKind>,
+    max_resource_ceiling: Option<ResourceCeiling>,
+) -> TrustDecision {
+    TrustDecision {
+        effective_trust: EffectiveTrustClass::sandbox(),
+        authority_ceiling: AuthorityCeiling {
+            allowed_effects,
+            max_resource_ceiling,
+        },
+        provenance: TrustProvenance::Default,
+        evaluated_at: Utc::now(),
     }
 }
 

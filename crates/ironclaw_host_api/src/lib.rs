@@ -23,6 +23,8 @@
 //!   host decisions, obligations, and approval scopes.
 //! - [`resource`]: budget/resource scopes, estimates, usage, and quota contracts.
 //! - [`audit`]: redacted durable audit envelope shapes.
+//! - [`trust`]: requested-trust vocabulary and `PackageIdentity` consumed by
+//!   the host trust policy engine in `ironclaw_trust`.
 
 pub mod action;
 pub mod approval;
@@ -37,6 +39,7 @@ pub mod path;
 pub mod resource;
 pub mod runtime;
 pub mod scope;
+pub mod trust;
 
 // Flat re-exports are intentional: downstream Reborn service crates consume
 // `ironclaw_host_api` as a contract prelude, while module docs remain the
@@ -54,6 +57,7 @@ pub use path::*;
 pub use resource::*;
 pub use runtime::*;
 pub use scope::*;
+pub use trust::*;
 
 /// Canonical timestamp type for host API wire contracts.
 pub type Timestamp = chrono::DateTime<chrono::Utc>;

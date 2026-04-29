@@ -4,9 +4,11 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
+use chrono::Utc;
 use ironclaw_authorization::*;
 use ironclaw_filesystem::{DirEntry, FileStat, FilesystemError, LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
+use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
 #[tokio::test]
 async fn lease_authorizer_allows_matching_active_lease_without_context_grant() {
@@ -36,6 +38,39 @@ async fn lease_authorizer_allows_matching_active_lease_without_context_grant() {
             .await
             .unwrap(),
         lease
+    );
+}
+
+#[tokio::test]
+async fn lease_backed_authorizer_with_trust_denies_when_authority_ceiling_excludes_effect() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let capability = CapabilityId::new("echo.say").unwrap();
+    let mut descriptor = descriptor(capability.clone());
+    descriptor.effects = vec![EffectKind::DispatchCapability, EffectKind::Network];
+
+    leases
+        .issue(CapabilityLease::new(
+            context.resource_scope.clone(),
+            grant_for(
+                capability,
+                Principal::Extension(context.extension_id.clone()),
+                vec![EffectKind::DispatchCapability, EffectKind::Network],
+            ),
+        ))
+        .await
+        .unwrap();
+    let trust = trust_decision(vec![EffectKind::DispatchCapability], None);
+
+    let decision = LeaseBackedAuthorizer::new(&leases)
+        .authorize_dispatch_with_trust(&context, &descriptor, &ResourceEstimate::default(), &trust)
+        .await;
+
+    assert_eq!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::PolicyDenied
+        }
     );
 }
 
@@ -972,6 +1007,21 @@ impl RootFilesystem for CountingFilesystem {
 
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.inner.create_dir_all(path).await
+    }
+}
+
+fn trust_decision(
+    allowed_effects: Vec<EffectKind>,
+    max_resource_ceiling: Option<ResourceCeiling>,
+) -> TrustDecision {
+    TrustDecision {
+        effective_trust: EffectiveTrustClass::sandbox(),
+        authority_ceiling: AuthorityCeiling {
+            allowed_effects,
+            max_resource_ceiling,
+        },
+        provenance: TrustProvenance::Default,
+        evaluated_at: Utc::now(),
     }
 }
 

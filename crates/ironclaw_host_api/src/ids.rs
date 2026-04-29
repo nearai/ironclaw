@@ -99,7 +99,7 @@ fn validate_name_segment(kind: &'static str, value: &str) -> Result<(), HostApiE
 
 macro_rules! string_id {
     ($name:ident, $kind:literal, $validator:ident) => {
-        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
         pub struct $name(String);
 
         impl $name {
@@ -190,6 +190,7 @@ string_id!(ProjectId, "project", validate_scope_id);
 string_id!(MissionId, "mission", validate_scope_id);
 string_id!(ThreadId, "thread", validate_scope_id);
 string_id!(ExtensionId, "extension", validate_name_segment);
+string_id!(PackageId, "package", validate_name_segment);
 string_id!(SecretHandle, "secret", validate_name_segment);
 string_id!(SystemServiceId, "system_service", validate_name_segment);
 
@@ -197,7 +198,7 @@ string_id!(SystemServiceId, "system_service", validate_name_segment);
 ///
 /// Capability IDs require at least two dot-separated segments and may use
 /// additional segments for namespacing, e.g. `github.issues.search`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CapabilityId(String);
 
 impl CapabilityId {

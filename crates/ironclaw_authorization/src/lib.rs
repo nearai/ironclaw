@@ -17,8 +17,9 @@ use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, Decision, DenyReason,
     EffectKind, ExecutionContext, HostApiError, InvocationFingerprint, InvocationId, MissionId,
     NetworkPolicy, Obligation, Obligations, Principal, ProjectId, ResourceCeiling,
-    ResourceEstimate, ResourceScope, TenantId, ThreadId, UserId, VirtualPath,
+    ResourceEstimate, ResourceScope, SandboxQuota, TenantId, ThreadId, UserId, VirtualPath,
 };
+use ironclaw_trust::{AuthorityCeiling, TrustDecision};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -39,6 +40,41 @@ pub trait CapabilityDispatchAuthorizer: Send + Sync {
         _context: &ExecutionContext,
         _descriptor: &CapabilityDescriptor,
         _estimate: &ResourceEstimate,
+    ) -> Decision {
+        Decision::Deny {
+            reason: DenyReason::MissingGrant,
+        }
+    }
+}
+
+/// Trust-aware capability dispatch authorizer.
+///
+/// This trait is the host-policy-aware counterpart to
+/// [`CapabilityDispatchAuthorizer`]. Callers pass the policy-validated
+/// [`TrustDecision`] alongside the serializable [`ExecutionContext`]. We keep
+/// this separate because `ironclaw_trust::EffectiveTrustClass` deliberately
+/// does not implement `Deserialize`; it should not be embedded directly in
+/// wire-shaped execution contexts.
+#[async_trait]
+pub trait TrustAwareCapabilityDispatchAuthorizer: Send + Sync {
+    /// Authorize a dispatch using both explicit grants/leases and the
+    /// policy-derived authority ceiling.
+    async fn authorize_dispatch_with_trust(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        trust_decision: &TrustDecision,
+    ) -> Decision;
+
+    /// Authorize a background-process spawn using both explicit grants/leases
+    /// and the policy-derived authority ceiling.
+    async fn authorize_spawn_with_trust(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+        _trust_decision: &TrustDecision,
     ) -> Decision {
         Decision::Deny {
             reason: DenyReason::MissingGrant,
@@ -78,6 +114,41 @@ impl CapabilityDispatchAuthorizer for GrantAuthorizer {
             &spawn_descriptor(descriptor),
             estimate,
             context.grants.grants.iter(),
+        )
+    }
+}
+
+#[async_trait]
+impl TrustAwareCapabilityDispatchAuthorizer for GrantAuthorizer {
+    async fn authorize_dispatch_with_trust(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        trust_decision: &TrustDecision,
+    ) -> Decision {
+        authorize_from_grants_with_trust(
+            context,
+            descriptor,
+            estimate,
+            context.grants.grants.iter(),
+            trust_decision,
+        )
+    }
+
+    async fn authorize_spawn_with_trust(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        trust_decision: &TrustDecision,
+    ) -> Decision {
+        authorize_from_grants_with_trust(
+            context,
+            &spawn_descriptor(descriptor),
+            estimate,
+            context.grants.grants.iter(),
+            trust_decision,
         )
     }
 }
@@ -697,6 +768,58 @@ where
     }
 }
 
+#[async_trait]
+impl<S> TrustAwareCapabilityDispatchAuthorizer for LeaseBackedAuthorizer<'_, S>
+where
+    S: CapabilityLeaseStore + ?Sized,
+{
+    async fn authorize_dispatch_with_trust(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        trust_decision: &TrustDecision,
+    ) -> Decision {
+        if context.validate().is_err() {
+            return Decision::Deny {
+                reason: DenyReason::InternalInvariantViolation,
+            };
+        }
+
+        let lease_grants = self.leases.active_grants_for_context(context).await;
+        authorize_from_grants_with_trust(
+            context,
+            descriptor,
+            estimate,
+            context.grants.grants.iter().chain(lease_grants.iter()),
+            trust_decision,
+        )
+    }
+
+    async fn authorize_spawn_with_trust(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        trust_decision: &TrustDecision,
+    ) -> Decision {
+        if context.validate().is_err() {
+            return Decision::Deny {
+                reason: DenyReason::InternalInvariantViolation,
+            };
+        }
+
+        let lease_grants = self.leases.active_grants_for_context(context).await;
+        authorize_from_grants_with_trust(
+            context,
+            &spawn_descriptor(descriptor),
+            estimate,
+            context.grants.grants.iter().chain(lease_grants.iter()),
+            trust_decision,
+        )
+    }
+}
+
 fn spawn_descriptor(descriptor: &CapabilityDescriptor) -> CapabilityDescriptor {
     let mut descriptor = descriptor.clone();
     if !descriptor.effects.contains(&EffectKind::SpawnProcess) {
@@ -711,6 +834,42 @@ fn authorize_from_grants<'a>(
     estimate: &ResourceEstimate,
     grants: impl Iterator<Item = &'a CapabilityGrant>,
 ) -> Decision {
+    authorize_from_grants_with_authority_ceiling(context, descriptor, estimate, grants, None)
+}
+
+fn authorize_from_grants_with_trust<'a>(
+    context: &ExecutionContext,
+    descriptor: &CapabilityDescriptor,
+    estimate: &ResourceEstimate,
+    grants: impl Iterator<Item = &'a CapabilityGrant>,
+    trust_decision: &TrustDecision,
+) -> Decision {
+    if context.validate().is_err() {
+        return Decision::Deny {
+            reason: DenyReason::InternalInvariantViolation,
+        };
+    }
+    if context.trust != trust_decision.effective_trust.class() {
+        return Decision::Deny {
+            reason: DenyReason::PolicyDenied,
+        };
+    }
+    authorize_from_grants_with_authority_ceiling(
+        context,
+        descriptor,
+        estimate,
+        grants,
+        Some(&trust_decision.authority_ceiling),
+    )
+}
+
+fn authorize_from_grants_with_authority_ceiling<'a>(
+    context: &ExecutionContext,
+    descriptor: &CapabilityDescriptor,
+    estimate: &ResourceEstimate,
+    grants: impl Iterator<Item = &'a CapabilityGrant>,
+    authority_ceiling: Option<&AuthorityCeiling>,
+) -> Decision {
     if context.validate().is_err() {
         return Decision::Deny {
             reason: DenyReason::InternalInvariantViolation,
@@ -724,9 +883,19 @@ fn authorize_from_grants<'a>(
         .filter(|grant| grant_is_active(grant))
     {
         saw_active_matching_grant = true;
+        let effective_resource_ceiling = intersect_resource_ceilings(
+            grant.constraints.resource_ceiling.as_ref(),
+            authority_ceiling.and_then(|ceiling| ceiling.max_resource_ceiling.as_ref()),
+        );
+        let authority_effects_allow_descriptor = match authority_ceiling {
+            Some(ceiling) => effects_are_covered(&descriptor.effects, &ceiling.allowed_effects),
+            None => true,
+        };
         if effects_are_covered(&descriptor.effects, &grant.constraints.allowed_effects)
-            && resource_estimate_is_covered(estimate, grant.constraints.resource_ceiling.as_ref())
-            && let Some(obligations) = obligations_for_grant(descriptor, grant)
+            && authority_effects_allow_descriptor
+            && resource_estimate_is_covered(estimate, effective_resource_ceiling.as_ref())
+            && let Some(obligations) =
+                obligations_for_grant(descriptor, grant, effective_resource_ceiling)
         {
             return Decision::Allow { obligations };
         }
@@ -746,6 +915,7 @@ fn authorize_from_grants<'a>(
 fn obligations_for_grant(
     descriptor: &CapabilityDescriptor,
     grant: &CapabilityGrant,
+    effective_resource_ceiling: Option<ResourceCeiling>,
 ) -> Option<Obligations> {
     let mut obligations = Vec::new();
 
@@ -772,7 +942,7 @@ fn obligations_for_grant(
         }
     }
 
-    if let Some(ceiling) = grant.constraints.resource_ceiling.as_ref() {
+    if let Some(ceiling) = effective_resource_ceiling {
         obligations.push(Obligation::EnforceResourceCeiling {
             ceiling: ceiling.clone(),
         });
@@ -820,11 +990,139 @@ fn effects_are_covered(required: &[EffectKind], allowed: &[EffectKind]) -> bool 
 }
 
 fn grant_is_active(grant: &CapabilityGrant) -> bool {
-    grant
-        .constraints
-        .expires_at
-        .is_none_or(|expires_at| expires_at > Utc::now())
-        && grant.constraints.max_invocations != Some(0)
+    let grant_not_expired = match grant.constraints.expires_at.as_ref() {
+        Some(expires_at) => expires_at > &Utc::now(),
+        None => true,
+    };
+    grant_not_expired && grant.constraints.max_invocations != Some(0)
+}
+
+/// Returns true when an existing grant exceeds the current policy-derived
+/// authority ceiling and should be reissued or revoked by a trust-change
+/// invalidation listener.
+///
+/// This helper is intentionally synchronous and store-agnostic: the
+/// `ironclaw_trust::InvalidationBus` runs listeners synchronously, while this
+/// crate's durable lease stores are async. Higher-level host wiring can use
+/// this predicate inside whatever transactional store/reconciliation path it
+/// owns, without introducing nested blocking executors or process/runtime dependencies here.
+pub fn grant_exceeds_authority_ceiling(
+    grant: &CapabilityGrant,
+    authority_ceiling: &AuthorityCeiling,
+) -> bool {
+    !effects_are_covered(
+        &grant.constraints.allowed_effects,
+        &authority_ceiling.allowed_effects,
+    ) || resource_ceiling_exceeds_authority(
+        grant.constraints.resource_ceiling.as_ref(),
+        authority_ceiling.max_resource_ceiling.as_ref(),
+    )
+}
+
+fn resource_ceiling_exceeds_authority(
+    grant_ceiling: Option<&ResourceCeiling>,
+    authority_ceiling: Option<&ResourceCeiling>,
+) -> bool {
+    match (grant_ceiling, authority_ceiling) {
+        (None, Some(_)) => true,
+        (None, None) | (Some(_), None) => false,
+        (Some(grant), Some(authority)) => {
+            limit_exceeds(&grant.max_usd, &authority.max_usd)
+                || limit_exceeds(&grant.max_input_tokens, &authority.max_input_tokens)
+                || limit_exceeds(&grant.max_output_tokens, &authority.max_output_tokens)
+                || limit_exceeds(&grant.max_wall_clock_ms, &authority.max_wall_clock_ms)
+                || limit_exceeds(&grant.max_output_bytes, &authority.max_output_bytes)
+                || sandbox_quota_exceeds_authority(
+                    grant.sandbox.as_ref(),
+                    authority.sandbox.as_ref(),
+                )
+        }
+    }
+}
+
+fn sandbox_quota_exceeds_authority(
+    grant_quota: Option<&SandboxQuota>,
+    authority_quota: Option<&SandboxQuota>,
+) -> bool {
+    match (grant_quota, authority_quota) {
+        (None, Some(_)) => true,
+        (None, None) | (Some(_), None) => false,
+        (Some(grant), Some(authority)) => {
+            limit_exceeds(&grant.cpu_time_ms, &authority.cpu_time_ms)
+                || limit_exceeds(&grant.memory_bytes, &authority.memory_bytes)
+                || limit_exceeds(&grant.disk_bytes, &authority.disk_bytes)
+                || limit_exceeds(&grant.network_egress_bytes, &authority.network_egress_bytes)
+                || limit_exceeds(&grant.process_count, &authority.process_count)
+        }
+    }
+}
+
+fn limit_exceeds<T>(grant: &Option<T>, authority: &Option<T>) -> bool
+where
+    T: PartialOrd,
+{
+    match (grant, authority) {
+        (Some(grant), Some(authority)) => grant > authority,
+        (None, Some(_)) => true,
+        (None, None) | (Some(_), None) => false,
+    }
+}
+
+fn intersect_resource_ceilings(
+    grant_ceiling: Option<&ResourceCeiling>,
+    authority_ceiling: Option<&ResourceCeiling>,
+) -> Option<ResourceCeiling> {
+    match (grant_ceiling, authority_ceiling) {
+        (None, None) => None,
+        (Some(ceiling), None) | (None, Some(ceiling)) => Some(ceiling.clone()),
+        (Some(grant), Some(authority)) => Some(ResourceCeiling {
+            max_usd: stricter_limit(&grant.max_usd, &authority.max_usd),
+            max_input_tokens: stricter_limit(&grant.max_input_tokens, &authority.max_input_tokens),
+            max_output_tokens: stricter_limit(
+                &grant.max_output_tokens,
+                &authority.max_output_tokens,
+            ),
+            max_wall_clock_ms: stricter_limit(
+                &grant.max_wall_clock_ms,
+                &authority.max_wall_clock_ms,
+            ),
+            max_output_bytes: stricter_limit(&grant.max_output_bytes, &authority.max_output_bytes),
+            sandbox: intersect_sandbox_quotas(grant.sandbox.as_ref(), authority.sandbox.as_ref()),
+        }),
+    }
+}
+
+fn intersect_sandbox_quotas(
+    grant_quota: Option<&SandboxQuota>,
+    authority_quota: Option<&SandboxQuota>,
+) -> Option<SandboxQuota> {
+    match (grant_quota, authority_quota) {
+        (None, None) => None,
+        (Some(quota), None) | (None, Some(quota)) => Some(quota.clone()),
+        (Some(grant), Some(authority)) => Some(SandboxQuota {
+            cpu_time_ms: stricter_limit(&grant.cpu_time_ms, &authority.cpu_time_ms),
+            memory_bytes: stricter_limit(&grant.memory_bytes, &authority.memory_bytes),
+            disk_bytes: stricter_limit(&grant.disk_bytes, &authority.disk_bytes),
+            network_egress_bytes: stricter_limit(
+                &grant.network_egress_bytes,
+                &authority.network_egress_bytes,
+            ),
+            process_count: stricter_limit(&grant.process_count, &authority.process_count),
+        }),
+    }
+}
+
+fn stricter_limit<T>(left: &Option<T>, right: &Option<T>) -> Option<T>
+where
+    T: Clone + PartialOrd,
+{
+    match (left, right) {
+        (Some(left), Some(right)) if right < left => Some(right.clone()),
+        (Some(left), Some(_)) => Some(left.clone()),
+        (Some(left), None) => Some(left.clone()),
+        (None, Some(right)) => Some(right.clone()),
+        (None, None) => None,
+    }
 }
 
 fn resource_estimate_is_covered(
@@ -851,15 +1149,18 @@ fn resource_estimate_is_covered(
             estimate.output_bytes.as_ref(),
             ceiling.max_output_bytes.as_ref(),
         )
-        && ceiling.sandbox.as_ref().is_none_or(|sandbox| {
-            options_within_ceiling(
-                estimate.network_egress_bytes.as_ref(),
-                sandbox.network_egress_bytes.as_ref(),
-            ) && options_within_ceiling(
-                estimate.process_count.as_ref(),
-                sandbox.process_count.as_ref(),
-            )
-        })
+        && match ceiling.sandbox.as_ref() {
+            Some(sandbox) => {
+                options_within_ceiling(
+                    estimate.network_egress_bytes.as_ref(),
+                    sandbox.network_egress_bytes.as_ref(),
+                ) && options_within_ceiling(
+                    estimate.process_count.as_ref(),
+                    sandbox.process_count.as_ref(),
+                )
+            }
+            None => true,
+        }
 }
 
 fn options_within_ceiling<T>(estimate: Option<&T>, maximum: Option<&T>) -> bool

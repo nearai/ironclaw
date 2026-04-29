@@ -83,6 +83,31 @@ impl RuntimeDispatchErrorKind {
             Self::Unknown => "Unknown",
         }
     }
+
+    /// Sanitizer-compatible event/audit token for this redacted failure kind.
+    pub const fn event_kind(self) -> &'static str {
+        match self {
+            Self::Backend => "backend",
+            Self::Client => "client",
+            Self::Executor => "executor",
+            Self::ExitFailure => "exit_failure",
+            Self::ExtensionRuntimeMismatch => "extension.runtime_mismatch",
+            Self::FilesystemDenied => "filesystem_denied",
+            Self::Guest => "guest",
+            Self::InputEncode => "input_encode",
+            Self::InvalidResult => "invalid_result",
+            Self::Manifest => "manifest",
+            Self::Memory => "memory",
+            Self::MethodMissing => "method_missing",
+            Self::NetworkDenied => "network_denied",
+            Self::OutputDecode => "output_decode",
+            Self::OutputTooLarge => "output_too_large",
+            Self::Resource => "resource",
+            Self::UndeclaredCapability => "undeclared_capability",
+            Self::UnsupportedRunner => "unsupported_runner",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 impl std::fmt::Display for RuntimeDispatchErrorKind {

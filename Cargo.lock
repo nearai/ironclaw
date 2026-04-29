@@ -4007,6 +4007,7 @@ dependencies = [
  "chrono",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_trust",
  "serde",
  "serde_json",
  "tempfile",
@@ -4023,6 +4024,23 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "ironclaw_dispatcher"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_events",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_resources",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-test",
 ]
 
 [[package]]
@@ -4067,6 +4085,7 @@ version = "0.1.0"
 dependencies = [
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_trust",
  "serde",
  "serde_json",
  "tempfile",
@@ -4115,6 +4134,46 @@ dependencies = [
  "static_assertions",
  "thiserror 2.0.18",
  "uuid",
+]
+
+[[package]]
+name = "ironclaw_mcp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_extensions",
+ "ironclaw_host_api",
+ "ironclaw_resources",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "ironclaw_network"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_host_api",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "ironclaw_processes"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "ironclaw_events",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_resources",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -4177,6 +4236,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_scripts"
+version = "0.1.0"
+dependencies = [
+ "ironclaw_extensions",
+ "ironclaw_host_api",
+ "ironclaw_resources",
+ "rust_decimal_macros",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ironclaw_secrets"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_host_api",
+ "secrecy",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ironclaw_skills"
 version = "0.1.0"
 dependencies = [
@@ -4193,6 +4276,18 @@ dependencies = [
  "tokio",
  "tracing",
  "urlencoding",
+]
+
+[[package]]
+name = "ironclaw_trust"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ironclaw_host_api",
+ "serde",
+ "serde_json",
+ "static_assertions",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

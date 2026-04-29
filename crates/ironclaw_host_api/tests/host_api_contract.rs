@@ -102,6 +102,78 @@ fn local_default_resource_scope_uses_default_agent_and_bootstrap_project() {
 }
 
 #[test]
+fn runtime_dispatch_error_kinds_have_safe_event_tokens() {
+    for (kind, token) in [
+        (RuntimeDispatchErrorKind::Backend, "backend"),
+        (RuntimeDispatchErrorKind::Client, "client"),
+        (RuntimeDispatchErrorKind::Executor, "executor"),
+        (RuntimeDispatchErrorKind::ExitFailure, "exit_failure"),
+        (
+            RuntimeDispatchErrorKind::ExtensionRuntimeMismatch,
+            "extension.runtime_mismatch",
+        ),
+        (
+            RuntimeDispatchErrorKind::FilesystemDenied,
+            "filesystem_denied",
+        ),
+        (RuntimeDispatchErrorKind::Guest, "guest"),
+        (RuntimeDispatchErrorKind::InputEncode, "input_encode"),
+        (RuntimeDispatchErrorKind::InvalidResult, "invalid_result"),
+        (RuntimeDispatchErrorKind::Manifest, "manifest"),
+        (RuntimeDispatchErrorKind::Memory, "memory"),
+        (RuntimeDispatchErrorKind::MethodMissing, "method_missing"),
+        (RuntimeDispatchErrorKind::NetworkDenied, "network_denied"),
+        (RuntimeDispatchErrorKind::OutputDecode, "output_decode"),
+        (RuntimeDispatchErrorKind::OutputTooLarge, "output_too_large"),
+        (RuntimeDispatchErrorKind::Resource, "resource"),
+        (
+            RuntimeDispatchErrorKind::UndeclaredCapability,
+            "undeclared_capability",
+        ),
+        (
+            RuntimeDispatchErrorKind::UnsupportedRunner,
+            "unsupported_runner",
+        ),
+        (RuntimeDispatchErrorKind::Unknown, "unknown"),
+    ] {
+        assert_eq!(kind.event_kind(), token);
+        assert_safe_runtime_event_token(token);
+    }
+}
+
+fn assert_safe_runtime_event_token(token: &str) {
+    assert!(!token.is_empty(), "runtime event token must not be empty");
+    assert!(
+        token.len() <= 64,
+        "{token:?} must fit runtime event sanitizer length"
+    );
+    assert!(
+        token.as_bytes()[0].is_ascii_lowercase(),
+        "{token:?} must start with lowercase ASCII"
+    );
+    assert!(
+        token.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'.' | b':')
+        }),
+        "{token:?} must stay compatible with runtime event sanitization"
+    );
+    for segment in token.split(['.', ':']) {
+        assert!(
+            !segment.is_empty(),
+            "{token:?} must not have empty segments"
+        );
+        assert!(
+            segment.len() <= 24,
+            "{token:?} segment {segment:?} must fit runtime event sanitizer segment length"
+        );
+        assert!(
+            segment.as_bytes()[0].is_ascii_lowercase(),
+            "{token:?} segment {segment:?} must start with lowercase ASCII"
+        );
+    }
+}
+
+#[test]
 fn local_default_execution_context_keeps_scope_fields_aligned() {
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/workspace").unwrap(),
@@ -583,6 +655,73 @@ fn privileged_runtime_and_trust_classes_cannot_be_self_asserted_from_json() {
     assert!(serde_json::from_value::<RuntimeKind>(json!("system")).is_err());
     assert!(serde_json::from_value::<TrustClass>(json!("first_party")).is_err());
     assert!(serde_json::from_value::<TrustClass>(json!("system")).is_err());
+}
+
+#[test]
+fn requested_trust_class_round_trips_all_variants() {
+    // Requested trust is intentionally fully deserializable — it is *declared*
+    // intent, not effective authority. Privileged-sounding variants only
+    // become real after policy evaluation in ironclaw_trust.
+    for (raw, expected) in [
+        ("untrusted", RequestedTrustClass::Untrusted),
+        ("third_party", RequestedTrustClass::ThirdParty),
+        (
+            "first_party_requested",
+            RequestedTrustClass::FirstPartyRequested,
+        ),
+        ("system_requested", RequestedTrustClass::SystemRequested),
+    ] {
+        let parsed: RequestedTrustClass = serde_json::from_value(json!(raw)).unwrap();
+        assert_eq!(parsed, expected);
+        assert_eq!(serde_json::to_value(parsed).unwrap(), json!(raw));
+    }
+}
+
+#[test]
+fn manifest_json_with_system_field_parses_only_into_requested_type() {
+    // A manifest fragment cannot be coerced into an effective TrustClass:
+    // the wire form `"system"` is rejected by TrustClass deserialization but
+    // accepted as RequestedTrustClass::SystemRequested when the manifest
+    // schema explicitly uses the requested form. Manifests that try to use
+    // `"system"` for the *effective* slot get a compile/parse error before
+    // any policy code runs.
+    assert!(serde_json::from_value::<TrustClass>(json!("system")).is_err());
+    assert_eq!(
+        serde_json::from_value::<RequestedTrustClass>(json!("system_requested")).unwrap(),
+        RequestedTrustClass::SystemRequested
+    );
+}
+
+#[test]
+fn package_identity_serializes_with_source_tag() {
+    let identity = PackageIdentity::new(
+        PackageId::new("github").unwrap(),
+        PackageSource::LocalManifest {
+            path: "/extensions/github/manifest.toml".to_string(),
+        },
+        Some("abcd1234".to_string()),
+        None,
+    );
+    let value = serde_json::to_value(&identity).unwrap();
+    assert_eq!(value["package_id"], json!("github"));
+    assert_eq!(value["source"]["kind"], json!("local_manifest"));
+    assert_eq!(
+        value["source"]["path"],
+        json!("/extensions/github/manifest.toml")
+    );
+    assert_eq!(value["digest"], json!("abcd1234"));
+    assert!(value["signer"].is_null());
+
+    let round_trip: PackageIdentity = serde_json::from_value(value).unwrap();
+    assert_eq!(round_trip, identity);
+}
+
+#[test]
+fn package_source_admin_and_bundled_have_no_extra_fields() {
+    let bundled: PackageSource = serde_json::from_value(json!({"kind": "bundled"})).unwrap();
+    assert_eq!(bundled, PackageSource::Bundled);
+    let admin: PackageSource = serde_json::from_value(json!({"kind": "admin"})).unwrap();
+    assert_eq!(admin, PackageSource::Admin);
 }
 
 #[test]
