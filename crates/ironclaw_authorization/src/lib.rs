@@ -887,10 +887,12 @@ fn authorize_from_grants_with_authority_ceiling<'a>(
             grant.constraints.resource_ceiling.as_ref(),
             authority_ceiling.and_then(|ceiling| ceiling.max_resource_ceiling.as_ref()),
         );
+        let authority_effects_allow_descriptor = match authority_ceiling {
+            Some(ceiling) => effects_are_covered(&descriptor.effects, &ceiling.allowed_effects),
+            None => true,
+        };
         if effects_are_covered(&descriptor.effects, &grant.constraints.allowed_effects)
-            && authority_ceiling.is_none_or(|ceiling| {
-                effects_are_covered(&descriptor.effects, &ceiling.allowed_effects)
-            })
+            && authority_effects_allow_descriptor
             && resource_estimate_is_covered(estimate, effective_resource_ceiling.as_ref())
             && let Some(obligations) =
                 obligations_for_grant(descriptor, grant, effective_resource_ceiling)
@@ -988,11 +990,11 @@ fn effects_are_covered(required: &[EffectKind], allowed: &[EffectKind]) -> bool 
 }
 
 fn grant_is_active(grant: &CapabilityGrant) -> bool {
-    grant
-        .constraints
-        .expires_at
-        .is_none_or(|expires_at| expires_at > Utc::now())
-        && grant.constraints.max_invocations != Some(0)
+    let grant_not_expired = match grant.constraints.expires_at.as_ref() {
+        Some(expires_at) => expires_at > &Utc::now(),
+        None => true,
+    };
+    grant_not_expired && grant.constraints.max_invocations != Some(0)
 }
 
 /// Returns true when an existing grant exceeds the current policy-derived
@@ -1147,15 +1149,18 @@ fn resource_estimate_is_covered(
             estimate.output_bytes.as_ref(),
             ceiling.max_output_bytes.as_ref(),
         )
-        && ceiling.sandbox.as_ref().is_none_or(|sandbox| {
-            options_within_ceiling(
-                estimate.network_egress_bytes.as_ref(),
-                sandbox.network_egress_bytes.as_ref(),
-            ) && options_within_ceiling(
-                estimate.process_count.as_ref(),
-                sandbox.process_count.as_ref(),
-            )
-        })
+        && match ceiling.sandbox.as_ref() {
+            Some(sandbox) => {
+                options_within_ceiling(
+                    estimate.network_egress_bytes.as_ref(),
+                    sandbox.network_egress_bytes.as_ref(),
+                ) && options_within_ceiling(
+                    estimate.process_count.as_ref(),
+                    sandbox.process_count.as_ref(),
+                )
+            }
+            None => true,
+        }
 }
 
 fn options_within_ceiling<T>(estimate: Option<&T>, maximum: Option<&T>) -> bool
