@@ -1,4 +1,6 @@
-use ironclaw_authorization::{CapabilityLease, CapabilityLeaseError, CapabilityLeaseStore};
+use ironclaw_authorization::{
+    CapabilityLease, CapabilityLeaseError, CapabilityLeaseStatus, CapabilityLeaseStore,
+};
 use ironclaw_host_api::{
     CapabilityId, ExecutionContext, InvocationFingerprint, InvocationId, Obligation, ResourceScope,
 };
@@ -100,6 +102,16 @@ pub(crate) fn capability_lease_error_kind(error: &CapabilityLeaseError) -> &'sta
         CapabilityLeaseError::InactiveLease { .. } => "InactiveLease",
         CapabilityLeaseError::Persistence { .. } => "Persistence",
     }
+}
+
+pub(crate) fn claim_error_may_be_concurrent_resume(error: &CapabilityLeaseError) -> bool {
+    matches!(
+        error,
+        CapabilityLeaseError::InactiveLease {
+            status: CapabilityLeaseStatus::Claimed | CapabilityLeaseStatus::Consumed,
+            ..
+        }
+    )
 }
 
 pub(crate) fn run_state_error_kind(error: &RunStateError) -> &'static str {

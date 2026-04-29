@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use async_trait::async_trait;
 use ironclaw_approvals::*;
 use ironclaw_authorization::*;
@@ -115,6 +118,43 @@ async fn capability_host_returns_business_error_when_run_state_fail_transition_f
         }
     ));
     assert!(!dispatcher.has_request());
+}
+
+#[tokio::test]
+async fn capability_host_does_not_orphan_approval_when_run_block_fails() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = RecordingDispatcher::default();
+    let run_state = FailBlockApprovalRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+
+    let err = host
+        .invoke_json(CapabilityInvocationRequest {
+            context,
+            capability_id: capability_id(),
+            estimate: ResourceEstimate::default(),
+            input: json!({"message": "needs approval"}),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, CapabilityInvocationError::RunState(_)));
+    assert!(!dispatcher.has_request());
+    assert!(
+        approval_requests
+            .records_for_scope(&scope)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.error_kind.as_deref(), Some("ApprovalBlock"));
 }
 
 #[tokio::test]
@@ -289,6 +329,88 @@ async fn capability_host_returns_dispatch_result_when_lease_consume_fails_after_
     assert_eq!(run.status, RunStatus::Completed);
     let claimed = leases.get(&scope, lease.grant.id).await.unwrap();
     assert_eq!(claimed.status, CapabilityLeaseStatus::Claimed);
+}
+
+#[tokio::test]
+async fn capability_host_does_not_overwrite_completed_run_when_concurrent_resume_loses_claim() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = RecordingDispatcher::default();
+    let complete_notify = Arc::new(tokio::sync::Notify::new());
+    let run_state = CompleteNotifyingRunStateStore::new(complete_notify.clone());
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let leases = CoordinatedClaimConflictLeaseStore::new(complete_notify);
+    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "approved"});
+
+    block_host
+        .invoke_json(CapabilityInvocationRequest {
+            context: context.clone(),
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+        })
+        .await
+        .unwrap_err();
+    let approval_id = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .approval_request_id
+        .unwrap();
+    ApprovalResolver::new(&approval_requests, &leases)
+        .approve_dispatch(
+            &scope,
+            approval_id,
+            LeaseApproval {
+                issued_by: Principal::HostRuntime,
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                mounts: MountView::default(),
+                network: NetworkPolicy::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
+                expires_at: None,
+                max_invocations: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+
+    let resume_authorizer = GrantAuthorizer::new();
+    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+
+    let first = resume_host.resume_json(CapabilityResumeRequest {
+        context: context.clone(),
+        approval_request_id: approval_id,
+        capability_id: capability_id(),
+        estimate: estimate.clone(),
+        input: input.clone(),
+    });
+    let second = resume_host.resume_json(CapabilityResumeRequest {
+        context,
+        approval_request_id: approval_id,
+        capability_id: capability_id(),
+        estimate,
+        input,
+    });
+    let (first_result, second_result) = tokio::join!(first, second);
+
+    assert!(first_result.is_ok());
+    assert!(matches!(
+        second_result,
+        Err(CapabilityInvocationError::Lease(_))
+    ));
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::Completed);
 }
 
 #[tokio::test]
@@ -494,6 +616,156 @@ async fn capability_host_rejects_resume_with_mutated_input_before_lease_claim_or
     assert_eq!(active.status, CapabilityLeaseStatus::Active);
 }
 
+struct FailBlockApprovalRunStateStore {
+    inner: InMemoryRunStateStore,
+}
+
+impl FailBlockApprovalRunStateStore {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryRunStateStore::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl RunStateStore for FailBlockApprovalRunStateStore {
+    async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
+        self.inner.start(start).await
+    }
+
+    async fn block_approval(
+        &self,
+        _scope: &ResourceScope,
+        _invocation_id: InvocationId,
+        _approval: ApprovalRequest,
+    ) -> Result<RunRecord, RunStateError> {
+        Err(RunStateError::Filesystem(
+            "block approval unavailable".to_string(),
+        ))
+    }
+
+    async fn block_auth(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        error_kind: String,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner
+            .block_auth(scope, invocation_id, error_kind)
+            .await
+    }
+
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner.complete(scope, invocation_id).await
+    }
+
+    async fn fail(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        error_kind: String,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner.fail(scope, invocation_id, error_kind).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<Option<RunRecord>, RunStateError> {
+        self.inner.get(scope, invocation_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<RunRecord>, RunStateError> {
+        self.inner.records_for_scope(scope).await
+    }
+}
+
+struct CompleteNotifyingRunStateStore {
+    inner: InMemoryRunStateStore,
+    complete_notify: Arc<tokio::sync::Notify>,
+}
+
+impl CompleteNotifyingRunStateStore {
+    fn new(complete_notify: Arc<tokio::sync::Notify>) -> Self {
+        Self {
+            inner: InMemoryRunStateStore::new(),
+            complete_notify,
+        }
+    }
+}
+
+#[async_trait]
+impl RunStateStore for CompleteNotifyingRunStateStore {
+    async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
+        self.inner.start(start).await
+    }
+
+    async fn block_approval(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        approval: ApprovalRequest,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner
+            .block_approval(scope, invocation_id, approval)
+            .await
+    }
+
+    async fn block_auth(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        error_kind: String,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner
+            .block_auth(scope, invocation_id, error_kind)
+            .await
+    }
+
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<RunRecord, RunStateError> {
+        let record = self.inner.complete(scope, invocation_id).await?;
+        self.complete_notify.notify_waiters();
+        Ok(record)
+    }
+
+    async fn fail(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        error_kind: String,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner.fail(scope, invocation_id, error_kind).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<Option<RunRecord>, RunStateError> {
+        self.inner.get(scope, invocation_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<RunRecord>, RunStateError> {
+        self.inner.records_for_scope(scope).await
+    }
+}
+
 struct FailOnFailRunStateStore {
     inner: InMemoryRunStateStore,
 }
@@ -566,6 +838,85 @@ impl RunStateStore for FailOnFailRunStateStore {
         scope: &ResourceScope,
     ) -> Result<Vec<RunRecord>, RunStateError> {
         self.inner.records_for_scope(scope).await
+    }
+}
+
+struct CoordinatedClaimConflictLeaseStore {
+    inner: InMemoryCapabilityLeaseStore,
+    claim_calls: AtomicUsize,
+    second_claim_started: tokio::sync::Notify,
+    run_completed: Arc<tokio::sync::Notify>,
+}
+
+impl CoordinatedClaimConflictLeaseStore {
+    fn new(run_completed: Arc<tokio::sync::Notify>) -> Self {
+        Self {
+            inner: InMemoryCapabilityLeaseStore::new(),
+            claim_calls: AtomicUsize::new(0),
+            second_claim_started: tokio::sync::Notify::new(),
+            run_completed,
+        }
+    }
+}
+
+#[async_trait]
+impl CapabilityLeaseStore for CoordinatedClaimConflictLeaseStore {
+    async fn issue(&self, lease: CapabilityLease) -> Result<CapabilityLease, CapabilityLeaseError> {
+        self.inner.issue(lease).await
+    }
+
+    async fn revoke(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        self.inner.revoke(scope, lease_id).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Option<CapabilityLease> {
+        self.inner.get(scope, lease_id).await
+    }
+
+    async fn claim(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let call = self.claim_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if call == 1 {
+            self.second_claim_started.notified().await;
+            self.inner
+                .claim(scope, lease_id, invocation_fingerprint)
+                .await
+        } else {
+            self.second_claim_started.notify_waiters();
+            self.run_completed.notified().await;
+            Err(CapabilityLeaseError::InactiveLease {
+                lease_id,
+                status: CapabilityLeaseStatus::Consumed,
+            })
+        }
+    }
+
+    async fn consume(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        self.inner.consume(scope, lease_id).await
+    }
+
+    async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease> {
+        self.inner.leases_for_scope(scope).await
+    }
+
+    async fn active_leases_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityLease> {
+        self.inner.active_leases_for_context(context).await
     }
 }
 

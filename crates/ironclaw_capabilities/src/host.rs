@@ -11,8 +11,9 @@ use ironclaw_run_state::{
 use tracing::warn;
 
 use crate::helpers::{
-    approval_not_approved_error_kind, capability_lease_error_kind, ensure_no_obligations, fail_run,
-    fail_run_if_configured, matching_approval_lease, resume_context_mismatch_kind,
+    approval_not_approved_error_kind, capability_lease_error_kind,
+    claim_error_may_be_concurrent_resume, ensure_no_obligations, fail_run, fail_run_if_configured,
+    matching_approval_lease, resume_context_mismatch_kind,
 };
 use crate::{
     CapabilityInvocationError, CapabilityInvocationRequest, CapabilityInvocationResult,
@@ -197,17 +198,41 @@ where
 
                 match (self.run_state, self.approval_requests) {
                     (Some(run_state), Some(approval_requests)) => {
-                        approval_requests
-                            .save_pending(scope.clone(), approval.clone())
-                            .await?;
-                        run_state
-                            .block_approval(&scope, invocation_id, approval)
-                            .await?;
+                        if let Err(error) = run_state
+                            .block_approval(&scope, invocation_id, approval.clone())
+                            .await
+                        {
+                            fail_run_if_configured(
+                                Some(run_state),
+                                &scope,
+                                invocation_id,
+                                "ApprovalBlock",
+                            )
+                            .await;
+                            return Err(CapabilityInvocationError::from(error));
+                        }
+                        if let Err(error) = approval_requests
+                            .save_pending(scope.clone(), approval)
+                            .await
+                        {
+                            fail_run_if_configured(
+                                Some(run_state),
+                                &scope,
+                                invocation_id,
+                                "ApprovalStore",
+                            )
+                            .await;
+                            return Err(CapabilityInvocationError::from(error));
+                        }
                     }
                     (Some(run_state), None) => {
-                        let _ = run_state
-                            .fail(&scope, invocation_id, "ApprovalStoreMissing".to_string())
-                            .await;
+                        fail_run_if_configured(
+                            Some(run_state),
+                            &scope,
+                            invocation_id,
+                            "ApprovalStoreMissing",
+                        )
+                        .await;
                         return Err(CapabilityInvocationError::ApprovalStoreMissing {
                             capability: request.capability_id,
                             store: "approval_requests",
@@ -416,7 +441,17 @@ where
         {
             Ok(lease) => lease,
             Err(error) => {
-                fail_run(run_state, &scope, invocation_id, "ApprovalLeaseClaim").await?;
+                if claim_error_may_be_concurrent_resume(&error) {
+                    warn!(
+                        lease_id = %lease.grant.id,
+                        invocation_id = %invocation_id,
+                        capability_id = %capability_id,
+                        error_kind = capability_lease_error_kind(&error),
+                        "approval lease claim lost to a concurrent resume; leaving run state unchanged",
+                    );
+                } else {
+                    fail_run(run_state, &scope, invocation_id, "ApprovalLeaseClaim").await?;
+                }
                 return Err(CapabilityInvocationError::Lease(Box::new(error)));
             }
         };
