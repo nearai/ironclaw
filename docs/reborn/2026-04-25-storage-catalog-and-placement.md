@@ -1,7 +1,7 @@
 # Reborn Storage Catalog and Placement Plan
 
-**Status:** Implementation planning note
-**Date:** 2026-04-25
+**Status:** Implementation planning note  
+**Date:** 2026-04-25  
 **Related contracts:** `contracts/filesystem.md`, `contracts/secrets.md`, `contracts/processes.md`, `contracts/events-projections.md`
 
 ---
@@ -162,35 +162,48 @@ Canonical path shape:
 Implemented first seam in `ironclaw_memory`:
 
 ```rust
+MemoryBackend
+MemoryBackendCapabilities
+MemoryContext
+MemorySearchRequest
+MemorySearchResult
+MemoryBackendFilesystemAdapter
+RepositoryMemoryBackend
 MemoryDocumentFilesystem
 MemoryDocumentScope
 MemoryDocumentPath
 MemoryDocumentRepository
 MemoryDocumentIndexer
+MemoryDocumentIndexRepository
+ChunkConfig
+chunk_document
+content_sha256
+ChunkingMemoryDocumentIndexer
 InMemoryMemoryDocumentRepository
 LibSqlMemoryDocumentRepository
 PostgresMemoryDocumentRepository
 ```
 
-`ironclaw_filesystem` remains generic. `ironclaw_memory` owns memory-specific path grammar, scope parsing, repository delegation, directory inference, and best-effort write-after-persist index hook invocation.
+`ironclaw_filesystem` remains generic. `ironclaw_memory` owns memory-specific path grammar, host-resolved memory context, plugin backend contracts, scope parsing, repository delegation, directory inference, and write-after-persist index hook invocation.
 
-The PostgreSQL/libSQL repository adapters map file-shaped memory documents into the existing `memory_documents` table shape. The adapter stores scoped owner identity, including the project id or `_none` sentinel, in the `user_id` column and keeps `path` as the user-visible relative document path. This avoids reserving ordinary top-level paths such as `projects/...` inside no-project memory scopes while staying compatible with the current document table shape.
+Reuse rule: Reborn memory should port/adapt the current working workspace implementation instead of inventing parallel SQL or chunking semantics. The current source-of-truth implementation is in `src/workspace/{document,chunker,repository,search}.rs`, `src/db/libsql/workspace.rs`, and the existing workspace migrations.
 
-The current repository adapters intentionally touch only document rows:
+The PostgreSQL/libSQL repository adapters map file-shaped memory documents into the existing table family:
 
 ```text
 memory_documents
-```
-
-These remain owned by later memory service/indexer wiring:
-
-```text
 memory_chunks
+memory_chunks_fts          # libSQL FTS5 side table/triggers
 memory_document_versions
-embedding/search index tables
 ```
 
-`RootFilesystem::read_file` and `write_file` expose file-shaped documents; the memory service/repository owns indexing, embedding, metadata inheritance, versioning, and search. Repository writes are the source of truth; index refresh failures leave derived state stale but do not roll back or report the committed write as failed.
+The adapter stores scoped owner identity in the `user_id` column and maps project-scoped documents under `projects/{project_id}/...` so the backend remains compatible with the current document table model. The first memory-owned indexer now ports the existing word-overlap chunking, `sha256:{hex}` version hash format, `DocumentMetadata` shallow merge behavior, nearest ancestor `.config` inheritance, `skip_indexing`, `skip_versioning`, JSON Schema validation, embedding-provider seam, embedded chunk writes, libSQL FTS5 query escaping/search, PostgreSQL FTS query shape, and rank-fused full-text/vector search APIs. Multi-scope search, production provider credential/network wiring, and richer provider-specific result metadata remain later memory service work.
+
+`MemoryBackendFilesystemAdapter` exposes any declared file-document backend as a `RootFilesystem`, but checks `MemoryBackendCapabilities` before calling the backend so unsupported behavior fails closed without plugin side effects. Plugins receive `MemoryContext` after the host has parsed tenant/user/project scope; they do not grant themselves broader authority.
+
+`RepositoryMemoryBackend` wraps the built-in repository/indexer path as the default backend implementation. External memory systems can implement `MemoryBackend` directly or be adapted through MCP/WASM/Rust wrappers later.
+
+`RootFilesystem::read_file` and `write_file` expose file-shaped documents; the memory service/repository owns indexing, embedding, metadata inheritance, versioning, and search.
 
 ---
 

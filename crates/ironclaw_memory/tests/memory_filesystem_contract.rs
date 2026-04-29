@@ -36,8 +36,10 @@ async fn memory_filesystem_maps_virtual_paths_to_repository_keys() {
         MemoryDocumentPath::new("tenant-a", "alice", Some("project-1"), "notes/a.md").unwrap();
 
     fs.write_file(
-        &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/project-1/notes/a.md")
-            .unwrap(),
+        &VirtualPath::new(
+            "/memory/tenants/tenant-a/users/alice/agents/_none/projects/project-1/notes/a.md",
+        )
+        .unwrap(),
         b"memory note",
     )
     .await
@@ -49,8 +51,10 @@ async fn memory_filesystem_maps_virtual_paths_to_repository_keys() {
     );
     assert_eq!(
         fs.read_file(
-            &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/project-1/notes/a.md")
-                .unwrap()
+            &VirtualPath::new(
+                "/memory/tenants/tenant-a/users/alice/agents/_none/projects/project-1/notes/a.md"
+            )
+            .unwrap()
         )
         .await
         .unwrap(),
@@ -59,34 +63,141 @@ async fn memory_filesystem_maps_virtual_paths_to_repository_keys() {
 }
 
 #[tokio::test]
+async fn memory_filesystem_accepts_transitional_no_agent_paths_as_absent_agent_scope() {
+    let repo = Arc::new(InMemoryMemoryDocumentRepository::new());
+    let fs = MemoryDocumentFilesystem::new(repo.clone());
+    let key =
+        MemoryDocumentPath::new("tenant-a", "alice", Some("project-1"), "notes/a.md").unwrap();
+
+    fs.write_file(
+        &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/project-1/notes/a.md")
+            .unwrap(),
+        b"legacy no-agent path",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(key.agent_id(), None);
+    assert_eq!(
+        repo.read_document(&key).await.unwrap().unwrap(),
+        b"legacy no-agent path"
+    );
+}
+
+#[tokio::test]
+async fn memory_filesystem_maps_agent_scoped_virtual_paths_to_repository_keys() {
+    let repo = Arc::new(InMemoryMemoryDocumentRepository::new());
+    let fs = MemoryDocumentFilesystem::new(repo.clone());
+    let key = MemoryDocumentPath::new_with_agent(
+        "tenant-a",
+        "alice",
+        Some("agent-1"),
+        Some("project-1"),
+        "notes/a.md",
+    )
+    .unwrap();
+
+    fs.write_file(
+        &VirtualPath::new(
+            "/memory/tenants/tenant-a/users/alice/agents/agent-1/projects/project-1/notes/a.md",
+        )
+        .unwrap(),
+        b"agent-scoped memory note",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(key.agent_id(), Some("agent-1"));
+    assert_eq!(
+        repo.read_document(&key).await.unwrap().unwrap(),
+        b"agent-scoped memory note"
+    );
+}
+
+#[tokio::test]
+async fn memory_filesystem_preserves_agent_isolation_and_absent_agent_scope() {
+    let repo = Arc::new(InMemoryMemoryDocumentRepository::new());
+    let fs = MemoryDocumentFilesystem::new(repo);
+
+    for (path, bytes) in [
+        (
+            "/memory/tenants/tenant-a/users/alice/agents/agent-1/projects/project-1/MEMORY.md",
+            b"agent 1".as_slice(),
+        ),
+        (
+            "/memory/tenants/tenant-a/users/alice/agents/agent-2/projects/project-1/MEMORY.md",
+            b"agent 2".as_slice(),
+        ),
+        (
+            "/memory/tenants/tenant-a/users/alice/agents/_none/projects/project-1/MEMORY.md",
+            b"no agent".as_slice(),
+        ),
+    ] {
+        fs.write_file(&VirtualPath::new(path).unwrap(), bytes)
+            .await
+            .unwrap();
+    }
+
+    for (path, expected) in [
+        (
+            "/memory/tenants/tenant-a/users/alice/agents/agent-1/projects/project-1/MEMORY.md",
+            b"agent 1".as_slice(),
+        ),
+        (
+            "/memory/tenants/tenant-a/users/alice/agents/agent-2/projects/project-1/MEMORY.md",
+            b"agent 2".as_slice(),
+        ),
+        (
+            "/memory/tenants/tenant-a/users/alice/agents/_none/projects/project-1/MEMORY.md",
+            b"no agent".as_slice(),
+        ),
+    ] {
+        assert_eq!(
+            fs.read_file(&VirtualPath::new(path).unwrap())
+                .await
+                .unwrap(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
 async fn memory_filesystem_preserves_tenant_user_project_isolation() {
     let repo = Arc::new(InMemoryMemoryDocumentRepository::new());
     let fs = MemoryDocumentFilesystem::new(repo);
 
     fs.write_file(
-        &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/project-1/MEMORY.md")
-            .unwrap(),
+        &VirtualPath::new(
+            "/memory/tenants/tenant-a/users/alice/agents/_none/projects/project-1/MEMORY.md",
+        )
+        .unwrap(),
         b"alice tenant-a project-1",
     )
     .await
     .unwrap();
     fs.write_file(
-        &VirtualPath::new("/memory/tenants/tenant-a/users/bob/projects/project-1/MEMORY.md")
-            .unwrap(),
+        &VirtualPath::new(
+            "/memory/tenants/tenant-a/users/bob/agents/_none/projects/project-1/MEMORY.md",
+        )
+        .unwrap(),
         b"bob tenant-a project-1",
     )
     .await
     .unwrap();
     fs.write_file(
-        &VirtualPath::new("/memory/tenants/tenant-b/users/alice/projects/project-1/MEMORY.md")
-            .unwrap(),
+        &VirtualPath::new(
+            "/memory/tenants/tenant-b/users/alice/agents/_none/projects/project-1/MEMORY.md",
+        )
+        .unwrap(),
         b"alice tenant-b project-1",
     )
     .await
     .unwrap();
     fs.write_file(
-        &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/project-2/MEMORY.md")
-            .unwrap(),
+        &VirtualPath::new(
+            "/memory/tenants/tenant-a/users/alice/agents/_none/projects/project-2/MEMORY.md",
+        )
+        .unwrap(),
         b"alice tenant-a project-2",
     )
     .await
@@ -94,8 +205,10 @@ async fn memory_filesystem_preserves_tenant_user_project_isolation() {
 
     assert_eq!(
         fs.read_file(
-            &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/project-1/MEMORY.md")
-                .unwrap(),
+            &VirtualPath::new(
+                "/memory/tenants/tenant-a/users/alice/agents/_none/projects/project-1/MEMORY.md"
+            )
+            .unwrap(),
         )
         .await
         .unwrap(),
@@ -103,8 +216,10 @@ async fn memory_filesystem_preserves_tenant_user_project_isolation() {
     );
     assert_eq!(
         fs.read_file(
-            &VirtualPath::new("/memory/tenants/tenant-a/users/bob/projects/project-1/MEMORY.md")
-                .unwrap(),
+            &VirtualPath::new(
+                "/memory/tenants/tenant-a/users/bob/agents/_none/projects/project-1/MEMORY.md"
+            )
+            .unwrap(),
         )
         .await
         .unwrap(),
@@ -112,8 +227,10 @@ async fn memory_filesystem_preserves_tenant_user_project_isolation() {
     );
     assert_eq!(
         fs.read_file(
-            &VirtualPath::new("/memory/tenants/tenant-b/users/alice/projects/project-1/MEMORY.md")
-                .unwrap(),
+            &VirtualPath::new(
+                "/memory/tenants/tenant-b/users/alice/agents/_none/projects/project-1/MEMORY.md"
+            )
+            .unwrap(),
         )
         .await
         .unwrap(),
@@ -121,8 +238,10 @@ async fn memory_filesystem_preserves_tenant_user_project_isolation() {
     );
     assert_eq!(
         fs.read_file(
-            &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/project-2/MEMORY.md")
-                .unwrap(),
+            &VirtualPath::new(
+                "/memory/tenants/tenant-a/users/alice/agents/_none/projects/project-2/MEMORY.md"
+            )
+            .unwrap(),
         )
         .await
         .unwrap(),
@@ -137,15 +256,15 @@ async fn memory_filesystem_lists_direct_children_from_document_paths() {
 
     for (path, bytes) in [
         (
-            "/memory/tenants/tenant-a/users/alice/projects/_none/SOUL.md",
+            "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/SOUL.md",
             b"soul".as_slice(),
         ),
         (
-            "/memory/tenants/tenant-a/users/alice/projects/_none/notes/a.md",
+            "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/notes/a.md",
             b"a",
         ),
         (
-            "/memory/tenants/tenant-a/users/alice/projects/_none/notes/deep/b.md",
+            "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/notes/deep/b.md",
             b"b",
         ),
     ] {
@@ -155,7 +274,10 @@ async fn memory_filesystem_lists_direct_children_from_document_paths() {
     }
 
     let entries = fs
-        .list_dir(&VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none").unwrap())
+        .list_dir(
+            &VirtualPath::new("/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none")
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -169,12 +291,12 @@ async fn memory_filesystem_lists_direct_children_from_document_paths() {
             (
                 "SOUL.md",
                 FileType::File,
-                "/memory/tenants/tenant-a/users/alice/projects/_none/SOUL.md",
+                "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/SOUL.md",
             ),
             (
                 "notes",
                 FileType::Directory,
-                "/memory/tenants/tenant-a/users/alice/projects/_none/notes",
+                "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/notes",
             ),
         ]
     );
@@ -186,8 +308,10 @@ async fn memory_filesystem_stats_exact_files_and_inferred_directories() {
     let fs = MemoryDocumentFilesystem::new(repo);
 
     fs.write_file(
-        &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/notes/a.md")
-            .unwrap(),
+        &VirtualPath::new(
+            "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/notes/a.md",
+        )
+        .unwrap(),
         b"abc",
     )
     .await
@@ -195,8 +319,10 @@ async fn memory_filesystem_stats_exact_files_and_inferred_directories() {
 
     let file = fs
         .stat(
-            &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/notes/a.md")
-                .unwrap(),
+            &VirtualPath::new(
+                "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/notes/a.md",
+            )
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -205,7 +331,10 @@ async fn memory_filesystem_stats_exact_files_and_inferred_directories() {
 
     let directory = fs
         .stat(
-            &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/notes").unwrap(),
+            &VirtualPath::new(
+                "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/notes",
+            )
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -214,8 +343,10 @@ async fn memory_filesystem_stats_exact_files_and_inferred_directories() {
 
     let err = fs
         .stat(
-            &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/missing.md")
-                .unwrap(),
+            &VirtualPath::new(
+                "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/missing.md",
+            )
+            .unwrap(),
         )
         .await
         .unwrap_err();
@@ -233,8 +364,10 @@ async fn memory_filesystem_invokes_indexer_after_writes() {
     let fs = MemoryDocumentFilesystem::new(repo).with_indexer(indexer.clone());
 
     fs.write_file(
-        &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/project-1/AGENTS.md")
-            .unwrap(),
+        &VirtualPath::new(
+            "/memory/tenants/tenant-a/users/alice/agents/_none/projects/project-1/AGENTS.md",
+        )
+        .unwrap(),
         b"agent instructions",
     )
     .await
@@ -296,7 +429,8 @@ async fn memory_filesystem_rejects_non_document_memory_paths() {
 
     let err = fs
         .write_file(
-            &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none").unwrap(),
+            &VirtualPath::new("/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none")
+                .unwrap(),
             b"not a document",
         )
         .await
