@@ -8,9 +8,10 @@ mod support;
 
 #[cfg(feature = "libsql")]
 mod attachment_tests {
-    use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::OnceLock;
     use std::time::Duration;
+
+    use tokio::sync::Mutex;
 
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
@@ -24,34 +25,13 @@ mod attachment_tests {
     );
     const TIMEOUT: Duration = Duration::from_secs(15);
 
-    fn cwd_lock() -> &'static Mutex<()> {
+    /// Serialize tests that mutate the process-global engine `project_root`
+    /// via `override_engine_project_root_for_test`. Concurrent overrides
+    /// would trample each other's paths — the lock is still required even
+    /// though each test now uses its own tempdir.
+    fn engine_v2_attachment_root_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    struct WorkingDirGuard {
-        original: PathBuf,
-        _guard: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl WorkingDirGuard {
-        fn enter(path: &Path) -> Self {
-            let guard = cwd_lock()
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            let original = std::env::current_dir().expect("current dir");
-            std::env::set_current_dir(path).expect("set current dir");
-            Self {
-                original,
-                _guard: guard,
-            }
-        }
-    }
-
-    impl Drop for WorkingDirGuard {
-        fn drop(&mut self) {
-            std::env::set_current_dir(&self.original).expect("restore current dir");
-        }
     }
 
     fn make_attachment(kind: AttachmentKind) -> IncomingAttachment {
@@ -243,11 +223,28 @@ mod attachment_tests {
 
     #[tokio::test]
     async fn engine_v2_channel_attachments_persist_for_telegram_and_whatsapp() {
-        for channel in ["telegram", "whatsapp"] {
-            let cwd = tempfile::tempdir().expect("temp cwd");
-            let _cwd = WorkingDirGuard::enter(cwd.path());
+        let _guard = engine_v2_attachment_root_lock().lock().await;
 
+        // Each iteration gets its own tempdir so attachment writes stay
+        // fully off the host HOME directory. The previous version of this
+        // test derived `project_root` from `bootstrap::ironclaw_base_dir()`
+        // and would actually write real files into `~/.ironclaw/attachments`
+        // on a dev machine / CI runner.
+        let project_root_tmp = tempfile::tempdir().expect("create attachment project_root tempdir");
+        let project_root = project_root_tmp.path().to_path_buf();
+
+        for channel in ["telegram", "whatsapp"] {
             let rig = TestRigBuilder::new().with_engine_v2().build().await;
+            // Redirect the engine's project_root to our tempdir so the
+            // assertion on saved_path below sees the real write. Without
+            // this override the engine joins paths against the cached
+            // `ironclaw_base_dir()` (first-caller-wins LazyLock), which
+            // resolves to `$HOME/.ironclaw` and is unrelated to the
+            // per-test tempdir here.
+            assert!(
+                ironclaw::bridge::override_engine_project_root_for_test(project_root.clone()).await,
+                "engine state should be installed after build()"
+            );
 
             let attachment_bytes = format!("Attachment from {channel}").into_bytes();
             let mut msg = IncomingMessage::new(channel, "cross-channel-user", "check this file");
@@ -302,7 +299,7 @@ mod attachment_tests {
                 "unexpected persisted path for {channel}: {project_path}"
             );
 
-            let saved_path = cwd.path().join(project_path);
+            let saved_path = project_root.join(project_path);
             assert!(
                 saved_path.exists(),
                 "saved attachment missing: {}",

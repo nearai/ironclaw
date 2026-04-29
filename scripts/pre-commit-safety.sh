@@ -13,6 +13,7 @@
 #   6. .unwrap(), .expect(), assert!() in production code (panics)
 #   7. Gateway/CLI handlers bypassing ToolDispatcher (must go through tools)
 #   8. CredentialName referenced in web-layer code (wrong identity at boundary)
+#   9. SSE broadcast emitted outside the engine→AppEvent projection bridge
 #
 # Also runs check-i18n-parity.sh when crates/ironclaw_gateway/static/i18n/*.js
 # files are staged, to ensure every language pack has the same key set.
@@ -20,6 +21,7 @@
 # Suppress individual lines with an inline "// safety: <reason>" comment.
 # For check #7, use "// dispatch-exempt: <reason>" instead.
 # For check #8, use "// web-identity-exempt: <reason>" instead.
+# For check #9, use "// projection-exempt: <category>, <detail>" instead.
 
 set -euo pipefail
 
@@ -342,7 +344,7 @@ fi
 if [ -n "$DISPATCH_DIFF" ]; then
     DISPATCH_HITS=$(echo "$DISPATCH_DIFF" | grep -nE '^\+' \
         | grep -E 'state\.(store|workspace|workspace_pool|extension_manager|skill_registry|session_manager)\.' \
-        | grep -vE '// dispatch-exempt:|// safety:|^\+\+\+' \
+        | grep -vE '// dispatch-exempt:|// safety:|:\+\+\+ ' \
         | head -5 || true)
     if [ -n "$DISPATCH_HITS" ]; then
         warn "DISPATCH" "Handler directly touches state.{store,workspace,extension_manager,skill_registry,session_manager}. Route through ToolDispatcher::dispatch() instead. See .claude/rules/tools.md."
@@ -370,9 +372,12 @@ if [ -n "$WEB_IDENTITY_DIFF" ]; then
     # Strip lines inside `#[cfg(test)] mod tests` blocks using the same
     # precomputed boundaries used for other prod-only checks.
     WEB_IDENTITY_PROD=$(printf '%s\n' "$WEB_IDENTITY_DIFF" | strip_test_mod_lines)
+    # `(^|[^[:alnum:]_])CredentialName([^[:alnum:]_]|$)` is a portable
+    # word boundary; `grep -E`'s `\b` is a GNU extension and is not
+    # recognised by BSD grep.
     WEB_IDENTITY_HITS=$(echo "$WEB_IDENTITY_PROD" | grep -nE '^\+' \
-        | grep -E '\bCredentialName\b' \
-        | grep -vE '// web-identity-exempt:|// safety:|^\+\+\+' \
+        | grep -E '(^|[^[:alnum:]_])CredentialName([^[:alnum:]_]|$)' \
+        | grep -vE '// web-identity-exempt:|// safety:|:\+\+\+ ' \
         | head -5 || true)
     if [ -n "$WEB_IDENTITY_HITS" ]; then
         warn "CREDNAME" "\`CredentialName\` referenced in src/channels/web/** — web code takes \`ExtensionName\`; credential identity stays backend-side. Push the mapping into bridge::auth_manager or annotate with '// web-identity-exempt: <reason>'."
@@ -380,11 +385,54 @@ if [ -n "$WEB_IDENTITY_DIFF" ]; then
     fi
 fi
 
+# 9. SSE `AppEvent` broadcast outside the engine→AppEvent projection bridge.
+#    Every `AppEvent` that hits the SSE/WS stream should project from a typed
+#    source log (`ironclaw_engine::EventKind`, `JobEvent`, channel-lifecycle)
+#    or belong to the documented transport-only allowlist. Direct
+#    `sse.broadcast(...)` / `sse.broadcast_for_user(...)` calls from tools,
+#    handlers, or extension managers drift the UI stream out of alignment
+#    with the replayable source, which is the root cause of the state
+#    desync class tracked by #2792. See `.claude/rules/gateway-events.md`.
+#
+#    Annotation format: `// projection-exempt: <category>, <detail>` — the
+#    category names the source log (`bridge dispatcher`, `channel-lifecycle`,
+#    `sandbox JobEvent`, `legacy v1 auth`) or the transport-only allowlist
+#    (`transport-only, heartbeat`). The comma is required — an unnamed
+#    `// projection-exempt: legacy` does not suppress the check.
+#
+#    Two match patterns:
+#    1. `*.broadcast_for_user(...)` on any receiver — `broadcast_for_user`
+#       is unique to `SseManager` (see `src/channels/web/platform/sse.rs`),
+#       so matching the method name alone catches both same-line
+#       receivers (`state.sse.broadcast_for_user(...)`) and rustfmt
+#       wraps (`state\n    .sse\n    .broadcast_for_user(...)`) without
+#       risk of false positives from other types.
+#    2. `<word-boundary>sse.broadcast(...)` — the single-name `.broadcast(`
+#       on its own line can be the `Channel` trait method, so this arm
+#       is deliberately narrower and anchors on an `sse` receiver.
+#       `(^|[^[:alnum:]_])sse\.` is a portable boundary; `grep -E`'s
+#       `\b` is a GNU extension and is not recognised by BSD grep, so
+#       we avoid it here.
+#    Suppression regex requires a non-empty detail after the comma:
+#    `[^,]+,[[:space:]]*[^[:space:]]` — `// projection-exempt: foo,`
+#    (empty detail) does NOT exempt; `// projection-exempt: foo, bar`
+#    does. This matches the documented contract in
+#    `.claude/rules/gateway-events.md`.
+PROJECTION_HITS=$(echo "$DIFF_OUTPUT_NO_TESTS" | grep -nE '^\+' \
+    | grep -E '(\.broadcast_for_user|(^|[^[:alnum:]_])sse\.broadcast)[[:space:]]*\(' \
+    | grep -vE '// projection-exempt: [^,]+,[[:space:]]*[^[:space:]]|// safety:|:\+\+\+ ' \
+    | head -5 || true)
+if [ -n "$PROJECTION_HITS" ]; then
+    warn "PROJECTION" "Direct SSE broadcast outside the engine→AppEvent bridge. Route through \`thread_event_to_app_events\` in \`src/bridge/router.rs\` (project from a typed source log) or annotate with '// projection-exempt: <category>, <detail>'. See .claude/rules/gateway-events.md."
+    echo "$PROJECTION_HITS" | sed 's/^/    /'
+fi
+
 if [ "$WARNINGS" -gt 0 ]; then
     echo ""
     echo "Found $WARNINGS potential issue(s). Fix them or add '// safety: <reason>' to suppress."
     echo "(For DISPATCH warnings, use '// dispatch-exempt: <reason>' instead.)"
     echo "(For CREDNAME warnings, use '// web-identity-exempt: <reason>' instead.)"
+    echo "(For PROJECTION warnings, use '// projection-exempt: <category>, <detail>' instead.)"
     echo ""
     exit 1
 fi

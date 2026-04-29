@@ -36,6 +36,7 @@ pub mod runtime;
 pub mod session;
 pub mod smart_routing;
 mod token_refreshing;
+pub(crate) mod tool_schema;
 pub mod transcription;
 
 #[cfg(test)]
@@ -69,6 +70,7 @@ pub use reasoning::{
     TokenUsage, ToolSelection, is_silent_reply, llm_signals_tool_intent,
     user_signals_execution_intent,
 };
+pub(crate) use reasoning::{clean_response, recover_tool_calls_from_content};
 pub use recording::RecordingLlm;
 pub use registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
 pub use response_cache::{CachedProvider, ResponseCacheConfig};

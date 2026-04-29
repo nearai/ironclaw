@@ -126,6 +126,7 @@ def signals_tool_intent(text):
         "read the", "write the", "create", "run the", "execute",
         "query", "retrieve", "add it", "add the", "add this",
         "add that", "update the", "delete", "remove the", "look into",
+        "stop", "pause", "cancel", "halt", "disable",
     ]
 
     for prefix in PREFIXES:
@@ -161,10 +162,33 @@ def signals_execution_intent(text):
         "ship it", "deploy it", "deploy that", "deploy this", "deploy the ",
         "send it", "send that", "send the ",
         "fetch it", "fetch that", "fetch the ",
+        "stop it", "stop that", "stop this", "stop the ",
+        "pause it", "pause that", "pause this", "pause the ",
+        "cancel it", "cancel that", "cancel this", "cancel the ",
+        "halt it", "halt that", "halt this", "halt the ",
+        "disable it", "disable that", "disable this", "disable the ",
         "please run ", "please execute ", "please fetch ",
         "please send ", "please deploy ",
+        "please stop ", "please pause ", "please cancel ",
+        "please halt ", "please disable ",
     ]
-    return any(phrase in lower for phrase in EXEC_PHRASES)
+    if any(phrase in lower for phrase in EXEC_PHRASES):
+        return True
+
+    # Bare imperative commands at the start of the message.
+    # "stop pinging", "stop", "pause", "cancel" are unambiguous commands
+    # that don't match the "verb + pronoun/article" pattern above.
+    # Checking startswith avoids false positives like "I can't stop".
+    # Strip trailing punctuation so "Stop." and "cancel!" still match.
+    trimmed = lower.strip().rstrip(".,!?;:")
+    IMPERATIVE_STARTS = ["stop ", "pause ", "cancel ", "halt ", "disable "]
+    BARE_COMMANDS = ["stop", "pause", "cancel", "halt", "disable"]
+    if trimmed in BARE_COMMANDS:
+        return True
+    if any(trimmed.startswith(s) for s in IMPERATIVE_STARTS):
+        return True
+
+    return False
 
 
 def format_output(result, max_chars=8000):
@@ -217,6 +241,43 @@ def format_docs(docs):
         parts.append("### [" + label + "] " + doc.get("title", "") +
                       "\n" + content + truncated + "\n")
     return "\n".join(parts)
+
+
+def ensure_working_messages(state, context):
+    """Initialize the mutable orchestrator transcript."""
+    existing = state.get("working_messages")
+    if isinstance(existing, list):
+        return existing
+    if isinstance(context, list):
+        state["working_messages"] = list(context)
+    else:
+        state["working_messages"] = []
+    return state["working_messages"]
+
+
+def append_message(messages, role, content, action_name=None, action_call_id=None, action_calls=None):
+    """Append a normalized message to the working transcript."""
+    msg = {"role": role, "content": content}
+    if action_name is not None:
+        msg["action_name"] = action_name
+    if action_call_id is not None:
+        msg["action_call_id"] = action_call_id
+    if action_calls is not None:
+        msg["action_calls"] = action_calls
+    messages.append(msg)
+
+
+def append_system_append(messages, content):
+    """Append additional context to the first system message."""
+    for msg in messages:
+        if msg.get("role") == "System":
+            existing = msg.get("content", "")
+            if existing:
+                msg["content"] = existing + "\n\n" + content
+            else:
+                msg["content"] = content
+            return
+    messages.insert(0, {"role": "System", "content": content})
 
 
 # Conservative fallback heuristic matching the old Rust-side estimator.
@@ -379,11 +440,26 @@ def score_skill(skill, message_lower, message_original):
         trimmed = word.strip(".,!?;:'\"()[]{}<>`~@#$%^&*-_=+/\\|")
         if trimmed:
             words.append(trimmed)
-    for kw in activation.get("keywords", []):
-        kw_lower = kw.lower()
-        if kw_lower in words:
+    # The skill's own name (and the hyphen->space-normalized form) counts
+    # as an implicit keyword. A user who writes "please use pikastream-
+    # video-meeting to prepare this call" is explicitly invoking the
+    # skill by name without the `/` prefix; `extract_explicit_skills`
+    # only picks up slash-prefixed mentions, so without this a manifest
+    # that omits `activation.keywords` would score 0 and never activate
+    # even when the user literally named it. Only count names ≥ 4 chars
+    # so short generic names (e.g. "code") don't match every prompt.
+    name = str(meta.get("name", "")).strip().lower()
+    implicit_keywords = []
+    if len(name) >= 4:
+        implicit_keywords.append(name)
+        normalized_name = name.replace("-", " ").replace("_", " ")
+        if normalized_name != name:
+            implicit_keywords.append(normalized_name)
+    declared = [kw.lower() for kw in activation.get("keywords", [])]
+    for kw in list(dict.fromkeys(declared + implicit_keywords)):
+        if kw in words:
             kw_score += 10
-        elif kw_lower in message_lower:
+        elif kw in message_lower:
             kw_score += 5
     score += min(kw_score, 30)
 
@@ -633,43 +709,6 @@ def format_skills(skills):
                      "automatically inject the required credentials.\n")
 
     return "\n".join(parts)
-
-
-def ensure_working_messages(state, context):
-    """Initialize the mutable orchestrator transcript."""
-    existing = state.get("working_messages")
-    if isinstance(existing, list):
-        return existing
-    if isinstance(context, list):
-        state["working_messages"] = list(context)
-    else:
-        state["working_messages"] = []
-    return state["working_messages"]
-
-
-def append_message(messages, role, content, action_name=None, action_call_id=None, action_calls=None):
-    """Append a normalized message to the working transcript."""
-    msg = {"role": role, "content": content}
-    if action_name is not None:
-        msg["action_name"] = action_name
-    if action_call_id is not None:
-        msg["action_call_id"] = action_call_id
-    if action_calls is not None:
-        msg["action_calls"] = action_calls
-    messages.append(msg)
-
-
-def append_system_append(messages, content):
-    """Append additional context to the first system message."""
-    for msg in messages:
-        if msg.get("role") == "System":
-            existing = msg.get("content", "")
-            if existing:
-                msg["content"] = existing + "\n\n" + content
-            else:
-                msg["content"] = content
-            return
-    messages.insert(0, {"role": "System", "content": content})
 
 
 def complete_result(state, outcome, response=None, error=None, extra=None):

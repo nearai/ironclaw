@@ -1,4 +1,4 @@
-//! Centralized authentication manager for engine v2.
+//! Centralized extension/tool credential authentication manager.
 //!
 //! Owns the pre-flight credential check logic and setup instruction lookup.
 //! Replaces scattered auth knowledge across router.rs, effect_adapter.rs,
@@ -17,10 +17,12 @@ use crate::auth::{
     upsert_auth_descriptor,
 };
 use crate::extensions::naming::canonicalize_extension_name;
-use crate::extensions::{ConfigureResult, ExtensionError};
+use crate::extensions::{
+    ConfigureResult, ExtensionError, InstalledExtension, LatentProviderAction,
+};
 use crate::secrets::SecretsStore;
 use crate::tools::ToolRegistry;
-use crate::tools::builtin::extract_host_from_params;
+use crate::tools::builtin::{extract_host_from_params, extract_path_from_params};
 use crate::tools::wasm::SharedCredentialRegistry;
 use ironclaw_common::{CredentialName, ExtensionName as CommonExtensionName};
 use ironclaw_skills::{SkillCredentialSpec, SkillRegistry};
@@ -88,11 +90,10 @@ pub enum LatentActionExecution {
     },
 }
 
-/// Centralized auth state for the engine v2 bridge layer.
+/// Centralized auth state for extension/tool credential flows.
 ///
 /// Provides pre-flight credential checking, setup instruction lookup,
-/// and tool readiness queries. Injected into `EffectBridgeAdapter` and
-/// `EngineState` by the router at init time.
+/// and tool readiness queries for the engine, gateway, and extension runtime.
 pub struct AuthManager {
     secrets_store: Arc<dyn SecretsStore + Send + Sync>,
     skill_registry: Option<Arc<std::sync::RwLock<SkillRegistry>>>,
@@ -278,7 +279,8 @@ impl AuthManager {
             }
         };
 
-        let matched = credential_registry.find_for_host(&host);
+        let path = extract_path_from_params(parameters).unwrap_or_else(|| "/".to_string());
+        let matched = credential_registry.find_for_url(&host, &path);
         tracing::debug!(
             host = %host,
             matched_count = matched.len(),
@@ -288,8 +290,16 @@ impl AuthManager {
             return AuthCheckResult::NoAuthRequired;
         }
 
+        // Conjunctive evaluation: every *required* matched mapping must
+        // resolve. Endpoints that legitimately need two credentials (e.g. a
+        // Bearer token plus an organization/account header) would otherwise
+        // silently 401 at the wire if only one is configured. `optional`
+        // mappings are allowed to be missing — that's their whole purpose.
         let mut missing = Vec::new();
         for mapping in &matched {
+            if mapping.optional {
+                continue;
+            }
             let oauth_refresh = credential_registry.oauth_refresh_for_secret(&mapping.secret_name);
             let role_lookup = self
                 .tools
@@ -305,13 +315,7 @@ impl AuthManager {
             )
             .await
             {
-                Ok(_) => {
-                    // At least one credential is configured — tool can proceed.
-                    // (Multiple mappings for the same host is normal, e.g.,
-                    // Bearer token + org header. If any is present, we allow
-                    // execution and let the HTTP tool handle partial injection.)
-                    return AuthCheckResult::Ready;
-                }
+                Ok(_) => { /* required credential resolved — keep checking the others */ }
                 Err(error) if error.requires_authentication() => {
                     missing.push(
                         self.describe_missing_credential(&mapping.secret_name, user_id)
@@ -520,6 +524,33 @@ impl AuthManager {
             .collect()
     }
 
+    /// Thin bridge accessor for capability projection inventory.
+    pub(crate) async fn list_capability_extensions(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<InstalledExtension>, ExtensionError> {
+        let Some(ext_mgr) = self.extension_manager.as_ref() else {
+            return Ok(Vec::new());
+        };
+
+        ext_mgr.list(None, true, user_id).await
+    }
+
+    /// Thin bridge accessor for user-scoped latent provider projection.
+    pub(crate) async fn latent_provider_actions(&self, user_id: &str) -> Vec<LatentProviderAction> {
+        let Some(ext_mgr) = self.extension_manager.as_ref() else {
+            return Vec::new();
+        };
+
+        ext_mgr.latent_provider_actions(user_id).await
+    }
+
+    /// Thin bridge accessor for routed channel capability hints.
+    pub(crate) async fn notification_target_for_channel(&self, name: &str) -> Option<String> {
+        let ext_mgr = self.extension_manager.as_ref()?;
+        ext_mgr.notification_target_for_channel(name).await
+    }
+
     pub async fn execute_latent_extension_action(
         &self,
         action_name: &str,
@@ -580,9 +611,11 @@ impl AuthManager {
         user_id: &str,
     ) -> MissingCredential {
         let setup_instructions = self.get_setup_instructions(credential_name);
-        let auth_url = self
-            .start_skill_oauth_if_supported(credential_name, user_id)
-            .await;
+        let auth_url = crate::auth::oauth::sanitize_auth_url(
+            self.start_skill_oauth_if_supported(credential_name, user_id)
+                .await
+                .as_deref(),
+        );
         let setup_instructions = if auth_url.is_some() {
             Some(
                 setup_instructions
@@ -763,6 +796,18 @@ impl AuthManager {
             client_secret_expires_at: None,
             auto_activate_extension: false,
         });
+        let launch = match launch {
+            Ok(launch) => launch,
+            Err(error) => {
+                tracing::error!(
+                    credential_name = %credential_name,
+                    user_id = %user_id,
+                    error = %error,
+                    "Skill OAuth launch rejected due to malformed descriptor; falling back to manual token entry"
+                );
+                return None;
+            }
+        };
         let pending_flow = launch.flow;
 
         if use_gateway {
@@ -775,7 +820,7 @@ impl AuthManager {
                     pending_flow,
                 )
                 .await;
-            return auth_result.auth_url().map(ToString::to_string);
+            return crate::auth::oauth::sanitize_auth_url(auth_result.auth_url());
         } else {
             let listener = oauth::bind_callback_listener().await.ok()?;
             let display_name = pending_flow.display_name.clone();
@@ -860,7 +905,7 @@ impl AuthManager {
             });
         }
 
-        Some(launch.auth_url)
+        crate::auth::oauth::sanitize_auth_url(Some(&launch.auth_url))
     }
 
     fn get_credential_spec(&self, credential_name: &str) -> Option<SkillCredentialSpec> {
@@ -907,6 +952,7 @@ impl AuthManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::secrets::CreateSecretParams;
     use crate::testing::credentials::test_secrets_store;
     use crate::tools::ToolRegistry;
     use std::path::Path;
@@ -1028,6 +1074,42 @@ Test skill
         Arc::new(std::sync::RwLock::new(registry))
     }
 
+    async fn make_skill_registry_with_insecure_oauth(
+        dir: &Path,
+    ) -> Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>> {
+        std::fs::create_dir_all(dir.join("insecure-skill")).expect("create skill dir");
+        std::fs::write(
+            dir.join("insecure-skill").join("SKILL.md"),
+            r#"---
+name: insecure
+version: "1.0.0"
+description: Insecure OAuth test
+activation:
+  keywords: ["insecure"]
+credentials:
+  - name: insecure_oauth_token
+    provider: insecure
+    location:
+      type: bearer
+    hosts: ["api.insecure.test"]
+    oauth:
+      authorization_url: "http://auth.insecure.test/authorize"
+      token_url: "https://auth.insecure.test/token"
+      client_id: "insecure-client-id"
+      client_secret: "insecure-client-secret"
+      scopes: ["read"]
+    setup_instructions: "Sign in with Insecure"
+---
+Test skill
+"#,
+        )
+        .expect("write skill");
+
+        let mut registry = ironclaw_skills::SkillRegistry::new(dir.to_path_buf());
+        registry.discover_all().await;
+        Arc::new(std::sync::RwLock::new(registry))
+    }
+
     fn test_store() -> Arc<dyn SecretsStore + Send + Sync> {
         Arc::new(test_secrets_store())
     }
@@ -1058,6 +1140,77 @@ Test skill
             None => unsafe { std::env::remove_var(key) },
         }
         TestEnvVarGuard { key, original }
+    }
+
+    #[tokio::test]
+    async fn check_http_conjunctive_auth_any_missing_required_raises_gate() {
+        // Regression for Firat round-4 (#3125963977): previously, the first
+        // resolved credential short-circuited with `Ready`, so an endpoint
+        // that requires bearer + org-header would silently 401 at the wire
+        // if only one of the two was configured. Now every required
+        // (non-optional) mapping must resolve; missing ones surface the
+        // auth gate.
+        use crate::secrets::CredentialMapping;
+
+        let store_concrete = test_secrets_store();
+        // Configure ONLY bearer; org_header is missing.
+        store_concrete
+            .create(
+                "user1",
+                CreateSecretParams::new("bearer_tok", "bearer-value"),
+            )
+            .await
+            .expect("store bearer");
+        let store: Arc<dyn SecretsStore + Send + Sync> = Arc::new(store_concrete);
+
+        let registry = SharedCredentialRegistry::new();
+        registry.add_mappings(vec![
+            CredentialMapping::bearer("bearer_tok", "api.example.com"),
+            CredentialMapping::header("org_header", "X-Org-ID", "api.example.com"),
+        ]);
+
+        let mgr = make_auth_manager(store);
+        let params = serde_json::json!({"url": "https://api.example.com/api/v1/users"});
+        let result = mgr
+            .check_action_auth("http", &params, "user1", &registry)
+            .await;
+
+        match result {
+            AuthCheckResult::MissingCredentials(missing) => {
+                assert!(
+                    missing.iter().any(|m| m.credential_name == "org_header"),
+                    "missing org_header should be surfaced even though bearer_tok is configured; got: {missing:?}"
+                );
+            }
+            other => panic!("expected MissingCredentials(org_header), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_http_conjunctive_auth_all_required_resolved_is_ready() {
+        use crate::secrets::CredentialMapping;
+
+        let store_concrete = test_secrets_store();
+        for (name, value) in [("bearer_tok", "bearer-value"), ("org_header", "acme")] {
+            store_concrete
+                .create("user1", CreateSecretParams::new(name, value))
+                .await
+                .expect("store");
+        }
+        let store: Arc<dyn SecretsStore + Send + Sync> = Arc::new(store_concrete);
+
+        let registry = SharedCredentialRegistry::new();
+        registry.add_mappings(vec![
+            CredentialMapping::bearer("bearer_tok", "api.example.com"),
+            CredentialMapping::header("org_header", "X-Org-ID", "api.example.com"),
+        ]);
+
+        let mgr = make_auth_manager(store);
+        let params = serde_json::json!({"url": "https://api.example.com/api/v1/users"});
+        let result = mgr
+            .check_action_auth("http", &params, "user1", &registry)
+            .await;
+        assert!(matches!(result, AuthCheckResult::Ready), "got {result:?}");
     }
 
     #[tokio::test]
@@ -1283,6 +1436,49 @@ Test skill
         let flow = flows.values().next().expect("pending oauth flow");
         assert_eq!(flow.client_id, "custom-client-id");
         assert_eq!(flow.client_secret.as_deref(), Some("custom-client-secret"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn check_http_missing_credential_strips_non_https_skill_auth_url() {
+        let _env_guard = crate::config::helpers::lock_env();
+        let _callback_guard = set_test_env_var(
+            "IRONCLAW_OAUTH_CALLBACK_URL",
+            Some("https://example.com/oauth/callback"),
+        );
+
+        let store = test_store();
+        let skills_dir = tempfile::tempdir().expect("skills dir");
+        let skill_registry = make_skill_registry_with_insecure_oauth(skills_dir.path()).await;
+        let wasm_tools_dir = tempfile::tempdir().expect("wasm tools dir");
+        let wasm_channels_dir = tempfile::tempdir().expect("wasm channels dir");
+        let ext_mgr = make_extension_manager(
+            Arc::clone(&store),
+            wasm_tools_dir.path(),
+            wasm_channels_dir.path(),
+        );
+        let mgr = AuthManager::new(
+            Arc::clone(&store),
+            Some(skill_registry),
+            Some(Arc::clone(&ext_mgr)),
+            None,
+        );
+        let registry = make_registry_with_mapping("insecure_oauth_token", "api.insecure.test");
+        let params = serde_json::json!({"url": "https://api.insecure.test/v1/me"});
+
+        let result = mgr
+            .check_action_auth("http", &params, "user1", &registry)
+            .await;
+        let AuthCheckResult::MissingCredentials(missing) = result else {
+            panic!("expected missing credential");
+        };
+
+        assert_eq!(missing[0].credential_name, "insecure_oauth_token");
+        assert_eq!(missing[0].auth_url, None);
+        assert_eq!(
+            missing[0].setup_instructions.as_deref(),
+            Some("Sign in with Insecure")
+        );
     }
 
     #[tokio::test]
