@@ -19,7 +19,8 @@ use std::{
     future::Future,
     net::{IpAddr, ToSocketAddrs},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, mpsc},
+    sync::atomic::{AtomicBool, Ordering},
+    sync::{Arc, Condvar, Mutex, OnceLock, Weak, mpsc},
     time::{Duration, Instant},
 };
 use thiserror::Error;
@@ -47,6 +48,7 @@ const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
 const MAX_FS_WRITE_BYTES: usize = 1024 * 1024;
 const DEFAULT_FILESYSTEM_BRIDGE_TIMEOUT: Duration = Duration::from_secs(60);
 const HOST_IMPORT_TIMEOUT_CODE: i32 = -12;
+const MAX_CONCURRENT_HOST_IMPORT_THREADS: usize = 64;
 
 /// WASM runtime configuration for the V1 runtime lane.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,10 +168,15 @@ where
     T: Send + 'static,
     Fut: Future<Output = Result<T, FilesystemError>> + Send + 'static,
 {
+    let Some(permit) = host_import_thread_limiter().acquire(DEFAULT_FILESYSTEM_BRIDGE_TIMEOUT)
+    else {
+        return Err("filesystem bridge thread budget exhausted".to_string());
+    };
     let (sender, receiver) = mpsc::sync_channel(1);
     std::thread::Builder::new()
         .name("ironclaw-wasm-fs-bridge".to_string())
         .spawn(move || {
+            let _permit = permit;
             let result = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -594,6 +601,7 @@ pub struct WasmRuntime {
     engine: Engine,
     config: WasmRuntimeConfig,
     prepared_modules: Arc<Mutex<HashMap<ModuleCacheKey, Arc<PreparedWasmModule>>>>,
+    _epoch_ticker: Option<EpochTicker>,
 }
 
 impl WasmRuntime {
@@ -609,11 +617,12 @@ impl WasmRuntime {
         let engine = Engine::new(&wasmtime_config).map_err(|error| WasmError::Engine {
             reason: error.to_string(),
         })?;
-        spawn_epoch_ticker(engine.clone(), config.epoch_tick_interval)?;
+        let epoch_ticker = spawn_epoch_ticker(engine.clone(), config.epoch_tick_interval)?;
         Ok(Self {
             engine,
             config,
             prepared_modules: Arc::new(Mutex::new(HashMap::new())),
+            _epoch_ticker: epoch_ticker,
         })
     }
 
@@ -1211,7 +1220,7 @@ struct RuntimeStoreData {
     limiter: WasmRuntimeLimiter,
     logs: Vec<WasmLogEntry>,
     network_egress_bytes: u64,
-    host_import_timeout: Duration,
+    host_import_deadline: Option<Instant>,
     host_import_timed_out: bool,
     filesystem: Option<Arc<dyn WasmHostFilesystem>>,
     http: Option<Arc<dyn WasmHostHttp>>,
@@ -1228,7 +1237,11 @@ impl RuntimeStoreData {
             limiter: WasmRuntimeLimiter::new(memory_limit),
             logs: Vec::new(),
             network_egress_bytes: 0,
-            host_import_timeout,
+            host_import_deadline: if host_import_timeout.is_zero() {
+                None
+            } else {
+                Instant::now().checked_add(host_import_timeout)
+            },
             host_import_timed_out: false,
             filesystem,
             http,
@@ -1241,6 +1254,25 @@ impl RuntimeStoreData {
 
     fn record_host_import_timeout(&mut self) {
         self.host_import_timed_out = true;
+    }
+
+    fn remaining_host_import_timeout(&mut self) -> Option<Duration> {
+        if self.host_import_timed_out {
+            return None;
+        }
+        let Some(deadline) = self.host_import_deadline else {
+            return Some(Duration::ZERO);
+        };
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            self.record_host_import_timeout();
+            return None;
+        };
+        if remaining.is_zero() {
+            self.record_host_import_timeout();
+            None
+        } else {
+            Some(remaining)
+        }
     }
 
     fn push_log(&mut self, level: WasmLogLevel, message: String) {
@@ -1482,6 +1514,82 @@ enum HostImportCallError<E> {
     Panicked,
 }
 
+struct HostImportThreadLimiter {
+    state: Mutex<HostImportThreadState>,
+    released: Condvar,
+}
+
+#[derive(Debug)]
+struct HostImportThreadState {
+    active: usize,
+}
+
+struct HostImportThreadPermit {
+    limiter: &'static HostImportThreadLimiter,
+}
+
+impl HostImportThreadLimiter {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(HostImportThreadState { active: 0 }),
+            released: Condvar::new(),
+        }
+    }
+
+    fn acquire(&'static self, timeout: Duration) -> Option<HostImportThreadPermit> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if timeout.is_zero() {
+            while state.active >= MAX_CONCURRENT_HOST_IMPORT_THREADS {
+                state = self
+                    .released
+                    .wait(state)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+            state.active += 1;
+            return Some(HostImportThreadPermit { limiter: self });
+        }
+
+        let deadline = Instant::now().checked_add(timeout)?;
+        while state.active >= MAX_CONCURRENT_HOST_IMPORT_THREADS {
+            let remaining = deadline.checked_duration_since(Instant::now())?;
+            let (next_state, wait_result) = self
+                .released
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state = next_state;
+            if wait_result.timed_out() && state.active >= MAX_CONCURRENT_HOST_IMPORT_THREADS {
+                return None;
+            }
+        }
+        state.active += 1;
+        Some(HostImportThreadPermit { limiter: self })
+    }
+
+    fn release(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.active = state.active.saturating_sub(1);
+        self.released.notify_one();
+    }
+}
+
+impl Drop for HostImportThreadPermit {
+    fn drop(&mut self) {
+        self.limiter.release();
+    }
+}
+
+static HOST_IMPORT_THREAD_LIMITER: OnceLock<HostImportThreadLimiter> = OnceLock::new();
+
+fn host_import_thread_limiter() -> &'static HostImportThreadLimiter {
+    HOST_IMPORT_THREAD_LIMITER.get_or_init(HostImportThreadLimiter::new)
+}
+
 fn run_sync_host_import<T, E, F>(
     timeout: Duration,
     operation: F,
@@ -1494,11 +1602,15 @@ where
     if timeout.is_zero() {
         return operation().map_err(HostImportCallError::Operation);
     }
+    let Some(permit) = host_import_thread_limiter().acquire(timeout) else {
+        return Err(HostImportCallError::TimedOut);
+    };
 
     let (sender, receiver) = mpsc::sync_channel(1);
     if std::thread::Builder::new()
         .name("ironclaw-wasm-host-import".to_string())
         .spawn(move || {
+            let _permit = permit;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation))
                 .map_err(|_| HostImportCallError::Panicked)
                 .and_then(|result| result.map_err(HostImportCallError::Operation));
@@ -1512,6 +1624,10 @@ where
     receiver
         .recv_timeout(timeout)
         .map_err(|_| HostImportCallError::TimedOut)?
+}
+
+fn host_import_timeout(caller: &mut Caller<'_, RuntimeStoreData>) -> Option<Duration> {
+    caller.data_mut().remaining_host_import_timeout()
 }
 
 fn record_timeout_and_return_code(caller: &mut Caller<'_, RuntimeStoreData>) -> i32 {
@@ -1532,7 +1648,9 @@ fn host_fs_read_utf8(
     let Some(filesystem) = caller.data().filesystem.clone() else {
         return -10;
     };
-    let timeout = caller.data().host_import_timeout;
+    let Some(timeout) = host_import_timeout(caller) else {
+        return record_timeout_and_return_code(caller);
+    };
     match run_sync_host_import(timeout, move || filesystem.read_utf8(&path)) {
         Ok(contents) => write_guest_bytes(caller, out_ptr, out_cap, contents.as_bytes()),
         Err(HostImportCallError::Operation(_)) => -11,
@@ -1557,7 +1675,9 @@ fn host_fs_write_utf8(
     let Some(filesystem) = caller.data().filesystem.clone() else {
         return -10;
     };
-    let timeout = caller.data().host_import_timeout;
+    let Some(timeout) = host_import_timeout(caller) else {
+        return record_timeout_and_return_code(caller);
+    };
     match run_sync_host_import(timeout, move || filesystem.write_utf8(&path, &contents)) {
         Ok(()) => 0,
         Err(HostImportCallError::Operation(_)) => -11,
@@ -1579,7 +1699,9 @@ fn host_fs_list_utf8(
     let Some(filesystem) = caller.data().filesystem.clone() else {
         return -10;
     };
-    let timeout = caller.data().host_import_timeout;
+    let Some(timeout) = host_import_timeout(caller) else {
+        return record_timeout_and_return_code(caller);
+    };
     match run_sync_host_import(timeout, move || filesystem.list_utf8(&path)) {
         Ok(contents) => write_guest_bytes(caller, out_ptr, out_cap, contents.as_bytes()),
         Err(HostImportCallError::Operation(_)) => -11,
@@ -1599,7 +1721,9 @@ fn host_fs_stat_len(
     let Some(filesystem) = caller.data().filesystem.clone() else {
         return -10;
     };
-    let timeout = caller.data().host_import_timeout;
+    let Some(timeout) = host_import_timeout(caller) else {
+        return record_timeout_and_return_code(caller) as i64;
+    };
     match run_sync_host_import(timeout, move || filesystem.stat_len(&path)) {
         Ok(len) => len.min(i64::MAX as u64) as i64,
         Err(HostImportCallError::Operation(_)) => -11,
@@ -1686,7 +1810,9 @@ fn host_http_request_utf8(caller: &mut Caller<'_, RuntimeStoreData>, args: HttpI
         return -10;
     };
     let request_body_bytes = body.len() as u64;
-    let timeout = caller.data().host_import_timeout;
+    let Some(timeout) = host_import_timeout(caller) else {
+        return record_timeout_and_return_code(caller);
+    };
     let request = WasmHttpRequest {
         method,
         url,
@@ -1935,19 +2061,48 @@ fn enable_compilation_cache(config: &mut Config, cache_dir: &Path) -> Result<(),
     Ok(())
 }
 
-fn spawn_epoch_ticker(engine: Engine, tick_interval: Duration) -> Result<(), WasmError> {
-    if tick_interval.is_zero() {
-        return Ok(());
+#[derive(Debug, Clone)]
+struct EpochTicker {
+    _state: Arc<EpochTickerState>,
+}
+
+#[derive(Debug)]
+struct EpochTickerState {
+    stop: AtomicBool,
+}
+
+impl Drop for EpochTickerState {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
     }
+}
+
+fn spawn_epoch_ticker(
+    engine: Engine,
+    tick_interval: Duration,
+) -> Result<Option<EpochTicker>, WasmError> {
+    if tick_interval.is_zero() {
+        return Ok(None);
+    }
+    let state = Arc::new(EpochTickerState {
+        stop: AtomicBool::new(false),
+    });
+    let weak_state: Weak<EpochTickerState> = Arc::downgrade(&state);
     std::thread::Builder::new()
         .name("ironclaw-wasm-epoch-ticker".to_string())
         .spawn(move || {
-            loop {
+            while let Some(state) = weak_state.upgrade() {
+                if state.stop.load(Ordering::SeqCst) {
+                    break;
+                }
                 std::thread::sleep(tick_interval);
+                if state.stop.load(Ordering::SeqCst) {
+                    break;
+                }
                 engine.increment_epoch();
             }
         })
-        .map(|_| ())
+        .map(|_| Some(EpochTicker { _state: state }))
         .map_err(|error| WasmError::Engine {
             reason: format!("failed to spawn epoch ticker thread: {error}"),
         })
@@ -2036,5 +2191,50 @@ fn resource_usage(start: Instant, output_bytes: u64, network_egress_bytes: u64) 
         output_bytes,
         network_egress_bytes,
         process_count: 1,
+    }
+}
+
+#[cfg(test)]
+mod review_hardening_tests {
+    use super::*;
+
+    #[test]
+    fn runtime_store_data_uses_one_invocation_wide_host_import_deadline() {
+        let mut store = RuntimeStoreData::new(1024, Duration::from_millis(50), None, None);
+
+        let first = store.remaining_host_import_timeout().unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+        let second = store.remaining_host_import_timeout().unwrap();
+
+        assert!(
+            second < first,
+            "host import timeout budget must not reset per import"
+        );
+        assert!(!store.host_import_timed_out);
+    }
+
+    #[test]
+    fn runtime_store_data_fails_subsequent_imports_after_timeout() {
+        let mut store = RuntimeStoreData::new(1024, Duration::from_millis(1), None, None);
+
+        std::thread::sleep(Duration::from_millis(5));
+
+        assert_eq!(store.remaining_host_import_timeout(), None);
+        assert!(store.host_import_timed_out);
+        assert_eq!(store.remaining_host_import_timeout(), None);
+    }
+
+    #[test]
+    fn epoch_ticker_thread_does_not_own_shutdown_state() {
+        let engine = Engine::default();
+        let ticker = spawn_epoch_ticker(engine, Duration::from_millis(1))
+            .unwrap()
+            .unwrap();
+        let weak = Arc::downgrade(&ticker._state);
+
+        drop(ticker);
+        std::thread::sleep(Duration::from_millis(5));
+
+        assert!(weak.upgrade().is_none());
     }
 }
