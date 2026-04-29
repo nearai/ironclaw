@@ -17,28 +17,31 @@ use std::sync::{Arc, RwLock};
 
 use ironclaw_host_api::{CapabilityId, PackageIdentity, Timestamp};
 
-use crate::decision::EffectiveTrustClass;
+use crate::decision::{AuthorityCeiling, EffectiveTrustClass, TrustDecision};
 
 /// Listener notified when effective trust for a package changes.
 pub trait TrustChangeListener: Send + Sync {
     fn on_trust_changed(&self, change: &TrustChange);
 }
 
-/// One trust-change event.
+/// One invalidation-relevant trust/authority change event.
 ///
-/// Use [`TrustChange::new`] to construct — it filters no-ops (`previous ==
-/// current`) by returning `None`. Direct struct-literal construction is
+/// Use [`TrustChange::new`] to construct — it compares the full previous
+/// and current [`TrustDecision`] and filters no-ops / benign authority
+/// expansions by returning `None`. Direct struct-literal construction is
 /// still possible for tests but [`InvalidationBus::publish`] applies a
-/// defense-in-depth filter that drops a no-op rather than fanning it out.
+/// defense-in-depth filter that drops events with neither a trust-class
+/// change nor an authority-ceiling reduction.
 ///
 /// Listeners that only care about *downgrades* (the AC #6 case — revoke
-/// grants whose authority no longer fits the lower ceiling) should gate
-/// on [`TrustChange::is_downgrade`]. Listeners that scope grants to a
-/// specific privilege *kind* (e.g., FirstParty vs System) must also
-/// react to [`TrustChange::is_kind_change`]. Listeners coding the naive
-/// pattern "any TrustChange ⇒ revoke" will over-revoke on benign
-/// upgrades — the helpers exist so that's a code-review-visible bug
-/// rather than a silent default.
+/// grants whose authority no longer fits the lower trust ceiling) should
+/// gate on [`TrustChange::is_downgrade`]. Listeners must also treat
+/// [`TrustChange::authority_ceiling_reduced`] as invalidating: a same-class
+/// removal of `WriteFilesystem`, or a stricter resource ceiling, can make
+/// retained grants exceed the new cap even though `effective_trust` did
+/// not change. Listeners that scope grants to a specific privilege *kind*
+/// (e.g., FirstParty vs System) should also react to
+/// [`TrustChange::is_kind_change`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustChange {
     pub identity: PackageIdentity,
@@ -55,31 +58,43 @@ pub struct TrustChange {
     /// gives deterministic iteration order, which matters for
     /// audit-replay and golden-file comparisons.
     pub previous_authority: BTreeSet<CapabilityId>,
+    /// Authority ceiling before the policy mutation.
+    pub previous_authority_ceiling: AuthorityCeiling,
+    /// Authority ceiling after the policy mutation.
+    pub current_authority_ceiling: AuthorityCeiling,
     pub effective_at: Timestamp,
 }
 
 impl TrustChange {
-    /// Construct a `TrustChange`. Returns `None` when `previous == current`
-    /// — no-ops are not publishable events. This is the recommended
-    /// construction path; struct-literal construction skips the no-op
-    /// check, but [`InvalidationBus::publish`] still drops no-ops as
-    /// defense-in-depth.
+    /// Construct a `TrustChange` from full policy decisions. Returns `None`
+    /// when neither the trust class changed nor the authority ceiling shrank.
+    ///
+    /// Same-class authority reductions are publishable because existing
+    /// grants may now exceed the new `AuthorityCeiling`; benign expansions
+    /// are not publishable because they do not require fail-closed grant
+    /// invalidation.
     pub fn new(
         identity: PackageIdentity,
-        previous: EffectiveTrustClass,
-        current: EffectiveTrustClass,
+        previous_decision: &TrustDecision,
+        current_decision: &TrustDecision,
         previous_authority: BTreeSet<CapabilityId>,
-        effective_at: Timestamp,
     ) -> Option<Self> {
-        if previous == current {
+        let authority_ceiling_reduced = current_decision
+            .authority_ceiling
+            .is_reduction_from(&previous_decision.authority_ceiling);
+        if previous_decision.effective_trust == current_decision.effective_trust
+            && !authority_ceiling_reduced
+        {
             return None;
         }
         Some(Self {
             identity,
-            previous,
-            current,
+            previous: previous_decision.effective_trust,
+            current: current_decision.effective_trust,
             previous_authority,
-            effective_at,
+            previous_authority_ceiling: previous_decision.authority_ceiling.clone(),
+            current_authority_ceiling: current_decision.authority_ceiling.clone(),
+            effective_at: current_decision.evaluated_at,
         })
     }
 
@@ -107,6 +122,15 @@ impl TrustChange {
     pub fn is_kind_change(&self) -> bool {
         self.previous != self.current
             && self.current.authority_level() == self.previous.authority_level()
+    }
+
+    /// True when the trust class stayed the same but the grant ceiling got
+    /// stricter, or when a trust-class change also carried a stricter
+    /// ceiling. This is invalidation-relevant because retained grants may
+    /// include effects or resource budgets no longer allowed.
+    pub fn authority_ceiling_reduced(&self) -> bool {
+        self.current_authority_ceiling
+            .is_reduction_from(&self.previous_authority_ceiling)
     }
 }
 
@@ -143,18 +167,18 @@ impl InvalidationBus {
     /// every listener having processed the change. A panicking listener
     /// propagates on the publishing thread — fail-closed.
     ///
-    /// No-op changes (`previous == current`) are dropped without invoking
-    /// any listener. The recommended construction path
-    /// ([`TrustChange::new`]) prevents no-ops at the source; this filter
-    /// is defense-in-depth for callers that built a `TrustChange` via
-    /// struct literal. In debug builds the no-op trips an assertion so
-    /// the offending caller is surfaced loudly.
+    /// Events with no trust-class change and no authority-ceiling reduction
+    /// are dropped without invoking any listener. The recommended
+    /// construction path ([`TrustChange::new`]) prevents these at the
+    /// source; this filter is defense-in-depth for callers that built a
+    /// `TrustChange` via struct literal. In debug builds the no-op trips an
+    /// assertion so the offending caller is surfaced loudly.
     pub fn publish(&self, change: TrustChange) {
-        if change.previous == change.current {
+        if change.previous == change.current && !change.authority_ceiling_reduced() {
             debug_assert!(
                 false,
-                "TrustChange with previous == current reached InvalidationBus::publish — \
-                 use TrustChange::new(...) which filters no-ops at construction"
+                "TrustChange without trust-class change or authority-ceiling reduction \
+                 reached InvalidationBus::publish — use TrustChange::new(...)"
             );
             return;
         }

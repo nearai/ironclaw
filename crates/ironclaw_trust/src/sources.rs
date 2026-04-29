@@ -11,7 +11,7 @@
 //!
 //! `BundledRegistry`, `AdminConfig`, and `SignedRegistry` mutate in place
 //! via `upsert` / `remove`. Per AC #6 of issue #3012, any mutation that
-//! *lowers* a previously-effective trust class must publish a
+//! lowers effective trust or shrinks the authority ceiling must publish a
 //! [`crate::TrustChange`] on an [`crate::InvalidationBus`] **before** any
 //! subsequent dispatch can run under the stale ceiling.
 //!
@@ -22,10 +22,10 @@
 //! runtime-mutation path**: the per-source `upsert` / `remove` methods are
 //! `pub(crate)` and reachable only through
 //! [`crate::SourceMutators`] inside a `mutate_with` closure. That call
-//! pre-evaluates, runs the mutation, post-evaluates, and publishes a
-//! `TrustChange` synchronously if the effective trust class changed —
-//! making AC #6 a compile-time guarantee rather than a doc-comment
-//! convention.
+//! pre-evaluates, stages fallible mutations, commits only after the closure
+//! succeeds, post-evaluates, and publishes a `TrustChange` synchronously if
+//! trust changed or the authority ceiling shrank — making AC #6 a
+//! compile-time guarantee rather than a doc-comment convention.
 //!
 //! Construction-time population (the `with_entries` / `with_signers`
 //! constructors below) remains `pub` because no policy state exists for an
@@ -122,6 +122,15 @@ impl BundledRegistry {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         entries.insert(entry.package_id.clone(), entry);
+    }
+
+    /// Return an entry by id, without mutating it.
+    pub(crate) fn get(&self, package_id: &PackageId) -> Option<BundledEntry> {
+        let entries = self
+            .entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        entries.get(package_id).cloned()
     }
 
     /// Remove an entry by id, returning the previous value if any.
@@ -301,8 +310,27 @@ impl AdminEntry {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct AdminSubject {
+    package_id: PackageId,
+    source: PackageSource,
+}
+
+impl AdminSubject {
+    pub(crate) fn new(package_id: PackageId, source: PackageSource) -> Self {
+        Self { package_id, source }
+    }
+
+    fn from_entry(entry: &AdminEntry) -> Self {
+        Self {
+            package_id: entry.package_id.clone(),
+            source: entry.source.clone(),
+        }
+    }
+}
+
 pub struct AdminConfig {
-    entries: RwLock<HashMap<PackageId, AdminEntry>>,
+    entries: RwLock<HashMap<AdminSubject, AdminEntry>>,
 }
 
 impl AdminConfig {
@@ -315,7 +343,7 @@ impl AdminConfig {
     pub fn with_entries<I: IntoIterator<Item = AdminEntry>>(entries: I) -> Self {
         let map = entries
             .into_iter()
-            .map(|entry| (entry.package_id.clone(), entry))
+            .map(|entry| (AdminSubject::from_entry(&entry), entry))
             .collect();
         Self {
             entries: RwLock::new(map),
@@ -329,17 +357,32 @@ impl AdminConfig {
             .entries
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        entries.insert(entry.package_id.clone(), entry);
+        entries.insert(AdminSubject::from_entry(&entry), entry);
     }
 
-    /// Remove an entry by id, returning the previous value if any.
+    /// Return an entry by full trust subject, without mutating it.
+    pub(crate) fn get(&self, package_id: &PackageId, source: &PackageSource) -> Option<AdminEntry> {
+        let entries = self
+            .entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        entries
+            .get(&AdminSubject::new(package_id.clone(), source.clone()))
+            .cloned()
+    }
+
+    /// Remove an entry by full trust subject, returning the previous value if any.
     /// `pub(crate)` — runtime mutation must go through `mutate_with`.
-    pub(crate) fn remove(&self, package_id: &PackageId) -> Option<AdminEntry> {
+    pub(crate) fn remove(
+        &self,
+        package_id: &PackageId,
+        source: &PackageSource,
+    ) -> Option<AdminEntry> {
         let mut entries = self
             .entries
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        entries.remove(package_id)
+        entries.remove(&AdminSubject::new(package_id.clone(), source.clone()))
     }
 }
 
@@ -363,17 +406,12 @@ impl PolicySource for AdminConfig {
             .entries
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(entry) = entries.get(&input.identity.package_id) else {
+        let Some(entry) = entries.get(&AdminSubject::new(
+            input.identity.package_id.clone(),
+            input.identity.source.clone(),
+        )) else {
             return Ok(None);
         };
-        // Source pin: an admin entry binds elevation to a specific
-        // `PackageSource`. Mismatch falls through (returns `None`) so a
-        // less-trusted-origin package with the same `package_id` cannot
-        // inherit the elevation. This is the structural fix for the
-        // shadowing footgun documented in the PR3043 review.
-        if entry.source != input.identity.source {
-            return Ok(None);
-        }
         // Digest pin: same drift semantics as `BundledRegistry` — when set,
         // the package's digest must match exactly. Drift falls through to
         // the default downgrade, which is the AC #7 grant-reissue trigger.
@@ -467,6 +505,15 @@ impl SignedRegistry {
         entries.insert(entry.signer.clone(), entry);
     }
 
+    /// Return a trusted signer without mutating it.
+    pub(crate) fn get(&self, signer: &str) -> Option<SignerEntry> {
+        let entries = self
+            .trusted_signers
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        entries.get(signer).cloned()
+    }
+
     /// Remove a trusted signer. `pub(crate)` — runtime mutation must go
     /// through `mutate_with`.
     pub(crate) fn remove(&self, signer: &str) -> Option<SignerEntry> {
@@ -556,10 +603,10 @@ impl LocalDevOverride {
     /// PR1b's contract is that the source is inert until the future
     /// dev-override implementation lands. The fixture exists so tests
     /// can pin that inert contract: enabling + staging overrides must
-    /// not produce trust under any input. Gated on the `test-fixtures`
-    /// feature so production builds cannot reach this path even if a
-    /// future caller forgets the discipline.
-    #[cfg(any(test, feature = "test-fixtures"))]
+    /// not produce trust under any input. It is compiled only for this
+    /// crate's `#[cfg(test)]` targets and is not exposed by any Cargo
+    /// feature.
+    #[cfg(test)]
     pub fn enabled_for_test(entries: Vec<(PackageId, AdminEntry)>) -> Self {
         let map: HashMap<_, _> = entries.into_iter().collect();
         Self {
@@ -600,6 +647,7 @@ impl PolicySource for LocalDevOverride {
 /// [`crate::fixtures`] for the public, hidden-from-docs surface that
 /// integration tests use; this internal helper takes the
 /// [`EffectiveTrustClass`] directly.
+#[cfg(test)]
 pub(crate) fn bundled_entry_with_trust(
     package_id: PackageId,
     digest: Option<String>,
@@ -616,6 +664,7 @@ pub(crate) fn bundled_entry_with_trust(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn admin_entry_with_trust(
     package_id: PackageId,
     source: PackageSource,

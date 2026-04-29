@@ -18,21 +18,23 @@
 //! behavior at the integration boundary that PR3 will eventually own.
 
 use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
 
-use chrono::Utc;
-use ironclaw_host_api::{
-    CapabilityId, EffectKind, PackageId, PackageIdentity, PackageSource, RequestedTrustClass,
-    TrustClass,
-};
-use ironclaw_trust::fixtures::{
+use crate::fixtures::{
     admin_entry_for_test, admin_entry_with_digest_for_test, bundled_entry_for_test,
     effective_first_party_for_test, effective_system_for_test,
 };
-use ironclaw_trust::{
+use crate::{
     AdminConfig, AdminEntry, BundledRegistry, EffectiveTrustClass, HostTrustPolicy,
-    InvalidationBus, LocalDevOverride, PolicySource, TrustChange, TrustDecision, TrustError,
-    TrustPolicy, TrustPolicyInput, TrustProvenance, authority_changed, grant_retention_eligible,
-    identity_changed,
+    InvalidationBus, LocalDevOverride, PolicySource, TrustChange, TrustChangeListener,
+    TrustDecision, TrustError, TrustPolicy, TrustPolicyInput, TrustProvenance, authority_changed,
+    grant_retention_eligible, identity_changed,
+};
+use chrono::Utc;
+use ironclaw_host_api::{
+    CapabilityId, EffectKind, PackageId, PackageIdentity, PackageSource, RequestedTrustClass,
+    ResourceCeiling, TrustClass,
 };
 use static_assertions::assert_not_impl_any;
 
@@ -49,13 +51,13 @@ use static_assertions::assert_not_impl_any;
 // ---------------------------------------------------------------------------
 assert_not_impl_any!(EffectiveTrustClass: serde::de::DeserializeOwned);
 
-use crate::support::{FakeAuthorizer, FakeGrantStore};
+use self::support::{FakeAuthorizer, FakeGrantStore};
 
 mod support {
     use std::sync::{Arc, Mutex};
 
+    use crate::{EffectiveTrustClass, TrustChange, TrustChangeListener};
     use ironclaw_host_api::{CapabilityId, PackageIdentity};
-    use ironclaw_trust::{EffectiveTrustClass, TrustChange, TrustChangeListener};
 
     /// Records every invalidation that fires on the bus, in order, with the
     /// timestamp at which it was observed. Used to assert ordering against
@@ -185,6 +187,43 @@ fn input(identity: PackageIdentity, requested: RequestedTrustClass) -> TrustPoli
 /// invariant the type signature is enforcing in production.
 fn caps(names: &[&str]) -> BTreeSet<CapabilityId> {
     names.iter().map(|n| cap(n)).collect()
+}
+
+fn decision_for_test(
+    effective_trust: EffectiveTrustClass,
+    allowed_effects: Vec<EffectKind>,
+) -> TrustDecision {
+    TrustDecision {
+        effective_trust,
+        authority_ceiling: crate::AuthorityCeiling {
+            allowed_effects,
+            max_resource_ceiling: None,
+        },
+        provenance: TrustProvenance::AdminConfig,
+        evaluated_at: Utc::now(),
+    }
+}
+
+fn trust_change_for_test(
+    identity: PackageIdentity,
+    previous: EffectiveTrustClass,
+    current: EffectiveTrustClass,
+    previous_authority: BTreeSet<CapabilityId>,
+) -> Option<TrustChange> {
+    let previous = decision_for_test(previous, Vec::new());
+    let current = decision_for_test(current, Vec::new());
+    TrustChange::new(identity, &previous, &current, previous_authority)
+}
+
+fn output_token_ceiling(max_output_tokens: u64) -> ResourceCeiling {
+    ResourceCeiling {
+        max_usd: None,
+        max_input_tokens: None,
+        max_output_tokens: Some(max_output_tokens),
+        max_wall_clock_ms: None,
+        max_output_bytes: None,
+        sandbox: None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -398,12 +437,11 @@ fn t7_downgrade_publishes_invalidation_before_next_dispatch() {
     let identity = bundled_identity("ironclaw_core", Some("digest_v1"));
     let prev_authority = caps(&["ironclaw_core.dispatch"]);
 
-    let change = TrustChange::new(
+    let change = trust_change_for_test(
         identity.clone(),
         effective_system_for_test(),
         EffectiveTrustClass::user_trusted(),
         prev_authority.clone(),
-        Utc::now(),
     )
     .expect("System → UserTrusted is a real change, not a no-op");
     bus.publish(change.clone());
@@ -446,12 +484,11 @@ fn t8_revocation_publishes_invalidation_before_next_dispatch() {
     // Revocation models a complete drop to non-privileged trust due to a
     // policy-source removal (admin removed the entry).
     let identity = bundled_identity("ironclaw_core", None);
-    let change = TrustChange::new(
+    let change = trust_change_for_test(
         identity.clone(),
         effective_system_for_test(),
         EffectiveTrustClass::sandbox(),
         caps(&["ironclaw_core.dispatch"]),
-        Utc::now(),
     )
     .expect("System → Sandbox is a real revocation, not a no-op");
     bus.publish(change.clone());
@@ -798,6 +835,122 @@ fn t13e_admin_for_local_manifest_elevates_when_explicit() {
 }
 
 // ---------------------------------------------------------------------------
+// T13f — admin config stores same-id entries independently by source.
+//
+// Regression for the PR3043 inline review: the trust subject is the full
+// `(package_id, source)` pair, not `package_id` alone. A source-pinned
+// map must retain both entries and evaluate each independently.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t13f_admin_config_keeps_same_id_entries_for_distinct_sources() {
+    let package_id = pkg("shared_pkg");
+    let admin = AdminConfig::with_entries([
+        admin_entry_for_test(
+            package_id.clone(),
+            PackageSource::Bundled,
+            effective_first_party_for_test(),
+            vec![EffectKind::ReadFilesystem],
+        ),
+        AdminEntry::for_registry(
+            package_id.clone(),
+            "https://trusted.example/registry".to_string(),
+            None,
+            effective_system_for_test(),
+            vec![EffectKind::Network],
+            None,
+        ),
+    ]);
+    let policy = HostTrustPolicy::new(vec![Box::new(admin)]);
+
+    let bundled = policy
+        .evaluate(&input(
+            bundled_identity("shared_pkg", None),
+            RequestedTrustClass::FirstPartyRequested,
+        ))
+        .unwrap();
+    assert_eq!(bundled.effective_trust.class(), TrustClass::FirstParty);
+    assert_eq!(
+        bundled.authority_ceiling.allowed_effects,
+        vec![EffectKind::ReadFilesystem]
+    );
+
+    let registry = policy
+        .evaluate(&input(
+            PackageIdentity::new(
+                package_id,
+                PackageSource::Registry {
+                    url: "https://trusted.example/registry".to_string(),
+                },
+                None,
+                None,
+            ),
+            RequestedTrustClass::SystemRequested,
+        ))
+        .unwrap();
+    assert_eq!(registry.effective_trust.class(), TrustClass::System);
+    assert_eq!(
+        registry.authority_ceiling.allowed_effects,
+        vec![EffectKind::Network]
+    );
+}
+
+#[test]
+fn t13g_admin_remove_is_source_aware() {
+    let package_id = pkg("shared_pkg");
+    let registry_source = PackageSource::Registry {
+        url: "https://trusted.example/registry".to_string(),
+    };
+    let admin = AdminConfig::with_entries([
+        admin_entry_for_test(
+            package_id.clone(),
+            PackageSource::Bundled,
+            effective_first_party_for_test(),
+            vec![EffectKind::ReadFilesystem],
+        ),
+        admin_entry_for_test(
+            package_id.clone(),
+            registry_source.clone(),
+            effective_system_for_test(),
+            vec![EffectKind::Network],
+        ),
+    ]);
+    let policy = HostTrustPolicy::new(vec![Box::new(admin)]);
+    let bus = InvalidationBus::new();
+
+    let removed = policy
+        .mutate_with(
+            &bus,
+            PackageIdentity::new(package_id.clone(), registry_source.clone(), None, None),
+            caps(&["shared_pkg.network"]),
+            RequestedTrustClass::SystemRequested,
+            |m| m.admin_remove(&package_id, &registry_source),
+        )
+        .unwrap();
+    assert!(removed.is_some());
+
+    let bundled = policy
+        .evaluate(&input(
+            bundled_identity("shared_pkg", None),
+            RequestedTrustClass::FirstPartyRequested,
+        ))
+        .unwrap();
+    assert_eq!(
+        bundled.effective_trust.class(),
+        TrustClass::FirstParty,
+        "removing the registry entry must not remove the bundled entry"
+    );
+
+    let registry = policy
+        .evaluate(&input(
+            PackageIdentity::new(package_id, registry_source, None, None),
+            RequestedTrustClass::SystemRequested,
+        ))
+        .unwrap();
+    assert_eq!(registry.effective_trust.class(), TrustClass::Sandbox);
+}
+
+// ---------------------------------------------------------------------------
 // T14 — `mutate_with` orchestrates pre-eval / mutate / post-eval / publish.
 //
 // Regression for the "InvalidationBus orchestration is enforced only by
@@ -812,8 +965,11 @@ fn t13e_admin_for_local_manifest_elevates_when_explicit() {
 // T14c — closure return value is surfaced to the caller.
 // T14d — missing source kind yields `InvariantViolation` with the type
 //        spelled out in the message.
-// T14e — closure errors short-circuit the orchestration: no publish, no
-//        post-evaluate.
+// T14e — closure errors roll back staged mutations: no state change and no
+//        publish.
+// T14f — same-trust allowed-effect reductions publish.
+// T14g — evaluate waits until synchronous invalidation publish completes.
+// T14h — same-trust resource-ceiling reductions publish.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -839,7 +995,7 @@ fn t14_mutate_with_publishes_when_affected_trust_class_drops() {
             prev_authority.clone(),
             RequestedTrustClass::FirstPartyRequested,
             |m| {
-                m.admin_remove(&pkg("operator_blessed"))?;
+                m.admin_remove(&pkg("operator_blessed"), &PackageSource::Bundled)?;
                 Ok(())
             },
         )
@@ -918,7 +1074,7 @@ fn t14c_mutate_with_returns_closure_result() {
             bundled_identity("operator_blessed", None),
             BTreeSet::new(),
             RequestedTrustClass::FirstPartyRequested,
-            |m| m.admin_remove(&pkg("operator_blessed")),
+            |m| m.admin_remove(&pkg("operator_blessed"), &PackageSource::Bundled),
         )
         .unwrap();
 
@@ -941,7 +1097,7 @@ fn t14d_mutate_with_surfaces_missing_source_kind() {
         BTreeSet::new(),
         RequestedTrustClass::ThirdParty,
         |m| {
-            m.admin_remove(&pkg("anything"))?;
+            m.admin_remove(&pkg("anything"), &PackageSource::Bundled)?;
             Ok(())
         },
     );
@@ -954,7 +1110,7 @@ fn t14d_mutate_with_surfaces_missing_source_kind() {
 }
 
 #[test]
-fn t14e_mutate_with_short_circuits_on_closure_error() {
+fn t14e_mutate_with_rolls_back_staged_mutations_on_closure_error() {
     let admin = AdminConfig::with_entries([admin_entry_for_test(
         pkg("operator_blessed"),
         PackageSource::Bundled,
@@ -966,17 +1122,18 @@ fn t14e_mutate_with_short_circuits_on_closure_error() {
     let store = FakeGrantStore::new();
     bus.register(store.clone());
 
-    // Closure performs a real mutation, then errors. The trust class for
-    // the affected identity *would* have changed, but because the closure
-    // errored we must NOT publish — the caller has to handle the partial
-    // state explicitly.
+    let identity = bundled_identity("operator_blessed", None);
+
+    // Closure stages a real removal, then errors. The staged mutation must
+    // roll back: policy state remains unchanged and no invalidation is
+    // necessary because no lower decision became visible.
     let result: Result<(), TrustError> = policy.mutate_with(
         &bus,
-        bundled_identity("operator_blessed", None),
+        identity.clone(),
         BTreeSet::new(),
         RequestedTrustClass::FirstPartyRequested,
         |m| {
-            m.admin_remove(&pkg("operator_blessed"))?;
+            m.admin_remove(&pkg("operator_blessed"), &PackageSource::Bundled)?;
             Err(TrustError::InvariantViolation {
                 reason: "simulated downstream failure".to_string(),
             })
@@ -986,9 +1143,220 @@ fn t14e_mutate_with_short_circuits_on_closure_error() {
     assert!(matches!(result, Err(TrustError::InvariantViolation { .. })));
     assert!(
         store.invalidations().is_empty(),
-        "closure errors must short-circuit before publish — \
-         partial mutations are the caller's problem"
+        "rolled-back closure errors must not publish"
     );
+
+    let decision = policy
+        .evaluate(&input(identity, RequestedTrustClass::FirstPartyRequested))
+        .unwrap();
+    assert_eq!(
+        decision.effective_trust.class(),
+        TrustClass::FirstParty,
+        "staged removal must not be committed after the closure returns Err"
+    );
+}
+
+#[test]
+fn t14f_mutate_with_publishes_when_same_trust_loses_allowed_effects() {
+    let admin = AdminConfig::with_entries([admin_entry_for_test(
+        pkg("operator_blessed"),
+        PackageSource::Bundled,
+        effective_first_party_for_test(),
+        vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+    )]);
+    let policy = HostTrustPolicy::new(vec![Box::new(admin)]);
+    let bus = InvalidationBus::new();
+    let store = FakeGrantStore::new();
+    bus.register(store.clone());
+
+    let identity = bundled_identity("operator_blessed", None);
+    policy
+        .mutate_with(
+            &bus,
+            identity.clone(),
+            caps(&["operator_blessed.read", "operator_blessed.write"]),
+            RequestedTrustClass::FirstPartyRequested,
+            |m| {
+                m.admin_upsert(admin_entry_for_test(
+                    pkg("operator_blessed"),
+                    PackageSource::Bundled,
+                    effective_first_party_for_test(),
+                    vec![EffectKind::ReadFilesystem],
+                ))?;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+    let recorded = store.invalidations();
+    assert_eq!(
+        recorded.len(),
+        1,
+        "same-trust authority-ceiling reductions must still publish"
+    );
+    assert_eq!(recorded[0].identity, identity);
+    assert_eq!(recorded[0].previous.class(), TrustClass::FirstParty);
+    assert_eq!(recorded[0].current.class(), TrustClass::FirstParty);
+    assert!(
+        recorded[0].authority_ceiling_reduced(),
+        "event should explain that the invalidating change was a ceiling reduction"
+    );
+    assert_eq!(
+        recorded[0].previous_authority_ceiling.allowed_effects,
+        vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem]
+    );
+    assert_eq!(
+        recorded[0].current_authority_ceiling.allowed_effects,
+        vec![EffectKind::ReadFilesystem]
+    );
+}
+
+#[test]
+fn t14h_mutate_with_publishes_when_same_trust_lowers_resource_ceiling() {
+    let admin = AdminConfig::with_entries([AdminEntry::for_bundled(
+        pkg("operator_blessed"),
+        None,
+        effective_first_party_for_test(),
+        vec![EffectKind::ReadFilesystem],
+        Some(output_token_ceiling(1_000)),
+    )]);
+    let policy = HostTrustPolicy::new(vec![Box::new(admin)]);
+    let bus = InvalidationBus::new();
+    let store = FakeGrantStore::new();
+    bus.register(store.clone());
+
+    policy
+        .mutate_with(
+            &bus,
+            bundled_identity("operator_blessed", None),
+            caps(&["operator_blessed.read"]),
+            RequestedTrustClass::FirstPartyRequested,
+            |m| {
+                m.admin_upsert(AdminEntry::for_bundled(
+                    pkg("operator_blessed"),
+                    None,
+                    effective_first_party_for_test(),
+                    vec![EffectKind::ReadFilesystem],
+                    Some(output_token_ceiling(100)),
+                ))?;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+    let recorded = store.invalidations();
+    assert_eq!(
+        recorded.len(),
+        1,
+        "lower resource ceilings must publish even when trust/effects stay equal"
+    );
+    assert!(recorded[0].authority_ceiling_reduced());
+    assert_eq!(
+        recorded[0]
+            .previous_authority_ceiling
+            .max_resource_ceiling
+            .as_ref()
+            .and_then(|ceiling| ceiling.max_output_tokens),
+        Some(1_000)
+    );
+    assert_eq!(
+        recorded[0]
+            .current_authority_ceiling
+            .max_resource_ceiling
+            .as_ref()
+            .and_then(|ceiling| ceiling.max_output_tokens),
+        Some(100)
+    );
+}
+
+struct BlockingTrustChangeListener {
+    started: Mutex<Option<mpsc::Sender<()>>>,
+    finish: Mutex<mpsc::Receiver<()>>,
+}
+
+impl TrustChangeListener for BlockingTrustChangeListener {
+    fn on_trust_changed(&self, _change: &TrustChange) {
+        if let Some(started) = self
+            .started
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        {
+            started.send(()).unwrap();
+        }
+        self.finish
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .recv()
+            .unwrap();
+    }
+}
+
+#[test]
+fn t14g_evaluate_waits_until_mutation_invalidation_publish_completes() {
+    let admin = AdminConfig::with_entries([admin_entry_for_test(
+        pkg("operator_blessed"),
+        PackageSource::Bundled,
+        effective_first_party_for_test(),
+        vec![EffectKind::ReadFilesystem],
+    )]);
+    let policy = Arc::new(HostTrustPolicy::new(vec![Box::new(admin)]));
+    let bus = Arc::new(InvalidationBus::new());
+
+    let (started_tx, started_rx) = mpsc::channel();
+    let (finish_tx, finish_rx) = mpsc::channel();
+    bus.register(Arc::new(BlockingTrustChangeListener {
+        started: Mutex::new(Some(started_tx)),
+        finish: Mutex::new(finish_rx),
+    }));
+
+    let mutate_policy = policy.clone();
+    let mutate_bus = bus.clone();
+    let mutator = std::thread::spawn(move || {
+        mutate_policy
+            .mutate_with(
+                &mutate_bus,
+                bundled_identity("operator_blessed", None),
+                caps(&["operator_blessed.read"]),
+                RequestedTrustClass::FirstPartyRequested,
+                |m| {
+                    m.admin_remove(&pkg("operator_blessed"), &PackageSource::Bundled)?;
+                    Ok(())
+                },
+            )
+            .unwrap();
+    });
+
+    started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("mutation should reach synchronous publish");
+
+    let (eval_tx, eval_rx) = mpsc::channel();
+    let eval_policy = policy.clone();
+    let evaluator = std::thread::spawn(move || {
+        let decision = eval_policy
+            .evaluate(&input(
+                bundled_identity("operator_blessed", None),
+                RequestedTrustClass::FirstPartyRequested,
+            ))
+            .unwrap();
+        eval_tx.send(decision).unwrap();
+    });
+
+    assert!(
+        eval_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "evaluate returned while invalidation publish was still blocked; \
+         the downgraded decision became visible before grants were invalidated"
+    );
+
+    finish_tx.send(()).unwrap();
+    mutator.join().unwrap();
+
+    let decision = eval_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("evaluate should complete after publish returns");
+    evaluator.join().unwrap();
+    assert_eq!(decision.effective_trust.class(), TrustClass::Sandbox);
 }
 
 // ---------------------------------------------------------------------------
@@ -1073,7 +1441,7 @@ fn t16_trust_change_new_filters_no_ops() {
     let identity = bundled_identity("any", None);
     let trust = EffectiveTrustClass::user_trusted();
     assert!(
-        TrustChange::new(identity, trust, trust, BTreeSet::new(), Utc::now()).is_none(),
+        trust_change_for_test(identity, trust, trust, BTreeSet::new()).is_none(),
         "TrustChange::new must return None when previous == current"
     );
 }
@@ -1081,41 +1449,28 @@ fn t16_trust_change_new_filters_no_ops() {
 #[test]
 fn t16b_trust_change_classifies_downgrade_upgrade_and_kind_change() {
     let identity = bundled_identity("any", None);
-    let now = Utc::now();
     let sandbox = EffectiveTrustClass::sandbox();
     let user_trusted = EffectiveTrustClass::user_trusted();
     let first_party = effective_first_party_for_test();
     let system = effective_system_for_test();
 
     // Downgrade: FirstParty → UserTrusted.
-    let down = TrustChange::new(
-        identity.clone(),
-        first_party,
-        user_trusted,
-        BTreeSet::new(),
-        now,
-    )
-    .unwrap();
+    let down = trust_change_for_test(identity.clone(), first_party, user_trusted, BTreeSet::new())
+        .unwrap();
     assert!(down.is_downgrade());
     assert!(!down.is_upgrade());
     assert!(!down.is_kind_change());
 
     // Upgrade: Sandbox → UserTrusted.
-    let up = TrustChange::new(
-        identity.clone(),
-        sandbox,
-        user_trusted,
-        BTreeSet::new(),
-        now,
-    )
-    .unwrap();
+    let up =
+        trust_change_for_test(identity.clone(), sandbox, user_trusted, BTreeSet::new()).unwrap();
     assert!(!up.is_downgrade());
     assert!(up.is_upgrade());
     assert!(!up.is_kind_change());
 
     // Kind change: FirstParty ↔ System (both privileged, level 2, but
     // semantically different privilege kinds).
-    let kind = TrustChange::new(identity, first_party, system, BTreeSet::new(), now).unwrap();
+    let kind = trust_change_for_test(identity, first_party, system, BTreeSet::new()).unwrap();
     assert!(!kind.is_downgrade());
     assert!(!kind.is_upgrade());
     assert!(
@@ -1151,6 +1506,8 @@ fn t16c_invalidation_bus_publish_drops_no_op_struct_literal_in_release() {
         previous: same,
         current: same,
         previous_authority: BTreeSet::new(),
+        previous_authority_ceiling: crate::AuthorityCeiling::empty(),
+        current_authority_ceiling: crate::AuthorityCeiling::empty(),
         effective_at: Utc::now(),
     };
     bus.publish(no_op);
@@ -1226,7 +1583,7 @@ fn t17_local_dev_override_remains_inert_even_when_enabled_and_staged() {
 // what audit envelopes record. The existing
 // `trust_decision_serializes_for_audit` smoke test only exercises
 // `Sandbox`; this test pins all four wire strings, including the
-// privileged variants reachable via `test-fixtures`.
+// privileged variants reachable only from crate-internal test fixtures.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1260,7 +1617,7 @@ fn t18_effective_trust_class_serializes_to_canonical_wire_strings() {
 fn trust_decision_serializes_for_audit() {
     let decision = TrustDecision {
         effective_trust: EffectiveTrustClass::sandbox(),
-        authority_ceiling: ironclaw_trust::AuthorityCeiling::empty(),
+        authority_ceiling: crate::AuthorityCeiling::empty(),
         provenance: TrustProvenance::Default,
         evaluated_at: Utc::now(),
     };
@@ -1276,8 +1633,8 @@ fn trust_decision_serializes_for_audit() {
 
 #[test]
 fn evaluate_uses_injected_clock_for_evaluated_at() {
+    use crate::FixedClock;
     use chrono::TimeZone;
-    use ironclaw_trust::FixedClock;
 
     let frozen = chrono::Utc.with_ymd_and_hms(2026, 4, 28, 12, 0, 0).unwrap();
     let policy = HostTrustPolicy::with_clock(

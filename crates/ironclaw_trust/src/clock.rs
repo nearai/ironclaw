@@ -25,10 +25,10 @@ impl Clock for SystemClock {
 }
 
 /// Test fixture: a clock that returns a fixed timestamp on every call.
-/// Defined unconditionally (not gated behind `test-fixtures`) because it is
-/// not a privilege-construction surface — fabricating a timestamp grants no
-/// authority. Useful in any context where deterministic evaluation is
-/// needed (audit golden files, replay harnesses, fuzzers).
+/// Defined unconditionally because it is not a privilege-construction
+/// surface — fabricating a timestamp grants no authority. Useful in any
+/// context where deterministic evaluation is needed (audit golden files,
+/// replay harnesses, fuzzers).
 #[derive(Debug, Clone, Copy)]
 pub struct FixedClock {
     pub instant: DateTime<Utc>,

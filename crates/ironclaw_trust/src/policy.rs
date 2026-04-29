@@ -7,7 +7,9 @@
 //! recognizes the package identity assigns the effective trust. If no source
 //! matches, the policy falls through to a non-privileged default.
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
+use std::sync::RwLock;
 
 use ironclaw_host_api::{
     CapabilityId, EffectKind, PackageId, PackageIdentity, RequestedTrustClass, ResourceCeiling,
@@ -62,6 +64,7 @@ pub struct SourceMatch {
 pub struct HostTrustPolicy {
     sources: Vec<Box<dyn PolicySource>>,
     clock: Box<dyn Clock>,
+    mutation_gate: RwLock<()>,
 }
 
 impl HostTrustPolicy {
@@ -71,6 +74,7 @@ impl HostTrustPolicy {
         Self {
             sources,
             clock: Box::new(SystemClock),
+            mutation_gate: RwLock::new(()),
         }
     }
 
@@ -81,7 +85,11 @@ impl HostTrustPolicy {
     /// Construct with an explicit clock. Tests inject `FixedClock` here so
     /// `evaluated_at` is reproducible across runs.
     pub fn with_clock(sources: Vec<Box<dyn PolicySource>>, clock: Box<dyn Clock>) -> Self {
-        Self { sources, clock }
+        Self {
+            sources,
+            clock,
+            mutation_gate: RwLock::new(()),
+        }
     }
 
     pub fn add_source(&mut self, source: Box<dyn PolicySource>) {
@@ -91,6 +99,16 @@ impl HostTrustPolicy {
 
 impl TrustPolicy for HostTrustPolicy {
     fn evaluate(&self, input: &TrustPolicyInput) -> Result<TrustDecision, TrustError> {
+        let _guard = self
+            .mutation_gate
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.evaluate_unlocked(input)
+    }
+}
+
+impl HostTrustPolicy {
+    fn evaluate_unlocked(&self, input: &TrustPolicyInput) -> Result<TrustDecision, TrustError> {
         let evaluated_at = self.clock.now();
         for source in &self.sources {
             if let Some(matched) = source.evaluate(input)? {
@@ -114,21 +132,26 @@ impl HostTrustPolicy {
     /// Mutate one or more policy sources atomically with respect to the
     /// trust-change invalidation contract (AC #6).
     ///
-    /// The orchestration:
+    /// The orchestration runs under a policy-level write gate:
     ///
     /// 1. Evaluate `affected_identity` against the current chain to capture
-    ///    the *previous* effective trust.
-    /// 2. Run the closure with [`SourceMutators`] handles. Inside the closure
-    ///    the caller can `bundled_upsert` / `admin_remove` / etc. — these are
-    ///    the only public path to the per-source `pub(crate)` mutators.
-    /// 3. Re-evaluate `affected_identity`.
-    /// 4. If the effective trust class changed, publish a [`TrustChange`] on
-    ///    `bus` synchronously so listeners observe it before any subsequent
-    ///    `evaluate()` returns the new decision.
+    ///    the *previous* decision.
+    /// 2. Run the closure with [`SourceMutators`] handles. The handles stage
+    ///    `bundled_upsert` / `admin_remove` / etc.; they do **not** mutate
+    ///    live source state while the closure is still fallible.
+    /// 3. If the closure returns an error, drop the staged mutations and
+    ///    return that error. No lower decision became visible, so no publish
+    ///    is needed.
+    /// 4. Commit the staged mutations, re-evaluate `affected_identity`, and
+    ///    publish a [`TrustChange`] if the effective trust class changed or
+    ///    the authority ceiling shrank.
+    /// 5. Release the policy gate only after synchronous bus publication
+    ///    completes, so no concurrent `evaluate()` can observe the new lower
+    ///    decision before listeners invalidate stale grants.
     ///
     /// Closures that don't actually change `affected_identity`'s effective
-    /// trust produce no publish — the bus is only notified on real
-    /// downgrades/upgrades. Closures that *do* change it cannot bypass the
+    /// trust or reduce its authority ceiling produce no publish. Closures
+    /// that *do* change the invalidation-relevant decision cannot bypass the
     /// publish, because the orchestration is hard-wired into this method.
     /// That's the whole point: AC #6 becomes a compile-time guarantee.
     ///
@@ -143,14 +166,12 @@ impl HostTrustPolicy {
     /// Error semantics:
     /// - **Pre-mutation evaluate failure**: returned before any source is
     ///   touched. No mutation, no publish.
-    /// - **Closure error**: returned via `?` from the closure short-circuits
-    ///   the orchestration. Any partial mutation the closure performed
-    ///   before erroring stays in place (the registry mutators are
-    ///   in-place inserts/removes), but no `TrustChange` is published —
-    ///   callers needing rollback must handle it inside the closure.
-    /// - **Post-mutation evaluate failure**: surfaced to the caller after
-    ///   the mutation has already happened. No publish — the caller is
-    ///   responsible for any recovery.
+    /// - **Closure error**: staged mutations are discarded, then the closure
+    ///   error is returned. No mutation, no publish.
+    /// - **Post-commit evaluate failure**: surfaced to the caller after the
+    ///   mutation has already happened. This indicates corrupt policy state;
+    ///   the policy gate stays held until the error is observed so another
+    ///   evaluation cannot race ahead of the failed orchestration.
     pub fn mutate_with<F, R>(
         &self,
         bus: &InvalidationBus,
@@ -162,31 +183,31 @@ impl HostTrustPolicy {
     where
         F: FnOnce(&SourceMutators<'_>) -> Result<R, TrustError>,
     {
+        let _gate = self
+            .mutation_gate
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let probe = TrustPolicyInput {
             identity: affected_identity.clone(),
             requested_trust,
             requested_authority: previous_authority.clone(),
         };
-        let prev = self.evaluate(&probe)?;
+        let prev = self.evaluate_unlocked(&probe)?;
 
         let mutators = SourceMutators {
             sources: &self.sources,
+            staged: RefCell::new(Vec::new()),
         };
         let result = f(&mutators)?;
+        mutators.commit()?;
 
-        let curr = self.evaluate(&probe)?;
+        let curr = self.evaluate_unlocked(&probe)?;
 
-        // `TrustChange::new` returns `None` for no-ops (prev == curr) — that
-        // is the canonical filter, so a closure that mutates without
-        // changing this identity's effective trust class produces no
-        // publish.
-        if let Some(change) = TrustChange::new(
-            affected_identity,
-            prev.effective_trust,
-            curr.effective_trust,
-            previous_authority,
-            curr.evaluated_at,
-        ) {
+        // `TrustChange::new` returns `None` for no-ops and for benign
+        // authority-ceiling expansions; it returns `Some` when the trust
+        // class changes or the authority ceiling shrinks.
+        if let Some(change) = TrustChange::new(affected_identity, &prev, &curr, previous_authority)
+        {
             bus.publish(change);
         }
         Ok(result)
@@ -208,8 +229,21 @@ impl HostTrustPolicy {
 /// type spelled out — wiring a `mutate_with` closure that mutates a
 /// source the chain doesn't have is a configuration bug, not a silent
 /// no-op.
+enum SourceMutation {
+    BundledUpsert(BundledEntry),
+    BundledRemove(PackageId),
+    AdminUpsert(AdminEntry),
+    AdminRemove {
+        package_id: PackageId,
+        source: ironclaw_host_api::PackageSource,
+    },
+    SignedUpsert(SignerEntry),
+    SignedRemove(String),
+}
+
 pub struct SourceMutators<'a> {
     sources: &'a [Box<dyn PolicySource>],
+    staged: RefCell<Vec<SourceMutation>>,
 }
 
 impl<'a> SourceMutators<'a> {
@@ -228,29 +262,54 @@ impl<'a> SourceMutators<'a> {
     /// Insert or replace a [`BundledEntry`] in the chain's
     /// `BundledRegistry`.
     pub fn bundled_upsert(&self, entry: BundledEntry) -> Result<(), TrustError> {
-        self.find::<BundledRegistry>()?.upsert(entry);
+        self.find::<BundledRegistry>()?;
+        self.staged
+            .borrow_mut()
+            .push(SourceMutation::BundledUpsert(entry));
         Ok(())
     }
 
     /// Remove a [`BundledEntry`] from the chain's `BundledRegistry`,
-    /// returning the previous value if any.
+    /// returning the currently committed value if any. The removal itself
+    /// is staged and is only committed if the enclosing `mutate_with`
+    /// closure returns `Ok`.
     pub fn bundled_remove(
         &self,
         package_id: &PackageId,
     ) -> Result<Option<BundledEntry>, TrustError> {
-        Ok(self.find::<BundledRegistry>()?.remove(package_id))
+        let registry = self.find::<BundledRegistry>()?;
+        let previous = registry.get(package_id);
+        self.staged
+            .borrow_mut()
+            .push(SourceMutation::BundledRemove(package_id.clone()));
+        Ok(previous)
     }
 
     /// Insert or replace an [`AdminEntry`] in the chain's `AdminConfig`.
     pub fn admin_upsert(&self, entry: AdminEntry) -> Result<(), TrustError> {
-        self.find::<AdminConfig>()?.upsert(entry);
+        self.find::<AdminConfig>()?;
+        self.staged
+            .borrow_mut()
+            .push(SourceMutation::AdminUpsert(entry));
         Ok(())
     }
 
     /// Remove an [`AdminEntry`] from the chain's `AdminConfig`, returning
-    /// the previous value if any.
-    pub fn admin_remove(&self, package_id: &PackageId) -> Result<Option<AdminEntry>, TrustError> {
-        Ok(self.find::<AdminConfig>()?.remove(package_id))
+    /// the currently committed value if any. The key is the full trust
+    /// subject `(package_id, source)`; same-id entries from other sources
+    /// are unaffected.
+    pub fn admin_remove(
+        &self,
+        package_id: &PackageId,
+        source: &ironclaw_host_api::PackageSource,
+    ) -> Result<Option<AdminEntry>, TrustError> {
+        let admin = self.find::<AdminConfig>()?;
+        let previous = admin.get(package_id, source);
+        self.staged.borrow_mut().push(SourceMutation::AdminRemove {
+            package_id: package_id.clone(),
+            source: source.clone(),
+        });
+        Ok(previous)
     }
 
     /// Insert or replace a [`SignerEntry`] in the chain's
@@ -258,14 +317,48 @@ impl<'a> SourceMutators<'a> {
     /// this is the staging path future signature-verification work will
     /// consume.
     pub fn signed_upsert(&self, entry: SignerEntry) -> Result<(), TrustError> {
-        self.find::<SignedRegistry>()?.upsert(entry);
+        self.find::<SignedRegistry>()?;
+        self.staged
+            .borrow_mut()
+            .push(SourceMutation::SignedUpsert(entry));
         Ok(())
     }
 
     /// Remove a trusted signer from the chain's `SignedRegistry`,
-    /// returning the previous entry if any.
+    /// returning the currently committed entry if any.
     pub fn signed_remove(&self, signer: &str) -> Result<Option<SignerEntry>, TrustError> {
-        Ok(self.find::<SignedRegistry>()?.remove(signer))
+        let registry = self.find::<SignedRegistry>()?;
+        let previous = registry.get(signer);
+        self.staged
+            .borrow_mut()
+            .push(SourceMutation::SignedRemove(signer.to_string()));
+        Ok(previous)
+    }
+
+    fn commit(&self) -> Result<(), TrustError> {
+        for mutation in self.staged.borrow_mut().drain(..) {
+            match mutation {
+                SourceMutation::BundledUpsert(entry) => {
+                    self.find::<BundledRegistry>()?.upsert(entry);
+                }
+                SourceMutation::BundledRemove(package_id) => {
+                    self.find::<BundledRegistry>()?.remove(&package_id);
+                }
+                SourceMutation::AdminUpsert(entry) => {
+                    self.find::<AdminConfig>()?.upsert(entry);
+                }
+                SourceMutation::AdminRemove { package_id, source } => {
+                    self.find::<AdminConfig>()?.remove(&package_id, &source);
+                }
+                SourceMutation::SignedUpsert(entry) => {
+                    self.find::<SignedRegistry>()?.upsert(entry);
+                }
+                SourceMutation::SignedRemove(signer) => {
+                    self.find::<SignedRegistry>()?.remove(&signer);
+                }
+            }
+        }
+        Ok(())
     }
 }
 

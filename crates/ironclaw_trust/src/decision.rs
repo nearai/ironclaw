@@ -7,7 +7,7 @@
 //! `TrustClass` — host_api's `#[serde(skip_deserializing)]` guards the wire
 //! boundary, this newtype guards the in-process construction boundary.
 
-use ironclaw_host_api::{EffectKind, ResourceCeiling, Timestamp, TrustClass};
+use ironclaw_host_api::{EffectKind, ResourceCeiling, SandboxQuota, Timestamp, TrustClass};
 use serde::Serialize;
 
 /// Policy-validated trust ceiling.
@@ -45,6 +45,7 @@ impl EffectiveTrustClass {
 
     /// First-party privilege. Constructible only from inside the trust crate;
     /// outside callers must receive this via policy evaluation.
+    #[allow(dead_code)]
     pub(crate) fn first_party() -> Self {
         Self {
             inner: TrustClass::FirstParty,
@@ -52,6 +53,7 @@ impl EffectiveTrustClass {
     }
 
     /// System privilege. Constructible only from inside the trust crate.
+    #[allow(dead_code)]
     pub(crate) fn system() -> Self {
         Self {
             inner: TrustClass::System,
@@ -135,6 +137,62 @@ impl AuthorityCeiling {
 
     pub fn allows_effect(&self, effect: &EffectKind) -> bool {
         self.allowed_effects.contains(effect)
+    }
+
+    /// Returns true when `self` is a stricter ceiling than `previous`.
+    ///
+    /// This is the invalidation-relevant direction: grants issued under
+    /// `previous` may now exceed what `self` allows. Expansions are not
+    /// reductions and do not require revoking existing grants.
+    pub fn is_reduction_from(&self, previous: &Self) -> bool {
+        previous
+            .allowed_effects
+            .iter()
+            .any(|effect| !self.allowed_effects.contains(effect))
+            || resource_ceiling_reduced(&previous.max_resource_ceiling, &self.max_resource_ceiling)
+    }
+}
+
+fn resource_ceiling_reduced(
+    previous: &Option<ResourceCeiling>,
+    current: &Option<ResourceCeiling>,
+) -> bool {
+    match (previous, current) {
+        (None, Some(_)) => true,
+        (None, None) | (Some(_), None) => false,
+        (Some(previous), Some(current)) => {
+            limit_reduced(&previous.max_usd, &current.max_usd)
+                || limit_reduced(&previous.max_input_tokens, &current.max_input_tokens)
+                || limit_reduced(&previous.max_output_tokens, &current.max_output_tokens)
+                || limit_reduced(&previous.max_wall_clock_ms, &current.max_wall_clock_ms)
+                || limit_reduced(&previous.max_output_bytes, &current.max_output_bytes)
+                || sandbox_quota_reduced(&previous.sandbox, &current.sandbox)
+        }
+    }
+}
+
+fn sandbox_quota_reduced(previous: &Option<SandboxQuota>, current: &Option<SandboxQuota>) -> bool {
+    match (previous, current) {
+        (None, Some(_)) => true,
+        (None, None) | (Some(_), None) => false,
+        (Some(previous), Some(current)) => {
+            limit_reduced(&previous.cpu_time_ms, &current.cpu_time_ms)
+                || limit_reduced(&previous.memory_bytes, &current.memory_bytes)
+                || limit_reduced(&previous.disk_bytes, &current.disk_bytes)
+                || limit_reduced(
+                    &previous.network_egress_bytes,
+                    &current.network_egress_bytes,
+                )
+                || limit_reduced(&previous.process_count, &current.process_count)
+        }
+    }
+}
+
+fn limit_reduced<T: PartialOrd>(previous: &Option<T>, current: &Option<T>) -> bool {
+    match (previous, current) {
+        (None, Some(_)) => true,
+        (Some(previous), Some(current)) => current < previous,
+        (None, None) | (Some(_), None) => false,
     }
 }
 

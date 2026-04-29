@@ -12,10 +12,11 @@
 //! 2. **Trust is an authority *ceiling*, not a grant.** [`TrustDecision`]
 //!    returns an [`AuthorityCeiling`] enumerating *what may be granted*;
 //!    capability invocation still requires an explicit `CapabilityGrant`.
-//! 3. **Trust changes invalidate active grants.** A trust downgrade or
-//!    revocation publishes a [`TrustChange`] on the [`InvalidationBus`]
-//!    synchronously, before any subsequent dispatch can produce a side
-//!    effect under the stale ceiling. Runtime mutation goes through
+//! 3. **Trust changes invalidate active grants.** A trust downgrade,
+//!    revocation, or authority-ceiling reduction publishes a [`TrustChange`]
+//!    on the [`InvalidationBus`] synchronously, before any subsequent
+//!    dispatch can produce a side effect under the stale ceiling. Runtime
+//!    mutation goes through
 //!    [`HostTrustPolicy::mutate_with`], which hard-wires the
 //!    pre-evaluate / mutate / post-evaluate / publish dance so AC #6 is
 //!    a compile-time guarantee — the per-source `upsert` / `remove`
@@ -35,9 +36,8 @@ pub mod invalidation;
 pub mod policy;
 pub mod sources;
 
-#[cfg(any(test, feature = "test-fixtures"))]
-#[doc(hidden)]
-pub mod fixtures;
+#[cfg(test)]
+mod fixtures;
 
 pub use clock::{Clock, FixedClock, SystemClock};
 pub use decision::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
@@ -54,12 +54,10 @@ pub use sources::{
 
 #[cfg(test)]
 mod tests {
-    //! Lib-level smoke tests that run on bare `cargo test -p ironclaw_trust`
-    //! (without the `test-fixtures` feature). The full contract suite lives
-    //! in `tests/policy_contract.rs` and is only compiled with
-    //! `--features test-fixtures`. If this module is empty, anyone running
-    //! the bare command sees `0 passed` and might think nothing exercised
-    //! the crate — which would be misleading.
+    //! Lib-level smoke tests that run on bare `cargo test -p ironclaw_trust`.
+    //! The full contract suite lives in `policy_contract_tests` below. If
+    //! this module is empty, anyone running the bare command sees `0 passed`
+    //! and might think nothing exercised the crate — which would be misleading.
     use super::*;
 
     #[test]
@@ -91,3 +89,6 @@ mod tests {
         assert_eq!(decision.provenance, TrustProvenance::Default);
     }
 }
+
+#[cfg(test)]
+mod policy_contract_tests;

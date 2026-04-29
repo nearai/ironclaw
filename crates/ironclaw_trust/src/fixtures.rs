@@ -1,12 +1,10 @@
-//! Test-only fixture constructors. **Not for production use.**
+//! Crate-internal test fixture constructors. **Not for production use.**
 //!
-//! This module is gated behind the `test-fixtures` Cargo feature so it is
-//! invisible to normal production builds. The crate's own unit tests
-//! (`#[cfg(test)]`) and integration tests opt in via the feature; nothing
-//! else can.
-//!
-//! Even with the feature on, naming intentionally signals the boundary
-//! (`*_for_test`). PR review should reject any non-test caller.
+//! This module is compiled only for `#[cfg(test)]` targets of
+//! `ironclaw_trust` itself. There is deliberately no Cargo feature that
+//! exposes these helpers to downstream crates: privileged
+//! `EffectiveTrustClass` values must flow out of policy evaluation in every
+//! non-test build.
 
 use ironclaw_host_api::{EffectKind, PackageId, PackageSource, ResourceCeiling};
 
@@ -34,6 +32,7 @@ pub fn bundled_entry_for_test(
 }
 
 /// Test fixture: a [`BundledEntry`] with an explicit resource ceiling.
+#[allow(dead_code)]
 pub fn bundled_entry_with_resource_ceiling_for_test(
     package_id: PackageId,
     digest: Option<String>,

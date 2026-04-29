@@ -97,7 +97,9 @@ Construction-side guarantees:
   compile time.
 - The only public `EffectiveTrustClass` constructors are `sandbox()`
   and `user_trusted()`. Privileged values flow out of
-  `TrustPolicy::evaluate` and the `test-fixtures` feature only.
+  `TrustPolicy::evaluate` in non-test builds. Crate-internal tests have
+  `#[cfg(test)]` fixtures, but there is deliberately no Cargo feature that
+  exposes privileged constructors to downstream crates.
 
 Manifest input: the `trust = "..."` field on extension manifests
 populates `RequestedTrustClass`, **not** `TrustClass` directly.
@@ -256,10 +258,11 @@ docs).
 ## 6. Mutation and invalidation orchestration
 
 When the host policy revokes or downgrades a package's effective
-trust, affected grants must be invalidated **before** any subsequent
+trust, or shrinks the authority ceiling while keeping the same trust
+class, affected grants must be invalidated **before** any subsequent
 dispatch runs under the stale ceiling (AC #6).
 
-Computing the *previous* effective trust requires evaluating the
+Computing the *previous* decision requires evaluating the
 whole policy chain — not just the source being mutated. The
 orchestration therefore lives at the `HostTrustPolicy` layer, not the
 per-source layer:
@@ -271,7 +274,7 @@ policy.mutate_with(
     previous_authority,
     requested_trust,
     |mutators| {
-        mutators.admin_remove(&package_id)?;
+        mutators.admin_remove(&package_id, &source)?;
         Ok(())
     },
 )?;
@@ -283,24 +286,32 @@ per-source `upsert` / `remove` methods on `BundledRegistry` /
 through `SourceMutators` inside a `mutate_with` closure. The
 orchestration:
 
-1. Pre-evaluate `affected_identity` to capture previous trust.
-2. Run the closure with mutator handles.
-3. Post-evaluate.
-4. If `previous != current`, publish a `TrustChange` on the
-   `InvalidationBus` synchronously.
+1. Acquire a policy-level mutation gate so concurrent `evaluate()` calls
+   cannot observe in-flight mutations.
+2. Pre-evaluate `affected_identity` to capture the previous full decision.
+3. Run the closure with mutator handles that stage operations rather than
+   mutating live source state.
+4. If the closure returns an error, discard staged operations and return
+   the error; no lower decision became visible.
+5. Commit staged mutations, post-evaluate, and publish a `TrustChange` on
+   the `InvalidationBus` synchronously when the trust class changed or the
+   authority ceiling shrank.
+6. Release the mutation gate only after synchronous publication completes.
 
 Construction-time population (`with_entries` / `with_signers`)
 remains `pub` because no policy state exists for an invalidation to
 be meaningful against — those constructors seed the chain *before*
 it is wired up to a bus.
 
-`TrustChange::new(...) -> Option<Self>` returns `None` for no-ops
-(`previous == current`) at construction. `InvalidationBus::publish`
-applies a defense-in-depth filter and `debug_assert!`s on no-ops.
+`TrustChange::new(...) -> Option<Self>` compares the full previous and
+current `TrustDecision`. It returns `None` for no-ops and benign ceiling
+expansions; it returns `Some` for trust-class changes and same-class
+authority-ceiling reductions. `InvalidationBus::publish` applies a
+defense-in-depth filter and `debug_assert!`s on non-invalidating events.
 Helper methods `is_downgrade` / `is_upgrade` / `is_kind_change`
-(latter for `FirstParty ↔ System`) let listeners be selective —
-naive "any TrustChange ⇒ revoke" listeners would over-revoke on
-benign upgrades.
+(latter for `FirstParty ↔ System`) / `authority_ceiling_reduced` let
+listeners be selective — naive "any TrustChange ⇒ revoke" listeners
+would over-revoke on benign upgrades.
 
 ---
 
@@ -404,9 +415,10 @@ This slice intentionally keeps the substrate narrow:
   `Ok(None)`. Real signature verification (binding `(signer,
   package_id, digest)` so a verified signature on package X does not
   vouch for an unrelated package Y) belongs to a follow-up.
-- `LocalDevOverride` is inert — fixture-only via the `test-fixtures`
-  feature (`enabled_for_test`), exists so future dev-mode opt-in has
-  a stable seam. The inert contract is pinned by test T17.
+- `LocalDevOverride` is inert — `enabled_for_test` is compiled only for
+  this crate's `#[cfg(test)]` targets, so future dev-mode opt-in has a
+  stable seam without exposing a production feature. The inert contract is
+  pinned by test T17.
 - `AdminEntry` fields are `pub` for ergonomics; the `for_*`
   constructors are conventions, not type-enforced. Tightening to
   fully-private fields + accessor methods is a follow-up.
