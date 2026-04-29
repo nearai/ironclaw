@@ -20,6 +20,7 @@ async fn capability_host_denies_missing_grant_before_dispatch() {
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "blocked"}),
+            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -28,6 +29,37 @@ async fn capability_host_denies_missing_grant_before_dispatch() {
         err,
         CapabilityInvocationError::AuthorizationDenied {
             reason: DenyReason::MissingGrant,
+            ..
+        }
+    ));
+    assert!(!dispatcher.has_request());
+}
+
+#[tokio::test]
+async fn capability_host_denies_dispatch_when_trust_ceiling_omits_capability_effect() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = RecordingDispatcher::default();
+    let authorizer = GrantAuthorizer::new();
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer);
+    let context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+
+    let err = host
+        .invoke_json(CapabilityInvocationRequest {
+            context,
+            capability_id: capability_id(),
+            estimate: ResourceEstimate::default(),
+            input: json!({"message": "blocked by trust"}),
+            trust_decision: trust_decision_with_effects(Vec::new()),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::AuthorizationDenied {
+            reason: DenyReason::PolicyDenied,
             ..
         }
     ));
@@ -54,6 +86,7 @@ async fn capability_host_authorized_dispatch_uses_neutral_dispatch_port() {
                 ..ResourceEstimate::default()
             },
             input: json!({"message": "authorized"}),
+            trust_decision: trust_decision(),
         })
         .await
         .unwrap();
@@ -80,6 +113,7 @@ async fn capability_host_returns_approval_store_missing_when_approval_cannot_be_
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "needs approval"}),
+            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -105,6 +139,7 @@ async fn capability_host_fails_closed_on_unsupported_obligations_before_dispatch
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "must not dispatch"}),
+            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();

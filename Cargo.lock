@@ -4019,12 +4019,14 @@ name = "ironclaw_capabilities"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "ironclaw_approvals",
  "ironclaw_authorization",
  "ironclaw_extensions",
  "ironclaw_host_api",
  "ironclaw_processes",
  "ironclaw_run_state",
+ "ironclaw_trust",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",

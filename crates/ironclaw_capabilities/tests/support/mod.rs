@@ -3,9 +3,11 @@
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use ironclaw_authorization::*;
 use ironclaw_extensions::*;
 use ironclaw_host_api::*;
+use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use serde_json::json;
 
 #[derive(Default)]
@@ -60,12 +62,13 @@ impl CapabilityDispatcher for RecordingDispatcher {
 pub struct ApprovalAuthorizer;
 
 #[async_trait]
-impl CapabilityDispatchAuthorizer for ApprovalAuthorizer {
-    async fn authorize_dispatch(
+impl TrustAwareCapabilityDispatchAuthorizer for ApprovalAuthorizer {
+    async fn authorize_dispatch_with_trust(
         &self,
         context: &ExecutionContext,
         _descriptor: &CapabilityDescriptor,
         estimate: &ResourceEstimate,
+        _trust_decision: &TrustDecision,
     ) -> Decision {
         Decision::RequireApproval {
             request: ApprovalRequest {
@@ -87,12 +90,13 @@ impl CapabilityDispatchAuthorizer for ApprovalAuthorizer {
 pub struct MismatchedApprovalAuthorizer;
 
 #[async_trait]
-impl CapabilityDispatchAuthorizer for MismatchedApprovalAuthorizer {
-    async fn authorize_dispatch(
+impl TrustAwareCapabilityDispatchAuthorizer for MismatchedApprovalAuthorizer {
+    async fn authorize_dispatch_with_trust(
         &self,
         context: &ExecutionContext,
         _descriptor: &CapabilityDescriptor,
         estimate: &ResourceEstimate,
+        _trust_decision: &TrustDecision,
     ) -> Decision {
         let wrong_scope =
             ResourceScope::local_default(context.user_id.clone(), InvocationId::new()).unwrap();
@@ -124,12 +128,13 @@ impl CapabilityDispatchAuthorizer for MismatchedApprovalAuthorizer {
 pub struct ObligatingAuthorizer;
 
 #[async_trait]
-impl CapabilityDispatchAuthorizer for ObligatingAuthorizer {
-    async fn authorize_dispatch(
+impl TrustAwareCapabilityDispatchAuthorizer for ObligatingAuthorizer {
+    async fn authorize_dispatch_with_trust(
         &self,
         _context: &ExecutionContext,
         _descriptor: &CapabilityDescriptor,
         _estimate: &ResourceEstimate,
+        _trust_decision: &TrustDecision,
     ) -> Decision {
         Decision::Allow {
             obligations: Obligations::new(vec![Obligation::AuditBefore]).unwrap(),
@@ -162,13 +167,24 @@ pub fn execution_context(grants: CapabilitySet) -> ExecutionContext {
 }
 
 pub fn dispatch_grant() -> CapabilityGrant {
+    capability_grant_with_effects(vec![EffectKind::DispatchCapability])
+}
+
+pub fn spawn_grant() -> CapabilityGrant {
+    capability_grant_with_effects(vec![
+        EffectKind::DispatchCapability,
+        EffectKind::SpawnProcess,
+    ])
+}
+
+pub fn capability_grant_with_effects(allowed_effects: Vec<EffectKind>) -> CapabilityGrant {
     CapabilityGrant {
         id: CapabilityGrantId::new(),
         capability: capability_id(),
         grantee: Principal::Extension(ExtensionId::new("caller").unwrap()),
         issued_by: Principal::HostRuntime,
         constraints: GrantConstraints {
-            allowed_effects: vec![EffectKind::DispatchCapability],
+            allowed_effects,
             mounts: MountView::default(),
             network: NetworkPolicy::default(),
             secrets: Vec::new(),
@@ -176,6 +192,25 @@ pub fn dispatch_grant() -> CapabilityGrant {
             expires_at: None,
             max_invocations: None,
         },
+    }
+}
+
+pub fn trust_decision() -> TrustDecision {
+    trust_decision_with_effects(vec![
+        EffectKind::DispatchCapability,
+        EffectKind::SpawnProcess,
+    ])
+}
+
+pub fn trust_decision_with_effects(allowed_effects: Vec<EffectKind>) -> TrustDecision {
+    TrustDecision {
+        effective_trust: EffectiveTrustClass::user_trusted(),
+        authority_ceiling: AuthorityCeiling {
+            allowed_effects,
+            max_resource_ceiling: None,
+        },
+        provenance: TrustProvenance::Default,
+        evaluated_at: Utc::now(),
     }
 }
 

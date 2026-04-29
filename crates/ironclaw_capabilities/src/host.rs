@@ -1,4 +1,4 @@
-use ironclaw_authorization::{CapabilityDispatchAuthorizer, CapabilityLeaseStore};
+use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{
     CapabilityDispatchRequest, CapabilityDispatcher, Decision, DenyReason, InvocationFingerprint,
@@ -12,8 +12,8 @@ use tracing::warn;
 
 use crate::helpers::{
     approval_not_approved_error_kind, capability_lease_error_kind,
-    claim_error_may_be_concurrent_resume, ensure_no_obligations, fail_run, fail_run_if_configured,
-    matching_approval_lease, resume_context_mismatch_kind,
+    claim_error_may_be_concurrent_resume, complete_run_after_side_effect, ensure_no_obligations,
+    fail_run, fail_run_if_configured, matching_approval_lease, resume_context_mismatch_kind,
 };
 use crate::{
     CapabilityInvocationError, CapabilityInvocationRequest, CapabilityInvocationResult,
@@ -26,7 +26,7 @@ where
 {
     registry: &'a ExtensionRegistry,
     dispatcher: &'a D,
-    authorizer: &'a dyn CapabilityDispatchAuthorizer,
+    authorizer: &'a dyn TrustAwareCapabilityDispatchAuthorizer,
     run_state: Option<&'a dyn RunStateStore>,
     approval_requests: Option<&'a dyn ApprovalRequestStore>,
     capability_leases: Option<&'a dyn CapabilityLeaseStore>,
@@ -40,7 +40,7 @@ where
     pub fn new(
         registry: &'a ExtensionRegistry,
         dispatcher: &'a D,
-        authorizer: &'a dyn CapabilityDispatchAuthorizer,
+        authorizer: &'a dyn TrustAwareCapabilityDispatchAuthorizer,
     ) -> Self {
         Self {
             registry,
@@ -146,7 +146,12 @@ where
 
         match self
             .authorizer
-            .authorize_dispatch(&request.context, descriptor, &request.estimate)
+            .authorize_dispatch_with_trust(
+                &request.context,
+                descriptor,
+                &request.estimate,
+                &request.trust_decision,
+            )
             .await
         {
             Decision::Allow { obligations } => {
@@ -277,7 +282,14 @@ where
         };
 
         if let Some(run_state) = self.run_state {
-            run_state.complete(&scope, invocation_id).await?;
+            complete_run_after_side_effect(
+                run_state,
+                &scope,
+                invocation_id,
+                &capability_id,
+                "dispatch",
+            )
+            .await;
         }
 
         Ok(CapabilityInvocationResult { dispatch })
@@ -405,7 +417,12 @@ where
 
         match self
             .authorizer
-            .authorize_dispatch(&authorized_context, descriptor, &request.estimate)
+            .authorize_dispatch_with_trust(
+                &authorized_context,
+                descriptor,
+                &request.estimate,
+                &request.trust_decision,
+            )
             .await
         {
             Decision::Allow { obligations } => {
@@ -488,7 +505,14 @@ where
             );
         }
 
-        run_state.complete(&scope, invocation_id).await?;
+        complete_run_after_side_effect(
+            run_state,
+            &scope,
+            invocation_id,
+            &capability_id,
+            "dispatch",
+        )
+        .await;
         Ok(CapabilityInvocationResult { dispatch })
     }
 
@@ -531,7 +555,12 @@ where
 
         match self
             .authorizer
-            .authorize_spawn(&request.context, descriptor, &request.estimate)
+            .authorize_spawn_with_trust(
+                &request.context,
+                descriptor,
+                &request.estimate,
+                &request.trust_decision,
+            )
             .await
         {
             Decision::Allow { obligations } => {
@@ -600,7 +629,14 @@ where
         };
 
         if let Some(run_state) = self.run_state {
-            run_state.complete(&scope, invocation_id).await?;
+            complete_run_after_side_effect(
+                run_state,
+                &scope,
+                invocation_id,
+                &capability_id,
+                "spawn",
+            )
+            .await;
         }
 
         Ok(CapabilitySpawnResult { process })

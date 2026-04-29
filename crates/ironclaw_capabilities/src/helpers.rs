@@ -70,6 +70,24 @@ pub(crate) async fn fail_run(
     Ok(())
 }
 
+pub(crate) async fn complete_run_after_side_effect(
+    run_state: &dyn RunStateStore,
+    scope: &ResourceScope,
+    invocation_id: InvocationId,
+    capability_id: &CapabilityId,
+    side_effect: &'static str,
+) {
+    if let Err(error) = run_state.complete(scope, invocation_id).await {
+        warn!(
+            invocation_id = %invocation_id,
+            capability_id = %capability_id,
+            side_effect,
+            transition_error_kind = run_state_error_kind(&error),
+            "run-state completion failed after successful side effect; returning successful capability result",
+        );
+    }
+}
+
 pub(crate) fn approval_not_approved_error_kind(status: ApprovalStatus) -> &'static str {
     match status {
         ApprovalStatus::Pending => "ApprovalPending",

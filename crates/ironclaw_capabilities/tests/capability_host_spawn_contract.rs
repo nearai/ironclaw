@@ -5,10 +5,75 @@ use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
 use ironclaw_host_api::*;
 use ironclaw_processes::*;
+use ironclaw_run_state::*;
 use serde_json::json;
 
 mod support;
 use support::*;
+
+#[tokio::test]
+async fn capability_host_denies_spawn_when_trust_ceiling_omits_spawn_effect() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = RecordingDispatcher::default();
+    let process_manager = RecordingProcessManager::default();
+    let authorizer = GrantAuthorizer::new();
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+        .with_process_manager(&process_manager);
+    let context = execution_context(CapabilitySet {
+        grants: vec![spawn_grant()],
+    });
+
+    let err = host
+        .spawn_json(CapabilitySpawnRequest {
+            context,
+            capability_id: capability_id(),
+            estimate: ResourceEstimate::default(),
+            input: json!({"message": "blocked spawn"}),
+            trust_decision: trust_decision_with_effects(vec![EffectKind::DispatchCapability]),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::AuthorizationDenied {
+            reason: DenyReason::PolicyDenied,
+            ..
+        }
+    ));
+    assert!(!dispatcher.has_request());
+    assert!(!process_manager.has_start());
+}
+
+#[tokio::test]
+async fn capability_host_returns_spawn_result_when_run_completion_fails_after_spawn() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = RecordingDispatcher::default();
+    let process_manager = RecordingProcessManager::default();
+    let run_state = FailCompleteRunStateStore::new();
+    let authorizer = SpawnAuthorizer;
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+        .with_process_manager(&process_manager)
+        .with_run_state(&run_state);
+    let context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+
+    let result = host
+        .spawn_json(CapabilitySpawnRequest {
+            context: context.clone(),
+            capability_id: capability_id(),
+            estimate: ResourceEstimate::default(),
+            input: json!({"message": "background"}),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap();
+
+    assert!(!dispatcher.has_request());
+    let start = process_manager.take_start();
+    assert_eq!(result.process.process_id, start.process_id);
+}
 
 #[tokio::test]
 async fn capability_host_spawns_authorized_process_without_dispatching_inline() {
@@ -28,6 +93,7 @@ async fn capability_host_spawns_authorized_process_without_dispatching_inline() 
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "background"}),
+            trust_decision: trust_decision(),
         })
         .await
         .unwrap();
@@ -54,6 +120,88 @@ impl RecordingProcessManager {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
             .unwrap()
+    }
+
+    fn has_start(&self) -> bool {
+        self.start
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+    }
+}
+
+struct FailCompleteRunStateStore {
+    inner: InMemoryRunStateStore,
+}
+
+impl FailCompleteRunStateStore {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryRunStateStore::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl RunStateStore for FailCompleteRunStateStore {
+    async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
+        self.inner.start(start).await
+    }
+
+    async fn block_approval(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        approval: ApprovalRequest,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner
+            .block_approval(scope, invocation_id, approval)
+            .await
+    }
+
+    async fn block_auth(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        error_kind: String,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner
+            .block_auth(scope, invocation_id, error_kind)
+            .await
+    }
+
+    async fn complete(
+        &self,
+        _scope: &ResourceScope,
+        _invocation_id: InvocationId,
+    ) -> Result<RunRecord, RunStateError> {
+        Err(RunStateError::Filesystem(
+            "complete transition unavailable".to_string(),
+        ))
+    }
+
+    async fn fail(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        error_kind: String,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner.fail(scope, invocation_id, error_kind).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<Option<RunRecord>, RunStateError> {
+        self.inner.get(scope, invocation_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<RunRecord>, RunStateError> {
+        self.inner.records_for_scope(scope).await
     }
 }
 
@@ -85,23 +233,25 @@ impl ProcessManager for RecordingProcessManager {
 struct SpawnAuthorizer;
 
 #[async_trait]
-impl CapabilityDispatchAuthorizer for SpawnAuthorizer {
-    async fn authorize_dispatch(
+impl TrustAwareCapabilityDispatchAuthorizer for SpawnAuthorizer {
+    async fn authorize_dispatch_with_trust(
         &self,
         _context: &ExecutionContext,
         _descriptor: &CapabilityDescriptor,
         _estimate: &ResourceEstimate,
+        _trust_decision: &ironclaw_trust::TrustDecision,
     ) -> Decision {
         Decision::Deny {
             reason: DenyReason::MissingGrant,
         }
     }
 
-    async fn authorize_spawn(
+    async fn authorize_spawn_with_trust(
         &self,
         _context: &ExecutionContext,
         _descriptor: &CapabilityDescriptor,
         _estimate: &ResourceEstimate,
+        _trust_decision: &ironclaw_trust::TrustDecision,
     ) -> Decision {
         Decision::Allow {
             obligations: Obligations::empty(),
