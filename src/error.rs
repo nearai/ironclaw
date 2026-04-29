@@ -16,6 +16,9 @@ pub enum Error {
     #[error("Channel error: {0}")]
     Channel(#[from] ChannelError),
 
+    #[error("Transport error: {0}")]
+    Transport(#[from] ironclaw_transport::TransportError),
+
     #[error("LLM error: {0}")]
     Llm(#[from] LlmError),
 

@@ -47,6 +47,9 @@ pub struct AgentConfig {
     /// Enable engine v2 routing (Strategy C parallel deployment).
     /// Set via `ENGINE_V2=true` env var or programmatically in tests.
     pub engine_v2: bool,
+    /// Start channel ingress through the Reborn transport adapter runtime.
+    /// Set via `REBORN_TRANSPORT=true` env var for cutover validation.
+    pub reborn_transport: bool,
 }
 
 impl AgentConfig {
@@ -75,6 +78,7 @@ impl AgentConfig {
             max_llm_concurrent_per_user: None,
             max_jobs_concurrent_per_user: None,
             engine_v2: false,
+            reborn_transport: false,
         }
     }
 
@@ -157,6 +161,7 @@ impl AgentConfig {
             max_llm_concurrent_per_user: parse_option_env("TENANT_MAX_LLM_CONCURRENT")?,
             max_jobs_concurrent_per_user: parse_option_env("TENANT_MAX_JOBS_CONCURRENT")?,
             engine_v2: parse_bool_env("ENGINE_V2", false)?,
+            reborn_transport: parse_bool_env("REBORN_TRANSPORT", false)?,
         })
     }
 }
@@ -179,5 +184,29 @@ mod tests {
         let settings = Settings::default(); // default is "UTC"
         let config = AgentConfig::resolve(&settings).expect("resolve");
         assert_eq!(config.default_timezone, "UTC");
+    }
+
+    #[test]
+    fn test_reborn_transport_defaults_off_and_env_enables() {
+        let _guard = crate::config::helpers::lock_env();
+        let original = std::env::var_os("REBORN_TRANSPORT");
+        unsafe { std::env::remove_var("REBORN_TRANSPORT") };
+        crate::config::helpers::set_runtime_env("REBORN_TRANSPORT", "");
+
+        let config = AgentConfig::resolve(&Settings::default()).expect("default resolve");
+        assert!(!config.reborn_transport);
+
+        crate::config::helpers::set_runtime_env("REBORN_TRANSPORT", "true");
+        let config = AgentConfig::resolve(&Settings::default()).expect("enabled resolve");
+        assert!(config.reborn_transport);
+
+        crate::config::helpers::set_runtime_env("REBORN_TRANSPORT", "");
+        unsafe {
+            if let Some(value) = original {
+                std::env::set_var("REBORN_TRANSPORT", value);
+            } else {
+                std::env::remove_var("REBORN_TRANSPORT");
+            }
+        }
     }
 }
