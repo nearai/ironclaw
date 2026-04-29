@@ -352,3 +352,36 @@ pub(crate) fn same_scope_owner(left: &ResourceScope, right: &ResourceScope) -> b
         && left.user_id == right.user_id
         && left.agent_id == right.agent_id
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: the broad `From<HostApiError> for ProcessError` impl previously
+    /// mismapped every `HostApiError` shape (validation, invariant, mount, network)
+    /// to `ProcessError::InvalidPath`, poisoning error-kind classification at
+    /// path-construction call sites. The replacement `invalid_path` helper must
+    /// only be used where the call site has already established that a
+    /// `HostApiError` represents a path validation failure, and it must preserve
+    /// the original message in the `InvalidPath` payload.
+    #[test]
+    fn invalid_path_helper_maps_host_api_error_into_invalid_path_variant() {
+        let host_error = VirtualPath::new("not-absolute")
+            .expect_err("non-absolute virtual paths must be rejected by VirtualPath::new");
+        let host_error_message = host_error.to_string();
+
+        let process_error = invalid_path(host_error);
+
+        match process_error {
+            ProcessError::InvalidPath(reason) => {
+                assert_eq!(
+                    reason, host_error_message,
+                    "invalid_path helper must preserve the original HostApiError message"
+                );
+            }
+            other => panic!(
+                "invalid_path helper must map HostApiError to ProcessError::InvalidPath, got {other:?}"
+            ),
+        }
+    }
+}
