@@ -91,4 +91,5 @@ mod tests {
 }
 
 #[cfg(test)]
+#[path = "tests/policy_contract.rs"]
 mod policy_contract_tests;
