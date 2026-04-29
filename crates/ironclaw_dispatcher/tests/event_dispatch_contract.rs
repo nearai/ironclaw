@@ -6,6 +6,8 @@ use ironclaw_filesystem::*;
 use ironclaw_host_api::*;
 use ironclaw_resources::*;
 use serde_json::{Value, json};
+use tracing::Instrument;
+use tracing_test::traced_test;
 
 #[tokio::test]
 async fn dispatcher_emits_events_for_wasm_and_script_success() {
@@ -152,6 +154,58 @@ async fn dispatcher_preserves_original_error_when_failure_event_sink_fails() {
             runtime: RuntimeKind::Script
         }
     ));
+}
+
+#[tokio::test]
+#[traced_test]
+async fn dispatcher_logs_release_failure_without_masking_dispatch_error() {
+    let fs = filesystem_with_echo_extensions();
+    let registry =
+        ExtensionDiscovery::discover(&fs, &VirtualPath::new("/system/extensions").unwrap())
+            .await
+            .unwrap();
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    let reservation = ResourceReservation {
+        id: ResourceReservationId::new(),
+        scope: scope.clone(),
+        estimate: ResourceEstimate {
+            concurrency_slots: Some(1),
+            process_count: Some(1),
+            ..ResourceEstimate::default()
+        },
+    };
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
+
+    let err = dispatcher
+        .dispatch_json(CapabilityDispatchRequest {
+            capability_id: CapabilityId::new("echo-script.say").unwrap(),
+            scope,
+            estimate: ResourceEstimate {
+                concurrency_slots: Some(1),
+                process_count: Some(1),
+                ..ResourceEstimate::default()
+            },
+            mounts: None,
+            resource_reservation: Some(reservation.clone()),
+            input: json!({"message": "missing backend"}),
+        })
+        .instrument(tracing::info_span!(
+            "dispatcher_logs_release_failure_without_masking_dispatch_error"
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        DispatchError::MissingRuntimeBackend {
+            runtime: RuntimeKind::Script
+        }
+    ));
+    assert!(logs_contain(
+        "failed to release prepared resource reservation after dispatcher validation failure"
+    ));
+    assert!(logs_contain(&reservation.id.to_string()));
 }
 
 #[tokio::test]

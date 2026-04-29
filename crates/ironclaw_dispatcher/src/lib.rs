@@ -309,8 +309,14 @@ where
     }
 
     fn release_request_reservation(&self, request: &CapabilityDispatchRequest) {
-        if let Some(reservation) = &request.resource_reservation {
-            let _ = self.governor.as_ref().release(reservation.id);
+        if let Some(reservation) = &request.resource_reservation
+            && let Err(error) = self.governor.as_ref().release(reservation.id)
+        {
+            tracing::warn!(
+                reservation_id = %reservation.id,
+                error = %error,
+                "failed to release prepared resource reservation after dispatcher validation failure"
+            );
         }
     }
 
