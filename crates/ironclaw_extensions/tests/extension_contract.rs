@@ -97,6 +97,56 @@ fn package_builds_trust_policy_input_from_requested_manifest_trust() {
 }
 
 #[test]
+fn package_trust_policy_input_rejects_mutated_public_descriptors() {
+    let manifest = ExtensionManifest::parse(WASM_MANIFEST).unwrap();
+    let mut package = ExtensionPackage::from_manifest(
+        manifest,
+        VirtualPath::new("/system/extensions/echo").unwrap(),
+    )
+    .unwrap();
+    package.capabilities[0].id = CapabilityId::new("echo.mutated").unwrap();
+
+    let err = package
+        .trust_policy_input(PackageSource::Bundled, None, None)
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExtensionError::InvalidManifest { reason } if reason.contains("capability descriptors")
+    ));
+}
+
+#[test]
+fn missing_manifest_trust_defaults_to_untrusted() {
+    let manifest =
+        ExtensionManifest::parse(&WASM_MANIFEST.replace("trust = \"untrusted\"\n", "")).unwrap();
+
+    assert_eq!(manifest.requested_trust, RequestedTrustClass::Untrusted);
+    assert_eq!(manifest.trust, TrustClass::Sandbox);
+    let package = ExtensionPackage::from_manifest(
+        manifest,
+        VirtualPath::new("/system/extensions/echo").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(package.capabilities[0].trust_ceiling, TrustClass::Sandbox);
+}
+
+#[test]
+fn legacy_manifest_trust_values_get_actionable_error() {
+    let err = ExtensionManifest::parse(
+        &WASM_MANIFEST.replace("trust = \"untrusted\"", "trust = \"sandbox\""),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExtensionError::ManifestParse { reason }
+            if reason.contains("trust = \"sandbox\" is obsolete")
+                && reason.contains("use \"untrusted\"")
+    ));
+}
+
+#[test]
 fn invalid_extension_id_is_rejected() {
     let err =
         ExtensionManifest::parse(&WASM_MANIFEST.replace("id = \"echo\"", "id = \"Echo/Bad\""))

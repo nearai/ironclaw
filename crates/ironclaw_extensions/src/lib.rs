@@ -14,7 +14,7 @@ use ironclaw_host_api::{
     RuntimeKind, TrustClass, VirtualPath,
 };
 use ironclaw_trust::TrustPolicyInput;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use thiserror::Error;
 
 /// Extension manifest and registry failures.
@@ -273,8 +273,9 @@ impl ExtensionPackage {
         digest: Option<String>,
         signer: Option<String>,
     ) -> Result<PackageIdentity, ExtensionError> {
+        validate_package_consistency(self)?;
         Ok(PackageIdentity::new(
-            PackageId::new(self.id.as_str().to_string())?,
+            PackageId::new(self.manifest.id.as_str().to_string())?,
             source,
             digest,
             signer,
@@ -448,7 +449,10 @@ struct RawManifest {
     name: String,
     version: String,
     description: String,
-    #[serde(default = "default_requested_trust")]
+    #[serde(
+        default = "default_requested_trust",
+        deserialize_with = "deserialize_requested_trust"
+    )]
     trust: RequestedTrustClass,
     runtime: RawRuntime,
     #[serde(default)]
@@ -457,6 +461,34 @@ struct RawManifest {
 
 fn default_requested_trust() -> RequestedTrustClass {
     RequestedTrustClass::Untrusted
+}
+
+fn deserialize_requested_trust<'de, D>(deserializer: D) -> Result<RequestedTrustClass, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    match value.as_str() {
+        "untrusted" => Ok(RequestedTrustClass::Untrusted),
+        "third_party" => Ok(RequestedTrustClass::ThirdParty),
+        "first_party_requested" => Ok(RequestedTrustClass::FirstPartyRequested),
+        "system_requested" => Ok(RequestedTrustClass::SystemRequested),
+        "sandbox" => Err(serde::de::Error::custom(
+            "trust = \"sandbox\" is obsolete; use \"untrusted\"",
+        )),
+        "user_trusted" => Err(serde::de::Error::custom(
+            "trust = \"user_trusted\" is obsolete; use \"third_party\"",
+        )),
+        "first_party" => Err(serde::de::Error::custom(
+            "trust = \"first_party\" is obsolete; use \"first_party_requested\"",
+        )),
+        "system" => Err(serde::de::Error::custom(
+            "trust = \"system\" is obsolete; use \"system_requested\"",
+        )),
+        _ => Err(serde::de::Error::custom(format!(
+            "unsupported trust value {value:?}; expected one of untrusted, third_party, first_party_requested, system_requested"
+        ))),
+    }
 }
 
 fn requested_trust_to_descriptor_trust(requested: RequestedTrustClass) -> TrustClass {
