@@ -1184,13 +1184,14 @@ impl Agent {
             let handle_fut = self.handle_message(&message);
             tokio::pin!(handle_fut);
 
+            let mut stream_open = true;
             let result = loop {
                 tokio::select! {
                     biased;
                     outcome = &mut handle_fut => {
                         break outcome;
                     }
-                    interrupt_msg = message_stream.next() => {
+                    interrupt_msg = message_stream.next(), if stream_open => {
                         match interrupt_msg {
                             Some(imsg) => {
                                 let sub = imsg
@@ -1211,7 +1212,7 @@ impl Agent {
                                 }
                             }
                             None => {
-                                // Stream ended — let handle_fut finish
+                                stream_open = false;
                             }
                         }
                     }
