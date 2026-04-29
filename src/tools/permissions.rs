@@ -35,7 +35,12 @@ pub enum PermissionState {
 /// persisted row is missing, so non-owner users and pre-seed accounts see the
 /// same permission behavior as seeded users.
 pub fn seeded_default_permission(tool_name: &str) -> Option<PermissionState> {
-    match tool_name.replace('-', "_").as_str() {
+    let canonical = tool_name.replace('-', "_");
+    seeded_default_permission_canonical(&canonical)
+}
+
+fn seeded_default_permission_canonical(canonical_tool_name: &str) -> Option<PermissionState> {
+    match canonical_tool_name {
         "echo" | "time" | "json" | "memory_search" | "memory_read" | "memory_write"
         | "memory_tree" | "tool_list" | "tool_info" | "tool_search" | "tool_activate"
         | "skill_list" | "skill_search" | "http" | "list_jobs" | "job_status" | "job_events"
@@ -271,7 +276,7 @@ pub fn effective_permission(
         .copied()
         .or_else(|| overrides.get(&canonical).copied())
         .or_else(|| overrides.get(&hyphenated).copied())
-        .or_else(|| seeded_default_permission(&canonical))
+        .or_else(|| seeded_default_permission_canonical(&canonical))
         .unwrap_or(PermissionState::AskEachTime)
 }
 
