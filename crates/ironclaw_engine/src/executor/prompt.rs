@@ -1,7 +1,6 @@
 //! System prompt construction for the execution loop.
 //!
-//! Builds a CodeAct/RLM system prompt that instructs the LLM to write
-//! Python code in ```repl blocks with tools available as callable functions.
+//! Builds the v2 execution-loop system prompt.
 //!
 //! Prompt templates live in `crates/ironclaw_engine/prompts/` as plain
 //! markdown files for easy inspection and iteration. They are embedded
@@ -80,6 +79,8 @@ const STRUCTURED_TOOL_PREAMBLE: &str = r#"You are IronClaw, a personal AI assist
 Use the provider's structured tool_calls interface for every action.
 Do not emit Python, repl, py, or other executable fenced code blocks.
 Do not call tools as Python functions.
+Do not write tool invocations in assistant text. Never output `[[call_tool ...]]`, `<tool_call>`, `<function_call>`, JSON tool-call blobs, or function-style calls such as `tool_name(...)`.
+Only the provider-level `tool_calls` field invokes tools. If you need a tool, return a structured tool call instead of describing or printing the call.
 When no action is needed, answer in plain text.
 "#;
 
@@ -88,6 +89,7 @@ const STRUCTURED_TOOL_POSTAMBLE: &str = r#"
 
 Use structured tool calls when you need data, persistence, external effects, or system state.
 After tool results are available, continue with another structured tool call or return the final plain-text answer.
+Some integrations use literal UI blocks such as `[[choice_set]]...[[/choice_set]]` in final user-facing text. These are UI markup only; do not invent other bracketed control blocks, especially `[[call_tool ...]]`.
 "#;
 
 /// Well-known title for the CodeAct preamble overlay.
@@ -99,14 +101,10 @@ pub const PROMPT_OVERLAY_TAG: &str = "prompt_overlay";
 /// Maximum size for a prompt overlay document (in chars).
 const MAX_PROMPT_OVERLAY_CHARS: usize = 4000;
 
-/// Build the system prompt for CodeAct/RLM execution.
+/// Build the system prompt for v2 execution.
 ///
-/// The prompt instructs the LLM to:
-/// - Write Python code in ```repl fenced blocks
-/// - Call tools as regular Python functions
-/// - Use llm_query(prompt, context) for sub-agent calls
-/// - Use FINAL(answer) to return the final answer
-/// - Access thread context via the `context` variable
+/// The prompt instructs the LLM to use provider-level structured tool calls,
+/// not CodeAct, Python, or text-encoded tool-call syntax.
 ///
 /// If a Store is provided, checks for a runtime prompt overlay (a MemoryDoc
 /// with tag "prompt_overlay" and title "prompt:codeact_preamble") and appends
@@ -223,6 +221,9 @@ mod tests {
             build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), None).await;
         assert!(prompt.contains("structured tool_calls"));
         assert!(prompt.contains("Do not emit Python"));
+        assert!(prompt.contains("Never output `[[call_tool ...]]`"));
+        assert!(prompt.contains("Only the provider-level `tool_calls` field invokes tools"));
+        assert!(prompt.contains("do not invent other bracketed control blocks"));
         assert!(prompt.contains("Strategy"));
         assert!(!prompt.contains("Learned Rules"));
     }
