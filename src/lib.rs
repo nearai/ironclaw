@@ -60,6 +60,7 @@ pub(crate) mod generated_images;
 pub mod history;
 pub mod hooks;
 pub mod http_intercept;
+pub(crate) mod image_artifacts;
 #[cfg(feature = "import")]
 pub mod import;
 pub mod llm;

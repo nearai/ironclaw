@@ -1,6 +1,9 @@
 //! Shared helpers for image-generation sentinel payloads.
 
 use std::borrow::Cow;
+use std::path::Path;
+
+use uuid::Uuid;
 
 pub(crate) const MAX_RECORDED_IMAGE_SENTINEL_BYTES: usize = 512 * 1024;
 const MAX_EMBEDDED_JSON_STRING_LAYERS: usize = 3;
@@ -18,6 +21,14 @@ pub(crate) fn recorded_image_sentinel_cap_label() -> String {
         return format!("{} KiB", MAX_RECORDED_IMAGE_SENTINEL_BYTES / 1024);
     }
     format!("{} bytes", MAX_RECORDED_IMAGE_SENTINEL_BYTES)
+}
+
+pub(crate) fn image_tool_event_id(turn_number: usize, tool_call_id: &str) -> String {
+    let tool_call_id = tool_call_id.trim();
+    if tool_call_id.is_empty() {
+        return format!("turn-{turn_number}-image");
+    }
+    format!("turn-{turn_number}-{tool_call_id}")
 }
 
 impl GeneratedImageSentinel {
@@ -51,6 +62,32 @@ impl GeneratedImageSentinel {
         self.value.get("path").and_then(|v| v.as_str())
     }
 
+    pub(crate) fn event_id(&self) -> Option<&str> {
+        self.value.get("event_id").and_then(|v| v.as_str())
+    }
+
+    pub(crate) fn with_event_id(&self, event_id: impl Into<String>) -> Self {
+        let mut value = self.value.clone();
+        if let serde_json::Value::Object(ref mut object) = value {
+            object.insert(
+                "event_id".to_string(),
+                serde_json::Value::String(event_id.into()),
+            );
+        }
+        Self { value }
+    }
+
+    pub(crate) fn with_path(&self, path: impl Into<String>, media_type: impl Into<String>) -> Self {
+        let mut value = self.value.clone();
+        if let serde_json::Value::Object(ref mut object) = value {
+            object.insert("path".to_string(), serde_json::Value::String(path.into()));
+            object
+                .entry("media_type".to_string())
+                .or_insert_with(|| serde_json::Value::String(media_type.into()));
+        }
+        Self { value }
+    }
+
     pub(crate) fn summary_for_context(&self) -> String {
         let media_type = self.media_type().unwrap_or("image");
         if let Some(path) = self.path()
@@ -71,6 +108,14 @@ impl GeneratedImageSentinel {
             summary.insert(
                 "media_type".to_string(),
                 serde_json::Value::String(media_type.to_string()),
+            );
+        }
+        if let Some(event_id) = self.event_id()
+            && !event_id.is_empty()
+        {
+            summary.insert(
+                "event_id".to_string(),
+                serde_json::Value::String(event_id.to_string()),
             );
         }
         if let Some(path) = self.path()
@@ -136,9 +181,39 @@ fn normalize_embedded_json(value: &serde_json::Value) -> Option<Cow<'_, serde_js
     Some(Cow::Owned(current))
 }
 
+pub(crate) async fn persist_sentinel_image_artifact(
+    root: Option<&Path>,
+    sentinel: &GeneratedImageSentinel,
+    user_id: &str,
+    thread_id: Uuid,
+    artifact_id: &str,
+) -> Result<GeneratedImageSentinel, String> {
+    if sentinel.path().is_some_and(|path| !path.is_empty()) {
+        return Ok(sentinel.clone());
+    }
+    let Some(data_url) = sentinel.data_url() else {
+        return Ok(sentinel.clone());
+    };
+    let (media_type, bytes) = crate::image_artifacts::decode_image_data_url(data_url)?;
+    let path = crate::image_artifacts::persist_image_artifact(
+        root,
+        &bytes,
+        &media_type,
+        user_id,
+        thread_id,
+        artifact_id,
+    )
+    .await?;
+    Ok(sentinel.with_path(path, media_type))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{GeneratedImageSentinel, MAX_RECORDED_IMAGE_SENTINEL_BYTES};
+    use super::{
+        GeneratedImageSentinel, MAX_RECORDED_IMAGE_SENTINEL_BYTES, persist_sentinel_image_artifact,
+    };
+    use base64::Engine as _;
+    use uuid::Uuid;
 
     fn double_stringified_sentinel_under_normalized_cap() -> (String, String) {
         let base = serde_json::json!({
@@ -240,5 +315,47 @@ mod tests {
         assert_eq!(recorded, normalized);
         assert!(recorded.contains("data:image/png;base64"));
         assert!(!recorded.contains("\"data_omitted\":true"));
+    }
+
+    #[test]
+    fn with_path_adds_path_without_dropping_data_url() {
+        let sentinel = GeneratedImageSentinel::from_value(&serde_json::json!({
+            "type": "image_generated",
+            "data": "data:image/png;base64,abc123",
+        }))
+        .expect("sentinel");
+
+        let with_path = sentinel.with_path("/tmp/out.png", "image/png");
+
+        assert_eq!(with_path.path(), Some("/tmp/out.png"));
+        assert_eq!(with_path.media_type(), Some("image/png"));
+        assert_eq!(with_path.data_url(), Some("data:image/png;base64,abc123"));
+    }
+
+    #[tokio::test]
+    async fn persist_sentinel_image_artifact_adds_reusable_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data = base64::engine::general_purpose::STANDARD.encode(b"png-bytes");
+        let sentinel = GeneratedImageSentinel::from_value(&serde_json::json!({
+            "type": "image_generated",
+            "data": format!("data:image/png;base64,{data}"),
+            "media_type": "image/png",
+        }))
+        .expect("sentinel");
+
+        let persisted = persist_sentinel_image_artifact(
+            Some(dir.path()),
+            &sentinel,
+            "user@example.com",
+            Uuid::new_v4(),
+            "call_img_0",
+        )
+        .await
+        .expect("persisted");
+
+        let path = persisted.path().expect("path");
+        assert!(path.ends_with(".png"));
+        assert_eq!(tokio::fs::read(path).await.expect("read"), b"png-bytes");
+        assert!(persisted.data_url().is_some());
     }
 }

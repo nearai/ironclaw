@@ -108,17 +108,10 @@ fn format_attachment(index: usize, att: &IncomingAttachment) -> String {
                 .map(|s| format!(" size=\"{}\"", format_size(s)))
                 .unwrap_or_default();
 
-            // Pick the right prompt for the agent based on whether the
-            // image bytes reached the model. Engine v2 persists the file to
-            // disk but leaves `data` populated so `augment_with_attachments`
-            // can emit a multimodal `image_parts` entry — that's the path
-            // that actually sends the image to the LLM. An empty `data`
-            // with a `local_path` set can only happen if a downstream
-            // caller cleared the buffer (or if the channel elided it); in
-            // that case the model doesn't see the pixels and must go
-            // through the project file path instead.
-            let body = if !att.data.is_empty() {
-                "[Image attached — you can already see this image directly in the conversation. Do NOT use image_analyze or try to find this file on disk — it exists only in memory. Analyze it using your vision capabilities.]"
+            let body = if !att.data.is_empty() && att.local_path.is_some() {
+                "[Image attached — you can already see this image directly in the conversation. If the user asks to edit it, use image_edit with the saved project file path above as image_path.]"
+            } else if !att.data.is_empty() {
+                "[Image attached — you can already see this image directly in the conversation. No editable file path is available in this turn; analyze it using your vision capabilities.]"
             } else if att.local_path.is_some() {
                 "[Image attached — the raw bytes are not in this turn's multimodal context, but the file has been persisted at the project file path above. Reference that path when you need the image.]"
             } else {
@@ -286,6 +279,26 @@ mod tests {
             }
             other => panic!("Expected ImageUrl, got: {:?}", other),
         }
+    }
+
+    #[test]
+    fn image_with_data_and_project_path_mentions_image_edit_path() {
+        let mut att = make_attachment(AttachmentKind::Image);
+        att.filename = Some("photo.png".to_string());
+        att.mime_type = "image/png".to_string();
+        att.local_path = Some("/tmp/photo.png".to_string());
+        att.data = vec![0x89, 0x50, 0x4E, 0x47];
+
+        let result = augment_with_attachments("edit this", &[att]).unwrap();
+
+        assert!(
+            result
+                .text
+                .contains("Saved to project file: /tmp/photo.png")
+        );
+        assert!(result.text.contains("use image_edit"));
+        assert!(result.text.contains("image_path"));
+        assert_eq!(result.image_parts.len(), 1);
     }
 
     #[test]

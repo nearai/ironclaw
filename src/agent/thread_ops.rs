@@ -13,15 +13,20 @@ use uuid::Uuid;
 use crate::agent::Agent;
 use crate::agent::compaction::ContextCompactor;
 use crate::agent::dispatcher::{
-    AgenticLoopResult, ParsedAuthData, TurnUsageSummary, auth_instructions_or_default,
-    capture_auth_prompt, emit_auth_required_status, execute_chat_tool_standalone,
-    persist_selected_auth_prompt, restore_selected_auth_prompt,
+    AgenticLoopResult, ImageToolResultContext, ParsedAuthData, TurnUsageSummary,
+    auth_instructions_or_default, capture_auth_prompt, emit_auth_required_status,
+    enrich_image_tool_result, execute_chat_tool_standalone, image_generation_record_content,
+    image_generation_summary_tool_message, persist_selected_auth_prompt,
+    restore_selected_auth_prompt,
 };
 use crate::agent::session::{
     MAX_PENDING_MESSAGES, PendingApproval, Session, ThreadState, TurnOutcome,
 };
 use crate::agent::submission::SubmissionResult;
-use crate::channels::{ChatApprovalPrompt, HistoryMessage, IncomingMessage, StatusUpdate};
+use crate::channels::{
+    AttachmentKind, ChatApprovalPrompt, HistoryMessage, IncomingAttachment, IncomingMessage,
+    StatusUpdate,
+};
 use crate::context::JobContext;
 use crate::error::Error;
 use crate::generated_images::GeneratedImageSentinel;
@@ -69,6 +74,91 @@ fn tool_result_content_for_rebuild(result: &str) -> String {
         return result.to_string();
     };
     sentinel.summary_for_context()
+}
+
+struct PersistedInlineImageAttachments {
+    attachments: Vec<IncomingAttachment>,
+    created_paths: Vec<String>,
+}
+
+async fn persist_inline_image_attachments(
+    message: &IncomingMessage,
+    thread_id: Uuid,
+) -> PersistedInlineImageAttachments {
+    persist_inline_image_attachments_at(None, message, thread_id).await
+}
+
+async fn persist_inline_image_attachments_at(
+    root: Option<&std::path::Path>,
+    message: &IncomingMessage,
+    thread_id: Uuid,
+) -> PersistedInlineImageAttachments {
+    if message.attachments.is_empty() {
+        return PersistedInlineImageAttachments {
+            attachments: Vec::new(),
+            created_paths: Vec::new(),
+        };
+    }
+
+    let mut attachments = message.attachments.clone();
+    let mut created_paths = Vec::new();
+    for (idx, attachment) in attachments.iter_mut().enumerate() {
+        if attachment.kind != AttachmentKind::Image
+            || attachment.data.is_empty()
+            || attachment.local_path.is_some()
+        {
+            continue;
+        }
+
+        let artifact_id = if attachment.id.trim().is_empty() {
+            format!("{}-attachment-{idx}", message.id)
+        } else {
+            format!("{}-{}", message.id, attachment.id)
+        };
+        match crate::image_artifacts::persist_image_artifact(
+            root,
+            &attachment.data,
+            &attachment.mime_type,
+            &message.user_id,
+            thread_id,
+            &artifact_id,
+        )
+        .await
+        {
+            Ok(path) => {
+                created_paths.push(path.clone());
+                attachment.local_path = Some(path);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    message_id = %message.id,
+                    attachment_id = %attachment.id,
+                    error = %err,
+                    "Failed to persist inline image attachment artifact"
+                );
+            }
+        }
+    }
+    PersistedInlineImageAttachments {
+        attachments,
+        created_paths,
+    }
+}
+
+async fn cleanup_created_image_artifacts(paths: &[String]) {
+    for path in paths {
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                tracing::warn!(
+                    path = %path,
+                    error = %err,
+                    "Failed to remove rejected inline image artifact"
+                );
+            }
+        }
+    }
 }
 
 const INVALID_AUTH_TOKEN_MESSAGE: &str = "Invalid token. Please try again.";
@@ -545,17 +635,19 @@ impl Agent {
 
         // Attachments can carry the only user-visible payload (for example,
         // a files-only send with empty chat text), so validation and policy
-        // checks must run against the augmented content that will actually
-        // enter the turn rather than the raw text field alone.
-        let augmented =
+        // checks must run against augmented content rather than the raw text
+        // field alone. First validate before writing upload bytes to disk; after
+        // accepting the message, validate once more against the final augmented
+        // content that includes newly assigned project paths.
+        let preflight_augmented =
             crate::agent::attachments::augment_with_attachments(content, &message.attachments);
-        let (effective_content, image_parts) = match &augmented {
-            Some(result) => (result.text.as_str(), result.image_parts.clone()),
-            None => (content, Vec::new()),
+        let preflight_content = match &preflight_augmented {
+            Some(result) => result.text.as_str(),
+            None => content,
         };
 
         // Safety validation for user input
-        let validation = self.safety().validate_input(effective_content);
+        let validation = self.safety().validate_input(preflight_content);
         if !validation.is_valid {
             let details = validation
                 .errors
@@ -569,7 +661,7 @@ impl Agent {
             )));
         }
 
-        let violations = self.safety().check_policy(effective_content);
+        let violations = self.safety().check_policy(preflight_content);
         if violations
             .iter()
             .any(|rule| rule.action == ironclaw_safety::PolicyAction::Block)
@@ -580,7 +672,7 @@ impl Agent {
         // Scan inbound messages for secrets (API keys, tokens).
         // Catching them here prevents the LLM from echoing them back, which
         // would trigger the outbound leak detector and create error loops.
-        if let Some(warning) = self.safety().scan_inbound_for_secrets(effective_content) {
+        if let Some(warning) = self.safety().scan_inbound_for_secrets(preflight_content) {
             tracing::warn!(
                 user = %message.user_id,
                 channel = %message.channel,
@@ -599,6 +691,50 @@ impl Agent {
         if let Some(intent) = self.router.route_command(&temp_message) {
             // Explicit command like /status, /job, /list - handle directly
             return self.handle_job_or_command(intent, message, &tenant).await;
+        }
+
+        let persisted_attachments = persist_inline_image_attachments(message, thread_id).await;
+        let augmented = crate::agent::attachments::augment_with_attachments(
+            content,
+            &persisted_attachments.attachments,
+        );
+        let (effective_content, image_parts) = match &augmented {
+            Some(result) => (result.text.as_str(), result.image_parts.clone()),
+            None => (content, Vec::new()),
+        };
+
+        let validation = self.safety().validate_input(effective_content);
+        if !validation.is_valid {
+            cleanup_created_image_artifacts(&persisted_attachments.created_paths).await;
+            let details = validation
+                .errors
+                .iter()
+                .map(|e| format!("{}: {}", e.field, e.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Ok(SubmissionResult::error(format!(
+                "Input rejected by safety validation: {}",
+                details
+            )));
+        }
+
+        let violations = self.safety().check_policy(effective_content);
+        if violations
+            .iter()
+            .any(|rule| rule.action == ironclaw_safety::PolicyAction::Block)
+        {
+            cleanup_created_image_artifacts(&persisted_attachments.created_paths).await;
+            return Ok(SubmissionResult::error("Input rejected by safety policy."));
+        }
+
+        if let Some(warning) = self.safety().scan_inbound_for_secrets(effective_content) {
+            cleanup_created_image_artifacts(&persisted_attachments.created_paths).await;
+            tracing::warn!(
+                user = %message.user_id,
+                channel = %message.channel,
+                "Inbound message blocked after attachment persistence: contains leaked secret"
+            );
+            return Ok(SubmissionResult::error(warning));
         }
 
         // Natural language goes through the agentic loop
@@ -1532,6 +1668,11 @@ impl Agent {
                 }
             };
 
+            let resumed_turn_number = resumed_turn
+                .as_ref()
+                .map(|(turn_number, _, _, _)| *turn_number)
+                .unwrap_or_default();
+
             if let Some((turn_number, user_message_id, user_input, started_at)) = resumed_turn {
                 self.persist_processing_live_state(
                     thread_id,
@@ -1578,7 +1719,7 @@ impl Agent {
                 .await;
 
             let started_at = std::time::Instant::now();
-            let tool_result = self
+            let mut tool_result = self
                 .execute_chat_tool(&pending.tool_name, &pending.parameters, &job_ctx)
                 .await;
             let duration_ms = started_at.elapsed().as_millis() as u64;
@@ -1600,7 +1741,23 @@ impl Agent {
                 )
                 .await;
 
+            let image_sentinel = enrich_image_tool_result(
+                ImageToolResultContext::new(
+                    &self.channels,
+                    &message.channel,
+                    &message.metadata,
+                    &message.user_id,
+                    thread_id,
+                    resumed_turn_number,
+                ),
+                &pending.tool_name,
+                &pending.tool_call_id,
+                &mut tool_result,
+            )
+            .await;
+
             if let Ok(ref output) = tool_result
+                && image_sentinel.is_none()
                 && !output.is_empty()
             {
                 let _ = self
@@ -1627,12 +1784,25 @@ impl Agent {
             // Sanitize tool result, then record the cleaned version in the
             // thread. Must happen before auth intercept check which may return early.
             let is_tool_error = tool_result.is_err();
-            let (result_content, _) = crate::tools::execute::process_tool_result(
-                self.safety(),
-                &pending.tool_name,
-                &pending.tool_call_id,
-                &tool_result,
-            );
+            let (result_content, tool_message) =
+                if let (Ok(_), Some(sentinel)) = (&tool_result, image_sentinel.as_ref()) {
+                    (
+                        image_generation_record_content(sentinel),
+                        image_generation_summary_tool_message(
+                            self.safety(),
+                            &pending.tool_name,
+                            &pending.tool_call_id,
+                            sentinel,
+                        ),
+                    )
+                } else {
+                    crate::tools::execute::process_tool_result(
+                        self.safety(),
+                        &pending.tool_name,
+                        &pending.tool_call_id,
+                        &tool_result,
+                    )
+                };
 
             // Record sanitized result in thread
             {
@@ -1662,11 +1832,7 @@ impl Agent {
                 }
             }
 
-            context_messages.push(ChatMessage::tool_result(
-                &pending.tool_call_id,
-                &pending.tool_name,
-                result_content,
-            ));
+            context_messages.push(tool_message);
 
             capture_auth_prompt(&mut selected_auth_prompt, &pending.tool_name, &tool_result);
 
@@ -1871,8 +2037,24 @@ impl Agent {
             // Process all results before any conditional return so every
             // tool result is recorded in the session audit trail.
 
-            for (tc, deferred_result) in exec_results {
+            for (tc, mut deferred_result) in exec_results {
+                let image_sentinel = enrich_image_tool_result(
+                    ImageToolResultContext::new(
+                        &self.channels,
+                        &message.channel,
+                        &message.metadata,
+                        &message.user_id,
+                        thread_id,
+                        resumed_turn_number,
+                    ),
+                    &tc.name,
+                    &tc.id,
+                    &mut deferred_result,
+                )
+                .await;
+
                 if let Ok(ref output) = deferred_result
+                    && image_sentinel.is_none()
                     && !output.is_empty()
                 {
                     let _ = self
@@ -1892,12 +2074,25 @@ impl Agent {
                 // Sanitize first, then record the cleaned version in thread.
                 // Must happen before auth detection which may set deferred_auth.
                 let is_deferred_error = deferred_result.is_err();
-                let (deferred_content, _) = crate::tools::execute::process_tool_result(
-                    self.safety(),
-                    &tc.name,
-                    &tc.id,
-                    &deferred_result,
-                );
+                let (deferred_content, deferred_message) =
+                    if let (Ok(_), Some(sentinel)) = (&deferred_result, image_sentinel.as_ref()) {
+                        (
+                            image_generation_record_content(sentinel),
+                            image_generation_summary_tool_message(
+                                self.safety(),
+                                &tc.name,
+                                &tc.id,
+                                sentinel,
+                            ),
+                        )
+                    } else {
+                        crate::tools::execute::process_tool_result(
+                            self.safety(),
+                            &tc.name,
+                            &tc.id,
+                            &deferred_result,
+                        )
+                    };
 
                 // Record sanitized result in thread
                 {
@@ -1927,7 +2122,7 @@ impl Agent {
 
                 capture_auth_prompt(&mut selected_auth_prompt, &tc.name, &deferred_result);
 
-                context_messages.push(ChatMessage::tool_result(&tc.id, &tc.name, deferred_content));
+                context_messages.push(deferred_message);
             }
 
             // Handle approval if a tool needed it
@@ -3366,7 +3561,7 @@ mod tests {
 
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].generated_images.len(), 1);
-        assert_eq!(turns[0].generated_images[0].event_id, "call_img_0");
+        assert_eq!(turns[0].generated_images[0].event_id, "turn-0-call_img_0");
         assert!(turns[0].generated_images[0].data_url.is_none());
         assert_eq!(
             turns[0].generated_images[0].path.as_deref(),
@@ -3657,6 +3852,58 @@ mod tests {
             "{}",
             turn.user_input
         );
+    }
+
+    #[tokio::test]
+    async fn test_persist_inline_image_attachments_adds_editable_path() {
+        use crate::channels::{AttachmentKind, IncomingAttachment, IncomingMessage};
+        use uuid::Uuid;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let thread_id = Uuid::new_v4();
+        let message =
+            IncomingMessage::new("test", "test-user", "edit this").with_attachments(vec![
+                IncomingAttachment {
+                    id: "img_1".to_string(),
+                    kind: AttachmentKind::Image,
+                    mime_type: "image/png".to_string(),
+                    filename: Some("photo.png".to_string()),
+                    size_bytes: Some(4),
+                    source_url: None,
+                    storage_key: None,
+                    local_path: None,
+                    extracted_text: None,
+                    data: vec![0x89, 0x50, 0x4E, 0x47],
+                    duration_secs: None,
+                },
+            ]);
+
+        let persisted =
+            super::persist_inline_image_attachments_at(Some(dir.path()), &message, thread_id).await;
+
+        let path = persisted.attachments[0]
+            .local_path
+            .as_deref()
+            .expect("local path");
+        assert!(path.ends_with(".png"));
+        assert_eq!(persisted.created_paths, vec![path.to_string()]);
+        assert_eq!(
+            tokio::fs::read(path).await.expect("read"),
+            vec![0x89, 0x50, 0x4E, 0x47]
+        );
+        assert_eq!(persisted.attachments[0].data, vec![0x89, 0x50, 0x4E, 0x47]);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_created_image_artifacts_removes_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rejected.png");
+        tokio::fs::write(&path, b"rejected").await.expect("write");
+        let path = path.to_string_lossy().into_owned();
+
+        super::cleanup_created_image_artifacts(std::slice::from_ref(&path)).await;
+
+        assert!(!std::path::Path::new(&path).exists());
     }
 
     #[tokio::test]

@@ -69,7 +69,7 @@ impl Tool for ImageEditTool {
     }
 
     fn description(&self) -> &str {
-        "Edit an existing image using an AI model. Provide the workspace path to the source image and a text prompt describing the desired edits."
+        "Edit an existing image using an AI model. Provide the saved project file path to the source image and a text prompt describing the desired edits."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -83,7 +83,7 @@ impl Tool for ImageEditTool {
                 },
                 "image_path": {
                     "type": "string",
-                    "description": "Path to the source image in the workspace (e.g., 'images/photo.jpg')"
+                    "description": "Saved project file path to the source image, usually from an uploaded image or a previous image_generate/image_edit result"
                 }
             },
             "required": ["prompt", "image_path"]
