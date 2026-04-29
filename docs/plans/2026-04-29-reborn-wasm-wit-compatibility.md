@@ -22,12 +22,13 @@ The user direction for this plan is explicit:
 
 1. **WIT is the production ABI**: `crates/ironclaw_wasm` should use Wasmtime component model and generated bindings from `wit/tool.wit` / `wit/channel.wit`. The custom JSON ABI from PR #3028 should not become a public compatibility path.
 2. **V1 is not modified**: `src/tools/wasm/*` and `src/channels/wasm/*` remain untouched. They are only used as behavioral references for Reborn compatibility tests and sidecar mapping.
-3. **Kernel network owns HTTP**: Reborn WASM code must not build direct `reqwest` clients, perform ad-hoc DNS resolution, or implement local SSRF checks. `ironclaw_network` owns outbound HTTP policy and execution.
-4. **Kernel secrets own secret material**: Reborn WASM code must not access app-level V1 secret stores directly. `ironclaw_secrets` owns secret metadata, one-shot leases, and redaction handles.
-5. **The guest should not see raw secrets**: Existing host-controlled credential injection behavior should be preserved. Guests can check `secret-exists` where allowed, but raw secret values are leased and injected by the host.
-6. **Resource egress invariant**: `ResourceUsage.network_egress_bytes` counts outbound request bytes only. Response body limits and response byte accounting are separate.
-7. **Fresh instance isolation**: Match V1's safety model: tools get a fresh instance per execution; channels get a fresh instance per callback, with host-managed state persisted between callbacks.
-8. **Compatibility starts with tools**: WIT tools are smaller and should land before WIT channels. Channel routing/polling/webhook integration is a separate slice.
+3. **Kernel network owns HTTP**: Reborn runtime code must not build direct `reqwest` clients, perform ad-hoc DNS resolution, or implement local SSRF checks. `ironclaw_network` owns outbound HTTP policy and execution.
+4. **Shared runtime egress, not WASM-only**: The HTTP gateway is tracked by #3085 and is shared by WASM, Script, and host-mediated MCP runtime lanes. WASM keeps only a thin WIT adapter over that shared service.
+5. **Kernel secrets own secret material**: Reborn runtime code must not access app-level V1 secret stores directly. `ironclaw_secrets` owns secret metadata, one-shot leases, and redaction handles.
+6. **The guest should not see raw secrets**: Existing host-controlled credential injection behavior should be preserved. Guests can check `secret-exists` where allowed, but raw secret values are leased and injected by the host.
+7. **Resource egress invariant**: `ResourceUsage.network_egress_bytes` counts outbound request bytes only. Response body limits and response byte accounting are separate.
+8. **Fresh instance isolation**: Match V1's safety model: tools get a fresh instance per execution; channels get a fresh instance per callback, with host-managed state persisted between callbacks.
+9. **Compatibility starts with tools**: WIT tools are smaller and should land before WIT channels. Channel routing/polling/webhook integration is a separate slice.
 
 ## Target architecture
 
@@ -37,7 +38,8 @@ ironclaw-reborn binary
         ├── ironclaw_dispatcher
         ├── ironclaw_wasm          # WIT tool/channel runtime
         ├── ironclaw_secrets       # secret leases, metadata, redaction
-        ├── ironclaw_network       # all outbound HTTP
+        ├── ironclaw_network       # all outbound HTTP transport/policy
+        ├── runtime HTTP egress    # shared WASM/Script/MCP gateway (#3085)
         ├── ironclaw_filesystem    # workspace/filesystem grants
         └── ironclaw_resources     # reserve/reconcile accounting
 ```
@@ -57,7 +59,7 @@ ironclaw_wasm WIT adapter
         ├── workspace/filesystem bridge
         ├── resource governor
         ├── secret bridge via ironclaw_secrets
-        └── HTTP bridge via ironclaw_network
+        └── HTTP adapter -> shared runtime egress (#3085) -> ironclaw_network
 ```
 
 ## Non-goals
@@ -181,50 +183,64 @@ credential mapping + secret lease
   -> drop lease
 ```
 
-## Phase 4: Add a Reborn WASM host HTTP gateway
+## Phase 4: Add shared Reborn runtime HTTP egress (#3085)
 
-Add a Reborn-only gateway that composes `ironclaw_secrets` + `ironclaw_network`. This should not live in V1 code.
+Add a Reborn-only shared runtime egress service that composes `ironclaw_secrets` + `ironclaw_network`. This is not WASM-only and does not live in V1 code.
+
+The shared service is used by all Reborn capability runtime lanes that need host-mediated HTTP:
+
+```text
+WIT http-request import -> WIT adapter -> RuntimeHttpEgress -> ironclaw_secrets + ironclaw_network
+Script host HTTP API    -> Script adapter -> RuntimeHttpEgress -> ironclaw_secrets + ironclaw_network
+MCP host-mediated HTTP  -> MCP adapter -> RuntimeHttpEgress -> ironclaw_secrets + ironclaw_network
+```
+
+The runtime-specific adapters translate runtime-native request/response shapes into the shared request type. They do not own network policy, DNS, redirects, SSRF checks, credential leasing, or actual HTTP transport.
 
 Possible locations:
 
-- `crates/ironclaw_wasm/src/host/http.rs` for trait/adapter definitions.
-- `crates/ironclaw_host_runtime/src/wasm_http.rs` for production composition if host-runtime composition exists by then.
+- `crates/ironclaw_host_runtime/src/http_egress.rs` for the production shared service if host-runtime composition exists by then.
+- `crates/ironclaw_wasm/src/host/http.rs` only for the thin WIT adapter/types needed by generated WIT host imports.
+- Script/MCP runtime crates should add similarly thin adapters when they expose host-mediated HTTP.
 
-The gateway owns the translation from WIT host import shape to kernel network request shape:
+The shared service owns the translation from runtime host calls to kernel network/secrets calls:
 
 ```text
-WIT http-request import
-  -> validate WASM capability/network policy
+runtime HTTP call
+  -> validate capability/network policy
   -> lease/inject secrets through ironclaw_secrets
   -> call ironclaw_network::NetworkEgress
   -> redact errors/logs/traces
-  -> return WIT-compatible HttpResponse
+  -> return runtime-compatible response
 ```
 
-Suggested logical request/response types:
+Suggested shared request/response types:
 
 ```rust
-pub struct WasmHostHttpRequest {
-    pub method: String,
+pub struct RuntimeHttpEgressRequest {
+    pub runtime: RuntimeKind,
+    pub method: NetworkMethod,
     pub url: String,
-    pub headers_json: String,
-    pub body: Option<Vec<u8>>,
-    pub timeout_ms: Option<u32>,
-    pub credential_policy: WasmCredentialPolicy,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    pub timeout: Duration,
+    pub credential_policy: RuntimeCredentialPolicy,
     pub network_policy: NetworkPolicy,
     pub response_body_limit: Option<u64>,
 }
 
-pub struct WasmHostHttpResponse {
+pub struct RuntimeHttpEgressResponse {
     pub status: u16,
-    pub headers_json: String,
+    pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
     pub request_bytes: u64,
     pub response_bytes: u64,
 }
 ```
 
-Ratchet tests should fail if Reborn WASM code directly uses:
+MCP and arbitrary-process script modes need an explicit bypass-prevention story. If a runtime can open sockets directly, host-mediated egress is not sufficient by itself; that runtime must use sandbox/proxy/network-namespace controls or fail closed until process-level enforcement exists.
+
+Ratchet tests should fail if Reborn runtime code directly uses:
 
 - `reqwest::Client`
 - `reqwest::ClientBuilder`
@@ -318,7 +334,7 @@ Host imports map to Reborn services:
 | `log` | guest log collector / event sink |
 | `now-millis` | clock |
 | `workspace-read` | Reborn workspace/filesystem service |
-| `http-request` | Reborn WASM host gateway -> `ironclaw_network` |
+| `http-request` | WIT adapter -> shared runtime HTTP egress (#3085) -> `ironclaw_network` |
 | `secret-exists` | `ironclaw_secrets` metadata/policy check |
 | `tool-invoke` | fail closed or preserve V1's current unsupported behavior initially |
 
@@ -328,7 +344,7 @@ Acceptance criteria:
 - `description()` and `schema()` extraction work.
 - `execute()` works with V1-compatible request/response types.
 - Host imports fail closed without matching grants.
-- HTTP always goes through the Reborn WASM host gateway.
+- HTTP always goes through the shared runtime HTTP egress service (#3085), with WASM using only a thin WIT adapter.
 - Secrets always go through `ironclaw_secrets`.
 - Fuel/memory/timeout/output protections still apply.
 
@@ -455,7 +471,7 @@ Host imports map to Reborn services:
 | `now-millis` | clock |
 | `workspace-read` | Reborn channel workspace |
 | `workspace-write` | Reborn channel workspace |
-| `http-request` | Reborn WASM host gateway -> `ironclaw_network` |
+| `http-request` | WIT adapter -> shared runtime HTTP egress (#3085) -> `ironclaw_network` |
 | `secret-exists` | `ironclaw_secrets` metadata/policy check |
 | `emit-message` | Reborn channel message sink |
 | `store-attachment-data` | Reborn attachment/channel state |
@@ -465,7 +481,7 @@ Compatibility requirements:
 - Fresh instance per callback.
 - Host-side state persists across callbacks.
 - Durable workspace is host-managed.
-- HTTP/secrets use the same Reborn gateway as tools.
+- HTTP/secrets use the same shared runtime HTTP egress service (#3085) as tools.
 
 ## Phase 11: Add Reborn channel product integration
 
@@ -525,11 +541,13 @@ This phase should update docs and feature tracking:
 - Add missing required/optional credential tests.
 - Prove raw secret values are not `Debug`/logged.
 
-### PR 3: Reborn WASM host gateway
+### PR 3: Shared Reborn runtime HTTP egress (#3085)
 
-- Compose `ironclaw_secrets` + `ironclaw_network` for WIT HTTP imports.
+- Compose `ironclaw_secrets` + `ironclaw_network` once for WASM, Script, and host-mediated MCP HTTP.
+- Add only thin runtime-specific adapters for WIT/Script/MCP request shapes.
 - No V1 changes.
-- Add tests proving all Reborn WASM HTTP goes through the gateway.
+- Add tests proving Reborn WASM and at least one non-WASM runtime path go through the shared service.
+- Define sandbox/proxy/fail-closed behavior for runtime modes that could otherwise open sockets directly.
 
 ### PR 4: Rewrite #3028 as WIT tool runtime
 
@@ -537,7 +555,7 @@ This phase should update docs and feature tracking:
 - Use `wit/tool.wit` and Wasmtime component model.
 - Add `WitToolRuntime`.
 - Add WIT tool compatibility tests.
-- Use Reborn host gateway for HTTP/secrets.
+- Use shared runtime HTTP egress (#3085) for HTTP/secrets.
 
 ### PR 5: Reborn WIT tool loader and dispatcher adapter
 
@@ -551,7 +569,7 @@ This phase should update docs and feature tracking:
 - Use `wit/channel.wit`.
 - Execute channel callbacks.
 - Add callback compatibility tests.
-- Use the same host gateway.
+- Use the same shared runtime HTTP egress (#3085).
 
 ### PR 7: Reborn channel loader/router/polling
 
@@ -585,7 +603,7 @@ The rewritten PR should remove the JSON ABI and land the first production-compat
 - `wit/tool.wit` generated bindings.
 - WIT tool metadata extraction.
 - WIT tool execution.
-- Kernel-backed HTTP/secrets host imports.
+- Kernel-backed HTTP/secrets host imports through shared runtime HTTP egress (#3085).
 - No direct HTTP or app-level secret access from `ironclaw_wasm`.
 - Hardened fuel/memory/timeout/resource behavior retained.
 
