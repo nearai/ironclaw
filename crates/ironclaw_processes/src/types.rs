@@ -158,10 +158,16 @@ pub enum ProcessError {
     Deserialization(String),
 }
 
-impl From<HostApiError> for ProcessError {
-    fn from(error: HostApiError) -> Self {
-        Self::InvalidPath(error.to_string())
-    }
+/// Wraps a `HostApiError` raised while constructing a virtual path into the
+/// typed `InvalidPath` variant.
+///
+/// The broad `From<HostApiError> for ProcessError` impl was removed because it
+/// silently mismapped every `HostApiError` (validation, invariant, mount,
+/// network) to `InvalidPath`, poisoning error-kind classification downstream.
+/// Use this helper at path-construction sites where the only `HostApiError`
+/// shape is in fact a path/identifier validation failure.
+pub(crate) fn invalid_path(error: HostApiError) -> ProcessError {
+    ProcessError::InvalidPath(error.to_string())
 }
 
 impl From<FilesystemError> for ProcessError {
