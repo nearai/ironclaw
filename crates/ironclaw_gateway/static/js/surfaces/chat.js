@@ -126,8 +126,9 @@ async function sendMessage() {
     preview_url: att.preview_url || null,
     preview_text: '',
   }));
-  const displayContent = content
-    || (pendingAttachmentsForDisplay.length > 0 ? '(files attached)' : '');
+  // Early-return at the top guarantees content or attachments is non-empty,
+  // so the fallback always reflects "files attached" when content is blank.
+  const displayContent = content || '(files attached)';
   const pendingCopyTextParts = [];
   if (displayContent) pendingCopyTextParts.push(displayContent);
   pendingAttachmentsForDisplay.forEach((att) => {
@@ -593,24 +594,24 @@ function attachmentMetaText(filename, mimeType, sizeLabel) {
     .join(' • ');
 }
 
-function appendAttachmentFileCard(container, itemClassName, nameClassName, metaClassName, filename, metaText, mimeType) {
+function appendAttachmentFileCard(container, classes, filename, metaText, mimeType) {
   const item = document.createElement('div');
-  item.className = itemClassName;
+  item.className = classes.item;
   // Mirror the staging preview: icon on the left, name + meta on the right.
   const iconEl = document.createElement('div');
-  iconEl.className = `${nameClassName.replace('-name', '-icon')}`;
+  iconEl.className = classes.icon;
   iconEl.innerHTML = attachmentIconSvg(mimeType);
   item.appendChild(iconEl);
   const metaWrap = document.createElement('div');
-  metaWrap.className = `${nameClassName.replace('-name', '-body')}`;
+  metaWrap.className = classes.body;
   const nameEl = document.createElement('div');
-  nameEl.className = nameClassName;
+  nameEl.className = classes.name;
   nameEl.textContent = filename || 'attachment';
   nameEl.title = filename || '';
   metaWrap.appendChild(nameEl);
   if (metaText) {
     const metaEl = document.createElement('div');
-    metaEl.className = metaClassName;
+    metaEl.className = classes.meta;
     metaEl.textContent = metaText;
     metaWrap.appendChild(metaEl);
   }
@@ -857,9 +858,13 @@ function renderMessageAttachments(container, attachments) {
     // Match the staging preview: type-aware icon + filename + (type • size).
     appendAttachmentFileCard(
       strip,
-      'message-attachment-file',
-      'message-attachment-file-name',
-      'message-attachment-file-meta',
+      {
+        item: 'message-attachment-file',
+        icon: 'message-attachment-file-icon',
+        body: 'message-attachment-file-body',
+        name: 'message-attachment-file-name',
+        meta: 'message-attachment-file-meta',
+      },
       att.filename || 'attachment',
       attachmentMetaText(att.filename, att.mime_type, att.size_label),
       att.mime_type
@@ -882,7 +887,7 @@ function showImageLightbox(src, alt) {
   overlay.className = 'image-lightbox-overlay';
   overlay.setAttribute('role', 'dialog');
   overlay.setAttribute('aria-modal', 'true');
-  overlay.setAttribute('aria-label', 'Image preview');
+  overlay.setAttribute('aria-label', I18n.t('chat.imagePreview'));
   overlay.tabIndex = -1;
 
   const img = document.createElement('img');
@@ -909,17 +914,23 @@ function showImageLightbox(src, alt) {
 
 // Delegate click handling to document.body so dynamically-added images
 // (history rerenders, generated images, staging strip) are picked up
-// without rebinding listeners.
+// without rebinding listeners. Idempotent: re-injection of the bundle
+// (e.g. hot-reload) won't stack duplicate listeners.
 (function wireImageLightbox() {
+  if (window.__lightboxWired) return;
+  window.__lightboxWired = true;
   document.addEventListener('click', (e) => {
     const target = e.target;
     if (!(target instanceof HTMLImageElement)) return;
-    if (target.classList.contains('image-preview')
+    if (!(target.classList.contains('image-preview')
         || target.classList.contains('message-attachment-image')
-        || target.classList.contains('generated-image')) {
-      if (e.defaultPrevented) return;
-      e.preventDefault();
-      showImageLightbox(target.src, target.alt || '');
+        || target.classList.contains('generated-image'))) {
+      return;
     }
+    // Don't hijack clicks on images wrapped in anchors — let the link navigate.
+    if (target.closest('a')) return;
+    if (e.defaultPrevented) return;
+    e.preventDefault();
+    showImageLightbox(target.src, target.alt || '');
   });
 })();
