@@ -4084,6 +4084,7 @@ version = "0.1.0"
 dependencies = [
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_trust",
  "serde",
  "serde_json",
  "tempfile",
