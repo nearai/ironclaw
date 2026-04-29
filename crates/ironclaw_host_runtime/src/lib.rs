@@ -6,11 +6,13 @@
 //! process services, network, secrets, filesystem, resources, and events in a
 //! later slice.
 //!
-//! The facade preserves two important boundaries:
+//! The facade preserves three important boundaries:
 //!
 //! - callers see structured capability outcomes instead of lower substrate
 //!   handles;
-//! - approval/auth/resource waits are suspension states, not errors.
+//! - approval/auth/resource waits are suspension states, not errors;
+//! - request origin and capability projection metadata never grant or bypass
+//!   authority.
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
@@ -27,23 +29,7 @@ pub struct IdempotencyKey(String);
 
 impl IdempotencyKey {
     pub fn new(value: impl Into<String>) -> Result<Self, HostRuntimeError> {
-        let value = value.into();
-        if value.is_empty() {
-            return Err(HostRuntimeError::invalid_request(
-                "idempotency key must not be empty",
-            ));
-        }
-        if value.len() > 256 {
-            return Err(HostRuntimeError::invalid_request(
-                "idempotency key must be at most 256 bytes",
-            ));
-        }
-        if value.chars().any(|c| c == '\0' || c.is_control()) {
-            return Err(HostRuntimeError::invalid_request(
-                "idempotency key must not contain NUL/control characters",
-            ));
-        }
-        Ok(Self(value))
+        validate_bounded_contract_string(value.into(), "idempotency key", 256).map(Self)
     }
 
     pub fn as_str(&self) -> &str {
@@ -71,6 +57,29 @@ impl fmt::Display for IdempotencyKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
     }
+}
+
+fn validate_bounded_contract_string(
+    value: String,
+    label: &'static str,
+    max_bytes: usize,
+) -> Result<String, HostRuntimeError> {
+    if value.is_empty() {
+        return Err(HostRuntimeError::invalid_request(format!(
+            "{label} must not be empty"
+        )));
+    }
+    if value.len() > max_bytes {
+        return Err(HostRuntimeError::invalid_request(format!(
+            "{label} must be at most {max_bytes} bytes"
+        )));
+    }
+    if value.chars().any(|c| c == '\0' || c.is_control()) {
+        return Err(HostRuntimeError::invalid_request(format!(
+            "{label} must not contain NUL/control characters"
+        )));
+    }
+    Ok(value)
 }
 
 /// Host-runtime-local gate id for non-approval suspension states.
@@ -117,23 +126,7 @@ pub struct CapabilitySurfaceVersion(String);
 
 impl CapabilitySurfaceVersion {
     pub fn new(value: impl Into<String>) -> Result<Self, HostRuntimeError> {
-        let value = value.into();
-        if value.is_empty() {
-            return Err(HostRuntimeError::invalid_request(
-                "capability surface version must not be empty",
-            ));
-        }
-        if value.len() > 128 {
-            return Err(HostRuntimeError::invalid_request(
-                "capability surface version must be at most 128 bytes",
-            ));
-        }
-        if value.chars().any(|c| c == '\0' || c.is_control()) {
-            return Err(HostRuntimeError::invalid_request(
-                "capability surface version must not contain NUL/control characters",
-            ));
-        }
-        Ok(Self(value))
+        validate_bounded_contract_string(value.into(), "capability surface version", 128).map(Self)
     }
 
     pub fn as_str(&self) -> &str {
@@ -159,16 +152,17 @@ impl fmt::Display for CapabilitySurfaceVersion {
     }
 }
 
-/// Upper-layer caller category for audit/projection context.
+/// Product-owned workflow origin for audit/correlation context.
 ///
-/// This is not authority. Authority still comes from the scoped execution
-/// context, grants, leases, and kernel policy.
+/// This is not authority and must never grant or bypass authority. Authority
+/// remains exclusively in `ExecutionContext`, principals, grants, leases, and
+/// policy. Projection differences belong in [`CapabilitySurfaceKind`]. Runtime
+/// adapters are callees of `HostRuntime`, not top-level caller/origin values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
-pub enum RuntimeCaller {
+pub enum RuntimeRequestOrigin {
     TurnCoordinator,
-    AgentLoopHost,
-    Adapter,
+    MissionService,
     SystemService,
 }
 
@@ -193,7 +187,8 @@ pub struct RuntimeCapabilityRequest {
     /// and must not trust caller estimates as binding limits or actual usage.
     pub estimate: ResourceEstimate,
     pub input: Value,
-    pub caller: RuntimeCaller,
+    /// Product workflow origin for audit/correlation only.
+    pub request_origin: RuntimeRequestOrigin,
     pub idempotency_key: Option<IdempotencyKey>,
 }
 
@@ -202,7 +197,8 @@ pub struct RuntimeCapabilityRequest {
 pub struct VisibleCapabilityRequest {
     pub scope: ResourceScope,
     pub correlation_id: CorrelationId,
-    pub caller: RuntimeCaller,
+    /// Product workflow origin for audit/correlation only.
+    pub request_origin: RuntimeRequestOrigin,
     pub surface_kind: CapabilitySurfaceKind,
 }
 
@@ -430,13 +426,16 @@ impl HostRuntimeError {
 /// Testkit for upper Reborn stack contract tests.
 pub mod testkit {
     use super::*;
-    use std::{collections::VecDeque, sync::Mutex};
+    use std::{
+        collections::VecDeque,
+        sync::{Mutex, MutexGuard},
+    };
 
     #[derive(Debug, Default)]
     struct FakeHostRuntimeState {
         outcomes: VecDeque<RuntimeCapabilityOutcome>,
         visible_surfaces: VecDeque<VisibleCapabilitySurface>,
-        cancelled_work: VecDeque<Vec<RuntimeWorkId>>,
+        cancel_outcomes: VecDeque<CancelRuntimeWorkOutcome>,
         status: HostRuntimeStatus,
         health: HostRuntimeHealth,
         invocations: Vec<RuntimeCapabilityRequest>,
@@ -461,77 +460,56 @@ pub mod testkit {
             Self::default()
         }
 
+        fn lock_state(&self) -> MutexGuard<'_, FakeHostRuntimeState> {
+            match self.state.lock() {
+                Ok(state) => state,
+                Err(poisoned) => poisoned.into_inner(),
+            }
+        }
+
         pub fn with_outcome(self, outcome: RuntimeCapabilityOutcome) -> Self {
-            self.state
-                .lock()
-                .expect("fake mutex poisoned")
-                .outcomes
-                .push_back(outcome);
+            self.lock_state().outcomes.push_back(outcome);
             self
         }
 
         pub fn with_visible_surface(self, surface: VisibleCapabilitySurface) -> Self {
-            self.state
-                .lock()
-                .expect("fake mutex poisoned")
-                .visible_surfaces
-                .push_back(surface);
+            self.lock_state().visible_surfaces.push_back(surface);
             self
         }
 
-        pub fn with_cancelled_work(self, work: Vec<RuntimeWorkId>) -> Self {
-            self.state
-                .lock()
-                .expect("fake mutex poisoned")
-                .cancelled_work
-                .push_back(work);
+        pub fn with_cancel_outcome(self, outcome: CancelRuntimeWorkOutcome) -> Self {
+            self.lock_state().cancel_outcomes.push_back(outcome);
             self
         }
 
         pub fn with_status(self, status: HostRuntimeStatus) -> Self {
-            self.state.lock().expect("fake mutex poisoned").status = status;
+            self.lock_state().status = status;
             self
         }
 
         pub fn with_health(self, health: HostRuntimeHealth) -> Self {
-            self.state.lock().expect("fake mutex poisoned").health = health;
+            self.lock_state().health = health;
             self
         }
 
         pub fn recorded_invocations(&self) -> Vec<RuntimeCapabilityRequest> {
-            self.state
-                .lock()
-                .expect("fake mutex poisoned")
-                .invocations
-                .clone()
+            self.lock_state().invocations.clone()
         }
 
         pub fn recorded_visible_capability_requests(&self) -> Vec<VisibleCapabilityRequest> {
-            self.state
-                .lock()
-                .expect("fake mutex poisoned")
-                .visible_requests
-                .clone()
+            self.lock_state().visible_requests.clone()
         }
 
         pub fn recorded_cancellations(&self) -> Vec<CancelRuntimeWorkRequest> {
-            self.state
-                .lock()
-                .expect("fake mutex poisoned")
-                .cancellations
-                .clone()
+            self.lock_state().cancellations.clone()
         }
 
         pub fn recorded_status_requests(&self) -> Vec<RuntimeStatusRequest> {
-            self.state
-                .lock()
-                .expect("fake mutex poisoned")
-                .status_requests
-                .clone()
+            self.lock_state().status_requests.clone()
         }
 
         pub fn recorded_health_calls(&self) -> usize {
-            self.state.lock().expect("fake mutex poisoned").health_calls
+            self.lock_state().health_calls
         }
     }
 
@@ -541,7 +519,7 @@ pub mod testkit {
             &self,
             request: RuntimeCapabilityRequest,
         ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-            let mut state = self.state.lock().expect("fake mutex poisoned");
+            let mut state = self.lock_state();
             state.invocations.push(request);
             state.outcomes.pop_front().ok_or_else(|| {
                 HostRuntimeError::unavailable("scripted invoke_capability outcome exhausted")
@@ -552,7 +530,7 @@ pub mod testkit {
             &self,
             request: VisibleCapabilityRequest,
         ) -> Result<VisibleCapabilitySurface, HostRuntimeError> {
-            let mut state = self.state.lock().expect("fake mutex poisoned");
+            let mut state = self.lock_state();
             state.visible_requests.push(request);
             state.visible_surfaces.pop_front().ok_or_else(|| {
                 HostRuntimeError::unavailable("scripted visible_capabilities surface exhausted")
@@ -563,13 +541,10 @@ pub mod testkit {
             &self,
             request: CancelRuntimeWorkRequest,
         ) -> Result<CancelRuntimeWorkOutcome, HostRuntimeError> {
-            let mut state = self.state.lock().expect("fake mutex poisoned");
+            let mut state = self.lock_state();
             state.cancellations.push(request);
-            let cancelled = state.cancelled_work.pop_front().unwrap_or_default();
-            Ok(CancelRuntimeWorkOutcome {
-                cancelled,
-                already_terminal: Vec::new(),
-                unsupported: Vec::new(),
+            state.cancel_outcomes.pop_front().ok_or_else(|| {
+                HostRuntimeError::unavailable("scripted cancel_work outcome exhausted")
             })
         }
 
@@ -577,13 +552,13 @@ pub mod testkit {
             &self,
             request: RuntimeStatusRequest,
         ) -> Result<HostRuntimeStatus, HostRuntimeError> {
-            let mut state = self.state.lock().expect("fake mutex poisoned");
+            let mut state = self.lock_state();
             state.status_requests.push(request);
             Ok(state.status.clone())
         }
 
         async fn health(&self) -> Result<HostRuntimeHealth, HostRuntimeError> {
-            let mut state = self.state.lock().expect("fake mutex poisoned");
+            let mut state = self.lock_state();
             state.health_calls += 1;
             Ok(state.health.clone())
         }

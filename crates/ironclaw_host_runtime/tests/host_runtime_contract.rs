@@ -1,13 +1,28 @@
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
-    CancelReason, CancelRuntimeWorkRequest, CapabilitySurfaceKind, CapabilitySurfaceVersion,
-    HostRuntime, HostRuntimeHealth, HostRuntimeStatus, IdempotencyKey, RuntimeAuthGate,
-    RuntimeBlockedReason, RuntimeCaller, RuntimeCapabilityCompleted, RuntimeCapabilityFailure,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeGateId,
-    RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, testkit::FakeHostRuntime,
+    CancelReason, CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfaceKind,
+    CapabilitySurfaceVersion, HostRuntime, HostRuntimeError, HostRuntimeHealth, HostRuntimeStatus,
+    IdempotencyKey, RuntimeApprovalGate, RuntimeAuthGate, RuntimeBlockedReason,
+    RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
+    RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeGateId, RuntimeRequestOrigin,
+    RuntimeResourceGate, RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, testkit::FakeHostRuntime,
 };
 use serde_json::json;
+
+#[test]
+fn bounded_contract_strings_share_validation_semantics() {
+    assert!(IdempotencyKey::new("").is_err());
+    assert!(IdempotencyKey::new("turn\n1").is_err());
+    assert!(IdempotencyKey::new("x".repeat(257)).is_err());
+    assert!(CapabilitySurfaceVersion::new("surface\t1").is_err());
+    assert!(CapabilitySurfaceVersion::new("x".repeat(129)).is_err());
+
+    let idempotency = IdempotencyKey::new("turn-1/tool-1").unwrap();
+    let surface = CapabilitySurfaceVersion::new("surface-v1").unwrap();
+    assert_eq!(idempotency.as_str(), "turn-1/tool-1");
+    assert_eq!(surface.as_str(), "surface-v1");
+}
 
 #[tokio::test]
 async fn fake_runtime_records_invocation_and_preserves_structured_outcomes() {
@@ -25,7 +40,7 @@ async fn fake_runtime_records_invocation_and_preserves_structured_outcomes() {
         capability_id: capability_id.clone(),
         estimate: ResourceEstimate::default(),
         input: json!({"message": "hello"}),
-        caller: RuntimeCaller::AgentLoopHost,
+        request_origin: RuntimeRequestOrigin::TurnCoordinator,
         idempotency_key: Some(IdempotencyKey::new("turn-1/tool-1").unwrap()),
     };
 
@@ -47,7 +62,7 @@ async fn fake_runtime_surfaces_approval_auth_and_resource_waits_as_values_not_er
     });
     let runtime = FakeHostRuntime::new()
         .with_outcome(RuntimeCapabilityOutcome::ApprovalRequired(
-            ironclaw_host_runtime::RuntimeApprovalGate {
+            RuntimeApprovalGate {
                 approval_request_id: ApprovalRequestId::new(),
                 capability_id: capability_id.clone(),
                 reason: RuntimeBlockedReason::ApprovalRequired,
@@ -55,7 +70,7 @@ async fn fake_runtime_surfaces_approval_auth_and_resource_waits_as_values_not_er
         ))
         .with_outcome(auth_gate.clone())
         .with_outcome(RuntimeCapabilityOutcome::ResourceBlocked(
-            ironclaw_host_runtime::RuntimeResourceGate {
+            RuntimeResourceGate {
                 gate_id: RuntimeGateId::new(),
                 capability_id: capability_id.clone(),
                 reason: RuntimeBlockedReason::ResourceLimit,
@@ -73,7 +88,7 @@ async fn fake_runtime_surfaces_approval_auth_and_resource_waits_as_values_not_er
                 capability_id: capability_id.clone(),
                 estimate: ResourceEstimate::default(),
                 input: json!({}),
-                caller: RuntimeCaller::TurnCoordinator,
+                request_origin: RuntimeRequestOrigin::TurnCoordinator,
                 idempotency_key: None,
             })
             .await
@@ -106,7 +121,7 @@ async fn fake_runtime_returns_versioned_visible_surface_and_records_requests() {
     let request = VisibleCapabilityRequest {
         scope: context.resource_scope.clone(),
         correlation_id: context.correlation_id,
-        caller: RuntimeCaller::AgentLoopHost,
+        request_origin: RuntimeRequestOrigin::TurnCoordinator,
         surface_kind: CapabilitySurfaceKind::AgentLoop,
     };
 
@@ -134,8 +149,13 @@ async fn fake_runtime_records_cancellation_status_and_health_calls() {
         ready: true,
         missing_runtime_backends: vec![RuntimeKind::Wasm],
     };
+    let cancel_outcome = CancelRuntimeWorkOutcome {
+        cancelled: vec![work_id.clone()],
+        already_terminal: vec![RuntimeWorkId::Gate(RuntimeGateId::new())],
+        unsupported: vec![RuntimeWorkId::Process(ProcessId::new())],
+    };
     let runtime = FakeHostRuntime::new()
-        .with_cancelled_work(vec![work_id.clone()])
+        .with_cancel_outcome(cancel_outcome.clone())
         .with_status(status.clone())
         .with_health(health.clone());
     let cancel = CancelRuntimeWorkRequest {
@@ -154,10 +174,26 @@ async fn fake_runtime_records_cancellation_status_and_health_calls() {
         .unwrap();
     let actual_health = runtime.health().await.unwrap();
 
-    assert_eq!(cancelled.cancelled, vec![work_id]);
+    assert_eq!(cancelled, cancel_outcome);
     assert_eq!(actual_status, status);
     assert_eq!(actual_health, health);
     assert_eq!(runtime.recorded_cancellations(), vec![cancel]);
+}
+
+#[tokio::test]
+async fn fake_runtime_errors_when_cancel_outcome_exhausted() {
+    let context = execution_context();
+    let runtime = FakeHostRuntime::new();
+    let err = runtime
+        .cancel_work(CancelRuntimeWorkRequest {
+            scope: context.resource_scope,
+            correlation_id: context.correlation_id,
+            reason: CancelReason::TurnCancelled,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, HostRuntimeError::Unavailable { .. }));
 }
 
 #[tokio::test]
@@ -177,7 +213,7 @@ async fn fake_runtime_reports_sanitized_failures_as_outcomes() {
             capability_id,
             estimate: ResourceEstimate::default(),
             input: json!({}),
-            caller: RuntimeCaller::SystemService,
+            request_origin: RuntimeRequestOrigin::SystemService,
             idempotency_key: None,
         })
         .await
