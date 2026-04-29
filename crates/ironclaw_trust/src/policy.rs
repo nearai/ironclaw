@@ -7,8 +7,9 @@
 //! recognizes the package identity assigns the effective trust. If no source
 //! matches, the policy falls through to a non-privileged default.
 
+use std::any::TypeId;
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::RwLock;
 
 use ironclaw_host_api::{
@@ -23,6 +24,33 @@ use crate::sources::{
     AdminConfig, AdminEntry, BundledEntry, BundledRegistry, PolicySource, SignedRegistry,
     SignerEntry,
 };
+
+thread_local! {
+    static PUBLISHING_POLICIES: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+struct PublishReentryGuard {
+    key: usize,
+}
+
+impl PublishReentryGuard {
+    fn enter(policy: &HostTrustPolicy) -> Self {
+        let key = policy.reentry_key();
+        PUBLISHING_POLICIES.with(|policies| policies.borrow_mut().push(key));
+        Self { key }
+    }
+}
+
+impl Drop for PublishReentryGuard {
+    fn drop(&mut self) {
+        PUBLISHING_POLICIES.with(|policies| {
+            let mut policies = policies.borrow_mut();
+            if let Some(pos) = policies.iter().rposition(|key| *key == self.key) {
+                policies.remove(pos);
+            }
+        });
+    }
+}
 
 /// Untrusted input to the policy engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,22 +97,27 @@ pub struct HostTrustPolicy {
 
 impl HostTrustPolicy {
     /// Construct with a default `SystemClock`. Most production callers use
-    /// this.
-    pub fn new(sources: Vec<Box<dyn PolicySource>>) -> Self {
-        Self {
-            sources,
-            clock: Box::new(SystemClock),
-            mutation_gate: RwLock::new(()),
-        }
+    /// this. Duplicate source types are rejected because mutation routing is
+    /// type-directed.
+    pub fn new(sources: Vec<Box<dyn PolicySource>>) -> Result<Self, TrustError> {
+        Self::with_clock(sources, Box::new(SystemClock))
     }
 
     pub fn empty() -> Self {
-        Self::new(Vec::new())
+        Self::from_parts_unchecked(Vec::new(), Box::new(SystemClock))
     }
 
     /// Construct with an explicit clock. Tests inject `FixedClock` here so
     /// `evaluated_at` is reproducible across runs.
-    pub fn with_clock(sources: Vec<Box<dyn PolicySource>>, clock: Box<dyn Clock>) -> Self {
+    pub fn with_clock(
+        sources: Vec<Box<dyn PolicySource>>,
+        clock: Box<dyn Clock>,
+    ) -> Result<Self, TrustError> {
+        ensure_unique_source_types(&sources)?;
+        Ok(Self::from_parts_unchecked(sources, clock))
+    }
+
+    fn from_parts_unchecked(sources: Vec<Box<dyn PolicySource>>, clock: Box<dyn Clock>) -> Self {
         Self {
             sources,
             clock,
@@ -92,13 +125,62 @@ impl HostTrustPolicy {
         }
     }
 
-    pub fn add_source(&mut self, source: Box<dyn PolicySource>) {
+    pub fn add_source(&mut self, source: Box<dyn PolicySource>) -> Result<(), TrustError> {
+        ensure_source_type_absent(&self.sources, source.as_ref())?;
         self.sources.push(source);
+        Ok(())
     }
+
+    fn reentry_key(&self) -> usize {
+        self as *const Self as usize
+    }
+
+    fn is_publish_reentrant(&self) -> bool {
+        let key = self.reentry_key();
+        PUBLISHING_POLICIES.with(|policies| policies.borrow().contains(&key))
+    }
+}
+
+fn ensure_unique_source_types(sources: &[Box<dyn PolicySource>]) -> Result<(), TrustError> {
+    let mut seen = HashSet::<TypeId>::new();
+    for source in sources {
+        let type_id = source.as_any().type_id();
+        if !seen.insert(type_id) {
+            return Err(TrustError::InvariantViolation {
+                reason: format!(
+                    "policy chain contains duplicate source type `{}`",
+                    source.name()
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn ensure_source_type_absent(
+    sources: &[Box<dyn PolicySource>],
+    candidate: &dyn PolicySource,
+) -> Result<(), TrustError> {
+    let candidate_type = candidate.as_any().type_id();
+    if sources
+        .iter()
+        .any(|source| source.as_any().type_id() == candidate_type)
+    {
+        return Err(TrustError::InvariantViolation {
+            reason: format!(
+                "policy chain already contains source type `{}`",
+                candidate.name()
+            ),
+        });
+    }
+    Ok(())
 }
 
 impl TrustPolicy for HostTrustPolicy {
     fn evaluate(&self, input: &TrustPolicyInput) -> Result<TrustDecision, TrustError> {
+        if self.is_publish_reentrant() {
+            return self.evaluate_unlocked(input);
+        }
         let _guard = self
             .mutation_gate
             .read()
@@ -155,11 +237,12 @@ impl HostTrustPolicy {
     /// publish, because the orchestration is hard-wired into this method.
     /// That's the whole point: AC #6 becomes a compile-time guarantee.
     ///
-    /// `previous_authority` is forwarded onto the published `TrustChange`
-    /// so listeners know which grant set to invalidate. `requested_trust` is
-    /// the same axis the caller would use for an ordinary `evaluate` — kept
-    /// stable across the pre/post evaluations so we measure only the
-    /// mutation's effect.
+    /// `requested_authority` is the same authority set the caller would use
+    /// for an ordinary `evaluate` — kept stable across the pre/post
+    /// evaluations so we measure only the mutation's effect. It is not
+    /// forwarded to `TrustChange`; invalidation listeners must derive the
+    /// grant-revocation scope from their own grant store and the decision
+    /// delta, not from caller-supplied hints.
     ///
     /// Returns the closure's result.
     ///
@@ -176,7 +259,7 @@ impl HostTrustPolicy {
         &self,
         bus: &InvalidationBus,
         affected_identity: PackageIdentity,
-        previous_authority: BTreeSet<CapabilityId>,
+        requested_authority: BTreeSet<CapabilityId>,
         requested_trust: RequestedTrustClass,
         f: F,
     ) -> Result<R, TrustError>
@@ -190,7 +273,7 @@ impl HostTrustPolicy {
         let probe = TrustPolicyInput {
             identity: affected_identity.clone(),
             requested_trust,
-            requested_authority: previous_authority.clone(),
+            requested_authority: requested_authority.clone(),
         };
         let prev = self.evaluate_unlocked(&probe)?;
 
@@ -206,8 +289,8 @@ impl HostTrustPolicy {
         // `TrustChange::new` returns `None` for no-ops and for benign
         // authority-ceiling expansions; it returns `Some` when the trust
         // class changes or the authority ceiling shrinks.
-        if let Some(change) = TrustChange::new(affected_identity, &prev, &curr, previous_authority)
-        {
+        if let Some(change) = TrustChange::new(affected_identity, &prev, &curr) {
+            let _reentry_guard = PublishReentryGuard::enter(self);
             bus.publish(change);
         }
         Ok(result)
@@ -248,15 +331,27 @@ pub struct SourceMutators<'a> {
 
 impl<'a> SourceMutators<'a> {
     fn find<T: PolicySource + 'static>(&self) -> Result<&'a T, TrustError> {
-        self.sources
+        let mut matches = self
+            .sources
             .iter()
-            .find_map(|s| s.as_any().downcast_ref::<T>())
-            .ok_or_else(|| TrustError::InvariantViolation {
+            .filter_map(|s| s.as_any().downcast_ref::<T>());
+        let Some(first) = matches.next() else {
+            return Err(TrustError::InvariantViolation {
                 reason: format!(
                     "policy chain does not contain a source of type `{}`",
                     std::any::type_name::<T>()
                 ),
-            })
+            });
+        };
+        if matches.next().is_some() {
+            return Err(TrustError::InvariantViolation {
+                reason: format!(
+                    "policy chain contains duplicate source type `{}`",
+                    std::any::type_name::<T>()
+                ),
+            });
+        }
+        Ok(first)
     }
 
     /// Insert or replace a [`BundledEntry`] in the chain's

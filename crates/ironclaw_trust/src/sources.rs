@@ -38,7 +38,7 @@ use std::sync::RwLock;
 
 use ironclaw_host_api::{EffectKind, PackageId, PackageSource, ResourceCeiling};
 
-use crate::decision::{EffectiveTrustClass, TrustProvenance};
+use crate::decision::{EffectiveTrustClass, HostTrustAssignment, TrustProvenance};
 use crate::error::TrustError;
 use crate::policy::{SourceMatch, TrustPolicyInput};
 
@@ -69,9 +69,10 @@ pub struct BundledEntry {
     /// `PackageIdentity::digest` is `Some` and equals this value — digest
     /// drift forces grant reissue per AC #7.
     pub digest: Option<String>,
-    /// Effective trust this entry grants. The constructor accepts an
-    /// `EffectiveTrustClass` so only crate-internal callers (or test
-    /// fixtures) can stage privileged entries.
+    /// Effective trust this entry grants. Public constructors accept
+    /// [`HostTrustAssignment`] so host-controlled bundle/admin loaders can
+    /// stage privileged entries without exposing raw effective-trust
+    /// constructors.
     pub effective_trust: EffectiveTrustClass,
     /// Effects the entry permits to be granted. Trust class alone grants
     /// nothing; downstream authorization must intersect this with each
@@ -82,6 +83,25 @@ pub struct BundledEntry {
     /// the entry imposes no extra resource cap beyond what the host policy
     /// already enforces elsewhere.
     pub max_resource_ceiling: Option<ResourceCeiling>,
+}
+
+impl BundledEntry {
+    /// Construct a bundled policy entry from host-controlled bundle metadata.
+    pub fn new(
+        package_id: PackageId,
+        digest: Option<String>,
+        trust: HostTrustAssignment,
+        allowed_effects: Vec<EffectKind>,
+        max_resource_ceiling: Option<ResourceCeiling>,
+    ) -> Self {
+        Self {
+            package_id,
+            digest,
+            effective_trust: trust.into_effective(),
+            allowed_effects,
+            max_resource_ceiling,
+        }
+    }
 }
 
 /// Compiled-in / signed-bundled package registry.
@@ -227,7 +247,7 @@ impl AdminEntry {
     pub fn for_bundled(
         package_id: PackageId,
         digest: Option<String>,
-        effective_trust: EffectiveTrustClass,
+        trust: HostTrustAssignment,
         allowed_effects: Vec<EffectKind>,
         max_resource_ceiling: Option<ResourceCeiling>,
     ) -> Self {
@@ -235,7 +255,7 @@ impl AdminEntry {
             package_id,
             source: PackageSource::Bundled,
             digest,
-            effective_trust,
+            effective_trust: trust.into_effective(),
             allowed_effects,
             max_resource_ceiling,
         }
@@ -248,7 +268,7 @@ impl AdminEntry {
         package_id: PackageId,
         registry_url: String,
         digest: Option<String>,
-        effective_trust: EffectiveTrustClass,
+        trust: HostTrustAssignment,
         allowed_effects: Vec<EffectKind>,
         max_resource_ceiling: Option<ResourceCeiling>,
     ) -> Self {
@@ -256,7 +276,7 @@ impl AdminEntry {
             package_id,
             source: PackageSource::Registry { url: registry_url },
             digest,
-            effective_trust,
+            effective_trust: trust.into_effective(),
             allowed_effects,
             max_resource_ceiling,
         }
@@ -266,7 +286,7 @@ impl AdminEntry {
     /// — the operator is the source.
     pub fn for_admin(
         package_id: PackageId,
-        effective_trust: EffectiveTrustClass,
+        trust: HostTrustAssignment,
         allowed_effects: Vec<EffectKind>,
         max_resource_ceiling: Option<ResourceCeiling>,
     ) -> Self {
@@ -274,7 +294,7 @@ impl AdminEntry {
             package_id,
             source: PackageSource::Admin,
             digest: None,
-            effective_trust,
+            effective_trust: trust.into_effective(),
             allowed_effects,
             max_resource_ceiling,
         }
@@ -293,7 +313,7 @@ impl AdminEntry {
         package_id: PackageId,
         manifest_path: String,
         digest: Option<String>,
-        effective_trust: EffectiveTrustClass,
+        trust: HostTrustAssignment,
         allowed_effects: Vec<EffectKind>,
         max_resource_ceiling: Option<ResourceCeiling>,
     ) -> Self {
@@ -303,7 +323,7 @@ impl AdminEntry {
                 path: manifest_path,
             },
             digest,
-            effective_trust,
+            effective_trust: trust.into_effective(),
             allowed_effects,
             max_resource_ceiling,
         }
@@ -440,9 +460,9 @@ pub struct SignerEntry {
     pub signer: String,
     /// Optional human-readable label for audit/logging.
     pub label: Option<String>,
-    /// Effective trust to grant matched packages. Privileged values can only
-    /// be staged through the test fixtures or future host-controlled
-    /// signing infrastructure.
+    /// Effective trust to grant matched packages. Privileged values should
+    /// be staged through crate-owned host-assignment constructors or future
+    /// host-controlled signing infrastructure.
     pub effective_trust: EffectiveTrustClass,
     pub allowed_effects: Vec<EffectKind>,
     pub max_resource_ceiling: Option<ResourceCeiling>,
@@ -643,10 +663,9 @@ impl PolicySource for LocalDevOverride {
     }
 }
 
-/// Constructors for fixture-style privileged entries used by tests. See
-/// [`crate::fixtures`] for the public, hidden-from-docs surface that
-/// integration tests use; this internal helper takes the
-/// [`EffectiveTrustClass`] directly.
+/// Constructors for crate-internal privileged test entries. These helpers
+/// take [`EffectiveTrustClass`] directly but are compiled only for this
+/// crate's `#[cfg(test)]` targets.
 #[cfg(test)]
 pub(crate) fn bundled_entry_with_trust(
     package_id: PackageId,

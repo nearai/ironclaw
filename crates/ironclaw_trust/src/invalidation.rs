@@ -1,8 +1,9 @@
 //! Trust-change invalidation contract.
 //!
 //! When the host policy revokes or downgrades a package's effective trust,
-//! affected grants and leases must be invalidated *before* any subsequent
-//! dispatch can produce a side effect under the stale ceiling. PR3's
+//! or shrinks its authority ceiling, affected grants and leases must be
+//! invalidated *before* any subsequent dispatch can produce a side effect
+//! under the stale ceiling. PR3's
 //! authorization layer registers a [`TrustChangeListener`] on the
 //! [`InvalidationBus`] and revokes matching grants synchronously when
 //! [`InvalidationBus::publish`] runs.
@@ -19,7 +20,7 @@ use ironclaw_host_api::{CapabilityId, PackageIdentity, Timestamp};
 
 use crate::decision::{AuthorityCeiling, EffectiveTrustClass, TrustDecision};
 
-/// Listener notified when effective trust for a package changes.
+/// Listener notified when trust or authority ceiling for a package changes.
 pub trait TrustChangeListener: Send + Sync {
     fn on_trust_changed(&self, change: &TrustChange);
 }
@@ -47,17 +48,6 @@ pub struct TrustChange {
     pub identity: PackageIdentity,
     pub previous: EffectiveTrustClass,
     pub current: EffectiveTrustClass,
-    /// Authority that was active before the change, if known. Listeners
-    /// use this to scope the grant set they invalidate.
-    ///
-    /// Typed as `BTreeSet` because authority is conceptually a *set* of
-    /// capabilities, not a list with multiplicity. Using a slice/`Vec`
-    /// here would let `[a, a, b]` and `[a, b]` look different to
-    /// [`authority_changed`] even though their effective authority is
-    /// identical, forcing unnecessary grant reissue. `BTreeSet` also
-    /// gives deterministic iteration order, which matters for
-    /// audit-replay and golden-file comparisons.
-    pub previous_authority: BTreeSet<CapabilityId>,
     /// Authority ceiling before the policy mutation.
     pub previous_authority_ceiling: AuthorityCeiling,
     /// Authority ceiling after the policy mutation.
@@ -77,7 +67,6 @@ impl TrustChange {
         identity: PackageIdentity,
         previous_decision: &TrustDecision,
         current_decision: &TrustDecision,
-        previous_authority: BTreeSet<CapabilityId>,
     ) -> Option<Self> {
         let authority_ceiling_reduced = current_decision
             .authority_ceiling
@@ -91,7 +80,6 @@ impl TrustChange {
             identity,
             previous: previous_decision.effective_trust,
             current: current_decision.effective_trust,
-            previous_authority,
             previous_authority_ceiling: previous_decision.authority_ceiling.clone(),
             current_authority_ceiling: current_decision.authority_ceiling.clone(),
             effective_at: current_decision.evaluated_at,

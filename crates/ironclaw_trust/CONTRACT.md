@@ -85,6 +85,7 @@ claim* and the *host-validated ceiling*:
 | `RequestedTrustClass` | `ironclaw_host_api::trust` | manifest / registry entry | freely deserializable; not authority |
 | `TrustClass` | `ironclaw_host_api::runtime` | wire vocabulary | `FirstParty`, `System` reject deserialization (`#[serde(skip_deserializing)]`) |
 | `EffectiveTrustClass` | `ironclaw_trust::decision` | `HostTrustPolicy::evaluate` | privileged constructors are crate-private; serializable for audit but **not** deserializable |
+| `HostTrustAssignment` | `ironclaw_trust::decision` | host-controlled bundle/admin loaders | production seeding token for policy entries; **not** an authorization input and not deserializable |
 
 Construction-side guarantees:
 
@@ -96,10 +97,16 @@ Construction-side guarantees:
   A `static_assertions::assert_not_impl_any!` lock pins this at
   compile time.
 - The only public `EffectiveTrustClass` constructors are `sandbox()`
-  and `user_trusted()`. Privileged values flow out of
+  and `user_trusted()`. Privileged effective values flow out of
   `TrustPolicy::evaluate` in non-test builds. Crate-internal tests have
   `#[cfg(test)]` fixtures, but there is deliberately no Cargo feature that
-  exposes privileged constructors to downstream crates.
+  exposes privileged effective constructors to downstream crates.
+- Production bundle/admin loaders seed privileged policy entries through
+  `HostTrustAssignment` and the crate-owned `BundledEntry::new` /
+  `AdminEntry::for_*` constructors. `HostTrustAssignment` is not
+  deserializable and is not accepted by authorization APIs; it is only the
+  host-policy configuration token that the trust crate converts into an
+  `EffectiveTrustClass` during source evaluation.
 
 Manifest input: the `trust = "..."` field on extension manifests
 populates `RequestedTrustClass`, **not** `TrustClass` directly.
@@ -176,9 +183,10 @@ of capabilities the package is asking authority over. In V1:
 
 - It is **not** consulted by `PolicySource::evaluate` and does **not**
   cap `AuthorityCeiling`. The ceiling comes purely from policy entries.
-- It is forwarded onto `TrustChange::previous_authority` so listeners
-  (a future grant store) can scope grant invalidation when the set
-  changes.
+- It is used as a stable evaluation input for pre/post mutation probes.
+  It is **not** forwarded to `TrustChange` and must not be used as the
+  authoritative revocation scope; invalidation listeners derive revocation
+  from their grant store plus the decision/ceiling delta.
 - It is `BTreeSet`, not `Vec` — capability authority is a set, not a
   multiset, and `[a, a, b]` vs `[a, b]` must never produce different
   invalidation outcomes.
@@ -187,10 +195,11 @@ of capabilities the package is asking authority over. In V1:
 
 Source priority is the chain order passed to `HostTrustPolicy::new`.
 The first source returning `Ok(Some(...))` is binding; subsequent
-sources are not consulted. This is intentional — composition
-ambiguity (multiple sources matching with different ceilings) would
-give the chain non-deterministic behavior depending on iteration
-order.
+sources are not consulted. Duplicate source *types* are rejected at
+construction time because mutation APIs target sources by concrete type;
+allowing two `AdminConfig` instances would make evaluation and mutation
+routing ambiguous. Different source types may still match the same
+identity, and first-match-wins resolves that intentionally.
 
 Recommended chain order for production wiring:
 
@@ -271,7 +280,7 @@ per-source layer:
 policy.mutate_with(
     &bus,
     affected_identity,
-    previous_authority,
+    requested_authority,
     requested_trust,
     |mutators| {
         mutators.admin_remove(&package_id, &source)?;
@@ -286,17 +295,22 @@ per-source `upsert` / `remove` methods on `BundledRegistry` /
 through `SourceMutators` inside a `mutate_with` closure. The
 orchestration:
 
-1. Acquire a policy-level mutation gate so concurrent `evaluate()` calls
+1. Reject duplicate source types at construction time, so mutator routing
+   cannot disagree with evaluation about which source instance is active.
+2. Acquire a policy-level mutation gate so concurrent `evaluate()` calls
    cannot observe in-flight mutations.
-2. Pre-evaluate `affected_identity` to capture the previous full decision.
-3. Run the closure with mutator handles that stage operations rather than
+3. Pre-evaluate `affected_identity` to capture the previous full decision.
+4. Run the closure with mutator handles that stage operations rather than
    mutating live source state.
-4. If the closure returns an error, discard staged operations and return
+5. If the closure returns an error, discard staged operations and return
    the error; no lower decision became visible.
-5. Commit staged mutations, post-evaluate, and publish a `TrustChange` on
+6. Commit staged mutations, post-evaluate, and publish a `TrustChange` on
    the `InvalidationBus` synchronously when the trust class changed or the
    authority ceiling shrank.
-6. Release the mutation gate only after synchronous publication completes.
+7. Release the mutation gate only after synchronous publication completes.
+   A listener running on the publishing thread may re-enter `evaluate()` for
+   read-only inspection without deadlocking; other threads remain blocked
+   until publication completes.
 
 Construction-time population (`with_entries` / `with_signers`)
 remains `pub` because no policy state exists for an invalidation to
@@ -320,9 +334,8 @@ would over-revoke on benign upgrades.
 All capability-authority surfaces are typed as
 `BTreeSet<CapabilityId>`, not `Vec` or `&[CapabilityId]`:
 
-- `TrustChange::previous_authority`
 - `TrustPolicyInput::requested_authority`
-- `mutate_with`'s `previous_authority` parameter
+- `mutate_with`'s `requested_authority` parameter
 - `authority_changed` / `grant_retention_eligible`
 
 Rationale: capability authority is conceptually a set, not a

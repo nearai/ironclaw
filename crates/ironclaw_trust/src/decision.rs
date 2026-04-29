@@ -98,6 +98,61 @@ impl EffectiveTrustClass {
     }
 }
 
+/// Host-controlled trust assignment used to seed policy-source entries.
+///
+/// This is deliberately distinct from [`EffectiveTrustClass`]: downstream
+/// host wiring may build bundled/admin policy entries from trusted bundle
+/// metadata or operator config, but authorization still consumes only the
+/// `EffectiveTrustClass` that comes out of [`crate::TrustPolicy::evaluate`].
+/// The type does not implement `Deserialize`, so untrusted manifests cannot
+/// deserialize directly into a privileged assignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HostTrustAssignment {
+    inner: TrustClass,
+}
+
+impl HostTrustAssignment {
+    pub fn sandbox() -> Self {
+        Self {
+            inner: TrustClass::Sandbox,
+        }
+    }
+
+    pub fn user_trusted() -> Self {
+        Self {
+            inner: TrustClass::UserTrusted,
+        }
+    }
+
+    pub fn first_party() -> Self {
+        Self {
+            inner: TrustClass::FirstParty,
+        }
+    }
+
+    pub fn system() -> Self {
+        Self {
+            inner: TrustClass::System,
+        }
+    }
+
+    pub fn class(&self) -> TrustClass {
+        self.inner
+    }
+
+    pub(crate) fn into_effective(self) -> EffectiveTrustClass {
+        EffectiveTrustClass { inner: self.inner }
+    }
+}
+
+impl From<EffectiveTrustClass> for HostTrustAssignment {
+    fn from(value: EffectiveTrustClass) -> Self {
+        Self {
+            inner: value.class(),
+        }
+    }
+}
+
 /// Where the effective trust came from. Recorded on every decision for audit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]

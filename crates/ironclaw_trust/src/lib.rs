@@ -18,7 +18,7 @@
 //!    dispatch can produce a side effect under the stale ceiling. Runtime
 //!    mutation goes through
 //!    [`HostTrustPolicy::mutate_with`], which hard-wires the
-//!    pre-evaluate / mutate / post-evaluate / publish dance so AC #6 is
+//!    pre-evaluate / stage / commit / post-evaluate / publish dance so AC #6 is
 //!    a compile-time guarantee — the per-source `upsert` / `remove`
 //!    methods are `pub(crate)` and only reachable through
 //!    [`SourceMutators`] inside a `mutate_with` closure.
@@ -40,7 +40,9 @@ pub mod sources;
 mod fixtures;
 
 pub use clock::{Clock, FixedClock, SystemClock};
-pub use decision::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+pub use decision::{
+    AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment, TrustDecision, TrustProvenance,
+};
 pub use error::TrustError;
 pub use invalidation::{
     InvalidationBus, TrustChange, TrustChangeListener, authority_changed, grant_retention_eligible,

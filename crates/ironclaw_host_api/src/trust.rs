@@ -85,9 +85,10 @@ pub enum RequestedTrustClass {
 /// Origin of a package definition.
 ///
 /// The variant tells the trust policy engine which evaluation rule applies
-/// (bundled-only registry vs. signed remote vs. operator override). Only
-/// host-controlled origins (`Bundled`, `Admin`, signed `Registry`) can produce
-/// privileged effective trust; `LocalManifest` always caps at user-trusted.
+/// (bundled-only registry vs. signed remote vs. operator override). Local
+/// manifests are untrusted by default; privileged effective trust requires an
+/// explicit, source-pinned host policy entry (for example an admin override
+/// for that exact manifest path), never the manifest's own assertion.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum PackageSource {

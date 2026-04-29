@@ -26,10 +26,10 @@ use crate::fixtures::{
     effective_first_party_for_test, effective_system_for_test,
 };
 use crate::{
-    AdminConfig, AdminEntry, BundledRegistry, EffectiveTrustClass, HostTrustPolicy,
-    InvalidationBus, LocalDevOverride, PolicySource, TrustChange, TrustChangeListener,
-    TrustDecision, TrustError, TrustPolicy, TrustPolicyInput, TrustProvenance, authority_changed,
-    grant_retention_eligible, identity_changed,
+    AdminConfig, AdminEntry, BundledRegistry, EffectiveTrustClass, HostTrustAssignment,
+    HostTrustPolicy, InvalidationBus, LocalDevOverride, PolicySource, TrustChange,
+    TrustChangeListener, TrustDecision, TrustError, TrustPolicy, TrustPolicyInput, TrustProvenance,
+    authority_changed, grant_retention_eligible, identity_changed,
 };
 use chrono::Utc;
 use ironclaw_host_api::{
@@ -50,6 +50,7 @@ use static_assertions::assert_not_impl_any;
 // `Deserialize<'de>` impl would also fail this check on `Copy` types.
 // ---------------------------------------------------------------------------
 assert_not_impl_any!(EffectiveTrustClass: serde::de::DeserializeOwned);
+assert_not_impl_any!(HostTrustAssignment: serde::de::DeserializeOwned);
 
 use self::support::{FakeAuthorizer, FakeGrantStore};
 
@@ -181,6 +182,10 @@ fn input(identity: PackageIdentity, requested: RequestedTrustClass) -> TrustPoli
     }
 }
 
+fn policy(sources: Vec<Box<dyn PolicySource>>) -> HostTrustPolicy {
+    HostTrustPolicy::new(sources).unwrap()
+}
+
 /// Build a capability set from a list of names. Convenience helper for
 /// tests that exercise authority sets — duplicates and reorderings
 /// collapse into the same canonical `BTreeSet`, which is exactly the
@@ -208,11 +213,10 @@ fn trust_change_for_test(
     identity: PackageIdentity,
     previous: EffectiveTrustClass,
     current: EffectiveTrustClass,
-    previous_authority: BTreeSet<CapabilityId>,
 ) -> Option<TrustChange> {
     let previous = decision_for_test(previous, Vec::new());
     let current = decision_for_test(current, Vec::new());
-    TrustChange::new(identity, &previous, &current, previous_authority)
+    TrustChange::new(identity, &previous, &current)
 }
 
 fn output_token_ceiling(max_output_tokens: u64) -> ResourceCeiling {
@@ -233,7 +237,7 @@ fn output_token_ceiling(max_output_tokens: u64) -> ResourceCeiling {
 
 #[test]
 fn t1_self_promotion_denied_for_user_manifest() {
-    let policy = HostTrustPolicy::new(vec![
+    let policy = policy(vec![
         Box::new(BundledRegistry::new()),
         Box::new(AdminConfig::new()),
     ]);
@@ -262,7 +266,7 @@ fn t1_self_promotion_denied_for_user_manifest() {
 
 #[test]
 fn t2_self_promotion_blocks_privileged_grant_via_fake_authorizer() {
-    let policy = HostTrustPolicy::new(vec![Box::new(BundledRegistry::new())]);
+    let policy = policy(vec![Box::new(BundledRegistry::new())]);
     let authorizer = FakeAuthorizer::new();
 
     let identity = local_manifest_identity("rogue");
@@ -294,7 +298,7 @@ fn t3_host_assignment_via_bundled_registry_grants_effective_trust() {
         effective_system_for_test(),
         vec![EffectKind::DispatchCapability],
     )]);
-    let policy = HostTrustPolicy::new(vec![Box::new(registry)]);
+    let policy = policy(vec![Box::new(registry)]);
 
     let identity = bundled_identity("ironclaw_core", Some("digest_v1"));
     let decision = policy
@@ -320,7 +324,7 @@ fn t4_host_assignment_alone_grants_no_capability() {
         effective_system_for_test(),
         vec![EffectKind::DispatchCapability],
     )]);
-    let policy = HostTrustPolicy::new(vec![Box::new(registry)]);
+    let policy = policy(vec![Box::new(registry)]);
 
     let identity = bundled_identity("ironclaw_core", None);
     let decision = policy
@@ -435,13 +439,11 @@ fn t7_downgrade_publishes_invalidation_before_next_dispatch() {
     bus.register(store.clone());
 
     let identity = bundled_identity("ironclaw_core", Some("digest_v1"));
-    let prev_authority = caps(&["ironclaw_core.dispatch"]);
 
     let change = trust_change_for_test(
         identity.clone(),
         effective_system_for_test(),
         EffectiveTrustClass::user_trusted(),
-        prev_authority.clone(),
     )
     .expect("System → UserTrusted is a real change, not a no-op");
     bus.publish(change.clone());
@@ -459,7 +461,7 @@ fn t7_downgrade_publishes_invalidation_before_next_dispatch() {
     // downgraded decision. The grant store has already recorded the
     // invalidation, so any subsequent policy result returning the lower
     // trust is observed *after* the invalidation, not before.
-    let policy = HostTrustPolicy::new(vec![Box::new(BundledRegistry::new())]);
+    let policy = policy(vec![Box::new(BundledRegistry::new())]);
     let next_decision = policy
         .evaluate(&input(identity, RequestedTrustClass::SystemRequested))
         .unwrap();
@@ -488,7 +490,6 @@ fn t8_revocation_publishes_invalidation_before_next_dispatch() {
         identity.clone(),
         effective_system_for_test(),
         EffectiveTrustClass::sandbox(),
-        caps(&["ironclaw_core.dispatch"]),
     )
     .expect("System → Sandbox is a real revocation, not a no-op");
     bus.publish(change.clone());
@@ -579,7 +580,7 @@ fn t11_digest_drift_forces_grant_reissue() {
         effective_first_party_for_test(),
         vec![],
     )]);
-    let policy = HostTrustPolicy::new(vec![Box::new(registry)]);
+    let policy = policy(vec![Box::new(registry)]);
 
     let prev_decision = policy
         .evaluate(&input(
@@ -659,7 +660,7 @@ fn t13_admin_config_grants_trust_when_source_binding_matches() {
     // entry binds to PackageSource::Bundled, and the input identity is
     // also PackageSource::Bundled, so the admin entry matches and grants
     // FirstParty.
-    let policy = HostTrustPolicy::new(vec![Box::new(bundled), Box::new(admin)]);
+    let policy = policy(vec![Box::new(bundled), Box::new(admin)]);
 
     let identity = bundled_identity("operator_blessed", None);
     let decision = policy
@@ -688,7 +689,7 @@ fn t13b_admin_config_does_not_shadow_local_manifest_with_bundled_entry() {
         effective_first_party_for_test(),
         vec![EffectKind::ReadFilesystem],
     )]);
-    let policy = HostTrustPolicy::new(vec![Box::new(BundledRegistry::new()), Box::new(admin)]);
+    let policy = policy(vec![Box::new(BundledRegistry::new()), Box::new(admin)]);
 
     // Same package_id as the admin entry, but coming from a user-writable
     // LocalManifest. Must NOT inherit the elevation.
@@ -719,11 +720,11 @@ fn t13c_admin_config_does_not_shadow_bundled_with_registry_entry() {
         pkg("operator_blessed"),
         "https://trusted.example/registry".to_string(),
         None,
-        effective_first_party_for_test(),
+        HostTrustAssignment::first_party(),
         vec![EffectKind::ReadFilesystem],
         None,
     )]);
-    let policy = HostTrustPolicy::new(vec![Box::new(admin)]);
+    let policy = policy(vec![Box::new(admin)]);
 
     // Same package_id as the admin entry, but Bundled origin instead of
     // the entry's pinned Registry. Must fall through.
@@ -753,7 +754,7 @@ fn t13d_admin_digest_pin_drift_falls_through() {
         effective_first_party_for_test(),
         vec![EffectKind::ReadFilesystem],
     )]);
-    let policy = HostTrustPolicy::new(vec![Box::new(admin)]);
+    let policy = policy(vec![Box::new(admin)]);
 
     // Digest drift: package presents v2, entry pins v1. No match.
     let drifted = bundled_identity("operator_blessed", Some("digest_v2"));
@@ -790,11 +791,11 @@ fn t13e_admin_for_local_manifest_elevates_when_explicit() {
         pkg("operator_blessed"),
         path.clone(),
         None,
-        effective_first_party_for_test(),
+        HostTrustAssignment::first_party(),
         vec![EffectKind::ReadFilesystem],
         None,
     )]);
-    let policy = HostTrustPolicy::new(vec![Box::new(admin)]);
+    let policy = policy(vec![Box::new(admin)]);
 
     // Identity path matches the entry's pinned manifest path — the
     // PackageSource::LocalManifest equality covers both kind and path.
@@ -856,12 +857,12 @@ fn t13f_admin_config_keeps_same_id_entries_for_distinct_sources() {
             package_id.clone(),
             "https://trusted.example/registry".to_string(),
             None,
-            effective_system_for_test(),
+            HostTrustAssignment::system(),
             vec![EffectKind::Network],
             None,
         ),
     ]);
-    let policy = HostTrustPolicy::new(vec![Box::new(admin)]);
+    let policy = policy(vec![Box::new(admin)]);
 
     let bundled = policy
         .evaluate(&input(
@@ -915,7 +916,7 @@ fn t13g_admin_remove_is_source_aware() {
             vec![EffectKind::Network],
         ),
     ]);
-    let policy = HostTrustPolicy::new(vec![Box::new(admin)]);
+    let policy = policy(vec![Box::new(admin)]);
     let bus = InvalidationBus::new();
 
     let removed = policy
@@ -970,6 +971,7 @@ fn t13g_admin_remove_is_source_aware() {
 // T14f — same-trust allowed-effect reductions publish.
 // T14g — evaluate waits until synchronous invalidation publish completes.
 // T14h — same-trust resource-ceiling reductions publish.
+// T14i — listeners can re-enter evaluate without deadlocking.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -980,7 +982,7 @@ fn t14_mutate_with_publishes_when_affected_trust_class_drops() {
         effective_first_party_for_test(),
         vec![EffectKind::ReadFilesystem],
     )]);
-    let policy = HostTrustPolicy::new(vec![Box::new(admin)]);
+    let policy = policy(vec![Box::new(admin)]);
     let bus = InvalidationBus::new();
     let store = FakeGrantStore::new();
     bus.register(store.clone());
@@ -1014,7 +1016,6 @@ fn t14_mutate_with_publishes_when_affected_trust_class_drops() {
         "post-removal trust must not be privileged \
          (unmatched Bundled falls to Sandbox per default_decision fail-closed contract)"
     );
-    assert_eq!(recorded[0].previous_authority, prev_authority);
 }
 
 #[test]
@@ -1025,7 +1026,7 @@ fn t14b_mutate_with_does_not_publish_when_affected_trust_class_unchanged() {
         effective_first_party_for_test(),
         vec![EffectKind::ReadFilesystem],
     )]);
-    let policy = HostTrustPolicy::new(vec![Box::new(admin)]);
+    let policy = policy(vec![Box::new(admin)]);
     let bus = InvalidationBus::new();
     let store = FakeGrantStore::new();
     bus.register(store.clone());
@@ -1065,7 +1066,7 @@ fn t14c_mutate_with_returns_closure_result() {
         effective_first_party_for_test(),
         vec![EffectKind::ReadFilesystem],
     )]);
-    let policy = HostTrustPolicy::new(vec![Box::new(admin)]);
+    let policy = policy(vec![Box::new(admin)]);
     let bus = InvalidationBus::new();
 
     let removed = policy
@@ -1088,7 +1089,7 @@ fn t14c_mutate_with_returns_closure_result() {
 fn t14d_mutate_with_surfaces_missing_source_kind() {
     // Policy chain has no AdminConfig — calling admin_remove must yield
     // InvariantViolation, not silently no-op.
-    let policy = HostTrustPolicy::new(vec![Box::new(BundledRegistry::new())]);
+    let policy = policy(vec![Box::new(BundledRegistry::new())]);
     let bus = InvalidationBus::new();
 
     let result = policy.mutate_with(
@@ -1117,7 +1118,7 @@ fn t14e_mutate_with_rolls_back_staged_mutations_on_closure_error() {
         effective_first_party_for_test(),
         vec![EffectKind::ReadFilesystem],
     )]);
-    let policy = HostTrustPolicy::new(vec![Box::new(admin)]);
+    let policy = policy(vec![Box::new(admin)]);
     let bus = InvalidationBus::new();
     let store = FakeGrantStore::new();
     bus.register(store.clone());
@@ -1164,7 +1165,7 @@ fn t14f_mutate_with_publishes_when_same_trust_loses_allowed_effects() {
         effective_first_party_for_test(),
         vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
     )]);
-    let policy = HostTrustPolicy::new(vec![Box::new(admin)]);
+    let policy = policy(vec![Box::new(admin)]);
     let bus = InvalidationBus::new();
     let store = FakeGrantStore::new();
     bus.register(store.clone());
@@ -1216,11 +1217,11 @@ fn t14h_mutate_with_publishes_when_same_trust_lowers_resource_ceiling() {
     let admin = AdminConfig::with_entries([AdminEntry::for_bundled(
         pkg("operator_blessed"),
         None,
-        effective_first_party_for_test(),
+        HostTrustAssignment::first_party(),
         vec![EffectKind::ReadFilesystem],
         Some(output_token_ceiling(1_000)),
     )]);
-    let policy = HostTrustPolicy::new(vec![Box::new(admin)]);
+    let policy = policy(vec![Box::new(admin)]);
     let bus = InvalidationBus::new();
     let store = FakeGrantStore::new();
     bus.register(store.clone());
@@ -1235,7 +1236,7 @@ fn t14h_mutate_with_publishes_when_same_trust_lowers_resource_ceiling() {
                 m.admin_upsert(AdminEntry::for_bundled(
                     pkg("operator_blessed"),
                     None,
-                    effective_first_party_for_test(),
+                    HostTrustAssignment::first_party(),
                     vec![EffectKind::ReadFilesystem],
                     Some(output_token_ceiling(100)),
                 ))?;
@@ -1292,6 +1293,31 @@ impl TrustChangeListener for BlockingTrustChangeListener {
     }
 }
 
+struct ReentrantEvaluateListener {
+    policy: Arc<HostTrustPolicy>,
+    observed: Mutex<Option<mpsc::Sender<TrustClass>>>,
+}
+
+impl TrustChangeListener for ReentrantEvaluateListener {
+    fn on_trust_changed(&self, change: &TrustChange) {
+        let decision = self
+            .policy
+            .evaluate(&input(
+                change.identity.clone(),
+                RequestedTrustClass::FirstPartyRequested,
+            ))
+            .unwrap();
+        if let Some(observed) = self
+            .observed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        {
+            observed.send(decision.effective_trust.class()).unwrap();
+        }
+    }
+}
+
 #[test]
 fn t14g_evaluate_waits_until_mutation_invalidation_publish_completes() {
     let admin = AdminConfig::with_entries([admin_entry_for_test(
@@ -1300,7 +1326,7 @@ fn t14g_evaluate_waits_until_mutation_invalidation_publish_completes() {
         effective_first_party_for_test(),
         vec![EffectKind::ReadFilesystem],
     )]);
-    let policy = Arc::new(HostTrustPolicy::new(vec![Box::new(admin)]));
+    let policy = Arc::new(policy(vec![Box::new(admin)]));
     let bus = Arc::new(InvalidationBus::new());
 
     let (started_tx, started_rx) = mpsc::channel();
@@ -1359,6 +1385,44 @@ fn t14g_evaluate_waits_until_mutation_invalidation_publish_completes() {
     assert_eq!(decision.effective_trust.class(), TrustClass::Sandbox);
 }
 
+#[test]
+fn t14i_trust_change_listener_can_reenter_evaluate_without_deadlock() {
+    let admin = AdminConfig::with_entries([admin_entry_for_test(
+        pkg("operator_blessed"),
+        PackageSource::Bundled,
+        effective_first_party_for_test(),
+        vec![EffectKind::ReadFilesystem],
+    )]);
+    let policy = Arc::new(policy(vec![Box::new(admin)]));
+    let bus = InvalidationBus::new();
+    let (observed_tx, observed_rx) = mpsc::channel();
+    bus.register(Arc::new(ReentrantEvaluateListener {
+        policy: policy.clone(),
+        observed: Mutex::new(Some(observed_tx)),
+    }));
+
+    let identity = bundled_identity("operator_blessed", None);
+    policy
+        .mutate_with(
+            &bus,
+            identity,
+            caps(&["operator_blessed.read"]),
+            RequestedTrustClass::FirstPartyRequested,
+            |m| {
+                m.admin_remove(&pkg("operator_blessed"), &PackageSource::Bundled)?;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        observed_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("listener should re-enter evaluate without deadlocking"),
+        TrustClass::Sandbox
+    );
+}
+
 // ---------------------------------------------------------------------------
 // T15 — `default_decision` is fail-closed for every PackageSource.
 //
@@ -1376,7 +1440,7 @@ fn t14g_evaluate_waits_until_mutation_invalidation_publish_completes() {
 #[test]
 fn t15_default_decision_is_sandbox_for_every_unmatched_package_source() {
     // Empty policy chain — every input falls through to `default_decision`.
-    let policy = HostTrustPolicy::new(vec![
+    let policy = policy(vec![
         Box::new(BundledRegistry::new()),
         Box::new(AdminConfig::new()),
     ]);
@@ -1441,7 +1505,7 @@ fn t16_trust_change_new_filters_no_ops() {
     let identity = bundled_identity("any", None);
     let trust = EffectiveTrustClass::user_trusted();
     assert!(
-        trust_change_for_test(identity, trust, trust, BTreeSet::new()).is_none(),
+        trust_change_for_test(identity, trust, trust).is_none(),
         "TrustChange::new must return None when previous == current"
     );
 }
@@ -1455,22 +1519,20 @@ fn t16b_trust_change_classifies_downgrade_upgrade_and_kind_change() {
     let system = effective_system_for_test();
 
     // Downgrade: FirstParty → UserTrusted.
-    let down = trust_change_for_test(identity.clone(), first_party, user_trusted, BTreeSet::new())
-        .unwrap();
+    let down = trust_change_for_test(identity.clone(), first_party, user_trusted).unwrap();
     assert!(down.is_downgrade());
     assert!(!down.is_upgrade());
     assert!(!down.is_kind_change());
 
     // Upgrade: Sandbox → UserTrusted.
-    let up =
-        trust_change_for_test(identity.clone(), sandbox, user_trusted, BTreeSet::new()).unwrap();
+    let up = trust_change_for_test(identity.clone(), sandbox, user_trusted).unwrap();
     assert!(!up.is_downgrade());
     assert!(up.is_upgrade());
     assert!(!up.is_kind_change());
 
     // Kind change: FirstParty ↔ System (both privileged, level 2, but
     // semantically different privilege kinds).
-    let kind = trust_change_for_test(identity, first_party, system, BTreeSet::new()).unwrap();
+    let kind = trust_change_for_test(identity, first_party, system).unwrap();
     assert!(!kind.is_downgrade());
     assert!(!kind.is_upgrade());
     assert!(
@@ -1505,7 +1567,6 @@ fn t16c_invalidation_bus_publish_drops_no_op_struct_literal_in_release() {
         identity,
         previous: same,
         current: same,
-        previous_authority: BTreeSet::new(),
         previous_authority_ceiling: crate::AuthorityCeiling::empty(),
         current_authority_ceiling: crate::AuthorityCeiling::empty(),
         effective_at: Utc::now(),
@@ -1640,7 +1701,8 @@ fn evaluate_uses_injected_clock_for_evaluated_at() {
     let policy = HostTrustPolicy::with_clock(
         vec![Box::new(BundledRegistry::new())],
         Box::new(FixedClock::new(frozen)),
-    );
+    )
+    .unwrap();
 
     let identity = bundled_identity("ironclaw_core", None);
     let first = policy
