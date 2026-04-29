@@ -248,7 +248,9 @@ make wipe
 
 # No-cache rebuild of a specific service (use when Docker layer caching
 # is fooling you after changing something subtle like a .dockerignore)
-docker compose --profile app build --no-cache t3n-mcp-sidecar && make up
+docker compose --profile app --profile mcp build --no-cache t3n-mcp-sidecar
+docker compose --profile app --profile mcp up -d --force-recreate t3n-mcp-sidecar
+docker compose --profile app --profile mcp restart t3claw
 ```
 
 ---
@@ -265,8 +267,10 @@ docker compose --profile app build --no-cache t3n-mcp-sidecar && make up
   `t3claw mcp remove t3n-mcp` + `make restart` to re-bootstrap clean.
 
 - **`make rebuild` doesn't pick up a change you're sure you made** —
-  Docker layer cache. Use `docker compose --profile app build --no-cache <service>`
-  to force a clean rebuild of just that service.
+  Docker layer cache. Use `docker compose --profile app --profile mcp build
+  --no-cache <service>` to force a clean rebuild of just that service. For
+  sidecar-only changes, prefer `make rebuild-sidecar`; it also restarts
+  `t3claw` so the cached MCP tool list is refreshed.
 
 - **`GATEWAY_AUTH_TOKEN` / `SECRETS_MASTER_KEY` changed and the agent
   won't start** — these are hashed/used on first boot and can't be

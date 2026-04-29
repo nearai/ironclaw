@@ -5,7 +5,7 @@
 # Full stack (app profile):
 #   cp .env.example .env
 #   # Set GATEWAY_AUTH_TOKEN, SECRETS_MASTER_KEY, and your LLM key in .env
-#   docker compose --profile app up --build
+#   docker compose --profile app --profile mcp up --build
 #
 # Gateway: http://127.0.0.1:3000
 # For production put Caddy/nginx in front for TLS; Postgres is never exposed externally.
@@ -98,6 +98,7 @@ services:
   t3n-mcp-sidecar:
     profiles: ["mcp"]
     user: "0:0"
+    image: ${T3N_MCP_SIDECAR_IMAGE:-t3claw/t3n-mcp-sidecar:local}
     build:
       # The main context is t3-claw (for the bridge script). Trinity
       # sources come in as named additional contexts so we can `COPY

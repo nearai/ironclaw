@@ -4,6 +4,7 @@
 #   make up              – start the full stack including t3n-mcp sidecar (detached)
 #   make build           – build / rebuild all images including t3n-mcp sidecar
 #   make rebuild         – build then restart (use after code changes)
+#   make rebuild-sidecar – rebuild only the t3n-mcp sidecar, recreate it, refresh t3claw
 #   make up-no-t3n       – start stack without the t3n-mcp sidecar (no trinity needed)
 #   make build-no-t3n    – build without the t3n-mcp sidecar
 #   make rebuild-no-t3n  – build without sidecar then restart
@@ -35,8 +36,11 @@ export DOCKER_GID
 COMPOSE     := docker compose --profile app --profile mcp
 COMPOSE_CORE := docker compose --profile app
 SERVICE := t3claw
+SIDECAR_SERVICE := t3n-mcp-sidecar
+SIDECAR_REGISTRY_IMAGE := ghcr.io/terminal-3/t3n-mcp-sidecar:latest
+SIDECAR_RUNTIME_IMAGE := t3claw/t3n-mcp-sidecar:local
 
-.PHONY: up build rebuild up-no-t3n build-no-t3n rebuild-no-t3n build-sidecar push-sidecar-gcp pull-sidecar down wipe wipe-all restart logs shell status help
+.PHONY: up build rebuild up-no-t3n build-no-t3n rebuild-no-t3n build-sidecar rebuild-sidecar push-sidecar-gcp pull-sidecar down wipe wipe-all restart logs shell status help
 
 ## Start the full stack (detached). Builds images if they don't exist yet.
 up:
@@ -79,22 +83,24 @@ push-sidecar-gcp:
 		-t us-central1-docker.pkg.dev/gen-lang-client-0263867259/t3claw/t3n-mcp-sidecar:latest \
 		--push .
 
-## Build the t3n-mcp-sidecar image locally (for dev, not GCP).
+## Build the t3n-mcp-sidecar image locally for the compose stack.
 ## Requires the ../trinity repo to be checked out as a sibling directory.
 build-sidecar:
-	docker buildx build \
-		--build-context trinity_mcp=../trinity/client/mcp/t3n-mcp \
-		--build-context trinity_shared=../trinity/client/shared \
-		-f docker/t3n-mcp-sidecar.Dockerfile \
-		-t ghcr.io/terminal-3/t3n-mcp-sidecar:latest \
-		.
+	$(COMPOSE) build $(SIDECAR_SERVICE)
+
+## Rebuild only the sidecar, recreate it, then restart t3claw so MCP tools refresh.
+rebuild-sidecar: build-sidecar
+	$(COMPOSE) up -d --force-recreate $(SIDECAR_SERVICE)
+	$(COMPOSE) restart $(SERVICE) || $(COMPOSE) up -d $(SERVICE)
 
 ## Pull the latest t3n-mcp-sidecar image from GHCR and restart the container.
 ## Use this after CI has published a new image (i.e. after merging to staging
 ## and the npm-package-release workflow has run in trinity).
 pull-sidecar:
-	docker pull ghcr.io/terminal-3/t3n-mcp-sidecar:latest
-	$(COMPOSE) up -d t3n-mcp-sidecar
+	docker pull $(SIDECAR_REGISTRY_IMAGE)
+	docker tag $(SIDECAR_REGISTRY_IMAGE) $(SIDECAR_RUNTIME_IMAGE)
+	$(COMPOSE) up -d --no-build --force-recreate $(SIDECAR_SERVICE)
+	$(COMPOSE) restart $(SERVICE) || $(COMPOSE) up -d $(SERVICE)
 
 ## Stop containers and remove them. Volumes are preserved (data survives).
 down:
