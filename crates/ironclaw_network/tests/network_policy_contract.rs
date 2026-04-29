@@ -160,6 +160,72 @@ async fn network_policy_denies_non_public_literal_ips_allowed_by_host_contract()
 }
 
 #[tokio::test]
+async fn network_policy_denies_ipv4_mapped_private_ipv6_literals() {
+    for host in ["::ffff:127.0.0.1", "::ffff:10.0.0.1"] {
+        let enforcer = StaticNetworkPolicyEnforcer::new(NetworkPolicy {
+            allowed_targets: vec![pattern(Some(NetworkScheme::Http), host, None)],
+            deny_private_ip_ranges: true,
+            max_egress_bytes: Some(1024),
+        });
+        let scope = sample_scope("tenant-a", "user-a");
+
+        let err = enforcer
+            .authorize(NetworkRequest {
+                scope,
+                target: target(NetworkScheme::Http, host, None),
+                method: NetworkMethod::Get,
+                estimated_bytes: Some(0),
+            })
+            .await
+            .unwrap_err();
+
+        assert!(err.is_private_target_denied());
+    }
+
+    let public_mapped_host = "::ffff:8.8.8.8";
+    let enforcer = StaticNetworkPolicyEnforcer::new(NetworkPolicy {
+        allowed_targets: vec![pattern(Some(NetworkScheme::Http), public_mapped_host, None)],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(1024),
+    });
+    enforcer
+        .authorize(NetworkRequest {
+            scope: sample_scope("tenant-a", "user-a"),
+            target: target(NetworkScheme::Http, public_mapped_host, None),
+            method: NetworkMethod::Get,
+            estimated_bytes: Some(0),
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn network_policy_requires_egress_estimate_when_limit_is_configured() {
+    let enforcer = StaticNetworkPolicyEnforcer::new(NetworkPolicy {
+        allowed_targets: vec![pattern(
+            Some(NetworkScheme::Https),
+            "api.example.test",
+            Some(443),
+        )],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(10),
+    });
+    let scope = sample_scope("tenant-a", "user-a");
+
+    let err = enforcer
+        .authorize(NetworkRequest {
+            scope,
+            target: target(NetworkScheme::Https, "api.example.test", Some(443)),
+            method: NetworkMethod::Get,
+            estimated_bytes: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(err.is_egress_estimate_required());
+}
+
+#[tokio::test]
 async fn network_policy_is_fail_closed_without_allowed_targets() {
     let enforcer = StaticNetworkPolicyEnforcer::new(NetworkPolicy::default());
     let scope = sample_scope("tenant-a", "user-a");

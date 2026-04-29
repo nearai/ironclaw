@@ -47,6 +47,11 @@ pub enum NetworkPolicyError {
         scope: Box<ResourceScope>,
         target: NetworkTarget,
     },
+    #[error("network egress estimate is required when limit {limit} is configured")]
+    EgressEstimateRequired {
+        scope: Box<ResourceScope>,
+        limit: u64,
+    },
     #[error("network egress estimate {estimated} exceeds limit {limit}")]
     EgressLimitExceeded {
         scope: Box<ResourceScope>,
@@ -66,6 +71,10 @@ impl NetworkPolicyError {
 
     pub fn is_egress_limit_exceeded(&self) -> bool {
         matches!(self, Self::EgressLimitExceeded { .. })
+    }
+
+    pub fn is_egress_estimate_required(&self) -> bool {
+        matches!(self, Self::EgressEstimateRequired { .. })
     }
 }
 
@@ -99,15 +108,20 @@ impl NetworkPolicyEnforcer for StaticNetworkPolicyEnforcer {
         &self,
         request: NetworkRequest,
     ) -> Result<NetworkPermit, NetworkPolicyError> {
-        if let Some(limit) = self.policy.max_egress_bytes
-            && let Some(estimated) = request.estimated_bytes
-            && estimated > limit
-        {
-            return Err(NetworkPolicyError::EgressLimitExceeded {
-                scope: Box::new(request.scope),
-                estimated,
-                limit,
-            });
+        if let Some(limit) = self.policy.max_egress_bytes {
+            let Some(estimated) = request.estimated_bytes else {
+                return Err(NetworkPolicyError::EgressEstimateRequired {
+                    scope: Box::new(request.scope),
+                    limit,
+                });
+            };
+            if estimated > limit {
+                return Err(NetworkPolicyError::EgressLimitExceeded {
+                    scope: Box::new(request.scope),
+                    estimated,
+                    limit,
+                });
+            }
         }
 
         if self.policy.deny_private_ip_ranges
@@ -193,6 +207,9 @@ pub fn is_private_or_loopback_ip(ip: IpAddr) -> bool {
                 || is_carrier_grade_nat_v4(ip)
         }
         IpAddr::V6(ip) => {
+            if let Some(mapped) = ip.to_ipv4_mapped() {
+                return is_private_or_loopback_ip(IpAddr::V4(mapped));
+            }
             ip.is_loopback()
                 || ip.is_unspecified()
                 || ip.is_unique_local()

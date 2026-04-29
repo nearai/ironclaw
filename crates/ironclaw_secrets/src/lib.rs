@@ -11,7 +11,10 @@ use std::fmt;
 use std::sync::{Mutex, MutexGuard};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{ProjectId, ResourceScope, SecretHandle, TenantId, UserId};
+use ironclaw_host_api::{
+    AgentId, InvocationId, MissionId, ProjectId, ResourceScope, SecretHandle, TenantId, ThreadId,
+    UserId,
+};
 pub use secrecy::SecretString as SecretMaterial;
 use thiserror::Error;
 use uuid::Uuid;
@@ -181,6 +184,7 @@ struct SecretState {
 struct SecretKey {
     tenant_id: TenantId,
     user_id: UserId,
+    agent_id: Option<AgentId>,
     project_id: Option<ProjectId>,
     handle: SecretHandle,
 }
@@ -190,6 +194,7 @@ impl SecretKey {
         Self {
             tenant_id: scope.tenant_id.clone(),
             user_id: scope.user_id.clone(),
+            agent_id: scope.agent_id.clone(),
             project_id: scope.project_id.clone(),
             handle: handle.clone(),
         }
@@ -200,7 +205,11 @@ impl SecretKey {
 struct SecretLeaseKey {
     tenant_id: TenantId,
     user_id: UserId,
+    agent_id: Option<AgentId>,
     project_id: Option<ProjectId>,
+    mission_id: Option<MissionId>,
+    thread_id: Option<ThreadId>,
+    invocation_id: InvocationId,
     lease_id: SecretLeaseId,
 }
 
@@ -209,7 +218,11 @@ impl SecretLeaseKey {
         Self {
             tenant_id: scope.tenant_id.clone(),
             user_id: scope.user_id.clone(),
+            agent_id: scope.agent_id.clone(),
             project_id: scope.project_id.clone(),
+            mission_id: scope.mission_id.clone(),
+            thread_id: scope.thread_id.clone(),
+            invocation_id: scope.invocation_id,
             lease_id,
         }
     }
@@ -217,7 +230,11 @@ impl SecretLeaseKey {
     fn matches_scope(&self, scope: &ResourceScope) -> bool {
         self.tenant_id == scope.tenant_id
             && self.user_id == scope.user_id
+            && self.agent_id == scope.agent_id
             && self.project_id == scope.project_id
+            && self.mission_id == scope.mission_id
+            && self.thread_id == scope.thread_id
+            && self.invocation_id == scope.invocation_id
     }
 }
 
@@ -230,7 +247,7 @@ struct SecretRecord {
 #[derive(Debug, Clone)]
 struct LeaseRecord {
     lease: SecretLease,
-    material: SecretMaterial,
+    material: Option<SecretMaterial>,
 }
 
 #[async_trait]
@@ -288,7 +305,7 @@ impl SecretStore for InMemorySecretStore {
         };
         let record = LeaseRecord {
             lease: lease.clone(),
-            material: secret.material.clone(),
+            material: Some(secret.material.clone()),
         };
         state
             .leases
@@ -312,8 +329,14 @@ impl SecretStore for InMemorySecretStore {
             })?;
         match record.lease.status {
             SecretLeaseStatus::Active => {
+                let Some(material) = record.material.take() else {
+                    record.lease.status = SecretLeaseStatus::Consumed;
+                    return Err(SecretStoreError::StoreUnavailable {
+                        reason: "active lease material unavailable".to_string(),
+                    });
+                };
                 record.lease.status = SecretLeaseStatus::Consumed;
-                Ok(record.material.clone())
+                Ok(material)
             }
             SecretLeaseStatus::Consumed => Err(SecretStoreError::LeaseConsumed { lease_id }),
             SecretLeaseStatus::Revoked => Err(SecretStoreError::LeaseRevoked { lease_id }),
@@ -335,6 +358,7 @@ impl SecretStore for InMemorySecretStore {
                 lease_id,
             })?;
         if record.lease.status == SecretLeaseStatus::Active {
+            record.material = None;
             record.lease.status = SecretLeaseStatus::Revoked;
         }
         Ok(record.lease.clone())
@@ -351,5 +375,76 @@ impl SecretStore for InMemorySecretStore {
             .filter(|(key, _)| key.matches_scope(scope))
             .map(|(_, record)| record.lease.clone())
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_host_api::{
+        InvocationId, MissionId, ProjectId, ResourceScope, SecretHandle, TenantId, ThreadId, UserId,
+    };
+
+    use crate::{InMemorySecretStore, SecretMaterial, SecretStore};
+
+    #[tokio::test]
+    async fn consumed_lease_record_drops_retained_material() {
+        let store = InMemorySecretStore::new();
+        let scope = sample_scope("tenant-a", "user-a");
+        let handle = SecretHandle::new("api_key").unwrap();
+        store
+            .put(
+                scope.clone(),
+                handle.clone(),
+                SecretMaterial::from("super-secret"),
+            )
+            .await
+            .unwrap();
+
+        let lease = store.lease_once(&scope, &handle).await.unwrap();
+        store.consume(&scope, lease.id).await.unwrap();
+
+        let state = store.state.lock().unwrap();
+        let leases_debug = format!("{:?}", state.leases);
+        assert!(
+            !leases_debug.contains("SecretBox"),
+            "consumed lease records must not retain cloned secret material: {leases_debug}"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoked_lease_record_drops_retained_material() {
+        let store = InMemorySecretStore::new();
+        let scope = sample_scope("tenant-a", "user-a");
+        let handle = SecretHandle::new("api_key").unwrap();
+        store
+            .put(
+                scope.clone(),
+                handle.clone(),
+                SecretMaterial::from("super-secret"),
+            )
+            .await
+            .unwrap();
+
+        let lease = store.lease_once(&scope, &handle).await.unwrap();
+        store.revoke(&scope, lease.id).await.unwrap();
+
+        let state = store.state.lock().unwrap();
+        let leases_debug = format!("{:?}", state.leases);
+        assert!(
+            !leases_debug.contains("SecretBox"),
+            "revoked lease records must not retain cloned secret material: {leases_debug}"
+        );
+    }
+
+    fn sample_scope(tenant: &str, user: &str) -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new(tenant).unwrap(),
+            user_id: UserId::new(user).unwrap(),
+            agent_id: None,
+            project_id: Some(ProjectId::new("project-a").unwrap()),
+            mission_id: Some(MissionId::new("mission-a").unwrap()),
+            thread_id: Some(ThreadId::new("thread-a").unwrap()),
+            invocation_id: InvocationId::new(),
+        }
     }
 }

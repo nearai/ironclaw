@@ -61,8 +61,8 @@ V1 semantics intentionally mirror the current WASM network import policy checks 
 - `NetworkTargetPattern.port` must match when present
 - `host_pattern` is exact host or one leading wildcard label such as `*.github.com`
 - wildcard patterns do not match the apex host itself or deeper multi-label subdomains
-- `deny_private_ip_ranges` blocks literal private, loopback, link-local, documentation, broadcast, multicast, unspecified, carrier-grade NAT, and unique-local IP targets
-- `max_egress_bytes` denies requests whose estimated bytes exceed the configured limit
+- `deny_private_ip_ranges` blocks literal private, loopback, link-local, documentation, broadcast, multicast, unspecified, carrier-grade NAT, IPv4-mapped IPv6 private ranges, and unique-local IP targets
+- `max_egress_bytes` denies requests without an estimated byte count and requests whose estimated bytes exceed the configured limit
 
 DNS/IP resolution safeguards against rebinding remain future work for the actual network execution/proxy boundary. This crate currently checks literal IP targets only.
 
@@ -112,7 +112,7 @@ The crate tests cover:
 - one-label wildcard host matching
 - wildcard apex and nested-subdomain denial
 - scheme/host/port mismatch denial
-- estimated egress limit denial
-- literal non-public IP denial
+- estimated egress requirement and limit denial
+- literal non-public IP denial, including IPv4-mapped IPv6 private literals
 - fail-closed empty policy behavior
 - crate boundary remains low-level and does not depend on workflow/runtime/secret/observability crates

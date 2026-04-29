@@ -57,16 +57,17 @@ runtimes        -> consume injected values only after host-side authorization an
 
 ## 3. Scope and isolation
 
-All operations receive a `ResourceScope`. The in-memory V1 implementation keys secrets and leases by tenant/user/project plus `SecretHandle` or `SecretLeaseId`.
+All operations receive a `ResourceScope`. The in-memory V1 implementation keys stored secrets by tenant/user/agent/project plus `SecretHandle`, and keys one-shot leases by the full resource scope plus `SecretLeaseId`.
 
 Rules:
 
 - no global handle lookup
-- the same `SecretHandle` in another tenant/user/project is a distinct secret
+- the same `SecretHandle` in another tenant/user/agent/project is a distinct secret
 - cross-scope lease consumption returns `UnknownLease`
 - missing secrets return `UnknownSecret` and do not create leases
 - consumed leases cannot be consumed again
 - revoked leases cannot be consumed
+- consumed and revoked lease tombstones drop retained cloned secret material
 
 This is the minimum shape needed before wiring secret injection into obligation handling.
 
@@ -113,7 +114,8 @@ The crate tests cover:
 
 - metadata returns no raw secret material
 - one-shot leases consume exactly once
-- same-handle secrets are tenant/user/project isolated
+- same-handle secrets are tenant/user/agent/project isolated
 - revoked leases cannot be consumed
 - missing secrets fail without creating leases
+- consumed and revoked lease records do not retain cloned secret material
 - crate boundary remains low-level and does not depend on workflow/runtime/observability crates

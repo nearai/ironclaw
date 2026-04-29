@@ -1,5 +1,6 @@
 use ironclaw_host_api::{
-    InvocationId, MissionId, ProjectId, ResourceScope, SecretHandle, TenantId, ThreadId, UserId,
+    AgentId, InvocationId, MissionId, ProjectId, ResourceScope, SecretHandle, TenantId, ThreadId,
+    UserId,
 };
 use ironclaw_secrets::{InMemorySecretStore, SecretLeaseStatus, SecretMaterial, SecretStore};
 use secrecy::ExposeSecret;
@@ -171,6 +172,54 @@ async fn secret_store_isolates_same_handle_between_users_and_projects() {
         .await
         .unwrap_err();
     assert!(cross_project.is_unknown_lease());
+}
+
+#[tokio::test]
+async fn secret_store_isolates_same_handle_between_agents() {
+    let store = InMemorySecretStore::new();
+    let mut agent_a = sample_scope("tenant-a", "user-a");
+    agent_a.agent_id = Some(AgentId::new("agent-a").unwrap());
+    let mut agent_b = agent_a.clone();
+    agent_b.agent_id = Some(AgentId::new("agent-b").unwrap());
+    let handle = SecretHandle::new("shared_name").unwrap();
+    store
+        .put(
+            agent_a.clone(),
+            handle.clone(),
+            SecretMaterial::from("agent-a-secret"),
+        )
+        .await
+        .unwrap();
+    store
+        .put(
+            agent_b.clone(),
+            handle.clone(),
+            SecretMaterial::from("agent-b-secret"),
+        )
+        .await
+        .unwrap();
+
+    let agent_a_lease = store.lease_once(&agent_a, &handle).await.unwrap();
+    let agent_b_lease = store.lease_once(&agent_b, &handle).await.unwrap();
+
+    let cross_agent = store.consume(&agent_b, agent_a_lease.id).await.unwrap_err();
+    assert!(cross_agent.is_unknown_lease());
+    assert_eq!(
+        store
+            .consume(&agent_a, agent_a_lease.id)
+            .await
+            .unwrap()
+            .expose_secret(),
+        "agent-a-secret"
+    );
+    assert_eq!(
+        store
+            .consume(&agent_b, agent_b_lease.id)
+            .await
+            .unwrap()
+            .expose_secret(),
+        "agent-b-secret"
+    );
 }
 
 #[tokio::test]
