@@ -249,7 +249,7 @@ impl LiveTestHarness {
     /// `user_input` is the message that was sent to the agent.
     /// `responses` are the agent's text responses (from `wait_for_responses`).
     ///
-    /// The session log is written to `tests/fixtures/llm_traces/live/{name}.log`.
+    /// Live runs write a local debugging log beside the committed trace JSON.
     pub async fn finish(self, user_input: &str, responses: &[String]) {
         let turns = [SessionTurn {
             source: TurnSource::User,
@@ -338,7 +338,7 @@ impl LiveTestHarness {
 
     /// Write a human-readable session log.
     ///
-    /// Live mode writes to `tests/fixtures/llm_traces/live/{name}.log` (committed).
+    /// Live mode writes to `tests/fixtures/llm_traces/live/{name}.log` (ignored).
     /// Replay mode writes to a temp file so it can be diffed against the live log.
     fn save_session_log(&self, turns: &[SessionTurn]) {
         use ironclaw::channels::StatusUpdate;
